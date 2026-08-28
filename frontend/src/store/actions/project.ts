@@ -240,10 +240,11 @@ async function collectRestoredMissingNAMAssets(data: any) {
 }
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
-  "meterLevels", "peakLevels", "masterLevel", "automatedParamValues",
+  "meterLevels", "midiInputLevels", "peakLevels", "masterLevel", "automatedParamValues",
   "recordingClips", "recordingMIDIPreviews", "playStartPosition",
   "selectedTrackId", "selectedTrackIds", "lastSelectedTrackId",
   "selectedClipId", "selectedClipIds", "clipboard", "midiNoteClipboard",
+  "selectedAutomationTarget",
   "selectedNoteIds", "pianoRollEditCursorTime", "selectedRegionIds", "razorEdits", "timeSelection",
   "showMixer", "showSettings", "showRenderModal", "showPluginBrowser", "pluginBrowserTrackId",
   "showVirtualKeyboard", "showUndoHistory", "showCommandPalette", "showRegionMarkerManager",
@@ -340,6 +341,14 @@ function isNAMRackChorusRateAutomationLane(lane: any) {
   return /^builtin_(?:input|track)_\d+_chorusRateHz$/.test(String(lane?.param || ""));
 }
 
+function persistedAutomationPointId(lane: any, point: any, index: number) {
+  if (typeof point?.id === "string" && point.id.length > 0) return point.id;
+  const laneKey = String(lane?.id || lane?.param || "automation").replace(/[^a-zA-Z0-9_-]/g, "-");
+  const time = Math.max(0, Number(point?.time) || 0);
+  const value = Math.max(0, Math.min(1, Number(point?.value) || 0));
+  return `project-automation-point-${laneKey}-${index}-${Math.round(time * 1_000_000)}-${Math.round(value * 1_000_000)}`;
+}
+
 function normalizeAutomationLane(lane: any, automationCurveVersion = 1) {
   const readEnabled = automationLaneReadFromLegacy(lane);
   const migrateChorusRate =
@@ -347,7 +356,8 @@ function normalizeAutomationLane(lane: any, automationCurveVersion = 1) {
     && isNAMRackChorusRateAutomationLane(lane);
   const points = Array.isArray(lane?.points)
     ? lane.points
-        .map((point: any) => ({
+        .map((point: any, index: number) => ({
+          id: persistedAutomationPointId(lane, point, index),
           time: Math.max(0, Number(point?.time) || 0),
           value: migrateChorusRate
             ? migrateLegacyChorusRateAutomationValue(Number(point?.value) || 0)
@@ -398,6 +408,10 @@ function serializeAutomationLanesForProject(lanes: any[]) {
     const readEnabled = automationLaneReadFromLegacy(lane);
     return {
       ...lane,
+      points: (Array.isArray(lane?.points) ? lane.points : []).map((point: any, index: number) => ({
+        ...point,
+        id: persistedAutomationPointId(lane, point, index),
+      })),
       readEnabled,
       mode: readEnabled ? "read" : "off",
       armed: false,
@@ -1184,7 +1198,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           masterAutomationWriteEnabled: false,
           masterAutomationEnabled: loadedMasterAutomationRead,
           automationWriteBehavior: loadedAutomationWriteBehavior,
-          suspendedMasterAutomationState: data.suspendedMasterAutomationState || null,
+          // Suspension is an in-session editing state. Never carry its saved
+          // owner/lane snapshot into a newly loaded project.
+          suspendedMasterAutomationState: null,
           mixerSnapshots: Array.isArray(data.mixerSnapshots) ? data.mixerSnapshots : [],
           trackGroups: Array.isArray(data.trackGroups) ? data.trackGroups : [],
           clipLauncher: loadedClipLauncher,

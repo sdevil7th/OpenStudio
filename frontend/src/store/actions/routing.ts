@@ -9,6 +9,62 @@ type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GetFn = () => any;
 
+const automationLaneHeightEditSnapshots = new Map<
+  string,
+  { height: number | undefined }
+>();
+
+function automationLaneHeightEditKey(trackId: string, laneId: string) {
+  return `${trackId}:${laneId}`;
+}
+
+function normalizedAutomationLaneHeight(height: unknown) {
+  const value = typeof height === "number" && Number.isFinite(height) ? height : 60;
+  return Math.max(24, Math.min(240, value));
+}
+
+function applyAutomationLaneHeight(
+  set: SetFn,
+  get: GetFn,
+  trackId: string,
+  laneId: string,
+  height: number | undefined,
+) {
+  const track = get().tracks.find((candidate) => candidate.id === trackId);
+  const lane = track?.automationLanes.find((candidate) => candidate.id === laneId);
+  if (!lane) return false;
+
+  const nextHeight = height === undefined
+    ? undefined
+    : normalizedAutomationLaneHeight(height);
+  if (
+    lane.height === nextHeight
+    || (lane.height === undefined && normalizedAutomationLaneHeight(nextHeight) === 60)
+  ) {
+    return false;
+  }
+
+  set((state) => ({
+    tracks: state.tracks.map((candidateTrack) =>
+      candidateTrack.id !== trackId
+        ? candidateTrack
+        : {
+            ...candidateTrack,
+            automationLanes: candidateTrack.automationLanes.map((candidateLane) => {
+              if (candidateLane.id !== laneId) return candidateLane;
+              if (nextHeight === undefined) {
+                const { height: _height, ...laneWithoutHeight } = candidateLane;
+                return laneWithoutHeight;
+              }
+              return { ...candidateLane, height: nextHeight };
+            }),
+          },
+    ),
+    isModified: true,
+  }));
+  return true;
+}
+
 export const routingActions = (set: SetFn, get: GetFn) => ({
     storePluginState: async (trackId, fxIndex, slot, isInputFX) => {
       const key = `${trackId}-${fxIndex}`;
@@ -203,12 +259,78 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
       }));
     },
 
+    beginAutomationLaneHeightEdit: (trackId, laneId) => {
+      const key = automationLaneHeightEditKey(trackId, laneId);
+      if (automationLaneHeightEditSnapshots.has(key)) return;
+      const track = get().tracks.find((candidate) => candidate.id === trackId);
+      const lane = track?.automationLanes.find((candidate) => candidate.id === laneId);
+      if (!lane) return;
+      automationLaneHeightEditSnapshots.set(key, { height: lane.height });
+    },
+
+    setAutomationLaneHeight: (trackId, laneId, height) => {
+      if (!automationLaneHeightEditSnapshots.has(
+        automationLaneHeightEditKey(trackId, laneId),
+      )) {
+        return;
+      }
+      applyAutomationLaneHeight(set, get, trackId, laneId, height);
+    },
+
+    commitAutomationLaneHeightEdit: (trackId, laneId) => {
+      const key = automationLaneHeightEditKey(trackId, laneId);
+      const snapshot = automationLaneHeightEditSnapshots.get(key);
+      automationLaneHeightEditSnapshots.delete(key);
+      if (!snapshot) return;
+
+      const track = get().tracks.find((candidate) => candidate.id === trackId);
+      const lane = track?.automationLanes.find((candidate) => candidate.id === laneId);
+      if (!lane) return;
+      const oldHeight = snapshot.height;
+      const newHeight = lane.height;
+      if (
+        oldHeight === newHeight
+        || normalizedAutomationLaneHeight(oldHeight) === normalizedAutomationLaneHeight(newHeight)
+      ) {
+        return;
+      }
+
+      commandManager.push({
+        type: "SET_AUTOMATION_LANE_HEIGHT",
+        description: "Resize automation lane",
+        timestamp: Date.now(),
+        execute: () => {
+          applyAutomationLaneHeight(set, get, trackId, laneId, newHeight);
+        },
+        undo: () => {
+          applyAutomationLaneHeight(set, get, trackId, laneId, oldHeight);
+        },
+      });
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+      });
+    },
+
     toggleSpectralView: (trackId: string) => {
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === trackId ? { ...t, spectralView: !t.spectralView } : t,
-        ),
+      const track = get().tracks.find((candidate) => candidate.id === trackId);
+      if (!track) return;
+      const oldValue = Boolean(track.spectralView);
+      const newValue = !oldValue;
+      const applyValue = (spectralView: boolean) => set((current) => ({
+        tracks: current.tracks.map((candidate) => candidate.id === trackId
+          ? { ...candidate, spectralView }
+          : candidate),
+        isModified: true,
       }));
+      commandManager.execute({
+        type: "TOGGLE_TRACK_SPECTRAL_VIEW",
+        description: newValue ? "Show track spectral view" : "Show track waveform view",
+        timestamp: Date.now(),
+        execute: () => applyValue(newValue),
+        undo: () => applyValue(oldValue),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     toggleCrosshair: () =>

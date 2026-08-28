@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { ProfiledRangeInput } from "./ui";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -45,10 +46,9 @@ export function CorrectPitchModal() {
             <label className="text-[10px] text-neutral-400">Pitch Center</label>
             <span className="text-[10px] font-mono text-neutral-300">{pitchCenter}%</span>
           </div>
-          <input
-            type="range"
+          <ProfiledRangeInput
             min={0} max={100} value={pitchCenter}
-            onChange={(e) => setPitchCenter(Number(e.target.value))}
+            onValueChange={setPitchCenter}
             className="w-full h-1 bg-neutral-700 rounded-full appearance-none cursor-pointer accent-daw-accent"
           />
           <div className="flex justify-between text-[8px] text-neutral-600 mt-0.5">
@@ -63,10 +63,9 @@ export function CorrectPitchModal() {
             <label className="text-[10px] text-neutral-400">Pitch Drift</label>
             <span className="text-[10px] font-mono text-neutral-300">{pitchDrift}%</span>
           </div>
-          <input
-            type="range"
+          <ProfiledRangeInput
             min={0} max={100} value={pitchDrift}
-            onChange={(e) => setPitchDrift(Number(e.target.value))}
+            onValueChange={setPitchDrift}
             className="w-full h-1 bg-neutral-700 rounded-full appearance-none cursor-pointer accent-daw-accent"
           />
           <div className="flex justify-between text-[8px] text-neutral-600 mt-0.5">

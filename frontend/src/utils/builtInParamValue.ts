@@ -17,6 +17,236 @@ export function isChorusRateParam(param: Pick<BuiltInParamDescriptor, "id">) {
   return param.id === CHORUS_RATE_PARAM_ID;
 }
 
+export const NAM_GRAPHIC_EQ_HPF_PARAM_ID = "eqHPFHz";
+export const NAM_GRAPHIC_EQ_LPF_PARAM_ID = "eqLPFHz";
+export const NAM_GRAPHIC_EQ_HPF_OFF_HZ = 0;
+export const NAM_GRAPHIC_EQ_HPF_MIN_HZ = 20;
+export const NAM_GRAPHIC_EQ_HPF_MAX_HZ = 500;
+export const NAM_GRAPHIC_EQ_LPF_MIN_HZ = 3000;
+export const NAM_GRAPHIC_EQ_LPF_MAX_HZ = 20000;
+export const NAM_GRAPHIC_EQ_LPF_OFF_HZ = 24000;
+export const NAM_PRE_EQ_HPF_PARAM_ID = "preEqHPFHz";
+export const NAM_PRE_EQ_LPF_PARAM_ID = "preEqLPFHz";
+export const NAM_PRE_EQ_HPF_OFF_HZ = 0;
+export const NAM_PRE_EQ_HPF_MIN_HZ = 35;
+export const NAM_PRE_EQ_HPF_MAX_HZ = 180;
+export const NAM_PRE_EQ_LPF_MIN_HZ = 3000;
+export const NAM_PRE_EQ_LPF_MAX_HZ = 20000;
+export const NAM_PRE_EQ_LPF_OFF_HZ = 24000;
+
+export type NAMGraphicEqRecallMemoryId =
+  | "eqHPFLastActiveHz"
+  | "eqLPFLastActiveHz"
+  | "preEqHPFLastActiveHz"
+  | "preEqLPFLastActiveHz";
+
+export function namGraphicEqActiveRecallUpdate(
+  paramId: string,
+  value: number,
+): readonly [NAMGraphicEqRecallMemoryId, number] | null {
+  if (!Number.isFinite(value)) return null;
+  if (
+    paramId === NAM_GRAPHIC_EQ_HPF_PARAM_ID
+    && value >= NAM_GRAPHIC_EQ_HPF_MIN_HZ
+    && value <= NAM_GRAPHIC_EQ_HPF_MAX_HZ
+  ) {
+    return ["eqHPFLastActiveHz", value];
+  }
+  if (
+    paramId === NAM_GRAPHIC_EQ_LPF_PARAM_ID
+    && value >= NAM_GRAPHIC_EQ_LPF_MIN_HZ
+    && value <= NAM_GRAPHIC_EQ_LPF_MAX_HZ
+  ) {
+    return ["eqLPFLastActiveHz", value];
+  }
+  if (
+    paramId === NAM_PRE_EQ_HPF_PARAM_ID
+    && value >= NAM_PRE_EQ_HPF_MIN_HZ
+    && value <= NAM_PRE_EQ_HPF_MAX_HZ
+  ) {
+    return ["preEqHPFLastActiveHz", value];
+  }
+  if (
+    paramId === NAM_PRE_EQ_LPF_PARAM_ID
+    && value >= NAM_PRE_EQ_LPF_MIN_HZ
+    && value <= NAM_PRE_EQ_LPF_MAX_HZ
+  ) {
+    return ["preEqLPFLastActiveHz", value];
+  }
+  return null;
+}
+
+// The two end stops deliberately reserve physical travel for OFF. This makes
+// bypass visually unambiguous while keeping the audible cutoff range logarithmic.
+export const NAM_GRAPHIC_EQ_FILTER_OFF_DETENT = 0.06;
+const NAM_GRAPHIC_EQ_FILTER_NORMALIZED_STEP = 1 / 300;
+const NAM_GRAPHIC_EQ_FILTER_BOUNDARY_EPSILON = 1.0e-9;
+
+export function isNAMGraphicEqHPFParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return param.id === NAM_GRAPHIC_EQ_HPF_PARAM_ID;
+}
+
+export function isNAMGraphicEqLPFParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return param.id === NAM_GRAPHIC_EQ_LPF_PARAM_ID;
+}
+
+export function isNAMGraphicEqFilterParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return isNAMGraphicEqHPFParam(param) || isNAMGraphicEqLPFParam(param);
+}
+
+export function isNAMPreEqHPFParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return param.id === NAM_PRE_EQ_HPF_PARAM_ID;
+}
+
+export function isNAMPreEqLPFParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return param.id === NAM_PRE_EQ_LPF_PARAM_ID;
+}
+
+export function isNAMPreEqFilterParam(
+  param: Pick<BuiltInParamDescriptor, "id">,
+) {
+  return isNAMPreEqHPFParam(param) || isNAMPreEqLPFParam(param);
+}
+
+function isNAMEqFilterParam(param: Pick<BuiltInParamDescriptor, "id">) {
+  return isNAMGraphicEqFilterParam(param) || isNAMPreEqFilterParam(param);
+}
+
+function logFrequencyFromUnit(unit: number, minHz: number, maxHz: number) {
+  return minHz * Math.pow(maxHz / minHz, clampNumber(unit, 0, 1));
+}
+
+function logFrequencyUnit(frequencyHz: number, minHz: number, maxHz: number) {
+  const hz = clampNumber(frequencyHz, minHz, maxHz);
+  return Math.log(hz / minHz) / Math.log(maxHz / minHz);
+}
+
+export function namGraphicEqFilterHzFromNormalized(
+  paramId: string,
+  normalized: number,
+) {
+  const n = clampNumber(normalized, 0, 1);
+  if (paramId === NAM_GRAPHIC_EQ_HPF_PARAM_ID) {
+    if (n < NAM_GRAPHIC_EQ_FILTER_OFF_DETENT - NAM_GRAPHIC_EQ_FILTER_BOUNDARY_EPSILON) {
+      return NAM_GRAPHIC_EQ_HPF_OFF_HZ;
+    }
+    const activeUnit = (n - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT)
+      / (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT);
+    return logFrequencyFromUnit(
+      activeUnit,
+      NAM_GRAPHIC_EQ_HPF_MIN_HZ,
+      NAM_GRAPHIC_EQ_HPF_MAX_HZ,
+    );
+  }
+  if (paramId === NAM_GRAPHIC_EQ_LPF_PARAM_ID) {
+    if (n > 1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT + NAM_GRAPHIC_EQ_FILTER_BOUNDARY_EPSILON) {
+      return NAM_GRAPHIC_EQ_LPF_OFF_HZ;
+    }
+    const activeUnit = n / (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT);
+    return logFrequencyFromUnit(
+      activeUnit,
+      NAM_GRAPHIC_EQ_LPF_MIN_HZ,
+      NAM_GRAPHIC_EQ_LPF_MAX_HZ,
+    );
+  }
+  if (paramId === NAM_PRE_EQ_HPF_PARAM_ID) {
+    if (n < NAM_GRAPHIC_EQ_FILTER_OFF_DETENT - NAM_GRAPHIC_EQ_FILTER_BOUNDARY_EPSILON) {
+      return NAM_PRE_EQ_HPF_OFF_HZ;
+    }
+    return logFrequencyFromUnit(
+      (n - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT) / (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT),
+      NAM_PRE_EQ_HPF_MIN_HZ,
+      NAM_PRE_EQ_HPF_MAX_HZ,
+    );
+  }
+  if (paramId === NAM_PRE_EQ_LPF_PARAM_ID) {
+    if (n > 1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT + NAM_GRAPHIC_EQ_FILTER_BOUNDARY_EPSILON) {
+      return NAM_PRE_EQ_LPF_OFF_HZ;
+    }
+    return logFrequencyFromUnit(
+      n / (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT),
+      NAM_PRE_EQ_LPF_MIN_HZ,
+      NAM_PRE_EQ_LPF_MAX_HZ,
+    );
+  }
+  return n;
+}
+
+export function namGraphicEqFilterNormalizedFromHz(
+  paramId: string,
+  frequencyHz: number,
+) {
+  if (paramId === NAM_GRAPHIC_EQ_HPF_PARAM_ID) {
+    if (!Number.isFinite(frequencyHz) || frequencyHz < NAM_GRAPHIC_EQ_HPF_MIN_HZ) return 0;
+    return NAM_GRAPHIC_EQ_FILTER_OFF_DETENT
+      + (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT)
+        * logFrequencyUnit(
+          frequencyHz,
+          NAM_GRAPHIC_EQ_HPF_MIN_HZ,
+          NAM_GRAPHIC_EQ_HPF_MAX_HZ,
+        );
+  }
+  if (paramId === NAM_GRAPHIC_EQ_LPF_PARAM_ID) {
+    if (!Number.isFinite(frequencyHz)
+        || frequencyHz >= (NAM_GRAPHIC_EQ_LPF_MAX_HZ + NAM_GRAPHIC_EQ_LPF_OFF_HZ) / 2) {
+      return 1;
+    }
+    return (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT)
+      * logFrequencyUnit(
+        frequencyHz,
+        NAM_GRAPHIC_EQ_LPF_MIN_HZ,
+        NAM_GRAPHIC_EQ_LPF_MAX_HZ,
+      );
+  }
+  if (paramId === NAM_PRE_EQ_HPF_PARAM_ID) {
+    if (!Number.isFinite(frequencyHz) || frequencyHz < NAM_PRE_EQ_HPF_MIN_HZ) return 0;
+    return NAM_GRAPHIC_EQ_FILTER_OFF_DETENT
+      + (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT)
+        * logFrequencyUnit(
+          frequencyHz,
+          NAM_PRE_EQ_HPF_MIN_HZ,
+          NAM_PRE_EQ_HPF_MAX_HZ,
+        );
+  }
+  if (paramId === NAM_PRE_EQ_LPF_PARAM_ID) {
+    if (!Number.isFinite(frequencyHz)
+        || frequencyHz >= (NAM_PRE_EQ_LPF_MAX_HZ + NAM_PRE_EQ_LPF_OFF_HZ) / 2) {
+      return 1;
+    }
+    return (1 - NAM_GRAPHIC_EQ_FILTER_OFF_DETENT)
+      * logFrequencyUnit(
+        frequencyHz,
+        NAM_PRE_EQ_LPF_MIN_HZ,
+        NAM_PRE_EQ_LPF_MAX_HZ,
+      );
+  }
+  return clampNumber(frequencyHz, 0, 1);
+}
+
+export function isNAMGraphicEqFilterOff(
+  param: Pick<BuiltInParamDescriptor, "id" | "value">,
+) {
+  if (isNAMGraphicEqHPFParam(param)) return param.value < NAM_GRAPHIC_EQ_HPF_MIN_HZ;
+  if (isNAMGraphicEqLPFParam(param)) {
+    return param.value >= (NAM_GRAPHIC_EQ_LPF_MAX_HZ + NAM_GRAPHIC_EQ_LPF_OFF_HZ) / 2;
+  }
+  if (isNAMPreEqHPFParam(param)) return param.value < NAM_PRE_EQ_HPF_MIN_HZ;
+  if (isNAMPreEqLPFParam(param)) {
+    return param.value >= (NAM_PRE_EQ_LPF_MAX_HZ + NAM_PRE_EQ_LPF_OFF_HZ) / 2;
+  }
+  return false;
+}
+
 function chorusRateCurveUnit(value: number) {
   const x = clampNumber(value, 0, 1);
   return x + CHORUS_RATE_CURVE_K * x * (1 - x);
@@ -68,6 +298,9 @@ export function migrateLegacyChorusRateAutomationValue(
 
 export function normalizeParamValue(param: BuiltInParamDescriptor, value: number) {
   if (isChorusRateParam(param)) return chorusRateNormalizedFromHz(value);
+  if (isNAMEqFilterParam(param)) {
+    return namGraphicEqFilterNormalizedFromHz(param.id, value);
+  }
   if (param.max <= param.min) return 0;
   return clampNumber((value - param.min) / (param.max - param.min), 0, 1);
 }
@@ -78,6 +311,9 @@ export function normalizeParam(param: BuiltInParamDescriptor) {
 
 export function denormalizeParamValue(param: BuiltInParamDescriptor, normalized: number) {
   if (isChorusRateParam(param)) return chorusRateHzFromNormalized(normalized);
+  if (isNAMEqFilterParam(param)) {
+    return namGraphicEqFilterHzFromNormalized(param.id, normalized);
+  }
   return param.min + clampNumber(normalized, 0, 1) * Math.max(param.max - param.min, 0);
 }
 
@@ -93,6 +329,11 @@ export function formatParamValue(param: BuiltInParamDescriptor) {
     const decimals = param.value < 1 ? 3 : 2;
     return `${param.value.toFixed(decimals)} Hz`;
   }
+  if (isNAMEqFilterParam(param)) {
+    if (isNAMGraphicEqFilterOff(param)) return "OFF";
+    if (isNAMGraphicEqLPFParam(param) || isNAMPreEqLPFParam(param)) return `${(param.value / 1000).toFixed(1)} kHz`;
+    return `${Math.round(param.value)} Hz`;
+  }
   const span = Math.abs(param.max - param.min);
   const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
   return `${param.value.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
@@ -100,6 +341,7 @@ export function formatParamValue(param: BuiltInParamDescriptor) {
 
 export function stepForParam(param: BuiltInParamDescriptor) {
   if (isChorusRateParam(param)) return CHORUS_RATE_NORMALIZED_STEP;
+  if (isNAMEqFilterParam(param)) return NAM_GRAPHIC_EQ_FILTER_NORMALIZED_STEP;
   const span = Math.abs(param.max - param.min);
   if (param.type === "toggle" || param.type === "enum") return 1;
   if (param.unit === "Hz" && param.max > 1000) return 1;
@@ -115,6 +357,16 @@ export function quantizeParamValue(param: BuiltInParamDescriptor, value: number)
     const snapped = Math.round(normalized / CHORUS_RATE_NORMALIZED_STEP)
       * CHORUS_RATE_NORMALIZED_STEP;
     return Number(chorusRateHzFromNormalized(snapped).toFixed(6));
+  }
+  if (isNAMEqFilterParam(param)) {
+    const normalized = namGraphicEqFilterNormalizedFromHz(param.id, value);
+    const snapped = Math.round(normalized / NAM_GRAPHIC_EQ_FILTER_NORMALIZED_STEP)
+      * NAM_GRAPHIC_EQ_FILTER_NORMALIZED_STEP;
+    const hz = namGraphicEqFilterHzFromNormalized(param.id, snapped);
+    if (hz === NAM_GRAPHIC_EQ_HPF_OFF_HZ || hz === NAM_GRAPHIC_EQ_LPF_OFF_HZ) return hz;
+    return isNAMGraphicEqLPFParam(param) || isNAMPreEqLPFParam(param)
+      ? Math.round(hz / 10) * 10
+      : Math.round(hz);
   }
   const step = stepForParam(param);
   if (step <= 0) return clampNumber(value, param.min, param.max);
@@ -133,30 +385,54 @@ export function offsetParamValue(
         + CHORUS_RATE_NORMALIZED_STEP * stepCount,
     );
   }
+  if (isNAMEqFilterParam(param)) {
+    const valueParam = { id: param.id, value };
+    if (isNAMGraphicEqHPFParam(param) && isNAMGraphicEqFilterOff(valueParam)) {
+      return stepCount > 0 ? NAM_GRAPHIC_EQ_HPF_MIN_HZ : NAM_GRAPHIC_EQ_HPF_OFF_HZ;
+    }
+    if (isNAMPreEqHPFParam(param) && isNAMGraphicEqFilterOff(valueParam)) {
+      return stepCount > 0 ? NAM_PRE_EQ_HPF_MIN_HZ : NAM_PRE_EQ_HPF_OFF_HZ;
+    }
+    if (isNAMGraphicEqLPFParam(param) && isNAMGraphicEqFilterOff(valueParam)) {
+      return stepCount < 0 ? NAM_GRAPHIC_EQ_LPF_MAX_HZ : NAM_GRAPHIC_EQ_LPF_OFF_HZ;
+    }
+    if (isNAMPreEqLPFParam(param) && isNAMGraphicEqFilterOff(valueParam)) {
+      return stepCount < 0 ? NAM_PRE_EQ_LPF_MAX_HZ : NAM_PRE_EQ_LPF_OFF_HZ;
+    }
+    return namGraphicEqFilterHzFromNormalized(
+      param.id,
+      namGraphicEqFilterNormalizedFromHz(param.id, value)
+        + NAM_GRAPHIC_EQ_FILTER_NORMALIZED_STEP * stepCount,
+    );
+  }
   return value + stepForParam(param) * stepCount;
 }
 
 export function rangeInputValue(param: BuiltInParamDescriptor) {
-  return isChorusRateParam(param) ? normalizeParam(param) : param.value;
+  return isChorusRateParam(param) || isNAMEqFilterParam(param)
+    ? normalizeParam(param)
+    : param.value;
 }
 
 export function rangeInputMin(param: BuiltInParamDescriptor) {
-  return isChorusRateParam(param) ? 0 : param.min;
+  return isChorusRateParam(param) || isNAMEqFilterParam(param) ? 0 : param.min;
 }
 
 export function rangeInputMax(param: BuiltInParamDescriptor) {
-  return isChorusRateParam(param) ? 1 : param.max;
+  return isChorusRateParam(param) || isNAMEqFilterParam(param) ? 1 : param.max;
 }
 
 export function rangeInputStep(param: BuiltInParamDescriptor) {
-  return isChorusRateParam(param) ? CHORUS_RATE_NORMALIZED_STEP : stepForParam(param);
+  return stepForParam(param);
 }
 
 export function paramValueFromRangeInput(
   param: BuiltInParamDescriptor,
   rangeValue: number,
 ) {
-  return isChorusRateParam(param)
-    ? chorusRateHzFromNormalized(rangeValue)
-    : rangeValue;
+  if (isChorusRateParam(param)) return chorusRateHzFromNormalized(rangeValue);
+  if (isNAMEqFilterParam(param)) {
+    return namGraphicEqFilterHzFromNormalized(param.id, rangeValue);
+  }
+  return rangeValue;
 }

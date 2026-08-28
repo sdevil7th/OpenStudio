@@ -7,7 +7,7 @@ import {
   getTrackGroupInfo,
   TRACK_GROUP_COLORS,
   getEffectiveTrackHeight,
-  AUTOMATION_LANE_HEIGHT,
+  getAutomationLaneHeight,
 } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
@@ -27,6 +27,9 @@ import {
 } from "../store/automationParams";
 import { subscribeToInstrumentChanged } from "../utils/fxChain";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
+import { activateShortcutContext } from "../utils/shortcutContext";
 import { TrackNameEditor } from "./TrackNameEditor";
 
 interface TrackHeaderProps {
@@ -47,6 +50,7 @@ export const TrackHeader = React.memo(function TrackHeader({
   // Isolated meter subscription — this component re-renders at 10Hz for the
   // mini activity bar, but that's cheap and doesn't affect Timeline/App.
   const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+  const midiInputLevel = useDAWStore((s) => s.midiInputLevels[track.id] ?? 0);
   // Automation display values — updated at ~30fps during playback
   const autoValues = useDAWStore((s) => s.automatedParamValues[track.id]);
 
@@ -69,6 +73,7 @@ export const TrackHeader = React.memo(function TrackHeader({
     refreshAudioDeviceSetup,
     trackHeight,
     trackGroups,
+    selectedTrackId,
     setTrackNotes,
     removeInstrumentWithUndo,
     setTrackSamplerSampleWithUndo,
@@ -93,6 +98,7 @@ export const TrackHeader = React.memo(function TrackHeader({
       refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
       trackHeight: s.trackHeight,
       trackGroups: s.trackGroups,
+      selectedTrackId: s.selectedTrackId,
       setTrackNotes: s.setTrackNotes,
       removeInstrumentWithUndo: s.removeInstrumentWithUndo,
       setTrackSamplerSampleWithUndo: s.setTrackSamplerSampleWithUndo,
@@ -217,6 +223,51 @@ export const TrackHeader = React.memo(function TrackHeader({
     setShowFXChain(true);
   };
 
+  useEffect(() => {
+    if (!isSelected || selectedTrackId !== track.id) return;
+    const execute = (actionId: string) => {
+      const selectedId = useDAWStore.getState().selectedTrackId;
+      if (selectedId !== track.id) return "claimed_noop" as const;
+      if (actionId === "track.openSelectedFxChain") {
+        setShowFXChain(true);
+        return "handled" as const;
+      }
+      if (actionId === "track.openSelectedNotes") {
+        setNotesValue(track.notes || "");
+        setShowNotes(true);
+        return "handled" as const;
+      }
+      if (actionId === "track.loadSelectedSamplerSample") {
+        if (track.type !== "instrument") return "claimed_noop" as const;
+        void handleLoadSamplerSample();
+        return "handled" as const;
+      }
+      return "unmatched" as const;
+    };
+    const unregisterTrackHeader = registerScopedActionExecutor(
+      { kind: "track_control_panel" },
+      execute,
+      [
+        "track.openSelectedFxChain",
+        "track.openSelectedNotes",
+        ...(track.type === "instrument" ? ["track.loadSelectedSamplerSample"] : []),
+      ],
+    );
+    const unregisterMixer = registerScopedActionExecutor(
+      { kind: "mixer" },
+      execute,
+      [
+        "track.openSelectedFxChain",
+        "track.openSelectedNotes",
+        ...(track.type === "instrument" ? ["track.loadSelectedSamplerSample"] : []),
+      ],
+    );
+    return () => {
+      unregisterMixer();
+      unregisterTrackHeader();
+    };
+  }, [isSelected, selectedTrackId, track.id, track.type]);
+
   const handleLoadSamplerSample = async () => {
     const samplePath = await nativeBridge.showOpenDialog(
       "Load Sampler Sample",
@@ -259,11 +310,18 @@ export const TrackHeader = React.memo(function TrackHeader({
 
   const currentInputValue = `${track.inputStartChannel}-${track.inputChannelCount}`;
 
+  const meterPresentation = resolveTrackMeterPresentation(
+    meterLevel,
+    midiInputLevel,
+    track.armed,
+    track.type,
+  );
+
   // Meter gradient based on dB-normalized level (matches PeakMeter breakpoints)
   const getMeterColor = () => {
     const dbNorm =
-      meterLevel > 0.001
-        ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72)
+      meterPresentation.normalizedLevel > 0.001
+        ? Math.max(0, (20 * Math.log10(meterPresentation.normalizedLevel) + 60) / 72)
         : 0;
     if (dbNorm > 0.92) return "#ef4444"; // Red — clipping
     if (dbNorm > 0.85) return "#facc15"; // Yellow — hot
@@ -274,6 +332,10 @@ export const TrackHeader = React.memo(function TrackHeader({
     <>
       <div
         className={`flex flex-col border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
+        onPointerDownCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        data-shortcut-context="track_control_panel"
         style={{
           height: getEffectiveTrackHeight(track, trackHeight),
           ...(groupColor
@@ -992,15 +1054,18 @@ export const TrackHeader = React.memo(function TrackHeader({
             className={classNames(
               "w-2 pt-1 bg-neutral-900 flex flex-col-reverse border-l border-neutral-800 shrink-0 mr-1 transition-all duration-300",
             )}
+            data-meter-source={meterPresentation.source}
           >
             <div
               className={classNames(
                 "w-full transition-all duration-75",
-                track.armed && meterLevel > 0.01 && "animate-pulse", // Pulse when recording with signal
+                track.armed && meterPresentation.normalizedLevel > 0.01 && "animate-pulse", // Pulse when recording with signal
               )}
               style={{
-                height: `${Math.min(100, meterLevel > 0.001 ? Math.max(0, (20 * Math.log10(meterLevel) + 60) / 72) * 100 : 0)}%`,
-                background: `linear-gradient(to top, ${getMeterColor()}, ${getMeterColor()})`,
+                height: `${Math.min(100, meterPresentation.source === "midi_input" ? meterPresentation.normalizedLevel * 100 : meterPresentation.normalizedLevel > 0.001 ? Math.max(0, (20 * Math.log10(meterPresentation.normalizedLevel) + 60) / 72) * 100 : 0)}%`,
+                background: meterPresentation.source === "midi_input"
+                  ? "linear-gradient(to top, #22d3ee, #a5f3fc)"
+                  : `linear-gradient(to top, ${getMeterColor()}, ${getMeterColor()})`,
               }}
             />
           </div>
@@ -1016,11 +1081,42 @@ export const TrackHeader = React.memo(function TrackHeader({
               const laneLabel = getAutomationShortLabel(lane.param);
               const paramDef = getAutomationParamDef(lane.param);
               const fader = paramDef.inlineFader;
+              const beginInlineFaderEdit = () => {
+                if (fader?.trackProperty === "volumeDB")
+                  beginTrackVolumeEdit(track.id);
+                else if (fader?.trackProperty === "pan")
+                  beginTrackPanEdit(track.id);
+              };
+              const commitInlineFaderEdit = () => {
+                if (fader?.trackProperty === "volumeDB")
+                  commitTrackVolumeEdit(track.id);
+                else if (fader?.trackProperty === "pan")
+                  commitTrackPanEdit(track.id);
+              };
               return (
                 <div
                   key={lane.id}
+                  data-automation-lane-id={lane.id}
+                  data-shortcut-context="automation"
+                  tabIndex={0}
+                  onPointerDownCapture={() => {
+                    activateShortcutContext({ kind: "automation" });
+                    useDAWStore.getState().setSelectedAutomationLane({
+                      kind: "track",
+                      trackId: track.id,
+                      laneId: lane.id,
+                    });
+                  }}
+                  onFocusCapture={() => {
+                    activateShortcutContext({ kind: "automation" });
+                    useDAWStore.getState().setSelectedAutomationLane({
+                      kind: "track",
+                      trackId: track.id,
+                      laneId: lane.id,
+                    });
+                  }}
                   className="flex items-center gap-1 px-1 border-t border-neutral-700/50 shrink-0"
-                  style={{ height: AUTOMATION_LANE_HEIGHT }}
+                  style={{ height: getAutomationLaneHeight(lane) }}
                 >
                   {/* Color indicator */}
                   <div
@@ -1057,20 +1153,6 @@ export const TrackHeader = React.memo(function TrackHeader({
                       data-no-select="true"
                       onPointerDown={(e) => {
                         e.stopPropagation();
-                        if (fader.trackProperty === "volumeDB")
-                          beginTrackVolumeEdit(track.id);
-                        else if (fader.trackProperty === "pan")
-                          beginTrackPanEdit(track.id);
-                        const commitOnce = () => {
-                          if (fader.trackProperty === "volumeDB")
-                            commitTrackVolumeEdit(track.id);
-                          else if (fader.trackProperty === "pan")
-                            commitTrackPanEdit(track.id);
-                          document.removeEventListener("pointerup", commitOnce);
-                        };
-                        document.addEventListener("pointerup", commitOnce, {
-                          once: true,
-                        });
                       }}
                     >
                       <Slider
@@ -1094,6 +1176,8 @@ export const TrackHeader = React.memo(function TrackHeader({
                           else if (fader.trackProperty === "pan")
                             setTrackPan(track.id, v);
                         }}
+                        onBeginEdit={beginInlineFaderEdit}
+                        onCommitEdit={commitInlineFaderEdit}
                         defaultValue={fader.defaultValue}
                         orientation="horizontal"
                         width="64px"

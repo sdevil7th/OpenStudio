@@ -54,6 +54,8 @@ get-pip.py
 # Local pitch/render regression outputs
 /qa/
 /.playwright-cli/
+/frontend/.playwright-cli/
+/.codex-key-diff.txt
 /.codex_tmp/
 /output/
 /tmp_nam_rack_runs/
@@ -65,6 +67,9 @@ get-pip.py
 /tmp_pitch_runs/
 /pitch_debug_captures/
 /*_signal_chain_debug/
+
+# Local maintainer planning (not for the public repository)
+/docs/roadmap.internal.md
 
 # NAM design masters are archived outside the repo; runtime WebP assets stay tracked.
 /frontend/src/assets/nam/design/**/*.png

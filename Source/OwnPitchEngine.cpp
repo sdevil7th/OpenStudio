@@ -84,16 +84,19 @@ static bool writeOwnPitchLayerDumpWav (
     }
 
     juce::WavAudioFormat format;
-    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
     if (stream == nullptr)
         return false;
 
-    std::unique_ptr<juce::AudioFormatWriter> writer (
-        format.createWriterFor (stream.get(), sampleRate, static_cast<unsigned int> (numChannels), 24, {}, 0));
+    auto writer = format.createWriterFor (
+        stream,
+        juce::AudioFormatWriterOptions()
+            .withSampleRate (sampleRate)
+            .withNumChannels (numChannels)
+            .withBitsPerSample (24));
     if (writer == nullptr)
         return false;
 
-    stream.release();
     return writer->writeFromAudioSampleBuffer (buffer, 0, numSamples);
 }
 

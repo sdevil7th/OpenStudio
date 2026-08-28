@@ -103,6 +103,7 @@ describe("NAM tone save metadata", () => {
         pedalModelPath: "",
         ampModelPath: "OpenStudio/NAM/library/amp.nam",
         cabIRPath: "OpenStudio/NAM/library/cab.wav",
+        ampModelSize: 0.42,
         pedalDeclaredCaptureType: "unknown",
         ampDeclaredCaptureType: "full-rig",
         cabEnabled: 0,
@@ -118,6 +119,7 @@ describe("NAM tone save metadata", () => {
       cabRequestedEnabled: true,
       pedalDeclaredCaptureType: "unknown",
       ampDeclaredCaptureType: "full_rig",
+      ampModelSize: 0.42,
       ampEnabled: 0,
       ampMix: 0,
     });
@@ -177,7 +179,7 @@ describe("NAM tone save metadata", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 11,
+        namEffectsDspVersion: 19,
       },
       uiState: {
         namActivePreview: activePreview,
@@ -221,7 +223,7 @@ describe("NAM tone save metadata", () => {
     }), expect.objectContaining({
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 11,
+        namEffectsDspVersion: 19,
       },
     }));
     expect(result.savedTone?.title).toBe("My Saved Crunch");
@@ -247,7 +249,7 @@ describe("NAM tone save metadata", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 11,
+        namEffectsDspVersion: 19,
       },
       slotOrder: ["gate", "pedal", "amp", "cab", "delay", "reverb", "mod", "eq"],
     });
@@ -460,7 +462,6 @@ describe("NAM tone save metadata", () => {
       modelState: {
         clearPedalModel: true,
         ampModelPath: "OpenStudio/NAM/previews/classic-crunch-a2.nam",
-        ampModelSize: 1,
         clearCabIR: true,
       },
       uiState: {

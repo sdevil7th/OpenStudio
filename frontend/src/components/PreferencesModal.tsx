@@ -1,10 +1,23 @@
-import { useState } from "react";
-import { getEffectiveActionShortcut } from "../store/actionRegistry";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { Button, Checkbox, Input, NativeSelect } from "./ui";
+import { Button, Checkbox, Input, NativeSelect, ProfiledRangeInput } from "./ui";
 import { Modal } from "./ui/Modal/Modal";
 import { GRID_TYPE_MODE_OPTIONS, type GridSize } from "../utils/snapToGrid";
+import { getShortcutPlatform } from "../utils/platform";
+import {
+  MOUSE_BEHAVIOR_PROFILE_OPTIONS,
+  getMouseBehaviorProfile,
+} from "../utils/mouseBehaviorProfiles";
+import {
+  MOUSE_MODIFIER_ACTIONS,
+  resolveMouseModifier,
+  type MouseModifierCombination,
+  type MouseModifierContext,
+} from "../utils/mouseModifierResolver";
+import { getSafeMouseModifierNoop } from "../utils/mouseModifierTimelineBehaviors";
+import { isKeyboardShortcutProfileId } from "../utils/shortcutProfiles";
+import { getEffectiveShortcutLabel } from "../utils/inputProfileHelp";
 
 interface PreferencesModalProps {
   isOpen: boolean;
@@ -12,6 +25,14 @@ interface PreferencesModalProps {
 }
 
 type TabId = "general" | "editing" | "display" | "mouse" | "backup";
+
+const PREFERENCE_TABS: readonly { id: TabId; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "editing", label: "Editing" },
+  { id: "display", label: "Display" },
+  { id: "mouse", label: "Mouse" },
+  { id: "backup", label: "Backup" },
+];
 
 /**
  * PreferencesModal - Comprehensive settings beyond audio device configuration.
@@ -22,28 +43,55 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
 
   if (!isOpen) return null;
 
-  const tabs: { id: TabId; label: string }[] = [
-    { id: "general", label: "General" },
-    { id: "editing", label: "Editing" },
-    { id: "display", label: "Display" },
-    { id: "mouse", label: "Mouse" },
-    { id: "backup", label: "Backup" },
-  ];
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % PREFERENCE_TABS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (index - 1 + PREFERENCE_TABS.length) % PREFERENCE_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = PREFERENCE_TABS.length - 1;
+    }
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    const nextTab = PREFERENCE_TABS[nextIndex];
+    setActiveTab(nextTab.id);
+    document.getElementById(`preferences-tab-${nextTab.id}`)?.focus();
+  };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Preferences" size="lg">
-      <div className="flex gap-4 min-h-[400px]">
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Preferences"
+      size="lg"
+      className="!w-[calc(100vw-2rem)] max-w-[700px]"
+    >
+      <div className="flex min-h-0 flex-col gap-3 sm:min-h-[400px] sm:flex-row sm:gap-4">
         {/* Tab sidebar */}
-        <div className="flex flex-col gap-1 min-w-[120px] border-r border-daw-border pr-3">
-          {tabs.map((tab) => (
+        <div
+          className="flex min-w-0 gap-1 overflow-x-auto border-b border-daw-border pb-2 sm:min-w-[120px] sm:flex-col sm:overflow-visible sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3"
+          role="tablist"
+          aria-label="Preference categories"
+        >
+          {PREFERENCE_TABS.map((tab, index) => (
             <button
               key={tab.id}
-              className={`text-left px-3 py-1.5 text-sm rounded transition-colors ${
+              id={`preferences-tab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              aria-controls="preferences-panel"
+              tabIndex={activeTab === tab.id ? 0 : -1}
+              className={`shrink-0 rounded px-3 py-1.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent ${
                 activeTab === tab.id
                   ? "bg-daw-accent text-white"
                   : "text-daw-text-muted hover:bg-neutral-800"
               }`}
               onClick={() => setActiveTab(tab.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
             >
               {tab.label}
             </button>
@@ -51,7 +99,13 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
         </div>
 
         {/* Tab content */}
-        <div className="flex-1 overflow-y-auto">
+        <div
+          id="preferences-panel"
+          role="tabpanel"
+          aria-labelledby={`preferences-tab-${activeTab}`}
+          tabIndex={0}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent"
+        >
           {activeTab === "general" && <GeneralTab />}
           {activeTab === "editing" && <EditingTab />}
           {activeTab === "display" && <DisplayTab />}
@@ -71,7 +125,7 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
 }
 
 function shortcut(actionId: string, fallback: string): string {
-  return getEffectiveActionShortcut(actionId) ?? fallback;
+  return getEffectiveShortcutLabel(actionId, fallback);
 }
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
@@ -258,11 +312,23 @@ function EditingTab() {
 
 // ========== Display Tab ==========
 function DisplayTab() {
-  const { timecodeMode, smpteFrameRate, uiFontScale } = useDAWStore(useShallow((s) => ({
+  const {
+    timecodeMode,
+    smpteFrameRate,
+    uiFontScale,
+    keyboardShortcutProfileId,
+    customShortcuts,
+  } = useDAWStore(useShallow((s) => ({
     timecodeMode: s.timecodeMode,
     smpteFrameRate: s.smpteFrameRate,
     uiFontScale: s.uiFontScale,
+    keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+    customShortcuts: s.customShortcuts,
   })));
+  const mixerShortcut = useMemo(
+    () => shortcut("view.toggleMixer", "Ctrl+M"),
+    [keyboardShortcutProfileId, customShortcuts],
+  );
 
   return (
     <div>
@@ -292,13 +358,12 @@ function DisplayTab() {
       <SectionHeader>Accessibility</SectionHeader>
       <Row label="UI Font Scale">
         <div className="flex items-center gap-2">
-          <input
-            type="range"
+          <ProfiledRangeInput
             min={0.75}
             max={1.5}
             step={0.05}
             value={uiFontScale}
-            onChange={(e) => useDAWStore.getState().setUIFontScale(Number.parseFloat(e.target.value))}
+            onValueChange={(value) => useDAWStore.getState().setUIFontScale(value)}
             className="w-24 cursor-pointer accent-blue-600"
             aria-label="UI Font Scale"
             aria-valuemin={0.75}
@@ -313,7 +378,7 @@ function DisplayTab() {
 
       <SectionHeader>Panels</SectionHeader>
       <Row label="Show Mixer on Start">
-        <span className="text-xs text-daw-text-muted">Use {shortcut("view.toggleMixer", "Ctrl+M")} to toggle</span>
+        <span className="text-xs text-daw-text-muted">Use {mixerShortcut} to toggle</span>
       </Row>
       <div className="text-[9px] text-daw-text-muted mb-2 ml-1">
         Keyboard shortcut rebinding is handled in the Keyboard Shortcuts window, not in Preferences.
@@ -323,7 +388,7 @@ function DisplayTab() {
 }
 
 // ========== Mouse Modifier Tab ==========
-const MODIFIER_CONTEXTS: { key: string; label: string }[] = [
+const MODIFIER_CONTEXTS: { key: MouseModifierContext; label: string }[] = [
   { key: "clip_drag", label: "Clip Drag" },
   { key: "clip_resize", label: "Clip Resize" },
   { key: "timeline_click", label: "Timeline Click" },
@@ -333,43 +398,100 @@ const MODIFIER_CONTEXTS: { key: string; label: string }[] = [
   { key: "ruler_click", label: "Ruler Click" },
 ];
 
-const MODIFIER_COMBOS = ["none", "ctrl", "shift", "alt"];
-
-const ACTION_OPTIONS: Record<string, string[]> = {
-  clip_drag: ["move", "copy", "constrain", "bypass_snap", "select", "none"],
-  clip_resize: ["resize", "fine", "symmetric", "stretch", "none"],
-  timeline_click: ["seek", "select_range", "extend_selection", "zoom", "none"],
-  track_header: ["select", "toggle_select", "range_select", "solo", "mute", "none"],
-  automation_point: ["move", "fine", "constrain_y", "delete", "none"],
-  fade_handle: ["adjust", "fine", "symmetric", "shape_cycle", "none"],
-  ruler_click: ["seek", "loop_set", "time_select", "zoom_to", "none"],
-};
+const MODIFIER_COMBOS = [
+  "none",
+  "primary",
+  "secondary",
+  "alt",
+  "shift",
+  "primary+secondary",
+  "primary+alt",
+  "primary+shift",
+  "secondary+alt",
+  "secondary+shift",
+  "alt+shift",
+  "primary+secondary+alt",
+  "primary+secondary+shift",
+  "primary+alt+shift",
+  "secondary+alt+shift",
+  "primary+secondary+alt+shift",
+] as const satisfies readonly MouseModifierCombination[];
 
 function MouseModifierTab() {
-  const { mouseModifiers } = useDAWStore(useShallow((s) => ({
+  const { mouseModifiers, mouseBehaviorProfileId, setMouseBehaviorProfile } = useDAWStore(useShallow((s) => ({
     mouseModifiers: s.mouseModifiers,
+    mouseBehaviorProfileId: s.mouseBehaviorProfileId,
+    setMouseBehaviorProfile: s.setMouseBehaviorProfile,
   })));
+  const platform = getShortcutPlatform();
+  const behaviorProfile = getMouseBehaviorProfile(mouseBehaviorProfileId, platform);
+  const primaryLabel = platform === "macos" ? "Cmd" : "Ctrl";
+  const secondaryLabel = platform === "macos" ? "Ctrl" : "Win";
+  const comboLabel = (combination: MouseModifierCombination) => {
+    if (combination === "none") return "Click";
+    return combination
+      .split("+")
+      .map((modifier) => modifier === "primary"
+        ? primaryLabel
+        : modifier === "secondary"
+          ? secondaryLabel
+          : modifier === "alt"
+            ? platform === "macos" ? "Option" : "Alt"
+            : "Shift")
+      .join("+");
+  };
+  const effectiveResolution = (context: MouseModifierContext, combination: MouseModifierCombination) => {
+    const active = new Set(combination === "none" ? [] : combination.split("+"));
+    return resolveMouseModifier({
+      ctrlKey: platform === "macos" ? active.has("secondary") : active.has("primary"),
+      metaKey: platform === "macos" ? active.has("primary") : active.has("secondary"),
+      altKey: active.has("alt"),
+      shiftKey: active.has("shift"),
+    }, context, {
+      platform: platform === "macos" ? "macos" : platform === "windows" ? "windows" : "other",
+      profile: behaviorProfile.modifiers,
+      overrides: mouseModifiers,
+    });
+  };
 
   return (
     <div>
       <SectionHeader>Mouse Modifier Actions</SectionHeader>
       <div className="text-[9px] text-daw-text-muted mb-2">
-        Configure what happens when you click with different modifier keys held down.
+        Configure exact modifier combinations. Custom cells override the selected profile; multi-key combinations fall back by profile precedence when left unmapped.
+      </div>
+
+      <div className="mb-3 max-w-sm">
+        <NativeSelect
+          label="Mouse & scroll profile"
+          options={MOUSE_BEHAVIOR_PROFILE_OPTIONS}
+          value={mouseBehaviorProfileId}
+          onChange={(value) => {
+            if (isKeyboardShortcutProfileId(value)) setMouseBehaviorProfile(value);
+          }}
+          showPlaceholder={false}
+          fullWidth
+          size="sm"
+        />
       </div>
 
       <div className="overflow-x-auto">
         <table className="w-full text-[10px] border-collapse">
+          <caption className="sr-only">
+            Mouse modifier actions by editing context and exact modifier combination
+          </caption>
           <thead>
             <tr>
-              <th className="text-left py-1 px-1 text-daw-text-muted font-normal border-b border-daw-border">
+              <th scope="col" className="text-left py-1 px-1 text-daw-text-muted font-normal border-b border-daw-border">
                 Context
               </th>
               {MODIFIER_COMBOS.map((mod) => (
                 <th
                   key={mod}
+                  scope="col"
                   className="text-center py-1 px-1 text-daw-text-muted font-normal border-b border-daw-border capitalize"
                 >
-                  {mod === "none" ? "Click" : mod}
+                  {comboLabel(mod)}
                 </th>
               ))}
             </tr>
@@ -377,26 +499,44 @@ function MouseModifierTab() {
           <tbody>
             {MODIFIER_CONTEXTS.map(({ key, label }) => (
               <tr key={key} className="hover:bg-neutral-800/50">
-                <td className="py-1 px-1 text-daw-text border-b border-daw-border/50 whitespace-nowrap">
+                <th scope="row" className="py-1 px-1 text-left font-normal text-daw-text border-b border-daw-border/50 whitespace-nowrap">
                   {label}
-                </td>
-                {MODIFIER_COMBOS.map((mod) => (
-                  <td key={mod} className="py-0.5 px-0.5 border-b border-daw-border/50">
+                </th>
+                {MODIFIER_COMBOS.map((mod) => {
+                  const resolution = effectiveResolution(key, mod);
+                  const inheritanceTitle = resolution.matchKind === "precedence"
+                    ? `Inherited from ${comboLabel(resolution.matchedCombination ?? "none")}`
+                    : resolution.source === "override" ? "Custom override" : "Profile default";
+                  return (
+                  <td key={mod} className="min-w-28 py-0.5 px-0.5 border-b border-daw-border/50">
                     <select
                       className="w-full bg-neutral-800 text-neutral-300 text-[9px] py-0.5 px-1 rounded border border-neutral-700 cursor-pointer"
-                      value={mouseModifiers[key]?.[mod] || "none"}
+                      value={resolution.action}
+                      title={inheritanceTitle}
+                      aria-label={`${label}, ${comboLabel(mod)} action`}
                       onChange={(e) =>
                         useDAWStore.getState().setMouseModifier(key, mod, e.target.value)
                       }
                     >
-                      {(ACTION_OPTIONS[key] || []).map((action) => (
-                        <option key={action} value={action} className="bg-neutral-900 text-white">
-                          {action.split("_").join(" ")}
-                        </option>
-                      ))}
+                      {(MOUSE_MODIFIER_ACTIONS[key] || []).map((action) => {
+                        const unavailable = getSafeMouseModifierNoop(key, action);
+                        return (
+                          <option
+                            key={action}
+                            value={action}
+                            disabled={Boolean(unavailable)}
+                            title={unavailable?.reason}
+                            className="bg-neutral-900 text-white"
+                          >
+                            {action.split("_").join(" ")}
+                            {unavailable ? " (unavailable)" : ""}
+                          </option>
+                        );
+                      })}
                     </select>
                   </td>
-                ))}
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -409,7 +549,7 @@ function MouseModifierTab() {
           size="sm"
           onClick={() => useDAWStore.getState().resetMouseModifiers()}
         >
-          Reset to Defaults
+          Clear Custom Overrides
         </Button>
       </div>
     </div>

@@ -16,8 +16,11 @@ import {
   MASTER_DBFS_RULING_MARKS,
 } from "./meterConfig";
 
-interface PeakMeterProps {
+export interface PeakMeterProps {
   level: number;
+  midiInputLevel?: number;
+  meterSource?: "audio" | "midi_input" | "idle";
+  ariaLabel?: string;
   peakHold?: number;
   height?: number;
   stereo?: boolean;
@@ -37,8 +40,32 @@ interface PeakMeterProps {
   colorScheme?: MeterColorScheme;
 }
 
+export function getStereoMeterChannelLevels(
+  normalizedLevel: number,
+  rmsLevel: number,
+  source: "audio" | "midi_input" | "idle",
+) {
+  if (source === "midi_input") {
+    return {
+      leftLevel: normalizedLevel,
+      rightLevel: normalizedLevel,
+      leftRms: rmsLevel,
+      rightRms: rmsLevel,
+    };
+  }
+  return {
+    leftLevel: normalizedLevel * 0.97,
+    rightLevel: normalizedLevel * 1.03,
+    leftRms: rmsLevel * 0.97,
+    rightRms: rmsLevel * 1.03,
+  };
+}
+
 export function PeakMeter({
   level,
+  midiInputLevel = 0,
+  meterSource = "audio",
+  ariaLabel,
   peakHold = 0,
   height,
   stereo = true,
@@ -93,6 +120,10 @@ export function PeakMeter({
   // Refs for latest values (avoid stale closures in animation loop)
   const levelRef = useRef(level);
   levelRef.current = level;
+  const midiInputLevelRef = useRef(midiInputLevel);
+  midiInputLevelRef.current = midiInputLevel;
+  const meterSourceRef = useRef(meterSource);
+  meterSourceRef.current = meterSource;
   const peakHoldPropRef = useRef(peakHold);
   peakHoldPropRef.current = peakHold;
   const stereoRef = useRef(stereo);
@@ -142,6 +173,9 @@ export function PeakMeter({
       lastDrawTimeRef.current = timestamp;
 
       const currentLevel = levelRef.current;
+      const currentMidiInputLevel = midiInputLevelRef.current;
+      const currentMeterSource = meterSourceRef.current;
+      const isMIDIInput = currentMeterSource === "midi_input";
       const currentPeakHoldProp = peakHoldPropRef.current;
       const isStereo = stereoRef.current;
       const isClipping = clippingRef.current;
@@ -168,13 +202,19 @@ export function PeakMeter({
       const rightWidth = isStereo ? width - rightX : width;
 
       // Update peak hold with decay
-      const normalizedLevel = normalizeLevelToMeter(currentLevel, currentScaleMode);
+      const normalizedLevel = isMIDIInput
+        ? Math.max(0, Math.min(1, currentMidiInputLevel))
+        : normalizeLevelToMeter(currentLevel, currentScaleMode);
 
       // RMS simulation: exponential smoothing of squared normalized level
       const smoothFactor = 0.3;
       const squared = normalizedLevel * normalizedLevel;
-      rmsSmoothedRef.current = rmsSmoothedRef.current * (1 - smoothFactor) + squared * smoothFactor;
-      const rmsLevel = Math.sqrt(rmsSmoothedRef.current);
+      if (!isMIDIInput) {
+        rmsSmoothedRef.current = rmsSmoothedRef.current * (1 - smoothFactor) + squared * smoothFactor;
+      }
+      const rmsLevel = isMIDIInput
+        ? normalizedLevel
+        : Math.sqrt(rmsSmoothedRef.current);
 
       // Use prop peakHold if provided, otherwise compute our own
       let peakDisplay: number;
@@ -185,10 +225,10 @@ export function PeakMeter({
       }
 
       // Internal peak hold with 3 dB/sec decay
-      if (normalizedLevel > peakHoldLevelRef.current) {
+      if (!isMIDIInput && normalizedLevel > peakHoldLevelRef.current) {
         peakHoldLevelRef.current = normalizedLevel;
         peakHoldTimerRef.current = timestamp;
-      } else {
+      } else if (!isMIDIInput) {
         // Decay: 3dB/sec in normalized space ~ 3/72 per second
         const elapsed = (timestamp - peakHoldTimerRef.current) / 1000;
         if (elapsed > 1.5) { // Hold for 1.5 seconds before decay
@@ -198,7 +238,9 @@ export function PeakMeter({
       }
 
       // Use whichever peak is higher
-      const effectivePeak = Math.max(peakDisplay, peakHoldLevelRef.current);
+      const effectivePeak = isMIDIInput
+        ? 0
+        : Math.max(peakDisplay, peakHoldLevelRef.current);
 
       // Clear canvas
       ctx.fillStyle = METER_COLORS.background;
@@ -213,7 +255,9 @@ export function PeakMeter({
           for (let y = 0; y < ch; ++y) {
             const pixelNorm = 1 - ((y + 0.5) / ch);
             const pixelDb = normalizedMeterToDb(pixelNorm, currentScaleMode);
-            const pixelColor = getMeterSegmentColor(pixelDb, currentScaleMode, currentColorScheme);
+            const pixelColor = isMIDIInput
+              ? METER_COLORS.midiInput
+              : getMeterSegmentColor(pixelDb, currentScaleMode, currentColorScheme);
             const litFromPeak = y >= ch - peakH;
             const litFromRms = y >= ch - rmsH;
 
@@ -224,7 +268,7 @@ export function PeakMeter({
               ctx.fillStyle = pixelColor;
               ctx.globalAlpha = 0.35;
             } else {
-              ctx.fillStyle = METER_COLORS.unlit;
+              ctx.fillStyle = isMIDIInput ? METER_COLORS.midiInputDim : METER_COLORS.unlit;
               ctx.globalAlpha = 1;
             }
             ctx.fillRect(cx, y, w, 1);
@@ -237,7 +281,9 @@ export function PeakMeter({
           const segY = y - METER_SEGMENT_HEIGHT;
           const segmentCenterNorm = 1 - ((segY + METER_SEGMENT_HEIGHT * 0.5) / ch);
           const segmentDb = normalizedMeterToDb(segmentCenterNorm, currentScaleMode);
-          const segmentColor = getMeterSegmentColor(segmentDb, currentScaleMode, currentColorScheme);
+          const segmentColor = isMIDIInput
+            ? METER_COLORS.midiInput
+            : getMeterSegmentColor(segmentDb, currentScaleMode, currentColorScheme);
           if (segY >= ch - peakH) {
             ctx.fillStyle = segmentColor;
             ctx.globalAlpha = 1;
@@ -245,7 +291,7 @@ export function PeakMeter({
             ctx.fillStyle = segmentColor;
             ctx.globalAlpha = 0.35;
           } else {
-            ctx.fillStyle = METER_COLORS.unlit;
+            ctx.fillStyle = isMIDIInput ? METER_COLORS.midiInputDim : METER_COLORS.unlit;
             ctx.globalAlpha = 1;
           }
           ctx.fillRect(cx, segY, w, METER_SEGMENT_HEIGHT);
@@ -254,10 +300,8 @@ export function PeakMeter({
       };
 
       if (isStereo) {
-        const leftLevel = normalizedLevel * 0.97;
-        const rightLevel = normalizedLevel * 1.03;
-        const leftRms = rmsLevel * 0.97;
-        const rightRms = rmsLevel * 1.03;
+        const { leftLevel, rightLevel, leftRms, rightRms } =
+          getStereoMeterChannelLevels(normalizedLevel, rmsLevel, currentMeterSource);
         drawChannel(0, leftWidth, leftLevel, leftRms);
         drawChannel(rightX, rightWidth, rightLevel, rightRms);
 
@@ -333,7 +377,7 @@ export function PeakMeter({
       }
 
       // Clip indicator - red block at top if clipping
-      if (isClipping) {
+      if (isClipping && !isMIDIInput) {
         ctx.fillStyle = METER_COLORS.clip;
         ctx.fillRect(0, 0, width, 3);
       }
@@ -356,6 +400,12 @@ export function PeakMeter({
         width={width ?? (stereo ? 16 : 10)}
         height={containerHeightRef.current}
         className={showBorder ? "rounded-sm border border-neutral-700 h-full" : "h-full"}
+        data-meter-source={meterSource}
+        aria-label={ariaLabel}
+        role={ariaLabel ? "meter" : undefined}
+        aria-valuemin={ariaLabel ? 0 : undefined}
+        aria-valuemax={ariaLabel ? 1 : undefined}
+        aria-valuenow={ariaLabel ? (meterSource === "midi_input" ? midiInputLevel : level) : undefined}
         onClick={() => {
           peakHoldLevelRef.current = 0;
           peakHoldTimerRef.current = 0;

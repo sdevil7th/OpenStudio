@@ -22,10 +22,36 @@ export const NAM_RETIRED_REVERB_V2_STATE_KEYS = new Set([
 
 export const NAM_RETIRED_PRECISION_DRIVE_STATE_KEYS = new Set([
   "precisionDriveMode",
+  "precisionDriveVoice",
 ]);
 
 export const NAM_RETIRED_COMPRESSOR_STATE_KEYS = new Set([
   "compressorDetail",
+]);
+
+export const NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS = new Set([
+  "preEq100Db",
+  "preEq200Db",
+  "preEq400Db",
+  "preEq800Db",
+  "preEq1k6Db",
+  "preEq3k2Db",
+  "preEq6k4Db",
+]);
+// These are migration inputs for V16-V18 JSON preset bundles. Do not add this
+// set to NAM_NON_PORTABLE_STATE_KEYS: the import reviver runs before the
+// versioned preset migrator and would otherwise erase the user's EQ curve.
+
+// The former dedicated Rack Tape Echo duplicated the post-FX Delay's Tape
+// voice. Retire its state instead of translating it into `delay*`: importing
+// an old tone must never overwrite the user's existing post-FX Delay setup.
+export const NAM_RETIRED_TAPE_ECHO_STATE_KEYS = new Set([
+  "tapeEchoEnabled",
+  "tapeEchoMix",
+  "tapeEchoTimeMs",
+  "tapeEchoFeedback",
+  "tapeEchoMod",
+  "tapeEchoTone",
 ]);
 
 export const NAM_RETIRED_AUDITION_STATE_KEYS = new Set([
@@ -67,9 +93,22 @@ export const NAM_NON_PORTABLE_STATE_KEYS = new Set([
   ...NAM_RETIRED_REVERB_V2_STATE_KEYS,
   ...NAM_RETIRED_PRECISION_DRIVE_STATE_KEYS,
   ...NAM_RETIRED_COMPRESSOR_STATE_KEYS,
+  ...NAM_RETIRED_TAPE_ECHO_STATE_KEYS,
 ]);
 
-export type NAMEffectsDspVersion = 11;
+export const NAM_PRECISION_DRIVE_VOICE_LABELS = ["Precision"] as const;
+export type NAMPrecisionDriveVoice = 0;
+
+/**
+ * V18 retired the inaccurate OD808 approximation. Keep this normalizer for
+ * old callers, but every saved value now resolves to Precision.
+ */
+export function normalizeNAMPrecisionDriveVoice(value: unknown): NAMPrecisionDriveVoice {
+  void value;
+  return 0;
+}
+
+export type NAMEffectsDspVersion = 19;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -79,8 +118,13 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 export function normalizeNAMEffectsDspVersion(value: unknown): NAMEffectsDspVersion | undefined {
   const version = Number(value);
-  return Number.isInteger(version) && version >= 1 && version <= 11
-    ? 11
+  // V13 was briefly emitted by a development build for an internal DSP-only
+  // refinement. It introduced no portable state fields, so migration treats
+  // it as V12; sanitization still canonicalizes every recognized selector to
+  // the one currently shipped V19 engine. V18 retires precisionDriveVoice;
+  // V19 replaces PRE EQ's seven octave bands with eight guitar-focused bands.
+  return Number.isInteger(version) && version >= 1 && version <= 19
+    ? 19
     : undefined;
 }
 
@@ -132,6 +176,7 @@ export function isRetiredNAMRackAutomationParamId(paramId: unknown): boolean {
         || NAM_RETIRED_REVERB_V2_STATE_KEYS.has(match[1])
         || NAM_RETIRED_PRECISION_DRIVE_STATE_KEYS.has(match[1])
         || NAM_RETIRED_COMPRESSOR_STATE_KEYS.has(match[1])
+        || NAM_RETIRED_TAPE_ECHO_STATE_KEYS.has(match[1])
         || NAM_RETIRED_AUDITION_STATE_KEYS.has(match[1])
         || NAM_RETIRED_INPUT_ROUTING_STATE_KEYS.has(match[1])
       ),

@@ -129,6 +129,13 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
+      - name: Run Windows native-window lifecycle release gate
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
+          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
+
       - name: Prepare Windows signing certificate
         shell: pwsh
         run: |
@@ -298,6 +305,15 @@ jobs:
 
           ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath $appPath.FullName -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
+      - name: Validate universal macOS executable
+        shell: bash
+        run: |
+          APP_PATH="$(find "$BUILD_DIR" -type d -name 'OpenStudio.app' | head -n 1)"
+          ARCHS="$(lipo -archs "$APP_PATH/Contents/MacOS/OpenStudio")"
+          echo "OpenStudio architectures: $ARCHS"
+          [[ " $ARCHS " == *" arm64 "* ]]
+          [[ " $ARCHS " == *" x86_64 "* ]]
+
       - name: Package macOS DMG
         shell: bash
         run: |
@@ -308,6 +324,34 @@ jobs:
             exit 1
           fi
           ./tools/package-macos-release.sh "$APP_PATH" "$VERSION"
+
+      - name: Run packaged macOS native-window lifecycle release gate
+        shell: bash
+        run: |
+          MOUNT_DIR="$(mktemp -d)"
+          REPORT_PATH="$RUNNER_TEMP/OpenStudio_PackagedWindowLifecycleHarness.json"
+          cleanup() {
+            hdiutil detach "$MOUNT_DIR" -quiet || true
+            rmdir "$MOUNT_DIR" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          hdiutil attach "dist/macos/OpenStudio-macOS.dmg" -nobrowse -readonly -mountpoint "$MOUNT_DIR"
+          APP_PATH="$MOUNT_DIR/OpenStudio.app"
+          test -x "$APP_PATH/Contents/MacOS/OpenStudio"
+
+          if [[ -n "${MACOS_CODESIGN_IDENTITY:-}" ]]; then
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          fi
+
+          if [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWORD:-}" ]]; then
+            spctl --assess --type execute --verbose=2 "$APP_PATH"
+          fi
+
+          pwsh -NoProfile -File ./tools/run-window-lifecycle-smoke.ps1 \
+            -AppPath "$APP_PATH/Contents/MacOS/OpenStudio" \
+            -ReportPath "$REPORT_PATH" \
+            -TimeoutSeconds 180
 
       - name: Verify macOS release outputs
         shell: bash
@@ -571,6 +615,7 @@ jobs:
             -WindowsInstallerArguments "/SP- /NOICONS" `
             -MacAssetPath "dist/macos/OpenStudio-macOS.dmg" `
             -MacAssetUrl $macosUrl `
+            -MacMinimumSystemVersion "12.0" `
             -LinuxAssetPath "dist/linux/OpenStudio-$env:VERSION-linux-x86_64.AppImage" `
             -LinuxAssetUrl $linuxUrl `
             -WindowsBaseAiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip" `

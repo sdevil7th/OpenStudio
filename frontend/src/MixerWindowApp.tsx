@@ -1,19 +1,27 @@
 import { useEffect, useState } from "react";
+import { useShallow } from "zustand/shallow";
 import { MixerPanel } from "./components/MixerPanel";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
-import { isEditableShortcutTarget } from "./utils/shortcutContext";
+import {
+  isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
+} from "./utils/shortcutContext";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import {
   hydrateMixerUISnapshotFromNative,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
+import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
 
 export default function MixerWindowApp() {
-  const batchUpdateMeterLevels = useDAWStore((state) => state.batchUpdateMeterLevels);
+  const { batchUpdateMeterLevels } = useDAWStore(useShallow((state) => ({
+    batchUpdateMeterLevels: state.batchUpdateMeterLevels,
+  })));
   const [hydrated, setHydrated] = useState(false);
+  useEffect(() => installBrowserZoomWheelGuard(document), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,9 +71,15 @@ export default function MixerWindowApp() {
         !Array.isArray(data.trackClipping)
           ? data.trackClipping
           : {};
+      const midiInputLevels: Record<string, number> =
+        data.midiInputLevels &&
+        typeof data.midiInputLevels === "object" &&
+        !Array.isArray(data.midiInputLevels)
+          ? data.midiInputLevels
+          : {};
       const masterLevel = typeof data.masterLevel === "number" ? data.masterLevel : 0;
       const masterClipping = data.masterClipping === true;
-      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping);
+      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping, midiInputLevels);
     });
   }, [batchUpdateMeterLevels]);
 
@@ -81,6 +95,7 @@ export default function MixerWindowApp() {
         repeat: e.repeat,
         source: "browser",
         targetIsEditable: isEditableShortcutTarget(e.target),
+        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
         stopImmediatePropagation: () => e.stopImmediatePropagation(),

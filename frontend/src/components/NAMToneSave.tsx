@@ -44,6 +44,8 @@ export type NAMPreviewBaseline = {
   pedalModelPath: string;
   ampModelPath: string;
   cabIRPath: string;
+  pedalModelSize?: number;
+  ampModelSize?: number;
   pedalDeclaredCaptureType?: NAMCaptureType;
   ampDeclaredCaptureType?: NAMCaptureType;
   cabEnabled: number;
@@ -304,6 +306,8 @@ export function normalizeNAMActivePreview(raw: unknown): NAMActivePreviewState |
       pedalModelPath: firstString(baselineRecord.pedalModelPath),
       ampModelPath: firstString(baselineRecord.ampModelPath),
       cabIRPath: firstString(baselineRecord.cabIRPath),
+      pedalModelSize: optionalBaselineNumber("pedalModelSize"),
+      ampModelSize: optionalBaselineNumber("ampModelSize"),
       pedalDeclaredCaptureType: normalizeNAMCaptureType(
         baselineRecord.pedalDeclaredCaptureType,
       ),

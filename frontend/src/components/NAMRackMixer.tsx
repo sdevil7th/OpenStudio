@@ -1,5 +1,6 @@
+import "./NAMRackMixer.css";
 import { type CSSProperties } from "react";
-import { ArrowLeft, SlidersHorizontal } from "lucide-react";
+import { SlidersHorizontal, X } from "lucide-react";
 import { type BuiltInParamDescriptor } from "../services/NativeBridge";
 import { RackKnob } from "./NAMRackKnob";
 
@@ -38,6 +39,7 @@ export const NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS = [
       "reverbLowCutHz",
       "reverbTone",
       "reverbShimmer",
+      "reverbPad",
     ],
   },
 ] as const satisfies readonly RackMixerParamGroupSpec[];
@@ -48,6 +50,7 @@ export const NAM_RACK_CABINET_SPACE_PARAM_IDS = [
   "cabRoomWidth",
   "cabDoublerEnabled",
   "cabDoublerMix",
+  "cabDoublerDelayMs",
   "cabDoublerSpread",
 ] as const;
 
@@ -80,38 +83,71 @@ export const NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS = [
   {
     id: "doubler",
     label: "Doubler",
-    paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread"],
+    paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread"],
   },
 ] as const satisfies readonly RackMixerParamGroupSpec[];
 
 export const NAM_RACK_ADVANCED_CONTROL_IDS = {
   input: ["inputTrimDb"],
   gate: ["gateThresholdDb", "gateReleaseMs"],
-  compressor: [
-    "compressorEnabled",
-    "compressorComp",
-    "compressorAttackMs",
-    "compressorReleaseMs",
-    "compressorToneDb",
-    "compressorSidechainHPF",
-    "compressorMix",
-    "compressorVolumeDb",
-  ],
-  "tape-echo": ["tapeEchoEnabled", "tapeEchoMix", "tapeEchoTimeMs", "tapeEchoFeedback", "tapeEchoMod", "tapeEchoTone"],
+  compressor: ["compressorEnabled", "compressorComp", "compressorAttackMs", "compressorReleaseMs", "compressorToneDb", "compressorIntensity", "compressorSidechainHPF", "compressorMix", "compressorVolumeDb"],
   octaver: ["octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix"],
-  "precision-drive": ["precisionDriveEnabled", "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack", "precisionDriveGate", "precisionDriveDrive"],
+  "pre-eq": ["preEqEnabled", "preEq120Db", "preEq250Db", "preEq500Db", "preEq1kDb", "preEq2k5Db", "preEq5kDb", "preEq8kDb", "preEq12kDb", "preEqHPFHz", "preEqLPFHz"],
+  "precision-drive": [
+    "precisionDriveEnabled", "precisionDriveDrive", "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack", "precisionDriveGate",
+  ],
   chaos: ["chaosEnabled", "chaosMode", "chaosDrive", "chaosWeight", "chaosTone", "chaosGate", "chaosMix", "chaosLevelDb"],
   "pedal-capture": ["pedalMix"],
   amp: ["ampEnabled", "ampGainDb", "ampBoost", "ampVoice", "ampMix", "ampOutputDb", "bassDb", "midDb", "trebleDb", "presenceDb"],
   cab: [...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0].paramIds],
   room: ["cabRoomEnabled", "cabRoomAmount", "cabRoomWidth"],
-  doubler: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread"],
-  eq: ["eqEnabled", "eqLevelDb"],
+  doubler: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread"],
+  eq: [
+    "eqEnabled",
+    "eqHPFHz",
+    "eq65Db",
+    "eq125Db",
+    "eq250Db",
+    "eq500Db",
+    "eq1kDb",
+    "eq2kDb",
+    "eq4kDb",
+    "eq8kDb",
+    "eq16kDb",
+    "eqLPFHz",
+    "eqLevelDb",
+  ],
   mod: ["modulatorEnabled", "chorusMix", "chorusRateHz", "chorusDepth", "chorusCharacter", "modulatorMode", "modulatorFeedback", "modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalMode", "modulatorPedalPosition"],
   delay: ["delayEnabled", "delayMix", "delayTimeMs", "delayFeedback", "delayMod", "delayDucker", "delayMode", "delayPingPong", "delayTempoSync"],
   reverb: NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS.flatMap((group) => [...group.paramIds]),
   output: ["outputTrimDb"],
 } as const;
+
+/* Parameters intentionally absent from the hardware faceplates. Keep this
+   separate from the complete registry above because the latter also powers
+   scene bindings and compact signal-chain summaries. */
+export const NAM_RACK_ADVANCED_ONLY_CONTROL_IDS = {
+  input: [],
+  gate: ["gateReleaseMs"],
+  compressor: [],
+  octaver: [],
+  "pre-eq": [],
+  "precision-drive": [],
+  chaos: [],
+  // The active Design Port does not expose the Pedal NAM wet/dry control on
+  // its faceplate. Keep it in Device Controls so the compact-chain Edit action
+  // has a real destination and pedalMix remains user-editable.
+  "pedal-capture": ["pedalMix"],
+  amp: [],
+  cab: [],
+  room: [],
+  doubler: [],
+  eq: [],
+  mod: ["modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalPosition"],
+  delay: ["delayPingPong"],
+  reverb: [],
+  output: [],
+} as const satisfies Record<NAMRackAdvancedStageId, readonly string[]>;
 
 export type NAMRackAdvancedStageId = keyof typeof NAM_RACK_ADVANCED_CONTROL_IDS;
 
@@ -119,8 +155,8 @@ const NAM_RACK_ADVANCED_FIXED_PRE_ORDER = [
   "input",
   "gate",
   "compressor",
-  "tape-echo",
   "octaver",
+  "pre-eq",
   "precision-drive",
   "chaos",
   "pedal-capture",
@@ -139,11 +175,18 @@ const NAM_RACK_ADVANCED_STAGE_IDS = new Set<string>([
 ]);
 
 export function namRackAdvancedStageForCompactModule(moduleId: string): NAMRackAdvancedStageId | null {
-  if (moduleId === "amp-nam") return "amp";
-  if (moduleId === "cab-ir") return "cab";
-  if (moduleId === "cabinet-space" || moduleId === "room") return "room";
-  if (moduleId === "doubler") return "doubler";
-  return NAM_RACK_ADVANCED_STAGE_IDS.has(moduleId) ? moduleId as NAMRackAdvancedStageId : null;
+  const stageId = moduleId === "amp-nam"
+    ? "amp"
+    : moduleId === "cab-ir"
+      ? "cab"
+      : moduleId === "cabinet-space" || moduleId === "room"
+        ? "room"
+        : moduleId === "doubler"
+          ? "doubler"
+          : NAM_RACK_ADVANCED_STAGE_IDS.has(moduleId)
+            ? moduleId as NAMRackAdvancedStageId
+            : null;
+  return stageId && NAM_RACK_ADVANCED_ONLY_CONTROL_IDS[stageId].length > 0 ? stageId : null;
 }
 
 /**
@@ -245,25 +288,27 @@ function RackMixerStrip({
             {stage.dependencyNote}
           </small>
         )}
-        {stage.params.length > 0 ? (
-          groupedSections.length > 0 ? (
-            <div className="nam-rack-mixer-control-groups">
-              {groupedSections.map((group) => (
-                <section key={group.id} className="nam-rack-mixer-control-group" data-control-group={group.id}>
-                  <strong>{group.label}</strong>
-                  <div>{group.params.map(renderParam)}</div>
-                </section>
-              ))}
-              {ungroupedParams.length > 0 && (
-                <section className="nam-rack-mixer-control-group" data-control-group="additional">
-                  <strong>Additional</strong>
-                  <div>{ungroupedParams.map(renderParam)}</div>
-                </section>
-              )}
-            </div>
-          ) : stage.params.map(renderParam)
-        ) : (
-          <small>{stage.active ? "Signal present" : "No direct mixer control"}</small>
+        {stage.available !== false && (
+          stage.params.length > 0 ? (
+            groupedSections.length > 0 ? (
+              <div className="nam-rack-mixer-control-groups">
+                {groupedSections.map((group) => (
+                  <section key={group.id} className="nam-rack-mixer-control-group" data-control-group={group.id}>
+                    <strong>{group.label}</strong>
+                    <div>{group.params.map(renderParam)}</div>
+                  </section>
+                ))}
+                {ungroupedParams.length > 0 && (
+                  <section className="nam-rack-mixer-control-group" data-control-group="additional">
+                    <strong>Additional</strong>
+                    <div>{ungroupedParams.map(renderParam)}</div>
+                  </section>
+                )}
+              </div>
+            ) : stage.params.map(renderParam)
+          ) : (
+            <small>All controls for this stage are available on its hardware faceplate.</small>
+          )
         )}
       </div>
     </article>
@@ -272,68 +317,47 @@ function RackMixerStrip({
 
 export function NAMRackMixerView({
   stages,
-  postCabOrderLabel,
-  ampActive,
-  hasCabIR,
   onParamChange,
   formatDb,
   meterPercent,
   onClose,
   focusedStageId,
-  onSelectStage,
 }: {
   stages: RackMixerStripSpec[];
-  postCabOrderLabel: string;
-  ampActive: boolean;
-  hasCabIR: boolean;
   onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
   onClose?: () => void;
   focusedStageId?: NAMRackAdvancedStageId | null;
-  onSelectStage: (stageId: NAMRackAdvancedStageId) => void;
 } & RackMixerHelpers) {
+  const advancedStages = stages.filter((stage) => stage.params.length > 0);
   const selectedStage = (
     focusedStageId
-      ? stages.find((stage) => stage.id === focusedStageId)
+      ? advancedStages.find((stage) => stage.id === focusedStageId)
       : undefined
-  ) ?? stages[0];
+  ) ?? advancedStages[0];
+
+  if (!selectedStage) return null;
 
   return (
     <section
-      className="nam-rack-mixer-view"
+      className="nam-rack-mixer-view nam-rack-context-inspector"
       data-qa="nam-rack-mixer"
       data-focused-stage={selectedStage?.id}
       data-single-stage="true"
+      data-compact={(selectedStage?.params.length ?? 0) <= 4 || undefined}
+      data-control-count={selectedStage?.params.length ?? 0}
+      role="dialog"
+      aria-label={`${selectedStage.label} advanced controls`}
     >
       <div className="nam-rack-mixer-header">
         <SlidersHorizontal size={15} />
         <div className="nam-rack-mixer-heading">
-          <span>Device inspector</span>
+          <span>Advanced</span>
           <strong>{selectedStage?.label ?? "No device selected"}</strong>
-          <small>
-            {selectedStage
-              ? "Only the controls for this signal-chain stage are shown."
-              : "There are no supported controls in this signal chain."}
-          </small>
+          <small>Controls not exposed on the hardware faceplate.</small>
         </div>
-        <label className="nam-rack-mixer-stage-picker">
-          <span>Stage</span>
-          <select
-            aria-label="Inspector stage"
-            value={selectedStage?.id ?? ""}
-            disabled={stages.length === 0}
-            onChange={(event) => onSelectStage(event.target.value as NAMRackAdvancedStageId)}
-          >
-            {stages.map((stage) => (
-              <option key={stage.id} value={stage.id}>
-                {stage.label}
-              </option>
-            ))}
-          </select>
-        </label>
         {onClose && (
-          <button type="button" data-qa="nam-mixer-back" onClick={onClose}>
-            <ArrowLeft size={14} aria-hidden="true" />
-            Back to rack
+          <button type="button" data-qa="nam-mixer-back" onClick={onClose} aria-label="Close advanced controls">
+            <X size={15} aria-hidden="true" />
           </button>
         )}
       </div>
@@ -350,11 +374,6 @@ export function NAMRackMixerView({
         ) : (
           <div className="nam-rack-mixer-empty">No supported stage controls are available.</div>
         )}
-      </div>
-      <div className="nam-rack-mixer-foot">
-        <span>{postCabOrderLabel}</span>
-        <strong>{ampActive ? "Amp active" : "Amp bypassed"}</strong>
-        <strong>{hasCabIR ? "IR configured" : "No IR"}</strong>
       </div>
     </section>
   );

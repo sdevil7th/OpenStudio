@@ -1,11 +1,19 @@
-import { NAM_RACK_ART } from "./NAMRackHardwareArt";
-import type { RackModuleId } from "./NAMRackPedalHardware";
+import type { RackModuleId, RackSectionId } from "./NAMSignalChainTypes";
+import { getNAMDesignBodyAsset } from "./NAMDesignAssets";
 
-export type RackSectionId = "pre" | "amp" | "cab" | "eq" | "post" | "browser" | "tuner" | "settings";
+const LEGACY_SKIN_ASSETS = {
+  cabBlank: new URL("../assets/nam/cab-blank-skin.webp", import.meta.url).href,
+  preCompressorPbr: new URL("../assets/nam/pre-compressor-pbr-skin.webp", import.meta.url).href,
+  preDualOctaverPbr: new URL("../assets/nam/pre-dual-octaver-pbr-skin.webp", import.meta.url).href,
+  preChaosPbr: new URL("../assets/nam/pre-chaos-pbr-skin.webp", import.meta.url).href,
+  modulatorExpressionPbr: new URL("../assets/nam/modulator-expression-pbr-skin.webp", import.meta.url).href,
+  rackPbrClean: new URL("../assets/nam/rack-pbr-clean-skin.webp", import.meta.url).href,
+  reverbBluePbr: new URL("../assets/nam/reverb-blue-pbr-skin.webp", import.meta.url).href,
+} as const;
 
 export type NAMRackVisualMode = "approved-parity-2d" | "cab-room-3d-proof" | "debug-anchors";
 
-export type NAMRackControlKind = "knob" | "switch" | "button" | "display" | "footswitch" | "meter" | "label" | "fader" | "mic" | "treadle";
+export type NAMRackControlKind = "knob" | "switch" | "button" | "display" | "footswitch" | "meter" | "label" | "fader" | "mic" | "treadle" | "led";
 
 export type NAMRackControlAnchor = {
   id: string;
@@ -21,7 +29,13 @@ export type NAMRackControlAnchor = {
   rotationMaxDeg?: number;
   resetValue?: number;
   displayFormat?: "db" | "hz" | "ms" | "percent" | "plain";
+  orientation?: "horizontal" | "vertical";
 };
+
+const eqBoostBody = getNAMDesignBodyAsset("stompbox-body-white-wide");
+const precisionDriveBody = getNAMDesignBodyAsset("stompbox-body-stone");
+const ampHeadV5 = getNAMDesignBodyAsset("amp-head-body-v5");
+const graphicEqV6 = getNAMDesignBodyAsset("graphic-eq-body-v6");
 
 export type NAMRackDeviceSkin = {
   id: string;
@@ -47,46 +61,12 @@ export type NAMRackPresetTag = {
   modelArchitecture?: string;
 };
 
-export const NAM_RACK_SECTIONS: Array<{
-  id: RackSectionId;
-  label: string;
-  targetModule: RackModuleId;
-}> = [
-  { id: "pre", label: "Pre FX", targetModule: "pedal" },
-  { id: "amp", label: "Amp", targetModule: "amp" },
-  { id: "cab", label: "Cab", targetModule: "cab" },
-  { id: "eq", label: "EQ", targetModule: "eq" },
-  { id: "post", label: "Post FX", targetModule: "delay" },
-];
-
-export function isRackSectionId(value: unknown): value is RackSectionId {
-  return (
-    value === "pre" ||
-    value === "amp" ||
-    value === "cab" ||
-    value === "eq" ||
-    value === "post" ||
-    value === "browser" ||
-    value === "tuner" ||
-    value === "settings"
-  );
-}
-
-export function rackSectionForModule(moduleId: RackModuleId): RackSectionId {
-  if (moduleId === "gate" || moduleId === "pedal") return "pre";
-  if (moduleId === "amp") return "amp";
-  if (moduleId === "cab") return "cab";
-  if (moduleId === "eq") return "eq";
-  if (moduleId === "mod" || moduleId === "delay" || moduleId === "reverb") return "post";
-  return "pre";
-}
-
 export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
   {
     id: "pre-compressor-design-a",
     section: "pre",
     title: "Compressor",
-    assetUrl: NAM_RACK_ART.preCompressorPbr,
+    assetUrl: LEGACY_SKIN_ASSETS.preCompressorPbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
     material: "pedal",
@@ -99,32 +79,17 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
       { id: "comp-volume", paramId: "compressorVolumeDb", kind: "knob", x: 0.82, y: 0.425, width: 0.17, height: 0.13, label: "Level", displayFormat: "db" },
       { id: "comp-hpf", paramId: "compressorSidechainHPF", kind: "switch", x: 0.22, y: 0.63, width: 0.13, height: 0.1, label: "HPF" },
       { id: "comp-meter", kind: "meter", x: 0.65, y: 0.632, width: 0.51, height: 0.09, label: "Gain reduction" },
-      { id: "comp-engage", paramId: "compressorEnabled", kind: "footswitch", x: 0.5, y: 0.86, width: 0.16, height: 0.12 },
-    ],
-  },
-  {
-    id: "pre-tape-echo-design-a",
-    section: "pre",
-    title: "Booster",
-    assetUrl: NAM_RACK_ART.preTapeEchoPbr,
-    sourceSize: { width: 720, height: 1040 },
-    aspectRatio: "720 / 1040",
-    material: "pedal",
-    controls: [
-      { id: "tape-mix", paramId: "tapeEchoMix", kind: "knob", x: 0.22, y: 0.2, width: 0.22, height: 0.16, label: "Mix" },
-      { id: "tape-feed", paramId: "tapeEchoFeedback", kind: "knob", x: 0.78, y: 0.2, width: 0.22, height: 0.16, label: "Feed" },
-      { id: "tape-time", paramId: "tapeEchoTimeMs", kind: "knob", x: 0.22, y: 0.44, width: 0.22, height: 0.16, label: "Time" },
-      { id: "tape-mod", paramId: "tapeEchoMod", kind: "knob", x: 0.5, y: 0.44, width: 0.22, height: 0.16, label: "Mod" },
-      { id: "tape-tone", paramId: "tapeEchoTone", kind: "knob", x: 0.78, y: 0.44, width: 0.22, height: 0.16, label: "Tone" },
-      { id: "tape-display", kind: "display", x: 0.5, y: 0.12, width: 0.36, height: 0.09 },
-      { id: "tape-engage", paramId: "tapeEchoEnabled", kind: "footswitch", x: 0.5, y: 0.84, width: 0.18, height: 0.12 },
+      { id: "comp-intensity-readout", paramId: "compressorIntensity", kind: "display", x: 0.21, y: 0.755, width: 0.3, height: 0.08, label: "Intensity 8:1 / 16:1" },
+      { id: "comp-intensity", paramId: "compressorIntensity", kind: "switch", x: 0.21, y: 0.86, width: 0.15, height: 0.1, label: "Intensity" },
+      { id: "comp-led", paramId: "compressorEnabled", kind: "led", x: 0.78, y: 0.765, width: 0.052, height: 0.052 },
+      { id: "comp-engage", paramId: "compressorEnabled", kind: "footswitch", x: 0.78, y: 0.9075, width: 0.16, height: 0.12 },
     ],
   },
   {
     id: "pre-dual-octaver-design-a",
     section: "pre",
     title: "Poly Octaver",
-    assetUrl: NAM_RACK_ART.preDualOctaverPbr,
+    assetUrl: LEGACY_SKIN_ASSETS.preDualOctaverPbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
     material: "pedal",
@@ -137,30 +102,52 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     ],
   },
   {
+    id: "pre-eq-boost-design-a",
+    section: "pre",
+    title: "EQ Boost",
+    assetUrl: eqBoostBody.href,
+    sourceSize: { width: eqBoostBody.width, height: eqBoostBody.height },
+    aspectRatio: "156 / 232",
+    material: "pedal",
+    controls: [
+      { id: "pre-eq-120", paramId: "preEq120Db", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.107759, width: 0.461538, height: 0.068966, label: "120" },
+      { id: "pre-eq-250", paramId: "preEq250Db", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.181034, width: 0.461538, height: 0.068966, label: "250" },
+      { id: "pre-eq-500", paramId: "preEq500Db", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.254310, width: 0.461538, height: 0.068966, label: "500" },
+      { id: "pre-eq-1k", paramId: "preEq1kDb", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.327586, width: 0.461538, height: 0.068966, label: "1K" },
+      { id: "pre-eq-2k5", paramId: "preEq2k5Db", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.400862, width: 0.461538, height: 0.068966, label: "2.5K" },
+      { id: "pre-eq-5k", paramId: "preEq5kDb", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.474138, width: 0.461538, height: 0.068966, label: "5K" },
+      { id: "pre-eq-8k", paramId: "preEq8kDb", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.547414, width: 0.461538, height: 0.068966, label: "8K" },
+      { id: "pre-eq-12k", paramId: "preEq12kDb", kind: "fader", orientation: "horizontal", x: 0.410256, y: 0.620690, width: 0.461538, height: 0.068966, label: "12K" },
+      { id: "pre-eq-hpf", paramId: "preEqHPFHz", kind: "knob", x: 0.794872, y: 0.237069, width: 0.179487, height: 0.120690, label: "HPF", displayFormat: "hz" },
+      { id: "pre-eq-lpf", paramId: "preEqLPFHz", kind: "knob", x: 0.794872, y: 0.512931, width: 0.179487, height: 0.120690, label: "LPF", displayFormat: "hz" },
+      { id: "pre-eq-led", paramId: "preEqEnabled", kind: "led", x: 0.5, y: 0.765, width: 0.076923, height: 0.051724 },
+      { id: "pre-eq-engage", paramId: "preEqEnabled", kind: "footswitch", x: 0.5, y: 0.9075, width: 0.179487, height: 0.120690, label: "EQ Boost" },
+    ],
+  },
+  {
     id: "pre-precision-drive-design-a",
     section: "pre",
     moduleId: "pedal",
     title: "Precision Drive",
-    assetUrl: NAM_RACK_ART.prePrecisionDrivePbr,
-    sourceSize: { width: 720, height: 1040 },
-    aspectRatio: "720 / 1040",
+    assetUrl: precisionDriveBody.href,
+    sourceSize: { width: precisionDriveBody.width, height: precisionDriveBody.height },
+    aspectRatio: "120 / 232",
     material: "pedal",
     controls: [
-      { id: "pedal-volume", paramId: "precisionDriveVolumeDb", kind: "knob", x: 0.24, y: 0.18, width: 0.22, height: 0.16, label: "Vol", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "pedal-bright", paramId: "precisionDriveBright", kind: "knob", x: 0.74, y: 0.18, width: 0.22, height: 0.16, label: "Bright", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
-      { id: "pedal-attack", paramId: "precisionDriveAttack", kind: "knob", x: 0.22, y: 0.39, width: 0.2, height: 0.15, label: "Attack", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
-      { id: "pedal-gate", paramId: "precisionDriveGate", kind: "knob", x: 0.50, y: 0.39, width: 0.14, height: 0.12, label: "Gate", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
-      { id: "pedal-mix", paramId: "precisionDriveDrive", kind: "knob", x: 0.78, y: 0.39, width: 0.2, height: 0.15, label: "Drive", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
-      { id: "pedal-model-display", kind: "display", x: 0.5, y: 0.58, width: 0.62, height: 0.1 },
-      { id: "pedal-browse", kind: "button", x: 0.5, y: 0.66, width: 0.4, height: 0.06, label: "Browse" },
-      { id: "pedal-engage", paramId: "precisionDriveEnabled", kind: "footswitch", x: 0.5, y: 0.84, width: 0.18, height: 0.12 },
+      { id: "pedal-drive", paramId: "precisionDriveDrive", kind: "knob", x: 0.30, y: 0.195, width: 0.29, height: 0.15, label: "Drive", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "pedal-volume", paramId: "precisionDriveVolumeDb", kind: "knob", x: 0.70, y: 0.195, width: 0.29, height: 0.15, label: "Level", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "pedal-gate", paramId: "precisionDriveGate", kind: "knob", x: 0.50, y: 0.33, width: 0.166667, height: 0.086207, label: "Gate", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "pedal-bright", paramId: "precisionDriveBright", kind: "knob", x: 0.30, y: 0.49, width: 0.29, height: 0.15, label: "Bright", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "pedal-attack", paramId: "precisionDriveAttack", kind: "knob", x: 0.70, y: 0.49, width: 0.29, height: 0.15, label: "Attack", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "pedal-led", paramId: "precisionDriveEnabled", kind: "led", x: 0.50, y: 0.732, width: 0.10, height: 0.052 },
+      { id: "pedal-engage", paramId: "precisionDriveEnabled", kind: "footswitch", x: 0.50, y: 0.883, width: 0.233333, height: 0.121, label: "Drive" },
     ],
   },
   {
     id: "pre-chaos-design-a",
     section: "pre",
     title: "Distortion",
-    assetUrl: NAM_RACK_ART.preChaosPbr,
+    assetUrl: LEGACY_SKIN_ASSETS.preChaosPbr,
     sourceSize: { width: 520, height: 1040 },
     aspectRatio: "520 / 1040",
     material: "pedal",
@@ -179,25 +166,27 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     id: "amp-head-design-a",
     section: "amp",
     moduleId: "amp",
-    title: "Amp Capture",
-    assetUrl: NAM_RACK_ART.ampHeadBlank,
-    sourceSize: { width: 1535, height: 557 },
-    aspectRatio: "1535 / 557",
+    title: "NAM Amp Wrapper",
+    assetUrl: ampHeadV5.href,
+    sourceSize: { width: ampHeadV5.width, height: ampHeadV5.height },
+    aspectRatio: "720 / 345",
     material: "amp",
     controls: [
-      { id: "amp-input-jack", kind: "label", x: 0.1, y: 0.72, width: 0.1, height: 0.13, label: "Input" },
-      { id: "amp-boost", paramId: "ampBoost", kind: "switch", x: 0.18, y: 0.72, width: 0.042, height: 0.14, label: "Boost" },
-      { id: "amp-voice", paramId: "ampVoice", kind: "switch", x: 0.24, y: 0.72, width: 0.042, height: 0.14, label: "Voice" },
-      { id: "amp-gain", paramId: "ampGainDb", kind: "knob", x: 0.31, y: 0.72, width: 0.08, height: 0.16, label: "Gain", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-bass", paramId: "bassDb", kind: "knob", x: 0.4, y: 0.72, width: 0.08, height: 0.16, label: "Bass", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-middle", paramId: "midDb", kind: "knob", x: 0.49, y: 0.72, width: 0.08, height: 0.16, label: "Middle", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-treble", paramId: "trebleDb", kind: "knob", x: 0.58, y: 0.72, width: 0.08, height: 0.16, label: "Treble", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-presence", paramId: "presenceDb", kind: "knob", x: 0.67, y: 0.72, width: 0.08, height: 0.16, label: "Presence", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-master", paramId: "ampMix", kind: "knob", x: 0.76, y: 0.72, width: 0.08, height: 0.16, label: "Master", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
-      { id: "amp-output", paramId: "ampOutputDb", kind: "knob", x: 0.85, y: 0.72, width: 0.08, height: 0.16, label: "Output", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
-      { id: "amp-model-display", kind: "display", x: 0.5, y: 0.36, width: 0.34, height: 0.1 },
-      { id: "amp-power-label", kind: "label", x: 0.93, y: 0.64, width: 0.08, height: 0.08, label: "Power" },
-      { id: "amp-power", paramId: "ampEnabled", kind: "footswitch", x: 0.93, y: 0.72, width: 0.06, height: 0.1 },
+      { id: "amp-model-display", kind: "display", x: 0.5, y: 0.367150, width: 0.268519, height: 0.154589, label: "NAM Capture" },
+      { id: "amp-wrapper-legend", kind: "label", x: 0.5, y: 0.512077, width: 0.42, height: 0.05, label: "Capture Fixed - Wrapper Controls" },
+      { id: "amp-power", paramId: "ampEnabled", kind: "switch", x: 0.104167, y: 0.719807, width: 0.030556, height: 0.063768, label: "Power" },
+      { id: "amp-power-led", paramId: "ampEnabled", kind: "led", x: 0.104167, y: 0.659903, width: 0.016667, height: 0.034783 },
+      { id: "amp-gain", paramId: "ampGainDb", kind: "knob", x: 0.166667, y: 0.719807, width: 0.05, height: 0.104348, label: "Gain", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "amp-boost", paramId: "ampBoost", kind: "switch", x: 0.240741, y: 0.719807, width: 0.030556, height: 0.063768, label: "Tight" },
+      { id: "amp-boost-led", paramId: "ampBoost", kind: "led", x: 0.240741, y: 0.659903, width: 0.016667, height: 0.034783 },
+      { id: "amp-voice", paramId: "ampVoice", kind: "switch", x: 0.3125, y: 0.719807, width: 0.030556, height: 0.063768, label: "Bright" },
+      { id: "amp-voice-led", paramId: "ampVoice", kind: "led", x: 0.3125, y: 0.659903, width: 0.016667, height: 0.034783 },
+      { id: "amp-bass", paramId: "bassDb", kind: "knob", x: 0.405093, y: 0.719807, width: 0.05, height: 0.104348, label: "Bass", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "amp-middle", paramId: "midDb", kind: "knob", x: 0.5, y: 0.719807, width: 0.05, height: 0.104348, label: "Mid", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "amp-treble", paramId: "trebleDb", kind: "knob", x: 0.594907, y: 0.719807, width: 0.05, height: 0.104348, label: "Treble", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "amp-presence", paramId: "presenceDb", kind: "knob", x: 0.689815, y: 0.719807, width: 0.05, height: 0.104348, label: "Presence", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
+      { id: "amp-mix", paramId: "ampMix", kind: "knob", x: 0.784722, y: 0.719807, width: 0.05, height: 0.104348, label: "Mix", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "percent" },
+      { id: "amp-output", paramId: "ampOutputDb", kind: "knob", x: 0.87963, y: 0.719807, width: 0.05, height: 0.104348, label: "Output", rotationMinDeg: -135, rotationMaxDeg: 135, displayFormat: "db" },
     ],
   },
   {
@@ -205,7 +194,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     section: "cab",
     moduleId: "cab",
     title: "Cabinet Room",
-    assetUrl: NAM_RACK_ART.cabBlank,
+    assetUrl: LEGACY_SKIN_ASSETS.cabBlank,
     sourceSize: { width: 1535, height: 557 },
     aspectRatio: "1535 / 557",
     material: "cab",
@@ -229,25 +218,26 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     id: "eq-rack-design-a",
     section: "eq",
     moduleId: "eq",
-    title: "Tone Stack EQ",
-    assetUrl: NAM_RACK_ART.rackPbrClean,
-    sourceSize: { width: 1280, height: 720 },
-    aspectRatio: "1280 / 720",
+    title: "Graphic EQ",
+    assetUrl: graphicEqV6.href,
+    sourceSize: { width: graphicEqV6.width, height: graphicEqV6.height },
+    aspectRatio: "720 / 240",
     material: "rack",
     controls: [
-      { id: "eq-input-trim", kind: "label", x: 0.12, y: 0.46, width: 0.11, height: 0.42, label: "Input Off" },
-      { id: "eq-65", paramId: "eq65Db", kind: "fader", x: 0.18, y: 0.52, width: 0.044, height: 0.46, label: "65 Hz" },
-      { id: "eq-125", paramId: "eq125Db", kind: "fader", x: 0.2511, y: 0.52, width: 0.044, height: 0.46, label: "125 Hz" },
-      { id: "eq-250", paramId: "eq250Db", kind: "fader", x: 0.3222, y: 0.52, width: 0.044, height: 0.46, label: "250 Hz" },
-      { id: "eq-500", paramId: "eq500Db", kind: "fader", x: 0.3933, y: 0.52, width: 0.044, height: 0.46, label: "500 Hz" },
-      { id: "eq-1k", paramId: "eq1kDb", kind: "fader", x: 0.4644, y: 0.52, width: 0.044, height: 0.46, label: "1 kHz" },
-      { id: "eq-2k", paramId: "eq2kDb", kind: "fader", x: 0.5356, y: 0.52, width: 0.044, height: 0.46, label: "2 kHz" },
-      { id: "eq-4k", paramId: "eq4kDb", kind: "fader", x: 0.6067, y: 0.52, width: 0.044, height: 0.46, label: "4 kHz" },
-      { id: "eq-8k", paramId: "eq8kDb", kind: "fader", x: 0.6778, y: 0.52, width: 0.044, height: 0.46, label: "8 kHz" },
-      { id: "eq-16k", paramId: "eq16kDb", kind: "fader", x: 0.7489, y: 0.52, width: 0.044, height: 0.46, label: "16 kHz" },
-      { id: "eq-output-level", paramId: "eqLevelDb", kind: "fader", x: 0.82, y: 0.52, width: 0.044, height: 0.46, label: "Level" },
-      { id: "eq-display", kind: "display", x: 0.54, y: 0.16, width: 0.5, height: 0.1 },
-      { id: "eq-power", paramId: "eqEnabled", kind: "footswitch", x: 0.08, y: 0.76, width: 0.07, height: 0.1 },
+      { id: "eq-power", paramId: "eqEnabled", kind: "switch", x: 0.134259, y: 0.729167, width: 0.030556, height: 0.091667, label: "Bypass" },
+      { id: "eq-led", paramId: "eqEnabled", kind: "led", x: 0.185185, y: 0.729167, width: 0.016667, height: 0.05 },
+      { id: "eq-65", paramId: "eq65Db", kind: "fader", x: 0.238426, y: 0.383333, width: 0.051852, height: 0.455556, label: "65 Hz" },
+      { id: "eq-125", paramId: "eq125Db", kind: "fader", x: 0.303819, y: 0.383333, width: 0.051852, height: 0.455556, label: "125 Hz" },
+      { id: "eq-250", paramId: "eq250Db", kind: "fader", x: 0.369213, y: 0.383333, width: 0.051852, height: 0.455556, label: "250 Hz" },
+      { id: "eq-500", paramId: "eq500Db", kind: "fader", x: 0.434606, y: 0.383333, width: 0.051852, height: 0.455556, label: "500 Hz" },
+      { id: "eq-1k", paramId: "eq1kDb", kind: "fader", x: 0.5, y: 0.383333, width: 0.051852, height: 0.455556, label: "1 kHz" },
+      { id: "eq-2k", paramId: "eq2kDb", kind: "fader", x: 0.565394, y: 0.383333, width: 0.051852, height: 0.455556, label: "2 kHz" },
+      { id: "eq-4k", paramId: "eq4kDb", kind: "fader", x: 0.630787, y: 0.383333, width: 0.051852, height: 0.455556, label: "4 kHz" },
+      { id: "eq-8k", paramId: "eq8kDb", kind: "fader", x: 0.696181, y: 0.383333, width: 0.051852, height: 0.455556, label: "8 kHz" },
+      { id: "eq-16k", paramId: "eq16kDb", kind: "fader", x: 0.761574, y: 0.383333, width: 0.051852, height: 0.455556, label: "16 kHz" },
+      { id: "eq-hpf", paramId: "eqHPFHz", kind: "knob", x: 0.134259, y: 0.380556, width: 0.069444, height: 0.208333, label: "HPF", displayFormat: "hz" },
+      { id: "eq-output-level", paramId: "eqLevelDb", kind: "knob", x: 0.865741, y: 0.729167, width: 0.041667, height: 0.125, label: "Level", displayFormat: "db" },
+      { id: "eq-lpf", paramId: "eqLPFHz", kind: "knob", x: 0.865741, y: 0.380556, width: 0.069444, height: 0.208333, label: "LPF", displayFormat: "hz" },
     ],
   },
   {
@@ -255,7 +245,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     section: "post",
     moduleId: "mod",
     title: "Modulator",
-    assetUrl: NAM_RACK_ART.modulatorExpressionPbr,
+    assetUrl: LEGACY_SKIN_ASSETS.modulatorExpressionPbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
     material: "pedal",
@@ -279,7 +269,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     section: "post",
     moduleId: "delay",
     title: "Stereo Delay",
-    assetUrl: NAM_RACK_ART.rackPbrClean,
+    assetUrl: LEGACY_SKIN_ASSETS.rackPbrClean,
     sourceSize: { width: 1280, height: 720 },
     aspectRatio: "1280 / 720",
     material: "rack",
@@ -301,7 +291,7 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
     section: "post",
     moduleId: "reverb",
     title: "Reverb",
-    assetUrl: NAM_RACK_ART.reverbBluePbr,
+    assetUrl: LEGACY_SKIN_ASSETS.reverbBluePbr,
     sourceSize: { width: 720, height: 1040 },
     aspectRatio: "720 / 1040",
     material: "pedal",
@@ -314,7 +304,8 @@ export const NAM_RACK_DEVICE_SKINS: NAMRackDeviceSkin[] = [
       { id: "reverb-low-cut", paramId: "reverbLowCutHz", kind: "knob", x: 0.18, y: 0.43, width: 0.18, height: 0.16, rotationMinDeg: -135, rotationMaxDeg: 135 },
       { id: "reverb-tone", paramId: "reverbTone", kind: "knob", x: 0.40, y: 0.43, width: 0.2, height: 0.16, rotationMinDeg: -135, rotationMaxDeg: 135 },
       { id: "reverb-shimmer", paramId: "reverbShimmer", kind: "knob", x: 0.66, y: 0.43, width: 0.18, height: 0.16, rotationMinDeg: -135, rotationMaxDeg: 135 },
-      { id: "reverb-footswitch", paramId: "reverbEnabled", kind: "footswitch", x: 0.42, y: 0.84, width: 0.18, height: 0.12 },
+      { id: "reverb-engage", paramId: "reverbEnabled", kind: "footswitch", x: 0.57, y: 0.84, width: 0.18, height: 0.12, label: "Engage" },
+      { id: "reverb-pad", paramId: "reverbPad", kind: "switch", x: 0.25, y: 0.84, width: 0.1, height: 0.1, label: "Pad" },
     ],
   },
 ];

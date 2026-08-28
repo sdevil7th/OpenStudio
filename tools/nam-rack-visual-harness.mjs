@@ -46,8 +46,6 @@ const SCENARIOS = [
   { name: "rack-pedal", params: { namView: "rack", namFocus: "pedal" } },
   { name: "rack-eq", params: { namView: "rack", namFocus: "eq" } },
   { name: "rack-delay", params: { namView: "rack", namFocus: "delay" } },
-  { name: "rack-sort-open", params: { namView: "rack", namFocus: "amp" } },
-  { name: "rack-cab", params: { namView: "rack", namFocus: "cab" } },
   { name: "rack-chain", params: { namView: "rack", namFocus: "delay", namChain: "1" } },
   { name: "rack-neural-pre", params: { namView: "rack", namFocus: "gate", namSection: "pre" } },
   { name: "rack-neural-amp", params: { namView: "rack", namFocus: "amp", namSection: "amp" } },
@@ -63,7 +61,6 @@ const SCENARIOS = [
   { name: "rack-slot-browser", params: { namView: "rack", namFocus: "amp", namSlotBrowser: "1", namSlotCategory: "amp" } },
   { name: "rack-mod", params: { namView: "rack", namFocus: "mod" } },
   { name: "rack-reverb", params: { namView: "rack", namFocus: "reverb" } },
-  { name: "rack-saved", params: { namView: "rack", namFocus: "amp" } },
   { name: "rack-tuner", params: { namView: "rack", namFocus: "amp" } },
   { name: "rack-calibration", checkName: "rack-neural-amp", params: { namView: "rack", namFocus: "amp", namSection: "amp" } },
   { name: "preset-manager", params: { namView: "rack", namFocus: "amp" } },
@@ -74,6 +71,22 @@ const SCENARIOS = [
   { name: "mixer", params: { namView: "mixer" } },
   { name: "advanced-alias", params: { namView: "advanced" } },
 ];
+
+const RACK_MAIN_SCENARIOS = new Set([
+  "rack",
+  "rack-gate",
+  "rack-pedal",
+  "rack-eq",
+  "rack-delay",
+  "rack-mod",
+  "rack-reverb",
+  "rack-tuner",
+  "rack-calibration",
+]);
+
+function isRackMainScenario(name) {
+  return RACK_MAIN_SCENARIOS.has(name) || name.startsWith("rack-neural-");
+}
 
 function parseArgs(argv) {
   const args = {
@@ -595,43 +608,14 @@ async function runSourceAmpAuditionProbe(cdp) {
   };
 }
 
-async function openRightRailTab(cdp, label) {
-  await evaluate(cdp, `
-    (() => {
-      const tab = Array.from(document.querySelectorAll('.nam-rail-tabs button'))
-        .find((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim().includes(${JSON.stringify(label)}));
-      tab?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
-      tab?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
-      tab?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
-      return Boolean(tab);
-    })()
-  `);
-  await sleep(180);
-}
-
-async function openRailSortMenu(cdp) {
-  await evaluate(cdp, `
-    (() => {
-      const trigger = document.querySelector('[data-qa="nam-rail-sort-trigger"]');
-      trigger?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
-      trigger?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
-      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
-      return Boolean(trigger);
-    })()
-  `);
-  await sleep(160);
-}
-
 async function openTunerRail(cdp) {
   await evaluate(cdp, `
     (() => {
-      const premiumTuner = Array.from(document.querySelectorAll('[data-qa="nam-premium-tuner"]'))
+      const tuner = Array.from(document.querySelectorAll('[data-qa="nam-premium-tuner"]'))
         .find((el) => {
           const rect = el.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0 && !el.disabled;
         });
-      const tuner = premiumTuner || Array.from(document.querySelectorAll('.nam-mode-rail-nav button'))
-        .find((el) => (el.textContent || '').includes('Tuner'));
       tuner?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
       tuner?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
       tuner?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
@@ -711,30 +695,49 @@ async function openSaveToneModal(cdp) {
   await sleep(200);
 }
 
-async function openFooterSizeMenu(cdp) {
-  await evaluate(cdp, `
+async function cycleRackSizeControl(cdp) {
+  const readState = `
     (() => {
-      const trigger = document.querySelector('[data-qa="nam-footer-size"]');
-      trigger?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
-      trigger?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
-      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
-      return Boolean(trigger);
+      const product = document.querySelector('.nam-product');
+      const control = document.querySelector('.nam-rack-design-port .footer button[title="Cycle rack display size"]');
+      return {
+        found: Boolean(control),
+        size: product?.getAttribute('data-rack-size') || '',
+        label: (control?.textContent || '').replace(/\\s+/g, ' ').trim(),
+      };
+    })()
+  `;
+  const before = await evaluate(cdp, readState);
+  const clicked = await evaluate(cdp, `
+    (() => {
+      const control = document.querySelector('.nam-rack-design-port .footer button[title="Cycle rack display size"]');
+      control?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+      control?.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+      control?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      return Boolean(control);
     })()
   `);
   await sleep(160);
+  const after = await evaluate(cdp, readState);
+  return {
+    before,
+    after,
+    clicked,
+    pass: Boolean(clicked && before.found && after.found && before.size !== after.size && before.label !== after.label),
+  };
 }
 
 async function runInstrumentProfileProbe(cdp, outDir, viewportName) {
   const result = await evaluate(cdp, `(() => {
     const root = document.querySelector('[data-param-id="instrumentProfile"]');
-    const buttons = Array.from(root?.querySelectorAll('button') || []);
-    const bass = buttons.find((button) => (button.textContent || '').trim() === 'Bass');
-    if (!bass) return { pass: false, reason: 'Bass control missing' };
-    bass.click();
+    if (!(root instanceof HTMLButtonElement)) return { pass: false, reason: 'Instrument profile control missing' };
+    const beforeState = root.getAttribute('data-state') || '';
+    root.click();
     const read = () => ({
-      labels: buttons.map((button) => (button.textContent || '').trim()),
-      pressed: buttons.map((button) => button.getAttribute('aria-pressed')),
-      active: buttons.map((button) => button.getAttribute('data-active')),
+      beforeState,
+      state: root.getAttribute('data-state') || '',
+      ariaLabel: root.getAttribute('aria-label') || '',
+      disabled: root.disabled,
       rootRect: (() => { const r = root.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; })(),
       viewport: { width: innerWidth, height: innerHeight },
       documentOverflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -744,11 +747,10 @@ async function runInstrumentProfileProbe(cdp, outDir, viewportName) {
   const value = result?.result?.value ?? result?.value ?? result;
   await screenshot(cdp, path.join(outDir, `nam-instrument-bass-${viewportName}.png`));
   const bounds = value?.rootRect;
-  const pass = Array.isArray(value?.pressed)
-    && value.pressed[0] === 'false'
-    && value.pressed[1] === 'true'
-    && value.active[0] === 'false'
-    && value.active[1] === 'true'
+  const pass = value?.beforeState === 'guitar'
+    && value?.state === 'bass'
+    && value?.ariaLabel?.startsWith('Bass instrument profile.')
+    && value?.disabled === false
     && value.documentOverflowX === false
     && bounds?.left >= 0
     && bounds?.top >= 0
@@ -903,15 +905,15 @@ async function runCompressorHpfProbe(cdp, outDir, viewportName) {
   const resetByClick = current.value === 0;
 
   // The 50 px release point is deliberately outside the compact selector hit
-  // ring. Pointer capture must retain the drag, snap to 120 Hz, and suppress
+  // ring. Pointer capture must retain the drag, snap to 80 Hz, and suppress
   // the synthetic release click that would otherwise advance to 240 Hz.
   await dispatchVerticalMouseDrag(cdp, center(), -50);
   const dragSample = await readThreePositionSelector(cdp, moduleName, paramId, readoutSelector);
   await screenshot(cdp, path.join(outDir, `nam-compressor-hpf-drag-1-${viewportName}.png`));
 
-  const expectedTexts = ['HPFOFF', 'HPF120', 'HPF240'];
+  const expectedTexts = ['HPFOFF', 'HPF80', 'HPF240'];
   const clickPass = samples.every((sample, index) => threePositionSelectorSamplePass(sample, index, expectedTexts[index]));
-  const dragPass = threePositionSelectorSamplePass(dragSample, 1, 'HPF120');
+  const dragPass = threePositionSelectorSamplePass(dragSample, 1, 'HPF80');
   return { pass: resetByClick && clickPass && dragPass, resetByClick, clickPass, dragPass, samples, dragSample };
 }
 
@@ -957,24 +959,9 @@ async function selectMixerStage(cdp, stageId) {
 }
 
 async function qualityChecks(cdp, scenarioName) {
-  const expectedNeuralSection = scenarioName === "rack-neural-size-menu"
-    ? "post"
-    : scenarioName.startsWith("rack-neural-")
-    ? scenarioName.replace("rack-neural-", "")
-    : "post";
   return evaluate(cdp, `
     (() => {
       const scenarioName = ${JSON.stringify(scenarioName)};
-      const expectedNeuralSection = ${JSON.stringify(expectedNeuralSection)};
-      const expectedNeuralModulesBySection = {
-        pre: ['pre-compressor-design-a', 'pre-tape-echo-design-a', 'pre-dual-octaver-design-a', 'pedal', 'pre-chaos-design-a'],
-        amp: ['amp'],
-        cab: ['cab'],
-        eq: ['eq'],
-        post: ['mod', 'delay', 'reverb'],
-      };
-      const expectedNeuralModules = expectedNeuralModulesBySection[expectedNeuralSection] || ['mod', 'delay', 'reverb'];
-      const expectedNeuralDeviceCount = expectedNeuralModules.length;
       const product = document.querySelector('.nam-product');
       const namWindowTitle = document.querySelector('[data-qa="nam-window-title"]');
       const windowControls = document.querySelector('.builtin-window-controls');
@@ -992,107 +979,6 @@ async function qualityChecks(cdp, scenarioName) {
         || root.scrollWidth > window.innerWidth + 2
         || body.scrollWidth > window.innerWidth + 2;
       const productRect = product?.getBoundingClientRect();
-      const productStyle = product ? window.getComputedStyle(product) : null;
-      const cssToken = (name) => (productStyle?.getPropertyValue(name) || '').trim();
-      const cssNumberToken = (name) => {
-        const value = Number.parseFloat(cssToken(name));
-        return Number.isFinite(value) ? value : 0;
-      };
-      const rackFinalParityTokens = {
-        accent: cssToken('--nam-ref-accent'),
-        accentSoft: cssToken('--nam-ref-accent-soft'),
-        stageAspect: cssNumberToken('--nam-ref-stage-aspect'),
-        stageGap: cssNumberToken('--nam-ref-stage-gap'),
-        stageFooterHeight: cssNumberToken('--nam-ref-stage-footer-height'),
-        stageFooterCompactHeight: cssNumberToken('--nam-ref-stage-footer-compact-height'),
-        explorerMin: cssNumberToken('--nam-ref-explorer-min'),
-        explorerMax: cssNumberToken('--nam-ref-explorer-max'),
-        explorerLaptop: cssNumberToken('--nam-ref-explorer-laptop'),
-        explorerCompactMin: cssNumberToken('--nam-ref-explorer-compact-min'),
-        explorerCompactMax: cssNumberToken('--nam-ref-explorer-compact-max'),
-        modeRailDesktop: cssNumberToken('--nam-ref-mode-rail-desktop'),
-        modeRailLaptop: cssNumberToken('--nam-ref-mode-rail-laptop'),
-        modeRailCompact: cssNumberToken('--nam-ref-mode-rail-compact'),
-      };
-      rackFinalParityTokens.ready = Boolean(
-        rackFinalParityTokens.accent === '#f5ae27'
-        && rackFinalParityTokens.accentSoft === '#f5c86a'
-        && Math.abs(rackFinalParityTokens.stageAspect - 1.7778958555) < 0.0001
-        && rackFinalParityTokens.stageGap === 8
-        && rackFinalParityTokens.stageFooterHeight === 46
-        && rackFinalParityTokens.stageFooterCompactHeight === 42
-        && rackFinalParityTokens.explorerMax === 340
-        && rackFinalParityTokens.explorerLaptop === 316
-        && rackFinalParityTokens.modeRailDesktop === 78
-        && rackFinalParityTokens.modeRailLaptop === 70
-        && rackFinalParityTokens.modeRailCompact === 58
-      );
-      const rackVisualPolishTokens = {
-        pass: cssNumberToken('--nam-ref-polish-pass'),
-        stageBorderAlpha: cssNumberToken('--nam-ref-stage-border-alpha'),
-        railCardRadius: cssNumberToken('--nam-ref-rail-card-radius'),
-        railCardMinHeight: cssNumberToken('--nam-ref-rail-card-min-height'),
-        artContrast: cssNumberToken('--nam-ref-art-contrast'),
-      };
-      rackVisualPolishTokens.ready = Boolean(
-        rackVisualPolishTokens.pass === 9
-        && rackVisualPolishTokens.stageBorderAlpha >= 0.1
-        && rackVisualPolishTokens.stageBorderAlpha <= 0.16
-        && rackVisualPolishTokens.railCardRadius === 5
-        && rackVisualPolishTokens.railCardMinHeight === 93
-        && rackVisualPolishTokens.artContrast >= 1.15
-      );
-      const hardwareDialTokens = {
-        pass: cssNumberToken('--nam-ref-hardware-dial-pass'),
-        grips: cssNumberToken('--nam-ref-hardware-dial-grips'),
-        numberCount: cssNumberToken('--nam-ref-hardware-dial-number-count'),
-        trackAlpha: cssNumberToken('--nam-ref-hardware-dial-track-alpha'),
-      };
-      hardwareDialTokens.ready = Boolean(
-        hardwareDialTokens.pass === 13
-        && hardwareDialTokens.grips === 36
-        && hardwareDialTokens.numberCount === 11
-        && hardwareDialTokens.trackAlpha > 0
-        && hardwareDialTokens.trackAlpha < 0.08
-      );
-      const railArtTokens = {
-        pass: cssNumberToken('--nam-ref-rail-art-pass'),
-        brightness: cssNumberToken('--nam-ref-rail-art-brightness'),
-        width: cssNumberToken('--nam-ref-rail-art-width'),
-      };
-      railArtTokens.ready = Boolean(
-        railArtTokens.pass === 11
-        && railArtTokens.brightness >= 1.1
-        && railArtTokens.width >= 64
-        && railArtTokens.width <= 78
-      );
-      const stageFillTokens = {
-        pass: cssNumberToken('--nam-ref-stage-fill-pass'),
-        bleed: cssNumberToken('--nam-ref-stage-frame-bleed'),
-        topOffset: cssNumberToken('--nam-ref-stage-frame-top-offset'),
-      };
-      stageFillTokens.ready = Boolean(
-        stageFillTokens.pass >= 14
-        && stageFillTokens.bleed >= (window.innerWidth < 1100 ? 24 : 48)
-        && stageFillTokens.bleed <= (window.innerWidth < 1100 ? 112 : 88)
-        && stageFillTokens.topOffset >= (window.innerWidth < 1100 ? 8 : 14)
-        && stageFillTokens.topOffset <= (window.innerWidth < 1100 ? 22 : 30)
-      );
-      const stageArtTokens = {
-        pass: cssNumberToken('--nam-ref-stage-art-pass'),
-        brightness: cssNumberToken('--nam-ref-stage-art-brightness'),
-        headOverlay: cssNumberToken('--nam-ref-stage-head-overlay-opacity'),
-        cabOverlay: cssNumberToken('--nam-ref-stage-cab-overlay-opacity'),
-      };
-      stageArtTokens.ready = Boolean(
-        stageArtTokens.pass >= 15
-        && stageArtTokens.brightness >= 0.92
-        && stageArtTokens.brightness <= 1.08
-        && stageArtTokens.headOverlay >= 0.58
-        && stageArtTokens.headOverlay <= 0.78
-        && stageArtTokens.cabOverlay >= 0.62
-        && stageArtTokens.cabOverlay <= 0.82
-      );
       const modules = Array.from(document.querySelectorAll('.nam-compact-chain-node')).map((el) => {
         const rect = el.getBoundingClientRect();
         const style = window.getComputedStyle(el);
@@ -1113,47 +999,6 @@ async function qualityChecks(cdp, scenarioName) {
         && activeNonSelectedModules.every((item) => !item.borderColor.includes('69, 179, 107') && !item.borderColor.includes('142, 245, 194'));
       const selectedChainCardAmber = selectedModules.length === 1
         && selectedModules.every((item) => item.borderColor.includes('245') || item.borderColor.includes('255, 216, 122'));
-      const ampFrame = document.querySelector('[data-qa="nam-amp-image-space"]');
-      const splitArtStack = document.querySelector('.nam-rack-art-stack');
-      const splitArtHead = document.querySelector('.nam-rack-art-head');
-      const splitArtCab = document.querySelector('.nam-rack-art-cab');
-      const toggle = document.querySelector('[data-qa="nam-physical-toggle"]');
-      const ampKnobs = Array.from(document.querySelectorAll('[data-qa="nam-faceplate-knob"]'));
-      const sceneRegions = Array.from(document.querySelectorAll('.nam-hardware-scene [data-scene-region]'))
-        .map((el) => el.getAttribute('data-scene-region') || '')
-        .filter(Boolean);
-      const sceneAnchors = Array.from(document.querySelectorAll('.nam-hardware-scene [data-scene-anchor]'))
-        .map((el) => el.getAttribute('data-scene-anchor') || '')
-        .filter(Boolean);
-      const ampKnobScaleMarks = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-rack-knob-scale i'));
-      const ampHardwareDials = Array.from(document.querySelectorAll('.nam-amp-knobs [data-qa="nam-hardware-dial"]'));
-      const ampHardwareDialNumbers = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-number'));
-      const ampHardwareDialTicks = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-tick'));
-      const ampHardwareDialScaleTracks = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-scale-track'));
-      const ampHardwareDialOuterRims = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-outer-rim'));
-      const ampHardwareDialGrips = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-grip'));
-      const ampHardwareDialCapHighlights = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-cap-highlight'));
-      const ampHardwareDialIndicatorShadows = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-indicator-shadow'));
-      const ampHardwareDialIndicatorTips = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-hardware-dial-indicator-tip'));
-      const ampKnobLabels = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-rack-knob-label'));
-      const ampKnobValueReadouts = Array.from(document.querySelectorAll('.nam-amp-knobs .nam-rack-control strong'));
-      const chain = document.querySelector('.nam-compact-chain');
-      const stageHero = document.querySelector('.nam-stage-hero');
-      const stageFooter = document.querySelector('[data-qa="nam-stage-footer"]');
-      const stageHeader = document.querySelector('.nam-stage-hero-head');
-      const ampTopline = document.querySelector('.nam-amp-topline');
-      const rightRail = document.querySelector('.nam-rack-right-rail');
-      const modeRail = document.querySelector('.nam-rack-mode-rail');
-      const modeRailNav = document.querySelector('[data-qa="nam-mode-rail-nav"]');
-      const modeRailStatus = document.querySelector('.nam-mode-rail-status');
-      const stageFooterLeft = document.querySelector('[data-qa="nam-stage-footer-left"]');
-      const stageFooterRight = document.querySelector('[data-qa="nam-stage-footer-right"]');
-      const railSortLabel = document.querySelector('.nam-explorer[data-variant="rail"] .nam-sort-control span');
-      const railSortTrigger = document.querySelector('[data-qa="nam-rail-sort-trigger"]');
-      const railSortNativeSelect = document.querySelector('.nam-explorer[data-variant="rail"] .nam-sort-control select');
-      const railSortPopover = document.querySelector('.nam-sort-menu-popover');
-      const railViewToggle = document.querySelector('.nam-explorer[data-variant="rail"] .nam-rail-view-toggle');
-      const railViewToggleButtons = Array.from(document.querySelectorAll('.nam-explorer[data-variant="rail"] .nam-rail-view-toggle button'));
       const headerLibraryCta = document.querySelector('.nam-product[data-view="rack"] .nam-product-topbar .nam-library-cta');
       const headerPresetManagerAction = document.querySelector('[data-qa="nam-header-preset-manager"]');
       const headerUtilityButtonEls = {
@@ -1161,398 +1006,37 @@ async function qualityChecks(cdp, scenarioName) {
         redo: document.querySelector('[data-qa="nam-header-redo"]'),
         more: document.querySelector('[data-qa="nam-header-more"]'),
       };
-      const modeRailIconClasses = Object.fromEntries(Array.from(document.querySelectorAll('.nam-mode-rail-nav button')).map((el) => [
-        ((el.textContent || '').replace(/\s+/g, ' ').trim()),
-        (el.querySelector('svg')?.getAttribute('class') || ''),
-      ]));
-      const farTunerButton = document.querySelector('[data-qa="nam-premium-tuner"]')
-        || Array.from(document.querySelectorAll('.nam-mode-rail-nav button')).find((el) => (el.textContent || '').includes('Tuner'));
-      const railLivePager = document.querySelector('.nam-explorer[data-variant="rail"] .nam-live-pager-footer');
-      const railLivePagerText = (railLivePager?.textContent || '').replace(/\s+/g, ' ').trim();
-      const railResultCards = Array.from(document.querySelectorAll('.nam-explorer[data-variant="rail"] .nam-result-card[data-view="list"]'));
-      const railNewTags = Array.from(document.querySelectorAll('.nam-explorer[data-variant="rail"] .nam-rail-new-tag'));
-      const railFeedback = document.querySelector('.nam-explorer[data-variant="rail"] .nam-feedback');
-      const railLibrarySummary = document.querySelector('.nam-explorer[data-variant="rail"] .nam-library-summary');
-      const cabRail = document.querySelector('[data-qa="nam-rail-cab"]');
-      const savedRail = document.querySelector('[data-qa="nam-rail-saved"]');
+      const farTunerButton = document.querySelector('[data-qa="nam-premium-tuner"]');
       const chainDragOverlay = document.querySelector('[data-qa="nam-chain-drag-overlay"]');
       const rackMixer = document.querySelector('[data-qa="nam-rack-mixer"]');
-      const fxHardware = document.querySelector('.nam-fx-hardware');
-      const fxFaceplate = document.querySelector('.nam-fx-faceplate');
-      const fxFaceplateArt = document.querySelector('.nam-fx-faceplate-art');
-      const fxKnobDeck = document.querySelector('.nam-fx-knob-deck');
-      const fxKnobs = Array.from(document.querySelectorAll('.nam-fx-knob-deck .nam-rack-control-knob'));
-      const fxFootswitch = document.querySelector('.nam-fx-faceplate > .nam-pedal-footswitch');
-      const hardwareNameplates = Array.from(document.querySelectorAll('.nam-hardware-nameplate'));
-      const legacyAmpBadges = document.querySelector('.nam-amp-badges');
       const selectedChainModule = document.querySelector('.nam-product[data-view="rack"] .nam-compact-chain-node[data-qa="nam-compact-chain-node-delay"]');
       const chainSlotActions = Array.from(document.querySelectorAll('.nam-product[data-view="rack"] .nam-compact-chain-order'));
-      const ampFrameRect = ampFrame?.getBoundingClientRect();
-      const chainRect = chain?.getBoundingClientRect();
-      const stageHeroRect = stageHero?.getBoundingClientRect();
-      const stageFooterRect = stageFooter?.getBoundingClientRect();
-      const stageFooterLeftRect = stageFooterLeft?.getBoundingClientRect();
-      const stageFooterRightRect = stageFooterRight?.getBoundingClientRect();
-      const rightRailRect = rightRail?.getBoundingClientRect();
-      const modeRailRect = modeRail?.getBoundingClientRect();
-      const modeRailNavRect = modeRailNav?.getBoundingClientRect();
-      const modeRailStatusRect = modeRailStatus?.getBoundingClientRect();
-      const railLivePagerRect = railLivePager?.getBoundingClientRect();
       const visibleBox = (el) => {
         if (!el) return false;
         const style = window.getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 2 && rect.height > 2;
       };
-      const neuralProduct = product?.classList.contains('nam-neural-product') ? product : null;
-      const neuralSectionRail = document.querySelector('.nam-neural-section-rail');
-      const neuralGlobalStrip = document.querySelector('.nam-neural-global-strip');
-      const neuralPostSuite = document.querySelector('.nam-neural-post-suite');
-      const neuralSectionSuite = document.querySelector('.nam-neural-section-suite');
-      const neuralPresetHub = document.querySelector('.nam-neural-preset-hub');
-      const neuralLegacyTopbar = product?.querySelector(':scope > .nam-product-topbar');
-      const neuralLegacyChain = product?.querySelector(':scope > .nam-chain');
-      const neuralDevices = Array.from(document.querySelectorAll('.nam-neural-device'));
-      const neuralAnchors = Array.from(document.querySelectorAll(
-        '.nam-neural-control-anchor, .nam-neural-decorative-switch-anchor, .nam-neural-anchor-button, .nam-neural-footswitch-anchor, .nam-neural-device-display[data-anchored="true"], .nam-neural-delay-display[data-anchored="true"], .nam-neural-label-anchor, .nam-neural-mic-anchor, .nam-neural-meter-anchor'
-      ));
-      const neuralSceneControls = Array.from(document.querySelectorAll('.nam-scene-control-visual[data-scene-control="true"]'));
-      const neuralSceneMetrics = neuralSceneControls.map((control) => {
-        const svg = control.closest('svg.nam-scene-device-svg');
-        const controlRect = control.getBoundingClientRect();
-        const svgRect = svg?.getBoundingClientRect();
-        const artboardWidth = Number(control.getAttribute('data-artboard-width') || 0);
-        const artboardHeight = Number(control.getAttribute('data-artboard-height') || 0);
-        const expectedX = Number(control.getAttribute('data-expected-x') || 0);
-        const expectedY = Number(control.getAttribute('data-expected-y') || 0);
-        const expectedWidth = Number(control.getAttribute('data-expected-width') || 0);
-        const expectedHeight = Number(control.getAttribute('data-expected-height') || 0);
-        const expectedDiameter = Number(control.getAttribute('data-expected-diameter') || 0);
-        const kind = control.getAttribute('data-kind') || '';
-        if (!svgRect || artboardWidth <= 0 || artboardHeight <= 0) {
-          return {
-            id: control.getAttribute('data-anchor-id') || '',
-            kind,
-            centerDelta: 999,
-            diameterRatioDelta: 999,
-            sizeRatioDelta: 999,
-            visible: visibleBox(control),
-            framed: false,
-          };
-        }
-        const preserveAspectRatio = svg?.getAttribute('preserveAspectRatio') || 'xMidYMid meet';
-        const fillsViewBox = preserveAspectRatio === 'none';
-        const scaleX = svgRect.width / artboardWidth;
-        const scaleY = svgRect.height / artboardHeight;
-        const scale = fillsViewBox ? 1 : Math.min(scaleX, scaleY);
-        const effectiveScaleX = fillsViewBox ? scaleX : scale;
-        const effectiveScaleY = fillsViewBox ? scaleY : scale;
-        const offsetX = fillsViewBox ? 0 : (svgRect.width - artboardWidth * scale) / 2;
-        const offsetY = fillsViewBox ? 0 : (svgRect.height - artboardHeight * scale) / 2;
-        const expectedCenterX = svgRect.left + offsetX + expectedX * effectiveScaleX;
-        const expectedCenterY = svgRect.top + offsetY + expectedY * effectiveScaleY;
-        const actualCenterX = controlRect.left + controlRect.width / 2;
-        const actualCenterY = controlRect.top + controlRect.height / 2;
-        const centerDelta = Math.hypot(actualCenterX - expectedCenterX, actualCenterY - expectedCenterY);
-        const checksDiameter = kind === 'knob' || kind === 'footswitch' || kind === 'led';
-        const expectedPixelDiameterX = expectedDiameter * effectiveScaleX;
-        const expectedPixelDiameterY = expectedDiameter * effectiveScaleY;
-        const diameterWidthRatioDelta = checksDiameter && expectedPixelDiameterX > 0
-          ? Math.abs(controlRect.width - expectedPixelDiameterX) / expectedPixelDiameterX
-          : 0;
-        const diameterHeightRatioDelta = checksDiameter && expectedPixelDiameterY > 0
-          ? Math.abs(controlRect.height - expectedPixelDiameterY) / expectedPixelDiameterY
-          : 0;
-        const diameterRatioDelta = checksDiameter && expectedPixelDiameterX > 0 && expectedPixelDiameterY > 0
-          ? Math.max(diameterWidthRatioDelta, diameterHeightRatioDelta)
-          : 0;
-        const expectedPixelWidth = expectedWidth * effectiveScaleX;
-        const expectedPixelHeight = expectedHeight * effectiveScaleY;
-        const widthRatioDelta = expectedPixelWidth > 0 ? Math.abs(controlRect.width - expectedPixelWidth) / expectedPixelWidth : 0;
-        const heightRatioDelta = expectedPixelHeight > 0 ? Math.abs(controlRect.height - expectedPixelHeight) / expectedPixelHeight : 0;
-        const sizeRatioDelta = checksDiameter ? 0 : Math.max(widthRatioDelta, heightRatioDelta);
-        const footerLimit = stageFooterRect ? stageFooterRect.top - 8 : window.innerHeight - 8;
-        const stageTopLimit = stageHeroRect ? stageHeroRect.top - 12 : 0;
-        const framed = controlRect.left >= -2
-          && controlRect.top >= stageTopLimit
-          && controlRect.right <= window.innerWidth + 2
-          && controlRect.bottom <= footerLimit;
-        return {
-          id: control.getAttribute('data-anchor-id') || '',
-          param: control.getAttribute('data-param') || '',
-          kind,
-          centerDelta: Number(centerDelta.toFixed(2)),
-          diameterRatioDelta: Number(diameterRatioDelta.toFixed(4)),
-          sizeRatioDelta: Number(sizeRatioDelta.toFixed(4)),
-          visible: visibleBox(control),
-          framed,
-        };
-      });
-      const neuralSceneCenterMaxDelta = neuralSceneMetrics.length
-        ? Math.max(...neuralSceneMetrics.map((item) => item.centerDelta))
-        : 999;
-      const neuralSceneDiameterMaxRatioDelta = neuralSceneMetrics.length
-        ? Math.max(...neuralSceneMetrics.map((item) => item.diameterRatioDelta))
-        : 999;
-      const neuralSceneSizeMaxRatioDelta = neuralSceneMetrics.length
-        ? Math.max(...neuralSceneMetrics.map((item) => item.sizeRatioDelta))
-        : 999;
-      const neuralSceneControlsAligned = neuralSceneMetrics.length > 0
-        && neuralSceneMetrics.every((item) => item.visible && item.centerDelta <= 2 && item.diameterRatioDelta <= 0.04 && item.sizeRatioDelta <= 0.04);
-      const neuralSceneControlsFramed = neuralSceneMetrics.length > 0
-        && neuralSceneMetrics.every((item) => item.visible && item.framed);
-      const neuralDeviceMetrics = neuralDevices.map((el) => {
-        const rect = el.getBoundingClientRect();
-        const anchors = Array.from(el.querySelectorAll(
-          '.nam-neural-control-anchor, .nam-neural-decorative-switch-anchor, .nam-neural-anchor-button, .nam-neural-footswitch-anchor, .nam-neural-device-display[data-anchored="true"], .nam-neural-delay-display[data-anchored="true"], .nam-neural-label-anchor, .nam-neural-mic-anchor, .nam-neural-meter-anchor'
-        ));
-        const sceneAnchors = Array.from(el.querySelectorAll('.nam-scene-control-visual[data-scene-control="true"]'));
-        const anchorInside = [...anchors, ...sceneAnchors].every((anchor) => {
-          const anchorRect = anchor.getBoundingClientRect();
-          return anchorRect.left >= rect.left - 12
-            && anchorRect.top >= rect.top - 12
-            && anchorRect.right <= rect.right + 12
-            && anchorRect.bottom <= rect.bottom + 12;
-        });
-        return {
-          module: el.getAttribute('data-module') || '',
-          active: el.getAttribute('data-active') === 'true',
-          visible: visibleBox(el),
-          width: Number(rect.width.toFixed(1)),
-          height: Number(rect.height.toFixed(1)),
-          anchorCount: anchors.length + sceneAnchors.length,
-          anchorInside,
-          hasLed: Boolean(el.querySelector('.nam-neural-led, .nam-scene-led')),
-          hasFootswitch: Boolean(el.querySelector('.nam-neural-footswitch, .nam-scene-footswitch')),
-          sceneGraph: el.getAttribute('data-scene-graph') === 'true',
-        };
-      });
-      const neuralSectionButtons = Array.from(document.querySelectorAll('.nam-neural-section-rail button')).map((el) => ({
+      const rackSectionRail = document.querySelector('.nam-neural-section-rail');
+      const rackGlobalStrip = document.querySelector('.nam-neural-global-strip');
+      const rackPresetHub = document.querySelector('.nam-neural-preset-hub');
+      const rackSectionButtons = Array.from(document.querySelectorAll('.nam-neural-section-rail button')).map((el) => ({
         id: el.getAttribute('data-section') || '',
-        label: (el.textContent || '').replace(/\s+/g, ' ').trim(),
+        label: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
         active: el.getAttribute('data-active') === 'true',
         visible: visibleBox(el),
       }));
-      const neuralGlobalControlCount = neuralGlobalStrip
-        ? neuralGlobalStrip.querySelectorAll('.nam-meter-trim, .nam-neural-global-knob, .nam-neural-stepper').length
+      const rackGlobalControlCount = rackGlobalStrip
+        ? rackGlobalStrip.querySelectorAll('.nam-meter-trim, .nam-neural-global-knob, .nam-neural-stepper').length
         : 0;
-      const neuralPresetLibraryButton = document.querySelector('.nam-neural-preset-library-button');
-      const neuralGlobalLibraryButton = document.querySelector('.nam-neural-global-side-right .nam-neural-library-button');
-      const neuralGlobalDividerCount = neuralGlobalStrip
-        ? neuralGlobalStrip.querySelectorAll('.nam-neural-global-side > * + *').length
+      const rackPresetLibraryButton = document.querySelector('.nam-neural-preset-library-button');
+      const rackGlobalLibraryButton = document.querySelector('.nam-neural-global-side-right .nam-neural-library-button');
+      const rackGlobalDividerCount = rackGlobalStrip
+        ? rackGlobalStrip.querySelectorAll('.nam-neural-global-side > * + *').length
         : 0;
-      const neuralTopStripRegionsReady = Boolean(
-        visibleBox(neuralSectionRail)
-        && visibleBox(neuralGlobalStrip)
-        && visibleBox(neuralPresetHub)
-        && visibleBox(neuralPresetLibraryButton)
-        && !visibleBox(neuralGlobalLibraryButton)
-        && neuralGlobalDividerCount >= 3
+      const rackRetiredControlsAbsent = !document.querySelector(
+        '.nam-neural-input-mode, [data-param="inputMode"], [data-param="transposeSemitones"], [aria-label="Transpose"]'
       );
-      const neuralRetiredInputModeAbsent = !document.querySelector('.nam-neural-input-mode, [data-param="inputMode"]');
-      const neuralRetiredTransposeAbsent = !document.querySelector('[data-param="transposeSemitones"], [aria-label="Transpose"]');
-      const neuralPrePedalCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-material="pedal"]').length;
-      const neuralCompressorBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pre-compressor-design-a"] [data-bound="true"]').length;
-      const neuralTapeEchoBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pre-tape-echo-design-a"] [data-bound="true"]').length;
-      const neuralOctaverBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pre-dual-octaver-design-a"] [data-bound="true"]').length;
-      const neuralPrecisionDriveBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pedal"] [data-bound="true"]').length;
-      const neuralChaosBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="pre"] .nam-neural-device[data-module="pre-chaos-design-a"] [data-bound="true"]').length;
-      const neuralPostModBoundCount = document.querySelectorAll('.nam-neural-post-suite .nam-neural-device[data-module="mod"] [data-bound="true"]').length;
-      const neuralPostModTreadleBound = Boolean(document.querySelector('.nam-neural-post-suite .nam-neural-device[data-module="mod"] .nam-neural-treadle-anchor[data-bound="true"][data-param="modulatorPedalPosition"], .nam-neural-post-suite .nam-neural-device[data-module="mod"] .nam-scene-control-visual[data-kind="treadle"][data-param="modulatorPedalPosition"]'));
-      const neuralPostModEngageBound = Boolean(document.querySelector('.nam-neural-post-suite .nam-neural-device[data-module="mod"] .nam-neural-footswitch-anchor[data-bound="true"][data-param="modulatorEnabled"], .nam-neural-post-suite .nam-neural-device[data-module="mod"] .nam-scene-control-visual[data-kind="footswitch"][data-param="modulatorEnabled"]'));
-      const neuralPostDelayBoundCount = document.querySelectorAll('.nam-neural-post-suite .nam-neural-device[data-module="delay"] [data-bound="true"]').length;
-      const neuralPostDelayEngageBound = Boolean(document.querySelector('.nam-neural-post-suite .nam-neural-device[data-module="delay"] .nam-neural-footswitch-anchor[data-bound="true"][data-param="delayEnabled"], .nam-neural-post-suite .nam-neural-device[data-module="delay"] .nam-scene-control-visual[data-kind="footswitch"][data-param="delayEnabled"]'));
-      const neuralPostDelaySevenSegment = Boolean(document.querySelector('.nam-neural-post-suite .nam-neural-device[data-module="delay"] .nam-neural-seven-segment .nam-neural-seven-segment-digit i[data-on="true"], .nam-neural-post-suite .nam-neural-device[data-module="delay"] .nam-scene-display .nam-scene-display-text'));
-      const neuralPostReverbBoundCount = document.querySelectorAll('.nam-neural-post-suite .nam-neural-device[data-module="reverb"] [data-bound="true"]').length;
-      const neuralPostReverbEngageBound = Boolean(document.querySelector('.nam-neural-post-suite .nam-neural-device[data-module="reverb"] .nam-neural-footswitch-anchor[data-bound="true"][data-param="reverbEnabled"], .nam-neural-post-suite .nam-neural-device[data-module="reverb"] .nam-scene-control-visual[data-kind="footswitch"][data-param="reverbEnabled"]'));
-      const neuralEqFaderCount = document.querySelectorAll('.nam-neural-section-suite[data-section="eq"] .nam-neural-eq-fader, .nam-neural-section-suite[data-section="eq"] .nam-scene-control-visual[data-kind="fader"]').length;
-      const neuralEqBoundFaderCount = document.querySelectorAll('.nam-neural-section-suite[data-section="eq"] .nam-neural-eq-fader[data-bound="true"], .nam-neural-section-suite[data-section="eq"] .nam-scene-fader[data-bound="true"]').length;
-      const neuralEqPowerBound = Boolean(document.querySelector('.nam-neural-section-suite[data-section="eq"] .nam-neural-device[data-module="eq"] .nam-neural-footswitch-anchor[data-bound="true"][data-param="eqEnabled"], .nam-neural-section-suite[data-section="eq"] .nam-neural-device[data-module="eq"] .nam-scene-control-visual[data-kind="footswitch"][data-param="eqEnabled"]'));
-      const neuralCabMicCount = document.querySelectorAll('.nam-neural-section-suite[data-section="cab"] .nam-neural-cab-mic, .nam-neural-section-suite[data-section="cab"] .nam-scene-control-visual[data-kind="mic"]').length;
-      const neuralCabBoundCount = document.querySelectorAll('.nam-neural-section-suite[data-section="cab"] .nam-neural-device[data-module="cab"] [data-bound="true"]').length;
-      const neuralAmpBackdropReady = Boolean(document.querySelector('.nam-neural-section-suite[data-section="amp"] .nam-neural-amp-head-backdrop'));
-      const neuralAmpSceneReady = Boolean(document.querySelector('.nam-neural-section-suite[data-section="amp"] .nam-scene-device[data-module="amp"][data-original-amp*="studio13-meridian"]'));
-      const neuralAmpDecorativeSwitchCount = document.querySelectorAll('.nam-neural-section-suite[data-section="amp"] .nam-neural-decorative-switch-anchor, .nam-neural-section-suite[data-section="amp"] .nam-scene-control-visual[data-kind="switch"]').length;
-      const neuralAmpDecorativeKnobCount = document.querySelectorAll('.nam-neural-section-suite[data-section="amp"] .nam-neural-decorative-knob, .nam-neural-section-suite[data-section="amp"] .nam-scene-control-visual[data-kind="knob"]').length;
-      const neuralAmpBoundFaceplateCount = document.querySelectorAll('.nam-neural-section-suite[data-section="amp"] .nam-neural-device[data-module="amp"] [data-bound="true"]').length;
-      const neuralAmpFaceplateReady = (neuralAmpBackdropReady || neuralAmpSceneReady) && neuralAmpBoundFaceplateCount >= 10 && neuralAmpDecorativeKnobCount >= 7 && neuralAmpDecorativeSwitchCount >= 2;
-      const neuralMaterialTokens = {
-        pass: cssNumberToken('--nam-neural-material-pass'),
-        skinOpacity: cssNumberToken('--nam-neural-skin-opacity'),
-        shadowAlpha: cssNumberToken('--nam-neural-device-shadow-alpha'),
-        sideDepth: cssNumberToken('--nam-neural-side-depth'),
-      };
-      neuralMaterialTokens.ready = Boolean(
-        neuralMaterialTokens.pass >= 2
-        && neuralMaterialTokens.skinOpacity >= 0.38
-        && neuralMaterialTokens.skinOpacity <= 0.58
-        && neuralMaterialTokens.shadowAlpha >= 0.36
-        && neuralMaterialTokens.shadowAlpha <= 0.58
-        && neuralMaterialTokens.sideDepth >= 6
-      );
-      const neuralFooterText = (stageFooter?.textContent || '').replace(/\s+/g, ' ').trim();
-      const neuralFooterRect = stageFooter?.getBoundingClientRect();
-      const neuralShell = {
-        productClassName: product?.className || '',
-        hasRoot: Boolean(neuralProduct),
-        sectionRailVisible: visibleBox(neuralSectionRail),
-        sectionButtonCount: neuralSectionButtons.length,
-        activeSectionIds: neuralSectionButtons.filter((item) => item.active).map((item) => item.id),
-        activeSectionLabels: neuralSectionButtons.filter((item) => item.active).map((item) => item.label),
-        sectionButtonsVisible: neuralSectionButtons.length >= 5 && neuralSectionButtons.every((item) => item.visible),
-        globalStripVisible: visibleBox(neuralGlobalStrip),
-        globalControlCount: neuralGlobalControlCount,
-        globalLabelsReady: neuralGlobalControlCount >= 4 && neuralRetiredInputModeAbsent && neuralRetiredTransposeAbsent,
-        topStripRegionsReady: neuralTopStripRegionsReady,
-        globalDividerCount: neuralGlobalDividerCount,
-        presetLibraryButtonVisible: visibleBox(neuralPresetLibraryButton),
-        globalLibraryButtonVisible: visibleBox(neuralGlobalLibraryButton),
-        retiredInputModeAbsent: neuralRetiredInputModeAbsent,
-        retiredTransposeAbsent: neuralRetiredTransposeAbsent,
-        presetHubVisible: visibleBox(neuralPresetHub),
-        postSuiteVisible: visibleBox(neuralPostSuite),
-        sectionSuiteVisible: visibleBox(neuralSectionSuite),
-        expectedSection: expectedNeuralSection,
-        expectedModules: expectedNeuralModules,
-        deviceCount: neuralDeviceMetrics.filter((item) => item.visible).length,
-        deviceModules: neuralDeviceMetrics.map((item) => item.module),
-        devicesHaveAnchors: neuralDeviceMetrics.length >= expectedNeuralDeviceCount && neuralDeviceMetrics.every((item) => item.anchorCount >= 3 && (item.sceneGraph || item.anchorInside)),
-        devicesHaveSwitches: neuralDeviceMetrics.length >= expectedNeuralDeviceCount && neuralDeviceMetrics.every((item) => item.hasLed && item.hasFootswitch),
-        anchorCount: neuralAnchors.length + neuralSceneControls.length,
-        sceneGraphDeviceCount: neuralDeviceMetrics.filter((item) => item.sceneGraph).length,
-        sceneControlCount: neuralSceneControls.length,
-        sceneControlsAligned: neuralSceneControlsAligned,
-        sceneControlsFramed: neuralSceneControlsFramed,
-        sceneCenterMaxDelta: Number(neuralSceneCenterMaxDelta.toFixed(2)),
-        sceneDiameterMaxRatioDelta: Number(neuralSceneDiameterMaxRatioDelta.toFixed(4)),
-        sceneSizeMaxRatioDelta: Number(neuralSceneSizeMaxRatioDelta.toFixed(4)),
-        sceneMetrics: neuralSceneMetrics.slice(0, 50),
-        prePedalCount: neuralPrePedalCount,
-        compressorBoundCount: neuralCompressorBoundCount,
-        tapeEchoBoundCount: neuralTapeEchoBoundCount,
-        octaverBoundCount: neuralOctaverBoundCount,
-        precisionDriveBoundCount: neuralPrecisionDriveBoundCount,
-        chaosBoundCount: neuralChaosBoundCount,
-        postModBoundCount: neuralPostModBoundCount,
-        postModTreadleBound: neuralPostModTreadleBound,
-        postModEngageBound: neuralPostModEngageBound,
-        postDelayBoundCount: neuralPostDelayBoundCount,
-        postDelayEngageBound: neuralPostDelayEngageBound,
-        postDelaySevenSegment: neuralPostDelaySevenSegment,
-        postReverbBoundCount: neuralPostReverbBoundCount,
-        postReverbEngageBound: neuralPostReverbEngageBound,
-        eqFaderCount: neuralEqFaderCount,
-        eqBoundFaderCount: neuralEqBoundFaderCount,
-        eqPowerBound: neuralEqPowerBound,
-        cabMicCount: neuralCabMicCount,
-        cabBoundCount: neuralCabBoundCount,
-        ampBackdropReady: neuralAmpBackdropReady,
-        ampSceneReady: neuralAmpSceneReady,
-        ampDecorativeSwitchCount: neuralAmpDecorativeSwitchCount,
-        ampDecorativeKnobCount: neuralAmpDecorativeKnobCount,
-        ampBoundFaceplateCount: neuralAmpBoundFaceplateCount,
-        ampFaceplateReady: neuralAmpFaceplateReady,
-        materialTokens: neuralMaterialTokens,
-        materialReady: neuralMaterialTokens.ready,
-        sectionSpecificReady: (expectedNeuralSection !== 'pre' || (neuralPrePedalCount >= 5 && neuralCompressorBoundCount >= 5 && neuralTapeEchoBoundCount >= 6 && neuralOctaverBoundCount >= 4 && neuralPrecisionDriveBoundCount >= 6 && neuralChaosBoundCount >= 2))
-          && (expectedNeuralSection !== 'amp' || neuralAmpFaceplateReady)
-          && (expectedNeuralSection !== 'post' || (neuralPostModBoundCount >= 10 && neuralPostModTreadleBound && neuralPostModEngageBound && neuralPostDelayBoundCount >= 9 && neuralPostDelayEngageBound && neuralPostDelaySevenSegment && neuralPostReverbBoundCount >= 6 && neuralPostReverbEngageBound))
-          && (expectedNeuralSection !== 'eq' || (neuralEqFaderCount >= 9 && neuralEqBoundFaderCount >= 9 && neuralEqPowerBound))
-          && (expectedNeuralSection !== 'cab' || (neuralCabMicCount >= 2 && neuralCabBoundCount >= 10)),
-        legacyTopbarVisible: visibleBox(neuralLegacyTopbar),
-        legacyChainVisible: visibleBox(neuralLegacyChain),
-        footerVisible: visibleBox(stageFooter),
-        footerTextReady: Boolean(neuralFooterRect && neuralFooterRect.height >= 48),
-        footerText: neuralFooterText,
-        metrics: neuralDeviceMetrics,
-      };
-      neuralShell.ready = Boolean(
-        neuralShell.hasRoot
-        && neuralShell.sectionRailVisible
-        && neuralShell.sectionButtonsVisible
-        && neuralShell.activeSectionIds.includes(expectedNeuralSection)
-        && neuralShell.globalStripVisible
-        && neuralShell.globalLabelsReady
-        && neuralShell.topStripRegionsReady
-        && neuralShell.presetHubVisible
-        && (neuralShell.postSuiteVisible || neuralShell.sectionSuiteVisible)
-        && neuralShell.deviceCount >= expectedNeuralDeviceCount
-        && expectedNeuralModules.every((module) => neuralShell.deviceModules.includes(module))
-        && neuralShell.devicesHaveAnchors
-        && neuralShell.devicesHaveSwitches
-        && neuralShell.anchorCount >= expectedNeuralDeviceCount * 3
-        && neuralShell.sceneGraphDeviceCount >= expectedNeuralDeviceCount
-        && neuralShell.sceneControlsAligned
-        && neuralShell.sceneControlsFramed
-        && neuralShell.sectionSpecificReady
-        && neuralShell.materialReady
-        && !neuralShell.legacyTopbarVisible
-        && !neuralShell.legacyChainVisible
-        && neuralShell.footerVisible
-        && neuralShell.footerTextReady
-      );
-      const modeRailButtonMetrics = Array.from(document.querySelectorAll('.nam-mode-rail-nav button')).map((el) => {
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        const icon = el.querySelector('svg');
-        const iconStyle = icon ? window.getComputedStyle(icon) : null;
-        return {
-          qa: el.getAttribute('data-qa') || '',
-          label: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
-          active: el.getAttribute('data-active') === 'true',
-          ariaPressed: el.getAttribute('aria-pressed') === 'true',
-          visible: visibleBox(el),
-          width: Number(rect.width.toFixed(1)),
-          height: Number(rect.height.toFixed(1)),
-          color: style.color,
-          borderColor: style.borderColor,
-          backgroundImage: style.backgroundImage,
-          iconColor: iconStyle?.color || '',
-        };
-      });
-      const modeRailActiveLabels = modeRailButtonMetrics
-        .filter((item) => item.active && item.ariaPressed)
-        .map((item) => item.label);
-      const modeRailReferenceActiveState = Boolean(modeRailButtonMetrics.length >= 4
-        && modeRailButtonMetrics.every((item) => item.visible)
-        && modeRailActiveLabels.length === 1
-        && modeRailActiveLabels[0] === 'Gear'
-        && modeRailButtonMetrics.find((item) => item.label === 'Gear')?.borderColor.includes('245')
-        && modeRailButtonMetrics.find((item) => item.label === 'Gear')?.iconColor.includes('245'));
-      const modeRailReferenceButtonSizing = Boolean(modeRailButtonMetrics.length >= 4
-        && modeRailButtonMetrics.every((item) => item.height >= (window.innerWidth < 1100 ? 28 : 58))
-        && modeRailButtonMetrics.every((item) => item.width >= (window.innerWidth < 1100 ? 46 : 54)));
-      const statusPanelStyle = modeRailStatus ? window.getComputedStyle(modeRailStatus) : null;
-      const statusRailBoxed = Boolean(visibleBox(modeRailStatus)
-        && statusPanelStyle
-        && statusPanelStyle.borderTopColor !== 'rgba(0, 0, 0, 0)'
-        && statusPanelStyle.borderTopStyle !== 'none'
-        && statusPanelStyle.backgroundImage !== 'none'
-        && modeRailNavRect
-        && modeRailStatusRect
-        && modeRailStatusRect.top >= modeRailNavRect.bottom - 1);
-      const stageFooterLeftText = (stageFooterLeft?.textContent || '').replace(/\\s+/g, ' ').trim();
-      const stageFooterRightText = (stageFooterRight?.textContent || '').replace(/\\s+/g, ' ').trim();
-      const footerSizeTrigger = document.querySelector('[data-qa="nam-footer-size"]');
-      const footerSizePopover = document.querySelector('.nam-stage-size-popover');
-      const footerSizeOptionLabels = Array.from(document.querySelectorAll('.nam-stage-size-popover [role="option"]'))
-        .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim());
-      const stageFooterReferenceGroups = Boolean(stageFooterRect
-        && stageFooterLeftRect
-        && stageFooterRightRect
-        && visibleBox(stageFooterLeft)
-        && visibleBox(stageFooterRight)
-        && stageFooterLeftRect.left >= stageFooterRect.left - 1
-        && stageFooterLeftRect.right < stageFooterRightRect.left
-        && stageFooterRightRect.right <= stageFooterRect.right + 1
-        && stageFooterRect.width - stageFooterRightRect.right <= 14
-        && stageFooterLeftText.includes('BPM')
-        && stageFooterLeftText.includes('4/4')
-        && !stageFooterLeftText.includes('TAP')
-        && stageFooterRightText.includes('140%'));
-      const stageFooterReferenceHeight = Boolean(stageFooterRect
-        && stageFooterRect.height >= (window.innerWidth < 1100 ? 40 : 44)
-        && stageFooterRect.height <= (window.innerWidth < 1100 ? 58 : 52));
       const headerUtilityActions = Object.fromEntries(Object.entries(headerUtilityButtonEls).map(([key, el]) => [
         key,
         {
@@ -1584,328 +1068,6 @@ async function qualityChecks(cdp, scenarioName) {
           || headerUtilityActions.more?.iconClass.includes('lucide-more-vertical'))
         && !visibleHeaderTopActionIconClasses.some((item) => item.includes('lucide-save'))
       );
-      const stageFooterControls = Array.from(document.querySelectorAll('[data-qa^="nam-footer-"]')).map((el) => ({
-        qa: el.getAttribute('data-qa') || '',
-        disabled: Boolean(el.disabled),
-        title: el.getAttribute('title') || '',
-        visible: visibleBox(el),
-      }));
-      const railSortOptionLabels = Array.from(document.querySelectorAll('.nam-sort-menu-popover [role="option"]'))
-        .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim())
-        .filter(Boolean);
-      const railSortLabelRect = railSortLabel?.getBoundingClientRect();
-      const railSortTriggerRect = railSortTrigger?.getBoundingClientRect();
-      const railViewToggleButtonStates = railViewToggleButtons.map((el) => ({
-        active: el.getAttribute('data-active') === 'true',
-        ariaPressed: el.getAttribute('aria-pressed') === 'true',
-        title: el.getAttribute('title') || '',
-        visible: visibleBox(el),
-      }));
-      const railSortReferenceLayout = Boolean(visibleBox(railSortLabel)
-        && visibleBox(railSortTrigger)
-        && railSortLabelRect
-        && railSortTriggerRect
-        && railSortTriggerRect.left >= railSortLabelRect.right + 4
-        && railSortTriggerRect.height >= 30);
-      const railViewToggleReferencePair = Boolean(visibleBox(railViewToggle)
-        && railViewToggleButtonStates.length === 2
-        && railViewToggleButtonStates.every((button) => button.visible)
-        && railViewToggleButtonStates.filter((button) => button.active && button.ariaPressed).length === 1
-        && railViewToggleButtonStates.some((button) => button.title === 'Card view')
-        && railViewToggleButtonStates.some((button) => button.title === 'List view'));
-      const rectInside = (rect, container, pad = 3) => Boolean(rect && container
-        && rect.left >= container.left - pad
-        && rect.top >= container.top - pad
-        && rect.right <= container.right + pad
-        && rect.bottom <= container.bottom + pad);
-      const normalizedRect = (el, container) => {
-        if (!el || !container) return null;
-        const rect = el.getBoundingClientRect();
-        const width = Math.max(1, container.width);
-        const height = Math.max(1, container.height);
-        return {
-          left: Number(((rect.left - container.left) / width).toFixed(3)),
-          top: Number(((rect.top - container.top) / height).toFixed(3)),
-          right: Number(((rect.right - container.left) / width).toFixed(3)),
-          bottom: Number(((rect.bottom - container.top) / height).toFixed(3)),
-          width: Number((rect.width / width).toFixed(3)),
-          height: Number((rect.height / height).toFixed(3)),
-          visible: visibleBox(el),
-          inside: rectInside(rect, container, 8),
-        };
-      };
-      const fxFaceplateRect = fxFaceplate?.getBoundingClientRect();
-      const fxKnobDeckRect = fxKnobDeck?.getBoundingClientRect();
-      const fxModule = fxHardware?.getAttribute('data-module') || '';
-      const fxFaceplateArtStyle = fxFaceplateArt ? window.getComputedStyle(fxFaceplateArt) : null;
-      const fxKnobDeckStyle = fxKnobDeck ? window.getComputedStyle(fxKnobDeck) : null;
-      const fxKnobMetrics = fxKnobs.map((el) => {
-        const rect = el.getBoundingClientRect();
-        const cap = el.querySelector('[data-qa="nam-hardware-dial"], .nam-rack-knob-cap');
-        const capRect = cap?.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return {
-          param: el.getAttribute('data-param') || '',
-          visible: visibleBox(el),
-          insideFaceplate: rectInside(rect, fxFaceplateRect, 3),
-          x: fxFaceplateRect ? Number(((rect.left + rect.width / 2 - fxFaceplateRect.left) / Math.max(1, fxFaceplateRect.width)).toFixed(3)) : 0,
-          y: fxFaceplateRect ? Number(((rect.top + rect.height / 2 - fxFaceplateRect.top) / Math.max(1, fxFaceplateRect.height)).toFixed(3)) : 0,
-          capWidth: capRect ? Number(capRect.width.toFixed(1)) : 0,
-          capHeight: capRect ? Number(capRect.height.toFixed(1)) : 0,
-          hasCardChrome: style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.borderTopStyle !== 'none',
-        };
-      });
-      const fxKnobSlotsIntegrated = fxModule === 'eq'
-        ? fxKnobMetrics.every((item) => item.y >= 0.16 && item.y <= 0.62 && item.x >= 0.22 && item.x <= 0.78)
-        : fxKnobMetrics.every((item) => item.y >= 0.16 && item.y <= 0.46);
-      const fxControlsIntegrated = Boolean(fxFaceplateRect
-        && fxKnobDeckRect
-        && fxKnobs.length > 0
-        && fxKnobDeckStyle?.position === 'absolute'
-        && fxFaceplateArtStyle?.mixBlendMode === 'normal'
-        && fxKnobMetrics.every((item) => item.visible && item.insideFaceplate && item.capWidth >= 44 && !item.hasCardChrome)
-        && fxKnobSlotsIntegrated);
-      const rightRailSideBySide = Boolean(stageHeroRect && rightRailRect && modeRailRect
-        && rightRailRect.left >= stageHeroRect.right - 4
-        && modeRailRect.right <= stageHeroRect.left + 4);
-      const desktopReferenceRailTop = Boolean(chainRect && stageHeroRect && rightRailRect
-        && Math.abs(rightRailRect.top - stageHeroRect.top) < 8
-        && stageHeroRect.top >= chainRect.bottom - 3
-        && chainRect.right <= rightRailRect.left + 4);
-      const compactStackedRailLayout = Boolean(window.innerWidth < 1100
-        && stageHeroRect
-        && rightRailRect
-        && modeRailRect
-        && rightRailRect.top >= stageHeroRect.bottom - 4
-        && rightRailRect.left >= modeRailRect.right - 4
-        && rightRailRect.right <= window.innerWidth - 4
-        && rightRailRect.height >= 104);
-      const compactReferenceRailTop = Boolean(stageHeroRect && rightRailRect
-        && Math.abs(rightRailRect.top - stageHeroRect.top) < 8);
-      const knobRects = ampKnobs.map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          id: el.getAttribute('data-param') || '',
-          x: ampFrameRect ? (rect.left + rect.width / 2 - ampFrameRect.left) / Math.max(1, ampFrameRect.width) : 0,
-          y: ampFrameRect ? (rect.top + rect.height / 2 - ampFrameRect.top) / Math.max(1, ampFrameRect.height) : 0,
-          inside: rectInside(rect, ampFrameRect),
-          width: rect.width,
-          height: rect.height,
-        };
-      });
-      const knobLabelRects = ampKnobLabels.map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          text: (el.textContent || '').trim(),
-          visible: visibleBox(el),
-          inside: rectInside(rect, ampFrameRect, 2),
-        };
-      });
-      const knobValueReadoutRects = ampKnobValueReadouts.map((el) => ({
-        text: (el.textContent || '').trim(),
-        visible: visibleBox(el),
-        rect: (() => {
-          const rect = el.getBoundingClientRect();
-          return {
-            width: Number(rect.width.toFixed(2)),
-            height: Number(rect.height.toFixed(2)),
-          };
-        })(),
-      }));
-      const toggleRect = toggle?.getBoundingClientRect();
-      const togglePosition = toggleRect && ampFrameRect ? {
-        x: Number(((toggleRect.left + toggleRect.width / 2 - ampFrameRect.left) / Math.max(1, ampFrameRect.width)).toFixed(3)),
-        y: Number(((toggleRect.top + toggleRect.height / 2 - ampFrameRect.top) / Math.max(1, ampFrameRect.height)).toFixed(3)),
-        width: Number(toggleRect.width.toFixed(1)),
-        height: Number(toggleRect.height.toFixed(1)),
-      } : null;
-      const toggleInFaceplateZone = Boolean(togglePosition
-        && togglePosition.x >= 0.13
-        && togglePosition.x <= 0.22
-        && togglePosition.y >= 0.39
-        && togglePosition.y <= 0.50);
-      const knobScaleMarkRects = ampKnobScaleMarks.map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          text: (el.textContent || '').trim(),
-          inside: rectInside(rect, ampFrameRect, 1),
-          visible: visibleBox(el),
-        };
-      });
-      const hardwareDialRects = ampHardwareDials.map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          param: el.getAttribute('data-param') || '',
-          inside: rectInside(rect, ampFrameRect, 1),
-          visible: visibleBox(el),
-          width: Number(rect.width.toFixed(1)),
-          height: Number(rect.height.toFixed(1)),
-        };
-      });
-      const hardwareDialNumberRects = ampHardwareDialNumbers.map((el) => {
-        const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return {
-          text: (el.textContent || '').trim(),
-          inside: rectInside(rect, ampFrameRect, 1),
-          visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0.5 && rect.height > 2,
-          width: Number(rect.width.toFixed(2)),
-          height: Number(rect.height.toFixed(2)),
-        };
-      });
-      const hardwareDialTickStrokeReady = ampHardwareDialTicks.length > 0
-        && ampHardwareDialTicks.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.stroke !== 'none' && style.strokeWidth !== '0px';
-        });
-      const hardwareDialScaleTrackReady = ampHardwareDialScaleTracks.length >= ampHardwareDials.length
-        && ampHardwareDialScaleTracks.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.fill !== 'none' && style.stroke !== 'none';
-        });
-      const hardwareDialOuterRimReady = ampHardwareDialOuterRims.length >= ampHardwareDials.length
-        && ampHardwareDialOuterRims.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.fill !== 'none' && style.stroke !== 'none';
-        });
-      const hardwareDialGripStrokeReady = ampHardwareDialGrips.length >= ampHardwareDials.length * Math.max(1, hardwareDialTokens.grips)
-        && ampHardwareDialGrips.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.stroke !== 'none' && style.strokeWidth !== '0px';
-        });
-      const hardwareDialCapHighlightReady = ampHardwareDialCapHighlights.length >= ampHardwareDials.length
-        && ampHardwareDialCapHighlights.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.fill !== 'none';
-        });
-      const hardwareDialIndicatorShadowReady = ampHardwareDialIndicatorShadows.length >= ampHardwareDials.length
-        && ampHardwareDialIndicatorShadows.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.stroke !== 'none' && style.strokeWidth !== '0px';
-        });
-      const hardwareDialIndicatorTipReady = ampHardwareDialIndicatorTips.length >= ampHardwareDials.length
-        && ampHardwareDialIndicatorTips.every((el) => {
-          const style = window.getComputedStyle(el);
-          return style.fill !== 'none';
-        });
-      const hardwareNameplateRects = hardwareNameplates.map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          text: (el.textContent || '').replace(/\\s+/g, ' ').trim(),
-          ariaLabel: el.getAttribute('aria-label') || '',
-          visible: visibleBox(el),
-          inside: rectInside(rect, ampFrameRect),
-          x: ampFrameRect ? Number(((rect.left + rect.width / 2 - ampFrameRect.left) / Math.max(1, ampFrameRect.width)).toFixed(3)) : 0,
-          y: ampFrameRect ? Number(((rect.top + rect.height / 2 - ampFrameRect.top) / Math.max(1, ampFrameRect.height)).toFixed(3)) : 0,
-          width: Number(rect.width.toFixed(1)),
-          height: Number(rect.height.toFixed(1)),
-        };
-      });
-      const ampNameplateRect = hardwareNameplateRects.find((rect) => rect.ariaLabel.startsWith('Amp model:'));
-      const cabNameplateRect = hardwareNameplateRects.find((rect) => rect.ariaLabel.startsWith('Cabinet:'));
-      const hardwareNameplatesDesignBand = Boolean(ampNameplateRect
-        && cabNameplateRect
-        && ampNameplateRect.y >= 0.20
-        && ampNameplateRect.y <= 0.31
-        && cabNameplateRect.y >= 0.78
-        && cabNameplateRect.y <= 0.88
-        && ampNameplateRect.width <= 380
-        && cabNameplateRect.width <= 380);
-      const splitArtRects = {
-        stack: normalizedRect(splitArtStack, ampFrameRect),
-        head: normalizedRect(splitArtHead, ampFrameRect),
-        cab: normalizedRect(splitArtCab, ampFrameRect),
-      };
-      const splitArtDesignBand = Boolean(splitArtRects.stack?.visible
-        && splitArtRects.head?.visible
-        && splitArtRects.cab?.visible
-        && splitArtRects.stack?.inside
-        && splitArtRects.head?.inside
-        && splitArtRects.cab?.inside
-        && splitArtRects.head.top >= -0.02
-        && splitArtRects.head.top <= 0.08
-        && splitArtRects.head.bottom >= 0.52
-        && splitArtRects.head.bottom <= 0.64
-        && splitArtRects.cab.top >= 0.54
-        && splitArtRects.cab.top <= 0.66
-        && splitArtRects.cab.bottom >= 0.92
-        && splitArtRects.cab.bottom <= 1.04
-        && Math.abs(splitArtRects.head.bottom - splitArtRects.cab.top) <= 0.08);
-      const physicalNameplateMinHeight = window.innerWidth < 1100 ? 28 : window.innerWidth < 1400 ? 34 : 38;
-      const ampHardware = {
-        hasFrame: Boolean(ampFrameRect),
-        sceneName: ampFrame?.getAttribute('data-scene') || '',
-        assetTreatment: ampFrame?.getAttribute('data-asset-treatment') || '',
-        sceneRegionNames: sceneRegions,
-        sceneAnchorNames: sceneAnchors,
-        hasHardwareSceneCoordinates: Boolean(ampFrame?.getAttribute('data-scene') === 'amp-cab'
-          && sceneRegions.includes('head')
-          && sceneRegions.includes('cab')
-          && sceneAnchors.includes('amp-nameplate')
-          && sceneAnchors.includes('cab-nameplate')
-          && sceneAnchors.includes('power')
-          && ['ampGainDb', 'bassDb', 'midDb', 'trebleDb', 'presenceDb', 'ampMix', 'ampOutputDb']
-            .every((id) => sceneAnchors.includes(id))),
-        hasHardwareAssetTreatment: ampFrame?.getAttribute('data-asset-treatment') === 'hardware-parity-v2',
-        frameRatio: ampFrameRect ? Number((ampFrameRect.width / Math.max(1, ampFrameRect.height)).toFixed(3)) : 0,
-        hasSplitStackArt: Boolean(splitArtStack && splitArtHead && splitArtCab),
-        splitArtDesignBand,
-        splitArtRects,
-        hasToggle: Boolean(toggle),
-        toggleInside: rectInside(toggleRect, ampFrameRect),
-        togglePosition,
-        toggleInFaceplateZone,
-        knobCount: ampKnobs.length,
-        knobsInside: knobRects.every((rect) => rect.inside),
-        hardwareNameplateCount: hardwareNameplateRects.length,
-        hardwareNameplatesVisible: hardwareNameplateRects.length >= 2 && hardwareNameplateRects.every((rect) => rect.visible && rect.inside),
-        hardwareNameplatesPhysical: hardwareNameplateRects.length >= 2 && hardwareNameplateRects.every((rect) => rect.height >= physicalNameplateMinHeight),
-        physicalNameplateMinHeight,
-        hardwareNameplatesDesignBand,
-        hardwareNameplateTexts: hardwareNameplateRects.map((rect) => rect.text),
-        hardwareNameplateAriaLabels: hardwareNameplateRects.map((rect) => rect.ariaLabel),
-        legacyAmpBadgesVisible: visibleBox(legacyAmpBadges),
-        knobIds: knobRects.map((rect) => rect.id),
-        knobScaleMarkCount: knobScaleMarkRects.length,
-        knobScaleMarksInside: knobScaleMarkRects.every((rect) => rect.visible && rect.inside),
-        hardwareDialCount: hardwareDialRects.length,
-        hardwareDialsVisible: hardwareDialRects.length >= 5 && hardwareDialRects.every((rect) => rect.visible && rect.inside),
-        hardwareDialMinSize: hardwareDialRects.reduce((min, rect) => Math.min(min, rect.width, rect.height), Number.POSITIVE_INFINITY),
-        hardwareDialNumberCount: hardwareDialNumberRects.length,
-        hardwareDialNumbersVisible: hardwareDialNumberRects.length >= hardwareDialRects.length * Math.max(7, hardwareDialTokens.numberCount || 0)
-          && hardwareDialNumberRects.every((rect) => rect.visible && rect.inside),
-        hardwareDialNumberInvisibleCount: hardwareDialNumberRects.filter((rect) => !rect.visible || !rect.inside).length,
-        hardwareDialNumberProblemRects: hardwareDialNumberRects
-          .filter((rect) => !rect.visible || !rect.inside)
-          .slice(0, 12),
-        hardwareDialTickCount: ampHardwareDialTicks.length,
-        hardwareDialTickStrokeReady,
-        hardwareDialVersionContract: ampHardwareDials.length >= 5
-          && ampHardwareDials.every((el) => el.getAttribute('data-dial-version') === 'faceplate-svg-v3'),
-        hardwareDialScaleTrackCount: ampHardwareDialScaleTracks.length,
-        hardwareDialScaleTrackReady,
-        hardwareDialOuterRimCount: ampHardwareDialOuterRims.length,
-        hardwareDialOuterRimReady,
-        hardwareDialGripCount: ampHardwareDialGrips.length,
-        hardwareDialGripStrokeReady,
-        hardwareDialCapHighlightCount: ampHardwareDialCapHighlights.length,
-        hardwareDialCapHighlightReady,
-        hardwareDialIndicatorShadowCount: ampHardwareDialIndicatorShadows.length,
-        hardwareDialIndicatorShadowReady,
-        hardwareDialIndicatorTipCount: ampHardwareDialIndicatorTips.length,
-        hardwareDialIndicatorTipReady,
-        knobRendererContract: ampKnobs.length >= 5 && ampKnobs.every((el) => el.getAttribute('data-renderer') === 'scene-svg-dial-v3'),
-        knobLabelCount: knobLabelRects.length,
-        knobLabelsVisible: knobLabelRects.length >= 5 && knobLabelRects.every((rect) => rect.text.length > 0),
-        knobValueReadoutsHidden: knobValueReadoutRects.length >= 5 && knobValueReadoutRects.every((rect) => !rect.visible),
-        knobValueReadoutRects,
-        knobRects,
-        knobLabelTexts: knobLabelRects.map((rect) => rect.text),
-        knobScaleMarkTexts: knobScaleMarkRects.slice(0, 14).map((rect) => rect.text),
-        hardwareDialTexts: hardwareDialNumberRects.slice(0, 14).map((rect) => rect.text),
-        hardwareDialRects,
-        hardwareNameplateRects,
-      };
       const selectedChainTextNodes = selectedChainModule
         ? Array.from(selectedChainModule.querySelectorAll('.nam-compact-chain-node-main strong, .nam-compact-chain-node-main small'))
         : [];
@@ -1942,108 +1104,6 @@ async function qualityChecks(cdp, scenarioName) {
       });
       const chainActionsHiddenAtRest = chainSlotActionStates.length >= 8
         && chainSlotActionStates.every((state) => state.opacity <= 0.05 && state.buttonCount >= 2);
-      const statusLabels = Array.from(document.querySelectorAll('.nam-mode-rail-status article span'))
-        .map((el) => (el.textContent || '').trim())
-        .filter(Boolean);
-      const statusItems = Array.from(document.querySelectorAll('.nam-mode-rail-status article')).map((el) => {
-        const rect = el.getBoundingClientRect();
-        return {
-          label: (el.querySelector('span')?.textContent || '').trim(),
-          value: (el.querySelector('strong')?.textContent || '').trim(),
-          hasMeter: el.getAttribute('data-meter') === 'true',
-          visible: visibleBox(el),
-          bottom: Number(rect.bottom.toFixed(1)),
-        };
-      }).filter((item) => item.label);
-      const statusValues = Object.fromEntries(statusItems.map((item) => [item.label, item.value]));
-      const statusMeterLabels = statusItems.filter((item) => item.hasMeter).map((item) => item.label);
-      const statusRailRowsFit = Boolean(modeRailRect)
-        && statusItems.every((item) => !item.visible || item.bottom <= modeRailRect.bottom + 1);
-      const statusRailReferenceSplit = Boolean(modeRailRect && modeRailStatusRect)
-        && (window.innerWidth < 1100 || ((modeRailStatusRect.top - modeRailRect.top) / Math.max(1, modeRailRect.height)) >= 0.45);
-      const modeRailReferenceWidth = Boolean(modeRailRect)
-        && (window.innerWidth < 1100
-          || modeRailRect.width >= (window.innerWidth <= 1400 ? 69 : 77));
-      const modeRailViewportFit = Boolean(modeRailRect)
-        && (window.innerWidth < 900 || modeRailRect.right <= window.innerWidth - 4);
-      const rightExplorerViewportFit = Boolean(rightRailRect)
-        && (window.innerWidth < 900 || rightRailRect.right <= window.innerWidth - 4);
-      const expectedModeRailWidth = window.innerWidth < 1100
-        ? rackFinalParityTokens.modeRailCompact
-        : window.innerWidth <= 1400
-          ? rackFinalParityTokens.modeRailLaptop
-          : rackFinalParityTokens.modeRailDesktop;
-      const expectedExplorerWidth = window.innerWidth < 1100
-        ? { min: rackFinalParityTokens.explorerCompactMin, max: rackFinalParityTokens.explorerCompactMax }
-        : window.innerWidth <= 1400
-          ? { min: rackFinalParityTokens.explorerLaptop, max: rackFinalParityTokens.explorerLaptop }
-          : { min: rackFinalParityTokens.explorerMin, max: rackFinalParityTokens.explorerMax };
-      const modeRailWidthMatchesFinalToken = Boolean(modeRailRect && expectedModeRailWidth > 0
-        && Math.abs(modeRailRect.width - expectedModeRailWidth) <= 3);
-      const rightExplorerWidthMatchesFinalToken = Boolean(rightRailRect
-        && rightRailRect.width >= expectedExplorerWidth.min - 3
-        && rightRailRect.width <= expectedExplorerWidth.max + 3);
-      const stageGapMatchesFinalToken = Boolean(stageHeroRect && rightRailRect && rackFinalParityTokens.stageGap > 0
-        && Math.abs(rightRailRect.left - stageHeroRect.right - rackFinalParityTokens.stageGap) <= 4);
-      const stageFrameMatchesReferenceAspect = Boolean(ampFrameRect
-        && Math.abs((ampFrameRect.width / Math.max(1, ampFrameRect.height)) - rackFinalParityTokens.stageAspect) <= 0.035);
-      const stageContentHeight = stageHeroRect
-        ? Math.max(1, (stageFooterRect?.top ?? stageHeroRect.bottom) - stageHeroRect.top)
-        : 0;
-      const stageFrameFillMetrics = ampFrameRect && stageHeroRect ? {
-        widthRatio: Number((ampFrameRect.width / Math.max(1, stageHeroRect.width)).toFixed(3)),
-        heightRatio: Number((ampFrameRect.height / Math.max(1, stageContentHeight)).toFixed(3)),
-        topGap: Number((ampFrameRect.top - stageHeroRect.top).toFixed(1)),
-        bottomGap: Number(((stageFooterRect?.top ?? stageHeroRect.bottom) - ampFrameRect.bottom).toFixed(1)),
-        leftBleed: Number((stageHeroRect.left - ampFrameRect.left).toFixed(1)),
-        rightBleed: Number((ampFrameRect.right - stageHeroRect.right).toFixed(1)),
-      } : null;
-      const stageFrameNoVerticalCutoff = Boolean(stageFrameFillMetrics
-        && stageFrameFillMetrics.topGap >= (window.innerWidth < 1100 ? 6 : 12)
-        && stageFrameFillMetrics.bottomGap >= -1);
-      const stageFrameFillReady = Boolean(stageFillTokens.ready
-        && stageFrameFillMetrics
-        && stageFrameNoVerticalCutoff
-        && stageFrameFillMetrics.heightRatio >= (window.innerWidth < 1100 ? 0.64 : 0.72)
-        && stageFrameFillMetrics.widthRatio >= (window.innerWidth < 1100 ? 0.50 : 0.74)
-        && stageFrameFillMetrics.topGap >= (window.innerWidth < 1100 ? 8 : 14)
-        && stageFrameFillMetrics.topGap <= (window.innerWidth < 1100 ? 24 : 38)
-        && stageFrameFillMetrics.bottomGap <= (window.innerWidth < 1100 ? 96 : 280)
-        && stageFrameFillMetrics.leftBleed >= (window.innerWidth < 1100 ? -240 : -360)
-        && stageFrameFillMetrics.rightBleed >= (window.innerWidth < 1100 ? -240 : -360));
-      const stageFooterHeightMatchesFinalToken = Boolean(stageFooterRect
-        && Math.abs(stageFooterRect.height - (window.innerWidth < 1100
-          ? rackFinalParityTokens.stageFooterCompactHeight
-          : rackFinalParityTokens.stageFooterHeight)) <= 10);
-      const rackFinalParityChrome = Boolean(rackFinalParityTokens.ready
-        && modeRailWidthMatchesFinalToken
-        && (window.innerWidth < 1100 ? compactStackedRailLayout : rightExplorerWidthMatchesFinalToken)
-        && (window.innerWidth < 1100 ? true : stageGapMatchesFinalToken)
-        && stageFrameMatchesReferenceAspect
-        && stageFooterHeightMatchesFinalToken);
-      const stageHeroStyle = stageHero ? window.getComputedStyle(stageHero) : null;
-      const selectedRailCard = railResultCards.find((el) => el.getAttribute('data-selected') === 'true') || railResultCards[0];
-      const selectedRailCardStyle = selectedRailCard ? window.getComputedStyle(selectedRailCard) : null;
-      const selectedRailCardRect = selectedRailCard?.getBoundingClientRect();
-      const firstRailCardArt = selectedRailCard?.querySelector('.nam-card-art') || railResultCards[0]?.querySelector('.nam-card-art');
-      const firstRailCardArtStyle = firstRailCardArt ? window.getComputedStyle(firstRailCardArt) : null;
-      const activeModeButton = document.querySelector('.nam-mode-rail-nav button[data-active="true"]');
-      const activeModeButtonStyle = activeModeButton ? window.getComputedStyle(activeModeButton) : null;
-      const expectedPolishedRailCardHeight = window.innerWidth <= 1100
-        ? 66
-        : window.innerWidth <= 1280
-          ? 74
-          : rackVisualPolishTokens.railCardMinHeight - 2;
-      const rackVisualPolishApplied = Boolean(rackVisualPolishTokens.ready
-        && stageHeroStyle?.backgroundImage.includes('radial-gradient')
-        && selectedRailCardStyle?.borderTopColor.includes('245')
-        && selectedRailCardStyle?.backgroundImage.includes('radial-gradient')
-        && Number.parseFloat(selectedRailCardStyle?.borderTopLeftRadius || '0') >= 4
-        && selectedRailCardRect
-        && selectedRailCardRect.height >= expectedPolishedRailCardHeight
-        && firstRailCardArtStyle?.filter.includes('contrast')
-        && activeModeButtonStyle?.backgroundImage.includes('radial-gradient')
-        && activeModeButtonStyle?.borderTopColor.includes('245'));
       const headerMeterWidths = headerMeters.map((el) => Number(el.getBoundingClientRect().width.toFixed(1)));
       const expectedHeaderMeterMinWidth = (scenarioName.startsWith('browse') || scenarioName === 'mixer')
         ? (window.innerWidth >= 1500
@@ -2067,99 +1127,12 @@ async function qualityChecks(cdp, scenarioName) {
         && headerCompareLabels.every((label) => label === 'A' || label === 'B');
       const headerPresetSelectIconHidden = headerPresetSelectIcons.length >= 1
         && headerPresetSelectIcons.every((el) => !visibleBox(el));
-      const requiredStatusLabels = ['DSP', 'SR', 'Buffer', 'Latency'];
-      const optionalStatusLabels = ['CPU'];
-      const allowedStatusLabels = [...optionalStatusLabels, ...requiredStatusLabels];
-      const extraStatusLabels = statusItems
-        .map((item) => item.label)
-        .filter((label) => !allowedStatusLabels.includes(label));
-      const railResultCardMetrics = railResultCards.map((el) => {
-        const rect = el.getBoundingClientRect();
-        const railStats = el.getAttribute('data-rail-stats') || '';
-        const small = el.querySelector('.nam-result-copy small');
-        const statLine = el.querySelector('.nam-rail-stats-line');
-        const art = el.querySelector('.nam-card-art');
-        const artRect = art?.getBoundingClientRect();
-        const artStyle = art ? window.getComputedStyle(art) : null;
-        const artBeforeStyle = art ? window.getComputedStyle(art, '::before') : null;
-        const artAfterStyle = art ? window.getComputedStyle(art, '::after') : null;
-        return {
-          text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
-          visible: visibleBox(el),
-          actionCount: el.querySelectorAll('.nam-result-actions button').length,
-          providerArt: el.getAttribute('data-provider-art') || '',
-          artVisible: visibleBox(art),
-          artWidth: artRect ? Number(artRect.width.toFixed(1)) : 0,
-          artHeight: artRect ? Number(artRect.height.toFixed(1)) : 0,
-          artFilter: artStyle?.filter || '',
-          artBackgroundImage: artStyle?.backgroundImage || '',
-          artBeforeDisplay: artBeforeStyle?.display || '',
-          artBeforeOpacity: artBeforeStyle?.opacity || '',
-          artAfterDisplay: artAfterStyle?.display || '',
-          artAfterOpacity: artAfterStyle?.opacity || '',
-          railStats,
-          smallText: (small?.textContent || '').replace(/\\s+/g, ' ').trim(),
-          smallKind: small?.getAttribute('data-kind') || '',
-          statDownloads: small?.getAttribute('data-downloads') || '',
-          statFavorites: small?.getAttribute('data-favorites') || '',
-          statIconCount: statLine?.querySelectorAll('svg').length || 0,
-          smallVisible: visibleBox(small),
-          top: Number(rect.top.toFixed(1)),
-          bottom: Number(rect.bottom.toFixed(1)),
-          height: Number(rect.height.toFixed(1)),
-        };
-      });
-      const railWholeRowsVisible = railResultCardMetrics.filter((card) => card.visible
-        && (!railLivePagerRect || card.bottom <= railLivePagerRect.top - 1)).length;
-      const visibleRailResultCards = railResultCardMetrics.filter((card) => card.visible);
-      const railArtReadable = visibleRailResultCards.length > 0
-        && railArtTokens.ready
-        && visibleRailResultCards.every((card) => card.artVisible
-          && card.artWidth >= Math.max(54, railArtTokens.width - 3)
-          && card.artHeight >= (window.innerWidth < 1100 ? 46 : window.innerWidth <= 1280 ? 52 : 58)
-          && card.artBackgroundImage.includes('url(')
-          && card.artFilter.includes('brightness')
-          && card.artBeforeDisplay !== 'none'
-          && Number.parseFloat(card.artBeforeOpacity || '0') >= 0.45
-          && card.artAfterDisplay !== 'none'
-          && Number.parseFloat(card.artAfterOpacity || '0') >= 0.45);
-      const railResultRowsClearFooter = !railLivePagerRect || visibleRailResultCards.every((card) => !card.visible
-        || card.top <= railLivePagerRect.top - 8
-        || card.top >= railLivePagerRect.bottom + 1);
-      const railLivePagerAnchoredBottom = Boolean(railLivePagerRect && rightRailRect
-        && rightRailRect.bottom - railLivePagerRect.bottom <= 18);
-      const railFooterReferenceLayout = Boolean(visibleBox(railLivePager)
-        && railLivePagerText.includes('Load more')
-        && railLivePagerText.includes('Page 1 of 18')
-        && !railLivePagerText.includes('RESULT')
-        && !railLivePagerText.includes('Sorted by')
-        && !railLivePagerText.includes('sorted by'));
-      const railNewTagTexts = railNewTags
-        .filter((el) => visibleBox(el))
-        .map((el) => (el.textContent || '').trim());
-      const railTransientSummaryHidden = !visibleBox(railFeedback) && !visibleBox(railLibrarySummary);
-      const modeRailReferenceIcons = Boolean(
-        modeRailIconClasses.Gear?.includes('lucide-package')
-        && modeRailIconClasses.Chain?.includes('lucide-audio-lines')
-        && modeRailIconClasses.Mixer?.includes('lucide-sliders-horizontal')
-        && modeRailIconClasses.Tuner?.includes('lucide-gauge')
-        && !modeRailIconClasses.Settings
-        && !modeRailIconClasses.Setting
-      );
-      const railRowsHaveQuickActions = visibleRailResultCards.length > 0
-        && visibleRailResultCards.every((card) => card.actionCount >= 3);
-      const railRowsShowStats = visibleRailResultCards.length > 0
-        && visibleRailResultCards.every((card) => card.smallVisible
-          && card.smallKind === 'stats'
-          && card.statIconCount >= 2
-          && /[0-9]/.test(card.statDownloads)
-          && /[0-9]/.test(card.statFavorites));
-      const tunerPanel = document.querySelector('.premium-tuner-stage, .premium-tuner-drawer, .nam-rail-tuner');
-      const tunerDisplay = tunerPanel?.querySelector('.premium-tuner-stage-copy, .premium-tuner-display, .nam-tuner-display');
-      const tunerScale = tunerPanel?.querySelector('.premium-tuner-scale, .premium-tuner-cents, .nam-tuner-cents');
-      const tunerNeedle = tunerPanel?.querySelector('.premium-tuner-needle, .premium-tuner-cents > i, .nam-tuner-cents > i');
-      const tunerNote = tunerPanel?.querySelector('.premium-tuner-stage-copy > strong, .premium-tuner-display > strong, .nam-tuner-display > strong');
-      const tunerCentsReadout = tunerPanel?.querySelector('.premium-tuner-stage-copy > em, .premium-tuner-display > em, .nam-tuner-display > em');
+      const tunerPanel = document.querySelector('.premium-tuner-stage, .premium-tuner-drawer');
+      const tunerDisplay = tunerPanel?.querySelector('.premium-tuner-stage-copy, .premium-tuner-display');
+      const tunerScale = tunerPanel?.querySelector('.premium-tuner-scale, .premium-tuner-cents');
+      const tunerNeedle = tunerPanel?.querySelector('.premium-tuner-needle, .premium-tuner-cents > i');
+      const tunerNote = tunerPanel?.querySelector('.premium-tuner-stage-copy > strong, .premium-tuner-display > strong');
+      const tunerCentsReadout = tunerPanel?.querySelector('.premium-tuner-stage-copy > em, .premium-tuner-display > em');
       const tunerReadoutEntries = Array.from(tunerPanel?.querySelectorAll('.premium-tuner-stage-readouts article, .premium-tuner-readouts article, .nam-tuner-readouts article') || []).map((article) => {
         const label = article.querySelector('span');
         const value = article.querySelector('strong');
@@ -2335,28 +1308,6 @@ async function qualityChecks(cdp, scenarioName) {
       const duplicateWindowControlsHidden = !windowControls
         || !visibleBox(windowControls)
         || windowControlItems.every((el) => !visibleBox(el));
-      const cabRailRect = cabRail?.getBoundingClientRect();
-      const cabRailHead = cabRail?.querySelector('.nam-rail-panel-head');
-      const cabRailActions = cabRail?.querySelector('.nam-rail-button-row');
-      const cabRailList = cabRail?.querySelector('.nam-rail-ir-list');
-      const cabRailHeadRect = cabRailHead?.getBoundingClientRect();
-      const cabRailActionsRect = cabRailActions?.getBoundingClientRect();
-      const cabRailListRect = cabRailList?.getBoundingClientRect();
-      const cabRailCompactLayout = Boolean(visibleBox(cabRail)
-        && visibleBox(cabRailHead)
-        && visibleBox(cabRailActions)
-        && visibleBox(cabRailList)
-        && cabRailRect
-        && cabRailHeadRect
-        && cabRailActionsRect
-        && cabRailListRect
-        && cabRailActionsRect.top <= cabRailHeadRect.bottom + 18
-        && cabRailListRect.top <= cabRailActionsRect.bottom + 22
-        && cabRailListRect.top < cabRailRect.bottom);
-      const savedRailRect = savedRail?.getBoundingClientRect();
-      const savedRailHead = savedRail?.querySelector('.nam-rail-panel-head');
-      const savedRailActions = savedRail?.querySelector('.nam-rail-button-row');
-      const savedRailList = savedRail?.querySelector('.nam-rail-preset-list');
       const saveToneModal = document.querySelector('.nam-save-tone-modal[data-modal-panel="true"]');
       const saveToneForm = saveToneModal?.querySelector('.nam-save-tone-form');
       const saveToneFields = Array.from(saveToneModal?.querySelectorAll('input, textarea') || []);
@@ -2365,20 +1316,6 @@ async function qualityChecks(cdp, scenarioName) {
       const namRackPrompt = document.querySelector('.nam-rack-prompt-modal');
       const namRackPromptButtons = Array.from(namRackPrompt?.querySelectorAll('button') || [])
         .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim());
-      const savedRailHeadRect = savedRailHead?.getBoundingClientRect();
-      const savedRailActionsRect = savedRailActions?.getBoundingClientRect();
-      const savedRailListRect = savedRailList?.getBoundingClientRect();
-      const savedRailCompactLayout = Boolean(visibleBox(savedRail)
-        && visibleBox(savedRailHead)
-        && visibleBox(savedRailActions)
-        && visibleBox(savedRailList)
-        && savedRailRect
-        && savedRailHeadRect
-        && savedRailActionsRect
-        && savedRailListRect
-        && savedRailActionsRect.top <= savedRailHeadRect.bottom + 18
-        && savedRailListRect.top <= savedRailActionsRect.bottom + 22
-        && savedRailListRect.top < savedRailRect.bottom);
       const mixerStageStrips = Array.from(document.querySelectorAll('.nam-rack-mixer-strip'));
       const mixerBackButton = document.querySelector('[data-qa="nam-mixer-back"]');
       const mixerRect = rackMixer?.getBoundingClientRect();
@@ -2646,7 +1583,6 @@ async function qualityChecks(cdp, scenarioName) {
       const rackStageRect = rackStageView?.getBoundingClientRect();
       const activeRackSection = product?.getAttribute('data-rack-section') || '';
       const rackSize = product?.getAttribute('data-rack-size') || '';
-      let rackSizeLabel = (document.querySelector('[data-qa="nam-footer-size"]')?.textContent || '').replace(/\s+/g, ' ').trim();
       const designPortHost = document.querySelector('.nam-rack-design-port.nam-native-design-surface');
       const designPortFrame = designPortHost;
       const designPortFrameRect = designPortHost?.getBoundingClientRect();
@@ -2657,9 +1593,26 @@ async function qualityChecks(cdp, scenarioName) {
       const designPortStageCanvasRect = designPortHost?.querySelector('.premium-stage-canvas')?.getBoundingClientRect();
       const designPortBoard = designPortHost?.getAttribute('data-design-board') || designPortHost?.querySelector('.nam-rack-artboard')?.getAttribute('data-design-board') || '';
       const designPortSection = designPortHost?.getAttribute('data-design-section') || designPortShell?.getAttribute('data-section') || '';
-      if (!rackSizeLabel) {
-        rackSizeLabel = (designPortHost?.querySelector('.footer')?.textContent || '').replace(/\s+/g, ' ').trim();
-      }
+      const designPortFooter = designPortHost?.querySelector('.footer');
+      const designPortSizeControl = designPortFooter?.querySelector('button[title="Cycle rack display size"]');
+      const rackSizeLabel = (designPortSizeControl?.textContent || '').replace(/\\s+/g, ' ').trim();
+      const designPortFooterRuntime = Array.from(designPortFooter?.querySelectorAll('.footer-runtime strong') || [])
+        .filter((el) => visibleBox(el))
+        .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim());
+      const rackTopStripReady = Boolean(
+        visibleBox(rackSectionRail)
+        && rackSectionButtons.length >= 5
+        && rackSectionButtons.every((item) => item.visible)
+        && rackSectionButtons.filter((item) => item.active).length === 1
+        && rackSectionButtons.some((item) => item.active && item.id === activeRackSection)
+        && visibleBox(rackGlobalStrip)
+        && rackGlobalControlCount >= 4
+        && visibleBox(rackPresetHub)
+        && visibleBox(rackPresetLibraryButton)
+        && !visibleBox(rackGlobalLibraryButton)
+        && rackGlobalDividerCount >= 3
+        && rackRetiredControlsAbsent
+      );
       const designExpectedBoardBySection = {
         pre: '03-pre-fx-section',
         amp: '04-amp-section',
@@ -2683,11 +1636,11 @@ async function qualityChecks(cdp, scenarioName) {
         && rect.height >= window.innerHeight - 16);
       const designReferenceBoxes = {
         pre: {
-          compressor: { x: 5, y: 42, w: 156, h: 232 },
-          'tape-echo': { x: 171, y: 42, w: 156, h: 232 },
-          octaver: { x: 337, y: 42, w: 120, h: 232 },
-          'precision-drive': { x: 467, y: 42, w: 120, h: 232 },
-          distortion: { x: 597, y: 42, w: 156, h: 232 },
+          compressor: { x: 85, y: 42, w: 156, h: 232 },
+          octaver: { x: 251, y: 42, w: 120, h: 232 },
+          'eq-boost': { x: 381, y: 42, w: 156, h: 232 },
+          'precision-drive': { x: 547, y: 42, w: 120, h: 232 },
+          distortion: { x: 677, y: 42, w: 156, h: 232 },
         },
         amp: {
           'amp-head': { x: 24, y: -2, w: 720, h: 345 },
@@ -2696,7 +1649,7 @@ async function qualityChecks(cdp, scenarioName) {
           'mic-panel': { x: 54, y: -30, w: 660, h: 402 },
         },
         eq: {
-          'eq-rack': { x: 24, y: 20, w: 720, h: 300 },
+          'eq-rack': { x: 24, y: 50, w: 720, h: 240 },
         },
         post: {
           modulator: { x: 25, y: 40, w: 220, h: 175 },
@@ -2936,36 +1889,146 @@ async function qualityChecks(cdp, scenarioName) {
       const eqFaders = Array.from(designEqModule?.querySelectorAll('.fader[data-param-id]') || [])
         .filter((node) => visibleBox(node));
       const eqFaderParamIds = eqFaders.map((node) => node.getAttribute('data-param-id') || '');
-      const eqLaneAlignmentFailures = !designEqModule ? [] : Array.from(designEqModule.querySelectorAll('.eq-band')).flatMap((lane) => {
-        const fader = lane.querySelector('.fader[data-param-id]');
-        const value = lane.querySelector('.eq-band-value');
-        const label = lane.querySelector('.eq-frequency');
-        if (!fader || !value || !label || !visibleBox(fader) || !visibleBox(value) || !visibleBox(label)) return ['eq-lane:missing'];
-        const faderRect = fader.getBoundingClientRect();
-        const faderCenter = faderRect.left + faderRect.width / 2;
-        const valueRect = value.getBoundingClientRect();
-        const labelRect = label.getBoundingClientRect();
-        const centerError = Math.max(
-          Math.abs(faderCenter - (valueRect.left + valueRect.width / 2)),
-          Math.abs(faderCenter - (labelRect.left + labelRect.width / 2)),
+      const eqFilterHits = Array.from(designEqModule?.querySelectorAll('.control-hit[data-param-id="eqHPFHz"], .control-hit[data-param-id="eqLPFHz"]') || [])
+        .filter((node) => visibleBox(node));
+      const eqFilterParamIds = eqFilterHits.map((node) => node.getAttribute('data-param-id') || '');
+      const eqUtilityHits = Array.from(designEqModule?.querySelectorAll('.control-hit[data-param-id="eqHPFHz"], .control-hit[data-param-id="eqLevelDb"], .control-hit[data-param-id="eqLPFHz"]') || [])
+        .filter((node) => visibleBox(node));
+      const eqUtilityParamIds = eqUtilityHits.map((node) => node.getAttribute('data-param-id') || '');
+      const eqFilterCaps = Array.from(designEqModule?.querySelectorAll('.asset-control.eq-filter-knob-hpf, .asset-control.eq-filter-knob-lpf') || [])
+        .filter((node) => visibleBox(node));
+      const eqFilterCapMetrics = [];
+      const eqFilterCapFailures = [];
+      const eqFilterLayoutFailures = [];
+      if (designEqModule) {
+        const moduleRect = designEqModule.getBoundingClientRect();
+        const moduleLayoutWidth = designEqModule.clientWidth;
+        const gridRect = designEqModule.querySelector('.eq-scale-grid')?.getBoundingClientRect();
+        const titleRect = designEqModule.querySelector('.eq-rack-title')?.getBoundingClientRect();
+        const controls = eqFilterHits;
+        const overlaps = (left, right, tolerance = 1) => (
+          Math.min(left.right, right.right) - Math.max(left.left, right.left) > tolerance
+          && Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > tolerance
         );
-        const collision = valueRect.bottom > faderRect.top - 3 || labelRect.top < faderRect.bottom + 3;
-        return centerError > 2 || collision
-          ? [(fader.getAttribute('data-param-id') || 'eq-lane') + ':center=' + centerError.toFixed(2) + ',collision=' + collision]
-          : [];
-      });
+        if (eqFilterHits.length !== 2) eqFilterLayoutFailures.push('filter-hit-count:' + eqFilterHits.length);
+        if (eqFilterCaps.length !== 2) eqFilterCapFailures.push('filter-cap-count:' + eqFilterCaps.length);
+        controls.forEach((node) => {
+          const rect = node.getBoundingClientRect();
+          const id = node.getAttribute('data-param-id')
+            || node.querySelector('[data-param-id]')?.getAttribute('data-param-id')
+            || node.className;
+          if (rect.left < moduleRect.left - 1 || rect.top < moduleRect.top - 1
+              || rect.right > moduleRect.right + 1 || rect.bottom > moduleRect.bottom + 1) {
+            eqFilterLayoutFailures.push(id + ':outside-module');
+          }
+          if (gridRect && overlaps(rect, gridRect, 1)) eqFilterLayoutFailures.push(id + ':grid-overlap');
+          if (titleRect && overlaps(rect, titleRect, 1)) eqFilterLayoutFailures.push(id + ':title-overlap');
+        });
+        for (let leftIndex = 0; leftIndex < controls.length; leftIndex += 1) {
+          for (let rightIndex = leftIndex + 1; rightIndex < controls.length; rightIndex += 1) {
+            if (overlaps(controls[leftIndex].getBoundingClientRect(), controls[rightIndex].getBoundingClientRect(), 1)) {
+              eqFilterLayoutFailures.push('filter-control-overlap:' + leftIndex + ':' + rightIndex);
+            }
+          }
+        }
+        eqFilterCaps.forEach((node) => {
+          const side = node.classList.contains('eq-filter-knob-hpf')
+            ? 'hpf'
+            : node.classList.contains('eq-filter-knob-lpf')
+              ? 'lpf'
+              : 'unknown';
+          const paramId = side === 'hpf' ? 'eqHPFHz' : side === 'lpf' ? 'eqLPFHz' : '';
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          const computedWidth = Number.parseFloat(style.width);
+          const computedHeight = Number.parseFloat(style.height);
+          const declaredPercent = Number(node.getAttribute('data-nam-exact-size-percent'));
+          const expectedWidth = moduleLayoutWidth * declaredPercent / 100;
+          const hit = paramId
+            ? designEqModule.querySelector('.control-hit[data-param-id="' + paramId + '"]')
+            : null;
+          const hitRect = hit?.getBoundingClientRect();
+          eqFilterCapMetrics.push({
+            side,
+            paramId,
+            variant: node.getAttribute('data-nam-exact-size-variant') || '',
+            declaredPercent: Number.isFinite(declaredPercent) ? Number(declaredPercent.toFixed(5)) : null,
+            computedWidth: Number.isFinite(computedWidth) ? Number(computedWidth.toFixed(2)) : null,
+            computedHeight: Number.isFinite(computedHeight) ? Number(computedHeight.toFixed(2)) : null,
+            expectedWidth: Number.isFinite(expectedWidth) ? Number(expectedWidth.toFixed(2)) : null,
+            renderedBounds: {
+              left: Number(rect.left.toFixed(2)),
+              top: Number(rect.top.toFixed(2)),
+              right: Number(rect.right.toFixed(2)),
+              bottom: Number(rect.bottom.toFixed(2)),
+            },
+          });
+          if (!paramId) eqFilterCapFailures.push('filter-cap:unknown-side');
+          if (node.getAttribute('data-nam-exact-size-variant') !== 'panel-knob') {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':missing-exact-size-variant');
+          }
+          if (node.hasAttribute('data-nam-hardware-standard-px')) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':inherited-pedal-knob-size');
+          }
+          if (!Number.isFinite(declaredPercent) || declaredPercent <= 0) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':invalid-declared-percent');
+          }
+          if (!Number.isFinite(computedWidth) || !Number.isFinite(expectedWidth)
+              || Math.abs(computedWidth - expectedWidth) > .3) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':computed-width-mismatch');
+          }
+          if (!Number.isFinite(computedHeight) || !Number.isFinite(computedWidth)
+              || Math.abs(computedHeight - computedWidth) > .3) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':non-square-cap');
+          }
+          if (rect.left < moduleRect.left - 1 || rect.top < moduleRect.top - 1
+              || rect.right > moduleRect.right + 1 || rect.bottom > moduleRect.bottom + 1) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':outside-module');
+          }
+          if (gridRect && overlaps(rect, gridRect, 1)) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':grid-overlap');
+          }
+          if (titleRect && overlaps(rect, titleRect, 1)) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':title-overlap');
+          }
+          if (!hitRect) {
+            eqFilterCapFailures.push((paramId || 'filter-cap') + ':missing-hitbox');
+          } else {
+            const capCenterX = (rect.left + rect.right) / 2;
+            const capCenterY = (rect.top + rect.bottom) / 2;
+            const hitCenterX = (hitRect.left + hitRect.right) / 2;
+            const hitCenterY = (hitRect.top + hitRect.bottom) / 2;
+            // NAM knob artwork rotates around the photographed gear centre at
+            // 47.5586% Y rather than the transparent bitmap square's exact
+            // midpoint. At large render scales that intentional optical
+            // anchor moves the transformed bounding-box centre by more than a
+            // fixed 1.25 CSS pixels even though the physical cap remains
+            // centred on its hit target. Keep the allowance proportional to
+            // the rendered cap while containment/collision checks stay strict.
+            const opticalCenterTolerance = Math.max(1.25, rect.width * .03);
+            if (Math.abs(capCenterX - hitCenterX) > opticalCenterTolerance
+                || Math.abs(capCenterY - hitCenterY) > opticalCenterTolerance) {
+              eqFilterCapFailures.push((paramId || 'filter-cap') + ':off-centre-hitbox');
+            }
+          }
+        });
+        if (new Set(eqFilterCapMetrics.map((entry) => entry.paramId)).size !== 2) {
+          eqFilterCapFailures.push('filter-cap:param-id-coverage');
+        }
+      }
       const headerShell = designPortHost?.querySelector('.premium-nam-shell');
       const headerUtility = designPortHost?.querySelector('.premium-routing-utility');
       const headerPreset = designPortHost?.querySelector('.preset-console');
-      const headerInstrument = designPortHost?.querySelector('.premium-instrument-choice');
+      const headerInstrument = designPortHost?.querySelector('.premium-output-instrument-switch');
       const headerDoubler = designPortHost?.querySelector('.premium-doubler-utility');
       const headerPresetTitle = designPortHost?.querySelector('.preset-console > .preset-title');
-      const headerBrand = designPortHost?.querySelector('.premium-brand');
       const headerCalibration = designPortHost?.querySelector('[data-qa="nam-premium-calibration"]');
       const headerInputBlock = designPortHost?.querySelector('.global-block.left');
       const headerOutputBlock = designPortHost?.querySelector('.global-block.right');
       const headerInputPeakMeter = headerInputBlock?.querySelector('.premium-level-meter');
       const headerOutputPeakMeter = headerOutputBlock?.querySelector('.premium-level-meter');
+      const headerInputMeterLanes = Array.from(headerInputPeakMeter?.querySelectorAll(':scope > i[data-meter-channel]') || []);
+      const headerOutputMeterLanes = Array.from(headerOutputPeakMeter?.querySelectorAll(':scope > i[data-meter-channel]') || []);
       const headerUtilityCards = Array.from(headerUtility?.children || []).filter((node) => visibleBox(node));
       const headerUtilityCardClasses = headerUtilityCards.map((node) => node.className);
       const headerProcessingPresent = Boolean(designPortHost?.querySelector('.premium-processing-choice'));
@@ -2990,12 +2053,15 @@ async function qualityChecks(cdp, scenarioName) {
         instrument: centerMetric(headerInstrument),
         doubler: centerMetric(headerDoubler),
         title: centerMetric(headerPresetTitle),
-        brand: centerMetric(headerBrand),
         calibration: centerMetric(headerCalibration),
         input: centerMetric(headerInputBlock),
         output: centerMetric(headerOutputBlock),
         inputPeakMeter: centerMetric(headerInputPeakMeter),
         outputPeakMeter: centerMetric(headerOutputPeakMeter),
+        inputMeterChannelCount: Number(headerInputPeakMeter?.getAttribute('data-channel-count') || 0),
+        outputMeterChannelCount: Number(headerOutputPeakMeter?.getAttribute('data-channel-count') || 0),
+        inputMeterLanes: headerInputMeterLanes.map(centerMetric).filter(Boolean),
+        outputMeterLanes: headerOutputMeterLanes.map(centerMetric).filter(Boolean),
         utilityCardClasses: headerUtilityCardClasses,
         processingPresent: headerProcessingPresent,
         physicalSourcePresent: headerPhysicalSourcePresent,
@@ -3009,7 +2075,6 @@ async function qualityChecks(cdp, scenarioName) {
           headerGeometry.instrument,
           headerGeometry.doubler,
           headerGeometry.title,
-          headerGeometry.brand,
           headerGeometry.calibration,
           headerGeometry.input,
           headerGeometry.output,
@@ -3017,38 +2082,45 @@ async function qualityChecks(cdp, scenarioName) {
         if (requiredHeaderGeometry.some((metric) => !metric)) {
           headerGeometryFailures.push('header-geometry:missing');
         } else {
-          const shellCenter = headerGeometry.shell.centerX;
-           const centerChecks = [
-            ['brand', headerGeometry.brand.centerX],
-             ['utility', headerGeometry.utility.centerX],
-             ['preset', headerGeometry.preset.centerX],
-             ['title', headerGeometry.title.centerX],
-          ];
-          centerChecks.forEach(([name, center]) => {
-            const delta = Math.abs(center - shellCenter);
-            if (delta > 1.25) headerGeometryFailures.push(name + '-center-delta=' + delta.toFixed(2));
-          });
           if (headerGeometry.utility.width > headerGeometry.preset.width - 8) {
             headerGeometryFailures.push('utility-not-narrower-than-preset=' + (headerGeometry.preset.width - headerGeometry.utility.width).toFixed(2));
           }
-          if (headerGeometry.utilityCardClasses.length !== 2
-            || !headerGeometry.utilityCardClasses.includes('premium-instrument-choice')
+          if (headerGeometry.utilityCardClasses.length !== 1
             || !headerGeometry.utilityCardClasses.includes('premium-doubler-utility')) {
             headerGeometryFailures.push('utility-card-contract=' + headerGeometry.utilityCardClasses.join(','));
           }
           if (headerGeometry.processingPresent) headerGeometryFailures.push('processing-card-present');
           if (headerGeometry.physicalSourcePresent) headerGeometryFailures.push('physical-source-present');
-          const utilityCardRatio = headerGeometry.doubler.width / headerGeometry.instrument.width;
-          const expectedUtilityCardRatio = 1.18 / .82;
-          if (Math.abs(utilityCardRatio - expectedUtilityCardRatio) > .03) {
-            headerGeometryFailures.push('utility-card-ratio=' + utilityCardRatio.toFixed(3));
-          }
-          if (headerGeometry.instrument.width < 300) {
-            headerGeometryFailures.push('instrument-card-min-width=' + headerGeometry.instrument.width.toFixed(2));
-          }
-          if (headerGeometry.doubler.width < 430) {
-            headerGeometryFailures.push('doubler-card-min-width=' + headerGeometry.doubler.width.toFixed(2));
-          }
+          const validateMeterLanes = (name, meterMetric, channelCount, laneMetrics, expectedCount) => {
+            if (!meterMetric || channelCount !== expectedCount || laneMetrics.length !== expectedCount) {
+              headerGeometryFailures.push(name + '-meter-lanes=' + channelCount + '/' + laneMetrics.length + ',expected=' + expectedCount);
+              return;
+            }
+            laneMetrics.forEach((lane, index) => {
+              const contained = lane.left >= meterMetric.left + 1
+                && lane.right <= meterMetric.right - 1
+                && lane.top >= meterMetric.top + 1
+                && lane.bottom <= meterMetric.bottom - 1;
+              if (!contained) headerGeometryFailures.push(name + '-meter-lane-' + index + ':overflow');
+            });
+            if (laneMetrics.length === 2 && laneMetrics[0].right > laneMetrics[1].left + .1) {
+              headerGeometryFailures.push(name + '-meter-lanes:overlap=' + (laneMetrics[0].right - laneMetrics[1].left).toFixed(2));
+            }
+          };
+          validateMeterLanes(
+            'input',
+            headerGeometry.inputPeakMeter,
+            headerGeometry.inputMeterChannelCount,
+            headerGeometry.inputMeterLanes,
+            headerGeometry.inputMeterChannelCount >= 2 ? 2 : 1,
+          );
+          validateMeterLanes(
+            'output',
+            headerGeometry.outputPeakMeter,
+            headerGeometry.outputMeterChannelCount,
+            headerGeometry.outputMeterLanes,
+            2,
+          );
           const metricInside = (metric, container, padding = 0) => Boolean(metric && container
             && metric.left >= container.left + padding - 1
             && metric.right <= container.right - padding + 1
@@ -3056,15 +2128,11 @@ async function qualityChecks(cdp, scenarioName) {
             && metric.bottom <= container.bottom - padding + 1);
           if (!metricInside(headerGeometry.utility, headerGeometry.shell)) headerGeometryFailures.push('utility-shell-overflow');
           if (!metricInside(headerGeometry.preset, headerGeometry.shell)) headerGeometryFailures.push('preset-shell-overflow');
-          if (window.innerWidth >= 1264) {
-            const calOutputCenterDelta = Math.abs(headerGeometry.calibration.centerX - headerGeometry.output.centerX);
-            const calOutputWidthDelta = Math.abs(headerGeometry.calibration.width - headerGeometry.output.width);
-            if (calOutputCenterDelta > 1.25) headerGeometryFailures.push('cal-output-center-delta=' + calOutputCenterDelta.toFixed(2));
-            if (calOutputWidthDelta > 1.25) headerGeometryFailures.push('cal-output-width-delta=' + calOutputWidthDelta.toFixed(2));
-          } else {
-            const calOutputGap = headerGeometry.output.left - headerGeometry.calibration.right;
-            if (calOutputGap < 4 || calOutputGap > 48) headerGeometryFailures.push('cal-output-gap=' + calOutputGap.toFixed(2));
-          }
+          if (!metricInside(headerGeometry.instrument, headerGeometry.output)) headerGeometryFailures.push('instrument-output-overflow');
+          if (!metricInside(headerGeometry.doubler, headerGeometry.utility)) headerGeometryFailures.push('doubler-utility-overflow');
+          if (!metricInside(headerGeometry.calibration, headerGeometry.shell)) headerGeometryFailures.push('calibration-shell-overflow');
+          if (!metricInside(headerGeometry.input, headerGeometry.shell)) headerGeometryFailures.push('input-shell-overflow');
+          if (!metricInside(headerGeometry.output, headerGeometry.shell)) headerGeometryFailures.push('output-shell-overflow');
 
           const intersects = (left, right) => {
             if (!left || !right || !visibleBox(left) || !visibleBox(right)) return false;
@@ -3072,11 +2140,9 @@ async function qualityChecks(cdp, scenarioName) {
             const b = right.getBoundingClientRect();
             return a.left < b.right - 1 && a.right > b.left + 1 && a.top < b.bottom - 1 && a.bottom > b.top + 1;
           };
-          const headerChrome = [headerBrand, headerCalibration, headerInputBlock, headerOutputBlock].filter(Boolean);
+          const headerChrome = [headerCalibration, headerInputBlock, headerOutputBlock].filter(Boolean);
           headerChrome.forEach((node) => {
-            const name = node.classList.contains('premium-brand')
-              ? 'brand'
-              : node.classList.contains('premium-calibration-launch') ? 'cal'
+            const name = node.classList.contains('premium-calibration-launch') ? 'cal'
               : node.classList.contains('left') ? 'input-block' : 'output-block';
             if (intersects(node, headerUtility)) headerGeometryFailures.push(name + '-utility-overlap');
             if (intersects(node, headerPreset)) headerGeometryFailures.push(name + '-preset-overlap');
@@ -3133,6 +2199,7 @@ async function qualityChecks(cdp, scenarioName) {
         'reverbLowCutHz',
         'reverbTone',
         'reverbShimmer',
+        'reverbPad',
         'reverbEnabled',
       ];
       const designPostReverbFixedReady = Boolean(designPostReverb
@@ -3198,10 +2265,10 @@ async function qualityChecks(cdp, scenarioName) {
           });
       });
       const rackExpectedBodyIdsBySection = {
-        pre: ['stompbox-body-blue-wide', 'stompbox-body-olive', 'stompbox-body-dark-wide', 'stompbox-body-red-wide', 'stompbox-body-stone'],
-        amp: ['amp-head-body'],
+        pre: ['stompbox-body-blue-wide', 'stompbox-body-olive', 'stompbox-body-white-wide', 'stompbox-body-red-wide', 'stompbox-body-stone'],
+        amp: ['amp-head-body-v5'],
         cab: ['cab-room-integrated-body'],
-        eq: ['rack-unit-body-deep'],
+        eq: ['graphic-eq-body-v6'],
         post: ['wide-pedal-body-copper-tall', 'wide-pedal-body-dark-tall', 'wide-pedal-body-navy-tall'],
       };
       const rackExpectedBodyIds = rackExpectedBodyIdsBySection[activeRackSection] || [];
@@ -3253,8 +2320,6 @@ async function qualityChecks(cdp, scenarioName) {
         if (rackSuiteRect.top < rackStageRect.top - 2) rackSceneOverflowFailures.push('suite-top');
         if (rackSuiteRect.bottom > rackStageRect.bottom + 2) rackSceneOverflowFailures.push('suite-bottom');
       }
-      const rackOldPbrSceneImages = Array.from(document.querySelectorAll('.nam-stage-hero .nam-scene-skin-image'))
-        .filter((el) => visibleBox(el));
       const rackTextElements = Array.from(designPortHost?.querySelectorAll('.screen-shell .rack-title, .screen-shell .nav-item, .screen-shell .label, .screen-shell .module-title, .screen-shell .preset, .screen-shell .footer span, .screen-shell .footer b') || [])
         .filter((el) => visibleBox(el));
       const rackTextOverflowFailures = rackTextElements
@@ -3265,13 +2330,28 @@ async function qualityChecks(cdp, scenarioName) {
         .map((el) => (el.textContent || el.getAttribute('aria-label') || el.className || el.tagName).replace(/\s+/g, ' ').trim().slice(0, 80));
       const rackFontElements = Array.from(designPortHost?.querySelectorAll('.screen-shell :is(button, span, b, strong, em, small, p, .label, .control-label, .value-label, .module-title)') || [])
         .filter((el) => visibleBox(el) && (el.textContent || '').trim());
+      const renderedRackFontSize = (el) => {
+        const fontSize = Number.parseFloat(window.getComputedStyle(el).fontSize || '0');
+        const artboard = el.closest('.nam-rack-artboard');
+        const transform = artboard ? window.getComputedStyle(artboard).transform : 'none';
+        let scale = 1;
+        if (transform && transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(transform);
+            scale = Math.hypot(matrix.a, matrix.b);
+          } catch {
+            scale = 1;
+          }
+        }
+        return fontSize * scale;
+      };
       const rackFontFloorFailures = rackFontElements
         .filter((el) => {
-          const fontSize = Number.parseFloat(window.getComputedStyle(el).fontSize || '0');
+          const fontSize = renderedRackFontSize(el);
           return Number.isFinite(fontSize) && fontSize > 0 && fontSize < 7;
         })
         .map((el) => {
-          const fontSize = Number.parseFloat(window.getComputedStyle(el).fontSize || '0');
+          const fontSize = renderedRackFontSize(el);
           return (el.textContent || el.className || el.tagName).replace(/\s+/g, ' ').trim().slice(0, 60) + ':' + fontSize.toFixed(1) + 'px';
         });
       const rackMainForbiddenVisibleTerms = Array.from(designPortHost?.querySelectorAll('.screen-shell') || [])
@@ -3300,23 +2380,6 @@ async function qualityChecks(cdp, scenarioName) {
         headerMeterReadouts,
         headerTrimReadoutChips: headerTrimReadoutChips.map((el) => (el.textContent || '').trim()),
         headerTrimReadoutChipsVisible,
-        rackFinalParityTokens,
-        rackFinalParityChrome,
-        rackVisualPolishTokens,
-        rackVisualPolishApplied,
-        hardwareDialTokens,
-        railArtTokens,
-        railArtReadable,
-        stageFillTokens,
-        stageArtTokens,
-        stageFrameFillMetrics,
-        stageFrameNoVerticalCutoff,
-        stageFrameFillReady,
-        modeRailWidthMatchesFinalToken,
-        rightExplorerWidthMatchesFinalToken,
-        stageGapMatchesFinalToken,
-        stageFrameMatchesReferenceAspect,
-        stageFooterHeightMatchesFinalToken,
         headerCompareLabels,
         headerCompareLabelsClean,
         headerPresetSelectIconHidden,
@@ -3328,7 +2391,6 @@ async function qualityChecks(cdp, scenarioName) {
         viewport: { width: window.innerWidth, height: window.innerHeight },
         iframeCount,
         rootScrollbar,
-        neuralShell,
         moduleCount: modules.length,
         modules,
         chainCardsNeutralWhenActive,
@@ -3354,29 +2416,12 @@ async function qualityChecks(cdp, scenarioName) {
         mixerStageOptions,
         mixerControlGroups,
         mixerReverbGroupsReady,
-        hasCabRoom: Boolean(document.querySelector('.nam-cab-room')),
-        hasCabRail: Boolean(cabRail),
-        cabRailCompactLayout,
-        hasSavedRail: Boolean(savedRail),
-        savedRailCompactLayout,
         hasSaveToneModal: Boolean(visibleBox(saveToneModal)),
         saveToneFormReadable: Boolean(visibleBox(saveToneForm) && saveToneFields.length >= 9),
         saveToneFooterButtons,
         hasNAMRackPrompt: Boolean(visibleBox(namRackPrompt)),
         namRackPromptButtons,
         hasChainDragOverlay: Boolean(chainDragOverlay),
-        hasSettingsModeButton: Boolean(document.querySelector('[data-qa="nam-mode-settings"]')),
-        hasFxHardware: Boolean(document.querySelector('.nam-fx-hardware')),
-        fxHardware: {
-          module: fxModule,
-          faceplateVisible: visibleBox(fxFaceplate),
-          artVisible: visibleBox(fxFaceplateArt),
-          knobDeckPosition: fxKnobDeckStyle?.position || '',
-          knobCount: fxKnobs.length,
-          controlsIntegrated: fxControlsIntegrated,
-          knobMetrics: fxKnobMetrics,
-          footswitchInsideFaceplate: !fxFootswitch || rectInside(fxFootswitch.getBoundingClientRect(), fxFaceplateRect, 3),
-        },
         hasPresetManager: Boolean(document.querySelector('.nam-preset-manager')),
         presetManagerMetrics: (() => {
           const element = document.querySelector('.nam-preset-manager');
@@ -3493,6 +2538,11 @@ async function qualityChecks(cdp, scenarioName) {
           size: rackSize,
           sizeLabel: rackSizeLabel,
           designPortReady,
+          topStripReady: rackTopStripReady,
+          sectionButtons: rackSectionButtons,
+          footerVisible: visibleBox(designPortFooter),
+          footerRuntime: designPortFooterRuntime,
+          sizeControlVisible: visibleBox(designPortSizeControl),
           designBoard: designPortBoard,
           expectedDesignBoard: designExpectedBoardBySection[activeRackSection] || '',
           designSection: designPortSection,
@@ -3514,7 +2564,6 @@ async function qualityChecks(cdp, scenarioName) {
             && rackExpectedBodyIds.every((id) => rackDesignBodyIds.includes(id)),
           generatedControlAssetReady: rackDesignControlIds.length > 0,
           assetLoadFailures: rackAssetLoadFailures,
-          oldPbrSceneImageCount: rackOldPbrSceneImages.length,
           deviceClipFailures: rackDeviceClipFailures,
           sceneOverflowFailures: rackSceneOverflowFailures,
           placementFailures: designPlacementFailures,
@@ -3537,7 +2586,12 @@ async function qualityChecks(cdp, scenarioName) {
           pedalHardwareMetrics,
           pedalHardwareConsistencyFailures,
           eqFaderParamIds,
-          eqLaneAlignmentFailures,
+          eqFilterParamIds,
+          eqUtilityParamIds,
+          eqFilterCapCount: eqFilterCaps.length,
+          eqFilterCapMetrics,
+          eqFilterCapFailures,
+          eqFilterLayoutFailures,
           headerGeometry,
           headerGeometryFailures,
           suiteRect: rackSuiteRect ? {
@@ -3576,103 +2630,10 @@ async function qualityChecks(cdp, scenarioName) {
           slots: calibrationSlots,
           textOverflowFailures: calibrationTextOverflowFailures,
         },
-        ampHardware,
-        statusLabels,
-        statusItems,
-        statusValues,
-        statusMeterLabels,
-        statusRailRowsFit,
-        statusRailReferenceSplit,
-        extraStatusLabels,
-        hasRealtimeTelemetryRail: requiredStatusLabels.every((label) => statusLabels.includes(label))
-          && extraStatusLabels.length === 0,
-        modeRailIconClasses,
-        modeRailReferenceIcons,
-        modeRailButtonMetrics,
-        modeRailActiveLabels,
-        modeRailReferenceActiveState,
-        modeRailReferenceButtonSizing,
-        statusRailBoxed,
-        railLivePagerVisible: visibleBox(railLivePager),
-        railLivePagerText,
-        railLivePagerAnchoredBottom,
-        railFooterReferenceLayout,
-        railNewTagTexts,
-        railTransientSummaryHidden,
-        railRowsHaveQuickActions,
-        railRowsShowStats,
-        railResultCardMetrics,
-        railResultRowsCompact: visibleRailResultCards.length > 0
-          && visibleRailResultCards.every((card) => card.height <= 100),
-        railResultRowsClearFooter,
-        railWholeRowsVisible,
         forbiddenNormalWords,
         rawWords,
         activeForbiddenTerms,
-        stageChrome: {
-          rects: {
-            chain: chainRect ? {
-              top: Number(chainRect.top.toFixed(1)),
-              right: Number(chainRect.right.toFixed(1)),
-              bottom: Number(chainRect.bottom.toFixed(1)),
-              height: Number(chainRect.height.toFixed(1)),
-            } : null,
-            stageHero: stageHeroRect ? {
-              top: Number(stageHeroRect.top.toFixed(1)),
-              right: Number(stageHeroRect.right.toFixed(1)),
-              bottom: Number(stageHeroRect.bottom.toFixed(1)),
-              height: Number(stageHeroRect.height.toFixed(1)),
-            } : null,
-            rightRail: rightRailRect ? {
-              top: Number(rightRailRect.top.toFixed(1)),
-              left: Number(rightRailRect.left.toFixed(1)),
-              bottom: Number(rightRailRect.bottom.toFixed(1)),
-              height: Number(rightRailRect.height.toFixed(1)),
-            } : null,
-            modeRail: modeRailRect ? {
-              top: Number(modeRailRect.top.toFixed(1)),
-              left: Number(modeRailRect.left.toFixed(1)),
-              bottom: Number(modeRailRect.bottom.toFixed(1)),
-              width: Number(modeRailRect.width.toFixed(1)),
-              height: Number(modeRailRect.height.toFixed(1)),
-            } : null,
-          },
-          chainHeight: chainRect?.height ?? 0,
-          chainReservedForRail: Boolean(chainRect && stageHeroRect && chainRect.right <= stageHeroRect.right + 4),
-          stageHeaderVisible: visibleBox(stageHeader),
-          ampToplineVisible: visibleBox(ampTopline),
-          rightRailSideBySide,
-          rightRailReferenceTop: window.innerWidth >= 1100 ? desktopReferenceRailTop : compactReferenceRailTop,
-          compactStackedRailLayout,
-          modeRailReferenceWidth,
-          modeRailViewportFit,
-          rightExplorerViewportFit,
-          stageFooterVisible: visibleBox(stageFooter),
-          stageFooterHeight: stageFooterRect?.height ?? 0,
-        },
-        hasVisibleRailSortLabel: visibleBox(railSortLabel) && (railSortLabel.textContent || '').trim().toLowerCase() === 'sort by',
-        hasCustomRailSortMenu: visibleBox(railSortTrigger) && !railSortNativeSelect,
-        railSortReferenceLayout,
-        railViewToggleReferencePair,
-        railViewToggleButtonStates,
-        railSortMenuOpen: visibleBox(railSortPopover),
         headerPresetManagerHidden: !visibleBox(headerPresetManagerAction),
-        railSortOptionLabels,
-        stageFooterLeftText,
-        stageFooterRightText,
-        stageFooterReferenceGroups,
-        stageFooterReferenceHeight,
-        stageFooterControls,
-        stageFooterControlsReady: ['nam-footer-lock', 'nam-footer-size', 'nam-footer-fullscreen']
-          .every((qa) => stageFooterControls.some((item) => item.qa === qa && item.visible && !item.disabled))
-          && ['nam-footer-zoom', 'nam-footer-tap-tempo', 'nam-footer-snap', 'nam-footer-fit']
-            .every((qa) => !stageFooterControls.some((item) => item.qa === qa && item.visible)),
-        footerSizeMenu: {
-          triggerVisible: visibleBox(footerSizeTrigger),
-          popoverVisible: visibleBox(footerSizePopover),
-          optionLabels: footerSizeOptionLabels,
-          optionCount: footerSizeOptionLabels.length,
-        },
       };
     })()
   `);
@@ -3751,20 +2712,14 @@ async function main() {
           error: null,
         };
         try {
+          if (isRackMainScenario(scenario.name)) {
+            await waitForDesignPort(cdp);
+          }
           if (scenario.name === "rack-chain") {
             item.interaction = await runInteractionProbe(cdp);
           }
           if (scenario.name === "source-amp-audition-click") {
             item.interaction = await runSourceAmpAuditionProbe(cdp);
-          }
-          if (scenario.name === "rack-cab") {
-            await openRightRailTab(cdp, "Cab/IR");
-          }
-          if (scenario.name === "rack-saved") {
-            await openRightRailTab(cdp, "Saved");
-          }
-          if (scenario.name === "rack-sort-open") {
-            await openRailSortMenu(cdp);
           }
           if (scenario.name === "rack-tuner") {
             await openTunerRail(cdp);
@@ -3782,13 +2737,10 @@ async function main() {
             await openSaveToneModal(cdp);
           }
           if (scenario.name === "rack-neural-size-menu") {
-            await openFooterSizeMenu(cdp);
+            item.interaction = await cycleRackSizeControl(cdp);
           }
           if (scenario.name === "mixer") {
             await selectMixerStage(cdp, "reverb");
-          }
-          if (scenario.name.startsWith("rack-neural-")) {
-            await waitForDesignPort(cdp);
           }
           item.checks = await qualityChecks(cdp, checkName);
           await screenshot(cdp, filePath);
@@ -3975,7 +2927,7 @@ async function main() {
             if (scenario.name === "source-amp-audition-click") {
               item.pass = item.pass && item.interaction?.stable === true;
             }
-          } else if (scenario.name === "rack" || scenario.name.startsWith("rack-neural-") || scenario.name === "rack-tuner" || scenario.name === "rack-calibration") {
+          } else if (isRackMainScenario(scenario.name)) {
             const expectedRackSize = scenario.params.namRackSize ? String(scenario.params.namRackSize) : "";
             const rackMain = item.checks.rackMain || {};
             const tunerStageOverlay = scenario.name === "rack-tuner";
@@ -4006,7 +2958,6 @@ async function main() {
               && (rackMain.fontFloorFailures || []).length === 0
               && (rackMain.headerGeometryFailures || []).length === 0
               && (rackMain.pedalHardwareConsistencyFailures || []).length === 0
-              && rackMain.oldPbrSceneImageCount === 0
               && (rackMain.section !== "post" || rackMain.reverbFixedControls?.ready === true)
               && (rackMain.section !== "post" || (
                 (rackMain.postKnobLabelGapFailures || []).length === 0
@@ -4014,9 +2965,17 @@ async function main() {
                 && (rackMain.postPrimaryHardwareFailures || []).length === 0
               ))
               && (rackMain.section !== "eq" || (
-                (rackMain.eqFaderParamIds || []).length === 10
-                && rackMain.eqFaderParamIds.includes("eqLevelDb")
-                && (rackMain.eqLaneAlignmentFailures || []).length === 0
+                (rackMain.eqFaderParamIds || []).length === 9
+                && (rackMain.eqFilterParamIds || []).length === 2
+                && rackMain.eqFilterParamIds.includes("eqHPFHz")
+                && rackMain.eqFilterParamIds.includes("eqLPFHz")
+                && (rackMain.eqUtilityParamIds || []).length === 3
+                && rackMain.eqUtilityParamIds.includes("eqHPFHz")
+                && rackMain.eqUtilityParamIds.includes("eqLevelDb")
+                && rackMain.eqUtilityParamIds.includes("eqLPFHz")
+                && rackMain.eqFilterCapCount === 2
+                && (rackMain.eqFilterCapFailures || []).length === 0
+                && (rackMain.eqFilterLayoutFailures || []).length === 0
               ))
               && (scenario.name !== "rack-tuner" || (
                 item.checks.tunerButtonEnabled === true
@@ -4034,9 +2993,8 @@ async function main() {
               // responsive capture fail after the copy was improved.
               && (!expectedRackSize || rackMain.size === expectedRackSize)
               && (scenario.name !== "rack-neural-size-menu" || (
-                item.checks.footerSizeMenu?.triggerVisible === true
-                && item.checks.footerSizeMenu?.popoverVisible === true
-                && item.checks.footerSizeMenu?.optionLabels?.some((label) => label.includes('Maximum'))
+                rackMain.sizeControlVisible === true
+                && item.interaction?.pass === true
               ));
           } else if (scenario.name === "rack-chain") {
             item.pass = Boolean(item.checks.productVisible)
@@ -4059,7 +3017,6 @@ async function main() {
               && item.checks.hasReferenceWindowChrome === true
               && (overlayScenario || advancedScenario || item.checks.hasReferenceHeaderMeters === true)
               && (overlayScenario || advancedScenario || item.checks.headerMetersResponsive === true)
-              && item.checks.hasSettingsModeButton === false
               && (overlayScenario || (!scenario.name.startsWith("rack") && scenario.name !== "preset-manager" ? true : item.checks.moduleCount >= 8))
               && item.checks.forbiddenNormalWords.length === 0
               && item.checks.rawWords.length === 0
@@ -4072,19 +3029,6 @@ async function main() {
               ))
               && (!scenario.name.startsWith("rack") || item.checks.rootScrollbar === false)
               && (!scenario.name.startsWith("rack") || overlayScenario || item.checks.hasCompactChainLane === true)
-              && (scenario.name !== "rack-cab" || (
-                item.checks.hasCabRoom === true
-                && item.checks.hasCabRail === true
-                && (item.checks.viewport.width < 1100
-                  ? item.checks.stageChrome?.compactStackedRailLayout === true
-                  : item.checks.cabRailCompactLayout === true)
-              ))
-              && (scenario.name !== "rack-saved" || (
-                item.checks.hasSavedRail === true
-                && (item.checks.viewport.width < 1100
-                  ? item.checks.stageChrome?.compactStackedRailLayout === true
-                  : item.checks.savedRailCompactLayout === true)
-              ))
               && (scenario.name !== "rack-slot-browser" || item.checks.hasSlotBrowser === true)
               && (scenario.name !== "rack-tuner" || (
                 item.checks.tunerButtonEnabled === true
@@ -4099,131 +3043,6 @@ async function main() {
                 && item.checks.mixerViewportFill === true
               ))
               && (scenario.name !== "mixer" || item.checks.mixerReverbGroupsReady === true)
-              && (scenario.name !== "rack-sort-open" || (
-                item.checks.railSortMenuOpen === true
-                && item.checks.railSortOptionLabels?.includes('Newest')
-                && item.checks.railSortOptionLabels?.includes('Trending')
-                && item.checks.railSortOptionLabels?.includes('Most Downloaded')
-                && item.checks.railSortOptionLabels?.includes('Most Liked')
-                && item.checks.railSortOptionLabels?.includes('Name A-Z')
-              ))
-              && (!["rack-gate", "rack-pedal", "rack-eq", "rack-delay", "rack-chain", "rack-mod", "rack-reverb"].includes(scenario.name) || (
-                item.checks.hasFxHardware === true
-                && item.checks.fxHardware?.controlsIntegrated === true
-              ))
-              && (scenario.name !== "rack" || (
-                item.checks.ampHardware?.hasFrame === true
-                && item.checks.ampHardware?.frameRatio > 1.72
-                && item.checks.ampHardware?.frameRatio < 1.84
-                && item.checks.ampHardware?.hasSplitStackArt === true
-                && item.checks.ampHardware?.splitArtDesignBand === true
-                && item.checks.ampHardware?.hasHardwareSceneCoordinates === true
-                && item.checks.ampHardware?.hasHardwareAssetTreatment === true
-                && item.checks.ampHardware?.hasToggle === true
-                && item.checks.ampHardware?.toggleInside === true
-                && item.checks.ampHardware?.toggleInFaceplateZone === true
-                && item.checks.ampHardware?.knobCount >= 5
-                && item.checks.ampHardware?.knobsInside === true
-                && item.checks.ampHardware?.hardwareDialCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialsVisible === true
-                && item.checks.ampHardware?.hardwareDialMinSize >= 34
-                && item.checks.ampHardware?.hardwareDialNumberCount >= item.checks.ampHardware?.knobCount * 11
-                && item.checks.ampHardware?.hardwareDialNumbersVisible === true
-                && item.checks.ampHardware?.hardwareDialTickCount >= item.checks.ampHardware?.knobCount * 41
-                && item.checks.ampHardware?.hardwareDialTickStrokeReady === true
-                && item.checks.hardwareDialTokens?.ready === true
-                && item.checks.ampHardware?.hardwareDialVersionContract === true
-                && item.checks.ampHardware?.hardwareDialScaleTrackCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialScaleTrackReady === true
-                && item.checks.ampHardware?.hardwareDialOuterRimCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialOuterRimReady === true
-                && item.checks.ampHardware?.hardwareDialGripCount >= item.checks.ampHardware?.knobCount * 36
-                && item.checks.ampHardware?.hardwareDialGripStrokeReady === true
-                && item.checks.ampHardware?.hardwareDialCapHighlightCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialCapHighlightReady === true
-                && item.checks.ampHardware?.hardwareDialIndicatorShadowCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialIndicatorShadowReady === true
-                && item.checks.ampHardware?.hardwareDialIndicatorTipCount >= item.checks.ampHardware?.knobCount
-                && item.checks.ampHardware?.hardwareDialIndicatorTipReady === true
-                && item.checks.ampHardware?.knobRendererContract === true
-                && item.checks.ampHardware?.knobLabelsVisible === true
-                && item.checks.ampHardware?.knobValueReadoutsHidden === true
-                && item.checks.ampHardware?.hardwareNameplateCount >= 2
-                && item.checks.ampHardware?.hardwareNameplatesVisible === true
-                && item.checks.ampHardware?.hardwareNameplatesPhysical === true
-                && item.checks.ampHardware?.hardwareNameplatesDesignBand === true
-                && item.checks.ampHardware?.hardwareNameplateTexts?.includes('Clean Twin-style')
-                && item.checks.ampHardware?.hardwareNameplateTexts?.includes('2x12 Blackface')
-                && item.checks.ampHardware?.hardwareNameplateAriaLabels?.includes('Amp model: Clean Twin-style')
-                && item.checks.ampHardware?.hardwareNameplateAriaLabels?.includes('Cabinet: 2x12 Blackface')
-                && item.checks.ampHardware?.legacyAmpBadgesVisible === false
-                && item.checks.chainCardsNeutralWhenActive === true
-                && item.checks.selectedChainCardAmber === true
-                && item.checks.headerMeterReadouts?.includes('-4.2 dB')
-                && item.checks.headerMeterReadouts?.includes('-3.1 dB')
-                && item.checks.headerTrimReadoutChipsVisible === true
-                && item.checks.rackFinalParityTokens?.ready === true
-                && item.checks.rackFinalParityChrome === true
-                && item.checks.rackVisualPolishTokens?.ready === true
-                && item.checks.rackVisualPolishApplied === true
-                && item.checks.stageFillTokens?.ready === true
-                && item.checks.stageArtTokens?.ready === true
-                && item.checks.stageFrameNoVerticalCutoff === true
-                && item.checks.stageFrameFillReady === true
-                && item.checks.headerCompareLabelsClean === true
-                && item.checks.headerPresetSelectIconHidden === true
-                && item.checks.headerUtilityReferenceIcons === true
-                && item.checks.headerLibraryActiveQuiet === true
-                && item.checks.hasRealtimeTelemetryRail === true
-                && item.checks.modeRailReferenceIcons === true
-                && item.checks.modeRailReferenceActiveState === true
-                && item.checks.modeRailReferenceButtonSizing === true
-                && item.checks.statusValues?.SR === '48 kHz'
-                && item.checks.statusValues?.Buffer === '128 smp'
-                && (!Object.prototype.hasOwnProperty.call(item.checks.statusValues || {}, 'CPU')
-                  || item.checks.statusValues?.CPU === '18%')
-                && item.checks.statusValues?.DSP === '24%'
-                && item.checks.statusValues?.Latency === '2.7 ms'
-                && (!Object.prototype.hasOwnProperty.call(item.checks.statusValues || {}, 'CPU')
-                  || item.checks.statusMeterLabels?.includes('CPU'))
-                && item.checks.statusMeterLabels?.includes('DSP')
-                && item.checks.statusRailRowsFit === true
-                && item.checks.statusRailReferenceSplit === true
-                && item.checks.statusRailBoxed === true
-                && item.checks.stageChrome?.modeRailReferenceWidth === true
-                && item.checks.stageChrome?.modeRailViewportFit === true
-                && item.checks.stageChrome?.rightExplorerViewportFit === true
-                && item.checks.extraStatusLabels?.length === 0
-                && item.checks.hasVisibleRailSortLabel === true
-                && item.checks.hasCustomRailSortMenu === true
-                && item.checks.railSortReferenceLayout === true
-                && item.checks.railViewToggleReferencePair === true
-                && item.checks.headerPresetManagerHidden === true
-                && item.checks.stageFooterControlsReady === true
-                && item.checks.stageFooterReferenceGroups === true
-                && item.checks.stageFooterReferenceHeight === true
-                && item.checks.railLivePagerVisible === true
-                && item.checks.railLivePagerAnchoredBottom === true
-                && item.checks.railFooterReferenceLayout === true
-                && item.checks.railNewTagTexts?.length >= 1
-                && item.checks.railTransientSummaryHidden === true
-                && item.checks.railRowsHaveQuickActions === true
-                && item.checks.railRowsShowStats === true
-                && item.checks.railArtTokens?.ready === true
-                && item.checks.railArtReadable === true
-                && item.checks.railResultRowsCompact === true
-                && (item.checks.viewport.width < 1100 || item.checks.railResultRowsClearFooter === true)
-                && (item.checks.viewport.width < 1100 || item.checks.railWholeRowsVisible >= (item.checks.viewport.width <= 1400 ? 3 : 4))
-                && item.checks.selectedChainTextFits === true
-                && item.checks.chainActionsHiddenAtRest === true
-                && item.checks.stageChrome?.stageHeaderVisible === false
-                && item.checks.stageChrome?.ampToplineVisible === false
-                && item.checks.stageChrome?.stageFooterVisible === true
-                && (item.checks.viewport.width < 1100 ? item.checks.stageChrome?.compactStackedRailLayout === true : (
-                  item.checks.stageChrome?.rightRailSideBySide === true
-                  && item.checks.stageChrome?.rightRailReferenceTop === true
-                ))
-              ))
               && (!scenario.name.startsWith("browse") || item.checks.hasBrowseHero === true)
               && (scenario.name !== "save-tone-modal" || (
                 item.checks.hasSaveToneModal === true

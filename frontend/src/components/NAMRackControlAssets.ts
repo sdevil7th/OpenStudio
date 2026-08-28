@@ -5,12 +5,7 @@ export const NAM_KNOB_FRAME_SIZE = 192;
 export type NAMControlAssetId =
   | "knobBlack"
   | "knobMetal"
-  | "knobCream"
-  | "footswitchChromeOff"
-  | "footswitchChromeOn"
-  | "footswitchChromePressed"
-  | "ledGlassOff"
-  | "ledGlassOn";
+  | "knobCream";
 
 type NAMControlAssetBase = {
   id: NAMControlAssetId;
@@ -31,12 +26,7 @@ export type NAMKnobAtlasAsset = NAMControlAssetBase & {
   columns: number;
 };
 
-export type NAMStateImageAsset = NAMControlAssetBase & {
-  kind: "stateImage";
-  state: "off" | "on" | "pressed";
-};
-
-export type NAMControlAsset = NAMKnobAtlasAsset | NAMStateImageAsset;
+export type NAMControlAsset = NAMKnobAtlasAsset;
 
 const knobAtlas = (id: NAMControlAssetId, href: string): NAMKnobAtlasAsset => ({
   id,
@@ -51,42 +41,16 @@ const knobAtlas = (id: NAMControlAssetId, href: string): NAMKnobAtlasAsset => ({
   anchor: { x: 0.5, y: 0.5 },
 });
 
-const stateImage = (
-  id: NAMControlAssetId,
-  href: string,
-  width: number,
-  height: number,
-  state: NAMStateImageAsset["state"],
-): NAMStateImageAsset => ({
-  id,
-  kind: "stateImage",
-  href,
-  width,
-  height,
-  state,
-  anchor: { x: 0.5, y: 0.5 },
-});
-
 export const NAM_CONTROL_ASSETS = {
   knobBlack: knobAtlas("knobBlack", new URL("../assets/nam/controls/knob-black-atlas.webp", import.meta.url).href),
   knobMetal: knobAtlas("knobMetal", new URL("../assets/nam/controls/knob-metal-atlas.webp", import.meta.url).href),
   knobCream: knobAtlas("knobCream", new URL("../assets/nam/controls/knob-cream-atlas.webp", import.meta.url).href),
-  footswitchChromeOff: stateImage("footswitchChromeOff", new URL("../assets/nam/controls/footswitch-chrome-off.webp", import.meta.url).href, 256, 256, "off"),
-  footswitchChromeOn: stateImage("footswitchChromeOn", new URL("../assets/nam/controls/footswitch-chrome-on.webp", import.meta.url).href, 256, 256, "on"),
-  footswitchChromePressed: stateImage("footswitchChromePressed", new URL("../assets/nam/controls/footswitch-chrome-pressed.webp", import.meta.url).href, 256, 256, "pressed"),
-  ledGlassOff: stateImage("ledGlassOff", new URL("../assets/nam/controls/led-glass-off.webp", import.meta.url).href, 96, 96, "off"),
-  ledGlassOn: stateImage("ledGlassOn", new URL("../assets/nam/controls/led-glass-on.webp", import.meta.url).href, 96, 96, "on"),
 } as const satisfies Record<NAMControlAssetId, NAMControlAsset>;
 
 export const NAM_REQUIRED_CONTROL_ASSET_IDS: NAMControlAssetId[] = [
   "knobBlack",
   "knobMetal",
   "knobCream",
-  "footswitchChromeOff",
-  "footswitchChromeOn",
-  "footswitchChromePressed",
-  "ledGlassOff",
-  "ledGlassOn",
 ];
 
 export function requireNAMControlAsset<T extends NAMControlAssetId>(assetId: T): (typeof NAM_CONTROL_ASSETS)[T] {
@@ -115,13 +79,4 @@ export function knobAssetForVariant(variant?: string): NAMKnobAtlasAsset {
   if (variant === "metal" || variant === "white" || variant === "panel") return requireNAMControlAsset("knobMetal");
   if (variant === "warning") return requireNAMControlAsset("knobCream");
   return requireNAMControlAsset("knobBlack");
-}
-
-export function footswitchAssetForState(active: boolean, pressed = false): NAMStateImageAsset {
-  if (pressed) return requireNAMControlAsset("footswitchChromePressed");
-  return active ? requireNAMControlAsset("footswitchChromeOn") : requireNAMControlAsset("footswitchChromeOff");
-}
-
-export function ledAssetForState(active: boolean): NAMStateImageAsset {
-  return active ? requireNAMControlAsset("ledGlassOn") : requireNAMControlAsset("ledGlassOff");
 }

@@ -9,7 +9,8 @@ date-stamped implementation diaries.
 
 - [User manual](USER_MANUAL.md) — install, configure, record, edit, mix, and export.
 - [Implemented features](implemented_features.md) — current feature inventory and caveats.
-- [NAM Rack](nam-rack.md) — guitar-rig workflow, DSP architecture, TONE3000 integration, and release contract.
+- [NAM Rack](nam-rack.md) — Guitar/Bass capture workflow, multi-capture selection, DSP/state contract, TONE3000 integration, and release acceptance.
+- [Keyboard and mouse profiles](input-profiles.md) — built-in DAW profiles, independent keyboard/mouse selection, scoped bindings, and custom profile import/export.
 - [MIDI editor](midi-editor.md) — supported editing contract and manual acceptance.
 - [NAM and audio QA](testing.md) — deterministic checks and manual release acceptance.
 - [Release roadmap](roadmap.md) — only work that is still open or deliberately deferred.
@@ -32,6 +33,6 @@ date-stamped implementation diaries.
 7. Prefer links to authoritative source files over copied code.
 8. Update the guide and test in the same change when a public contract changes.
 
-Detailed research notes that remain useful for pitch rendering are intentionally
-kept in the existing pitch research documents. They are technical reference
-material, not active release plans.
+Detailed research that remains useful for pitch rendering is consolidated in
+`pitch_renderer_research_notes.md`. It is technical reference material, not an
+active release plan.

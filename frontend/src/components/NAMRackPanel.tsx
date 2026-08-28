@@ -1,4 +1,16 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, type ReactNode, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "./NAMRackPanel.css";
+import {
+  normalizeNAMRackCapturePath,
+  rankNAMRackAmpCaptures,
+  rankNAMRackCabIRs,
+} from "../utils/namRackAmpCaptureLibrary";
+import "./NAMRackBrowser.css";
+import "./NAMRackPresets.css";
+import "./NAMRackPedalboard.css";
+import "./NAMRackSourceFlow.css";
+import "./NAMRackNeural.css";
+import "./NAMRackCalibration.css";
+import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, type WheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -29,6 +41,7 @@ import type {
   BuiltInPluginAddress,
   BuiltInPluginSchema,
   NAMCalibrationState,
+  NAMInstalledModel,
 } from "../services/NativeBridge";
 import {
   nativeBridge,
@@ -45,24 +58,17 @@ import {
   type NAMLibraryFlowMode,
   type OpenStudioFXModuleId,
 } from "./NAMExplorer";
-import { NAMRackAmpCabStage } from "./NAMRackAmpCabStage";
-import {
-  NAMRackModeRail,
-  NAMRackStageFooter,
-  type NAMRackModeRailStatus,
-  type RackRightRailTab,
-} from "./NAMRackChrome";
 import { RackModule } from "./NAMRackChainModule";
 import {
   NAMRackDiagnostics,
   type NAMRackDiagnosticsAction,
   type NAMRackDiagnosticsState,
 } from "./NAMRackDiagnostics";
-import { NAMRackDesignPort, delaySyncDisplay, type NAMRackDesignRecovery } from "./NAMRackDesignPort";
+import { NAMRackDesignPort, type NAMRackDesignRecovery } from "./NAMRackDesignPort";
 import {
   NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS,
   isNAMRackCabinetSpaceParamId,
-  NAM_RACK_ADVANCED_CONTROL_IDS,
+  NAM_RACK_ADVANCED_ONLY_CONTROL_IDS,
   NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS,
   NAMRackMixerView,
   namRackAdvancedStageForCompactModule,
@@ -71,32 +77,18 @@ import {
   type RackMixerStripSpec,
 } from "./NAMRackMixer";
 import {
+  NAM_RACK_SECTIONS,
+  isRackSectionId,
+  rackSectionForModule,
+  type NAMRackOversamplingFactor,
   type NAMSignalChainPostModule,
   type NAMSignalChainRouteModule,
+  type RackModuleId,
+  type RackSectionId,
 } from "./NAMSignalChainTypes";
 import { NAMCompactChain } from "./NAMCompactChain";
 import { resolveNAMRackCabPresentation } from "./NAMCabPresentation";
-import { NAMRackRightRail } from "./NAMRackRightRail";
 import { NAMPresetManagerModal } from "./NAMPresetManagerModal";
-import {
-  PEDAL_FACEPLATE_MODULES,
-  PedalHardwareStage,
-  type PedalFaceplateModuleId,
-  type RackModuleId,
-} from "./NAMRackPedalHardware";
-import { moduleHardwareArt } from "./NAMRackHardwareArt";
-import {
-  NAM_RACK_SECTIONS,
-  deviceSkinForModule,
-  deviceSkinsForSection,
-  isRackSectionId,
-  rackSectionForModule,
-  type RackSectionId,
-  type NAMRackDeviceSkin,
-  type NAMRackVisualMode,
-} from "./NAMRackNeuralSkinRegistry";
-import { footswitchAssetForState, ledAssetForState } from "./NAMRackControlAssets";
-import { NAMRackSceneDevice, sceneForSkin } from "./NAMRackSceneGraph";
 import { RackKnob } from "./NAMRackKnob";
 import {
   NAMToneSaveModal,
@@ -107,13 +99,36 @@ import {
   type NAMToneSaveDraft,
   type NAMToneSlot,
 } from "./NAMToneSave";
-import { formatParamValue, normalizeParam, quantizeParamValue, stepForParam } from "../utils/builtInParamValue";
 import {
+  formatParamValue,
+  namGraphicEqActiveRecallUpdate,
+  normalizeParam,
+  quantizeParamValue,
+  stepForParam,
+} from "../utils/builtInParamValue";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
+import {
+  getParameterWheelStepCount,
+  resolveProfiledParameterWheel,
+} from "../utils/parameterWheel";
+import {
+  filterAndPinNAMInstrumentItems,
   NAM_INSTRUMENT_PROFILE_BASS,
   labelForNAMInstrumentProfile,
+  namInstalledCaptureInstrumentLabels,
+  namInstrumentProfileTagIsCompatible,
+  namStoredPresetMatchesInstrumentProfile,
+  namPreEqBandLabelsForProfile,
   normalizeNAMInstrumentProfile,
+  shouldClearNAMFactoryPresetIdentityOnProfileChange,
 } from "../utils/namInstrumentProfile";
 import { firstNAMDisplayName, namDisplayNameFromPath, namHardwareDisplayName, resolveNAMToneIdentity } from "../utils/namDisplayName";
+import {
+  resolveNAMEconomyQualityWarning,
+  resolveNAMGainStagingWarning,
+  resolveNAMModelIdentityWarning,
+} from "../utils/namRackPresentationFeedback";
 import {
   isNAMNonPortableStateKey,
   omitNAMNonPortableState,
@@ -127,6 +142,7 @@ import {
   buildNAMRackRollbackPatch,
   countNAMUserPresetFilters,
   createNAMPresetSessionCache,
+  deriveNAMRackPresetDirtyState,
   drainNAMPresetWriteQueue,
   CURRENT_NAM_EFFECTS_DSP_VERSION,
   CURRENT_NAM_REVERB_ENGINE_VERSION,
@@ -135,12 +151,19 @@ import {
   isNAMReservedPresetCollectionName,
   migrateLegacyNAMRackPresetDspState,
   migrateNAMRackModelQualityState,
+  NAM_FULL_MODEL_SIZE,
+  NAM_RACK_DEFAULT_POST_FX_ORDER,
+  NAM_RACK_PRIVATE_EQ_RECALL_VALUE_KEYS,
+  namInstrumentProfileMetadataFromRackState,
+  namRackSnapshotValuesDiffer,
   NAM_UNFILED_PRESET_COLLECTION_ID,
   NAMPresetSessionInvalidatedError,
+  normalizeNAMRackSnapshotCaptureTypes,
   normalizeNAMUserPresetFolder,
   resolveNAMModelQualityOptionValue,
   resolveNAMHeaderPresetNavigation,
   runNAMHeaderPresetArrowAction,
+  shouldSynchronizeNAMRackPresetDirtyMarker,
   shouldClearNAMPresetIdentityForUnsavedAmpTransition,
   verifyNAMRackCompareReadback,
   type NAMHeaderPresetTarget,
@@ -166,6 +189,7 @@ import { resolveAudioDeadlineStatus } from "../utils/audioDeadlineStatus";
 import {
   clampNAMMeterDb,
   namMeterFraction,
+  resolveNAMChannelMeterDb,
   resolveNAMLinkedMeterDb,
 } from "../utils/namMeterLevel";
 import { Modal } from "./ui";
@@ -193,13 +217,21 @@ function createNAMTunerSubscriberId() {
 type CompareSlot = "A" | "B";
 type NAMProductView = "rack" | "browse" | "mixer";
 type NAMLibraryFlowState = NAMLibraryFlowMode | null;
+type RackRightRailTab = "gear" | "tones" | "cab" | "saved" | "tuner";
 type RackSlotBrowserCategory = Exclude<RackModuleId, "pedal"> | "utility";
 type NAMRackStageSizePercent = 80 | 100 | 140 | 180 | 220;
 type NAMActivePresetIdentity =
   | { kind: "factory"; id: string }
   | { kind: "user"; name: string }
   | null;
-type UserRackPreset = { name: string; path?: string; metadataPath?: string; metadata?: UserRackPresetMetadata };
+type UserRackPreset = {
+  name: string;
+  path?: string;
+  metadataPath?: string;
+  metadata?: UserRackPresetMetadata;
+  instrumentProfile?: "guitar" | "bass";
+  ampModelPath?: string;
+};
 type NAMRackPrompt = {
   kind: "input" | "confirm";
   title: string;
@@ -297,6 +329,7 @@ function namDialogFocusableElements(container: HTMLElement): HTMLElement[] {
 function useNAMOverlayDialog<T extends HTMLElement>(open: boolean, onClose: () => void) {
   const dialogRef = useRef<T | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  useTransientOverlayShortcutScope(open, onClose);
 
   useEffect(() => {
     if (!open || typeof document === "undefined") return;
@@ -319,12 +352,6 @@ function useNAMOverlayDialog<T extends HTMLElement>(open: boolean, onClose: () =
   }, [open]);
 
   const onKeyDown = useCallback((event: ReactKeyboardEvent<T>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-      return;
-    }
     if (event.key !== "Tab") return;
 
     const dialog = dialogRef.current;
@@ -346,7 +373,7 @@ function useNAMOverlayDialog<T extends HTMLElement>(open: boolean, onClose: () =
       event.preventDefault();
       first.focus({ preventScroll: true });
     }
-  }, [onClose]);
+  }, []);
 
   return { dialogRef, onKeyDown };
 }
@@ -378,7 +405,7 @@ function isNAMStoredPresetPayload(value: unknown): value is NAMStoredPresetPaylo
 
 const DEFAULT_RACK_SLOT_ORDER: RackModuleId[] = ["gate", "pedal", "amp", "cab", "eq", "mod", "delay", "reverb"];
 const LOCKED_RACK_SPINE: RackModuleId[] = ["gate", "pedal", "amp", "cab"];
-const DEFAULT_POST_FX_ORDER: RackModuleId[] = ["eq", "mod", "delay", "reverb"];
+const DEFAULT_POST_FX_ORDER: RackModuleId[] = [...NAM_RACK_DEFAULT_POST_FX_ORDER];
 const NAM_RACK_PLUGIN_NAME = "OpenStudio NAM Rack";
 const NAM_RACK_STAGE_SIZE_OPTIONS = [80, 100, 140, 180, 220] as const satisfies readonly NAMRackStageSizePercent[];
 const NAM_RACK_PRESET_METADATA_KEY = "openstudio_nam_rack_preset_metadata";
@@ -388,34 +415,79 @@ const NAM_RACK_PRESET_METADATA_KIND = "openstudio.namRackPresetMetadata";
 const NAM_RACK_PRESET_BUNDLE_EXT = ".s13nampreset";
 const DEFAULT_PRESET_FOLDERS = ["Clean", "Crunch", "Lead", "Studio"];
 const NAM_RACK_GRAPHIC_EQ_PARAM_IDS = ["eq65Db", "eq125Db", "eq250Db", "eq500Db", "eq1kDb", "eq2kDb", "eq4kDb", "eq8kDb", "eq16kDb"];
+const NAM_RACK_GRAPHIC_EQ_HPF_PARAM_ID = "eqHPFHz";
+const NAM_RACK_GRAPHIC_EQ_LPF_PARAM_ID = "eqLPFHz";
 const NAM_RACK_GRAPHIC_EQ_LEVEL_PARAM_ID = "eqLevelDb";
 const NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS = [
+  NAM_RACK_GRAPHIC_EQ_HPF_PARAM_ID,
   ...NAM_RACK_GRAPHIC_EQ_PARAM_IDS,
+  NAM_RACK_GRAPHIC_EQ_LPF_PARAM_ID,
   NAM_RACK_GRAPHIC_EQ_LEVEL_PARAM_ID,
 ];
-const NAM_RACK_GRAPHIC_EQ_NEUTRAL_VALUES: Record<string, number> = Object.fromEntries(
-  NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS.map((id) => [id, 0]),
-);
+const NAM_RACK_GRAPHIC_EQ_NEUTRAL_VALUES: Record<string, number> = {
+  [NAM_RACK_GRAPHIC_EQ_HPF_PARAM_ID]: 0,
+  ...Object.fromEntries(NAM_RACK_GRAPHIC_EQ_PARAM_IDS.map((id) => [id, 0])),
+  [NAM_RACK_GRAPHIC_EQ_LPF_PARAM_ID]: 24000,
+  [NAM_RACK_GRAPHIC_EQ_LEVEL_PARAM_ID]: 0,
+};
+const NAM_RACK_PRE_EQ_BAND_PARAM_IDS = [
+  "preEq120Db",
+  "preEq250Db",
+  "preEq500Db",
+  "preEq1kDb",
+  "preEq2k5Db",
+  "preEq5kDb",
+  "preEq8kDb",
+  "preEq12kDb",
+] as const;
+const NAM_RACK_PRE_EQ_CONTROL_PARAM_IDS = [
+  "preEqEnabled",
+  "preEqHPFHz",
+  ...NAM_RACK_PRE_EQ_BAND_PARAM_IDS,
+  "preEqLPFHz",
+] as const;
+const NAM_RACK_PRE_EQ_NEUTRAL_VALUES: Record<string, number> = {
+  preEqEnabled: 0,
+  preEqHPFHz: 0,
+  ...Object.fromEntries(NAM_RACK_PRE_EQ_BAND_PARAM_IDS.map((id) => [id, 0])),
+  preEqLPFHz: 24000,
+};
+// Factory templates are complete rack recalls. Reset the two latent cutoff
+// memories too, otherwise an all-OFF template can inherit the previous rig's
+// next-on values while appearing clean. These are native state fields, not
+// public controls, so they deliberately stay out of schemas and Advanced UI.
+const NAM_RACK_FACTORY_HIDDEN_EQ_DEFAULT_VALUES: Record<string, number> = {
+  preEqHPFLastActiveHz: 80,
+  preEqLPFLastActiveHz: 12000,
+  eqHPFLastActiveHz: 80,
+  eqLPFLastActiveHz: 12000,
+};
 const NAM_RACK_GLOBAL_DEFAULT_VALUES: Record<string, number> = {
   instrumentProfile: 0,
   compressorEnabled: 0,
   compressorAttackMs: 21.9,
   compressorReleaseMs: 149.1,
   compressorToneDb: 0,
+  compressorIntensity: 0,
   compressorSidechainHPF: 1,
   compressorMix: 0.65,
   compressorVolumeDb: 0,
   compressorComp: 0.35,
-  tapeEchoEnabled: 0,
-  tapeEchoMix: 0.28,
-  tapeEchoTimeMs: 360,
-  tapeEchoFeedback: 0.28,
-  tapeEchoMod: 0.18,
-  tapeEchoTone: 0.58,
   octaverEnabled: 0,
   octaverDownMix: 0.32,
   octaverUpMix: 0.18,
   octaverDirectMix: 1,
+  preEqEnabled: 0,
+  preEqHPFHz: 0,
+  preEq120Db: 0,
+  preEq250Db: 0,
+  preEq500Db: 0,
+  preEq1kDb: 0,
+  preEq2k5Db: 0,
+  preEq5kDb: 0,
+  preEq8kDb: 0,
+  preEq12kDb: 0,
+  preEqLPFHz: 24000,
   precisionDriveEnabled: 0,
   precisionDriveVolumeDb: 9,
   precisionDriveBright: 0.55,
@@ -444,6 +516,7 @@ const NAM_RACK_GLOBAL_DEFAULT_VALUES: Record<string, number> = {
   cabRoomWidth: 0.65,
   cabDoublerEnabled: 0,
   cabDoublerMix: 0.12,
+  cabDoublerDelayMs: 4.5,
   cabDoublerSpread: 0.65,
   cabPan: 0,
   eqEnabled: 0,
@@ -465,6 +538,7 @@ const NAM_RACK_GLOBAL_DEFAULT_VALUES: Record<string, number> = {
   reverbPreDelayMs: 18,
   reverbLowCutHz: 120,
   reverbShimmer: 0,
+  reverbPad: 0,
   chorusCharacter: 1,
   modulatorMode: 0,
   modulatorFeedback: 0.1,
@@ -671,6 +745,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 310,
       delayFeedback: 0.16,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.18,
       reverbEnabled: 1,
       reverbDecaySec: 2.4,
@@ -708,6 +783,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 360,
       delayFeedback: 0.12,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.2,
       reverbEnabled: 1,
       reverbDecaySec: 2.8,
@@ -747,6 +823,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 430,
       delayFeedback: 0.28,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.16,
       reverbEnabled: 1,
       reverbDecaySec: 2.1,
@@ -790,6 +867,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 290,
       delayFeedback: 0.14,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.12,
       reverbEnabled: 1,
       reverbDecaySec: 1.7,
@@ -841,6 +919,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 360,
       delayFeedback: 0.1,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.09,
       reverbEnabled: 1,
       reverbDecaySec: 1.4,
@@ -878,6 +957,7 @@ const NAM_RACK_PRESETS: Array<{
       delayTimeMs: 410,
       delayFeedback: 0.16,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.26,
       reverbEnabled: 1,
       reverbDecaySec: 3.8,
@@ -923,6 +1003,7 @@ const NAM_RACK_PRESETS: Array<{
       chorusMix: 0,
       delayMix: 0,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.05,
       reverbEnabled: 0,
       outputTrimDb: -1,
@@ -969,6 +1050,7 @@ const NAM_RACK_PRESETS: Array<{
       chorusMix: 0,
       delayMix: 0,
       reverbVoice: 0,
+      reverbPad: 0,
       reverbMix: 0.04,
       reverbEnabled: 0,
       outputTrimDb: -2,
@@ -1005,6 +1087,7 @@ function paramById(params: BuiltInParamDescriptor[], id: string) {
 function presetValuesWithRackDefaults(values: Record<string, number>) {
   return {
     ...NAM_RACK_GRAPHIC_EQ_NEUTRAL_VALUES,
+    ...NAM_RACK_FACTORY_HIDDEN_EQ_DEFAULT_VALUES,
     ...NAM_RACK_GLOBAL_DEFAULT_VALUES,
     ...values,
   };
@@ -1014,12 +1097,7 @@ function factoryPresetMatchesInstrumentProfile(
   preset: typeof NAM_RACK_PRESETS[number],
   profile: unknown,
 ) {
-  const target = normalizeNAMInstrumentProfile(profile) === NAM_INSTRUMENT_PROFILE_BASS
-    ? "bass"
-    : "guitar";
-  return !preset.instrumentProfile
-    || preset.instrumentProfile === "all"
-    || preset.instrumentProfile === target;
+  return namInstrumentProfileTagIsCompatible(preset.instrumentProfile, profile);
 }
 
 function fileName(path: string | undefined) {
@@ -1040,20 +1118,27 @@ function formatIRLastUsed(value: number | undefined) {
   return new Date(value).toLocaleDateString();
 }
 
-function presetDirty(preset: typeof NAM_RACK_PRESETS[number], params: BuiltInParamDescriptor[]) {
+function presetDirty(
+  preset: typeof NAM_RACK_PRESETS[number],
+  params: BuiltInParamDescriptor[],
+  authoritativeValues?: Record<string, number>,
+) {
   return Object.entries(presetValuesWithRackDefaults(preset.values)).some(([id, expected]) => {
     const param = paramById(params, id);
-    if (!param) return false;
+    if (!param) {
+      const privateValue = authoritativeValues?.[id];
+      return NAM_RACK_PRIVATE_EQ_RECALL_VALUE_KEYS.has(id)
+        && typeof privateValue === "number"
+        && Number.isFinite(privateValue)
+        && Math.abs(privateValue - expected) > 0.01;
+    }
     return Math.abs(param.value - expected) > Math.max(stepForParam(param) * 2, 0.01);
   });
 }
 
 function snapshotDiffers(current: RackCompareSnapshot, saved?: RackCompareSnapshot) {
   if (!saved) return true;
-  const ids = new Set([...Object.keys(current.values), ...Object.keys(saved.values)]);
-  for (const id of ids) {
-    if (Math.abs((current.values[id] ?? 0) - (saved.values[id] ?? 0)) > 0.0001) return true;
-  }
+  if (namRackSnapshotValuesDiffer(current.values, saved.values)) return true;
 
   for (const key of [
     "pedalModelPath",
@@ -1068,8 +1153,9 @@ function snapshotDiffers(current: RackCompareSnapshot, saved?: RackCompareSnapsh
     const currentSize = current.modelState[key];
     const savedSize = saved.modelState[key];
     if (
-      (currentSize !== undefined || savedSize !== undefined)
-      && Math.abs((currentSize ?? 1) - (savedSize ?? 1)) > 0.0001
+      currentSize !== undefined
+      && savedSize !== undefined
+      && Math.abs(currentSize - savedSize) > 0.0001
     ) {
       return true;
     }
@@ -1133,10 +1219,6 @@ function isRackModuleId(value: unknown): value is RackModuleId {
   );
 }
 
-function isPedalFaceplateModuleId(value: RackModuleId): value is PedalFaceplateModuleId {
-  return PEDAL_FACEPLATE_MODULES.includes(value as PedalFaceplateModuleId);
-}
-
 function initialRackFocus(): RackModuleId {
   if (typeof window === "undefined") return "amp";
   const value = new URLSearchParams(window.location.search).get("namFocus");
@@ -1150,12 +1232,6 @@ function initialRackSection(): RackSectionId {
   if (value === "special") return "post";
   if (isRackSectionId(value)) return value;
   return rackSectionForModule(initialRackFocus());
-}
-
-function initialNAMRackVisualMode(): NAMRackVisualMode {
-  if (typeof window === "undefined") return "approved-parity-2d";
-  const value = new URLSearchParams(window.location.search).get("namVisualMode");
-  return value === "debug-anchors" ? "debug-anchors" : "approved-parity-2d";
 }
 
 function initialPresetManagerOpen() {
@@ -1393,7 +1469,7 @@ function normalizeCompareSnapshot(raw: unknown): RackCompareSnapshot | undefined
   // Run the same ordered migration as imported/native presets so the retired
   // Precision distortion toggle is mapped before current defaults are filled.
   const source = migrateLegacyNAMRackPresetDspState(
-    raw,
+    migrateNAMRackModelQualityState(raw),
     { completePreset: true },
   ) as Record<string, unknown>;
   const rawValues = source.values && typeof source.values === "object"
@@ -1414,15 +1490,10 @@ function normalizeCompareSnapshot(raw: unknown): RackCompareSnapshot | undefined
     ? (source.modelState as Record<string, unknown>)
     : {};
   const modelState: RackCompareSnapshot["modelState"] = {};
-  for (const key of [
-    "pedalModelPath",
-    "ampModelPath",
-    "cabIRPath",
-    "pedalDeclaredCaptureType",
-    "ampDeclaredCaptureType",
-  ] as const) {
+  for (const key of ["pedalModelPath", "ampModelPath", "cabIRPath"] as const) {
     if (typeof rawModel[key] === "string" && rawModel[key]) modelState[key] = rawModel[key] as string;
   }
+  Object.assign(modelState, normalizeNAMRackSnapshotCaptureTypes(rawModel));
   for (const key of ["clearPedalModel", "clearAmpModel", "clearCabIR"] as const) {
     if (rawModel[key] === true) modelState[key] = true;
   }
@@ -1432,9 +1503,9 @@ function normalizeCompareSnapshot(raw: unknown): RackCompareSnapshot | undefined
   ] as const) {
     if (!modelState[pathKey]) continue;
     const rawSize = rawModel[sizeKey];
-    modelState[sizeKey] = typeof rawSize === "number" && Number.isFinite(rawSize)
-      ? Math.max(0, Math.min(1, rawSize))
-      : 1;
+    if (typeof rawSize === "number" && Number.isFinite(rawSize)) {
+      modelState[sizeKey] = Math.max(0, Math.min(1, rawSize));
+    }
   }
   if (typeof rawModel.cabRequestedEnabled === "boolean") {
     modelState.cabRequestedEnabled = rawModel.cabRequestedEnabled;
@@ -1515,9 +1586,9 @@ function moduleParamIds(moduleId: RackModuleId) {
     gate: ["gateThresholdDb", "gateReleaseMs"],
     pedal: [
       "compressorEnabled", "compressorComp", "compressorAttackMs", "compressorReleaseMs",
-      "compressorToneDb", "compressorSidechainHPF", "compressorMix", "compressorVolumeDb",
-      "tapeEchoEnabled", "tapeEchoMix", "tapeEchoTimeMs", "tapeEchoFeedback", "tapeEchoMod", "tapeEchoTone",
+      "compressorToneDb", "compressorIntensity", "compressorSidechainHPF", "compressorMix", "compressorVolumeDb",
       "octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix",
+      ...NAM_RACK_PRE_EQ_CONTROL_PARAM_IDS,
       "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack",
       "precisionDriveGate", "precisionDriveDrive", "precisionDriveEnabled",
       "chaosEnabled", "chaosMode", "chaosDrive", "chaosWeight", "chaosTone", "chaosGate", "chaosMix", "chaosLevelDb",
@@ -1526,14 +1597,14 @@ function moduleParamIds(moduleId: RackModuleId) {
     cab: [
       "cabEnabled", "cabMicPosition", "cabMicDistance", "cabMicBlend", "cabRoomSend",
       "cabRoomEnabled", "cabRoomAmount", "cabRoomWidth",
-      "cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread",
+      "cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread",
       "cabLevelDb", "cabPan", "cabHPFHz", "cabLPFHz", "cabPhaseInvert",
     ],
     eq: ["eqEnabled", ...NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS],
     mod: ["modulatorEnabled", "chorusMix", "chorusRateHz", "chorusDepth", "chorusCharacter", "modulatorMode", "modulatorFeedback", "modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalMode", "modulatorPedalPosition"],
     delay: ["delayEnabled", "delayMix", "delayTimeMs", "delayFeedback", "delayMod", "delayDucker", "delayMode", "delayPingPong", "delayTempoSync"],
     reverb: [
-      "reverbEnabled", "reverbVoice", "reverbMix", "reverbDecaySec",
+      "reverbEnabled", "reverbPad", "reverbVoice", "reverbMix", "reverbDecaySec",
       "reverbPreDelayMs", "reverbLowCutHz", "reverbTone", "reverbShimmer",
     ],
   };
@@ -1649,7 +1720,7 @@ function moduleTitle(moduleId: RackModuleId) {
 function moduleStageBody(moduleId: RackModuleId) {
   switch (moduleId) {
     case "pedal": return "NAM pedal slot before the amp/full-rig capture.";
-    case "gate": return "Set the input floor and release before the capture sees the guitar.";
+    case "gate": return "Set the input floor and release before the capture sees the instrument.";
     case "eq": return "OpenStudio post-Capture EQ controls. These are effect controls, not NAM Capture parameters.";
     case "mod": return "Chorus-style width for clean and edge-clean guitar tones.";
     case "delay": return "OpenStudio delay after the Capture and IR stages, with mix, time, and feedback.";
@@ -1793,10 +1864,13 @@ function MeterTrimControl({
   );
   const stepByWheel = (event: WheelEvent<HTMLDivElement>) => {
     if (!param) return;
-    event.preventDefault();
-    const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-    const direction = event.deltaY > 0 ? -1 : 1;
-    setValue(param.value + stepForParam(param) * fine * direction);
+    const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+    if (gesture.preventDefault) event.preventDefault();
+    if (gesture.stopPropagation) event.stopPropagation();
+    if (gesture.operation !== "adjust") return;
+    const stepCount = getParameterWheelStepCount(gesture);
+    if (stepCount === 0) return;
+    setValue(param.value + stepForParam(param) * stepCount);
   };
   const title = hasLevel
     ? `${label}: linked peak ${clampedLevel.toFixed(1)} dBFS, trim ${trimLabel}`
@@ -1895,26 +1969,6 @@ function neuralSectionIcon(sectionId: RackSectionId) {
   }
 }
 
-function neuralAnchorStyle(anchor: NAMRackDeviceSkin["controls"][number]): CSSProperties {
-  return {
-    "--nam-neural-x": `${anchor.x * 100}%`,
-    "--nam-neural-y": `${anchor.y * 100}%`,
-    "--nam-neural-w": `${anchor.width * 100}%`,
-    "--nam-neural-h": `${anchor.height * 100}%`,
-  } as CSSProperties;
-}
-
-function NeuralSkinDebugOverlay({ skin }: { skin: NAMRackDeviceSkin | undefined }) {
-  if (!skin) return null;
-  return (
-    <div className="nam-neural-anchor-debug" aria-hidden="true">
-      {skin.controls.map((anchor) => (
-        <span key={anchor.id} data-kind={anchor.kind} data-anchor-id={anchor.id} style={neuralAnchorStyle(anchor)} />
-      ))}
-    </div>
-  );
-}
-
 function NeuralParameterReadout({
   label,
   param,
@@ -1930,849 +1984,6 @@ function NeuralParameterReadout({
   );
 }
 
-type NeuralControlAnchor = NAMRackDeviceSkin["controls"][number];
-
-function NeuralGraphicEqFader({
-  anchor,
-  param,
-  onParamChange,
-}: {
-  anchor: NeuralControlAnchor;
-  param?: BuiltInParamDescriptor;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  const pct = param ? normalizeParam(param) : 0.5;
-  const label = anchor.label ?? param?.label ?? anchor.id;
-  const valueLabel = param ? formatParamValue(param) : anchor.valueLabel ?? "0.0 dB";
-  const style = {
-    ...neuralAnchorStyle(anchor),
-    "--nam-fader-pct": `${pct * 100}%`,
-  } as CSSProperties;
-  const dragRef = useRef<number | null>(null);
-  const setFromPointer = useCallback(
-    (event: PointerEvent<HTMLLabelElement>) => {
-      if (!param) return;
-      const rect = event.currentTarget.getBoundingClientRect();
-      const nextPct = clamp(1 - (event.clientY - rect.top) / Math.max(rect.height, 1), 0, 1);
-      const nextValue = param.min + nextPct * (param.max - param.min);
-      onParamChange(param, quantizeParamValue(param, nextValue));
-    },
-    [onParamChange, param],
-  );
-
-  return (
-    <label
-      className="nam-neural-control-anchor nam-neural-eq-fader"
-      data-anchor-id={anchor.id}
-      data-param={param?.id ?? ""}
-      data-bound={Boolean(param)}
-      style={style}
-      title={param ? `${label}: ${valueLabel}` : `${label}: visual band pending DSP expansion`}
-      aria-disabled={!param}
-      onPointerDown={(event) => {
-        if (!param || event.button !== 0) return;
-        event.preventDefault();
-        event.stopPropagation();
-        dragRef.current = event.pointerId;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        setFromPointer(event);
-      }}
-      onPointerMove={(event) => {
-        if (dragRef.current === event.pointerId) setFromPointer(event);
-      }}
-      onPointerUp={(event) => {
-        if (dragRef.current === event.pointerId) {
-          setFromPointer(event);
-          dragRef.current = null;
-        }
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onPointerCancel={(event) => {
-        if (dragRef.current === event.pointerId) dragRef.current = null;
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onWheel={(event: WheelEvent<HTMLLabelElement>) => {
-        if (!param) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-        const direction = event.deltaY > 0 ? -1 : 1;
-        onParamChange(param, quantizeParamValue(param, param.value + stepForParam(param) * fine * direction));
-      }}
-      onDoubleClick={(event) => {
-        if (!param) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onParamChange(param, param.defaultValue ?? 0);
-      }}
-    >
-      <em>{valueLabel}</em>
-      <span className="nam-neural-eq-fader-track" aria-hidden="true">
-        <i />
-        <b />
-      </span>
-      <strong>{label}</strong>
-      {param && (
-        <input
-          className="nam-neural-eq-fader-input"
-          type="range"
-          min={param.min}
-          max={param.max}
-          step={stepForParam(param)}
-          value={param.value}
-          aria-label={label}
-          onChange={(event) => onParamChange(param, Number(event.currentTarget.value))}
-        />
-      )}
-    </label>
-  );
-}
-
-function NeuralTreadleAnchor({
-  anchor,
-  param,
-  onParamChange,
-}: {
-  anchor: NeuralControlAnchor;
-  param?: BuiltInParamDescriptor;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  const pct = param ? normalizeParam(param) : 0.5;
-  const label = anchor.label ?? param?.label ?? anchor.id;
-  const valueLabel = param ? formatParamValue(param) : anchor.valueLabel ?? "50%";
-  const style = {
-    ...neuralAnchorStyle(anchor),
-    "--nam-treadle-pct": `${pct * 100}%`,
-  } as CSSProperties;
-  const dragRef = useRef<number | null>(null);
-  const setFromPointer = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (!param) return;
-      const rect = event.currentTarget.getBoundingClientRect();
-      const nextPct = clamp(1 - (event.clientY - rect.top) / Math.max(rect.height, 1), 0, 1);
-      const nextValue = param.min + nextPct * (param.max - param.min);
-      onParamChange(param, quantizeParamValue(param, nextValue));
-    },
-    [onParamChange, param],
-  );
-
-  return (
-    <button
-      type="button"
-      className="nam-neural-treadle-anchor"
-      data-anchor-id={anchor.id}
-      data-param={param?.id ?? ""}
-      data-bound={Boolean(param)}
-      style={style}
-      title={param ? `${label}: ${valueLabel}` : `${label}: visual treadle pending DSP expansion`}
-      disabled={!param}
-      onPointerDown={(event) => {
-        if (!param || event.button !== 0) return;
-        event.preventDefault();
-        event.stopPropagation();
-        dragRef.current = event.pointerId;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        setFromPointer(event);
-      }}
-      onPointerMove={(event) => {
-        if (dragRef.current === event.pointerId) setFromPointer(event);
-      }}
-      onPointerUp={(event) => {
-        if (dragRef.current === event.pointerId) {
-          setFromPointer(event);
-          dragRef.current = null;
-        }
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onPointerCancel={(event) => {
-        if (dragRef.current === event.pointerId) dragRef.current = null;
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
-      }}
-      onWheel={(event: WheelEvent<HTMLButtonElement>) => {
-        if (!param) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-        const direction = event.deltaY > 0 ? -1 : 1;
-        onParamChange(param, quantizeParamValue(param, param.value + stepForParam(param) * fine * direction));
-      }}
-      onDoubleClick={(event) => {
-        if (!param) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onParamChange(param, param.defaultValue ?? 0);
-      }}
-    >
-      <span aria-hidden="true">
-        <i />
-      </span>
-      <strong>{label}</strong>
-    </button>
-  );
-}
-
-function NeuralDecorativeKnobAnchor({ anchor }: { anchor: NeuralControlAnchor }) {
-  return (
-    <div
-      className="nam-neural-control-anchor nam-neural-decorative-knob"
-      data-anchor-id={anchor.id}
-      data-param=""
-      data-bound="false"
-      style={neuralAnchorStyle(anchor)}
-      title={`${anchor.label ?? anchor.id}: visual control pending Phase 6 DSP`}
-      aria-hidden="true"
-    >
-      <span className="nam-neural-decorative-knob-cap">
-        <i />
-      </span>
-      <strong>{anchor.label ?? anchor.id}</strong>
-      <em>{anchor.valueLabel ?? "Phase 6"}</em>
-    </div>
-  );
-}
-
-function NeuralDecorativeSwitchAnchor({ anchor }: { anchor: NeuralControlAnchor }) {
-  return (
-    <div
-      className="nam-neural-decorative-switch-anchor"
-      data-anchor-id={anchor.id}
-      data-param=""
-      data-bound="false"
-      style={neuralAnchorStyle(anchor)}
-      title={`${anchor.label ?? anchor.id}: visual switch pending Phase 6 DSP`}
-      aria-hidden="true"
-    >
-      <span>
-        <i />
-      </span>
-      <strong>{anchor.label ?? anchor.id}</strong>
-    </div>
-  );
-}
-
-function NeuralMeterAnchor({ anchor }: { anchor: NeuralControlAnchor }) {
-  return (
-    <div
-      className="nam-neural-meter-anchor"
-      data-anchor-id={anchor.id}
-      style={neuralAnchorStyle(anchor)}
-      aria-hidden="true"
-    >
-      <span>{anchor.label ?? "Meter"}</span>
-      <i><b /></i>
-    </div>
-  );
-}
-
-function NeuralLabelAnchor({ anchor }: { anchor: NeuralControlAnchor }) {
-  return (
-    <div
-      className="nam-neural-label-anchor"
-      data-anchor-id={anchor.id}
-      style={neuralAnchorStyle(anchor)}
-      aria-hidden="true"
-    >
-      <span>{anchor.label ?? anchor.id}</span>
-    </div>
-  );
-}
-
-const SEVEN_SEGMENT_ORDER = ["a", "b", "c", "d", "e", "f", "g"] as const;
-const SEVEN_SEGMENT_DIGITS: Record<string, readonly (typeof SEVEN_SEGMENT_ORDER)[number][]> = {
-  "0": ["a", "b", "c", "d", "e", "f"],
-  "1": ["b", "c"],
-  "2": ["a", "b", "d", "e", "g"],
-  "3": ["a", "b", "c", "d", "g"],
-  "4": ["b", "c", "f", "g"],
-  "5": ["a", "c", "d", "f", "g"],
-  "6": ["a", "c", "d", "e", "f", "g"],
-  "7": ["a", "b", "c"],
-  "8": ["a", "b", "c", "d", "e", "f", "g"],
-  "9": ["a", "b", "c", "d", "f", "g"],
-};
-
-function NeuralSevenSegmentValue({ value }: { value: string }) {
-  const display = value.trim();
-  if (!/^\d+$/.test(display)) {
-    return <strong>{value}</strong>;
-  }
-  return (
-    <strong className="nam-neural-seven-segment" aria-label={display}>
-      {display.split("").map((digit, index) => {
-        const activeSegments = new Set(SEVEN_SEGMENT_DIGITS[digit] ?? []);
-        return (
-          <span className="nam-neural-seven-segment-digit" data-digit={digit} key={`${digit}-${index}`}>
-            {SEVEN_SEGMENT_ORDER.map((segment) => (
-              <i key={segment} data-segment={segment} data-on={activeSegments.has(segment)} />
-            ))}
-          </span>
-        );
-      })}
-    </strong>
-  );
-}
-
-function NeuralRasterLed({ active }: { active: boolean }) {
-  const asset = ledAssetForState(active);
-  const style = {
-    "--nam-control-led-image": `url("${asset.href}")`,
-  } as CSSProperties;
-  return (
-    <div
-      className="nam-neural-led nam-raster-led-cap"
-      data-active={active}
-      data-control-asset={asset.id}
-      style={style}
-      aria-hidden="true"
-    />
-  );
-}
-
-function NeuralRasterFootswitch({ active }: { active: boolean }) {
-  const asset = footswitchAssetForState(active);
-  const style = {
-    "--nam-control-footswitch-image": `url("${asset.href}")`,
-  } as CSSProperties;
-  return <span className="nam-raster-footswitch-cap" data-control-asset={asset.id} style={style} aria-hidden="true" />;
-}
-
-function NeuralAmpHeadBackdrop() {
-  return (
-    <div className="nam-neural-amp-head-backdrop" aria-hidden="true">
-      <span className="nam-neural-amp-handle" />
-      <span className="nam-neural-amp-grille" />
-      <span className="nam-neural-amp-glow" />
-      <span className="nam-neural-amp-faceplate" />
-      <span className="nam-neural-amp-cable" />
-    </div>
-  );
-}
-
-function NeuralCabMicRoomBackdrop() {
-  return (
-    <div className="nam-neural-cab-room-backdrop" aria-hidden="true">
-      <span data-cone="left" />
-      <span data-cone="right" />
-      <i />
-    </div>
-  );
-}
-
-function NeuralCabMicAnchor({
-  anchor,
-  param,
-  onParamChange,
-}: {
-  anchor: NeuralControlAnchor;
-  param?: BuiltInParamDescriptor;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  const valueLabel = param ? formatParamValue(param) : (anchor.valueLabel ?? "0.000");
-  const active = param ? Math.abs(param.value - (param.defaultValue ?? 0)) > stepForParam(param) * 0.5 : false;
-  const stepMicValue = () => {
-    if (!param) return;
-    const step = Math.max(stepForParam(param), (param.max - param.min) / 10);
-    const next = param.value + step > param.max ? param.min : param.value + step;
-    onParamChange(param, quantizeParamValue(param, next));
-  };
-
-  if (param) {
-    return (
-      <button
-        type="button"
-        className="nam-neural-mic-anchor nam-neural-cab-mic"
-        data-anchor-id={anchor.id}
-        data-param={param.id}
-        data-bound="true"
-        data-active={active}
-        style={neuralAnchorStyle(anchor)}
-        onClick={(event) => {
-          event.stopPropagation();
-          stepMicValue();
-        }}
-        onDoubleClick={(event) => {
-          event.stopPropagation();
-          onParamChange(param, param.defaultValue ?? 0);
-        }}
-        title={`${param.label}: ${valueLabel}`}
-      >
-        <span>
-          <i />
-          <b />
-        </span>
-        <strong>{anchor.label ?? param.label}</strong>
-        <em>{valueLabel}</em>
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="nam-neural-mic-anchor nam-neural-cab-mic"
-      data-anchor-id={anchor.id}
-      data-bound="false"
-      style={neuralAnchorStyle(anchor)}
-      aria-hidden="true"
-    >
-      <span>
-        <i />
-        <b />
-      </span>
-      <strong>{anchor.label ?? "Mic"}</strong>
-      <em>{valueLabel}</em>
-    </div>
-  );
-}
-
-function NeuralGraphicEqBackdrop() {
-  return (
-    <div className="nam-neural-eq-backdrop" aria-hidden="true">
-      <span data-line="-12" />
-      <span data-line="-6" />
-      <span data-line="0" />
-      <span data-line="+6" />
-      <span data-line="+12" />
-    </div>
-  );
-}
-
-type NAMNeuralStageDevice = {
-  skin: NAMRackDeviceSkin;
-  moduleId?: RackModuleId;
-  title: string;
-  subtitle: string;
-  display: string;
-  active: boolean;
-  accent: string;
-  params: BuiltInParamDescriptor[];
-  actionLabel?: string;
-  onAction?: () => void;
-  onPowerToggle?: () => void;
-};
-
-function NAMRackNeuralSectionSuite({
-  sectionId,
-  devices,
-  activeModule,
-  visualMode,
-  renderKnob,
-  onFocusDevice,
-  onParamChange,
-}: {
-  sectionId: RackSectionId;
-  devices: NAMNeuralStageDevice[];
-  activeModule: RackModuleId;
-  visualMode: NAMRackVisualMode;
-  renderKnob: (param: BuiltInParamDescriptor) => ReactNode;
-  onFocusDevice: (sectionId: RackSectionId, moduleId?: RackModuleId) => void;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  return (
-    <div className="nam-neural-section-suite nam-stage-large" data-section={sectionId} data-debug-anchors={visualMode === "debug-anchors"}>
-      {devices.map((device) => {
-        const scene = sceneForSkin(device.skin.id);
-        if (scene) {
-          return (
-            <NAMRackSceneDevice
-              key={device.skin.id}
-              sectionId={sectionId}
-              device={device}
-              scene={scene}
-              activeModule={activeModule}
-              visualMode={visualMode}
-              onFocusDevice={onFocusDevice}
-              onParamChange={onParamChange}
-            />
-          );
-        }
-        const paramsById = new Map(device.params.map((param) => [param.id, param]));
-        const displayAnchor = device.skin.controls.find((anchor) => anchor.kind === "display");
-        const footswitchAnchors = device.skin.controls.filter((anchor) => anchor.kind === "footswitch");
-        const footswitchAnchor = footswitchAnchors[0];
-        const switchAnchors = device.skin.controls.filter((anchor) => (
-          anchor.kind === "switch"
-          || anchor.kind === "button"
-          || (anchor.kind === "footswitch" && anchor.id !== footswitchAnchor?.id)
-        ) && anchor.paramId);
-        const decorativeSwitchAnchors = device.skin.controls.filter((anchor) => anchor.kind === "switch" && !anchor.paramId);
-        const freeButtonAnchors = device.skin.controls.filter((anchor) => anchor.kind === "button" && !anchor.paramId);
-        const decorativeKnobAnchors = device.skin.controls.filter((anchor) => anchor.kind === "knob" && !anchor.paramId);
-        const faderAnchors = device.skin.controls.filter((anchor) => anchor.kind === "fader");
-        const treadleAnchors = device.skin.controls.filter((anchor) => anchor.kind === "treadle");
-        const labelAnchors = device.skin.controls.filter((anchor) => anchor.kind === "label");
-        const micAnchors = device.skin.controls.filter((anchor) => anchor.kind === "mic");
-        const meterAnchors = device.skin.controls.filter((anchor) => anchor.kind === "meter");
-        return (
-          <article
-            key={device.skin.id}
-            className="nam-neural-device nam-neural-section-device"
-            data-section={device.skin.section}
-            data-skin={device.skin.id}
-            data-module={device.moduleId ?? device.skin.id}
-            data-material={device.skin.material}
-            data-active={device.active}
-            data-focused={device.moduleId ? activeModule === device.moduleId : false}
-            style={{ "--nam-neural-accent": device.accent } as CSSProperties}
-            onClick={() => onFocusDevice(sectionId, device.moduleId)}
-          >
-            <img className="nam-neural-device-skin" src={device.skin.assetUrl} alt="" loading="eager" aria-hidden="true" />
-            <div className="nam-neural-device-plate">
-              {device.skin.section === "amp" && <NeuralAmpHeadBackdrop />}
-              {device.skin.section === "cab" && <NeuralCabMicRoomBackdrop />}
-              {device.skin.section === "eq" && <NeuralGraphicEqBackdrop />}
-              <div className="nam-neural-device-head">
-                <span>{device.subtitle}</span>
-                <strong>{device.title}</strong>
-              </div>
-              <NeuralRasterLed active={device.active} />
-              <div
-                className="nam-neural-mini-display nam-neural-device-display"
-                data-anchored={Boolean(displayAnchor)}
-                style={displayAnchor ? neuralAnchorStyle(displayAnchor) : undefined}
-              >
-                <span>{device.display}</span>
-                <i aria-hidden="true" />
-              </div>
-              {device.skin.controls.filter((anchor) => anchor.kind === "knob" && anchor.paramId).map((anchor) => {
-                const param = paramsById.get(anchor.paramId ?? "");
-                if (!param) return null;
-                return (
-                  <div
-                    key={anchor.id}
-                    className="nam-neural-control-anchor"
-                    data-anchor-id={anchor.id}
-                    data-param={param.id}
-                    data-bound={Boolean(param)}
-                    style={neuralAnchorStyle(anchor)}
-                  >
-                    {renderKnob(param)}
-                  </div>
-                );
-              })}
-              {decorativeKnobAnchors.map((anchor) => (
-                <NeuralDecorativeKnobAnchor key={anchor.id} anchor={anchor} />
-              ))}
-              {decorativeSwitchAnchors.map((anchor) => (
-                <NeuralDecorativeSwitchAnchor key={anchor.id} anchor={anchor} />
-              ))}
-              {faderAnchors.map((anchor) => (
-                <NeuralGraphicEqFader
-                  key={anchor.id}
-                  anchor={anchor}
-                  param={anchor.paramId ? paramsById.get(anchor.paramId) : undefined}
-                  onParamChange={onParamChange}
-                />
-              ))}
-              {treadleAnchors.map((anchor) => (
-                <NeuralTreadleAnchor
-                  key={anchor.id}
-                  anchor={anchor}
-                  param={anchor.paramId ? paramsById.get(anchor.paramId) : undefined}
-                  onParamChange={onParamChange}
-                />
-              ))}
-              {labelAnchors.map((anchor) => (
-                <NeuralLabelAnchor key={anchor.id} anchor={anchor} />
-              ))}
-              {micAnchors.map((anchor) => (
-                <NeuralCabMicAnchor
-                  key={anchor.id}
-                  anchor={anchor}
-                  param={anchor.paramId ? paramsById.get(anchor.paramId) : undefined}
-                  onParamChange={onParamChange}
-                />
-              ))}
-              {meterAnchors.map((anchor) => (
-                <NeuralMeterAnchor key={anchor.id} anchor={anchor} />
-              ))}
-              {switchAnchors.map((anchor) => {
-                const param = paramsById.get(anchor.paramId ?? "");
-                if (!param) return null;
-                const isEnum = param.type === "enum";
-                const active = isEnum
-                  ? (typeof anchor.resetValue === "number" ? Math.round(param.value) === Math.round(anchor.resetValue) : param.value > param.min)
-                  : param.value >= (param.max + param.min) / 2;
-                const enumOptionLabel = isEnum && typeof anchor.resetValue !== "number"
-                  ? param.enumOptions?.find((option) => Math.round(option.value) === Math.round(param.value))?.label
-                  : undefined;
-                return (
-                  <button
-                    key={anchor.id}
-                    type="button"
-                    className="nam-neural-anchor-button"
-                    data-kind={anchor.kind}
-                    data-active={active}
-                    data-anchor-id={anchor.id}
-                    data-param={param.id}
-                    data-bound={Boolean(param)}
-                    style={neuralAnchorStyle(anchor)}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (isEnum) {
-                        const next = typeof anchor.resetValue === "number"
-                          ? anchor.resetValue
-                          : (Math.round(param.value) >= param.max ? param.min : Math.round(param.value) + 1);
-                        onParamChange(param, next);
-                      } else {
-                        onParamChange(param, active ? param.min : param.max);
-                      }
-                    }}
-                    title={isEnum ? `Change ${param.label}` : `${active ? "Disable" : "Enable"} ${param.label}`}
-                  >
-                    <span aria-hidden="true" />
-                    <strong>{enumOptionLabel ?? anchor.label ?? (anchor.kind === "switch" ? "Switch" : param.label)}</strong>
-                  </button>
-                );
-              })}
-              {freeButtonAnchors.map((anchor) => (
-                <button
-                  key={anchor.id}
-                  type="button"
-                  className="nam-neural-anchor-button"
-                  data-kind="button"
-                  data-active={Boolean(device.onAction)}
-                  data-anchor-id={anchor.id}
-                  style={neuralAnchorStyle(anchor)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    device.onAction?.();
-                  }}
-                  disabled={!device.onAction}
-                  title={device.actionLabel ?? device.title}
-                >
-                  <span aria-hidden="true" />
-                  <strong>{anchor.label ?? device.actionLabel ?? "Action"}</strong>
-                </button>
-              ))}
-              {footswitchAnchor && (
-                <button
-                  type="button"
-                  className="nam-neural-footswitch nam-neural-footswitch-anchor"
-                  data-active={device.active}
-                  data-anchor-id={footswitchAnchor.id}
-                  data-param={footswitchAnchor.paramId ?? ""}
-                  data-bound={Boolean(footswitchAnchor.paramId && paramsById.has(footswitchAnchor.paramId))}
-                  style={neuralAnchorStyle(footswitchAnchor)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (device.onPowerToggle) device.onPowerToggle();
-                    else onFocusDevice(sectionId, device.moduleId);
-                  }}
-                  title={device.onPowerToggle ? `${device.active ? "Bypass" : "Enable"} ${device.title}` : `Focus ${device.title}`}
-                >
-                  <NeuralRasterFootswitch active={device.active} />
-                  <strong>{footswitchAnchor.label ?? (device.active ? "On" : "Off")}</strong>
-                </button>
-              )}
-              <NeuralSkinDebugOverlay skin={device.skin} />
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function NAMRackPostFxSuite({
-  devices,
-  activeModule,
-  visualMode,
-  renderKnob,
-  onFocusModule,
-  onParamChange,
-}: {
-  devices: Array<{
-    moduleId: Extract<RackModuleId, "mod" | "delay" | "reverb">;
-    title: string;
-    subtitle: string;
-    display: string;
-    active: boolean;
-    accent: string;
-    params: BuiltInParamDescriptor[];
-  }>;
-  activeModule: RackModuleId;
-  visualMode: NAMRackVisualMode;
-  renderKnob: (param: BuiltInParamDescriptor) => ReactNode;
-  onFocusModule: (moduleId: RackModuleId) => void;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  return (
-    <div className="nam-neural-post-suite nam-stage-large" data-debug-anchors={visualMode === "debug-anchors"}>
-      {devices.map((device) => {
-        const skin = deviceSkinForModule(device.moduleId);
-        const scene = skin ? sceneForSkin(skin.id) : undefined;
-        if (skin && scene) {
-          return (
-            <NAMRackSceneDevice
-              key={device.moduleId}
-              sectionId="post"
-              device={{ ...device, skin }}
-              scene={scene}
-              activeModule={activeModule}
-              visualMode={visualMode}
-              onFocusDevice={(_, moduleId) => onFocusModule(moduleId ?? device.moduleId)}
-              onParamChange={onParamChange}
-            />
-          );
-        }
-        const paramsById = new Map(device.params.map((param) => [param.id, param]));
-        const displayAnchor = skin?.controls.find((anchor) => anchor.kind === "display");
-        const footswitchAnchors = skin?.controls.filter((anchor) => anchor.kind === "footswitch") ?? [];
-        const footswitchAnchor = footswitchAnchors[0];
-        const switchAnchors = skin?.controls.filter((anchor) => (
-          anchor.kind === "switch"
-          || anchor.kind === "button"
-          || (anchor.kind === "footswitch" && anchor.id !== footswitchAnchor?.id)
-        ) && anchor.paramId) ?? [];
-        const treadleAnchors = skin?.controls.filter((anchor) => anchor.kind === "treadle") ?? [];
-        const footswitchParam = footswitchAnchor?.paramId ? paramsById.get(footswitchAnchor.paramId) : undefined;
-        return (
-          <article
-            key={device.moduleId}
-            className="nam-neural-device"
-            data-section={skin?.section ?? "post"}
-            data-skin={skin?.id}
-            data-module={device.moduleId}
-            data-material={skin?.material}
-            data-active={device.active}
-            data-focused={activeModule === device.moduleId}
-            style={{ "--nam-neural-accent": device.accent } as CSSProperties}
-            onClick={() => onFocusModule(device.moduleId)}
-          >
-            {skin && (
-              <img className="nam-neural-device-skin" src={skin.assetUrl} alt="" loading="eager" aria-hidden="true" />
-            )}
-            <div className="nam-neural-device-plate">
-              <div className="nam-neural-device-head">
-                <span>{device.subtitle}</span>
-                <strong>{device.title}</strong>
-              </div>
-              <NeuralRasterLed active={device.active} />
-              {device.moduleId === "delay" && (
-                <div
-                  className="nam-neural-delay-display"
-                  data-anchored={Boolean(displayAnchor)}
-                  style={displayAnchor ? neuralAnchorStyle(displayAnchor) : undefined}
-                >
-                  <NeuralSevenSegmentValue value={device.display} />
-                  <span>FREE MS</span>
-                  <span>BPM</span>
-                  <span>PING PONG</span>
-                  <span>DUCKING</span>
-                </div>
-              )}
-              {device.moduleId !== "delay" && (
-                <div
-                  className="nam-neural-mini-display"
-                  data-anchored={Boolean(displayAnchor)}
-                  style={displayAnchor ? neuralAnchorStyle(displayAnchor) : undefined}
-                >
-                  <span>{device.display}</span>
-                  <i aria-hidden="true" />
-                </div>
-              )}
-              {skin?.controls.filter((anchor) => anchor.kind === "knob" && anchor.paramId).map((anchor) => {
-                const param = paramsById.get(anchor.paramId ?? "");
-                if (!param) return null;
-                return (
-                  <div
-                    key={anchor.id}
-                    className="nam-neural-control-anchor"
-                    data-anchor-id={anchor.id}
-                    data-param={param.id}
-                    data-bound={Boolean(param)}
-                    style={neuralAnchorStyle(anchor)}
-                  >
-                    {renderKnob(param)}
-                  </div>
-                );
-              })}
-              {treadleAnchors.map((anchor) => (
-                <NeuralTreadleAnchor
-                  key={anchor.id}
-                  anchor={anchor}
-                  param={anchor.paramId ? paramsById.get(anchor.paramId) : undefined}
-                  onParamChange={onParamChange}
-                />
-              ))}
-              {switchAnchors.map((anchor) => {
-                const param = paramsById.get(anchor.paramId ?? "");
-                if (!param) return null;
-                const isEnum = param.type === "enum";
-                const active = isEnum
-                  ? (typeof anchor.resetValue === "number" ? Math.round(param.value) === Math.round(anchor.resetValue) : param.value > param.min)
-                  : param.value >= (param.max + param.min) / 2;
-                const enumOptionLabel = isEnum && typeof anchor.resetValue !== "number"
-                  ? param.enumOptions?.find((option) => Math.round(option.value) === Math.round(param.value))?.label
-                  : undefined;
-                return (
-                  <button
-                    key={anchor.id}
-                    type="button"
-                    className={anchor.kind === "footswitch" ? "nam-neural-footswitch nam-neural-footswitch-anchor" : "nam-neural-anchor-button"}
-                    data-kind={anchor.kind}
-                    data-active={active}
-                    data-anchor-id={anchor.id}
-                    data-param={param.id}
-                    data-bound={Boolean(param)}
-                    style={neuralAnchorStyle(anchor)}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (isEnum) {
-                        const next = typeof anchor.resetValue === "number"
-                          ? anchor.resetValue
-                          : (Math.round(param.value) >= param.max ? param.min : Math.round(param.value) + 1);
-                        onParamChange(param, next);
-                      } else {
-                        onParamChange(param, active ? param.min : param.max);
-                      }
-                    }}
-                    title={isEnum ? `Change ${param.label}` : `${active ? "Disable" : "Enable"} ${param.label}`}
-                  >
-                    {anchor.kind === "footswitch" ? <NeuralRasterFootswitch active={active} /> : <span aria-hidden="true" />}
-                    <strong>{enumOptionLabel ?? anchor.label ?? param.label}</strong>
-                  </button>
-                );
-              })}
-              <button
-                type="button"
-                className={`nam-neural-footswitch${footswitchAnchor ? " nam-neural-footswitch-anchor" : ""}`}
-                data-active={device.active}
-                data-anchor-id={footswitchAnchor?.id}
-                data-param={footswitchAnchor?.paramId ?? ""}
-                data-bound={Boolean(footswitchParam)}
-                style={footswitchAnchor ? neuralAnchorStyle(footswitchAnchor) : undefined}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (footswitchParam) {
-                    const active = footswitchParam.value >= (footswitchParam.max + footswitchParam.min) / 2;
-                    onParamChange(footswitchParam, active ? footswitchParam.min : footswitchParam.max);
-                  } else {
-                    onFocusModule(device.moduleId);
-                  }
-                }}
-                title={footswitchParam ? `${device.active ? "Bypass" : "Enable"} ${device.title}` : `Focus ${device.title}`}
-              >
-                <NeuralRasterFootswitch active={device.active} />
-                <strong>{footswitchAnchor?.label ?? (device.active ? "On" : "Off")}</strong>
-              </button>
-              <NeuralSkinDebugOverlay skin={skin} />
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
 export function NAMRackPanel({
   address,
   schema,
@@ -2784,6 +1995,21 @@ export function NAMRackPanel({
   const [libraryFlow, setLibraryFlow] = useState<NAMLibraryFlowState>(() => initialNAMLibraryFlow());
   const [chainOpen, setChainOpen] = useState(() => initialCompactChainOpen());
   const [advancedFocus, setAdvancedFocus] = useState<NAMRackAdvancedStageId | null>(null);
+  const [designInstalledCaptures, setDesignInstalledCaptures] = useState<NAMInstalledModel[]>([]);
+
+  useEffect(() => {
+    let current = true;
+    void nativeBridge.getNAMLibrary()
+      .then((payload) => {
+        if (current) setDesignInstalledCaptures(payload.installed ?? []);
+      })
+      .catch(() => {
+        if (current) setDesignInstalledCaptures([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, [activeView]);
   const [rackRailTab, setRackRailTab] = useState<RackRightRailTab>("tones");
   const [explorerIntent, setExplorerIntent] = useState<NAMExplorerIntent | null>(() => initialNAMExplorerIntent());
   // Loading the first amp capture starts an unsaved rig; it does not apply the
@@ -2824,7 +2050,6 @@ export function NAMRackPanel({
     const fxModule = initialNAMLibraryFXModule();
     return flow ? fxModule === "eq" ? "eq" : rackSectionForNAMLibraryFlow(flow) : initialRackSection();
   });
-  const [visualMode] = useState<NAMRackVisualMode>(() => initialNAMRackVisualMode());
   const [presetBusy, setPresetBusy] = useState(false);
   const [cabBusy, setCabBusy] = useState(false);
   const [modelQualityBusySlot, setModelQualityBusySlot] = useState<"pedal" | "amp" | null>(null);
@@ -2900,6 +2125,9 @@ export function NAMRackPanel({
     })),
   );
   const [audioDebugSnapshot, setAudioDebugSnapshot] = useState<AudioDebugSnapshot | null>(null);
+  const [rackOversamplingFactor, setRackOversamplingFactor] = useState<NAMRackOversamplingFactor>(4);
+  const [rackOversamplingBusy, setRackOversamplingBusy] = useState(false);
+  const rackOversamplingRequestRef = useRef(false);
   const tunerSubscriberIdRef = useRef("");
   if (!tunerSubscriberIdRef.current) {
     tunerSubscriberIdRef.current = createNAMTunerSubscriberId();
@@ -2916,6 +2144,61 @@ export function NAMRackPanel({
     () => resolveNAMRackWindowCapabilities(windowRole, address),
     [address.chain, address.trackId],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void nativeBridge.getNAMRackOversamplingFactor().then((factor) => {
+      if (!cancelled && (factor === 2 || factor === 4 || factor === 8)) {
+        setRackOversamplingFactor(factor);
+      }
+    }).catch((error) => {
+      if (!cancelled) {
+        console.warn("[NAMRackPanel] Could not read the NAM Rack oversampling preference", error);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (rackOversamplingRequestRef.current) return;
+    const telemetryFactor = Number(
+      (audioDebugSnapshot as unknown as Record<string, unknown> | null)?.namRackOversamplingFactor ?? 0,
+    );
+    if (telemetryFactor === 2 || telemetryFactor === 4 || telemetryFactor === 8) {
+      setRackOversamplingFactor(telemetryFactor);
+    }
+  }, [audioDebugSnapshot]);
+
+  const changeRackOversamplingFactor = useCallback(async (factor: NAMRackOversamplingFactor) => {
+    if (rackOversamplingRequestRef.current || factor === rackOversamplingFactor) return;
+
+    const previousFactor = rackOversamplingFactor;
+    rackOversamplingRequestRef.current = true;
+    setRackOversamplingBusy(true);
+    setRackOversamplingFactor(factor);
+
+    try {
+      const applied = await nativeBridge.setNAMRackOversamplingFactor(factor);
+      if (!applied) {
+        setRackOversamplingFactor(previousFactor);
+        setPresetStatus(`Oversampling remains at ${previousFactor}x.`);
+        return;
+      }
+      setPresetStatus(`Oversampling set to ${factor}x.`);
+    } catch (error) {
+      setRackOversamplingFactor(previousFactor);
+      setPresetStatus(`Could not change oversampling; still using ${previousFactor}x.`);
+      console.warn("[NAMRackPanel] Could not change NAM Rack oversampling", error);
+    } finally {
+      rackOversamplingRequestRef.current = false;
+      setRackOversamplingBusy(false);
+    }
+  }, [rackOversamplingFactor]);
+
   const [detachedRuntime, setDetachedRuntime] = useState<{
     tempo?: number;
     timeSignature?: { numerator: number; denominator: number };
@@ -3073,50 +2356,47 @@ export function NAMRackPanel({
   const compressorEnabledParam = paramById(params, "compressorEnabled");
   const compressorMixParam = paramById(params, "compressorMix");
   const compressorCompParam = paramById(params, "compressorComp");
-  const tapeEchoEnabledParam = paramById(params, "tapeEchoEnabled");
-  const tapeEchoMixParam = paramById(params, "tapeEchoMix");
-  const tapeEchoTimeParam = paramById(params, "tapeEchoTimeMs");
   const octaverEnabledParam = paramById(params, "octaverEnabled");
   const octaverDownParam = paramById(params, "octaverDownMix");
   const octaverUpParam = paramById(params, "octaverUpMix");
+  const preEqEnabledParam = paramById(params, "preEqEnabled");
+  const preEqHPFParam = paramById(params, "preEqHPFHz");
+  const preEqLPFParam = paramById(params, "preEqLPFHz");
   const precisionDriveEnabledParam = paramById(params, "precisionDriveEnabled");
+  const precisionDriveVoiceLabel = "Precision";
   const precisionDriveDriveParam = paramById(params, "precisionDriveDrive");
+  const precisionDriveVolumeParam = paramById(params, "precisionDriveVolumeDb");
   const chaosEnabledParam = paramById(params, "chaosEnabled");
   const chaosMixParam = paramById(params, "chaosMix");
   const pedalMix = paramById(params, "pedalMix");
   const ampEnabledParam = paramById(params, "ampEnabled");
-  const ampGainParam = paramById(params, "ampGainDb");
-  const ampOutputParam = paramById(params, "ampOutputDb");
+  const ampBoostParam = paramById(params, "ampBoost");
   const ampMix = paramById(params, "ampMix");
   const cabEnabledParam = paramById(params, "cabEnabled");
   const cabRoomEnabledParam = paramById(params, "cabRoomEnabled");
   const cabRoomAmountParam = paramById(params, "cabRoomAmount");
   const cabDoublerEnabledParam = paramById(params, "cabDoublerEnabled");
   const cabDoublerMixParam = paramById(params, "cabDoublerMix");
-  const cabPhaseInvertParam = paramById(params, "cabPhaseInvert");
+  const cabDoublerDelayParam = paramById(params, "cabDoublerDelayMs");
   const eqEnabledParam = paramById(params, "eqEnabled");
   const modulatorEnabledParam = paramById(params, "modulatorEnabled");
   const modulatorPedalModeParam = paramById(params, "modulatorPedalMode");
-  const modulatorPedalPositionParam = paramById(params, "modulatorPedalPosition");
   const chorusMixParam = paramById(params, "chorusMix");
-  const chorusRateParam = paramById(params, "chorusRateHz");
   const modulatorModeParam = paramById(params, "modulatorMode");
   const delayMixParam = paramById(params, "delayMix");
-  const delayTimeParam = paramById(params, "delayTimeMs");
-  const delayFeedbackParam = paramById(params, "delayFeedback");
-  const delayModParam = paramById(params, "delayMod");
-  const delayPingPongParam = paramById(params, "delayPingPong");
   const delayEnabledParam = paramById(params, "delayEnabled");
   const delayTempoSyncParam = paramById(params, "delayTempoSync");
   const reverbEnabledParam = paramById(params, "reverbEnabled");
+  const reverbPadParam = paramById(params, "reverbPad");
   const reverbMixParam = paramById(params, "reverbMix");
-  const reverbDecayParam = paramById(params, "reverbDecaySec");
-  const reverbPreDelayParam = paramById(params, "reverbPreDelayMs");
   const gateActive = gateThreshold ? gateThreshold.value > gateThreshold.min + 0.5 : true;
   const compressorPowerActive = (compressorEnabledParam?.value ?? 0) >= 0.5;
   const compressorActive = compressorPowerActive && (compressorMixParam?.value ?? 0) > 0.0001;
-  const tapeEchoActive = (tapeEchoEnabledParam?.value ?? 0) >= 0.5 && (tapeEchoMixParam?.value ?? 0) > 0.0001;
   const octaverActive = (octaverEnabledParam?.value ?? 0) >= 0.5 && (((octaverDownParam?.value ?? 0) > 0.0001) || ((octaverUpParam?.value ?? 0) > 0.0001));
+  const preEqActive = (preEqEnabledParam?.value ?? 0) >= 0.5;
+  const preEqShaped = (preEqHPFParam?.value ?? 0) >= 35
+    || (preEqLPFParam?.value ?? 24000) < 22000
+    || NAM_RACK_PRE_EQ_BAND_PARAM_IDS.some((id) => Math.abs(paramById(params, id)?.value ?? 0) > 0.0001);
   const precisionDriveActive = (precisionDriveEnabledParam?.value ?? 0) >= 0.5;
   const chaosActive = (chaosEnabledParam?.value ?? 0) >= 0.5 && (chaosMixParam?.value ?? 0) > 0.0001;
   const pedalActive = Boolean(modelState?.hasPedalModel) && (pedalMix?.value ?? 0) > 0.0001;
@@ -3145,6 +2425,10 @@ export function NAMRackPanel({
   );
   const ampModelQualityValue = resolveNAMModelQualityOptionValue(
     modelState?.ampModelSize,
+    modelState?.ampModelSizeBreakpoints,
+  );
+  const ampActiveModelQualityValue = resolveNAMModelQualityOptionValue(
+    modelState?.ampActiveModelSize,
     modelState?.ampModelSizeBreakpoints,
   );
   const previouslyHadAmpModelRef = useRef(hasAmpModel);
@@ -3188,7 +2472,9 @@ export function NAMRackPanel({
     embeddedCabCapture,
   });
   const cabControlsUnavailableReason = cabPresentation.mode === "embedded"
-    ? "This full-rig Capture already includes its cabinet. Load an amp-only Capture to use the external Cab/IR controls."
+    ? cabPresentation.hasRetainedExternalIR
+      ? "This full-rig Capture includes its cabinet. The retained external IR is bypassed, not removed; load an amp-only Capture to restore it."
+      : "This full-rig Capture includes its cabinet, so the external Cab/IR stage is bypassed. Load an amp-only Capture to use it."
     : cabPresentation.mode === "required"
       ? "Choose a cabinet IR to enable the Cab/IR shaper for this amp Capture."
       : cabPresentation.mode === "empty"
@@ -3219,7 +2505,42 @@ export function NAMRackPanel({
       : "No amp capture loaded";
   const hardwareCabLabel = cabPresentation.mode === "loaded"
     ? namHardwareDisplayName(firstNAMDisplayName(cabName, cabPathName), cabPresentation.label)
-    : cabPresentation.label;
+    : cabPresentation.mode === "embedded" && cabPresentation.hasRetainedExternalIR
+      ? "Cab in Capture / External IR bypassed"
+      : cabPresentation.label;
+  const pedalIdentityWarning = resolveNAMModelIdentityWarning({
+    displayName: pedalName,
+    metadataName: modelState?.pedalMetadataName,
+    gearMake: modelState?.pedalMetadataGearMake,
+    gearModel: modelState?.pedalMetadataGearModel,
+    metadataSources: [
+      activeNAMPreview?.slot === "pedal" ? activeNAMPreview.record : null,
+      savedNAMToneSlot === "pedal" ? savedNAMTone : null,
+    ],
+  });
+  const ampIdentityWarning = resolveNAMModelIdentityWarning({
+    displayName: ampName,
+    metadataName: modelState?.ampMetadataName,
+    gearMake: modelState?.ampMetadataGearMake,
+    gearModel: modelState?.ampMetadataGearModel,
+    metadataSources: [
+      activeNAMPreview?.slot === "amp" ? activeNAMPreview.record : null,
+      savedNAMToneSlot === "amp" ? savedNAMTone : null,
+    ],
+  });
+  const ampGainStagingWarning = resolveNAMGainStagingWarning({
+    inputTrimDb: inputTrim?.value,
+    driveActive: precisionDriveActive,
+    driveLevelDb: precisionDriveVolumeParam?.value,
+    ampActive,
+    ampBoostActive: (ampBoostParam?.value ?? 0) >= 0.5,
+  });
+  const ampEconomyQualityWarning = resolveNAMEconomyQualityWarning({
+    hasAmpModel,
+    slimmable: Boolean(modelState?.ampModelSlimmable),
+    requestedQualityValue: ampModelQualityValue,
+    activeQualityValue: ampActiveModelQualityValue,
+  });
   const roomActive = cabinetSpaceActivity.roomActive;
   const doublerActive = cabinetSpaceActivity.doublerActive;
   const effectiveInputRoutingMode = numberFromRecord(rackLiveDiagnostics, "effectiveInputRoutingMode")
@@ -3231,20 +2552,11 @@ export function NAMRackPanel({
     ?? ((runtimeHostTrack?.inputChannelCount ?? 1) >= 2 ? 2 : 0);
   const stereoInputActive = effectiveInputRoutingMode >= 1.5;
   const doublerAudible = doublerActive && !stereoInputActive;
-  const cabinetSpaceAudible = roomActive || doublerAudible;
-  const cabinetSpaceAudibleLabel = roomActive && doublerAudible
-    ? "Room + Doubler"
-    : roomActive
-      ? "Room"
-      : doublerAudible
-        ? "Doubler"
-        : "";
-  const cabinetStageActive = embeddedCabCapture || cabActive || cabinetSpaceAudible;
-  const currentIREntry = currentCabIRPath ? irLibrary.find((entry) => entry.path === currentCabIRPath) : undefined;
+  const doublerDelayLabel = cabDoublerDelayParam
+    ? formatParamValue(cabDoublerDelayParam)
+    : "4.5 ms";
   const favoriteIRs = irLibrary.filter((entry) => entry.favorite).slice(0, 6);
   const recentIRs = irLibrary.filter((entry) => !entry.favorite).slice(0, 8);
-  const visibleFavoriteIRs = favoriteIRs.slice(0, 2);
-  const visibleRecentIRs = recentIRs.slice(0, visibleFavoriteIRs.length > 0 ? 1 : 3);
   const schemaInputMeterDb = schema.visualization?.inputLevelDb;
   const schemaOutputMeterDb = schema.visualization?.outputLevelDb;
   const schemaRackDiagnostics =
@@ -3252,6 +2564,25 @@ export function NAMRackPanel({
       ? schema.visualization.diagnostics as Record<string, unknown>
       : null;
   const rackDiagnostics = rackLiveDiagnostics ?? schemaRackDiagnostics;
+  const inputMeterChannelCount = (
+    numberFromRecord(rackDiagnostics, "routedInputChannelCount")
+      ?? modelState?.routedInputChannelCount
+      ?? runtimeHostTrack?.inputChannelCount
+      ?? 1
+  ) >= 2 ? 2 : 1;
+  const cabRoomInputSourceAvailable = booleanFromRecord(rackDiagnostics, "cabRoomInputSourceAvailable")
+    ?? (cabActive || (ampActive && embeddedCabCapture));
+  const roomWaitingForCabSource = roomActive && !cabRoomInputSourceAvailable;
+  const roomAudible = roomActive && cabRoomInputSourceAvailable;
+  const cabinetSpaceAudible = roomAudible || doublerAudible;
+  const cabinetSpaceAudibleLabel = roomAudible && doublerAudible
+    ? "Room + Doubler"
+    : roomAudible
+      ? "Room"
+      : doublerAudible
+        ? "Doubler"
+        : "";
+  const cabinetStageActive = embeddedCabCapture || cabActive || cabinetSpaceAudible;
   const processedBlockCount = numberFromRecord(rackDiagnostics, "processedBlockCount");
   const meterFreshness = meterFreshnessRef.current;
   if (
@@ -3282,6 +2613,42 @@ export function NAMRackPanel({
     : -90;
   const outputMeterDb = meterTelemetryFresh
     ? resolveNAMLinkedMeterDb("output", rackDiagnostics, schemaOutputMeterDb)
+    : -90;
+  const inputLeftMeterDb = meterTelemetryFresh
+    ? resolveNAMChannelMeterDb(
+        "input",
+        "left",
+        rackDiagnostics,
+        schema.visualization?.inputLeftLevelDb,
+        inputMeterDb,
+      )
+    : -90;
+  const inputRightMeterDb = meterTelemetryFresh
+    ? resolveNAMChannelMeterDb(
+        "input",
+        "right",
+        rackDiagnostics,
+        schema.visualization?.inputRightLevelDb,
+        inputMeterDb,
+      )
+    : -90;
+  const outputLeftMeterDb = meterTelemetryFresh
+    ? resolveNAMChannelMeterDb(
+        "output",
+        "left",
+        rackDiagnostics,
+        schema.visualization?.outputLeftLevelDb,
+        outputMeterDb,
+      )
+    : -90;
+  const outputRightMeterDb = meterTelemetryFresh
+    ? resolveNAMChannelMeterDb(
+        "output",
+        "right",
+        rackDiagnostics,
+        schema.visualization?.outputRightLevelDb,
+        outputMeterDb,
+      )
     : -90;
   const compressorGainReductionDb = meterTelemetryFresh
     ? clamp(
@@ -3487,7 +2854,7 @@ export function NAMRackPanel({
     liveInputDetected ? "success" :
     auditionSourceRendered ? "info" :
     "idle";
-  const modeRailStatus: NAMRackModeRailStatus = {
+  const modeRailStatus = {
     cpu: nativeCpuUsage === undefined ? undefined : {
       label: `${clamp(nativeCpuUsage, 0, 999).toFixed(0)}%`,
       alert: nativeCpuUsage >= 85,
@@ -3611,47 +2978,6 @@ export function NAMRackPanel({
       window.clearInterval(timer);
     };
   }, [address.chain, address.fxIndex, address.trackId]);
-  const focusedParamIds = useMemo(() => {
-    return moduleParamIds(focusedModule);
-  }, [focusedModule]);
-  const focusedParams = useMemo(
-    () =>
-      focusedParamIds
-        .map((id) => paramById(params, id))
-        .filter((param): param is BuiltInParamDescriptor => Boolean(param)),
-    [focusedParamIds, params],
-  );
-  const ampFaceplateParams = useMemo(
-    () => [
-      ["ampGainDb", "Input"],
-      ["ampBoost", "Tight"],
-      ["ampVoice", "Bright"],
-      ["bassDb", "Post Bass"],
-      ["midDb", "Post Mid"],
-      ["trebleDb", "Post Treble"],
-      ["presenceDb", "Post Presence"],
-      ["ampMix", "Capture Mix"],
-      ["ampOutputDb", "Post Level"],
-    ]
-      .map(([id, label]) => {
-        const param = paramById(params, id);
-        return param ? { ...param, label } : undefined;
-      })
-      .filter((param): param is BuiltInParamDescriptor => Boolean(param)),
-    [params],
-  );
-  const pedalStageParams = useMemo(
-    () => focusedModule === "pedal"
-      ? focusedParams.filter((param) => param.id !== "inputTrimDb" && param.id !== "outputTrimDb")
-      : focusedParams,
-    [focusedModule, focusedParams],
-  );
-  const cabRoomKnobs = useMemo(
-    () => focusedModule === "cab"
-      ? focusedParams.filter((param) => param.id !== "cabEnabled" && param.id !== "cabPhaseInvert")
-      : [],
-    [focusedModule, focusedParams],
-  );
   const postCabOrder = useMemo(
     () => slotOrder.filter((moduleId) => moduleId === "eq" || moduleId === "mod" || moduleId === "delay" || moduleId === "reverb"),
     [slotOrder],
@@ -3660,14 +2986,6 @@ export function NAMRackPanel({
     () => postCabOrder.map((moduleId) => moduleTitle(moduleId)).join(" > "),
     [postCabOrder],
   );
-  const renderPedalKnob = useCallback(
-    (param: BuiltInParamDescriptor) => (
-      <RackKnob param={param} onChange={onParamChange} size="large" />
-    ),
-    [onParamChange],
-  );
-  const eqParamIds = NAM_RACK_GRAPHIC_EQ_PARAM_IDS;
-
   useEffect(() => {
     if (!persistedCompareState) return;
     setCompareSlot(persistedCompareState.compareSlot);
@@ -3690,11 +3008,37 @@ export function NAMRackPanel({
     });
   }, [persistedSlotStateKey]);
 
+  const diagnosticEqHPFLastActiveHz = numberFromRecord(
+    rackDiagnostics,
+    "eqHPFLastActiveHz",
+  );
+  const diagnosticEqLPFLastActiveHz = numberFromRecord(
+    rackDiagnostics,
+    "eqLPFLastActiveHz",
+  );
+  const diagnosticPreEqHPFLastActiveHz = numberFromRecord(
+    rackDiagnostics,
+    "preEqHPFLastActiveHz",
+  );
+  const diagnosticPreEqLPFLastActiveHz = numberFromRecord(
+    rackDiagnostics,
+    "preEqLPFLastActiveHz",
+  );
   const currentSnapshot = useMemo<RackCompareSnapshot>(() => {
     const values: Record<string, number> = {};
     for (const param of params) {
       if (isNAMNonPortableStateKey(param.id)) continue;
       values[param.id] = param.value;
+    }
+    for (const [id, value] of [
+      ["preEqHPFLastActiveHz", diagnosticPreEqHPFLastActiveHz],
+      ["preEqLPFLastActiveHz", diagnosticPreEqLPFLastActiveHz],
+      ["eqHPFLastActiveHz", diagnosticEqHPFLastActiveHz],
+      ["eqLPFLastActiveHz", diagnosticEqLPFLastActiveHz],
+    ] as const) {
+      if (NAM_RACK_PRIVATE_EQ_RECALL_VALUE_KEYS.has(id) && value !== undefined) {
+        values[id] = value;
+      }
     }
 
     const modelSnapshot: RackCompareSnapshot["modelState"] = {};
@@ -3714,17 +3058,17 @@ export function NAMRackPanel({
       modelSnapshot.pedalDeclaredCaptureType = modelState.pedalDeclaredCaptureType;
     }
     if (pedalPath) {
-      modelSnapshot.pedalModelSize = Number.isFinite(modelState?.pedalModelSize)
-        ? Math.max(0, Math.min(1, Number(modelState?.pedalModelSize)))
-        : 1;
+      if (Number.isFinite(modelState?.pedalModelSize)) {
+        modelSnapshot.pedalModelSize = Math.max(0, Math.min(1, Number(modelState?.pedalModelSize)));
+      }
     }
     if (ampPath && modelState?.ampDeclaredCaptureType) {
       modelSnapshot.ampDeclaredCaptureType = modelState.ampDeclaredCaptureType;
     }
     if (ampPath) {
-      modelSnapshot.ampModelSize = Number.isFinite(modelState?.ampModelSize)
-        ? Math.max(0, Math.min(1, Number(modelState?.ampModelSize)))
-        : 1;
+      if (Number.isFinite(modelState?.ampModelSize)) {
+        modelSnapshot.ampModelSize = Math.max(0, Math.min(1, Number(modelState?.ampModelSize)));
+      }
     }
 
     return {
@@ -3736,6 +3080,10 @@ export function NAMRackPanel({
       capturedAt: Date.now(),
     };
   }, [
+    diagnosticPreEqHPFLastActiveHz,
+    diagnosticPreEqLPFLastActiveHz,
+    diagnosticEqHPFLastActiveHz,
+    diagnosticEqLPFLastActiveHz,
     focusedModule,
     modelState?.ampDeclaredCaptureType,
     modelState?.ampModelSize,
@@ -3749,7 +3097,7 @@ export function NAMRackPanel({
     postCabOrder,
     presetId,
   ]);
-  const activeUserPresetBaseline = normalizeCompareSnapshot(schema.uiState?.namPresetBaseline);
+  const activePresetBaseline = normalizeCompareSnapshot(schema.uiState?.namPresetBaseline);
   const hasFactoryPresetSelection = profileFactoryPresets.some(
     (entry) => entry.id === presetId,
   );
@@ -3761,12 +3109,10 @@ export function NAMRackPanel({
     ? "Current Preset"
     : "Loaded Amp Capture";
   const profileUserPresets = useMemo(() => {
-    const expectedProfile = instrumentProfile === NAM_INSTRUMENT_PROFILE_BASS ? "bass" : "guitar";
-    return userPresets.filter((entry) => {
-      const savedProfile = presetMetadata[entry.name]?.instrumentProfile;
-      return !savedProfile || savedProfile === expectedProfile;
-    });
-  }, [instrumentProfile, presetMetadata, userPresets]);
+    return userPresets.filter((entry) => (
+      namStoredPresetMatchesInstrumentProfile(entry, instrumentProfile)
+    ));
+  }, [instrumentProfile, userPresets]);
   const headerPresetNavigation = useMemo(
     () => {
       const navigation = resolveNAMHeaderPresetNavigation({
@@ -3795,13 +3141,32 @@ export function NAMRackPanel({
   const headerNextPresetAvailable = Boolean(
     headerPresetNavigation.next || !activePresetIdentity,
   );
-  const isPresetDirty = activeUserPresetName
-    ? snapshotDiffers(currentSnapshot, activeUserPresetBaseline) || schema.uiState?.namPresetDirty === true
+  const persistedPresetDirty = schema.uiState?.namPresetDirty === true;
+  const hasActivePresetBaseline = Boolean(activePresetBaseline);
+  const activePresetKind = activeUserPresetName
+    ? "user" as const
     : hasFactoryPresetSelection
-      ? presetDirty(preset, params)
-        || !sameRackSlotOrder(postCabOrder, DEFAULT_POST_FX_ORDER)
-        || schema.uiState?.namPresetDirty === true
-      : schema.uiState?.namPresetDirty === true;
+      ? "factory" as const
+      : null;
+  const legacyFactoryDiffers = hasFactoryPresetSelection
+    && (
+      presetDirty(preset, params, currentSnapshot.values)
+      || !sameRackSlotOrder(postCabOrder, DEFAULT_POST_FX_ORDER)
+    );
+  const isPresetDirty = deriveNAMRackPresetDirtyState({
+    activePresetKind,
+    hasBaseline: hasActivePresetBaseline,
+    differsFromBaseline: snapshotDiffers(currentSnapshot, activePresetBaseline),
+    legacyFactoryDiffers,
+    persistedDirty: persistedPresetDirty,
+  });
+  const presetDirtyMarkerShadowRef = useRef(persistedPresetDirty);
+  const activePresetIdentityMatchesSchema = activePresetKind === "user"
+    ? schemaActiveUserPresetName.localeCompare(activeUserPresetName, undefined, { sensitivity: "base" }) === 0
+      && !schemaActiveFactoryPresetId
+    : activePresetKind === "factory"
+      ? schemaActiveFactoryPresetId === presetId && !schemaActiveUserPresetName
+      : false;
   const currentCompareDirty = snapshotDiffers(currentSnapshot, compareSnapshots[compareSlot]);
   const updatePresetDirtyMarker = async (
     dirty: boolean,
@@ -3872,8 +3237,7 @@ export function NAMRackPanel({
     const needle = presetSearch.trim().toLowerCase();
     const rows = userPresets.filter((entry) => {
       const metadata = presetMetadata[entry.name] ?? {};
-      const expectedProfile = instrumentProfile === NAM_INSTRUMENT_PROFILE_BASS ? "bass" : "guitar";
-      if (metadata.instrumentProfile && metadata.instrumentProfile !== expectedProfile) return false;
+      if (!namStoredPresetMatchesInstrumentProfile(entry, instrumentProfile)) return false;
       const tags = metadata.tags ?? [];
       const folder = sanitizePresetFolder(metadata.folder ?? "");
       const notes = metadata.notes ?? "";
@@ -3956,6 +3320,48 @@ export function NAMRackPanel({
     return operation;
   };
 
+  useEffect(() => {
+    presetDirtyMarkerShadowRef.current = persistedPresetDirty;
+  }, [persistedPresetDirty, schemaActiveFactoryPresetId, schemaActiveUserPresetName]);
+
+  useEffect(() => {
+    if (
+      presetTransactionPendingRef.current
+      || presetBusy
+      || presetManagerBusy
+      || !activePresetIdentityMatchesSchema
+    ) {
+      return;
+    }
+    if (!shouldSynchronizeNAMRackPresetDirtyMarker({
+      activePresetKind,
+      hasBaseline: hasActivePresetBaseline,
+      derivedDirty: isPresetDirty,
+      persistedDirty: presetDirtyMarkerShadowRef.current,
+    })) {
+      return;
+    }
+
+    const previousShadow = presetDirtyMarkerShadowRef.current;
+    presetDirtyMarkerShadowRef.current = isPresetDirty;
+    void persistNAMUiStatePatch(
+      { namPresetDirty: isPresetDirty },
+      "Could not synchronize the derived Preset edited state",
+    ).then((updated) => {
+      if (!updated && presetDirtyMarkerShadowRef.current === isPresetDirty) {
+        presetDirtyMarkerShadowRef.current = previousShadow;
+      }
+    });
+  }, [
+    activePresetIdentityMatchesSchema,
+    activePresetKind,
+    isPresetDirty,
+    hasActivePresetBaseline,
+    persistedPresetDirty,
+    presetBusy,
+    presetManagerBusy,
+  ]);
+
   const flushPendingParamWritesForPreset = async () => {
     try {
       return await onFlushPendingParamWrites();
@@ -3986,7 +3392,9 @@ export function NAMRackPanel({
       values: stateRecord.values,
       modelState: stateRecord.modelState,
       dspState: stateRecord.dspState,
-      postFxOrder: postFxOrderFromPluginState(state) ?? postCabOrder,
+      // Missing rack-slot UI state is the legacy encoding of the native
+      // default order. Do not reuse a possibly stale pre-load React order.
+      postFxOrder: postFxOrderFromPluginState(state) ?? DEFAULT_POST_FX_ORDER,
       presetId,
       focusedModule,
       capturedAt: Date.now(),
@@ -4006,6 +3414,20 @@ export function NAMRackPanel({
       }
     }
     return { ...baseline, modelState };
+  };
+
+  const readNAMRackPresetStateWithRetry = async (
+    accept: (state: any) => boolean,
+    maxAttempts = 32,
+  ): Promise<any | null> => {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const state = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+      if (state && accept(state)) return state;
+      if (attempt + 1 < maxAttempts) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1));
+      }
+    }
+    return null;
   };
 
   const capturePresetBaseline = async (): Promise<RackCompareSnapshot | undefined> => {
@@ -4096,6 +3518,12 @@ export function NAMRackPanel({
             path: typeof entry.path === "string" ? entry.path : undefined,
             metadataPath: typeof entry.metadataPath === "string" ? entry.metadataPath : undefined,
             metadata: normalizePresetSidecar(entry.metadata, String(entry.name ?? "").trim()),
+            instrumentProfile: entry.instrumentProfile === "bass" || entry.instrumentProfile === "guitar"
+              ? entry.instrumentProfile
+              : undefined,
+            ampModelPath: typeof (entry as unknown as { ampModelPath?: unknown }).ampModelPath === "string"
+              ? (entry as unknown as { ampModelPath: string }).ampModelPath
+              : undefined,
           }))
           .filter((entry) => entry.name)
           .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
@@ -4547,6 +3975,23 @@ export function NAMRackPanel({
       const param = paramById(params, id);
       if (param) values[id] = param.value;
     }
+    if (moduleId === "pedal" || moduleId === "eq") {
+      // An OFF filter still has a meaningful next-on cutoff. Carry the
+      // authoritative private memories when the native build publishes them;
+      // older builds simply keep the existing public-only copy behaviour.
+      for (const [id, value] of [
+        ["preEqHPFLastActiveHz", diagnosticPreEqHPFLastActiveHz],
+        ["preEqLPFLastActiveHz", diagnosticPreEqLPFLastActiveHz],
+        ["eqHPFLastActiveHz", diagnosticEqHPFLastActiveHz],
+        ["eqLPFLastActiveHz", diagnosticEqLPFLastActiveHz],
+      ] as const) {
+        const belongsToModule = moduleId === "pedal"
+          ? id.startsWith("preEq")
+          : !id.startsWith("preEq");
+        if (!belongsToModule) continue;
+        if (value !== undefined) values[id] = value;
+      }
+    }
     if (Object.keys(values).length === 0) {
       setSlotActionStatus(`${moduleTitle(moduleId)} has no editable settings to copy`);
       return;
@@ -4587,6 +4032,14 @@ export function NAMRackPanel({
       const param = paramById(params, id);
       if (param) values[id] = param.defaultValue ?? 0;
     }
+    if (moduleId === "pedal" || moduleId === "eq") {
+      for (const [id, value] of Object.entries(NAM_RACK_FACTORY_HIDDEN_EQ_DEFAULT_VALUES)) {
+        const belongsToModule = moduleId === "pedal"
+          ? id.startsWith("preEq")
+          : !id.startsWith("preEq");
+        if (belongsToModule) values[id] = value;
+      }
+    }
     const ok = await nativeBridge.setBuiltInPluginState(address, { values });
     if (ok) {
       setSlotActionStatus(`${moduleTitle(moduleId)} reset`);
@@ -4604,6 +4057,7 @@ export function NAMRackPanel({
       if (gateParam) values.gateThresholdDb = gateParam.min;
     } else if (moduleId === "pedal") {
       values.pedalMix = 0;
+      Object.assign(values, NAM_RACK_PRE_EQ_NEUTRAL_VALUES);
       values.precisionDriveEnabled = 0;
       values.chaosEnabled = 0;
       nextModelState.clearPedalModel = true;
@@ -4616,7 +4070,10 @@ export function NAMRackPanel({
       values.cabEnabled = 0;
       nextModelState.clearCabIR = true;
     } else if (moduleId === "eq") {
-      for (const id of NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS) values[id] = 0;
+      // Remove makes the audible EQ flat/OFF but preserves its remembered
+      // next-on cutoffs. The explicit Reset action above is the destructive
+      // path that restores those private memories to 80 Hz / 12 kHz.
+      Object.assign(values, NAM_RACK_GRAPHIC_EQ_NEUTRAL_VALUES);
     } else if (moduleId === "mod") {
       values.chorusMix = 0;
     } else if (moduleId === "delay") {
@@ -4633,6 +4090,20 @@ export function NAMRackPanel({
     if (ok) {
       setSlotActionStatus(`${moduleTitle(moduleId)} removed from the active rig`);
       onRefreshRack();
+    }
+  };
+
+  const clearAmpCapture = async () => {
+    if (blockResourceChangeWhilePreviewing("Unload Amp Capture")) return;
+    const ok = await nativeBridge.setBuiltInPluginState(address, {
+      values: { ampEnabled: 1, ampMix: 1 },
+      modelState: { clearAmpModel: true },
+    });
+    if (ok) {
+      setSlotActionStatus("Amp Capture unloaded");
+      onRefreshRack();
+    } else {
+      setSlotActionStatus("Could not unload the Amp Capture. The current capture was kept.");
     }
   };
 
@@ -4686,7 +4157,9 @@ export function NAMRackPanel({
       if (!(await drainPendingWritesForPresetTransaction(`Loading ${nextPreset.name}`))) {
         return false;
       }
-      const rackStateBeforeLoad = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+      const rackStateBeforeLoad = await readNAMRackPresetStateWithRetry(
+        (state) => isCurrentNAMRackPresetState(state),
+      );
       rollbackPatch = buildNAMRackRollbackPatch(rackStateBeforeLoad);
       if (!rollbackPatch) {
         setPresetStatus(`${nextPreset.name} was not loaded because the current rack could not be captured safely`);
@@ -4709,9 +4182,50 @@ export function NAMRackPanel({
         );
         return false;
       }
-      const identityUpdated = await updatePresetDirtyMarker(false, { factoryId: nextPreset.id });
+      const loadedState = await readNAMRackPresetStateWithRetry((state) => (
+        isCurrentNAMRackPresetState(state)
+        && verifyNAMRackCompareReadback(
+          {
+            values: presetValues,
+            dspState: {
+              reverbEngineVersion: CURRENT_NAM_REVERB_ENGINE_VERSION,
+              namEffectsDspVersion: CURRENT_NAM_EFFECTS_DSP_VERSION,
+            },
+          },
+          state,
+        )
+      ));
+      const loadedBaseline = presetBaselineFromState(loadedState);
+      if (!loadedBaseline) {
+        await recoverUnverifiedPresetMutation(
+          nextPreset.name,
+          rollbackPatch,
+          previousIdentity,
+          "its authoritative rack values could not be captured as a clean baseline",
+        );
+        return false;
+      }
+      const identityUpdated = await updatePresetDirtyMarker(false, {
+        factoryId: nextPreset.id,
+        baseline: loadedBaseline,
+      });
       const verifiedState = identityUpdated
-        ? await nativeBridge.getBuiltInPluginState(address).catch(() => null)
+        ? await readNAMRackPresetStateWithRetry((state) => {
+            const uiState = state?.uiState;
+            const factoryId = typeof uiState?.namActiveFactoryPresetId === "string"
+              ? uiState.namActiveFactoryPresetId.trim()
+              : "";
+            const userName = typeof uiState?.namActivePresetName === "string"
+              ? uiState.namActivePresetName.trim()
+              : "";
+            return factoryId === nextPreset.id
+              && !userName
+              && verifyNAMRackCompareReadback(
+                loadedBaseline,
+                state,
+                postFxOrderFromPluginState(state),
+              );
+          })
         : null;
       const verifiedFactoryId = typeof verifiedState?.uiState?.namActiveFactoryPresetId === "string"
         ? verifiedState.uiState.namActiveFactoryPresetId.trim()
@@ -4720,7 +4234,16 @@ export function NAMRackPanel({
         ? verifiedState.uiState.namActivePresetName.trim()
         : "";
       await onRefreshRack();
-      if (!identityUpdated || verifiedFactoryId !== nextPreset.id || verifiedUserName) {
+      if (
+        !identityUpdated
+        || verifiedFactoryId !== nextPreset.id
+        || verifiedUserName
+        || !verifyNAMRackCompareReadback(
+          loadedBaseline,
+          verifiedState,
+          postFxOrderFromPluginState(verifiedState),
+        )
+      ) {
         await recoverUnverifiedPresetMutation(
           nextPreset.name,
           rollbackPatch,
@@ -4890,15 +4413,16 @@ export function NAMRackPanel({
       if (!(await drainPendingWritesForPresetTransaction(`Loading ${presetName}`))) {
         return false;
       }
-      const rackStateBeforeLoad = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+      const rackStateBeforeLoad = await readNAMRackPresetStateWithRetry(
+        (state) => isCurrentNAMRackPresetState(state),
+      );
       rollbackPatch = buildNAMRackRollbackPatch(rackStateBeforeLoad);
       if (!rollbackPatch) {
         setPresetStatus(`${presetName} was not loaded because the current rack could not be captured safely`);
         return false;
       }
-      // Native load can restore the rack successfully and then report false
-      // if the migrated preset could not be committed atomically. Treat every
-      // invocation as a mutation attempt so that failure always rolls back.
+      // Treat native recall as a mutation attempt so a rejected publication
+      // still restores the previous complete rack transactionally.
       rackMutated = true;
       const ok = await nativeBridge.loadBuiltInFXPreset(
         address.trackId ?? "",
@@ -4912,12 +4436,14 @@ export function NAMRackPanel({
           presetName,
           rollbackPatch,
           previousIdentity,
-          "its migrated preset could not be persisted safely",
+          "native recall rejected the migrated rack state",
         );
         return false;
       }
-      const loadedState = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
-      if (!isCurrentNAMRackPresetState(loadedState)) {
+      const loadedState = await readNAMRackPresetStateWithRetry(
+        (state) => isCurrentNAMRackPresetState(state),
+      );
+      if (!loadedState) {
         await recoverUnverifiedPresetMutation(
           presetName,
           rollbackPatch,
@@ -4941,7 +4467,22 @@ export function NAMRackPanel({
         baseline: loadedBaseline,
       });
       const verifiedState = identityUpdated
-        ? await nativeBridge.getBuiltInPluginState(address).catch(() => null)
+        ? await readNAMRackPresetStateWithRetry((state) => {
+            const uiState = state?.uiState;
+            const name = typeof uiState?.namActivePresetName === "string"
+              ? uiState.namActivePresetName.trim()
+              : "";
+            const factoryId = typeof uiState?.namActiveFactoryPresetId === "string"
+              ? uiState.namActiveFactoryPresetId.trim()
+              : "";
+            return !factoryId
+              && name.localeCompare(presetName, undefined, { sensitivity: "base" }) === 0
+              && verifyNAMRackCompareReadback(
+                loadedBaseline,
+                state,
+                postFxOrderFromPluginState(state),
+              );
+          })
         : null;
       const verifiedName = typeof verifiedState?.uiState?.namActivePresetName === "string"
         ? verifiedState.uiState.namActivePresetName.trim()
@@ -4954,6 +4495,11 @@ export function NAMRackPanel({
         !identityUpdated
         || verifiedFactoryId
         || verifiedName.localeCompare(presetName, undefined, { sensitivity: "base" }) !== 0
+        || !verifyNAMRackCompareReadback(
+          loadedBaseline,
+          verifiedState,
+          postFxOrderFromPluginState(verifiedState),
+        )
       ) {
         await recoverUnverifiedPresetMutation(
           presetName,
@@ -4964,7 +4510,10 @@ export function NAMRackPanel({
         return false;
       }
       publishActivePresetIdentity({ kind: "user", name: presetName });
-      updatePresetMetadata(presetName, { lastUsed: Date.now() });
+      updatePresetMetadata(presetName, {
+        lastUsed: Date.now(),
+        instrumentProfile: namInstrumentProfileMetadataFromRackState(loadedState),
+      });
       setPresetStatus(`Loaded ${presetName}`);
       setPresetManagerOpen(false);
       return true;
@@ -5191,7 +4740,7 @@ export function NAMRackPanel({
       if (activeUserPresetName === presetName) {
         const identityUpdated = await updatePresetDirtyMarker(isPresetDirty, {
           name: nextName,
-          baseline: activeUserPresetBaseline ?? currentSnapshot,
+          baseline: activePresetBaseline ?? currentSnapshot,
         });
         if (!identityUpdated) {
           publishActivePresetIdentity(null);
@@ -5417,7 +4966,9 @@ export function NAMRackPanel({
         return;
       }
 
-      const rackStateBeforeImport = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+      const rackStateBeforeImport = await readNAMRackPresetStateWithRetry(
+        (state) => isCurrentNAMRackPresetState(state),
+      );
       const rollbackPatch = buildNAMRackRollbackPatch(rackStateBeforeImport);
       const rollbackImport = async (message: string, removeImportedPreset = false) => {
         if (removeImportedPreset) {
@@ -5489,8 +5040,10 @@ export function NAMRackPanel({
         await rollbackImport("The imported Preset could not be verified in the library.", true);
         return;
       }
-      const importedState = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
-      if (!isCurrentNAMRackPresetState(importedState)) {
+      const importedState = await readNAMRackPresetStateWithRetry(
+        (state) => isCurrentNAMRackPresetState(state),
+      );
+      if (!importedState) {
         await rollbackImport("The imported Preset did not restore the current DSP state.", true);
         return;
       }
@@ -5507,7 +5060,17 @@ export function NAMRackPanel({
         await rollbackImport("The imported Preset identity could not be persisted.", true);
         return;
       }
-      const verifiedState = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+      const verifiedState = await readNAMRackPresetStateWithRetry((state) => {
+        const uiState = state?.uiState;
+        const name = typeof uiState?.namActivePresetName === "string"
+          ? uiState.namActivePresetName.trim()
+          : "";
+        const factoryId = typeof uiState?.namActiveFactoryPresetId === "string"
+          ? uiState.namActiveFactoryPresetId.trim()
+          : "";
+        return !factoryId
+          && name.localeCompare(nextName, undefined, { sensitivity: "base" }) === 0;
+      });
       const verifiedName = typeof verifiedState?.uiState?.namActivePresetName === "string"
         ? verifiedState.uiState.namActivePresetName.trim()
         : "";
@@ -5523,6 +5086,7 @@ export function NAMRackPanel({
       }
       updatePresetMetadata(nextName, {
         ...fallbackPresetMetadata(nextName, bundle.metadata),
+        instrumentProfile: namInstrumentProfileMetadataFromRackState(importedState),
         importedAt: Date.now(),
         lastUsed: Date.now(),
         sourcePath: path,
@@ -5660,15 +5224,6 @@ export function NAMRackPanel({
     openSourceFlow("fx", moduleId);
   };
 
-  const openRackCabToneSearch = () => {
-    openRackToneRail({
-      tab: "latest",
-      query: "ir",
-      architecture: "all",
-      gearFilter: "ir",
-    });
-  };
-
   const clearCabIR = async () => {
     if (blockResourceChangeWhilePreviewing("Remove Cab/IR")) return;
     setCabBusy(true);
@@ -5772,370 +5327,22 @@ export function NAMRackPanel({
     openNAMCaptureLibrary(asset.slot);
   };
 
-  const toggleIRFavorite = (path: string) => {
-    const cleanPath = path.trim();
-    if (!cleanPath) return;
-    setIRLibrary((current) => {
-      const existing = current.find((entry) => entry.path === cleanPath);
-      const nextEntry: IRLibraryEntry = {
-        path: cleanPath,
-        favorite: !existing?.favorite,
-        lastUsed: existing?.lastUsed ?? Date.now(),
-      };
-      const next = normalizeIRLibrary([nextEntry, ...current.filter((entry) => entry.path !== cleanPath)]);
-      saveIRLibrary(next);
-      return next;
-    });
-  };
-
-  const removeIRFromLibrary = (path: string) => {
-    const cleanPath = path.trim();
-    if (!cleanPath) return;
-    setIRLibrary((current) => {
-      const next = current.filter((entry) => entry.path !== cleanPath);
-      saveIRLibrary(next);
-      return next;
-    });
-  };
-
   const eqPowerActive = (eqEnabledParam?.value ?? 0) >= 0.5;
-  const eqShaped = NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS.some(
-    (id) => Math.abs(paramById(params, id)?.value ?? 0) > 0.01,
-  );
+  const eqShaped = NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS.some((id) => {
+    const param = paramById(params, id);
+    return Boolean(
+      param
+      && Math.abs(param.value - (NAM_RACK_GRAPHIC_EQ_NEUTRAL_VALUES[id] ?? 0)) > 0.01,
+    );
+  });
   const eqActive = eqPowerActive && eqShaped;
   const modulatorPowerActive = (modulatorEnabledParam?.value ?? 0) >= 0.5;
   const chorusActive = modulatorPowerActive && (chorusMixParam?.value ?? 0) > 0.0001;
   const delayPowerActive = (delayEnabledParam?.value ?? 0) >= 0.5;
   const reverbPowerActive = (reverbEnabledParam?.value ?? 0) >= 0.5;
+  const reverbPadActive = (reverbPadParam?.value ?? 0) >= 0.5;
   const delayActive = delayPowerActive && (delayMixParam?.value ?? 0) > 0.0001;
   const reverbActive = reverbPowerActive && (reverbMixParam?.value ?? 0) > 0.0001;
-  const postFxDevices = useMemo(
-    () => {
-      const stageParams = (ids: string[]) => ids
-        .map((id) => paramById(params, id))
-        .filter((param): param is BuiltInParamDescriptor => Boolean(param));
-      return [
-        {
-          moduleId: "mod" as const,
-          title: "MODULATOR",
-          subtitle: "CHORUS / FLANGER",
-          display: !modulatorPowerActive
-            ? "BYPASS"
-            : `${(modulatorModeParam?.value ?? 0) >= 0.5 ? "FLANGER" : `${(chorusRateParam?.value ?? 0).toFixed((chorusRateParam?.value ?? 0) < 1 ? 3 : 2)} Hz`} / ${(modulatorPedalModeParam?.value ?? 1) >= 0.5 ? "AUTO" : `${Math.round((modulatorPedalPositionParam?.value ?? 0.5) * 100)}%`}`,
-          active: modulatorPowerActive,
-          accent: "#c58a73",
-          params: stageParams(["modulatorEnabled", "chorusRateHz", "chorusDepth", "chorusMix", "chorusCharacter", "modulatorMode", "modulatorFeedback", "modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalMode", "modulatorPedalPosition"]),
-        },
-        {
-          moduleId: "delay" as const,
-          title: "STEREO DELAY",
-          subtitle: "SYNC / MODE",
-          display: !delayPowerActive
-            ? "BYPASS"
-            : (delayTempoSyncParam?.value ?? 0) >= 0.5
-              ? `${delaySyncDisplay(delayModParam?.value ?? 0, (delayPingPongParam?.value ?? 0) >= 0.5)} · ${Number.isFinite(runtimeTempo) ? runtimeTempo.toFixed(1) : "--"} BPM`
-              : `${Math.round(delayTimeParam?.value ?? 0)} ms`,
-          active: delayPowerActive,
-          accent: "#ef4d52",
-          params: stageParams(["delayEnabled", "delayMix", "delayTimeMs", "delayFeedback", "delayMod", "delayDucker", "delayMode", "delayPingPong", "delayTempoSync"]),
-        },
-        {
-          moduleId: "reverb" as const,
-          title: "REVERB",
-          subtitle: "DECAY / TONE",
-          display: !reverbPowerActive
-            ? "BYPASS"
-            : `${(reverbDecayParam?.value ?? 0).toFixed(1)} s / ${Math.round(reverbPreDelayParam?.value ?? 0)} ms`,
-          active: reverbPowerActive,
-          accent: "#74b7ff",
-          params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.reverb),
-        },
-      ];
-    },
-    [chorusActive, chorusRateParam, delayFeedbackParam, delayModParam, delayPingPongParam, delayPowerActive, delayTempoSyncParam, delayTimeParam, modulatorModeParam, modulatorPedalModeParam, modulatorPedalPositionParam, modulatorPowerActive, params, reverbDecayParam, reverbPowerActive, reverbPreDelayParam, runtimeTempo],
-  );
-  const neuralSectionDevices = useMemo<NAMNeuralStageDevice[]>(() => {
-    const stageParams = (ids: readonly string[], labels: Record<string, string> = {}) => ids
-      .map((id) => {
-        const param = paramById(params, id);
-        return param ? { ...param, label: labels[id] ?? param.label } : undefined;
-      })
-      .filter((param): param is BuiltInParamDescriptor => Boolean(param));
-
-    return deviceSkinsForSection(activeRackSection).map((skin) => {
-      if (skin.section === "pre" && skin.id === "pre-compressor-design-a") {
-        return {
-          skin,
-          title: "COMPRESSOR",
-          subtitle: "PRE-FX DYNAMICS",
-          display: compressorActive ? (compressorCompParam ? formatParamValue(compressorCompParam) : "COMP") : "BYPASS",
-          active: compressorActive,
-          accent: "#e1e4e9",
-          params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.compressor, {
-            compressorAttackMs: "Attack",
-            compressorReleaseMs: "Release",
-            compressorToneDb: "Tone",
-            compressorSidechainHPF: "Detector HPF",
-            compressorMix: "Mix",
-            compressorComp: "Comp",
-            compressorVolumeDb: "Level",
-            compressorEnabled: "Engage",
-          }),
-          onPowerToggle: () => compressorEnabledParam && onParamChange(compressorEnabledParam, compressorActive ? 0 : 1),
-        };
-      }
-
-      if (skin.section === "pre" && skin.id === "pre-tape-echo-design-a") {
-        return {
-          skin,
-          title: "BOOSTER",
-          subtitle: "PRE-FX BOOST",
-          display: tapeEchoActive ? (tapeEchoTimeParam ? formatParamValue(tapeEchoTimeParam) : "TAPE") : "BYPASS",
-          active: tapeEchoActive,
-          accent: "#9aaa88",
-          params: stageParams(["tapeEchoMix", "tapeEchoFeedback", "tapeEchoTimeMs", "tapeEchoMod", "tapeEchoTone", "tapeEchoEnabled"], {
-            tapeEchoFeedback: "Boost",
-            tapeEchoTimeMs: "Range",
-            tapeEchoMod: "Feel",
-            tapeEchoTone: "Tone",
-            tapeEchoEnabled: "Engage",
-          }),
-          onPowerToggle: () => tapeEchoEnabledParam && onParamChange(tapeEchoEnabledParam, tapeEchoActive ? 0 : 1),
-        };
-      }
-
-      if (skin.section === "pre" && skin.id === "pre-dual-octaver-design-a") {
-        return {
-          skin,
-          title: "TONE SHAPER",
-          subtitle: "PRE-FX TONE",
-          display: octaverActive ? `${Math.round((octaverDownParam?.value ?? 0) * 100)} / ${Math.round((octaverUpParam?.value ?? 0) * 100)}` : "BYPASS",
-          active: octaverActive,
-          accent: "#c9b89c",
-          params: stageParams(["octaverDownMix", "octaverUpMix", "octaverDirectMix", "octaverEnabled"], {
-            octaverDownMix: "Low",
-            octaverUpMix: "High",
-            octaverDirectMix: "Body",
-            octaverEnabled: "Engage",
-          }),
-          onPowerToggle: () => octaverEnabledParam && onParamChange(octaverEnabledParam, octaverActive ? 0 : 1),
-        };
-      }
-
-      if (skin.section === "pre" && skin.moduleId === "gate") {
-        return {
-          skin,
-          moduleId: "gate",
-          title: "INPUT GATE",
-          subtitle: "THRESHOLD / RELEASE",
-          display: gateThreshold ? formatParamValue(gateThreshold) : "OPEN",
-          active: gateActive,
-          accent: "#d7d9df",
-          params: stageParams(["gateThresholdDb", "gateReleaseMs"], {
-            gateThresholdDb: "Threshold",
-            gateReleaseMs: "Release",
-          }),
-          onPowerToggle: () => toggleParamPower("gate", gateThreshold, gateActive, gateThreshold?.min ?? -100, -80),
-        };
-      }
-
-      if (skin.section === "pre" && skin.moduleId === "pedal") {
-        return {
-          skin,
-          moduleId: "pedal",
-          title: "PRECISION DRIVE",
-          subtitle: "DEDICATED TIGHT OVERDRIVE",
-          display: precisionDriveActive ? "PRECISION" : "BYPASS",
-          active: precisionDriveActive,
-          accent: "#1b242c",
-          params: stageParams(["precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack", "precisionDriveGate", "precisionDriveDrive", "precisionDriveEnabled"], {
-            precisionDriveVolumeDb: "Vol",
-            precisionDriveBright: "Bright",
-            precisionDriveAttack: "Attack",
-            precisionDriveGate: "Gate",
-            precisionDriveDrive: "Drive",
-            precisionDriveEnabled: "Engage",
-          }),
-          onPowerToggle: () => precisionDriveEnabledParam && onParamChange(precisionDriveEnabledParam, precisionDriveActive ? 0 : 1),
-        };
-      }
-
-      if (skin.section === "pre" && skin.id === "pre-chaos-design-a") {
-        return {
-          skin,
-          title: "DISTORTION",
-          subtitle: "DEDICATED HIGH-GAIN DISTORTION",
-          display: chaosActive ? "ENGAGED" : "BYPASS",
-          active: chaosActive,
-          accent: "#a16062",
-          params: stageParams(["chaosMode", "chaosDrive", "chaosWeight", "chaosTone", "chaosGate", "chaosMix", "chaosLevelDb", "chaosEnabled"], {
-            chaosMode: "Mode",
-            chaosDrive: "Drive",
-            chaosWeight: "Weight: Tight to Thick",
-            chaosTone: "Tone",
-            chaosGate: "Gate",
-            chaosMix: "Mix",
-            chaosLevelDb: "Level",
-            chaosEnabled: "Engage",
-          }),
-          onPowerToggle: () => chaosEnabledParam && onParamChange(chaosEnabledParam, chaosActive ? 0 : 1),
-        };
-      }
-
-      if (skin.section === "amp" && skin.moduleId === "amp") {
-        return {
-          skin,
-          moduleId: "amp",
-          title: "AMP CAPTURE",
-          subtitle: "A2 MODEL HOST",
-          display: !ampPowerActive
-            ? "POWER OFF"
-            : hardwareAmpLabel || ampName || `${ampGainParam ? formatParamValue(ampGainParam) : "0.0 dB"} / ${ampOutputParam ? formatParamValue(ampOutputParam) : "0.0 dB"}`,
-          active: ampActive,
-          accent: "#3b3e42",
-          params: stageParams(["ampEnabled", "ampGainDb", "ampBoost", "ampVoice", "bassDb", "midDb", "trebleDb", "presenceDb", "ampMix", "ampOutputDb"], {
-            ampEnabled: "Power",
-            ampGainDb: "Capture Input",
-            ampBoost: "Tight Boost",
-            ampVoice: "Bright Voice",
-            bassDb: "Post Bass",
-            midDb: "Post Mid",
-            trebleDb: "Post Treble",
-            presenceDb: "Post Presence",
-            ampMix: "Capture Mix",
-            ampOutputDb: "Post Level",
-          }),
-          actionLabel: "BROWSE",
-          onAction: () => openNAMCaptureLibrary("amp"),
-          onPowerToggle: () => toggleParamPower("amp", ampEnabledParam, ampPowerActive, 0, 1),
-        };
-      }
-
-      if (skin.section === "cab" && skin.moduleId === "cab") {
-        return {
-          skin,
-          moduleId: "cab",
-          title: "CABINET ROOM",
-          subtitle: "IR / FILTER / PHASE",
-          display: cabActive
-            ? cabName || (cabinetSpaceAudible ? "CAB + SPACE" : "FILTER")
-            : cabinetSpaceAudible
-              ? cabinetSpaceAudibleLabel.toUpperCase()
-              : embeddedCabCapture
-                ? "EMBEDDED CAB"
-                : "BYPASS",
-          active: cabinetStageActive,
-          accent: "#202326",
-          params: stageParams(["cabMicPosition", "cabMicDistance", "cabMicBlend", "cabRoomSend", "cabRoomAmount", "cabRoomWidth", "cabDoublerMix", "cabDoublerSpread", "cabLevelDb", "cabPan", "cabHPFHz", "cabLPFHz", "cabPhaseInvert", "cabEnabled"], {
-            cabMicPosition: "Tone Edge",
-            cabMicDistance: "Tone Damp",
-            cabMicBlend: "Shaper Blend",
-            cabRoomSend: "Low Bloom",
-            cabRoomAmount: "Room Amount",
-            cabRoomWidth: "Room Width",
-            cabDoublerMix: "Doubler Mix",
-            cabDoublerSpread: "Doubler Spread",
-            cabLevelDb: "Level",
-            cabPan: "Pan",
-            cabHPFHz: "HPF",
-            cabLPFHz: "LPF",
-            cabPhaseInvert: "Phase",
-            cabEnabled: "Power",
-          }),
-          actionLabel: hasCabIR ? "CLEAR IR" : "LOCAL IR",
-          onAction: hasCabIR ? () => void clearCabIR() : () => void loadCabIR(),
-          onPowerToggle: toggleCabPower,
-        };
-      }
-
-      if (skin.section === "eq" && skin.moduleId === "eq") {
-        return {
-          skin,
-          moduleId: "eq",
-          title: "GRAPHIC EQ",
-          subtitle: "GRAPHIC WRAPPER EQ",
-          display: !eqPowerActive ? "OFF" : eqShaped ? "SHAPED" : "FLAT",
-          active: eqPowerActive,
-          accent: "#3f4141",
-          params: stageParams(["eqEnabled", ...eqParamIds, NAM_RACK_GRAPHIC_EQ_LEVEL_PARAM_ID], {
-            eqEnabled: "Power",
-            eq65Db: "65 Hz",
-            eq125Db: "125 Hz",
-            eq250Db: "250 Hz",
-            eq500Db: "500 Hz",
-            eq1kDb: "1 kHz",
-            eq2kDb: "2 kHz",
-            eq4kDb: "4 kHz",
-            eq8kDb: "8 kHz",
-            eq16kDb: "16 kHz",
-            eqLevelDb: "Level",
-          }),
-          onPowerToggle: () => eqEnabledParam && onParamChange(eqEnabledParam, eqPowerActive ? 0 : 1),
-        };
-      }
-
-      return {
-        skin,
-        moduleId: skin.moduleId,
-        title: skin.title.toUpperCase(),
-        subtitle: "NAM RACK",
-        display: "READY",
-        active: false,
-        accent: "#707783",
-        params: stageParams(skin.controls.map((anchor) => anchor.paramId ?? "").filter(Boolean)),
-      };
-    });
-  }, [
-    activeRackSection,
-    ampActive,
-    ampEnabledParam,
-    ampGainParam,
-    ampMix,
-    ampName,
-    ampOutputParam,
-    ampPowerActive,
-    cabActive,
-    cabinetSpaceAudible,
-    cabinetSpaceAudibleLabel,
-    cabinetStageActive,
-    cabEnabledParam,
-    cabName,
-    chaosActive,
-    chaosEnabledParam,
-    chaosMixParam,
-    precisionDriveActive,
-    precisionDriveDriveParam,
-    precisionDriveEnabledParam,
-    chorusActive,
-    chorusMixParam,
-    chorusRateParam,
-    compressorActive,
-    compressorCompParam,
-    compressorEnabledParam,
-    eqActive,
-    eqEnabledParam,
-    eqPowerActive,
-    eqShaped,
-    embeddedCabCapture,
-    gateActive,
-    gateThreshold,
-    hardwareAmpLabel,
-    hasCabIR,
-    modulatorModeParam,
-    octaverActive,
-    octaverDownParam,
-    octaverEnabledParam,
-    octaverUpParam,
-    params,
-    pedalActive,
-    pedalMix,
-    pedalName,
-    onParamChange,
-    tapeEchoActive,
-    tapeEchoEnabledParam,
-    tapeEchoTimeParam,
-  ]);
-
   const mixerStageSpecs = useMemo<RackMixerStripSpec[]>(() => {
     const stageParams = (ids: readonly string[], labels: Record<string, string> = {}) => ids
       .map((id) => paramById(params, id))
@@ -6150,7 +5357,7 @@ export function NAMRackPanel({
         caption: `${selectedInputLabel} · ${inputTrim ? formatParamValue(inputTrim) : "Unity trim"}`,
         active: true,
         meterDb: inputMeterDb,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.input),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.input),
         warning: monoInputOneWarning,
       },
       {
@@ -6158,23 +5365,14 @@ export function NAMRackPanel({
         label: "Gate",
         caption: gateThreshold ? formatParamValue(gateThreshold) : "Gate open",
         active: gateActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.gate),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.gate),
       },
       {
         id: "compressor",
         label: "Comp",
         caption: compressorActive ? (compressorCompParam ? formatParamValue(compressorCompParam) : "Active") : "Bypassed",
         active: compressorActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.compressor),
-        available: hasAmpModel,
-        unavailableReason: ampRequiredReason,
-      },
-      {
-        id: "tape-echo",
-        label: "Tape",
-        caption: tapeEchoActive ? (tapeEchoTimeParam ? formatParamValue(tapeEchoTimeParam) : "Echo") : "Bypassed",
-        active: tapeEchoActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS["tape-echo"]),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.compressor),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
       },
@@ -6183,18 +5381,34 @@ export function NAMRackPanel({
         label: "Oct",
         caption: octaverActive ? `${Math.round((octaverDownParam?.value ?? 0) * 100)} / ${Math.round((octaverUpParam?.value ?? 0) * 100)}` : "Bypassed",
         active: octaverActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.octaver),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.octaver),
+        available: hasAmpModel,
+        unavailableReason: ampRequiredReason,
+      },
+      {
+        id: "pre-eq",
+        label: "PRE EQ",
+        caption: !preEqActive
+          ? "Bypassed"
+          : preEqShaped
+            ? `${preEqHPFParam ? formatParamValue(preEqHPFParam) : "HPF"} · ${preEqLPFParam ? formatParamValue(preEqLPFParam) : "LPF"}`
+            : "Enabled · Flat",
+        active: preEqActive,
+        params: stageParams(
+          NAM_RACK_ADVANCED_ONLY_CONTROL_IDS["pre-eq"],
+          namPreEqBandLabelsForProfile(instrumentProfile),
+        ),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
       },
       {
         id: "precision-drive",
-        label: "Precision Drive",
+        label: `${precisionDriveVoiceLabel} Drive`,
         caption: precisionDriveActive
-          ? `${precisionDriveDriveParam ? formatParamValue(precisionDriveDriveParam) : "Drive"}`
-          : "Bypassed",
+          ? `${precisionDriveVoiceLabel} · ${precisionDriveDriveParam ? formatParamValue(precisionDriveDriveParam) : "Drive"}`
+          : `Bypassed · ${precisionDriveVoiceLabel} armed`,
         active: precisionDriveActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS["precision-drive"]),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
       },
@@ -6203,7 +5417,7 @@ export function NAMRackPanel({
         label: "Distortion",
         caption: chaosActive ? (chaosMixParam ? formatParamValue(chaosMixParam) : "Active") : "Bypassed",
         active: chaosActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.chaos),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.chaos),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
       },
@@ -6212,7 +5426,7 @@ export function NAMRackPanel({
         label: "Pedal Capture",
         caption: hasPedalModel ? pedalName || "Capture loaded" : "No Pedal capture loaded",
         active: pedalActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS["pedal-capture"], { pedalMix: "Mix" }),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS["pedal-capture"], { pedalMix: "Mix" }),
         available: hasPedalModel,
         unavailableReason: "Load a Pedal NAM capture to control its wet/dry mix.",
         dependencyNote: "Mix is also this capture's power control: 0% is a true bypass. The compact Signal Chain power button remembers and restores the previous Mix value.",
@@ -6222,7 +5436,7 @@ export function NAMRackPanel({
         label: "Amp",
         caption: hasAmpModel ? ampName || "Capture loaded" : "Load an Amp capture",
         active: ampActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.amp),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.amp),
         available: hasAmpModel,
         unavailableReason: "Load an Amp NAM capture to enable the faceplate controls.",
       },
@@ -6237,7 +5451,7 @@ export function NAMRackPanel({
               ? "Choose an IR"
               : "Bypassed",
         active: embeddedCabCapture || cabActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.cab),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.cab),
         paramGroups: [NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0]],
         warning: cabMissingWarning,
         disabledParamIds: cabPresentation.mode === "loaded"
@@ -6252,14 +5466,18 @@ export function NAMRackPanel({
       {
         id: "room",
         label: "Room",
-        caption: roomActive
+        caption: roomWaitingForCabSource
+          ? "No cab source"
+          : roomActive
           ? formatPercentParam(cabRoomAmountParam, "Amount", "Room")
           : "Bypassed",
         active: roomActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.room),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.room),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
-        dependencyNote: "Room has its own power switch. Amount and Width are preserved while Room is bypassed. It runs after the cabinet stage and before EQ, Modulation, Delay, and Reverb.",
+        dependencyNote: roomWaitingForCabSource
+          ? "Room remains enabled and preserves Amount and Width, but waits for an active external Cab/IR or an engaged amp Capture with an embedded cabinet."
+          : "Room has its own power switch. Amount and Width are preserved while Room is bypassed. It runs after the cabinet stage and before EQ, Modulation, Delay, and Reverb.",
       },
       {
         id: "doubler",
@@ -6269,31 +5487,32 @@ export function NAMRackPanel({
             ? "Enabled / Paused in Stereo"
             : "Unavailable in Stereo"
           : doublerActive
-            ? formatPercentParam(cabDoublerMixParam, "Mix", "Doubler")
+            ? `${formatPercentParam(cabDoublerMixParam, "Mix", "Doubler")} · ${doublerDelayLabel}`
             : "Bypassed",
         active: doublerAudible,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.doubler),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.doubler),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
         disabledParamIds: stereoInputActive
-          ? ["cabDoublerMix", "cabDoublerSpread"]
+          ? ["cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread"]
           : undefined,
         disabledParamReasons: stereoInputActive
           ? {
               cabDoublerMix: "Doubler is paused while the DAW route is stereo.",
+              cabDoublerDelayMs: "Doubler is paused while the DAW route is stereo.",
               cabDoublerSpread: "Doubler is paused while the DAW route is stereo.",
             }
           : undefined,
         dependencyNote: stereoInputActive
-          ? "Doubler is paused on a stereo DAW route so the routed left/right image remains intact. Its enabled state, Mix, and Spread are preserved and resume when the DAW route is mono."
-          : "Doubler has its own power switch. Mix and Spread are preserved while it is bypassed. It runs after the cabinet stage and before EQ, Modulation, Delay, and Reverb.",
+          ? "Doubler is paused on a stereo DAW route so the routed left/right image remains intact. Its enabled state, Mix, Delay, and Spread are preserved and resume when the DAW route is mono."
+          : "Doubler has its own power switch. Mix, Delay, and Spread are preserved while it is bypassed. It runs after the cabinet stage and before EQ, Modulation, Delay, and Reverb.",
       },
       {
         id: "eq",
         label: "EQ",
         caption: !eqPowerActive ? "Off" : eqShaped ? "Graphic" : "Flat",
         active: eqActive,
-        params: stageParams([...NAM_RACK_ADVANCED_CONTROL_IDS.eq, ...eqParamIds]),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.eq),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
       },
@@ -6302,7 +5521,7 @@ export function NAMRackPanel({
         label: "Mod",
         caption: !modulatorPowerActive ? "Bypassed" : (modulatorModeParam?.value ?? 0) >= 0.5 ? "Flanger" : (chorusMixParam ? formatParamValue(chorusMixParam) : "Chorus"),
         active: modulatorPowerActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.mod),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.mod),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
         disabledParamIds: (modulatorPedalModeParam?.value ?? 1) >= 0.5 ? ["modulatorPedalPosition"] : undefined,
@@ -6315,7 +5534,7 @@ export function NAMRackPanel({
         label: "Delay",
         caption: !delayPowerActive ? "Bypassed" : delayMixParam ? formatParamValue(delayMixParam) : "Delay",
         active: delayActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.delay),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.delay),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
         disabledParamIds: (delayTempoSyncParam?.value ?? 0) >= 0.5 ? ["delayTimeMs"] : undefined,
@@ -6326,9 +5545,13 @@ export function NAMRackPanel({
       {
         id: "reverb",
         label: "Reverb",
-        caption: !reverbPowerActive ? "Bypassed" : reverbMixParam ? formatParamValue(reverbMixParam) : "Reverb",
+        caption: !reverbPowerActive
+          ? reverbPadActive ? "Bypassed · PAD armed" : "Bypassed"
+          : reverbPadActive
+            ? `PAD · ${formatPercentParam(reverbMixParam, "Mix", "Reverb")}`
+            : reverbMixParam ? formatParamValue(reverbMixParam) : "Reverb",
         active: reverbActive,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.reverb),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.reverb),
         paramGroups: NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS,
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
@@ -6337,15 +5560,16 @@ export function NAMRackPanel({
         id: "output",
         label: "Output",
         caption: postCabOrderLabel || "Post-rack path",
-        active: ampActive || pedalActive || precisionDriveActive || chaosActive || cabinetStageActive || eqActive || chorusActive || delayActive || reverbActive,
+        active: ampActive || pedalActive || preEqActive || precisionDriveActive || chaosActive || cabinetStageActive || eqActive || chorusActive || delayActive || reverbActive,
         meterDb: outputMeterDb,
-        params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS.output),
+        params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.output),
       },
     ], postCabOrder);
   }, [
     ampActive,
     ampName,
     cabActive,
+    cabDoublerDelayParam,
     cabDoublerMixParam,
     cabRoomAmountParam,
     cabinetStageActive,
@@ -6375,6 +5599,7 @@ export function NAMRackPanel({
     hardwareCabLabel,
     inputMeterDb,
     inputTrim,
+    instrumentProfile,
     modulatorPowerActive,
     monoInputOneWarning,
     modulatorModeParam,
@@ -6388,84 +5613,22 @@ export function NAMRackPanel({
     pedalName,
     postCabOrder,
     postCabOrderLabel,
+    preEqActive,
+    preEqHPFParam,
+    preEqLPFParam,
+    preEqShaped,
     precisionDriveActive,
     precisionDriveDriveParam,
+    precisionDriveVoiceLabel,
     reverbActive,
+    reverbPadActive,
     reverbPowerActive,
     reverbMixParam,
     roomActive,
+    roomWaitingForCabSource,
     selectedInputLabel,
     stereoInputActive,
-    tapeEchoActive,
-    tapeEchoTimeParam,
   ]);
-
-  const focusedPedalPower = isPedalFaceplateModuleId(focusedModule)
-    ? (() => {
-      switch (focusedModule) {
-        case "gate":
-          return {
-            active: gateActive,
-            disabled: !gateThreshold,
-            title: gateActive ? "Bypass gate" : "Enable gate",
-            onToggle: () => toggleParamPower("gate", gateThreshold, gateActive, gateThreshold?.min ?? -100, -80),
-          };
-        case "pedal":
-          return {
-            active: precisionDriveActive,
-            disabled: !precisionDriveEnabledParam,
-            title: precisionDriveActive ? "Bypass precision drive" : "Enable precision drive",
-            onToggle: () => precisionDriveEnabledParam && onParamChange(precisionDriveEnabledParam, precisionDriveActive ? 0 : 1),
-          };
-        case "eq":
-          return {
-            active: eqPowerActive,
-            disabled: !eqEnabledParam,
-            title: eqPowerActive ? "Power off graphic EQ" : "Power on graphic EQ",
-            onToggle: () => eqEnabledParam && onParamChange(eqEnabledParam, eqPowerActive ? 0 : 1),
-          };
-        case "mod":
-          return {
-            active: modulatorPowerActive,
-            disabled: !modulatorEnabledParam,
-            title: modulatorPowerActive ? "Bypass modulation" : "Enable modulation",
-            onToggle: () => {
-              if (!modulatorEnabledParam) return;
-              onParamChange(modulatorEnabledParam, modulatorPowerActive ? 0 : 1);
-              if (!modulatorPowerActive && chorusMixParam && chorusMixParam.value <= 0.0001) {
-                onParamChange(chorusMixParam, 0.25);
-              }
-            },
-          };
-        case "delay":
-          return {
-            active: delayPowerActive,
-            disabled: !delayEnabledParam,
-            title: delayPowerActive ? "Bypass delay" : "Enable delay",
-            onToggle: () => {
-              if (!delayEnabledParam) return;
-              onParamChange(delayEnabledParam, delayPowerActive ? 0 : 1);
-              if (!delayPowerActive && delayMixParam && delayMixParam.value <= 0.0001) {
-                onParamChange(delayMixParam, 0.12);
-              }
-            },
-          };
-        case "reverb":
-          return {
-            active: reverbPowerActive,
-            disabled: !reverbEnabledParam,
-            title: reverbPowerActive ? "Bypass reverb" : "Enable reverb",
-            onToggle: () => {
-              if (!reverbEnabledParam) return;
-              onParamChange(reverbEnabledParam, reverbPowerActive ? 0 : 1);
-              if (!reverbPowerActive && reverbMixParam && reverbMixParam.value <= 0.0001) {
-                onParamChange(reverbMixParam, 0.18);
-              }
-            },
-          };
-      }
-    })()
-    : null;
 
   const moveSlotBy = (moduleId: RackModuleId, delta: number) => {
     if (stageLocked || slotOrderBusy) return;
@@ -6688,7 +5851,11 @@ export function NAMRackPanel({
     reverb: {
       icon: <Volume2 size={16} />,
       label: "Reverb",
-      caption: !reverbPowerActive ? "Bypassed" : formatPercentParam(reverbMixParam, "Mix", "Reverb"),
+      caption: !reverbPowerActive
+        ? reverbPadActive ? "Bypassed · PAD armed" : "Bypassed"
+        : reverbPadActive
+          ? `PAD · ${formatPercentParam(reverbMixParam, "Mix", "Reverb")}`
+          : formatPercentParam(reverbMixParam, "Mix", "Reverb"),
       active: reverbPowerActive,
       power: {
         active: reverbPowerActive,
@@ -6725,12 +5892,6 @@ export function NAMRackPanel({
     setLibraryFlow(null);
     setFocusedModule(moduleId);
     setActiveRackSection(rackSectionForModule(moduleId));
-    setActiveView("rack");
-  };
-  const focusRackDevice = (sectionId: RackSectionId, moduleId?: RackModuleId) => {
-    setLibraryFlow(null);
-    if (moduleId) setFocusedModule(moduleId);
-    setActiveRackSection(sectionId);
     setActiveView("rack");
   };
   const enterRackSection = (sectionId: RackSectionId, targetModule: RackModuleId) => {
@@ -6786,12 +5947,27 @@ export function NAMRackPanel({
     return "mod";
   };
   const openAdvancedControls = (stageId?: NAMRackAdvancedStageId) => {
+    const targetStage = stageId ?? advancedStageForCurrentRackContext();
     setLibraryFlow(null);
     setChainOpen(false);
-    setAdvancedFocus(stageId ?? advancedStageForCurrentRackContext());
-    setActiveView("mixer");
+    if (targetStage === "precision-drive" || targetStage === "chaos") {
+      setAdvancedFocus(null);
+      setActiveRackSection("pre");
+      setFocusedModule("pedal");
+      setActiveView("rack");
+      return;
+    }
+    setAdvancedFocus(targetStage);
+    setActiveView("rack");
   };
-  const openContextualAdvancedControls = () => openAdvancedControls(advancedStageForCurrentRackContext());
+  const openContextualAdvancedControls = () => {
+    const stageId = advancedStageForCurrentRackContext();
+    if (activeView === "rack" && advancedFocus === stageId) {
+      setAdvancedFocus(null);
+      return;
+    }
+    openAdvancedControls(stageId);
+  };
   const toggleEffectPower = (
     enabledParam: BuiltInParamDescriptor | undefined,
     active: boolean,
@@ -6805,7 +5981,6 @@ export function NAMRackPanel({
     onParamChange(enabledParam, active ? 0 : 1);
   };
   const toggleCompressor = () => toggleEffectPower(compressorEnabledParam, compressorPowerActive, compressorMixParam, 0.65);
-  const toggleTapeEcho = () => toggleEffectPower(tapeEchoEnabledParam, tapeEchoActive, tapeEchoMixParam, 0.22);
   const toggleOctaver = () => {
     if (!octaverEnabledParam) return;
     if (!octaverActive && (octaverDownParam?.value ?? 0) <= 0.0001 && (octaverUpParam?.value ?? 0) <= 0.0001 && octaverDownParam) {
@@ -6813,6 +5988,7 @@ export function NAMRackPanel({
     }
     onParamChange(octaverEnabledParam, octaverActive ? 0 : 1);
   };
+  const togglePreEq = () => toggleEffectPower(preEqEnabledParam, preEqActive);
   const togglePrecisionDrive = () => toggleEffectPower(precisionDriveEnabledParam, precisionDriveActive);
   const toggleChaos = () => toggleEffectPower(chaosEnabledParam, chaosActive);
   const togglePedalCapture = () => toggleParamPower("pedal", pedalMix, pedalActive, 0, 1);
@@ -6866,17 +6042,6 @@ export function NAMRackPanel({
       editLabel: "Edit Compressor in Device Controls",
     },
     {
-      id: "tape-echo",
-      label: "Tape Echo",
-      caption: tapeEchoTimeParam ? formatParamValue(tapeEchoTimeParam) : "Pre-amp echo",
-      enabled: tapeEchoActive,
-      disabled: !hasAmpModel,
-      icon: <Cable size={15} />,
-      onToggle: tapeEchoEnabledParam ? toggleTapeEcho : undefined,
-      onEdit: editAdvancedFromCompactChain("tape-echo"),
-      editLabel: "Edit Tape Echo in Device Controls",
-    },
-    {
       id: "octaver",
       label: octaverPresentation.label,
       caption: `${octaverPresentation.captionPrefix} · Down ${Math.round((octaverDownParam?.value ?? 0) * 100)}% · Up ${Math.round((octaverUpParam?.value ?? 0) * 100)}%`,
@@ -6888,15 +6053,25 @@ export function NAMRackPanel({
       editLabel: `Edit ${octaverPresentation.label} in Device Controls`,
     },
     {
+      id: "pre-eq",
+      label: "PRE EQ",
+      caption: preEqShaped ? "Seven-band tone shaping" : "Seven-band · Flat",
+      status: preEqActive ? "Engaged" : "Bypassed",
+      enabled: preEqActive,
+      disabled: !hasAmpModel,
+      icon: <SlidersHorizontal size={15} />,
+      onToggle: preEqEnabledParam ? togglePreEq : undefined,
+    },
+    {
       id: "precision-drive",
-      label: "Precision Drive",
-      caption: formatPercentParam(precisionDriveDriveParam, "Drive", "Drive amount"),
+      label: `${precisionDriveVoiceLabel} Drive`,
+      caption: `${precisionDriveVoiceLabel} · ${formatPercentParam(precisionDriveDriveParam, "Drive", "Drive amount")}`,
       enabled: precisionDriveActive,
       disabled: !hasAmpModel,
       icon: <Zap size={15} />,
       onToggle: precisionDriveEnabledParam ? togglePrecisionDrive : undefined,
       onEdit: editAdvancedFromCompactChain("precision-drive"),
-      editLabel: "Edit Precision Drive in Device Controls",
+      editLabel: `Edit ${precisionDriveVoiceLabel} Drive in Device Controls`,
     },
     {
       id: "chaos",
@@ -6951,7 +6126,9 @@ export function NAMRackPanel({
       label: "Cab / IR",
       caption: hardwareCabLabel,
       status: embeddedCabCapture
-        ? "Included"
+        ? cabPresentation.hasRetainedExternalIR
+          ? "Retained IR bypassed"
+          : "Included"
         : cabActive
           ? "Engaged"
           : cabPresentation.needsCabIR
@@ -6966,8 +6143,10 @@ export function NAMRackPanel({
     {
       id: "room",
       label: "Room",
-      caption: formatPercentParam(cabRoomAmountParam, "Amount", "Early reflections"),
-      status: roomActive ? "Engaged" : "Bypassed",
+      caption: roomWaitingForCabSource
+        ? "No cab source"
+        : formatPercentParam(cabRoomAmountParam, "Amount", "Early reflections"),
+      status: roomWaitingForCabSource ? "No cab source" : roomActive ? "Engaged" : "Bypassed",
       enabled: roomActive,
       disabled: !cabRoomEnabledParam,
       icon: <Sparkles size={15} />,
@@ -6980,7 +6159,7 @@ export function NAMRackPanel({
       label: "Doubler",
       caption: stereoInputActive
         ? "Mono-source width · setting preserved"
-        : formatPercentParam(cabDoublerMixParam, "Mix", "Mono-source width"),
+        : `${formatPercentParam(cabDoublerMixParam, "Mix", "Mono-source width")} · ${doublerDelayLabel}`,
       status: stereoInputActive
         ? doublerActive ? "Paused in Stereo" : "Unavailable in Stereo"
         : doublerActive ? "Engaged" : "Bypassed",
@@ -7029,23 +6208,11 @@ export function NAMRackPanel({
     },
   ];
   const visibleSlotOrder = dragPreviewOrder ?? slotOrder;
-  const rightRailGear = {
-    pedalTitle: modelState?.pedalModelPath,
-    pedalLabel: pedalName || "Empty",
-    ampTitle: modelState?.ampModelPath,
-    ampLabel: hardwareAmpLabel,
-    cabTitle: modelState?.cabIRPath,
-    cabLabel: hardwareCabLabel,
-  };
   const rightRailCab = {
     title: modelState?.cabIRPath,
     label: hardwareCabLabel,
     status: cabinetSpaceAudible
-      ? `${cabPresentation.hasRetainedExternalIR
-        ? "External IR retained"
-        : cabPresentation.status} / ${cabinetSpaceAudibleLabel} active`
-      : cabPresentation.hasRetainedExternalIR
-      ? "External IR retained and will be restored for an amp-only Capture"
+      ? `${cabPresentation.status} / ${cabinetSpaceAudibleLabel} active`
       : cabPresentation.status,
     active: cabinetStageActive,
     hasIR: hasCabIR && !embeddedCabCapture,
@@ -7057,41 +6224,106 @@ export function NAMRackPanel({
       active: entry.path === currentCabIRPath,
     })),
   };
-  const rightRailSaved = {
-    heading: filteredUserPresets.length > 0 ? `${filteredUserPresets.length} user presets` : "Templates for Current Capture",
-    status: isPresetDirty
-      ? "Current rack has unsaved edits"
-      : activeUserPresetName || hasFactoryPresetSelection
-        ? "Current rack matches its selected preset"
-        : "No template selected",
-    saveToneBusy,
-    userPresets: filteredUserPresets.slice(0, 5).map((entry) => ({
-      key: `user-${entry.name}`,
-      name: entry.name,
-      subtitle: presetMetadata[entry.name]?.folder || "User preset",
-      title: entry.path,
-      active: entry.name.localeCompare(activeUserPresetName, undefined, { sensitivity: "base" }) === 0,
-    })),
-    factoryPresets: filteredFactoryPresets.slice(0, 5).map((entry) => ({
-      key: `factory-${entry.id}`,
-      id: entry.id,
-      name: entry.name,
-      subtitle: entry.description,
-      active: hasFactoryPresetSelection && entry.id === presetId,
-    })),
-  };
-  const designPortLibraryItems = profileFactoryPresets.map((entry) => ({
+  const designPortToneItems = profileFactoryPresets.map((entry) => ({
     id: entry.id,
     name: entry.name.replace(/^Current Capture\s*·\s*/i, ""),
     subtitle: "Effect settings for the loaded Capture",
     active: hasFactoryPresetSelection && entry.id === presetId,
   }));
+  const normalizedActiveAmpPath = normalizeNAMRackCapturePath(modelState?.ampModelPath);
+  const designPortCompatibleInstalledCaptures = filterAndPinNAMInstrumentItems(
+    designInstalledCaptures,
+    instrumentProfile,
+    namInstalledCaptureInstrumentLabels,
+    (entry) => Boolean(
+      normalizedActiveAmpPath
+      && normalizeNAMRackCapturePath(entry.localPath) === normalizedActiveAmpPath
+    ),
+  );
+  const designPortInstalledCaptureItems = rankNAMRackAmpCaptures(
+    designPortCompatibleInstalledCaptures,
+    userPresets.map((entry) => entry.ampModelPath),
+    modelState?.ampModelPath,
+  ).map((entry) => {
+    const instrumentLabels = namInstalledCaptureInstrumentLabels(entry);
+    const subtitle = [
+      entry.creator,
+      instrumentLabels.length > 0 ? instrumentLabels.join(" / ") : undefined,
+      "Installed Capture",
+    ].filter(Boolean).join(" · ");
+    return {
+      id: `installed:${encodeURIComponent(entry.localPath)}`,
+      name: entry.toneTitle || entry.name || fileName(entry.localPath) || "Installed Amp Capture",
+      subtitle,
+      active: entry.active,
+    };
+  });
+  const designPortInstalledIRItems = rankNAMRackCabIRs([
+    ...designInstalledCaptures,
+    ...irLibrary.map((entry) => ({
+      localPath: entry.path,
+      name: fileName(entry.path) || "Cabinet IR",
+      gearType: "cabinet ir",
+      favorite: entry.favorite,
+      lastUsed: entry.lastUsed,
+    })),
+  ], currentCabIRPath).map((entry) => ({
+    id: `installed-ir:${encodeURIComponent(entry.localPath)}`,
+    name: entry.toneTitle || entry.name || fileName(entry.localPath) || "Cabinet IR",
+    subtitle: entry.missing
+      ? "IR file is missing"
+      : entry.creator
+        ? `${entry.creator} - Installed IR`
+        : "Installed Cabinet IR",
+    active: entry.active,
+  }));
+  const designPortLibraryItems = [
+    ...designPortInstalledCaptureItems,
+    ...designPortInstalledIRItems,
+    ...designPortToneItems,
+  ];
   const onDesignPortParamChange = (param: BuiltInParamDescriptor, value: number) => {
     if (param.id.startsWith("cab") && !isNAMRackCabinetSpaceParamId(param.id) && cabPresentation.mode !== "loaded") {
       setSlotActionStatus(cabControlsUnavailableReason ?? "Choose a cabinet IR before changing the Cab/IR controls.");
       return;
     }
+    const recallUpdate = namGraphicEqActiveRecallUpdate(param.id, value);
+    if (recallUpdate) {
+      const [id, activeValue] = recallUpdate;
+      // Mirror the native last-active memory immediately so active -> OFF
+      // cannot flash clean while waiting for the 200 ms diagnostic poll. This
+      // is local UI state only; the next native poll remains authoritative.
+      setRackLiveDiagnostics((current) => ({
+        ...(schemaRackDiagnostics ?? {}),
+        ...(current ?? {}),
+        [id]: activeValue,
+      }));
+    }
+    const nextInstrumentProfile = normalizeNAMInstrumentProfile(value);
+    const currentPresetIdentity = activePresetIdentityRef.current;
+    const activeFactoryPreset = param.id === "instrumentProfile"
+      && nextInstrumentProfile !== instrumentProfile
+      && currentPresetIdentity?.kind === "factory"
+      ? NAM_RACK_PRESETS.find((entry) => entry.id === currentPresetIdentity.id)
+      : undefined;
+    const clearIncompatibleFactoryIdentity = shouldClearNAMFactoryPresetIdentityOnProfileChange(
+      activeFactoryPreset?.instrumentProfile,
+      instrumentProfile,
+      nextInstrumentProfile,
+    );
     onParamChange(param, value);
+    if (clearIncompatibleFactoryIdentity) {
+      // The rack is now a deliberate cross-profile edit, not the recalled
+      // factory template. Clear both the optimistic label and the persisted
+      // identity/baseline; the capture itself remains loaded and untouched.
+      publishActivePresetIdentity(null);
+      presetDirtyMarkerShadowRef.current = true;
+      void updatePresetDirtyMarker(true, { clear: true }).then((updated) => {
+        setPresetStatus(updated
+          ? "Instrument profile changed; choose a compatible template when ready"
+          : "Instrument profile changed, but the previous template label could not be cleared");
+      });
+    }
   };
   const rightRailTuner = {
     signalPresent: tunerSignalPresent,
@@ -7135,10 +6367,34 @@ export function NAMRackPanel({
                   : dualNAMRateMismatch
                     ? `Pedal NAM and Amp NAM are active through sample-rate conversion.${dualNAMRateAdvice}`
                   : liveInputDetected
-                    ? "Live guitar input is reaching the rack."
+                    ? "Live instrument input is reaching the rack."
                     : auditionSourceRendered
-                      ? "An internal diagnostic source is active. Stop the audition to return to live guitar input."
+                      ? "An internal diagnostic source is active. Stop the audition to return to live instrument input."
                       : "No strong live input is reaching the rack yet. Arm or monitor the track and check the selected input.";
+  const ampSetupFeedback = [ampIdentityWarning, ampEconomyQualityWarning]
+    .filter((message): message is string => Boolean(message))
+    .join(" / ");
+  const preSetupFeedback = [pedalIdentityWarning, ampGainStagingWarning]
+    .filter((message): message is string => Boolean(message))
+    .join(" / ");
+  const rackPresentationFeedbackMessage = activeRackSection === "cab" && embeddedCabCapture
+    ? cabPresentation.status
+    : activeRackSection === "amp"
+      ? ampSetupFeedback || ampGainStagingWarning
+      : activeRackSection === "pre"
+        ? preSetupFeedback
+        : null;
+  const rackPresentationFeedbackTone = activeRackSection === "cab" ? "info" : "warning";
+  const inputDiagnosticHasPriority = inputDiagnosticTone === "error" || inputDiagnosticTone === "warning";
+  const effectiveRackDiagnosticTone = modelState?.lastLoadError
+    ? "error"
+    : inputDiagnosticHasPriority
+      ? inputDiagnosticTone
+      : rackPresentationFeedbackMessage
+        ? rackPresentationFeedbackTone
+        : inputDiagnosticTone;
+  const effectiveRackDiagnosticMessage = modelState?.lastLoadError
+    || (inputDiagnosticHasPriority ? diagnosticsMessage : rackPresentationFeedbackMessage || diagnosticsMessage);
   const diagnosticActionCandidates: Array<NAMRackDiagnosticsAction | null> = [
     rackWindowCapabilities.canOpenAppAudio
       && (audioDeadlineWarning || (dspBudgetPct ?? 0) >= 80) ? {
@@ -7297,34 +6553,11 @@ export function NAMRackPanel({
       }
     : undefined;
 
-  // Inactive compatibility references: the old scene renderers and their data
-  // stay compiled for rollback/debugging, but the native design-port owns the
-  // active main rack visual surface.
-  void NAMRackAmpCabStage;
-  void PedalHardwareStage;
-  void moduleHardwareArt;
-  void NAMRackNeuralSectionSuite;
-  void NAMRackPostFxSuite;
-  void cabPhaseInvertParam;
-  void currentIREntry;
-  void visibleRecentIRs;
-  void ampFaceplateParams;
-  void pedalStageParams;
-  void cabRoomKnobs;
-  void renderPedalKnob;
-  void toggleIRFavorite;
-  void removeIRFromLibrary;
-  void postFxDevices;
-  void neuralSectionDevices;
-  void focusedPedalPower;
-  void focusRackDevice;
-
   return (
     <div
       className="nam-product nam-neural-product"
       data-view={activeView}
       data-rack-section={activeRackSection}
-      data-visual-mode={visualMode}
       data-rack-size={rackStageSizePercent}
       data-design-port-active={activeView === "rack"}
       data-chain-open={chainOpen}
@@ -7475,7 +6708,7 @@ export function NAMRackPanel({
           <div
             className="nam-neural-global-knob nam-neural-global-doubler"
             data-disabled={!cabDoublerEnabledParam}
-            data-bound={Boolean(cabDoublerEnabledParam && cabDoublerMixParam)}
+            data-bound={Boolean(cabDoublerEnabledParam && cabDoublerMixParam && cabDoublerDelayParam)}
             data-active={doublerAudible}
             data-paused={stereoInputActive && doublerActive}
           >
@@ -7492,7 +6725,9 @@ export function NAMRackPanel({
                   ? doublerActive
                     ? "Doubler is enabled but paused on the stereo DAW route. Turn it off or route a mono source to hear it."
                     : "Doubler is available when the DAW route is mono."
-                  : doublerActive ? "Bypass Doubler" : "Enable Doubler"}
+                  : doublerActive
+                    ? `Bypass Doubler (${doublerDelayLabel})`
+                    : `Enable Doubler (${doublerDelayLabel})`}
               >
                 <i />
               </button>
@@ -7502,12 +6737,12 @@ export function NAMRackPanel({
                 param={cabDoublerMixParam}
                 onChange={onParamChange}
                 disabled={stereoInputActive}
-                disabledReason="Doubler is paused while the DAW route is stereo. Its Mix is preserved."
+                disabledReason="Doubler is paused while the DAW route is stereo. Its Mix, Delay, and Spread are preserved."
               />
             ) : (
               <NeuralParameterReadout label="Mix" />
             )}
-            <small>{stereoInputActive ? doublerActive ? "Paused in Stereo" : "Mono only" : doublerActive ? "Active" : "Bypassed"}</small>
+            <small>{`${doublerDelayLabel} · ${stereoInputActive ? doublerActive ? "Paused in Stereo" : "Mono only" : doublerActive ? "Active" : "Bypassed"}`}</small>
           </div>
           <MeterTrimControl label="Output" levelDb={outputMeterDb} param={outputTrim} onChange={onParamChange} />
           {(
@@ -7562,6 +6797,8 @@ export function NAMRackPanel({
           aria-labelledby="nam-calibration-dialog-title"
           tabIndex={-1}
           onKeyDown={onCalibrationDialogKeyDown}
+          onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+          onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
         >
           <header>
             <div>
@@ -8114,6 +7351,11 @@ export function NAMRackPanel({
                     dspAlert: modeRailStatus.dsp.alert,
                     inputLevelDb: inputMeterDb,
                     outputLevelDb: outputMeterDb,
+                    inputLeftLevelDb: inputLeftMeterDb,
+                    inputRightLevelDb: inputRightMeterDb,
+                    outputLeftLevelDb: outputLeftMeterDb,
+                    outputRightLevelDb: outputRightMeterDb,
+                    inputChannelCount: inputMeterChannelCount,
                   }}
                   runtimeTempo={runtimeTempo}
                   runtimeTimeSignature={runtimeTimeSignature}
@@ -8159,7 +7401,6 @@ export function NAMRackPanel({
                     setRackRailTab((current) => current === "tuner" ? "tones" : "tuner");
                   }}
                   onOpenSignalChain={toggleCompactChain}
-                  onOpenAdvanced={openContextualAdvancedControls}
                   onCycleSize={cycleStageZoom}
                   onMaxSize={() => setRackStageSizePercent(220)}
                 />
@@ -8244,6 +7485,7 @@ export function NAMRackPanel({
                   ampCaptureMissing: Boolean(missingAmpAsset),
                   hasCabIR,
                   cabMode: cabPresentation.mode,
+                  cabRoomInputSourceAvailable,
                 }}
                 runtime={{
                   tempo: runtimeTempo,
@@ -8257,10 +7499,15 @@ export function NAMRackPanel({
                   cpuAlert: modeRailStatus.cpu?.alert,
                   dspLabel: modeRailStatus.dsp.label,
                   dspAlert: modeRailStatus.dsp.alert,
-                  diagnosticTone: modelState?.lastLoadError ? "error" : inputDiagnosticTone,
-                  diagnosticMessage: modelState?.lastLoadError || diagnosticsMessage,
+                  diagnosticTone: effectiveRackDiagnosticTone,
+                  diagnosticMessage: effectiveRackDiagnosticMessage,
                   inputLevelDb: inputMeterDb,
                   outputLevelDb: outputMeterDb,
+                  inputLeftLevelDb: inputLeftMeterDb,
+                  inputRightLevelDb: inputRightMeterDb,
+                  outputLeftLevelDb: outputLeftMeterDb,
+                  outputRightLevelDb: outputRightMeterDb,
+                  inputChannelCount: inputMeterChannelCount,
                 }}
                 recovery={designPortRecovery}
                 tuner={rightRailTuner}
@@ -8278,14 +7525,21 @@ export function NAMRackPanel({
                 tunerOpen={rackRailTab === "tuner"}
                 signalChainOpen={chainOpen}
                 onParamChange={onDesignPortParamChange}
-                onEnterSection={enterRackSection}
+                onEnterSection={(section, targetModule) => {
+                  setAdvancedFocus(null);
+                  enterRackSection(section, targetModule);
+                }}
                 onOpenAdvancedStage={openAdvancedControls}
                 onBrowseAmpCapture={() => openNAMCaptureLibrary("amp")}
                 onBrowseLocalAmpCapture={() => openSourceFlow("amp", undefined, "local")}
+                onClearAmpCapture={() => void clearAmpCapture()}
                 onBrowseAmpOnlyCapture={openAmpOnlyCaptureLibrary}
                 onBrowseCabIR={cabPresentation.canBrowseExternalIR ? openCabIRLibrary : undefined}
                 onBrowseLocalCabIR={cabPresentation.canLoadLocalIR ? () => void loadCabIR() : undefined}
-                onOpenLibrary={openDesignPortLibrary}
+                onOpenLibrary={(section) => {
+                  setAdvancedFocus(null);
+                  openDesignPortLibrary(section);
+                }}
                 onPreviousPreset={!presetBusy && !presetManagerBusy && headerPreviousPresetAvailable
                   ? () => void activateHeaderPresetDirection("previous")
                   : undefined}
@@ -8301,70 +7555,61 @@ export function NAMRackPanel({
                   : undefined}
                 onOpenCalibration={() => setCalibrationOpen((open) => !open)}
                 onSelectLibraryItem={(itemId) => {
+                  if (itemId.startsWith("installed-ir:")) {
+                    const localPath = decodeURIComponent(itemId.slice("installed-ir:".length));
+                    void nativeBridge.loadNAMModelIntoRack(address, "cab", localPath)
+                      .then((loaded) => {
+                        if (loaded) {
+                          setSlotActionStatus("Cabinet IR loaded");
+                          onRefreshRack();
+                        } else {
+                          setSlotActionStatus("Could not load the selected Cabinet IR.");
+                        }
+                      })
+                      .catch((error) => {
+                        setSlotActionStatus(error instanceof Error ? error.message : "Could not load the selected Cabinet IR.");
+                      });
+                    return;
+                  }
+                  if (itemId.startsWith("installed:")) {
+                    const localPath = decodeURIComponent(itemId.slice("installed:".length));
+                    void nativeBridge.loadNAMModelIntoRack(
+                      address,
+                      "amp",
+                      localPath,
+                      { modelSize: NAM_FULL_MODEL_SIZE },
+                    )
+                      .then((loaded) => {
+                        if (loaded) {
+                          setSlotActionStatus("Amp Capture loaded");
+                          onRefreshRack();
+                        } else {
+                          setSlotActionStatus("Could not load the selected Amp Capture.");
+                        }
+                      })
+                      .catch((error) => {
+                        setSlotActionStatus(error instanceof Error ? error.message : "Could not load the selected Amp Capture.");
+                      });
+                    return;
+                  }
                   const selectedPreset = NAM_RACK_PRESETS.find((entry) => entry.id === itemId);
                   if (selectedPreset) void applyPreset(selectedPreset);
                 }}
                 onOpenTuner={() => setRackRailTab((current) => current === "tuner" ? "tones" : "tuner")}
                 onOpenSignalChain={toggleCompactChain}
                 onOpenSettings={rackWindowCapabilities.canOpenAppAudio ? openSettings : undefined}
-                onOpenAdvanced={openContextualAdvancedControls}
+                oversamplingFactor={rackOversamplingFactor}
+                oversamplingBusy={rackOversamplingBusy}
+                onOversamplingFactorChange={(factor) => void changeRackOversamplingFactor(factor)}
+                onOpenAdvanced={
+                  ["gate", "mod", "delay"].includes(focusedModule)
+                    ? openContextualAdvancedControls
+                    : undefined
+                }
                 onCycleSize={cycleStageZoom}
                 onMaxSize={() => setRackStageSizePercent(220)}
               />
-              <NAMRackStageFooter
-                diagnosticTone={inputDiagnosticTone}
-                tempo={runtimeTempo}
-                timeSignature={runtimeTimeSignature}
-                stageLocked={stageLocked || slotOrderBusy}
-                stageZoomPercent={rackStageSizePercent}
-                onToggleLock={() => {
-                  if (!slotOrderBusy) setStageLocked((locked) => !locked);
-                }}
-                onCycleZoom={cycleStageZoom}
-                onSetZoomPercent={(zoomPercent) => setRackStageSizePercent(coerceRackStageSizePercent(zoomPercent))}
-              />
             </div>
-
-            <NAMRackRightRail
-              rackRailTab={rackRailTab}
-              address={address}
-              schema={schema}
-              explorerIntent={explorerIntent}
-              instrumentProfile={instrumentProfile}
-              gear={rightRailGear}
-              cab={rightRailCab}
-              saved={rightRailSaved}
-              presetBusy={presetBusy || presetManagerBusy}
-              tuner={rightRailTuner}
-              onRefreshRack={onRefreshRack}
-              onFlushPendingParamWrites={onFlushPendingParamWrites}
-              onShowGear={() => setRackRailTab("gear")}
-              onOpenTones={() => openRackToneRail()}
-              onOpenCab={openCabIRLibrary}
-              onShowSaved={() => setRackRailTab("saved")}
-              onBrowseAmp={() => openNAMCaptureLibrary("amp")}
-              onSearchIRs={openRackCabToneSearch}
-              onLoadLocalIR={() => void loadCabIR()}
-              onClearIR={() => void clearCabIR()}
-              onApplyIRPath={(path) => void applyCabIRPath(path)}
-              onOpenPresetManager={() => setPresetManagerOpen((open) => !open)}
-              onSaveTone={openSaveToneModal}
-              onLoadUserPreset={(name) => void loadUserPreset(name)}
-              onLoadFactoryPreset={(id) => {
-                const selectedPreset = filteredFactoryPresets.find((entry) => entry.id === id);
-                if (selectedPreset) void applyPreset(selectedPreset);
-              }}
-            />
-
-            <NAMRackModeRail
-              rackRailTab={rackRailTab}
-              slotBrowserOpen={chainOpen}
-              status={modeRailStatus}
-              onShowGear={() => setRackRailTab("gear")}
-              onToggleChain={toggleCompactChain}
-              onOpenMixer={openContextualAdvancedControls}
-              onOpenTuner={() => setRackRailTab("tuner")}
-            />
             {chainOpen && (
               <NAMCompactChain
                 fixedPre={signalChainFixedPre}
@@ -8405,20 +7650,15 @@ export function NAMRackPanel({
           </section>
         )}
 
-        {activeView === "mixer" && (
+        {activeView === "rack" && advancedFocus && (
           <NAMRackMixerView
             stages={mixerStageSpecs}
-            postCabOrderLabel={postCabOrderLabel}
-            ampActive={ampActive}
-            hasCabIR={hasCabIR}
             onParamChange={onDesignPortParamChange}
             formatDb={formatDb}
             meterPercent={meterPercent}
             focusedStageId={advancedFocus}
-            onSelectStage={setAdvancedFocus}
             onClose={() => {
               setAdvancedFocus(null);
-              setActiveView("rack");
             }}
           />
         )}

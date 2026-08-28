@@ -37,10 +37,17 @@ import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
 import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
 import { useShallow } from "zustand/react/shallow";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
-import { Button, Input, Select } from "./ui";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
+import { Button, Input, ProfiledRangeInput, Select } from "./ui";
 import {
   EQGraph,
   CompressorGraph,
@@ -58,7 +65,6 @@ import {
   waitForFXChainLength,
 } from "../utils/fxChain";
 import "./FXChainPanel.css";
-import "./NAMRackPanel.css";
 
 interface FXChainPanelProps {
   trackId: string;
@@ -189,7 +195,11 @@ export function FXChainPanel({
   const {
     updateTrack,
     addTrackFXWithUndo,
+    addTrackBuiltInFXWithUndo,
+    reorderTrackFXWithUndo,
     removeTrackFXWithUndo,
+    removeMasterFXWithUndo,
+    toggleFXSlotBypassWithUndo,
     loadInstrumentWithUndo,
     removeInstrumentWithUndo,
     clearTrackSamplerSampleWithUndo,
@@ -209,7 +219,11 @@ export function FXChainPanel({
     useShallow((s) => ({
       updateTrack: s.updateTrack,
       addTrackFXWithUndo: s.addTrackFXWithUndo,
+      addTrackBuiltInFXWithUndo: s.addTrackBuiltInFXWithUndo,
+      reorderTrackFXWithUndo: s.reorderTrackFXWithUndo,
       removeTrackFXWithUndo: s.removeTrackFXWithUndo,
+      removeMasterFXWithUndo: s.removeMasterFXWithUndo,
+      toggleFXSlotBypassWithUndo: s.toggleFXSlotBypassWithUndo,
       loadInstrumentWithUndo: s.loadInstrumentWithUndo,
       removeInstrumentWithUndo: s.removeInstrumentWithUndo,
       clearTrackSamplerSampleWithUndo: s.clearTrackSamplerSampleWithUndo,
@@ -230,6 +244,8 @@ export function FXChainPanel({
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [selectedFxIndex, setSelectedFxIndex] = useState<number | null>(null);
+  const availablePluginSearchRef = useRef<HTMLInputElement>(null);
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [bypassedFx, setBypassedFx] = useState<Set<number>>(new Set());
   const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
@@ -245,6 +261,14 @@ export function FXChainPanel({
   const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(
     null,
   );
+
+  useEffect(() => {
+    setSelectedFxIndex((current) => (
+      current !== null && fxSlots.some((fx) => fx.index === current)
+        ? current
+        : null
+    ));
+  }, [fxSlots]);
 
   // Plugin parameter list state (per-slot)
   const [expandedParamsFx, setExpandedParamsFx] = useState<number | null>(null);
@@ -601,11 +625,10 @@ export function FXChainPanel({
         if (chainType === "master") {
           success = await nativeBridge.addMasterBuiltInFX(plugin.name);
         } else {
-          const isInputFX = chainType === "input";
-          success = await nativeBridge.addTrackBuiltInFX(
+          success = await addTrackBuiltInFXWithUndo(
             trackId,
             plugin.name,
-            isInputFX,
+            chainType,
           );
           if (success && plugin.isInstrument && chainType === "track") {
             updateTrack(trackId, {
@@ -862,8 +885,7 @@ export function FXChainPanel({
     try {
       let success = false;
       if (chainType === "master") {
-        await nativeBridge.removeMasterFX(fxIndex);
-        success = true;
+        success = await removeMasterFXWithUndo(fxIndex);
       } else if (chainType === "input" || chainType === "track") {
         success = await removeTrackFXWithUndo(trackId, fxIndex, chainType);
       }
@@ -871,9 +893,6 @@ export function FXChainPanel({
       if (success) {
         console.log(`[FXChain] Removed ${chainType} FX ${fxIndex}`);
         await loadPlugins();
-        if (chainType === "master") {
-          notifyFXChainChanged({ trackId, chainType });
-        }
       }
     } catch (e) {
       console.error("[FXChain] Failed to remove plugin:", e);
@@ -881,37 +900,147 @@ export function FXChainPanel({
   };
 
   const handleToggleBypass = async (fxIndex: number) => {
-    const isBypassed = bypassedFx.has(fxIndex);
-    const newBypassed = !isBypassed;
     try {
-      let success = false;
-      if (chainType === "master") {
-        success = await nativeBridge.bypassMasterFX(fxIndex, newBypassed);
-      } else if (chainType === "input") {
-        success = await nativeBridge.bypassTrackInputFX(
-          trackId,
-          fxIndex,
-          newBypassed,
-        );
-      } else {
-        success = await nativeBridge.bypassTrackFX(
-          trackId,
-          fxIndex,
-          newBypassed,
-        );
-      }
+      const success = await toggleFXSlotBypassWithUndo(trackId, fxIndex, chainType);
       if (success) {
-        setBypassedFx((prev) => {
-          const next = new Set(prev);
-          if (newBypassed) next.add(fxIndex);
-          else next.delete(fxIndex);
-          return next;
-        });
+        await loadPlugins();
       }
     } catch (e) {
       console.error("[FXChain] Failed to toggle bypass:", e);
     }
   };
+
+  const fxShortcutSessionId = `fx-chain:${chainType}:${trackId}`;
+  const fxActionExecutorRef = useRef<
+    (actionId: string) => ReturnType<ShortcutSurfaceHandler>
+  >(() => "unmatched");
+  fxActionExecutorRef.current = (actionId) => {
+    if (actionId === "fx.close") {
+      onClose();
+      return "handled";
+    }
+    if (actionId === "track.openSelectedFxChain") {
+      return chainType === "track" && useDAWStore.getState().selectedTrackId === trackId
+        ? "handled"
+        : "claimed_noop";
+    }
+    if (actionId === "fx.add") {
+      const searchInput = availablePluginSearchRef.current;
+      if (!searchInput) return "claimed_noop";
+      searchInput.scrollIntoView({ block: "nearest", inline: "nearest" });
+      searchInput.focus();
+      searchInput.select();
+      return "handled";
+    }
+    if (actionId === "fx.openInstrumentEditor") {
+      if (chainType !== "track") return "claimed_noop";
+      if (hasLoadedInstrument) void handleOpenInstrumentEditor();
+      else if (hasFallbackInstrument) setExpandedFallbackInstrument((expanded) => !expanded);
+      else return "claimed_noop";
+      return "handled";
+    }
+    if (actionId === "fx.removeInstrument") {
+      if (chainType !== "track" || (!hasLoadedInstrument && !hasFallbackInstrument)) {
+        return "claimed_noop";
+      }
+      void handleRemoveInstrument();
+      return "handled";
+    }
+    if (
+      actionId !== "fx.removeSelected"
+      && actionId !== "fx.toggleSelectedBypass"
+      && actionId !== "fx.openSelectedEditor"
+      && actionId !== "fx.toggleSelectedAB"
+      && actionId !== "fx.reloadSelectedScript"
+      && actionId !== "fx.toggleSelectedParameters"
+      && actionId !== "fx.toggleSelectedPresets"
+    ) return "unmatched";
+
+    const selectedFx = selectedFxIndex === null
+      ? undefined
+      : fxSlots.find((fx) => fx.index === selectedFxIndex);
+    if (!selectedFx) return "claimed_noop";
+
+    if (actionId === "fx.removeSelected") {
+      void handleRemove(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedBypass") {
+      void handleToggleBypass(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedAB") {
+      if (selectedFx.type === "s13fx") return "claimed_noop";
+      togglePluginAB(trackId, selectedFx.index, chainType === "input");
+      return "handled";
+    }
+    if (actionId === "fx.reloadSelectedScript") {
+      if (selectedFx.type !== "s13fx") return "claimed_noop";
+      void handleReloadS13FX(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedParameters") {
+      if (selectedFx.type === "s13fx" || selectedFx.type === "builtin") return "claimed_noop";
+      void handleToggleParams(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedPresets") {
+      if (selectedFx.type === "s13fx") return "claimed_noop";
+      void handleTogglePluginPresets(selectedFx.index);
+      return "handled";
+    }
+
+    if (selectedFx.type === "builtin") {
+      void handleOpenBuiltInEditor(selectedFx);
+    } else {
+      void handleOpenEditor(selectedFx.index);
+    }
+    return "handled";
+  };
+
+  useEffect(() => {
+    const context = { kind: "plugin", sessionId: fxShortcutSessionId } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      () => "unmatched",
+      fallback,
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => fxActionExecutorRef.current(actionId),
+      [
+        "fx.close",
+        "fx.add",
+        ...(chainType === "track" ? ["track.openSelectedFxChain"] : []),
+        ...(chainType === "track" && (hasLoadedInstrument || hasFallbackInstrument)
+          ? ["fx.openInstrumentEditor", "fx.removeInstrument"]
+          : []),
+        ...(selectedFxIndex !== null ? [
+          "fx.removeSelected",
+          "fx.toggleSelectedBypass",
+          "fx.openSelectedEditor",
+          ...(fxSlots.find((slot) => slot.index === selectedFxIndex)?.type !== "s13fx"
+            ? ["fx.toggleSelectedAB", "fx.toggleSelectedPresets"]
+            : ["fx.reloadSelectedScript"]),
+          ...(["s13fx", "builtin"].includes(
+            fxSlots.find((slot) => slot.index === selectedFxIndex)?.type ?? "",
+          ) ? [] : ["fx.toggleSelectedParameters"]),
+        ] : []),
+      ],
+    );
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [
+    chainType,
+    fxShortcutSessionId,
+    fxSlots,
+    hasFallbackInstrument,
+    hasLoadedInstrument,
+    selectedFxIndex,
+  ]);
 
   const handleSetPrecisionOverride = useCallback(
     async (fxIndex: number, mode: "auto" | "float32") => {
@@ -969,17 +1098,12 @@ export function FXChainPanel({
       if (chainType === "master") {
         // Master FX reorder not yet supported
         success = false;
-      } else if (chainType === "input") {
-        success = await nativeBridge.reorderTrackInputFX(
-          trackId,
-          draggedIndex,
-          dropIndex,
-        );
       } else {
-        success = await nativeBridge.reorderTrackFX(
+        success = await reorderTrackFXWithUndo(
           trackId,
           draggedIndex,
           dropIndex,
+          chainType,
         );
       }
 
@@ -1242,6 +1366,9 @@ export function FXChainPanel({
         className="fx-chain-panel-two-column"
         onClick={(e) => e.stopPropagation()}
         onContextMenu={guardModalContextMenu}
+        onPointerDownCapture={() => activateShortcutContext({ kind: "plugin", sessionId: fxShortcutSessionId })}
+        onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: fxShortcutSessionId })}
+        data-shortcut-context={`plugin:${fxShortcutSessionId}`}
       >
         <div className="fx-chain-header">
           <h3>
@@ -1455,6 +1582,7 @@ export function FXChainPanel({
                           }}
                           fallbackName={fallbackInstrumentDisplayName}
                           onClose={() => setExpandedFallbackInstrument(false)}
+                          shortcutSessionId={fxShortcutSessionId}
                         />
                       )}
                     </div>
@@ -1528,8 +1656,12 @@ export function FXChainPanel({
                     return (
                       <div key={fx.index}>
                         <div
-                          className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
+                          className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${selectedFxIndex === fx.index ? "ring-1 ring-cyan-500/70" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
                           draggable
+                          tabIndex={0}
+                          data-selected={selectedFxIndex === fx.index ? "true" : undefined}
+                          onPointerDown={() => setSelectedFxIndex(fx.index)}
+                          onFocus={() => setSelectedFxIndex(fx.index)}
                           onDragStart={() => handleDragStart(index)}
                           onDragOver={handleDragOver}
                           onDrop={(e) => handleDrop(e, index)}
@@ -1826,14 +1958,13 @@ export function FXChainPanel({
                                       >
                                         {param.text}
                                       </span>
-                                      <input
-                                        type="range"
+                                      <ProfiledRangeInput
                                         min={0}
                                         max={1}
                                         step={0.001}
                                         value={param.value}
                                         className="w-20 h-1 accent-cyan-500"
-                                        onPointerDown={() => {
+                                        onBeginEdit={() => {
                                           if (chainType !== "master") {
                                             beginAutomationParamTouch(
                                               trackId,
@@ -1841,7 +1972,7 @@ export function FXChainPanel({
                                             );
                                           }
                                         }}
-                                        onPointerUp={() => {
+                                        onCommitEdit={() => {
                                           if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
@@ -1849,27 +1980,11 @@ export function FXChainPanel({
                                             );
                                           }
                                         }}
-                                        onPointerCancel={() => {
-                                          if (chainType !== "master") {
-                                            endAutomationParamTouch(
-                                              trackId,
-                                              automationParamId,
-                                            );
-                                          }
-                                        }}
-                                        onBlur={() => {
-                                          if (chainType !== "master") {
-                                            endAutomationParamTouch(
-                                              trackId,
-                                              automationParamId,
-                                            );
-                                          }
-                                        }}
-                                        onChange={(event) => {
+                                        onValueChange={(value) => {
                                           void handlePluginParamChange(
                                             fx.index,
                                             param,
-                                            Number(event.currentTarget.value),
+                                            value,
                                           );
                                         }}
                                         title={`Set ${param.name}`}
@@ -2077,16 +2192,15 @@ export function FXChainPanel({
                                           ))}
                                         </select>
                                       ) : (
-                                        <input
-                                          type="range"
+                                        <ProfiledRangeInput
                                           min={slider.min}
                                           max={slider.max}
                                           step={slider.inc || 0.001}
                                           value={slider.value}
-                                          onChange={(e) =>
+                                          onValueChange={(value) =>
                                             handleS13FXSliderChange(
                                               slider.index,
-                                              Number(e.target.value),
+                                              value,
                                             )
                                           }
                                           className="flex-1 accent-lime-500"
@@ -2142,6 +2256,7 @@ export function FXChainPanel({
             {/* Search and Filter */}
             <div className="flex gap-2 p-2 bg-neutral-800 items-center">
               <Input
+                ref={availablePluginSearchRef}
                 type="text"
                 variant="default"
                 size="lg"

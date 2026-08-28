@@ -8,6 +8,7 @@ import {
   notifyInstrumentChanged,
   waitForFXChainLength,
 } from "../../utils/fxChain";
+import type { FXChainType } from "../../utils/fxChain";
 import {
   automationToBackend,
   getAutomationDefault,
@@ -33,9 +34,16 @@ type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GetFn = () => any;
 
+export function isAutomationEditLocked(state: any): boolean {
+  return Boolean(state?.globalLocked || state?.lockSettings?.envelopes);
+}
+
 function buildAutomationSuspendSnapshot(track: any) {
   return {
     showAutomation: track.showAutomation,
+    automationReadEnabled: trackReadEnabled(track),
+    automationWriteEnabled: trackWriteEnabled(track),
+    automationEnabled: trackReadEnabled(track),
     lanes: Object.fromEntries(
       track.automationLanes.map((lane: any) => [
         lane.id,
@@ -49,6 +57,38 @@ const AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS = 0.025;
 const AUTOMATION_WRITE_SIMPLIFY_MAX_GAP_SECONDS = 0.18;
 const AUTOMATION_WRITE_SIMPLIFY_VALUE_TOLERANCE = 0.01;
 const _automationWriteSessionStartTimes = new Map<string, number>();
+const _automationWriteSessionSnapshots = new Map<string, {
+  trackId: string;
+  laneId: string;
+  points: any[];
+}>();
+
+let _automationPointEditSnapshot: null | {
+  target: any;
+  originalPoints: any[];
+  originalIsModified: boolean;
+  editKind: "move" | "copy";
+  workingPointCount: number;
+  originalSourcePoint: null | { time: number; value: number };
+} = null;
+
+let _automationPointIdCounter = 0;
+
+export function createAutomationPointId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  _automationPointIdCounter += 1;
+  return `automation-point-${Date.now()}-${_automationPointIdCounter}`;
+}
+
+export function getAutomationPointId(point: any, index: number) {
+  const time = Math.max(0, Number(point?.time) || 0);
+  const value = clamp01(Number(point?.value));
+  return typeof point?.id === "string" && point.id.length > 0
+    ? point.id
+    : `legacy-automation-point-${index}-${Math.round(time * 1_000_000)}-${Math.round(value * 1_000_000)}`;
+}
 
 function clamp01(value: number) {
   return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
@@ -84,7 +124,7 @@ function writeAutomationPoint(points: any[], time: number, value: number) {
   const end = time + AUTOMATION_WRITE_REPLACE_RADIUS_SECONDS;
   const next = (points || [])
     .filter((point) => point.time < start || point.time > end)
-    .concat([{ time: Math.max(0, time), value: clamp01(value) }]);
+    .concat([{ id: createAutomationPointId(), time: Math.max(0, time), value: clamp01(value) }]);
   next.sort((a, b) => a.time - b.time);
   return next;
 }
@@ -204,10 +244,12 @@ function simplifyContinuousAutomationWritePoints(param: string, points: any[], f
 
 function normalizeAutomationPoints(points: any[] = []) {
   return points
-    .map((point) => ({
-      time: Math.max(0, Number(point?.time) || 0),
-      value: clamp01(Number(point?.value)),
-    }))
+    .map((point, index) => {
+      const time = Math.max(0, Number(point?.time) || 0);
+      const value = clamp01(Number(point?.value));
+      const id = getAutomationPointId(point, index);
+      return { id, time, value };
+    })
     .sort((a, b) => a.time - b.time);
 }
 
@@ -307,6 +349,433 @@ function syncAutomationLaneAfterManualEdit(trackId: string, lane: any, resetWrit
     .then(() => syncAutomationLaneToBackend(trackId, lane));
 }
 
+function captureTrackAutomationModeSnapshot(state: any, trackId: string) {
+  const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+  if (!track) return null;
+  return {
+    trackId,
+    automationReadEnabled: track.automationReadEnabled,
+    automationWriteEnabled: track.automationWriteEnabled,
+    automationEnabled: track.automationEnabled,
+    automationLanes: (track.automationLanes || []).map((lane: any) => ({ ...lane })),
+    hadAutomatedValues: Object.prototype.hasOwnProperty.call(state.automatedParamValues || {}, trackId),
+    automatedValues: state.automatedParamValues?.[trackId]
+      ? { ...state.automatedParamValues[trackId] }
+      : undefined,
+  };
+}
+
+function applyTrackAutomationModeSnapshot(set: SetFn, get: GetFn, snapshot: any) {
+  if (!snapshot) return;
+  set((state: any) => {
+    const automatedParamValues = { ...(state.automatedParamValues || {}) };
+    if (snapshot.hadAutomatedValues) {
+      automatedParamValues[snapshot.trackId] = { ...(snapshot.automatedValues || {}) };
+    } else {
+      delete automatedParamValues[snapshot.trackId];
+    }
+    return {
+      tracks: state.tracks.map((track: any) => track.id === snapshot.trackId
+        ? {
+            ...track,
+            automationReadEnabled: snapshot.automationReadEnabled,
+            automationWriteEnabled: snapshot.automationWriteEnabled,
+            automationEnabled: snapshot.automationEnabled,
+            automationLanes: snapshot.automationLanes.map((lane: any) => ({ ...lane })),
+          }
+        : track),
+      automatedParamValues,
+      isModified: true,
+    };
+  });
+  const track = get().tracks.find((candidate: any) => candidate.id === snapshot.trackId);
+  if (!track) return;
+  if (!snapshot.automationReadEnabled || !snapshot.automationWriteEnabled) {
+    for (const lane of track.automationLanes || []) {
+      clearAutomationTouchState(track.id, lane.param);
+    }
+  }
+  syncTrackAutomationModes(track, writeBehavior(get));
+  if (!snapshot.automationReadEnabled) {
+    nativeBridge.setTrackVolume(track.id, track.volumeDB).catch(logBridgeError("sync"));
+    nativeBridge.setTrackPan(track.id, track.pan).catch(logBridgeError("sync"));
+    nativeBridge.setTrackMute(track.id, track.muted).catch(logBridgeError("sync"));
+  } else {
+    get().updateAutomatedValues?.();
+  }
+}
+
+function cloneAutomationLane(lane: any) {
+  return {
+    ...lane,
+    points: normalizeAutomationPoints(lane?.points || []),
+  };
+}
+
+type TrackFXAutomationChain = "input" | "track";
+
+function parseTrackFXAutomationParam(
+  param: string,
+): null | { chainType: TrackFXAutomationChain; fxIndex: number; suffix: string } {
+  const match = /^(builtin|plugin)_(input|track)_(\d+)_(.+)$/.exec(String(param));
+  if (!match) return null;
+  return {
+    chainType: match[2] as TrackFXAutomationChain,
+    fxIndex: Number(match[3]),
+    suffix: `${match[1]}_${match[2]}_#_${match[4]}`,
+  };
+}
+
+function replaceTrackFXAutomationIndex(
+  parsed: NonNullable<ReturnType<typeof parseTrackFXAutomationParam>>,
+  fxIndex: number,
+) {
+  return parsed.suffix.replace("_#_", `_${fxIndex}_`);
+}
+
+export function remapTrackFXAutomationLanes(
+  lanes: readonly any[],
+  chainType: TrackFXAutomationChain,
+  mapIndex: (fxIndex: number) => number | null,
+) {
+  const next: any[] = [];
+  for (const lane of lanes || []) {
+    const parsed = parseTrackFXAutomationParam(lane?.param);
+    if (!parsed || parsed.chainType !== chainType) {
+      next.push(cloneAutomationLane(lane));
+      continue;
+    }
+
+    const mappedIndex = mapIndex(parsed.fxIndex);
+    if (mappedIndex === null) continue;
+    next.push({
+      ...cloneAutomationLane(lane),
+      param: replaceTrackFXAutomationIndex(parsed, mappedIndex),
+    });
+  }
+  return next;
+}
+
+export function reorderTrackFXAutomationLanes(
+  lanes: readonly any[],
+  chainType: TrackFXAutomationChain,
+  fromIndex: number,
+  toIndex: number,
+) {
+  return remapTrackFXAutomationLanes(lanes, chainType, (fxIndex) => {
+    if (fxIndex === fromIndex) return toIndex;
+    if (fromIndex < toIndex && fxIndex > fromIndex && fxIndex <= toIndex) return fxIndex - 1;
+    if (fromIndex > toIndex && fxIndex >= toIndex && fxIndex < fromIndex) return fxIndex + 1;
+    return fxIndex;
+  });
+}
+
+export function removeTrackFXAutomationLanes(
+  lanes: readonly any[],
+  chainType: TrackFXAutomationChain,
+  removedIndex: number,
+) {
+  return remapTrackFXAutomationLanes(lanes, chainType, (fxIndex) => {
+    if (fxIndex === removedIndex) return null;
+    return fxIndex > removedIndex ? fxIndex - 1 : fxIndex;
+  });
+}
+
+function applyTrackFXFrontendState(
+  set: SetFn,
+  get: GetFn,
+  trackId: string,
+  chainType: TrackFXAutomationChain,
+  fxCount: number,
+  automationLanes: readonly any[],
+) {
+  const countField = chainType === "input" ? "inputFxCount" : "trackFxCount";
+  const clonedLanes = automationLanes.map(cloneAutomationLane);
+  set((state: any) => ({
+    tracks: state.tracks.map((track: any) => track.id === trackId
+      ? { ...track, [countField]: fxCount, automationLanes: clonedLanes }
+      : track),
+    isModified: true,
+  }));
+  const updatedTrack = get().tracks.find((track: any) => track.id === trackId);
+  for (const lane of updatedTrack?.automationLanes || []) {
+    syncAutomationLaneToBackend(trackId, lane);
+  }
+  notifyFXChainChanged({ trackId, chainType });
+}
+
+function cloneAutomationSuspendSnapshot(snapshot: any) {
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    lanes: Object.fromEntries(
+      Object.entries(snapshot.lanes || {}).map(([laneId, laneState]) => [
+        laneId,
+        { ...(laneState as any) },
+      ]),
+    ),
+  };
+}
+
+export function captureAutomationProjectSnapshot(state: any) {
+  return {
+    automationWriteBehavior: state.automationWriteBehavior ?? "touch",
+    tracks: (state.tracks || []).map((track: any) => ({
+      id: track.id,
+      showAutomation: Boolean(track.showAutomation),
+      automationReadEnabled: trackReadEnabled(track),
+      automationWriteEnabled: trackWriteEnabled(track),
+      automationEnabled: trackReadEnabled(track),
+      suspendedAutomationState: cloneAutomationSuspendSnapshot(track.suspendedAutomationState),
+      automationLanes: (track.automationLanes || []).map(cloneAutomationLane),
+    })),
+    showMasterAutomation: Boolean(state.showMasterAutomation),
+    masterAutomationReadEnabled: state.masterAutomationReadEnabled === true,
+    masterAutomationWriteEnabled: state.masterAutomationWriteEnabled === true,
+    masterAutomationEnabled: state.masterAutomationEnabled === true,
+    suspendedMasterAutomationState: cloneAutomationSuspendSnapshot(
+      state.suspendedMasterAutomationState,
+    ),
+    masterAutomationLanes: (state.masterAutomationLanes || []).map(cloneAutomationLane),
+  };
+}
+
+function automationProjectSnapshotsEqual(before: any, after: any) {
+  return JSON.stringify(before) === JSON.stringify(after);
+}
+
+export function applyAutomationProjectSnapshot(
+  set: SetFn,
+  get: GetFn,
+  snapshot: any,
+) {
+  const beforeLaneParams = new Map<string, { trackId: string; param: string }>();
+  const currentState = get();
+  for (const track of currentState.tracks || []) {
+    for (const lane of track.automationLanes || []) {
+      beforeLaneParams.set(`${track.id}\u0000${lane.param}`, {
+        trackId: track.id,
+        param: lane.param,
+      });
+    }
+  }
+  for (const lane of currentState.masterAutomationLanes || []) {
+    beforeLaneParams.set(`master\u0000${lane.param}`, {
+      trackId: "master",
+      param: lane.param,
+    });
+  }
+  const targetLaneParams = new Set<string>();
+  for (const track of snapshot.tracks || []) {
+    for (const lane of track.automationLanes || []) {
+      targetLaneParams.add(`${track.id}\u0000${lane.param}`);
+    }
+  }
+  for (const lane of snapshot.masterAutomationLanes || []) {
+    targetLaneParams.add(`master\u0000${lane.param}`);
+  }
+  const byTrackId = new Map(
+    (snapshot.tracks || []).map((track: any) => [track.id, track]),
+  );
+  set((state: any) => ({
+    automationWriteBehavior: snapshot.automationWriteBehavior,
+    tracks: state.tracks.map((track: any) => {
+      const saved: any = byTrackId.get(track.id);
+      if (!saved) return track;
+      return {
+        ...track,
+        showAutomation: saved.showAutomation,
+        automationReadEnabled: saved.automationReadEnabled,
+        automationWriteEnabled: saved.automationWriteEnabled,
+        automationEnabled: saved.automationEnabled,
+        suspendedAutomationState: cloneAutomationSuspendSnapshot(
+          saved.suspendedAutomationState,
+        ),
+        automationLanes: saved.automationLanes.map(cloneAutomationLane),
+      };
+    }),
+    showMasterAutomation: snapshot.showMasterAutomation,
+    masterAutomationReadEnabled: snapshot.masterAutomationReadEnabled,
+    masterAutomationWriteEnabled: snapshot.masterAutomationWriteEnabled,
+    masterAutomationEnabled: snapshot.masterAutomationEnabled,
+    suspendedMasterAutomationState: cloneAutomationSuspendSnapshot(
+      snapshot.suspendedMasterAutomationState,
+    ),
+    masterAutomationLanes: snapshot.masterAutomationLanes.map(cloneAutomationLane),
+    isModified: true,
+  }));
+
+  _automationTouchedParams.clear();
+  _automationLatchedParams.clear();
+  _autoRecordTimers.clear();
+  _automationWriteValues.clear();
+  _automationWriteSessionStartTimes.clear();
+
+  const state = get();
+  for (const [key, removed] of beforeLaneParams) {
+    if (!targetLaneParams.has(key)) {
+      nativeBridge.clearAutomation(removed.trackId, removed.param).catch(() => {});
+    }
+  }
+  for (const track of state.tracks || []) {
+    for (const lane of track.automationLanes || []) {
+      syncAutomationLaneToBackend(track.id, lane);
+    }
+  }
+  for (const lane of state.masterAutomationLanes || []) {
+    syncAutomationLaneToBackend("master", lane);
+  }
+  state.updateAutomatedValues?.();
+}
+
+export function pushAppliedAutomationProjectCommand(
+  set: SetFn,
+  get: GetFn,
+  before: any,
+  after: any,
+  type: string,
+  description: string,
+) {
+  if (automationProjectSnapshotsEqual(before, after)) return false;
+  commandManager.push({
+    type,
+    description,
+    timestamp: Date.now(),
+    execute: () => applyAutomationProjectSnapshot(set, get, after),
+    undo: () => applyAutomationProjectSnapshot(set, get, before),
+  });
+  set({
+    canUndo: commandManager.canUndo(),
+    canRedo: commandManager.canRedo(),
+    isModified: true,
+  });
+  return true;
+}
+
+function resolveAutomationLaneTarget(state: any, target = state.selectedAutomationTarget) {
+  if (!target || typeof target.laneId !== "string") return null;
+  if (target.kind === "master") {
+    const lane = (state.masterAutomationLanes || []).find(
+      (candidate: any) => candidate.id === target.laneId,
+    );
+    return lane ? { target, track: null, lane, trackId: "master" } : null;
+  }
+  if (target.kind !== "track" || typeof target.trackId !== "string") return null;
+  const track = (state.tracks || []).find(
+    (candidate: any) => candidate.id === target.trackId,
+  );
+  const lane = track?.automationLanes?.find(
+    (candidate: any) => candidate.id === target.laneId,
+  );
+  return track && lane ? { target, track, lane, trackId: track.id } : null;
+}
+
+function resolveAutomationPointTarget(state: any, target = state.selectedAutomationTarget) {
+  const resolved = resolveAutomationLaneTarget(state, target);
+  if (!resolved || typeof target?.pointId !== "string") return null;
+  const pointIndex = resolved.lane.points.findIndex(
+    (point: any, index: number) => getAutomationPointId(point, index) === target.pointId,
+  );
+  if (pointIndex < 0) return null;
+  return { ...resolved, pointIndex, point: resolved.lane.points[pointIndex] };
+}
+
+function applyAutomationTargetPoints(
+  set: SetFn,
+  get: GetFn,
+  target: any,
+  points: any[],
+  pointId: string | null,
+) {
+  const normalized = points.map((point) => ({
+    id: typeof point?.id === "string" && point.id.length > 0
+      ? point.id
+      : createAutomationPointId(),
+    time: Math.max(0, Number(point?.time) || 0),
+    value: clamp01(Number(point?.value)),
+  }));
+  if (target.kind === "master") {
+    set((state: any) => ({
+      masterAutomationLanes: state.masterAutomationLanes.map((lane: any) =>
+        lane.id === target.laneId ? { ...lane, points: normalized } : lane,
+      ),
+      selectedAutomationTarget: {
+        kind: "master",
+        laneId: target.laneId,
+        pointId,
+      },
+      isModified: true,
+    }));
+    const lane = get().masterAutomationLanes.find(
+      (candidate: any) => candidate.id === target.laneId,
+    );
+    if (lane) syncAutomationLaneToBackend("master", lane);
+    return;
+  }
+
+  set((state: any) => ({
+    tracks: state.tracks.map((track: any) => track.id !== target.trackId
+      ? track
+      : {
+          ...track,
+          automationLanes: track.automationLanes.map((lane: any) =>
+            lane.id === target.laneId ? { ...lane, points: normalized } : lane,
+          ),
+        }),
+    selectedAutomationTarget: {
+      kind: "track",
+      trackId: target.trackId,
+      laneId: target.laneId,
+      pointId,
+    },
+    isModified: true,
+  }));
+  const lane = get().tracks.find((track: any) => track.id === target.trackId)
+    ?.automationLanes.find((candidate: any) => candidate.id === target.laneId);
+  if (lane) syncAutomationLaneAfterManualEdit(target.trackId, lane, false);
+}
+
+function applyRecordedAutomationWritePass(
+  set: SetFn,
+  get: GetFn,
+  changes: Array<{
+    trackId: string;
+    laneId: string;
+    beforePoints: any[];
+    afterPoints: any[];
+  }>,
+  side: "beforePoints" | "afterPoints",
+) {
+  set((state: any) => ({
+    tracks: state.tracks.map((track: any) => ({
+      ...track,
+      automationLanes: track.automationLanes.map((lane: any) => {
+        const change = changes.find(
+          (candidate) => candidate.trackId === track.id && candidate.laneId === lane.id,
+        );
+        return change ? { ...lane, points: normalizeAutomationPoints(change[side]) } : lane;
+      }),
+    })),
+    masterAutomationLanes: state.masterAutomationLanes.map((lane: any) => {
+      const change = changes.find(
+        (candidate) => candidate.trackId === "master" && candidate.laneId === lane.id,
+      );
+      return change ? { ...lane, points: normalizeAutomationPoints(change[side]) } : lane;
+    }),
+    isModified: true,
+  }));
+
+  const state = get();
+  for (const change of changes) {
+    const lane = change.trackId === "master"
+      ? state.masterAutomationLanes.find((candidate: any) => candidate.id === change.laneId)
+      : state.tracks.find((track: any) => track.id === change.trackId)
+        ?.automationLanes.find((candidate: any) => candidate.id === change.laneId);
+    if (lane) syncAutomationLaneToBackend(change.trackId, lane);
+  }
+  state.updateAutomatedValues?.();
+}
+
 export const automationActions = (set: SetFn, get: GetFn) => ({
     addTrackFXWithUndo: async (trackId, pluginPath, chainType) => {
       const addFn = chainType === "input" ? nativeBridge.addTrackInputFX.bind(nativeBridge) : nativeBridge.addTrackFX.bind(nativeBridge);
@@ -346,57 +815,321 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       return true;
     },
 
-    removeTrackFXWithUndo: async (trackId, fxIndex, chainType) => {
+    addTrackBuiltInFXWithUndo: async (
+      trackId: string,
+      effectName: string,
+      chainType: TrackFXAutomationChain,
+    ) => {
+      const state = get();
+      const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+      if (!track || state.globalLocked || track.frozen || !String(effectName).trim()) return false;
+
+      const beforeSlots = await getFXChainSlots(trackId, chainType);
+      const beforeLanes = (track.automationLanes || []).map(cloneAutomationLane);
+      const newIndex = beforeSlots.length;
       const isInput = chainType === "input";
+      const added = await nativeBridge.addTrackBuiltInFX(trackId, effectName, isInput);
+      if (!added) return false;
 
-      // Save plugin state and path before removing
-      const fxList = isInput
-        ? await nativeBridge.getTrackInputFX(trackId)
-        : await nativeBridge.getTrackFX(trackId);
-      const pluginInfo = fxList[fxIndex];
-      const pluginPath = pluginInfo?.pluginPath || "";
-      const savedState = await nativeBridge.getPluginState(trackId, fxIndex, isInput);
+      const afterSlots = await waitForFXChainLength(trackId, chainType, newIndex + 1);
+      applyTrackFXFrontendState(set, get, trackId, chainType, afterSlots.length, beforeLanes);
 
-      const removeFn = isInput ? nativeBridge.removeTrackInputFX.bind(nativeBridge) : nativeBridge.removeTrackFX.bind(nativeBridge);
-      const addFn = isInput ? nativeBridge.addTrackInputFX.bind(nativeBridge) : nativeBridge.addTrackFX.bind(nativeBridge);
-
-      await removeFn(trackId, fxIndex);
-
-      // Update store FX counts
-      const countField = isInput ? "inputFxCount" : "trackFxCount";
-      const newList = isInput
-        ? await nativeBridge.getTrackInputFX(trackId)
-        : await nativeBridge.getTrackFX(trackId);
-      get().updateTrack(trackId, { [countField]: newList.length });
-      notifyFXChainChanged({ trackId, chainType });
-
-      const command: Command = {
-        type: "REMOVE_TRACK_FX",
-        description: `Remove ${chainType} FX`,
-        timestamp: Date.now(),
-        execute: async () => {
-          await removeFn(trackId, fxIndex);
-          const list = isInput
-            ? await nativeBridge.getTrackInputFX(trackId)
-            : await nativeBridge.getTrackFX(trackId);
-          get().updateTrack(trackId, { [countField]: list.length });
-          notifyFXChainChanged({ trackId, chainType });
-        },
-        undo: async () => {
-          // Re-add the plugin and restore its state
-          const success = await addFn(trackId, pluginPath);
-          if (success && savedState) {
-            // The re-added plugin is at the end; move it to original position if needed
-            await nativeBridge.setPluginState(trackId, fxIndex, isInput, savedState);
-          }
-          const list = isInput
-            ? await nativeBridge.getTrackInputFX(trackId)
-            : await nativeBridge.getTrackFX(trackId);
-          get().updateTrack(trackId, { [countField]: list.length });
-          notifyFXChainChanged({ trackId, chainType });
-        },
+      const addAgain = async () => {
+        const currentLength = (await getFXChainSlots(trackId, chainType)).length;
+        const success = await nativeBridge.addTrackBuiltInFX(trackId, effectName, isInput);
+        if (!success) return false;
+        const slots = await waitForFXChainLength(trackId, chainType, currentLength + 1);
+        applyTrackFXFrontendState(set, get, trackId, chainType, slots.length, beforeLanes);
+        return true;
       };
-      commandManager.push(command);
+      const removeAgain = async () => {
+        const success = isInput
+          ? await nativeBridge.removeTrackInputFX(trackId, newIndex)
+          : await nativeBridge.removeTrackFX(trackId, newIndex);
+        if (!success) return false;
+        const lanes = removeTrackFXAutomationLanes(
+          get().tracks.find((candidate: any) => candidate.id === trackId)?.automationLanes || [],
+          chainType,
+          newIndex,
+        );
+        const slots = await getFXChainSlots(trackId, chainType);
+        applyTrackFXFrontendState(set, get, trackId, chainType, slots.length, lanes);
+        return true;
+      };
+
+      commandManager.push({
+        type: "ADD_TRACK_BUILTIN_FX",
+        description: `Add ${effectName}`,
+        timestamp: Date.now(),
+        execute: () => { void addAgain().catch(logBridgeError("redo built-in FX add")); },
+        undo: () => { void removeAgain().catch(logBridgeError("undo built-in FX add")); },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    reorderTrackFXWithUndo: async (
+      trackId: string,
+      fromIndex: number,
+      toIndex: number,
+      chainType: TrackFXAutomationChain,
+    ) => {
+      const state = get();
+      const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+      if (!track || state.globalLocked || track.frozen) return false;
+      if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return false;
+
+      const slots = await getFXChainSlots(trackId, chainType);
+      if (fromIndex >= slots.length || toIndex >= slots.length) return false;
+      const beforeLanes = (track.automationLanes || []).map(cloneAutomationLane);
+      const afterLanes = reorderTrackFXAutomationLanes(beforeLanes, chainType, fromIndex, toIndex);
+      const reorder = chainType === "input"
+        ? nativeBridge.reorderTrackInputFX.bind(nativeBridge)
+        : nativeBridge.reorderTrackFX.bind(nativeBridge);
+      const success = await reorder(trackId, fromIndex, toIndex);
+      if (!success) return false;
+      applyTrackFXFrontendState(set, get, trackId, chainType, slots.length, afterLanes);
+
+      const applyOrder = async (from: number, to: number, lanes: readonly any[]) => {
+        const reordered = await reorder(trackId, from, to);
+        if (!reordered) return false;
+        const currentSlots = await getFXChainSlots(trackId, chainType);
+        applyTrackFXFrontendState(set, get, trackId, chainType, currentSlots.length, lanes);
+        return true;
+      };
+      commandManager.push({
+        type: "REORDER_TRACK_FX",
+        description: `Reorder ${chainType} FX`,
+        timestamp: Date.now(),
+        execute: () => { void applyOrder(fromIndex, toIndex, afterLanes).catch(logBridgeError("redo FX reorder")); },
+        undo: () => { void applyOrder(toIndex, fromIndex, beforeLanes).catch(logBridgeError("undo FX reorder")); },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    setFXSlotBypassedWithUndo: async (
+      trackId: string,
+      fxIndex: number,
+      chainType: FXChainType,
+      bypassed: boolean,
+    ) => {
+      if (!Number.isInteger(fxIndex) || fxIndex < 0) return false;
+      if (chainType !== "master" && !get().tracks.some((track) => track.id === trackId)) return false;
+      const slots = await getFXChainSlots(trackId, chainType).catch(logBridgeError("read FX chain"));
+      const slot = Array.isArray(slots) ? slots[fxIndex] : undefined;
+      if (!slot) return false;
+      const oldBypassed = Boolean(slot.bypassed);
+      const nextBypassed = Boolean(bypassed);
+      if (oldBypassed === nextBypassed) return true;
+
+      const applyBypass = async (value: boolean) => {
+        const success = chainType === "master"
+          ? await nativeBridge.bypassMasterFX(fxIndex, value)
+          : chainType === "input"
+            ? await nativeBridge.bypassTrackInputFX(trackId, fxIndex, value)
+            : await nativeBridge.bypassTrackFX(trackId, fxIndex, value);
+        if (success) {
+          set({ isModified: true });
+          notifyFXChainChanged({ trackId: chainType === "master" ? "master" : trackId, chainType });
+        }
+        return success;
+      };
+
+      const success = await applyBypass(nextBypassed).catch(logBridgeError("set FX slot bypass"));
+      if (!success) return false;
+      commandManager.push({
+        type: "SET_FX_SLOT_BYPASS",
+        description: `${nextBypassed ? "Bypass" : "Enable"} ${chainType} FX`,
+        timestamp: Date.now(),
+        execute: () => {
+          void applyBypass(nextBypassed).catch(logBridgeError("redo FX slot bypass"));
+        },
+        undo: () => {
+          void applyBypass(oldBypassed).catch(logBridgeError("undo FX slot bypass"));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    toggleFXSlotBypassWithUndo: async (
+      trackId: string,
+      fxIndex: number,
+      chainType: FXChainType,
+    ) => {
+      if (!Number.isInteger(fxIndex) || fxIndex < 0) return false;
+      const slots = await getFXChainSlots(trackId, chainType).catch(logBridgeError("read FX chain"));
+      const slot = Array.isArray(slots) ? slots[fxIndex] : undefined;
+      if (!slot) return false;
+      return await get().setFXSlotBypassedWithUndo(trackId, fxIndex, chainType, !Boolean(slot.bypassed));
+    },
+
+    removeMasterFXWithUndo: async (fxIndex: number) => {
+      if (!Number.isInteger(fxIndex) || fxIndex < 0) return false;
+
+      const fxList = await nativeBridge.getMasterFX().catch(logBridgeError("read master FX chain"));
+      const pluginInfo = Array.isArray(fxList)
+        ? fxList.find((slot) => slot?.index === fxIndex) ?? fxList[fxIndex]
+        : undefined;
+      if (!pluginInfo) return false;
+
+      const pluginType = typeof pluginInfo.type === "string"
+        ? pluginInfo.type.trim().toLowerCase()
+        : "";
+      const pluginReference = pluginType === "builtin"
+        ? String(pluginInfo.pluginPath || pluginInfo.name || "").trim()
+        : String(pluginInfo.pluginPath || "").trim();
+      if (!pluginReference) return false;
+
+      const savedState = await nativeBridge
+        .getMasterPluginState(fxIndex)
+        .catch(logBridgeError("capture master FX state"));
+      if (typeof savedState !== "string") return false;
+
+      const wasBypassed = Boolean(pluginInfo.bypassed);
+      const precisionOverride = pluginInfo.precisionOverride === "float32"
+        ? "float32"
+        : "auto";
+
+      const restorePlugin = async () => {
+        const added = pluginType === "builtin"
+          ? await nativeBridge.addMasterBuiltInFX(pluginReference)
+          : pluginType === "s13fx"
+            ? await nativeBridge.addMasterS13FX(pluginReference)
+            : await nativeBridge.addMasterFX(pluginReference);
+        if (!added) return false;
+
+        const restoredList = await nativeBridge.getMasterFX();
+        const appendedSlot = restoredList[restoredList.length - 1];
+        const appendedIndex = Number.isInteger(appendedSlot?.index)
+          ? appendedSlot.index
+          : restoredList.length - 1;
+        if (appendedIndex < 0) return false;
+
+        const stateRestored = savedState
+          ? await nativeBridge.setMasterPluginState(appendedIndex, savedState)
+          : true;
+        const bypassRestored = await nativeBridge.bypassMasterFX(appendedIndex, wasBypassed);
+        const precisionRestored = await nativeBridge.setMasterFXPrecisionOverride(
+          appendedIndex,
+          precisionOverride,
+        );
+        const orderRestored = appendedIndex === fxIndex
+          ? true
+          : await nativeBridge.reorderMasterFX(appendedIndex, fxIndex);
+        const restored = stateRestored && bypassRestored && precisionRestored && orderRestored;
+        if (!restored) {
+          console.error("[DAWStore] Master FX was re-added but its complete state could not be restored");
+        }
+        set({ isModified: true });
+        notifyFXChainChanged({ trackId: "master", chainType: "master" });
+        return restored;
+      };
+
+      const removed = await nativeBridge
+        .removeMasterFX(fxIndex)
+        .catch(logBridgeError("remove master FX"));
+      if (!removed) return false;
+
+      set({ isModified: true });
+      notifyFXChainChanged({ trackId: "master", chainType: "master" });
+      commandManager.push({
+        type: "REMOVE_MASTER_FX",
+        description: "Remove master FX",
+        timestamp: Date.now(),
+        execute: () => {
+          void nativeBridge.removeMasterFX(fxIndex).then((success) => {
+            if (!success) return;
+            set({ isModified: true });
+            notifyFXChainChanged({ trackId: "master", chainType: "master" });
+          }).catch(logBridgeError("redo master FX removal"));
+        },
+        undo: () => {
+          void restorePlugin().catch(logBridgeError("undo master FX removal"));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
+    removeTrackFXWithUndo: async (trackId, fxIndex, chainType) => {
+      const state = get();
+      const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+      if (!track || state.globalLocked || track.frozen || !Number.isInteger(fxIndex) || fxIndex < 0) return false;
+
+      const isInput = chainType === "input";
+      const fxList = await getFXChainSlots(trackId, chainType);
+      const pluginInfo = fxList[fxIndex];
+      if (!pluginInfo) return false;
+      const pluginType = String(pluginInfo.type || "").trim().toLowerCase();
+      const pluginReference = String(pluginInfo.pluginPath || pluginInfo.name || "").trim();
+      if (!pluginReference) return false;
+
+      const savedState = await nativeBridge.getPluginState(trackId, fxIndex, isInput);
+      if (typeof savedState !== "string") return false;
+      const wasBypassed = Boolean(pluginInfo.bypassed);
+      const precisionOverride = pluginInfo.precisionOverride === "float32" ? "float32" : "auto";
+      const beforeLanes = (track.automationLanes || []).map(cloneAutomationLane);
+      const afterLanes = removeTrackFXAutomationLanes(beforeLanes, chainType, fxIndex);
+      const removeFn = isInput
+        ? nativeBridge.removeTrackInputFX.bind(nativeBridge)
+        : nativeBridge.removeTrackFX.bind(nativeBridge);
+      const reorderFn = isInput
+        ? nativeBridge.reorderTrackInputFX.bind(nativeBridge)
+        : nativeBridge.reorderTrackFX.bind(nativeBridge);
+
+      const addSavedPlugin = async () => {
+        const beforeLength = (await getFXChainSlots(trackId, chainType)).length;
+        const added = pluginType === "builtin"
+          ? await nativeBridge.addTrackBuiltInFX(trackId, pluginReference, isInput)
+          : pluginType === "s13fx"
+            ? await nativeBridge.addTrackS13FX(trackId, pluginReference, isInput)
+            : isInput
+              ? await nativeBridge.addTrackInputFX(trackId, pluginReference, false)
+              : await nativeBridge.addTrackFX(trackId, pluginReference, false);
+        if (!added) return false;
+
+        const restoredList = await waitForFXChainLength(trackId, chainType, beforeLength + 1);
+        const appendedIndex = restoredList.length - 1;
+        if (appendedIndex < 0) return false;
+        const stateRestored = savedState
+          ? await nativeBridge.setPluginState(trackId, appendedIndex, isInput, savedState)
+          : true;
+        const bypassRestored = isInput
+          ? await nativeBridge.bypassTrackInputFX(trackId, appendedIndex, wasBypassed)
+          : await nativeBridge.bypassTrackFX(trackId, appendedIndex, wasBypassed);
+        const precisionRestored = await nativeBridge.setTrackPluginPrecisionOverride(
+          trackId,
+          appendedIndex,
+          isInput,
+          precisionOverride,
+        );
+        const orderRestored = appendedIndex === fxIndex
+          ? true
+          : await reorderFn(trackId, appendedIndex, fxIndex);
+        if (!(stateRestored && bypassRestored && precisionRestored && orderRestored)) return false;
+        const list = await getFXChainSlots(trackId, chainType);
+        applyTrackFXFrontendState(set, get, trackId, chainType, list.length, beforeLanes);
+        return true;
+      };
+
+      const removeSavedPlugin = async () => {
+        const removed = await removeFn(trackId, fxIndex);
+        if (!removed) return false;
+        const list = await getFXChainSlots(trackId, chainType);
+        applyTrackFXFrontendState(set, get, trackId, chainType, list.length, afterLanes);
+        return true;
+      };
+
+      if (!await removeSavedPlugin()) return false;
+      commandManager.push({
+        type: "REMOVE_TRACK_FX",
+        description: `Remove ${pluginInfo.name || chainType + " FX"}`,
+        timestamp: Date.now(),
+        execute: () => { void removeSavedPlugin().catch(logBridgeError("redo track FX removal")); },
+        undo: () => { void addSavedPlugin().catch(logBridgeError("undo track FX removal")); },
+      });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
       return true;
     },
@@ -740,15 +1473,30 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
 
 
     toggleTrackAutomation: (trackId) => {
+      if (isAutomationEditLocked(get())) return;
+      if (!get().tracks.some((track) => track.id === trackId)) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) =>
           t.id === trackId ? { ...t, showAutomation: !t.showAutomation } : t,
         ),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "TOGGLE_TRACK_AUTOMATION_VIEW",
+        "Toggle track automation view",
+      );
     },
 
     setAutomationWriteBehavior: (behavior) => {
+      if (isAutomationEditLocked(get())) return;
       const nextBehavior = behavior === "latch" || behavior === "overwrite" ? behavior : "touch";
+      if ((get().automationWriteBehavior ?? "touch") === nextBehavior) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         automationWriteBehavior: nextBehavior,
         tracks: s.tracks.map((track) => ({
@@ -775,6 +1523,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       _autoRecordTimers.clear();
       _automationWriteValues.clear();
       _automationWriteSessionStartTimes.clear();
+      _automationWriteSessionSnapshots.clear();
       const state = get();
       for (const track of state.tracks) syncTrackAutomationModes(track, nextBehavior);
       for (const lane of state.masterAutomationLanes) {
@@ -792,11 +1541,20 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           ),
         );
       }
+      const after = captureAutomationProjectSnapshot(get());
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        after,
+        "SET_AUTOMATION_WRITE_BEHAVIOR",
+        `Set automation write behavior to ${nextBehavior}`,
+      );
     },
 
     recordAutomationWriteTick: (nowMs = Date.now()) => {
       const state = get();
-      if (!automationTransportRolling(state)) return;
+      if (isAutomationEditLocked(state) || !automationTransportRolling(state)) return;
 
       const time = state.transport.currentTime;
       const behavior = writeBehavior(get);
@@ -831,6 +1589,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
               return lane;
 
             _autoRecordTimers.set(key, nowMs);
+            if (!_automationWriteSessionSnapshots.has(key)) {
+              _automationWriteSessionSnapshots.set(key, {
+                trackId: track.id,
+                laneId: lane.id,
+                points: normalizeAutomationPoints(lane.points),
+              });
+            }
             const value = currentNormalizedAutomationValue(track, lane, time);
             const point = { time: Math.max(0, time), value: clamp01(value) };
             const writtenPoints = writeAutomationPoint(lane.points, time, point.value);
@@ -878,6 +1643,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
               return lane;
 
             _autoRecordTimers.set(key, nowMs);
+            if (!_automationWriteSessionSnapshots.has(key)) {
+              _automationWriteSessionSnapshots.set(key, {
+                trackId: "master",
+                laneId: lane.id,
+                points: normalizeAutomationPoints(lane.points),
+              });
+            }
             const value = currentNormalizedAutomationValue(masterTrack, lane, time);
             const point = { time: Math.max(0, time), value: clamp01(value) };
             const writtenPoints = writeAutomationPoint(lane.points, time, point.value);
@@ -928,12 +1700,31 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     endAutomationWriteSession: () => {
+      const beforeSnapshots = Array.from(_automationWriteSessionSnapshots.values());
+      const stateBeforeEnd = get();
+      const writePassChanges = beforeSnapshots.flatMap((snapshot) => {
+        const lane = snapshot.trackId === "master"
+          ? stateBeforeEnd.masterAutomationLanes.find((candidate) => candidate.id === snapshot.laneId)
+          : stateBeforeEnd.tracks.find((track) => track.id === snapshot.trackId)
+            ?.automationLanes.find((candidate) => candidate.id === snapshot.laneId);
+        if (!lane) return [];
+        const beforePoints = normalizeAutomationPoints(snapshot.points);
+        const afterPoints = normalizeAutomationPoints(lane.points);
+        if (JSON.stringify(beforePoints) === JSON.stringify(afterPoints)) return [];
+        return [{
+          trackId: snapshot.trackId,
+          laneId: snapshot.laneId,
+          beforePoints,
+          afterPoints,
+        }];
+      });
       const behavior = writeBehavior(get);
       _automationTouchedParams.clear();
       _automationLatchedParams.clear();
       _autoRecordTimers.clear();
       _automationWriteValues.clear();
       _automationWriteSessionStartTimes.clear();
+      _automationWriteSessionSnapshots.clear();
       if (behavior === "overwrite") {
         set((s) => ({
           tracks: s.tracks.map((track) => {
@@ -979,10 +1770,35 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           );
         }
       }
+      if (writePassChanges.length > 0) {
+        commandManager.push({
+          type: "RECORD_AUTOMATION_WRITE_PASS",
+          description: "Record automation pass",
+          timestamp: Date.now(),
+          execute: () => applyRecordedAutomationWritePass(
+            set,
+            get,
+            writePassChanges,
+            "afterPoints",
+          ),
+          undo: () => applyRecordedAutomationWritePass(
+            set,
+            get,
+            writePassChanges,
+            "beforePoints",
+          ),
+        });
+        set({
+          canUndo: commandManager.canUndo(),
+          canRedo: commandManager.canRedo(),
+          isModified: true,
+        });
+      }
     },
 
     setAutomationWriteValue: (trackId, param, value) => {
-      if (!automationTransportRolling(get())) {
+      const state = get();
+      if (isAutomationEditLocked(state) || !automationTransportRolling(state)) {
         clearAutomationTouchState(trackId, param);
         return;
       }
@@ -1015,7 +1831,8 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     beginAutomationParamTouch: (trackId, param) => {
-      if (!automationTransportRolling(get())) {
+      const state = get();
+      if (isAutomationEditLocked(state) || !automationTransportRolling(state)) {
         clearAutomationTouchState(trackId, param);
         return;
       }
@@ -1141,6 +1958,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     setTrackAutomationRead: (trackId, enabled) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       if (!track) return;
       if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return;
@@ -1184,10 +2002,22 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     toggleTrackAutomationRead: (trackId) => {
       const track = get().tracks.find((t) => t.id === trackId);
       if (!track) return;
+      const before = captureTrackAutomationModeSnapshot(get(), trackId);
       get().setTrackAutomationRead(trackId, !trackReadEnabled(track));
+      const after = captureTrackAutomationModeSnapshot(get(), trackId);
+      if (!before || !after || JSON.stringify(before) === JSON.stringify(after)) return;
+      commandManager.push({
+        type: "TOGGLE_TRACK_AUTOMATION_READ",
+        description: after.automationReadEnabled ? "Enable track automation read" : "Disable track automation read",
+        timestamp: Date.now(),
+        execute: () => applyTrackAutomationModeSnapshot(set, get, after),
+        undo: () => applyTrackAutomationModeSnapshot(set, get, before),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
     },
 
     setTrackAutomationWrite: (trackId, enabled) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       if (!track) return;
       const behavior = writeBehavior(get);
@@ -1221,7 +2051,18 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     toggleTrackAutomationWrite: (trackId) => {
       const track = get().tracks.find((t) => t.id === trackId);
       if (!track) return;
+      const before = captureTrackAutomationModeSnapshot(get(), trackId);
       get().setTrackAutomationWrite(trackId, !trackWriteEnabled(track));
+      const after = captureTrackAutomationModeSnapshot(get(), trackId);
+      if (!before || !after || JSON.stringify(before) === JSON.stringify(after)) return;
+      commandManager.push({
+        type: "TOGGLE_TRACK_AUTOMATION_WRITE",
+        description: after.automationWriteEnabled ? "Enable track automation write" : "Disable track automation write",
+        timestamp: Date.now(),
+        execute: () => applyTrackAutomationModeSnapshot(set, get, after),
+        undo: () => applyTrackAutomationModeSnapshot(set, get, before),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
     },
 
     toggleTrackAutomationEnabled: (trackId) => {
@@ -1229,8 +2070,11 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     addAutomationLane: (trackId, param, _label) => {
-      const track = get().tracks.find((t) => t.id === trackId);
+      const state = get();
+      if (isAutomationEditLocked(state)) return null;
+      const track = state.tracks.find((t) => t.id === trackId);
       if (!track) return null;
+      const before = captureAutomationProjectSnapshot(get());
       const behavior = writeBehavior(get);
       // Don't add duplicate lanes for the same param
       const existing = track.automationLanes.find((l) => l.param === param);
@@ -1258,6 +2102,14 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         const updatedTrack = get().tracks.find((t) => t.id === trackId);
         const updatedLane = updatedTrack?.automationLanes.find((l) => l.id === existing.id);
         if (updatedTrack && updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+        pushAppliedAutomationProjectCommand(
+          set,
+          get,
+          before,
+          captureAutomationProjectSnapshot(get()),
+          "SHOW_AUTOMATION_LANE",
+          "Show automation lane",
+        );
         return existing.id;
       }
       const laneId = `lane_${param}_${Date.now()}`;
@@ -1284,20 +2136,33 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const updatedTrack = get().tracks.find((t) => t.id === trackId);
       const updatedLane = updatedTrack?.automationLanes.find((l) => l.id === laneId);
       if (updatedTrack && updatedLane) syncAutomationLaneToBackend(trackId, updatedLane);
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "ADD_AUTOMATION_LANE",
+        "Add automation lane",
+      );
       return laneId;
     },
 
     addAutomationPoint: (trackId, laneId, time, value) => {
+      if (isAutomationEditLocked(get())) return;
+      if (!Number.isFinite(time) || !Number.isFinite(value)) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
       if (!lane) return;
       const laneParam = lane.param;
-      const oldPoints = [...lane.points];
+      const oldPoints = normalizeAutomationPoints(lane.points);
       const oldTrackRead = trackReadEnabled(track);
       const oldTrackWrite = trackWriteEnabled(track);
       const oldLaneRead = automationLaneReadEnabled(lane);
       const oldLaneMode = lane.mode;
-      const newPoints = [...lane.points, { time: Math.max(0, time), value: clamp01(value) }].sort((a, b) => a.time - b.time);
+      const newPoints = [
+        ...oldPoints,
+        { id: createAutomationPointId(), time: Math.max(0, time), value: clamp01(value) },
+      ].sort((a, b) => a.time - b.time);
       const applyPoints = (points, options?: { restoreReadState?: boolean }) => {
         const behavior = writeBehavior(get);
         set((s) => ({
@@ -1331,7 +2196,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         const updatedTrack = get().tracks.find((t) => t.id === trackId);
         const updatedLane = updatedTrack?.automationLanes.find((l) => l.id === laneId);
         const resetWriteState = clearAutomationTouchState(trackId, laneParam) || trackWriteEnabled(updatedTrack);
-        if (updatedLane) syncAutomationLaneAfterManualEdit(trackId, updatedLane, resetWriteState);
+        if (updatedLane) {
+          if (updatedLane.points.length === 0) {
+            nativeBridge.clearAutomation(trackId, updatedLane.param).catch(() => {});
+          } else {
+            syncAutomationLaneAfterManualEdit(trackId, updatedLane, resetWriteState);
+          }
+        }
       };
       commandManager.execute({
         type: "AUTOMATION_POINT_ADD",
@@ -1344,12 +2215,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     removeAutomationPoint: (trackId, laneId, pointIndex) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (!lane || pointIndex < 0 || pointIndex >= lane.points.length) return;
+      if (!lane || !Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= lane.points.length) return;
       const laneParam = lane.param;
-      const oldPoints = [...lane.points];
-      const newPoints = lane.points.filter((_, i) => i !== pointIndex);
+      const oldPoints = normalizeAutomationPoints(lane.points);
+      const newPoints = oldPoints.filter((_, i) => i !== pointIndex);
       const applyPoints = (points) => {
         set((s) => ({
           tracks: s.tracks.map((t) => t.id !== trackId ? t : {
@@ -1376,14 +2248,17 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     moveAutomationPoint: (trackId, laneId, pointIndex, time, value) => {
+      if (isAutomationEditLocked(get())) return;
+      if (!Number.isFinite(time) || !Number.isFinite(value)) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (!lane || pointIndex < 0 || pointIndex >= lane.points.length) return;
+      if (!lane || !Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= lane.points.length) return;
       const laneParam = lane.param;
-      const oldPoints = [...lane.points];
-      const newPoints = lane.points
-        .map((p, i) => i === pointIndex ? { time: Math.max(0, time), value: clamp01(value) } : p)
+      const oldPoints = normalizeAutomationPoints(lane.points);
+      const newPoints = oldPoints
+        .map((p, i) => i === pointIndex ? { ...p, time: Math.max(0, time), value: clamp01(value) } : p)
         .sort((a, b) => a.time - b.time);
+      if (JSON.stringify(oldPoints) === JSON.stringify(newPoints)) return;
       const applyPoints = (points) => {
         set((s) => ({
           tracks: s.tracks.map((t) => t.id !== trackId ? t : {
@@ -1410,6 +2285,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     setAutomationLanePoints: (trackId, laneId, points, options = {}) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
       if (!track || !lane) return;
@@ -1421,6 +2297,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const oldLaneRead = options.oldLaneRead ?? automationLaneReadEnabled(lane);
       const oldLaneMode = options.oldLaneMode ?? lane.mode;
       const nextPoints = normalizeAutomationPoints(points);
+      if (JSON.stringify(oldPoints) === JSON.stringify(nextPoints)) return;
 
       const applyPoints = (targetPoints, applyOptions?: { restoreReadState?: boolean }) => {
         const behavior = writeBehavior(get);
@@ -1485,6 +2362,11 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     },
 
     toggleAutomationLaneVisibility: (trackId, laneId) => {
+      if (isAutomationEditLocked(get())) return;
+      const lane = get().tracks.find((track) => track.id === trackId)
+        ?.automationLanes.find((candidate) => candidate.id === laneId);
+      if (!lane) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1495,13 +2377,25 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             ),
           };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "TOGGLE_AUTOMATION_LANE_VISIBILITY",
+        lane.visible ? "Hide automation lane" : "Show automation lane",
+      );
     },
 
     setAutomationLaneRead: (trackId, laneId, enabled) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
       if (!track || !lane) return;
+      if (automationLaneReadEnabled(lane) === Boolean(enabled)) return;
+      const before = captureAutomationProjectSnapshot(get());
       const behavior = writeBehavior(get);
       if (!enabled) clearAutomationTouchState(trackId, lane.param);
       set((s) => ({
@@ -1522,20 +2416,30 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       if (updatedTrack && updatedLane)
         syncAutomationLaneToBackend(trackId, withResolvedLaneMode(updatedTrack, updatedLane, behavior, false));
       get().updateAutomatedValues();
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "SET_AUTOMATION_LANE_READ",
+        enabled ? "Enable automation lane read" : "Disable automation lane read",
+      );
     },
 
     toggleAutomationLaneRead: (trackId, laneId) => {
+      if (isAutomationEditLocked(get())) return;
       const lane = get().tracks.find((t) => t.id === trackId)?.automationLanes.find((l) => l.id === laneId);
       if (!lane) return;
       get().setAutomationLaneRead(trackId, laneId, !automationLaneReadEnabled(lane));
     },
 
     clearAutomationLane: (trackId, laneId) => {
+      if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       const lane = track?.automationLanes.find((l) => l.id === laneId);
-      if (!lane) return;
+      if (!lane || lane.points.length === 0) return;
       const laneParam = lane.param;
-      const oldPoints = [...lane.points];
+      const oldPoints = normalizeAutomationPoints(lane.points);
       const applyPoints = (points) => {
         set((s) => ({
           tracks: s.tracks.map((t) => t.id !== trackId ? t : {
@@ -1549,7 +2453,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         const updatedTrack = get().tracks.find((t) => t.id === trackId);
         const updatedLane = updatedTrack?.automationLanes.find((l) => l.id === laneId);
         const resetWriteState = clearAutomationTouchState(trackId, laneParam) || trackWriteEnabled(updatedTrack);
-        if (updatedLane) syncAutomationLaneAfterManualEdit(trackId, updatedLane, resetWriteState);
+        if (updatedLane) {
+          if (updatedLane.points.length === 0) {
+            nativeBridge.clearAutomation(trackId, updatedLane.param).catch(() => {});
+          } else {
+            syncAutomationLaneAfterManualEdit(trackId, updatedLane, resetWriteState);
+          }
+        }
       };
       commandManager.execute({
         type: "AUTOMATION_LANE_CLEAR",
@@ -1559,29 +2469,21 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         undo: () => applyPoints(oldPoints),
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
-      return;
-      set((s) => ({
-        tracks: s.tracks.map((t) => {
-          if (t.id !== trackId) return t;
-          return {
-            ...t,
-            automationLanes: t.automationLanes.map((l) =>
-              l.id === laneId ? { ...l, points: [] } : l,
-            ),
-          };
-        }),
-        isModified: true,
-      }));
       // Sync to C++ backend — clear the automation for this parameter
-      if (lane) {
-        const parameterId = lane.param === "mute" ? "mute" : lane.param;
-        nativeBridge.clearAutomation(trackId, parameterId).catch(() => {});
-      }
     },
 
     setAutomationLaneMode: (trackId, laneId, mode) => {
+      if (isAutomationEditLocked(get())) return;
+      const currentLane = get().tracks.find((track) => track.id === trackId)
+        ?.automationLanes.find((lane) => lane.id === laneId);
       const readEnabled = mode !== "off";
       const shouldWrite = mode === "write" || mode === "touch" || mode === "latch";
+      if (!currentLane || (
+        currentLane.mode === mode
+        && automationLaneReadEnabled(currentLane) === readEnabled
+        && currentLane.armed === shouldWrite
+      )) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1607,11 +2509,29 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         }
         nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
       }
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "SET_AUTOMATION_LANE_MODE",
+        `Set automation lane mode to ${mode}`,
+      );
     },
 
     setTrackAutomationMode: (trackId, mode) => {
+      if (isAutomationEditLocked(get())) return;
+      const currentTrack = get().tracks.find((track) => track.id === trackId);
+      if (!currentTrack) return;
       const readEnabled = mode !== "off";
       const shouldWrite = mode === "write" || mode === "touch" || mode === "latch";
+      const alreadySet = currentTrack.automationReadEnabled === readEnabled
+        && currentTrack.automationWriteEnabled === shouldWrite
+        && currentTrack.automationLanes.every((lane) => (
+          lane.mode === mode && lane.readEnabled === readEnabled && lane.armed === shouldWrite
+        ));
+      if (alreadySet) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1636,9 +2556,22 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           nativeBridge.setAutomationMode(trackId, lane.param, mode).catch(() => {});
         }
       }
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "SET_TRACK_AUTOMATION_MODE",
+        `Set track automation mode to ${mode}`,
+      );
     },
 
     armAutomationLane: (trackId, laneId, armed) => {
+      if (isAutomationEditLocked(get())) return;
+      const lane = get().tracks.find((track) => track.id === trackId)
+        ?.automationLanes.find((candidate) => candidate.id === laneId);
+      if (!lane || lane.armed === Boolean(armed)) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1649,10 +2582,21 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             ),
           };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        "ARM_AUTOMATION_LANE",
+        armed ? "Arm automation lane" : "Disarm automation lane",
+      );
     },
 
     armAllVisibleAutomationLanes: (trackId) => {
+      if (isAutomationEditLocked(get())) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1663,10 +2607,14 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             ),
           };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(set, get, before, captureAutomationProjectSnapshot(get()), "ARM_VISIBLE_AUTOMATION_LANES", "Arm visible automation lanes");
     },
 
     disarmAllAutomationLanes: (trackId) => {
+      if (isAutomationEditLocked(get())) return;
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1675,10 +2623,13 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             automationLanes: t.automationLanes.map((lane) => ({ ...lane, armed: false })),
           };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(set, get, before, captureAutomationProjectSnapshot(get()), "DISARM_AUTOMATION_LANES", "Disarm automation lanes");
     },
 
     showAllActiveEnvelopes: (trackId) => {
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
@@ -1690,16 +2641,882 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
             ),
           };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(set, get, before, captureAutomationProjectSnapshot(get()), "SHOW_ACTIVE_ENVELOPES", "Show active automation envelopes");
     },
 
     hideAllEnvelopes: (trackId) => {
+      const before = captureAutomationProjectSnapshot(get());
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
           return { ...t, showAutomation: false };
         }),
+        isModified: true,
       }));
+      pushAppliedAutomationProjectCommand(set, get, before, captureAutomationProjectSnapshot(get()), "HIDE_AUTOMATION_ENVELOPES", "Hide automation envelopes");
+    },
+
+    setSelectedAutomationTarget: (target) => {
+      if (!target) {
+        set({ selectedAutomationTarget: null });
+        return;
+      }
+      const resolvedLane = resolveAutomationLaneTarget(get(), target);
+      if (!resolvedLane) {
+        set({ selectedAutomationTarget: null });
+        return;
+      }
+      if (
+        target.pointId !== null
+        && !resolvedLane.lane.points.some(
+          (point, index) => getAutomationPointId(point, index) === target.pointId,
+        )
+      ) {
+        set({ selectedAutomationTarget: null });
+        return;
+      }
+      set({ selectedAutomationTarget: { ...target } });
+    },
+
+    setSelectedAutomationLane: (target) => {
+      get().setSelectedAutomationTarget({ ...target, pointId: null });
+    },
+
+    setSelectedAutomationPoint: (target) => {
+      get().setSelectedAutomationTarget(target);
+    },
+
+    clearSelectedAutomationTarget: () => {
+      if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+    },
+
+    selectAdjacentAutomationPoint: (direction) => {
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved || resolved.lane.points.length === 0) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      const currentIndex = typeof resolved.target.pointId === "string"
+        ? resolved.lane.points.findIndex(
+            (point, index) => getAutomationPointId(point, index) === resolved.target.pointId,
+          )
+        : -1;
+      const pointIndex = direction === "previous"
+        ? currentIndex < 0
+          ? resolved.lane.points.length - 1
+          : Math.max(0, currentIndex - 1)
+        : currentIndex < 0
+          ? 0
+          : Math.min(resolved.lane.points.length - 1, currentIndex + 1);
+      const pointId = getAutomationPointId(resolved.lane.points[pointIndex], pointIndex);
+      set({ selectedAutomationTarget: { ...resolved.target, pointId } });
+    },
+
+    selectAdjacentAutomationLane: (direction) => {
+      const state = get();
+      const resolved = resolveAutomationLaneTarget(state);
+      if (!resolved) {
+        const staleTarget = state.selectedAutomationTarget;
+        const preferredTrack = (
+          staleTarget?.kind === "track"
+            ? state.tracks.find((track) => track.id === staleTarget.trackId && track.automationLanes.length > 0)
+            : undefined
+        )
+          || state.tracks.find((track) => track.id === state.selectedTrackId && track.automationLanes.length > 0)
+          || state.tracks.find((track) => state.selectedTrackIds.includes(track.id) && track.automationLanes.length > 0)
+          || state.tracks.find((track) => track.automationLanes.length > 0);
+        if (preferredTrack) {
+          const laneIndex = direction === "previous" ? preferredTrack.automationLanes.length - 1 : 0;
+          set({
+            selectedAutomationTarget: {
+              kind: "track",
+              trackId: preferredTrack.id,
+              laneId: preferredTrack.automationLanes[laneIndex].id,
+              pointId: null,
+            },
+          });
+          return;
+        }
+        if (state.masterAutomationLanes.length > 0) {
+          const laneIndex = direction === "previous" ? state.masterAutomationLanes.length - 1 : 0;
+          set({
+            selectedAutomationTarget: {
+              kind: "master",
+              laneId: state.masterAutomationLanes[laneIndex].id,
+              pointId: null,
+            },
+          });
+          return;
+        }
+        if (state.selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      const lanes = resolved.target.kind === "master"
+        ? get().masterAutomationLanes
+        : get().tracks.find((track) => track.id === resolved.target.trackId)?.automationLanes || [];
+      if (lanes.length === 0) {
+        set({ selectedAutomationTarget: null });
+        return;
+      }
+      const currentIndex = lanes.findIndex((lane) => lane.id === resolved.target.laneId);
+      if (currentIndex < 0) {
+        set({ selectedAutomationTarget: null });
+        return;
+      }
+      const nextIndex = direction === "previous"
+        ? (currentIndex - 1 + lanes.length) % lanes.length
+        : (currentIndex + 1) % lanes.length;
+      set({
+        selectedAutomationTarget: {
+          ...resolved.target,
+          laneId: lanes[nextIndex].id,
+          pointId: null,
+        },
+      });
+    },
+
+    deleteSelectedAutomationPoint: () => {
+      if (isAutomationEditLocked(get())) return;
+      const resolved = resolveAutomationPointTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget?.pointId !== null) {
+          set({ selectedAutomationTarget: null });
+        }
+        return;
+      }
+      if (resolved.target.kind === "master") {
+        get().removeMasterAutomationPoint(resolved.target.laneId, resolved.pointIndex);
+      } else {
+        get().removeAutomationPoint(
+          resolved.target.trackId,
+          resolved.target.laneId,
+          resolved.pointIndex,
+        );
+      }
+      const laneAfter = resolveAutomationLaneTarget(get(), resolved.target)?.lane;
+      const nextIndex = laneAfter && laneAfter.points.length > 0
+        ? Math.min(resolved.pointIndex, laneAfter.points.length - 1)
+        : null;
+      const nextPointId = nextIndex === null
+        ? null
+        : getAutomationPointId(laneAfter.points[nextIndex], nextIndex);
+      set({
+        selectedAutomationTarget: laneAfter
+          ? { ...resolved.target, pointId: nextPointId }
+          : null,
+      });
+    },
+
+    beginAutomationPointEdit: (target) => {
+      if (isAutomationEditLocked(get())) return false;
+      if (_automationPointEditSnapshot) get().cancelAutomationPointEdit();
+      const resolved = resolveAutomationPointTarget(get(), target);
+      if (!resolved) return false;
+      _automationPointEditSnapshot = {
+        target: { ...target },
+        originalPoints: normalizeAutomationPoints(resolved.lane.points),
+        originalIsModified: get().isModified,
+        editKind: "move",
+        workingPointCount: resolved.lane.points.length,
+        originalSourcePoint: null,
+      };
+      set({ selectedAutomationTarget: { ...target } });
+      return true;
+    },
+
+    beginAutomationPointCopyEdit: (target) => {
+      if (isAutomationEditLocked(get())) return false;
+      if (_automationPointEditSnapshot) get().cancelAutomationPointEdit();
+      const resolved = resolveAutomationPointTarget(get(), target);
+      if (!resolved) return false;
+      const originalPoints = normalizeAutomationPoints(resolved.lane.points);
+      const sourcePoint = originalPoints.find((point: any) => point.id === target.pointId);
+      if (!sourcePoint) return false;
+      const preservedCopy = {
+        ...sourcePoint,
+        id: createAutomationPointId(),
+      };
+      _automationPointEditSnapshot = {
+        target: { ...target },
+        originalPoints,
+        originalIsModified: get().isModified,
+        editKind: "copy",
+        workingPointCount: originalPoints.length + 1,
+        originalSourcePoint: {
+          time: sourcePoint.time,
+          value: sourcePoint.value,
+        },
+      };
+      applyAutomationTargetPoints(
+        set,
+        get,
+        target,
+        [...originalPoints, preservedCopy],
+        target.pointId,
+      );
+      return true;
+    },
+
+    previewAutomationPointEdit: (time, value) => {
+      const snapshot = _automationPointEditSnapshot;
+      if (!snapshot || isAutomationEditLocked(get())) return false;
+      if (!Number.isFinite(time) || !Number.isFinite(value)) return false;
+      const resolved = resolveAutomationLaneTarget(get(), snapshot.target);
+      const currentPointIndex = resolved?.lane.points.findIndex(
+        (point, index) => getAutomationPointId(point, index) === snapshot.target.pointId,
+      ) ?? -1;
+      if (
+        !resolved
+        || resolved.lane.points.length !== snapshot.workingPointCount
+        || currentPointIndex < 0
+      ) {
+        get().cancelAutomationPointEdit();
+        return false;
+      }
+      const nextPoints = resolved.lane.points.map((point, index) => index === currentPointIndex
+        ? { ...point, id: snapshot.target.pointId, time: Math.max(0, time), value: clamp01(value) }
+        : { ...point });
+      applyAutomationTargetPoints(
+        set,
+        get,
+        snapshot.target,
+        nextPoints,
+        snapshot.target.pointId,
+      );
+      return true;
+    },
+
+    commitAutomationPointEdit: () => {
+      const snapshot = _automationPointEditSnapshot;
+      if (!snapshot) return false;
+      _automationPointEditSnapshot = null;
+      if (isAutomationEditLocked(get())) {
+        applyAutomationTargetPoints(
+          set,
+          get,
+          snapshot.target,
+          snapshot.originalPoints,
+          snapshot.target.pointId,
+        );
+        set({ isModified: snapshot.originalIsModified });
+        return false;
+      }
+      const resolved = resolveAutomationLaneTarget(get(), snapshot.target);
+      if (!resolved || resolved.lane.points.length !== snapshot.workingPointCount) {
+        applyAutomationTargetPoints(
+          set,
+          get,
+          snapshot.target,
+          snapshot.originalPoints,
+          snapshot.target.pointId,
+        );
+        set({ isModified: snapshot.originalIsModified });
+        return false;
+      }
+      const sorted = resolved.lane.points
+        .map((point, sourceIndex) => ({ point: { ...point }, sourceIndex }))
+        .sort((a, b) => (a.point.time - b.point.time) || (a.sourceIndex - b.sourceIndex));
+      const finalPoints = sorted.map((entry) => entry.point);
+      const finalSourcePoint = snapshot.editKind === "copy"
+        ? finalPoints.find((point) => point.id === snapshot.target.pointId)
+        : null;
+      const copyDidNotMove = snapshot.editKind === "copy"
+        && snapshot.originalSourcePoint
+        && finalSourcePoint
+        && Math.abs(finalSourcePoint.time - snapshot.originalSourcePoint.time) <= 0.000001
+        && Math.abs(finalSourcePoint.value - snapshot.originalSourcePoint.value) <= 0.000001;
+      if (
+        (snapshot.editKind === "move"
+          && JSON.stringify(snapshot.originalPoints) === JSON.stringify(finalPoints))
+        || copyDidNotMove
+      ) {
+        applyAutomationTargetPoints(
+          set,
+          get,
+          snapshot.target,
+          snapshot.originalPoints,
+          snapshot.target.pointId,
+        );
+        set({ isModified: snapshot.originalIsModified });
+        return false;
+      }
+      applyAutomationTargetPoints(
+        set,
+        get,
+        snapshot.target,
+        finalPoints,
+        snapshot.target.pointId,
+      );
+      const afterTarget = { ...snapshot.target };
+      commandManager.push({
+        type: snapshot.editKind === "copy"
+          ? snapshot.target.kind === "master"
+            ? "MASTER_AUTOMATION_POINT_COPY"
+            : "AUTOMATION_POINT_COPY"
+          : snapshot.target.kind === "master"
+            ? "MASTER_AUTOMATION_POINT_MOVE"
+            : "AUTOMATION_POINT_MOVE",
+        description: snapshot.editKind === "copy"
+          ? snapshot.target.kind === "master"
+            ? "Copy master automation point"
+            : "Copy automation point"
+          : snapshot.target.kind === "master"
+            ? "Move master automation point"
+            : "Move automation point",
+        timestamp: Date.now(),
+        execute: () => applyAutomationTargetPoints(
+          set,
+          get,
+          afterTarget,
+          finalPoints,
+          snapshot.target.pointId,
+        ),
+        undo: () => applyAutomationTargetPoints(
+          set,
+          get,
+          snapshot.target,
+          snapshot.originalPoints,
+          snapshot.target.pointId,
+        ),
+      });
+      set({
+        canUndo: commandManager.canUndo(),
+        canRedo: commandManager.canRedo(),
+        isModified: true,
+      });
+      return true;
+    },
+
+    cancelAutomationPointEdit: () => {
+      const snapshot = _automationPointEditSnapshot;
+      if (!snapshot) return false;
+      _automationPointEditSnapshot = null;
+      const resolved = resolveAutomationLaneTarget(get(), snapshot.target);
+      if (!resolved) {
+        set({ selectedAutomationTarget: null });
+        return false;
+      }
+      applyAutomationTargetPoints(
+        set,
+        get,
+        snapshot.target,
+        snapshot.originalPoints,
+        snapshot.target.pointId,
+      );
+      set({ isModified: snapshot.originalIsModified });
+      return true;
+    },
+
+    nudgeSelectedAutomationPoint: (axis, direction) => {
+      if (isAutomationEditLocked(get())) return;
+      const resolved = resolveAutomationPointTarget(get());
+      if (!resolved || !get().beginAutomationPointEdit(resolved.target)) {
+        if (!resolved) set({ selectedAutomationTarget: null });
+        return;
+      }
+      const nextTime = axis === "time"
+        ? Math.max(0, resolved.point.time + direction * 0.01)
+        : resolved.point.time;
+      const nextValue = axis === "value"
+        ? clamp01(resolved.point.value + direction * 0.01)
+        : resolved.point.value;
+      if (!get().previewAutomationPointEdit(nextTime, nextValue)) {
+        get().cancelAutomationPointEdit();
+        return;
+      }
+      get().commitAutomationPointEdit();
+    },
+
+    addAutomationPointAtPlayhead: () => {
+      if (isAutomationEditLocked(get())) return;
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      const time = Math.max(0, Number(get().transport?.currentTime) || 0);
+      const value = resolved.lane.points.length > 0
+        ? interpolateAtTime(resolved.lane.points, time)
+        : getAutomationDefault(resolved.lane.param);
+      const beforePointIds = new Set(
+        resolved.lane.points.map((point, index) => getAutomationPointId(point, index)),
+      );
+      if (resolved.target.kind === "master") {
+        get().addMasterAutomationPoint(resolved.target.laneId, time, value);
+      } else {
+        get().addAutomationPoint(
+          resolved.target.trackId,
+          resolved.target.laneId,
+          time,
+          value,
+        );
+      }
+      const laneAfter = resolveAutomationLaneTarget(get(), resolved.target)?.lane;
+      if (!laneAfter) return;
+      const pointIndex = laneAfter.points.findIndex(
+        (point, index) => !beforePointIds.has(getAutomationPointId(point, index)),
+      );
+      const pointId = pointIndex < 0
+        ? null
+        : getAutomationPointId(laneAfter.points[pointIndex], pointIndex);
+      set({ selectedAutomationTarget: { ...resolved.target, pointId } });
+    },
+
+    clearSelectedAutomationLane: () => {
+      if (isAutomationEditLocked(get())) return;
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      if (resolved.target.kind === "master") {
+        get().clearMasterAutomationLane(resolved.target.laneId);
+      } else {
+        get().clearAutomationLane(resolved.target.trackId, resolved.target.laneId);
+      }
+      set({ selectedAutomationTarget: { ...resolved.target, pointId: null } });
+    },
+
+    setSelectedAutomationLaneVisibility: (visible) => {
+      if (isAutomationEditLocked(get())) return;
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      if (resolved.lane.visible === Boolean(visible)) return;
+      if (resolved.target.kind === "master") {
+        get().toggleMasterAutomationLaneVisibility(resolved.target.laneId);
+      } else {
+        get().toggleAutomationLaneVisibility(resolved.target.trackId, resolved.target.laneId);
+      }
+    },
+
+    setSelectedAutomationLaneRead: (enabled) => {
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      if (automationLaneReadEnabled(resolved.lane) === Boolean(enabled)) return;
+      if (resolved.target.kind === "master") {
+        get().setMasterAutomationLaneRead(resolved.target.laneId, enabled);
+      } else {
+        get().setAutomationLaneRead(resolved.target.trackId, resolved.target.laneId, enabled);
+      }
+    },
+
+    setSelectedAutomationLaneWrite: (enabled) => {
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      const desiredMode = enabled ? "write" : "read";
+      if (resolved.lane.mode === desiredMode && resolved.lane.armed === Boolean(enabled)) return;
+      get().setSelectedAutomationLaneMode(desiredMode);
+    },
+
+    setSelectedAutomationLaneMode: (mode) => {
+      const resolved = resolveAutomationLaneTarget(get());
+      if (!resolved) {
+        if (get().selectedAutomationTarget) set({ selectedAutomationTarget: null });
+        return;
+      }
+      if (resolved.target.kind === "master") {
+        get().setMasterAutomationLaneMode(resolved.target.laneId, mode);
+      } else {
+        get().setAutomationLaneMode(resolved.target.trackId, resolved.target.laneId, mode);
+      }
+    },
+
+    toggleArrangementAutomationView: () => {
+      const state = get();
+      const hasAutomation = state.tracks.some((track) => track.automationLanes.length > 0)
+        || state.masterAutomationLanes.length > 0;
+      if (!hasAutomation) return;
+      const anyShown = state.tracks.some((track) => track.showAutomation)
+        || state.showMasterAutomation;
+      // Arrangement visibility is editor view state. Lane visibility is left
+      // untouched, and this intentionally does not enter project undo history.
+      set((current) => ({
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          showAutomation: anyShown ? false : track.automationLanes.length > 0,
+        })),
+        showMasterAutomation: anyShown
+          ? false
+          : current.masterAutomationLanes.length > 0,
+      }));
+    },
+
+    setTracksAutomationRead: (trackIds, enabled) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const behavior = writeBehavior(get);
+      const wasModified = Boolean(get().isModified);
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (!ids.has(track.id)) return track;
+          if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return track;
+          const nextRead = Boolean(enabled);
+          const nextTrack = {
+            ...track,
+            automationReadEnabled: nextRead,
+            automationEnabled: nextRead,
+          };
+          return {
+            ...nextTrack,
+            automationLanes: track.automationLanes.map((lane) =>
+              withResolvedLaneMode(nextTrack, lane, behavior, false),
+            ),
+          };
+        }),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      if (automationProjectSnapshotsEqual(before, after)) {
+        if (get().isModified !== wasModified) set({ isModified: wasModified });
+        return;
+      }
+      for (const track of get().tracks) {
+        if (ids.has(track.id)) syncTrackAutomationModes(track, behavior);
+      }
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        after,
+        "SET_TRACKS_AUTOMATION_READ",
+        enabled ? "Enable selected tracks automation read" : "Disable selected tracks automation read",
+      );
+    },
+
+    toggleTracksAutomationRead: (trackIds) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const behavior = writeBehavior(get);
+      const wasModified = Boolean(get().isModified);
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (!ids.has(track.id)) return track;
+          if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return track;
+          const nextRead = !trackReadEnabled(track);
+          const nextTrack = {
+            ...track,
+            automationReadEnabled: nextRead,
+            automationEnabled: nextRead,
+          };
+          return {
+            ...nextTrack,
+            automationLanes: track.automationLanes.map((lane) =>
+              withResolvedLaneMode(nextTrack, lane, behavior, false),
+            ),
+          };
+        }),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      if (automationProjectSnapshotsEqual(before, after)) {
+        if (get().isModified !== wasModified) set({ isModified: wasModified });
+        return;
+      }
+      for (const track of get().tracks) {
+        if (ids.has(track.id)) syncTrackAutomationModes(track, behavior);
+      }
+      pushAppliedAutomationProjectCommand(set, get, before, after, "TOGGLE_TRACKS_AUTOMATION_READ", "Toggle selected tracks automation read");
+    },
+
+    setTracksAutomationWrite: (trackIds, enabled) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const behavior = writeBehavior(get);
+      const wasModified = Boolean(get().isModified);
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (!ids.has(track.id)) return track;
+          const nextWrite = Boolean(enabled);
+          const keepReadOn = trackReadEnabled(track) && track.automationLanes.length > 0;
+          const nextTrack = {
+            ...track,
+            automationReadEnabled: nextWrite ? true : keepReadOn,
+            automationWriteEnabled: nextWrite,
+            automationEnabled: nextWrite ? true : keepReadOn,
+          };
+          return {
+            ...nextTrack,
+            automationLanes: track.automationLanes.map((lane) =>
+              withResolvedLaneMode(nextTrack, lane, behavior, false),
+            ),
+          };
+        }),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      if (automationProjectSnapshotsEqual(before, after)) {
+        if (get().isModified !== wasModified) set({ isModified: wasModified });
+        return;
+      }
+      for (const track of get().tracks) {
+        if (ids.has(track.id)) syncTrackAutomationModes(track, behavior);
+      }
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        after,
+        "SET_TRACKS_AUTOMATION_WRITE",
+        enabled ? "Enable selected tracks automation write" : "Disable selected tracks automation write",
+      );
+    },
+
+    toggleTracksAutomationWrite: (trackIds) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const behavior = writeBehavior(get);
+      const wasModified = Boolean(get().isModified);
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (!ids.has(track.id)) return track;
+          const nextWrite = !trackWriteEnabled(track);
+          const keepReadOn = trackReadEnabled(track) && track.automationLanes.length > 0;
+          const nextTrack = {
+            ...track,
+            automationReadEnabled: nextWrite ? true : keepReadOn,
+            automationWriteEnabled: nextWrite,
+            automationEnabled: nextWrite ? true : keepReadOn,
+          };
+          return {
+            ...nextTrack,
+            automationLanes: track.automationLanes.map((lane) =>
+              withResolvedLaneMode(nextTrack, lane, behavior, false),
+            ),
+          };
+        }),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      if (automationProjectSnapshotsEqual(before, after)) {
+        if (get().isModified !== wasModified) set({ isModified: wasModified });
+        return;
+      }
+      for (const track of get().tracks) {
+        if (ids.has(track.id)) syncTrackAutomationModes(track, behavior);
+      }
+      pushAppliedAutomationProjectCommand(set, get, before, after, "TOGGLE_TRACKS_AUTOMATION_WRITE", "Toggle selected tracks automation write");
+    },
+
+    setTracksAutomationMode: (trackIds, mode) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const readEnabled = mode !== "off";
+      const shouldWrite = mode === "write" || mode === "touch" || mode === "latch";
+      const wasModified = Boolean(get().isModified);
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => ids.has(track.id)
+          ? {
+              ...track,
+              automationReadEnabled: readEnabled,
+              automationWriteEnabled: shouldWrite,
+              automationEnabled: readEnabled,
+              automationLanes: track.automationLanes.map((lane) => ({
+                ...lane,
+                mode,
+                readEnabled,
+                armed: shouldWrite,
+              })),
+            }
+          : track),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      if (automationProjectSnapshotsEqual(before, after)) {
+        if (get().isModified !== wasModified) set({ isModified: wasModified });
+        return;
+      }
+      for (const track of get().tracks) {
+        if (!ids.has(track.id)) continue;
+        for (const lane of track.automationLanes) syncAutomationLaneToBackend(track.id, lane);
+      }
+      pushAppliedAutomationProjectCommand(set, get, before, after, "SET_TRACKS_AUTOMATION_MODE", `Set selected tracks automation mode to ${mode}`);
+    },
+
+    toggleTracksAutomationModes: (trackIds, firstMode, secondMode) => {
+      const ids = new Set(trackIds);
+      if (ids.size === 0 || firstMode === secondMode) return;
+      const selectedTracks = get().tracks.filter((track) => ids.has(track.id));
+      if (selectedTracks.length === 0) return;
+      const trackMode = (track) => {
+        if (!trackReadEnabled(track)) return "off";
+        if (!trackWriteEnabled(track)) return "read";
+        const laneModes = new Set(track.automationLanes.map((lane) => lane.mode));
+        if (laneModes.size === 1) return track.automationLanes[0]?.mode || "read";
+        return writeBehavior(get()) === "overwrite" ? "write" : writeBehavior(get());
+      };
+      const allAtSecondMode = selectedTracks.every((track) => trackMode(track) === secondMode);
+      get().setTracksAutomationMode(trackIds, allAtSecondMode ? firstMode : secondMode);
+    },
+
+    setTracksAutomationVisibility: (trackIds, visible) => {
+      if (isAutomationEditLocked(get())) return;
+      const ids = new Set(trackIds);
+      if (ids.size === 0) return;
+      const before = captureAutomationProjectSnapshot(get());
+      set((state) => ({
+        tracks: state.tracks.map((track) => {
+          if (!ids.has(track.id) || track.automationLanes.length === 0) return track;
+          if (!visible) return track.showAutomation ? { ...track, showAutomation: false } : track;
+          return {
+            ...track,
+            showAutomation: true,
+            automationLanes: track.automationLanes.map((lane) => (
+              lane.points.length > 0 ? { ...lane, visible: true } : lane
+            )),
+          };
+        }),
+      }));
+      pushAppliedAutomationProjectCommand(
+        set,
+        get,
+        before,
+        captureAutomationProjectSnapshot(get()),
+        visible ? "SHOW_SELECTED_TRACK_AUTOMATION" : "HIDE_SELECTED_TRACK_AUTOMATION",
+        visible ? "Show selected track automation" : "Hide selected track automation",
+      );
+    },
+
+    suspendAutomation: () => {
+      const state = get();
+      if (isAutomationEditLocked(state)) return;
+      if (_automationWriteSessionSnapshots.size > 0) get().endAutomationWriteSession();
+      const hasUnsuspended = state.tracks.some((track) => (
+        !track.suspendedAutomationState
+        && (track.automationLanes.length > 0 || trackReadEnabled(track) || trackWriteEnabled(track))
+      )) || (
+        !state.suspendedMasterAutomationState
+        && (state.masterAutomationLanes.length > 0 || state.masterAutomationReadEnabled || state.masterAutomationWriteEnabled)
+      );
+      if (!hasUnsuspended) return;
+      const before = captureAutomationProjectSnapshot(state);
+      set((current) => ({
+        tracks: current.tracks.map((track) => {
+          if (
+            track.suspendedAutomationState
+            || (track.automationLanes.length === 0 && !trackReadEnabled(track) && !trackWriteEnabled(track))
+          ) return track;
+          return {
+            ...track,
+            suspendedAutomationState: buildAutomationSuspendSnapshot(track),
+            automationReadEnabled: false,
+            automationWriteEnabled: false,
+            automationEnabled: false,
+            automationLanes: track.automationLanes.map((lane) => ({
+              ...lane,
+              mode: "off",
+              armed: false,
+              readEnabled: false,
+            })),
+          };
+        }),
+        ...(current.suspendedMasterAutomationState
+          || (current.masterAutomationLanes.length === 0
+            && !current.masterAutomationReadEnabled
+            && !current.masterAutomationWriteEnabled)
+          ? {}
+          : {
+              suspendedMasterAutomationState: {
+                showAutomation: current.showMasterAutomation,
+                automationReadEnabled: current.masterAutomationReadEnabled,
+                automationWriteEnabled: current.masterAutomationWriteEnabled,
+                automationEnabled: current.masterAutomationEnabled,
+                lanes: Object.fromEntries(current.masterAutomationLanes.map((lane) => [
+                  lane.id,
+                  {
+                    visible: lane.visible,
+                    armed: lane.armed,
+                    mode: lane.mode,
+                    readEnabled: automationLaneReadEnabled(lane),
+                  },
+                ])),
+              },
+              masterAutomationReadEnabled: false,
+              masterAutomationWriteEnabled: false,
+              masterAutomationEnabled: false,
+              masterAutomationLanes: current.masterAutomationLanes.map((lane) => ({
+                ...lane,
+                mode: "off",
+                armed: false,
+                readEnabled: false,
+              })),
+            }),
+        isModified: true,
+      }));
+      _automationTouchedParams.clear();
+      _automationLatchedParams.clear();
+      _automationWriteValues.clear();
+      _autoRecordTimers.clear();
+      const after = captureAutomationProjectSnapshot(get());
+      applyAutomationProjectSnapshot(set, get, after);
+      pushAppliedAutomationProjectCommand(set, get, before, after, "SUSPEND_AUTOMATION", "Suspend automation");
+    },
+
+    resumeAutomation: () => {
+      const state = get();
+      if (isAutomationEditLocked(state)) return;
+      if (
+        !state.suspendedMasterAutomationState
+        && !state.tracks.some((track) => track.suspendedAutomationState)
+      ) return;
+      const before = captureAutomationProjectSnapshot(state);
+      set((current) => ({
+        tracks: current.tracks.map((track) => {
+          const snapshot = track.suspendedAutomationState;
+          if (!snapshot) return track;
+          return {
+            ...track,
+            showAutomation: snapshot.showAutomation,
+            automationReadEnabled: snapshot.automationReadEnabled ?? false,
+            automationWriteEnabled: snapshot.automationWriteEnabled ?? false,
+            automationEnabled: snapshot.automationEnabled ?? snapshot.automationReadEnabled ?? false,
+            suspendedAutomationState: null,
+            automationLanes: track.automationLanes.map((lane) => {
+              const laneState = snapshot.lanes[lane.id];
+              return laneState ? { ...lane, ...laneState } : lane;
+            }),
+          };
+        }),
+        ...(current.suspendedMasterAutomationState
+          ? {
+              showMasterAutomation: current.suspendedMasterAutomationState.showAutomation,
+              masterAutomationReadEnabled: current.suspendedMasterAutomationState.automationReadEnabled ?? false,
+              masterAutomationWriteEnabled: current.suspendedMasterAutomationState.automationWriteEnabled ?? false,
+              masterAutomationEnabled: current.suspendedMasterAutomationState.automationEnabled
+                ?? current.suspendedMasterAutomationState.automationReadEnabled
+                ?? false,
+              masterAutomationLanes: current.masterAutomationLanes.map((lane) => {
+                const laneState = current.suspendedMasterAutomationState?.lanes[lane.id];
+                return laneState ? { ...lane, ...laneState } : lane;
+              }),
+              suspendedMasterAutomationState: null,
+            }
+          : {}),
+        isModified: true,
+      }));
+      const after = captureAutomationProjectSnapshot(get());
+      applyAutomationProjectSnapshot(set, get, after);
+      pushAppliedAutomationProjectCommand(set, get, before, after, "RESUME_AUTOMATION", "Resume automation");
     },
 
 });

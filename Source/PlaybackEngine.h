@@ -75,6 +75,7 @@ public:
     // Hot-swap a clip's audio file (used after pitch correction writes a new file)
     void replaceClipAudioFile(const juce::String& clipId, const juce::File& newFile);
     void queueDeferredClipAudioFile(const juce::String& clipId, const juce::File& newFile, bool restoringOriginal = false);
+    void cancelDeferredClipAudioFile(const juce::String& clipId);
     bool commitDeferredClipAudioFile(const juce::String& clipId);
     int commitAllDeferredClipAudioFiles();
 

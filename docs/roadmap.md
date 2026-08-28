@@ -1,53 +1,57 @@
-# Release Roadmap
+# OpenStudio Roadmap
 
-This file contains only open work. Completed implementation history belongs in
-Git.
+This public roadmap describes product direction, not fixed delivery dates or a
+promise that every exploratory item will ship. Current capabilities and caveats
+live in [Implemented features](implemented_features.md); release qualification
+lives in [Testing](testing.md) and the
+[Release smoke checklist](release-smoke-checklist.md).
 
-## Release gates
+## Now: release quality
 
-- [ ] Obtain written TONE3000 approval for the production OAuth, catalog,
-  attribution, and download scope.
-- [ ] Run the [fresh-account TONE3000 acceptance](testing.md#tone3000-first-user-acceptance)
-  with the release candidate.
-- [ ] Confirm `TONE3000_PUBLISHABLE_KEY` reaches every GitHub release job
-  through the configured Doppler service token.
-- [ ] Complete user guitar audition of the exact Debug/release candidate and
-  record `pass`, `fail`, or `not_asserted` per listening item.
-- [ ] Run a real screen-reader pass over the bitmap-backed NAM controls.
-- [ ] Verify licenses and redistribution terms for every starter NAM capture
-  and IR included in a release.
-- [ ] Complete platform download/install smoke tests and checksum verification
-  for every artifact advertised on the website.
+- Complete release qualification for the NAM Rack and optional TONE3000
+  workflow, including multi-capture selection, Guitar/Bass profiles, project and
+  preset recovery, accessibility, and real-interface listening tests.
+- Keep Windows and macOS installation, startup, updates, and optional AI Tools
+  setup reliable on clean systems.
+- Preserve old projects and presets while strengthening audio-thread safety,
+  deterministic state migration, and failure recovery.
 
-## Pitch editor
+## Next: DAW foundations
 
-The current production graphical path is the native VSF pitch-only renderer.
-Deterministic pitch requests and render integrity are covered; naturalness,
-formant quality, and difficult note boundaries remain listening decisions.
+- Finish the remaining MIDI playback, routing, note-lifecycle, hardware-output,
+  and plug-in-generated MIDI workflows across live playback and offline render.
+- Bring CLAP instrument/event handling and state restoration to the same
+  product standard as the reference VST3 path.
+- Unify menus and contextual commands around the action registry so shortcuts,
+  enablement, undo, and visible actions remain consistent.
+- Complete and test the render/export options that OpenStudio advertises,
+  including presets, queue behavior, metadata, failure cleanup, and project
+  round trips.
+- Improve project-wide media, FX, track/group, navigation, and floating-window
+  management.
 
-Reopen the experimental ML-restoration or clean-sheet engine families only when
-a materially stronger restorer/decomposition is available. Do not revive the
-rejected proxy path or treat diagnostic similarity scores as completion.
+## Exploring
 
-## Deliberately deferred
+- An optional local DAW assistant that selects a model appropriate for the
+  user's hardware, keeps project context local and bounded, previews every
+  mutating action, and uses OpenStudio's normal undo-aware commands.
+- Wider hybrid-precision processing where it produces measurable value without
+  compromising plug-in compatibility or the default float32 workflow.
+- More portable tone/library workflows, including cross-device metadata and
+  safe shared-asset management.
+- Future pitch-rendering or restoration research when a materially stronger,
+  testable approach becomes available.
+- A native extension SDK if demand justifies a stable ABI and long-term
+  compatibility commitment; Lua and JSFX remain the supported extension paths
+  today.
 
-- Same-path asset fingerprints: add only if replacing a model/IR in place
-  becomes a supported workflow.
-- One-file portable tone bundles and shared-asset reference counting: required
-  before offering destructive library cleanup, not before normal preset use.
-- Event-driven tuner telemetry and smaller knob atlases: profile first.
-- User-selectable 4x oversampling: expose only if measured value justifies its
-  CPU/latency cost.
-- Cross-device library export: move additional local library metadata native
-  only when the product commits to that workflow.
+## Product guardrails
 
-## Retired product paths
-
-Do not reintroduce these as visible features without a new product decision and
-full QA:
-
-- live rack Transpose;
-- active Pedal NAM processing (legacy state is migration-only);
-- Chaos as a separate mode (migrated to the dedicated Distortion pedal);
-- Glitch and Doubler;
-- decorative routing controls that imply unsupported topology.
+- OpenStudio will not bundle third-party NAM captures or cabinet IRs without
+  clear redistribution permission.
+- Automated measurements will not be presented as proof of subjective tone,
+  naturalness, or commercial-product parity.
+- Experimental controls will not be exposed as working product features before
+  their complete signal path, persistence, and tests exist.
+- Retired NAM Rack controls and misleading decorative routing will not return
+  without a new product decision and full QA.

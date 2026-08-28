@@ -1,16 +1,18 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { formatShortcut } from "../utils/platform";
 import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
 import {
   activateShortcutContext,
   registerShortcutSurface,
-  shortcutExactlyMatches,
-  toPressedShortcut,
   type ShortcutSurfaceHandler,
 } from "../utils/shortcutContext";
-import { usePitchEditorStore, PitchEditorTool, PitchSnapMode, PITCH_EDITOR_FORMANT_EDITING_ENABLED } from "../store/pitchEditorStore";
+import { getShortcutPlatform } from "../utils/platform";
+import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
+import { resolveWheelGesture } from "../utils/wheelGestureResolver";
+import { usePitchEditorStore, PitchEditorTool, PitchSnapMode, PITCH_EDITOR_FORMANT_EDITING_ENABLED, isCurrentPitchEditorClipEditable } from "../store/pitchEditorStore";
 import { GripHorizontal, X, Scissors, MousePointer, Activity, Waves, ChevronRight, Pencil } from "lucide-react";
 import { NoteInspector } from "./NoteInspector";
 import { CorrectPitchModal } from "./CorrectPitchModal";
@@ -37,6 +39,49 @@ const TOOL_DEFS: { id: PitchEditorTool; label: string; key: string; icon: React.
   { id: "draw", label: "Draw", key: "5", icon: <Pencil size={11} />, title: "Draw pitch curve on note (5)" },
   { id: "split", label: "Split", key: "6", icon: <Scissors size={11} />, title: "Split note at click (6)" },
 ];
+
+const PITCH_TOOL_ACTIONS: Record<string, PitchEditorTool> = {
+  "pitch.tool.select": "select",
+  "pitch.tool.drift": "drift",
+  "pitch.tool.vibrato": "vibrato",
+  "pitch.tool.transition": "transition",
+  "pitch.tool.draw": "draw",
+  "pitch.tool.split": "split",
+};
+
+const PITCH_MOVE_ACTION_IDS = [
+  "pitch.moveUp",
+  "pitch.moveDown",
+  "pitch.moveUpFine",
+  "pitch.moveDownFine",
+] as const;
+
+const PITCH_EDIT_ACTION_IDS = new Set<string>([
+  ...PITCH_MOVE_ACTION_IDS,
+  "pitch.correctSelectedToScale",
+  "pitch.correctAllToScale",
+  "pitch.toggleAB",
+  "pitch.mergeSelectedNotes",
+]);
+
+export function getPitchEditorEditActionBlockResult(actionId: string): "claimed_noop" | null {
+  return PITCH_EDIT_ACTION_IDS.has(actionId) && !isCurrentPitchEditorClipEditable()
+    ? "claimed_noop"
+    : null;
+}
+
+const PITCH_SHORTCUT_ACTION_IDS = [
+  "pitch.selectAll",
+  "pitch.closeEditor",
+  ...PITCH_MOVE_ACTION_IDS,
+  "pitch.correctSelectedToScale",
+  "pitch.detectKeyScale",
+  "pitch.correctAllToScale",
+  "pitch.toggleAB",
+  "pitch.openCorrectionMacro",
+  "pitch.mergeSelectedNotes",
+  ...Object.keys(PITCH_TOOL_ACTIONS),
+] as const;
 
 const SNAP_MODES: { id: PitchSnapMode; label: string }[] = [
   { id: "off", label: "Off" },
@@ -566,31 +611,41 @@ export function PitchEditorLowerZone() {
     if (!canvas) return;
 
     const handler = (e: WheelEvent) => {
-      e.preventDefault();
+      const shortcutPlatform = getShortcutPlatform();
+      const behaviorProfile = getMouseBehaviorProfile(
+        useDAWStore.getState().mouseBehaviorProfileId,
+        shortcutPlatform,
+      );
+      const gesture = resolveWheelGesture(e, {
+        surface: "pitch_editor",
+        subtarget: "grid",
+        platform: toMouseBehaviorPlatform(shortcutPlatform),
+      }, behaviorProfile.wheel);
+      if (gesture.preventDefault) e.preventDefault();
+      if (gesture.stopPropagation) e.stopPropagation();
       const curPps = pixelsPerSecondRef.current;
       const curScrollX = dawScrollXRef.current;
       const curScrollY = scrollYRef.current;
       const curZoomY = zoomYRef.current;
       const daw = useDAWStore.getState();
 
-      if (e.ctrlKey || e.metaKey) {
+      if (gesture.operation === "zoom" && gesture.target === "timeline") {
         // Horizontal zoom — mirrors Timeline.tsx exactly
         const rect = canvas.getBoundingClientRect();
         const cursorX = e.clientX - rect.left;
-        const factor = Math.exp(-e.deltaY * ZOOM_SENSITIVITY);
+        const factor = Math.exp(-gesture.amount * ZOOM_SENSITIVITY);
         const newPps = Math.max(MIN_PPS, Math.min(MAX_PPS, curPps * factor));
         const timeAtCursor = (curScrollX + cursorX) / curPps;
         const newScrollX = Math.max(0, timeAtCursor * newPps - cursorX);
         setZoom(newPps);
         setScroll(newScrollX, daw.scrollY);
-      } else if (e.shiftKey) {
+      } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
         // Horizontal scroll — same scrollSpeed as Timeline
-        const newScrollX = Math.max(0, curScrollX + e.deltaY * 2);
+        const newScrollX = Math.max(0, curScrollX + gesture.amount);
         setScroll(newScrollX, daw.scrollY);
-      } else {
+      } else if (gesture.operation === "scroll") {
         // Vertical pitch scroll
-        const delta = e.deltaY / curZoomY;
-        setScrollY(curScrollY - delta);
+        setScrollY(curScrollY + gesture.amount / curZoomY);
       }
     };
 
@@ -900,6 +955,76 @@ export function PitchEditorLowerZone() {
   }, [dragState, commitNoteEdit, commitDrawPitch, endInteractivePreview]);
 
   // Keyboard shortcuts are registered with the app's single capture router.
+  const pitchActionExecutorRef = useRef<
+    (actionId: string) => ReturnType<ShortcutSurfaceHandler>
+  >(() => "unmatched");
+  pitchActionExecutorRef.current = (actionId) => {
+    if (!pitchEditorTrackId) return "unmatched";
+    const blockedResult = getPitchEditorEditActionBlockResult(actionId);
+    if (blockedResult) return blockedResult;
+
+    if (actionId === "pitch.selectAll") {
+      selectAll();
+      return "handled";
+    }
+    if (actionId === "pitch.closeEditor") {
+      closePitchEditor();
+      return "handled";
+    }
+    if (actionId === "pitch.moveUp") {
+      moveSelectedPitch(1);
+      return "handled";
+    }
+    if (actionId === "pitch.moveDown") {
+      moveSelectedPitch(-1);
+      return "handled";
+    }
+    if (actionId === "pitch.moveUpFine") {
+      moveSelectedPitch(0.1);
+      return "handled";
+    }
+    if (actionId === "pitch.moveDownFine") {
+      moveSelectedPitch(-0.1);
+      return "handled";
+    }
+    if (actionId === "pitch.correctSelectedToScale") {
+      correctSelectedToScale();
+      return "handled";
+    }
+    if (actionId === "pitch.detectKeyScale") {
+      if (usePitchEditorStore.getState().notes.length === 0) return "claimed_noop";
+      autoDetectScale();
+      return "handled";
+    }
+    if (actionId === "pitch.correctAllToScale") {
+      if (usePitchEditorStore.getState().notes.length === 0) return "claimed_noop";
+      correctAllToScale();
+      return "handled";
+    }
+    if (actionId === "pitch.toggleAB") {
+      toggleABCompare();
+      return "handled";
+    }
+    if (actionId === "pitch.openCorrectionMacro") {
+      toggleCorrectPitchModal();
+      return "handled";
+    }
+    if (actionId === "pitch.mergeSelectedNotes") {
+      const selectedIds = usePitchEditorStore.getState().selectedNoteIds;
+      if (selectedIds.length < 2) return "claimed_noop";
+      mergeNotes(selectedIds);
+      return "handled";
+    }
+
+    const nextTool = PITCH_TOOL_ACTIONS[actionId];
+    if (nextTool) {
+      setTool(nextTool);
+      return "handled";
+    }
+
+    return "unmatched";
+  };
+
   const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
   shortcutHandlerRef.current = (event) => {
     if (!pitchEditorTrackId) return "unmatched";
@@ -916,55 +1041,34 @@ export function PitchEditorLowerZone() {
       redo();
       return "handled";
     }
-    if (shortcutExactlyMatches(event, "Ctrl+A")) {
-      if (event.repeat) return "claimed_noop";
-      selectAll();
-      return "handled";
-    }
-    if (shortcutExactlyMatches(event, "Esc")) {
-      if (event.repeat) return "claimed_noop";
-      closePitchEditor();
-      return "handled";
-    }
-    if (shortcutExactlyMatches(event, "Up", "Shift+Up")) {
-      moveSelectedPitch(event.shiftKey ? 0.1 : 1);
-      return "handled";
-    }
-    if (shortcutExactlyMatches(event, "Down", "Shift+Down")) {
-      moveSelectedPitch(event.shiftKey ? -0.1 : -1);
-      return "handled";
-    }
-    if (shortcutExactlyMatches(event, "Q")) {
-      if (event.repeat) return "claimed_noop";
-      correctSelectedToScale();
-      return "handled";
-    }
-    if (shortcutExactlyMatches(event, "Ctrl+J")) {
-      if (event.repeat) return "claimed_noop";
-      const selectedIds = usePitchEditorStore.getState().selectedNoteIds;
-      if (selectedIds.length < 2) return "claimed_noop";
-      mergeNotes(selectedIds);
-      return "handled";
-    }
 
-    const pressed = toPressedShortcut(event);
-    const toolIndex = pressed && /^\d$/.test(pressed)
-      ? Number.parseInt(pressed, 10) - 1
-      : -1;
-    if (toolIndex >= 0 && toolIndex < TOOL_DEFS.length) {
-      if (event.repeat) return "claimed_noop";
-      setTool(TOOL_DEFS[toolIndex].id);
-      return "handled";
-    }
-
-    return "unmatched";
+    const actionId = PITCH_SHORTCUT_ACTION_IDS.find((candidate) =>
+      matchesActionShortcut(event, candidate),
+    );
+    if (!actionId) return "unmatched";
+    if (event.repeat && !PITCH_MOVE_ACTION_IDS.includes(
+      actionId as typeof PITCH_MOVE_ACTION_IDS[number],
+    )) return "claimed_noop";
+    return pitchActionExecutorRef.current(actionId);
   };
 
-  useEffect(() => registerShortcutSurface(
-    { kind: "pitch_editor" },
-    (event) => shortcutHandlerRef.current(event),
-    { kind: "timeline" },
-  ), []);
+  useEffect(() => {
+    const context = { kind: "pitch_editor" } as const;
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      (event) => shortcutHandlerRef.current(event),
+      { kind: "timeline" },
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => pitchActionExecutorRef.current(actionId),
+      PITCH_SHORTCUT_ACTION_IDS,
+    );
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, []);
 
   // Panel resize
   const isDragging = useRef(false);

@@ -4,7 +4,13 @@
  * with the user's current custom global shortcut overrides.
  */
 
-import { getEffectiveActionShortcut } from "../store/actionRegistry";
+import { useDAWStore } from "../store/useDAWStore";
+import {
+  getEffectiveShortcutLabel,
+  getTimelineWheelHelpSentence,
+} from "./inputProfileHelp";
+import { getShortcutPlatform } from "./platform";
+import { getKeyboardShortcutProfile } from "./shortcutProfiles";
 
 export interface HelpEntry {
   title: string;
@@ -13,10 +19,16 @@ export interface HelpEntry {
 }
 
 function shortcut(actionId: string, fallback: string): string {
-  return getEffectiveActionShortcut(actionId) ?? fallback;
+  return getEffectiveShortcutLabel(actionId, fallback);
 }
 
 function buildHelpTexts(): Record<string, HelpEntry> {
+  const state = useDAWStore.getState();
+  const keyboardProfile = getKeyboardShortcutProfile(state.keyboardShortcutProfileId);
+  const wheelHelp = getTimelineWheelHelpSentence(
+    state.mouseBehaviorProfileId,
+    getShortcutPlatform(),
+  );
   const playShortcut = shortcut("transport.play", "Space");
   const recordShortcut = shortcut("transport.record", "Ctrl+R");
   const loopShortcut = shortcut("transport.loop", "L");
@@ -41,14 +53,13 @@ function buildHelpTexts(): Record<string, HelpEntry> {
   return {
     "navigation.essentials": {
       title: "Navigation & Essential Controls",
-      description:
-        "Normal mouse wheel uses native vertical scrolling in the workspace. Ctrl+Scroll zooms the timeline horizontally around the pointer. Shift+Scroll moves horizontally. Alt+Scroll changes track height. Ctrl+Shift+Scroll changes track height with a stronger zoom-style gesture. Start here if you are new to OpenStudio.",
-      shortcut: `Scroll: Vertical | Ctrl+Scroll: Timeline Zoom | Shift+Scroll: Horizontal | Alt+Scroll: Track Height | ${playShortcut}: Play | ${recordShortcut}: Record | ${helpShortcut}: Help`,
+      description: `${wheelHelp} Keyboard labels follow ${keyboardProfile.name}.`,
+      shortcut: `${playShortcut}: Play | ${recordShortcut}: Record | ${helpShortcut}: Help`,
     },
     "navigation.hotkeys": {
       title: "Core Hotkeys",
       description:
-        "The fastest first-session keys are Play, Record, Add Track, Toggle Mixer, Split at Playhead, Split Tool, Delete, Save, Help Reference, and Command Palette. Custom rebinding applies to global shortcuts; timeline/editor-specific shortcuts remain reference-only for now.",
+        "The fastest first-session keys are Play, Record, Add Track, Toggle Mixer, Split at Playhead, Split Tool, Delete, Save, Help Reference, and Command Palette. Custom bindings can override global and named editor scopes; an intentionally unassigned custom binding stays disabled.",
       shortcut: `${playShortcut} | ${recordShortcut} | ${newAudioTrackShortcut} | ${mixerShortcut} | ${splitAtCursorShortcut} | ${splitToolShortcut} | ${deleteShortcut} | ${saveShortcut} | ${commandPaletteShortcut}`,
     },
     "timeline": {
@@ -329,14 +340,14 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "shortcuts": {
       title: "Keyboard Shortcuts",
       description:
-        "The Keyboard Shortcuts window is the searchable reference for default and custom global bindings. Use it to review commands, print a cheat sheet, rebind global shortcuts, or reset them.",
+        "The Keyboard Shortcuts window is the searchable reference for profile and custom bindings in every supported scope. Use it to review commands, print a cheat sheet, rebind shortcuts, or reset them.",
       shortcut: `${keyboardShortcut}: Keyboard Shortcuts Window`,
     },
     "shortcuts.custom": {
       title: "Custom Shortcut Editing",
       description:
-        "Custom shortcuts are edited in the Keyboard Shortcuts window, not in Preferences. Rebinding currently applies to global shortcuts; timeline- and editor-scoped shortcuts remain documented but not rebindable in this pass.",
-      shortcut: `Open Keyboard Shortcuts from the Help menu, then choose Rebind on a global action`,
+        "Custom shortcuts are edited in the Keyboard Shortcuts window, not in Preferences. Global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, plug-in, automation, track-control, and modal scopes are rebindable.",
+      shortcut: `Open Keyboard Shortcuts from the Help menu, then choose Rebind on any action`,
     },
     "settings.audio": {
       title: "Audio Settings",

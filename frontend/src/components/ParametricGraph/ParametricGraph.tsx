@@ -1,5 +1,6 @@
 import { useCallback, useId, useRef, useState } from "react";
 import type { ParametricGraphProps, GraphNode } from "./ParametricGraph.types";
+import { resolveProfiledParameterWheel } from "../../utils/parameterWheel";
 
 // --- Coordinate helpers ---
 
@@ -207,14 +208,19 @@ export function ParametricGraph({
 
   const handleNodeWheel = useCallback(
     (e: React.WheelEvent, node: GraphNode) => {
-      e.stopPropagation();
       if (!onNodeChange || !nodeConfig.zAxis || node.z === undefined) return;
+      const gesture = resolveProfiledParameterWheel(e.nativeEvent, "graph");
+      if (gesture.preventDefault) e.preventDefault();
+      if (gesture.stopPropagation) e.stopPropagation();
+      if (gesture.operation !== "adjust") return;
       const { min, max, sensitivity } = nodeConfig.zAxis;
-      const delta = -e.deltaY * sensitivity;
+      const delta = -gesture.amount * sensitivity * (gesture.precision === "fine" ? 0.1 : 1);
       const newZ = Math.max(min, Math.min(max, node.z + delta));
+      onNodeDragStart?.(node.id);
       onNodeChange(node.id, { z: newZ });
+      onNodeDragEnd?.(node.id);
     },
-    [onNodeChange, nodeConfig.zAxis],
+    [onNodeChange, nodeConfig.zAxis, onNodeDragEnd, onNodeDragStart],
   );
 
   // --- Rendering ---

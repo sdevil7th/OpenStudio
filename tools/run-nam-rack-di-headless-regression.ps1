@@ -2,6 +2,8 @@ param(
     [string]$AppPath,
     [string]$OutputRoot,
     [string]$ModelPath,
+    [string]$PresetPath,
+    [string]$InputPath,
     [string]$Label = "nam-rack-di-regression",
     [int]$TimeoutSeconds = 180,
     [switch]$SkipBuild
@@ -183,12 +185,32 @@ if (-not $SkipBuild) {
     }
 }
 
-Ensure-DIFixtureBank
-
 $runDir = New-RunDirectory
-$fixtureWav = New-DIFixtureWav $runDir
+$fixtureWav = if ($InputPath) {
+    if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
+        throw "DI input file not found: $InputPath"
+    }
+    (Resolve-Path -LiteralPath $InputPath).Path
+} else {
+    Ensure-DIFixtureBank
+    New-DIFixtureWav $runDir
+}
 $resultPath = Join-Path $runDir "nam_rack_di_regression_result.json"
 $resolvedAppPath = Resolve-AppPath
+$defaultVictoryPresetPath = Join-Path $env:APPDATA "OpenStudio\Presets\OpenStudio_NAM_Rack\Victory Nolly 5150.ospreset"
+$resolvedPresetPath = if ($PresetPath) {
+    if (-not (Test-Path -LiteralPath $PresetPath -PathType Leaf)) {
+        throw "NAM Rack preset file not found: $PresetPath"
+    }
+    (Resolve-Path -LiteralPath $PresetPath).Path
+} elseif (Test-Path -LiteralPath $defaultVictoryPresetPath -PathType Leaf) {
+    # The PRE-EQ -> Maxon objective contract below is defined against the
+    # stored Victory Nolly 5150 voice. Prefer that deterministic fixture when
+    # the caller has not supplied an explicit preset override.
+    (Resolve-Path -LiteralPath $defaultVictoryPresetPath).Path
+} else {
+    $null
+}
 
 $argumentList = @(
     "--nam-rack-di-regression-headless",
@@ -211,6 +233,9 @@ $processStartInfo.CreateNoWindow = $true
 $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 $processStartInfo.RedirectStandardOutput = $true
 $processStartInfo.RedirectStandardError = $true
+if ($resolvedPresetPath) {
+    $processStartInfo.EnvironmentVariables["OPENSTUDIO_NAM_RACK_BEST_CLEAN_PRESET_PATH"] = $resolvedPresetPath
+}
 
 $process = [System.Diagnostics.Process]::Start($processStartInfo)
 if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
@@ -236,6 +261,10 @@ if (-not (Test-Path $resultPath)) {
 
 $result = Get-Content -Raw -Path $resultPath | ConvertFrom-Json
 Write-Host "NAM Rack DI regression result: $resultPath"
+Write-Host "DI input: $fixtureWav"
+if ($resolvedPresetPath) {
+    Write-Host "NAM Rack preset fixture: $resolvedPresetPath"
+}
 Write-Host "Objective gate status: $($result.objectiveGateStatus)"
 Write-Host "Subjective quality: $($result.subjectiveQuality)"
 Write-Host "Summary: $($result.summary)"

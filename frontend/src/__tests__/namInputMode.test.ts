@@ -112,7 +112,7 @@ describe("NAM Rack automatic input routing contract", () => {
       expect(readback.values.ampMix).toBe(0.73);
       expect(readback.uiState.namPresetBaseline.values.delayMix).toBe(0.24);
       expect(readback.uiState.namRackCompare.snapshots.A.values.reverbMix).toBe(0.31);
-      expect(readback.dspState.namEffectsDspVersion).toBe(11);
+      expect(readback.dspState.namEffectsDspVersion).toBe(19);
     } finally {
       if (previousWindow) {
         Object.defineProperty(scope, "window", previousWindow);

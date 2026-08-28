@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { EditMenu } from "./menus/EditMenu";
 import { MenuDropdown, MenuItemProps } from "./menus/MenuDropdown";
-import { getDisplayEffectiveShortcut } from "../store/actionRegistry";
+import { getDisplayEffectiveShortcut, getRegisteredAction } from "../store/actionRegistry";
 import { useDAWStore, THEME_PRESETS } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
@@ -15,9 +15,9 @@ import { GRID_TYPE_MODE_OPTIONS, type GridSize } from "../utils/snapToGrid";
  * Contains File, Edit, View, Insert, Track, Options, Actions, Help menus
  */
 export function MenuBar() {
-  const shortcut = (actionId: string, fallback: string) =>
-    getDisplayEffectiveShortcut(actionId) ?? fallback;
   const {
+    keyboardShortcutProfileId,
+    customShortcuts,
     toggleMixer,
     showMixer,
     showMasterTrackInTCP,
@@ -43,6 +43,8 @@ export function MenuBar() {
     toggleUndoHistory,
   } = useDAWStore(
     useShallow((s) => ({
+      keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+      customShortcuts: s.customShortcuts,
       toggleMixer: s.toggleMixer,
       showMixer: s.showMixer,
       showMasterTrackInTCP: s.showMasterTrackInTCP,
@@ -67,6 +69,10 @@ export function MenuBar() {
       showUndoHistory: s.showUndoHistory,
       toggleUndoHistory: s.toggleUndoHistory,
     })),
+  );
+  const shortcut = useCallback(
+    (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
+    [customShortcuts, keyboardShortcutProfileId],
   );
 
   const [isMaximized, setIsMaximized] = useState(false);
@@ -176,7 +182,7 @@ export function MenuBar() {
     alert(
       `OpenStudio ${version}\n\n` +
         "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.\n\n" +
-        "Built with:\n  JUCE 8.0 - Audio engine, VST3 hosting\n" +
+        "Built with:\n  JUCE 9.0.1 - Audio engine, VST3 hosting\n" +
         "  React - User interface\n  Konva - Timeline canvas\n  Zustand - State management\n\n" +
         "github.com/openstudio",
     );
@@ -520,10 +526,10 @@ export function MenuBar() {
       },
     },
     {
-      label: "Zoom to Fit",
+      label: "Zoom to Full Project",
       shortcut: shortcut("view.zoomToFit", "Ctrl+0"),
       onClick: () => {
-        useDAWStore.getState().setZoom(50);
+        getRegisteredAction("view.zoomToFit")?.execute();
       },
       dividerAfter: true,
     },
@@ -954,7 +960,7 @@ export function MenuBar() {
         /*
           "OpenStudio\n\n" +
           "A hybrid DAW with JUCE C++ backend and React/TypeScript frontend.\n\n" +
-          "Built with:\n  JUCE 8.0 — Audio engine, VST3 hosting\n" +
+          "Built with:\n  JUCE 9.0.1 — Audio engine, VST3 hosting\n" +
           "  React — User interface\n  Konva — Timeline canvas\n  Zustand — State management\n\n" +
           "github.com/sdevil7th/OpenStudio"
         */

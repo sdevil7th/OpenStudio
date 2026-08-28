@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   NAM_RACK_ADVANCED_CONTROL_IDS,
+  NAM_RACK_ADVANCED_ONLY_CONTROL_IDS,
   namRackAdvancedStageForCompactModule,
   orderNAMRackMixerStages,
   type RackMixerStripSpec,
@@ -19,6 +20,7 @@ const stage = (id: string): RackMixerStripSpec => ({
 describe("NAM Pedal Capture controls", () => {
   it("exposes the real wet/dry control as its own Device Controls stage", () => {
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["pedal-capture"]).toEqual(["pedalMix"]);
+    expect(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS["pedal-capture"]).toEqual(["pedalMix"]);
     expect(namRackAdvancedStageForCompactModule("pedal-capture")).toBe("pedal-capture");
 
     const ordered = orderNAMRackMixerStages([
@@ -37,7 +39,7 @@ describe("NAM Pedal Capture controls", () => {
 
     expect(panelSource).toContain('const togglePedalCapture = () => toggleParamPower("pedal", pedalMix, pedalActive, 0, 1)');
     expect(panelSource).toContain('label: "Pedal Capture"');
-    expect(panelSource).toContain('params: stageParams(NAM_RACK_ADVANCED_CONTROL_IDS["pedal-capture"], { pedalMix: "Mix" })');
+    expect(panelSource).toContain('params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS["pedal-capture"], { pedalMix: "Mix" })');
     expect(panelSource).toContain("Mix is also this capture's power control: 0% is a true bypass.");
     expect(captureCore).toContain('id: "pedal-capture"');
     expect(captureCore).toContain('caption: pedalName || "No capture loaded"');

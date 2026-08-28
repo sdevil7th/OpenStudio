@@ -39,7 +39,5 @@ private:
     static juce::var runRackDelaySpilloverProbe();
     static juce::var runRackDelayV10FrozenTailAndBudgetProbe();
     static juce::var runRackMinimumDelayBypassProbe();
-    static juce::var runRackTapeEchoSpilloverProbe();
-    static juce::var runRackTapeEchoFrozenTailContractProbe();
     static juce::var runTrackProcessorSparseTailServiceProbe();
 };

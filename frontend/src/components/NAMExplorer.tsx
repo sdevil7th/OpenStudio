@@ -63,6 +63,10 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Input, Modal } from "./ui";
 import {
+  NAMToneCapturePicker,
+  type NAMToneCapturePickerItem,
+} from "./NAMToneCapturePicker";
+import {
   NAMToneSaveModal,
   buildNAMToneSaveDraft,
   clearNAMActivePreview,
@@ -92,6 +96,8 @@ import {
   type NAMRackDesignRuntimeStatus,
 } from "./NAMRackDesignPort";
 import { firstNAMDisplayName, namDisplayNameFromPath, resolveNAMToneIdentity } from "../utils/namDisplayName";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 import {
   captureIncludesCab,
   captureTypeForInstalled,
@@ -100,7 +106,10 @@ import {
   targetSlotForCapture,
   type NAMCaptureType,
 } from "../utils/namCaptureType";
-import { buildNAMModulePresetCommitValues } from "../utils/namRackPresetTransactions";
+import {
+  buildNAMModulePresetCommitValues,
+  NAM_FULL_MODEL_SIZE,
+} from "../utils/namRackPresetTransactions";
 import {
   buildTONE3000LiveSearchSnapshot,
   createTONE3000QueryDebouncer,
@@ -122,10 +131,22 @@ import {
 } from "../utils/namCaptureActivation";
 import { windowRole } from "../utils/windowEnvironment";
 import {
-  namInstrumentLabelsAreCompatible,
+  filterAndPinNAMInstrumentItems,
+  labelForNAMInstrumentProfile,
+  namInstalledCaptureInstrumentLabels,
+  namInstrumentLabelsFromMetadataSources,
   normalizeNAMInstrumentProfile,
   type NAMInstrumentProfile,
 } from "../utils/namInstrumentProfile";
+import {
+  collapseNAMCatalogRowsToTonePacks,
+  isExplicitNAMCatalogCaptureSelection,
+  namCatalogCaptureSelectionKey,
+  namToneCaptureOptions,
+  namToneDeclaredCaptureCount,
+  namToneRequiresExplicitCapture,
+  sameNAMCatalogModelIdentity,
+} from "../utils/namToneCaptureSelection";
 
 type NAMTab = "latest" | "trending" | "downloads-all-time" | "installed" | "favorites";
 type NAMSlot = "amp" | "pedal";
@@ -174,6 +195,11 @@ export function resolveNAMCatalogSelection(
 ) {
   const exact = rows.find((row) => row.key === selectedKey);
   if (exact) return exact;
+
+  const sameCapture = rows.find((row) => (
+    namCatalogCaptureSelectionKey(row.tone, row.model) === selectedKey
+  ));
+  if (sameCapture) return sameCapture;
 
   // Live search rows intentionally begin as summary-only records with a
   // placeholder model ID. Hydrating the chosen tone replaces that placeholder
@@ -364,6 +390,12 @@ function previewBaselineFromState(state: unknown, fallback: BuiltInPluginSchema)
     pedalModelPath: String(modelState.pedalModelPath ?? ""),
     ampModelPath: String(modelState.ampModelPath ?? ""),
     cabIRPath: String(modelState.cabIRPath ?? ""),
+    pedalModelSize: typeof modelState.pedalModelSize === "number" && Number.isFinite(modelState.pedalModelSize)
+      ? Math.max(0, Math.min(1, modelState.pedalModelSize))
+      : undefined,
+    ampModelSize: typeof modelState.ampModelSize === "number" && Number.isFinite(modelState.ampModelSize)
+      ? Math.max(0, Math.min(1, modelState.ampModelSize))
+      : undefined,
     pedalDeclaredCaptureType: firstDeclaredCaptureType(
       modelState.pedalDeclaredCaptureType,
       modelState.pedalCaptureType,
@@ -761,6 +793,7 @@ export const OPENSTUDIO_FX_COLLECTION_PRESETS: OpenStudioFXPreset[] = [
     description: "Short plate-room blend for guitar ambience after delay.",
     values: {
       reverbEnabled: 1,
+      reverbPad: 0,
       reverbVoice: 1,
       reverbMix: 0.2,
       reverbDecaySec: 2.4,
@@ -860,7 +893,7 @@ export function buildNAMRailCatalogActionState({
   const primaryTitle = targetSlot === "cab"
     ? "Audition cabinet IR"
     : hasDownloadUrl
-      ? "Audition with live guitar"
+      ? "Audition with live instrument"
       : "Load model details and audition";
   const loadIcon = installedRecord && !installedRecord.missing
     ? "load"
@@ -907,7 +940,7 @@ export function buildNAMRailInstalledActionState({
       ? "Connect TONE3000 before restoring this missing tone."
       : "";
   return {
-    primaryTitle: targetSlot === "cab" ? "Audition cabinet IR" : "Audition with live guitar",
+    primaryTitle: targetSlot === "cab" ? "Audition cabinet IR" : "Audition with live instrument",
     primaryDisabled: Boolean(busyReason || primaryMissingReason),
     primaryDisabledReason: busyReason || primaryMissingReason,
     loadTitle: missing
@@ -931,7 +964,6 @@ const NAM_SHELVES: Array<[NAMShelf, string]> = [
   ["installed", "Installed"],
   ["favorites", "Favorites"],
 ];
-const INSTRUMENT_METADATA_KEYS = ["instrument", "instrument_type", "instrumentType", "instruments", "target_instrument", "targetInstrument"];
 const CHARACTER_METADATA_KEYS = ["character", "characters", "tone_character", "toneCharacter", "traits", "tags"];
 const CAPTURE_METADATA_FIELDS: Array<{ label: string; keys: string[] }> = [
   {
@@ -1090,7 +1122,6 @@ export function makeNAMSourceFlowRoute(
     "Input",
     "Gate",
     "Compressor",
-    "Tape Echo",
     octaverLabel,
     "Precision Drive",
     "High Gain Distortion",
@@ -1160,7 +1191,7 @@ function metadataLabelsFromSources(sources: unknown[], keys: string[]) {
 }
 
 function rowInstrumentLabels(tone: NAMCatalogTone, model: NAMCatalogModel) {
-  return metadataLabelsFromSources([model, tone], INSTRUMENT_METADATA_KEYS);
+  return namInstrumentLabelsFromMetadataSources([model, tone]);
 }
 
 function rowCharacterLabels(tone: NAMCatalogTone, model: NAMCatalogModel) {
@@ -1172,7 +1203,7 @@ function installedMetadataSources(record: NAMInstalledModel) {
 }
 
 function installedInstrumentLabels(record: NAMInstalledModel) {
-  return metadataLabelsFromSources(installedMetadataSources(record), INSTRUMENT_METADATA_KEYS);
+  return namInstalledCaptureInstrumentLabels(record);
 }
 
 function installedCharacterLabels(record: NAMInstalledModel) {
@@ -2557,6 +2588,7 @@ export function NAMExplorer({
   const [sortMode, setSortModeState] = useState<NAMSortMode>(() => initialSessionView?.sortMode as NAMSortMode || initialNAMSortMode());
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  useTransientOverlayShortcutScope(sortMenuOpen, () => setSortMenuOpen(false));
   const initialQueryRef = useRef(initialSessionView?.query ?? initialNAMQuery());
   const [query, setQueryState] = useState(initialQueryRef.current);
   const [committedQuery, setCommittedQuery] = useState(initialSessionView?.committedQuery ?? initialQueryRef.current);
@@ -2566,6 +2598,7 @@ export function NAMExplorer({
   const [filtersOpen, setFiltersOpen] = useState(() => initialSessionView?.filtersOpen ?? initialNAMFiltersOpen());
   const [catalogMode, setCatalogMode] = useState<NAMCatalogMode>(initialSessionCatalogIsLive ? "live" : "cache");
   const [selectedKey, setSelectedKey] = useState(() => initialDevMockAudition() ? DEV_MOCK_AUDITION_KEY : "");
+  const [capturePickerError, setCapturePickerError] = useState("");
   const [catalog, setCatalog] = useState<NAMCatalogTone[]>(() => initialRestoredCatalog);
   const [catalogGeneratedAt, setCatalogGeneratedAt] = useState(() => initialSessionCatalogIsLive
     ? initialSessionView?.catalogGeneratedAt ?? ""
@@ -2817,15 +2850,9 @@ export function NAMExplorer({
       setSortMenuOpen(false);
     };
 
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setSortMenuOpen(false);
-    };
-
     document.addEventListener("pointerdown", closeOnOutside);
-    document.addEventListener("keydown", closeOnEscape);
     return () => {
       document.removeEventListener("pointerdown", closeOnOutside);
-      document.removeEventListener("keydown", closeOnEscape);
     };
   }, [sortMenuOpen]);
 
@@ -3075,6 +3102,53 @@ export function NAMExplorer({
     }
     return map;
   }, [installed]);
+  const installedByModelUrl = useMemo(() => {
+    const map = new Map<string, NAMInstalledModel>();
+    for (const record of installed) {
+      const modelUrl = String(
+        record.modelUrl
+        ?? record.lastSeenMetadata?.model_url
+        ?? record.lastSeenMetadata?.modelUrl
+        ?? "",
+      ).trim().toLowerCase();
+      if (modelUrl) map.set(modelUrl, record);
+    }
+    return map;
+  }, [installed]);
+
+  const currentAmp = schema.modelState?.ampModelPath || "";
+  const currentPedal = schema.modelState?.pedalModelPath || "";
+  const activeCapturePaths = [currentAmp, currentPedal].filter(Boolean);
+  const installedRecordIsActive = (record: NAMInstalledModel) => (
+    activeCapturePaths.some((path) => sameLocalPath(record.localPath, path))
+  );
+  const installedRecordForCatalogModel = (model: NAMCatalogModel) => {
+    const modelId = modelIdOf(model);
+    if (modelId > 0) return installedByModelId.get(modelId);
+    const modelUrl = downloadUrlOf(model).trim().toLowerCase();
+    return modelUrl ? installedByModelUrl.get(modelUrl) : undefined;
+  };
+  const catalogModelIsActive = (model: NAMCatalogModel) => {
+    const installedRecord = installedRecordForCatalogModel(model);
+    return Boolean(installedRecord && installedRecordIsActive(installedRecord));
+  };
+  const captureOptionsForInstrumentProfile = (tone: NAMCatalogTone) => (
+    filterAndPinNAMInstrumentItems(
+      namToneCaptureOptions(tone),
+      instrumentProfile,
+      (option) => rowInstrumentLabels(tone, option.model),
+      (option) => catalogModelIsActive(option.model),
+    )
+  );
+  const catalogModelsForInstrumentProfile = (
+    tone: NAMCatalogTone,
+    models: readonly NAMCatalogModel[],
+  ) => filterAndPinNAMInstrumentItems(
+    models,
+    instrumentProfile,
+    (model) => rowInstrumentLabels(tone, model),
+    catalogModelIsActive,
+  );
 
   const filterOptions = useMemo(() => {
     const creators = new Set<string>();
@@ -3144,7 +3218,6 @@ export function NAMExplorer({
       if (creatorFilter !== "all" && creatorLabel(tone) !== creatorFilter) return false;
       if (licenseFilter !== "all" && licenseLabel(tone.license) !== licenseFilter) return false;
       const instrumentLabels = rowInstrumentLabels(tone, model);
-      if (!namInstrumentLabelsAreCompatible(instrumentLabels, instrumentProfile)) return false;
       if (instrumentFilter !== "all" && !instrumentLabels.includes(instrumentFilter)) return false;
       if (characterFilter !== "all" && !rowCharacterLabels(tone, model).includes(characterFilter)) return false;
       if (availabilityFilter !== "all" && rowAvailabilityLabel(tone, model) !== availabilityFilter) return false;
@@ -3170,13 +3243,20 @@ export function NAMExplorer({
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
-    return sortCatalogRows(
+    const sorted = sortCatalogRows(
       filtered,
       sortMode,
       catalogMode === "live" && (Boolean(needle) || sortMode === "trending"),
     );
-  }, [architecture, availabilityFilter, catalog, catalogMode, characterFilter, creatorFilter, favorites, installedByModelId, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
-  const displayRows = boundNAMCatalogRowsForDisplay(rows, variant, catalogMode, tab);
+    return filterAndPinNAMInstrumentItems(
+      sorted,
+      instrumentProfile,
+      ({ tone, model }) => rowInstrumentLabels(tone, model),
+      ({ model }) => catalogModelIsActive(model),
+    );
+  }, [architecture, availabilityFilter, catalog, catalogMode, characterFilter, creatorFilter, currentAmp, currentPedal, favorites, installedByModelId, installedByModelUrl, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
+  const packRows = useMemo(() => collapseNAMCatalogRowsToTonePacks(rows), [rows]);
+  const displayRows = boundNAMCatalogRowsForDisplay(packRows, variant, catalogMode, tab);
 
   const installedRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -3187,7 +3267,6 @@ export function NAMExplorer({
       if (creatorFilter !== "all" && String(record.creator ?? "") !== creatorFilter) return false;
       if (licenseFilter !== "all" && String(record.license ?? "") !== licenseFilter) return false;
       const instrumentLabels = installedInstrumentLabels(record);
-      if (!namInstrumentLabelsAreCompatible(instrumentLabels, instrumentProfile)) return false;
       if (instrumentFilter !== "all" && !instrumentLabels.includes(instrumentFilter)) return false;
       if (characterFilter !== "all" && !installedCharacterLabels(record).includes(characterFilter)) return false;
       if (availabilityFilter !== "all" && installedAvailabilityLabel(record) !== availabilityFilter) return false;
@@ -3199,8 +3278,14 @@ export function NAMExplorer({
       if (!needle) return true;
       return `${installedTitle(record)} ${record.name ?? ""} ${record.creator ?? ""} ${record.gearType ?? ""} ${record.updateReason ?? ""} ${installedInstrumentLabels(record).join(" ")} ${installedCharacterLabels(record).join(" ")} ${installedAvailabilityLabel(record)} ${record.localPath ?? ""}`.toLowerCase().includes(needle);
     });
-    return sortInstalledRows(filtered, sortMode);
-  }, [architecture, availabilityFilter, characterFilter, creatorFilter, installed, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
+    const sorted = sortInstalledRows(filtered, sortMode);
+    return filterAndPinNAMInstrumentItems(
+      sorted,
+      instrumentProfile,
+      installedInstrumentLabels,
+      installedRecordIsActive,
+    );
+  }, [architecture, availabilityFilter, characterFilter, creatorFilter, currentAmp, currentPedal, installed, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
 
   const selectedInstalled = tab === "installed" || tab === "favorites"
     ? installedRows.find((record) => installedKey(record) === selectedKey) ?? (!selectedKey ? installedRows[0] ?? null : null)
@@ -3208,8 +3293,59 @@ export function NAMExplorer({
   const selectedCatalogRow = selectedInstalled
     ? null
     : resolveNAMCatalogSelection(rows, selectedKey, displayRows[0] ?? null);
-  const currentAmp = schema.modelState?.ampModelPath || "";
-  const currentPedal = schema.modelState?.pedalModelPath || "";
+  const selectedToneCaptureOptions = selectedCatalogRow
+    ? captureOptionsForInstrumentProfile(selectedCatalogRow.tone)
+    : [];
+  const selectedToneCaptureItems: NAMToneCapturePickerItem[] = selectedCatalogRow
+    ? selectedToneCaptureOptions.map((option) => {
+      const catalogRow = rows.find((candidate) => (
+        candidate.tone === selectedCatalogRow.tone
+        && sameNAMCatalogModelIdentity(candidate.model, option.model)
+      )) ?? rows.find((candidate) => (
+        toneIdOf(candidate.tone) === option.toneId
+        && sameNAMCatalogModelIdentity(candidate.model, option.model)
+      ));
+      const installedRecord = installedRecordForCatalogModel(option.model);
+      const pickerForcedTarget = sourceFlowConfig?.targetSlot !== "delay" ? sourceFlowConfig?.targetSlot : undefined;
+      const targetSlot = pickerForcedTarget ?? preferredTargetForToneModel(selectedCatalogRow.tone, option.model);
+      const activePath = targetSlot === "pedal"
+        ? currentPedal
+        : targetSlot === "cab"
+          ? String(schema.modelState?.cabIRPath ?? "")
+          : currentAmp;
+      return {
+        id: catalogRow?.key ?? option.id,
+        name: option.name,
+        architecture: option.architecture,
+        captureType: option.captureType,
+        includesCab: option.includesCab,
+        installed: Boolean(installedRecord && !installedRecord.missing),
+        missing: Boolean(installedRecord?.missing),
+        active: Boolean(installedRecord?.localPath && sameLocalPath(installedRecord.localPath, activePath)),
+        auditioning: Boolean(audition && (
+          (catalogRow && isExplicitNAMCatalogCaptureSelection(
+            audition.key,
+            catalogRow.key,
+            catalogRow.tone,
+            catalogRow.model,
+          ))
+          || (audition.modelId > 0 && audition.modelId === option.modelId)
+        )),
+        busy: busyModelId === option.modelId,
+      };
+    })
+    : [];
+  const selectedToneCaptureId = selectedCatalogRow
+    ? rows.find((row) => (
+      toneIdOf(row.tone) === toneIdOf(selectedCatalogRow.tone)
+      && isExplicitNAMCatalogCaptureSelection(
+        selectedKey,
+        row.key,
+        row.tone,
+        row.model,
+      )
+    ))?.key ?? ""
+    : "";
   const rackActivePreview = normalizeNAMActivePreview(schema.uiState?.namActivePreview);
   const rackPreviewSessionKey = rackActivePreview
     ? `${rackActivePreview.slot}:${rackActivePreview.localPath ?? ""}:${rackActivePreview.createdAt ?? ""}`
@@ -3547,6 +3683,64 @@ export function NAMExplorer({
     return models;
   };
 
+  const selectCatalogPack = async (row: NAMCatalogRow) => {
+    const toneId = toneIdOf(row.tone);
+    if (toneId <= 0) {
+      setCapturePickerError("This pack has no stable TONE3000 identity.");
+      setStatus("This pack has no stable TONE3000 identity.");
+      return [] as NAMCatalogModel[];
+    }
+
+    setCapturePickerError("");
+    setSelectedKey(`${toneId}:0`);
+    const availableOptions = captureOptionsForInstrumentProfile(row.tone);
+    if (availableOptions.length > 0) {
+      if (availableOptions.length === 1) setSelectedKey(availableOptions[0].id);
+      else setStatus(`Choose one of ${availableOptions.length} captures in ${toneTitle(row.tone, row.model)}.`);
+      return availableOptions.map((option) => option.model);
+    }
+
+    const requestedArchitecture = resolveNAMSearchArchitecture(
+      sourceFlow,
+      String(row.tone.searchArchitecture ?? row.tone.architecture ?? (architecture === "all" ? "all" : architecture) ?? "all"),
+    );
+    const detailKey = `tone-models:${toneId}:${requestedArchitecture}`;
+    setBusyLibraryKey(detailKey);
+    setStatus("Loading captures in this pack...");
+    try {
+      const hydratedModels = await hydrateModelsForTone(row.tone, requestedArchitecture);
+      if (hydratedModels.length === 0) {
+        const message = "No downloadable NAM captures were found in this pack.";
+        setCapturePickerError(message);
+        setStatus(message);
+        return hydratedModels;
+      }
+      const models = catalogModelsForInstrumentProfile(row.tone, hydratedModels);
+      if (models.length === 0) {
+        const message = `No captures in this pack are tagged for ${labelForNAMInstrumentProfile(instrumentProfile)}.`;
+        setCapturePickerError(message);
+        setStatus(message);
+        return models;
+      }
+      if (models.length === 1) {
+        setSelectedKey(namCatalogCaptureSelectionKey(row.tone, models[0]));
+        setStatus("One capture is available. Choose Audition when you are ready.");
+      } else {
+        setSelectedKey(`${toneId}:0`);
+        setStatus(`Choose one of ${models.length} captures. Selecting a row will not change the audio.`);
+      }
+      return models;
+    } catch (error) {
+      console.error("[NAMExplorer] Could not open tone pack:", error);
+      const message = "Could not load the captures in this pack. Retry without changing the current sound.";
+      setCapturePickerError(message);
+      setStatus(message);
+      return [] as NAMCatalogModel[];
+    } finally {
+      setBusyLibraryKey(null);
+    }
+  };
+
   const discardUnloadedPreview = async (
     record: NAMInstalledModel,
     localPath: string,
@@ -3612,7 +3806,7 @@ export function NAMExplorer({
       await toggleTrackMonitor(hostTrack.id);
     } catch (error) {
       console.warn("[NAMExplorer] Could not enable host track monitoring for live preview", error);
-      if (canUpdateUI()) setStatus("Tone loaded for live guitar, but track monitoring could not be enabled automatically.");
+      if (canUpdateUI()) setStatus("Tone loaded for live input, but track monitoring could not be enabled automatically.");
     }
   };
 
@@ -3638,12 +3832,14 @@ export function NAMExplorer({
           ? {
               ampModelPath: snapshot.ampModelPath,
               ampDeclaredCaptureType: snapshot.ampDeclaredCaptureType ?? "unknown",
+              ...(snapshot.ampModelSize === undefined ? {} : { ampModelSize: snapshot.ampModelSize }),
             }
           : { clearAmpModel: true }),
         ...(snapshot.pedalModelPath
           ? {
               pedalModelPath: snapshot.pedalModelPath,
               pedalDeclaredCaptureType: snapshot.pedalDeclaredCaptureType ?? "unknown",
+              ...(snapshot.pedalModelSize === undefined ? {} : { pedalModelSize: snapshot.pedalModelSize }),
             }
           : { clearPedalModel: true }),
         ...(snapshot.cabIRPath ? { cabIRPath: snapshot.cabIRPath } : { clearCabIR: true, cabIRPath: "" }),
@@ -3674,6 +3870,8 @@ export function NAMExplorer({
         : !String(path ?? "").trim() && !Boolean(hasModel);
       const valueMatches = (id: string, expected: number | undefined) => expected === undefined
         || (Number.isFinite(Number(restoredValues[id])) && Math.abs(Number(restoredValues[id]) - expected) < 0.01);
+      const modelSizeMatches = (actual: unknown, expected: number | undefined) => expected === undefined
+        || (Number.isFinite(Number(actual)) && Math.abs(Number(actual) - expected) < 0.0001);
       return modelMatches(restoredModels.ampModelPath, restoredModels.hasAmpModel, snapshot.ampModelPath)
         && modelMatches(restoredModels.pedalModelPath, restoredModels.hasPedalModel, snapshot.pedalModelPath)
         && modelMatches(restoredModels.cabIRPath, restoredModels.hasCabIR, snapshot.cabIRPath)
@@ -3682,6 +3880,8 @@ export function NAMExplorer({
         && Math.abs(Number(restoredValues.pedalMix ?? 0) - snapshot.pedalMix) < 0.01
         && Math.abs(Number(restoredValues.ampEnabled ?? 0) - snapshot.ampEnabled) < 0.01
         && Math.abs(Number(restoredValues.ampMix ?? 0) - snapshot.ampMix) < 0.01
+        && modelSizeMatches(restoredModels.ampModelSize, snapshot.ampModelSize)
+        && modelSizeMatches(restoredModels.pedalModelSize, snapshot.pedalModelSize)
         && valueMatches("pedalCalibrationMode", snapshot.pedalCalibrationMode)
         && valueMatches("pedalOverrideInputLevelDbu", snapshot.pedalOverrideInputLevelDbu)
         && valueMatches("pedalOverrideOutputLevelDbu", snapshot.pedalOverrideOutputLevelDbu)
@@ -3722,7 +3922,7 @@ export function NAMExplorer({
     const requestedIncludesCab = targetSlot === "amp" && captureIncludesCab(requestedCaptureType);
     setSlot(targetSlot);
     setBusyModelId(modelId || null);
-    setStatus("Preparing live guitar audition...");
+    setStatus("Preparing live instrument audition...");
     let publicationAccepted = false;
     let publishedAudition: NAMAuditionState | null = null;
     try {
@@ -3809,11 +4009,13 @@ export function NAMExplorer({
         modelState: targetSlot === "amp"
           ? {
               ampModelPath: record.localPath,
+              ampModelSize: NAM_FULL_MODEL_SIZE,
               ampDeclaredCaptureType: requestedCaptureType,
               cabRequestedEnabled: baseline.cabRequestedEnabled,
             }
           : {
               pedalModelPath: record.localPath,
+              pedalModelSize: NAM_FULL_MODEL_SIZE,
               pedalDeclaredCaptureType: requestedCaptureType,
               cabRequestedEnabled: baseline.cabRequestedEnabled,
             },
@@ -3858,6 +4060,11 @@ export function NAMExplorer({
       const verifiedHasModel = targetSlot === "amp"
         ? Boolean(verifiedModelState.hasAmpModel)
         : Boolean(verifiedModelState.hasPedalModel);
+      const verifiedModelSize = Number(
+        targetSlot === "amp"
+          ? verifiedModelState.ampModelSize
+          : verifiedModelState.pedalModelSize,
+      );
       const backendCaptureType = targetSlot === "amp"
         ? normalizeNAMCaptureType(verifiedModelState.ampCaptureType)
         : normalizeNAMCaptureType(verifiedModelState.pedalCaptureType);
@@ -3890,6 +4097,8 @@ export function NAMExplorer({
         && (!Number.isFinite(verifiedAmpMix) || Math.abs(verifiedAmpMix - publicationAmpMix) >= 0.01);
       if (!sameLocalPath(verifiedPath, record.localPath)
         || !verifiedHasModel
+        || !Number.isFinite(verifiedModelSize)
+        || Math.abs(verifiedModelSize - NAM_FULL_MODEL_SIZE) > 0.0001
         || verifiedCabRequestedEnabled !== baseline.cabRequestedEnabled
         || effectiveCabMismatch
         || pedalMixMismatch
@@ -3956,14 +4165,14 @@ export function NAMExplorer({
         if (!isCurrent()) return false;
       }
       const ampMissingNotice = targetSlot === "pedal" && !currentAmp
-        ? " Pedal captures need an amp/full-rig tone after them for a complete guitar sound."
+        ? " Pedal captures need an amp/full-rig tone after them for a complete instrument sound."
         : "";
       if (canUpdateUI()) setStatus(
         !previewStateSaved
           ? "The audition is audible, but its session recovery metadata could not be saved. Use it or choose Stop Audition before closing this rack."
           : sourceFlow === "amp" || sourceFlow === "pedal"
-            ? `Auditioning the ${targetSlot} capture with live guitar. This is temporary; choose Use Capture to keep it or Stop Audition to restore the previous capture.` + ampMissingNotice
-            : `${previewDownload ? "Loaded unsaved" : "Loaded"} ${targetSlot} Capture for live guitar. Track monitoring is ${hostTrack?.monitorEnabled ? "on" : "requested"}; Save Preset stores the complete rack.` + ampMissingNotice,
+            ? `Auditioning the ${targetSlot} capture with live input. This is temporary; choose Use Capture to keep it or Stop Audition to restore the previous capture.` + ampMissingNotice
+            : `${previewDownload ? "Loaded unsaved" : "Loaded"} ${targetSlot} Capture for live input. Track monitoring is ${hostTrack?.monitorEnabled ? "on" : "requested"}; Save Preset stores the complete rack.` + ampMissingNotice,
       );
       window.setTimeout(() => {
         if (!mountedRef.current || !isNAMRackTransactionLatest(rackTransactionKey, generation)
@@ -4373,9 +4582,20 @@ export function NAMExplorer({
     }
   };
 
-  const auditionCatalogTone = async (row: NAMCatalogRow, action: NAMLibraryAction = "live-preview") => {
+  const auditionCatalogTone = async (
+    row: NAMCatalogRow,
+    action: NAMLibraryAction = "live-preview",
+    explicitCapture = false,
+  ) => {
     const { tone } = row;
     let model = row.model;
+    const rowHasExplicitSelection = explicitCapture
+      || isExplicitNAMCatalogCaptureSelection(selectedKey, row.key, tone, model);
+    if (namToneRequiresExplicitCapture(tone) && !rowHasExplicitSelection) {
+      setSelectedKey(`${toneIdOf(tone)}:0`);
+      setStatus("Choose a specific capture in this pack before auditioning. The current sound is unchanged.");
+      return false;
+    }
     let sourceCategory = sourceCategoryForToneModel(tone, model);
     if (sourceFlow && sourceFlow !== "fx" && !isNAMSourceFlowCategoryAllowed(sourceFlow, sourceCategory)) {
       setStatus("This source is not supported in the current library flow.");
@@ -4398,7 +4618,7 @@ export function NAMExplorer({
     const canUpdateUI = () => canUpdateRackTransactionUI(generation);
     let unownedPreviewRecord: NAMInstalledModel | null = null;
     setSelectedKey(row.key);
-    setStatus(downloadUrlOf(model) ? "Preparing live guitar audition..." : "Loading model details...");
+    setStatus(downloadUrlOf(model) ? "Preparing live instrument audition..." : "Loading model details...");
 
     try {
       if (!downloadUrlOf(model)) {
@@ -4410,18 +4630,20 @@ export function NAMExplorer({
           if (canUpdateUI()) setStatus("No downloadable model was found for this tone.");
           return false;
         }
-        const forcedTarget = sourceFlowConfig?.targetSlot !== "delay" ? sourceFlowConfig?.targetSlot : undefined;
-        const requestedTarget: NAMTargetSlot = forcedTarget ?? (gearFilter === "ir" ? "cab" : slot);
-        model =
-          models.find((candidate) => preferredTargetForToneModel(tone, candidate) === requestedTarget) ??
-          models.find((candidate) => preferredTargetForToneModel(tone, candidate) === "amp") ??
-          models[0];
+        if (models.length > 1) {
+          if (canUpdateUI()) {
+            setSelectedKey(`${toneId}:0`);
+            setStatus(`Choose one of ${models.length} captures in this pack before auditioning. The current sound is unchanged.`);
+          }
+          return false;
+        }
+        model = models[0];
         if (canUpdateUI()) {
           // `rows` belongs to the render that began this async transaction and
           // still contains the summary placeholder. Store a stable tone/model
           // identity now; selection resolution maps it to the hydrated row on
           // the next render, even when this tone exposes multiple models.
-          setSelectedKey(`${toneId}:${modelIdOf(model)}`);
+          setSelectedKey(namCatalogCaptureSelectionKey(tone, model));
         }
         sourceCategory = sourceCategoryForToneModel(tone, model);
         if (sourceFlow && sourceFlow !== "fx" && !isNAMSourceFlowCategoryAllowed(sourceFlow, sourceCategory)) {
@@ -4438,7 +4660,8 @@ export function NAMExplorer({
       const forcedTarget = sourceFlowConfig?.targetSlot !== "delay" ? sourceFlowConfig?.targetSlot : undefined;
       const targetSlot = forcedTarget ?? preferredTargetForToneModel(tone, model);
       const catalogCaptureType = captureTypeForToneModel(tone, model);
-      const installedRecord = modelId > 0 ? installedByModelId.get(modelId) : undefined;
+      const installedRecord = installedRecordForCatalogModel(model);
+      const catalogAuditionKey = namCatalogCaptureSelectionKey(tone, model);
       if (installedRecord && !installedRecord.missing) {
         const installedTargetSlot = forcedTarget ?? targetSlot;
         if (installedTargetSlot === "cab") {
@@ -4446,7 +4669,7 @@ export function NAMExplorer({
         }
         return await loadRecordForAudition(
           installedRecord,
-          `${toneId}:${modelId}`,
+          catalogAuditionKey,
           "catalog",
           pathForSlot(installedTargetSlot),
           isActivePreviewRecord(installedRecord),
@@ -4469,7 +4692,7 @@ export function NAMExplorer({
       }
       unownedPreviewRecord = result.record;
 
-      if (canUpdateUI()) setStatus("Preparing live guitar audition...");
+      if (canUpdateUI()) setStatus("Preparing live instrument audition...");
       await refreshInstalledLibraryAfterMutation(canUpdateUI);
       if (!isCurrent()) return false;
       const installedTargetSlot = forcedTarget ?? targetSlot;
@@ -4480,7 +4703,7 @@ export function NAMExplorer({
       }
       return await loadRecordForAudition(
         preparedRecord,
-        `${toneId}:${modelIdOf(preparedRecord) || modelId}`,
+        catalogAuditionKey,
         "catalog",
         pathForSlot(installedTargetSlot),
         true,
@@ -5182,7 +5405,12 @@ export function NAMExplorer({
 
   const catalogAuditionIsActive = (row: NAMCatalogRow) => Boolean(
     audition
-    && (audition.key === row.key
+    && (isExplicitNAMCatalogCaptureSelection(
+      audition.key,
+      row.key,
+      row.tone,
+      row.model,
+    )
       || (audition.modelId > 0 && audition.modelId === modelIdOf(row.model))),
   );
 
@@ -5206,7 +5434,7 @@ export function NAMExplorer({
   const renderCatalogAction = (row: NAMCatalogRow) => {
     const { tone, model } = row;
     const modelId = modelIdOf(model);
-    const installedRecord = installedByModelId.get(modelId);
+    const installedRecord = installedRecordForCatalogModel(model);
     const modelUrl = downloadUrlOf(model);
     const category = sourceCategoryForToneModel(tone, model);
     if (sourceFlow === "ir" && category !== "cabinet-ir") {
@@ -5228,6 +5456,18 @@ export function NAMExplorer({
     const targetSlot = forcedTarget ?? (installedRecord ? preferredTargetForInstalled(installedRecord) : preferredTargetForToneModel(tone, model));
     const targetLabel = targetLabelForSlot(targetSlot);
     const TargetIcon = targetSlot === "cab" ? FolderOpen : Play;
+    const captureCount = namToneDeclaredCaptureCount(tone);
+    if (!modelUrl || namToneRequiresExplicitCapture(tone)) {
+      const toneId = toneIdOf(tone);
+      const requestedArchitecture = String(tone.searchArchitecture ?? tone.architecture ?? (architecture === "all" ? "all" : architecture) ?? "all");
+      const requestKey = `tone-models:${toneId}:${requestedArchitecture}`;
+      return (
+        <Button size="sm" onClick={() => void selectCatalogPack(row)} disabled={rackActionsBusy || toneId <= 0 || busyLibraryKey === requestKey}>
+          {busyLibraryKey === requestKey ? <RefreshCw size={13} /> : <List size={13} />}
+          {busyLibraryKey === requestKey ? "Loading" : captureCount > 1 ? `${captureCount} Captures` : "Choose Capture"}
+        </Button>
+      );
+    }
     if (installedRecord) {
       const reinstallPayload = makeReinstallPayload(installedRecord);
       if (installedRecord.missing) {
@@ -5252,25 +5492,6 @@ export function NAMExplorer({
         <Button size="sm" onClick={() => void toggleInstalledAudition(installedRecord)} disabled={rackActionsBusy || busyModelId === modelId}>
           {installedAuditionIsActive(installedRecord) ? <RotateCcw size={13} /> : <TargetIcon size={13} />}
           {installedAuditionIsActive(installedRecord) ? "Stop" : `Audition ${targetLabel}`}
-        </Button>
-      );
-    }
-    if (!modelUrl) {
-      const toneId = toneIdOf(tone);
-      const requestedArchitecture = String(tone.searchArchitecture ?? tone.architecture ?? (architecture === "all" ? "all" : architecture) ?? "all");
-      const requestKey = `tone-models:${toneId}:${requestedArchitecture}`;
-      if (targetSlot !== "cab") {
-        return (
-          <Button size="sm" onClick={() => void toggleCatalogAudition(row)} disabled={rackActionsBusy || toneId <= 0 || busyLibraryKey === requestKey}>
-            {busyLibraryKey === requestKey ? <RefreshCw size={13} /> : catalogAuditionIsActive(row) ? <RotateCcw size={13} /> : <Play size={13} />}
-            {busyLibraryKey === requestKey ? "Loading" : catalogAuditionIsActive(row) ? "Stop" : "Audition"}
-          </Button>
-        );
-      }
-      return (
-        <Button size="sm" onClick={() => void toggleCatalogAudition(row)} disabled={rackActionsBusy || toneId <= 0 || busyLibraryKey === requestKey}>
-          {busyLibraryKey === requestKey ? <RefreshCw size={13} /> : catalogAuditionIsActive(row) ? <RotateCcw size={13} /> : <TargetIcon size={13} />}
-          {busyLibraryKey === requestKey ? "Loading" : catalogAuditionIsActive(row) ? "Stop" : `Audition ${targetLabel}`}
         </Button>
       );
     }
@@ -5322,10 +5543,37 @@ export function NAMExplorer({
     isBusy: boolean,
   ) => {
     const { tone, model } = row;
-    const modelId = modelIdOf(model);
     const toneId = toneIdOf(tone);
-    const installedRecord = installedByModelId.get(modelId);
+    const installedRecord = installedRecordForCatalogModel(model);
     const favoriteActive = favorites.has(favoriteKey);
+    const opensCapturePicker = !downloadUrlOf(model) || namToneRequiresExplicitCapture(tone);
+    if (opensCapturePicker) {
+      return (
+        <>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => void selectCatalogPack(row)}
+            disabled={isBusy || toneId <= 0}
+            title="Choose a capture from this pack"
+            aria-label="Choose a capture from this pack"
+          >
+            {isBusy ? <RefreshCw size={14} /> : <List size={14} />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => toggleFavorite(tone, model)}
+            title={favoriteActive ? "Remove favorite" : "Favorite"}
+            aria-label={favoriteActive ? "Remove favorite" : "Favorite"}
+            aria-pressed={favoriteActive}
+            data-active={favoriteActive}
+          >
+            <Heart size={14} />
+          </Button>
+        </>
+      );
+    }
     const actionState = buildNAMRailCatalogActionState({
       targetSlot,
       isBusy,
@@ -5436,7 +5684,7 @@ export function NAMExplorer({
     const modelId = modelIdOf(model);
     const favoriteKey = `${toneIdOf(tone)}:${modelId}`;
     const arch = modelArchitecture(tone, model);
-    const installedRecord = installedByModelId.get(modelId);
+    const installedRecord = installedRecordForCatalogModel(model);
     const sourceCategory = sourceCategoryForToneModel(tone, model);
     const artUrl = imageUrlOf(tone, model);
     const displayArtUrl = artUrl || sourceLibraryArtForCategory(sourceCategory, tone.gear, model.gear, tone.title, model.name);
@@ -5446,10 +5694,16 @@ export function NAMExplorer({
       : fallbackArtProfileForGear(tone.gear, model.gear, tone.title, tone.name, tone.description, model.title, model.name);
     const avatarUrl = creatorAvatarUrl(tone);
     const creatorUrl = creatorProfileUrl(tone);
-    const isAuditioning = Boolean(audition && (audition.key === row.key || (audition.modelId > 0 && audition.modelId === modelId)));
+    const toneId = toneIdOf(tone);
+    const captureCount = namToneDeclaredCaptureCount(tone);
+    const opensCapturePicker = !downloadUrlOf(model) || namToneRequiresExplicitCapture(tone);
+    const isAuditioning = Boolean(audition && (
+      audition.key === row.key
+      || (audition.modelId > 0 && audition.modelId === modelId)
+      || (audition.toneId > 0 && audition.toneId === toneId)
+    ));
     const targetSlot = sourceFlowForcedTarget ?? preferredTargetForToneModel(tone, model);
     const targetLabel = targetLabelForSlot(targetSlot);
-    const toneId = toneIdOf(tone);
     const requestedArchitecture = String(tone.searchArchitecture ?? tone.architecture ?? (architecture === "all" ? "all" : architecture) ?? "all");
     const isBusy = rackActionsBusy || busyModelId === modelId || busyLibraryKey === `tone-models:${toneId}:${requestedArchitecture}`;
     const rowActionError = rowActionErrors[row.key] || "";
@@ -5457,7 +5711,9 @@ export function NAMExplorer({
       ? "Preparing"
       : isAuditioning
         ? audition?.saved ? "Saved" : "Stop"
-        : installedRecord?.missing ? "Restore Tone" : sourceOnlyCatalogRow ? "Source Material" : `Audition ${targetLabel}`;
+        : opensCapturePicker
+          ? captureCount > 1 ? `${captureCount} Captures` : "Choose Capture"
+          : installedRecord?.missing ? "Restore Tone" : sourceOnlyCatalogRow ? "Source Material" : `Audition ${targetLabel}`;
     const gear = gearLabel(tone.gear) || gearLabel(model.gear) || "Amp";
     const availability = rowAvailabilityLabel(tone, model);
     const license = licenseLabel(tone.license);
@@ -5475,7 +5731,7 @@ export function NAMExplorer({
       && sortMode === "newest"
       && index < 2;
     const catalogMetaLine = railMode
-      ? [creatorLabel(tone), catalogDescriptorLabel(tone, model)]
+      ? [creatorLabel(tone), captureCount > 1 ? `${captureCount} captures` : catalogDescriptorLabel(tone, model)]
           .map((item) => item.trim())
           .filter(Boolean)
           .join(" / ")
@@ -5484,7 +5740,7 @@ export function NAMExplorer({
       <article
         className="nam-result-card tone-feed-row"
         data-view={viewMode}
-        data-selected={selectedCatalogRow?.key === row.key}
+        data-selected={selectedCatalogRow ? toneIdOf(selectedCatalogRow.tone) === toneId : false}
         data-audition={isAuditioning}
         data-busy={isBusy}
         data-source="tone3000"
@@ -5496,9 +5752,9 @@ export function NAMExplorer({
         data-rail-stats={railMode ? railStats : undefined}
         data-new={showRailNewBadge ? "true" : undefined}
         key={row.key}
-        onClick={() => setSelectedKey(row.key)}
+        onClick={() => void selectCatalogPack(row)}
         onDoubleClick={() => {
-          if (!sourceOnlyCatalogRow) void auditionCatalogTone(row, "live-preview");
+          void selectCatalogPack(row);
         }}
       >
         <button
@@ -5506,7 +5762,7 @@ export function NAMExplorer({
           className="nam-result-select-target"
           onClick={(event) => {
             event.stopPropagation();
-            setSelectedKey(row.key);
+            void selectCatalogPack(row);
           }}
           aria-label={`Select ${toneTitle(tone, model)} details`}
         />
@@ -5582,7 +5838,7 @@ export function NAMExplorer({
           {railMode ? renderRailCatalogActions(row, favoriteKey, targetSlot, isBusy) : renderCatalogAction(row)}
           {!railMode && (
             <>
-              <Button variant="ghost" size="sm" onClick={() => setSelectedKey(row.key)}>
+              <Button variant="ghost" size="sm" onClick={() => void selectCatalogPack(row)}>
                 Details
               </Button>
               {sourceUrlOf(tone, model) && (
@@ -6271,9 +6527,16 @@ export function NAMExplorer({
     const { tone, model } = row;
     const category = sourceCategoryForToneModel(tone, model);
     const modelId = modelIdOf(model);
-    const installedRecord = installedByModelId.get(modelId);
+    const toneId = toneIdOf(tone);
+    const captureCount = namToneDeclaredCaptureCount(tone);
+    const opensCapturePicker = !downloadUrlOf(model) || namToneRequiresExplicitCapture(tone);
+    const installedRecord = installedRecordForCatalogModel(model);
     const policy = sourceFlow ? getNAMSourceFlowRowActionPolicy(sourceFlow, category) : "model-preview";
-    const isAuditioning = Boolean(audition && (audition.key === row.key || (audition.modelId > 0 && audition.modelId === modelId)));
+    const isAuditioning = Boolean(audition && (
+      audition.key === row.key
+      || (audition.modelId > 0 && audition.modelId === modelId)
+      || (audition.toneId > 0 && audition.toneId === toneId)
+    ));
     const targetSlot = sourceFlowForcedTarget ?? preferredTargetForToneModel(tone, model);
     const sourceArchitecture = targetSlot === "cab" ? "IR" : modelArchitecture(tone, model);
     const missingInstalledRecord = Boolean(installedRecord?.missing);
@@ -6281,7 +6544,7 @@ export function NAMExplorer({
       id: row.key,
       name: toneTitle(tone, model),
       creator: creatorLabel(tone),
-      kind: sourceCategoryLabel(category),
+      kind: captureCount > 1 ? `${captureCount} Captures` : sourceCategoryLabel(category),
       arch: sourceArchitecture,
       category,
       tags: [
@@ -6303,11 +6566,13 @@ export function NAMExplorer({
       state: policy === "source-only" ? "external" : isAuditioning ? "preview" : installedRecord?.missing ? "missing" : installedRecord ? "installed" : "online",
       action: policy === "source-only"
         ? "Open Source"
+        : opensCapturePicker
+          ? captureCount > 1 ? `View ${captureCount} Captures` : "Choose Capture"
         : missingInstalledRecord
           ? "Re-download"
           : isAuditioning ? "Stop" : targetSlot === "cab" ? "Audition IR" : "Audition",
-      actionId: policy === "source-only" ? "open-source" : isAuditioning ? "revert" : "preview",
-      active: selectedCatalogRow?.key === row.key || isAuditioning,
+      actionId: policy === "source-only" ? "open-source" : opensCapturePicker ? "select-row" : isAuditioning ? "revert" : "preview",
+      active: (selectedCatalogRow ? toneIdOf(selectedCatalogRow.tone) === toneId : false) || isAuditioning,
       artUrl: imageUrlOf(tone, model) || sourceLibraryArtForCategory(category, tone.gear, model.gear, tone.title, model.name),
       favorite: favorites.has(`${toneIdOf(tone)}:${modelId}`),
       source: category === "space-ir" ? "external" : "tone3000",
@@ -6423,6 +6688,21 @@ export function NAMExplorer({
     ? selectedFXPreset?.name || "OpenStudio FX Preset"
     : selectedRailTitle
       || (captureUseInFlight ? captureUseProgress.message : sourceFlowConfig?.emptyTitle || "No selection");
+  const selectedCatalogHasExplicitCapture = Boolean(
+    selectedCatalogRow
+    && isExplicitNAMCatalogCaptureSelection(
+      selectedKey,
+      selectedCatalogRow.key,
+      selectedCatalogRow.tone,
+      selectedCatalogRow.model,
+    )
+    && downloadUrlOf(selectedCatalogRow.model),
+  );
+  const selectedCatalogNeedsCaptureChoice = Boolean(
+    selectedCatalogRow
+    && (!selectedCatalogHasExplicitCapture
+      && (!downloadUrlOf(selectedCatalogRow.model) || namToneRequiresExplicitCapture(selectedCatalogRow.tone))),
+  );
   const sourceFlowDetailMetaLine = sourceFlow === "fx"
     ? selectedFXPreset
       ? `OpenStudio FX Collection - ${sourceCategoryLabel(selectedFXPreset.category)} preset - local library`
@@ -6459,10 +6739,10 @@ export function NAMExplorer({
         : [
           {
             id: selectedSourceAuditionActive ? "revert" : "preview",
-            label: selectedSourceAuditionActive ? "Stop Audition" : "Audition",
-            disabled: rackActionsBusy,
+            label: selectedSourceAuditionActive ? "Stop Audition" : selectedCatalogNeedsCaptureChoice ? "Choose Capture" : "Audition",
+            disabled: rackActionsBusy || selectedCatalogNeedsCaptureChoice,
           },
-          { id: "use-selection", label: captureUseActionLabel, primary: true, disabled: rackActionsBusy },
+          { id: "use-selection", label: selectedCatalogNeedsCaptureChoice ? "Choose Capture First" : captureUseActionLabel, primary: true, disabled: rackActionsBusy || selectedCatalogNeedsCaptureChoice },
         ];
 
   const sourceFlowOrigin = sourceOriginLabel ?? sourceFlowConfig?.originLabel ?? "the rack";
@@ -6470,7 +6750,7 @@ export function NAMExplorer({
     ? "Preview Preset is temporary. Apply Preset keeps the settings; Cancel Preview restores the previous effect settings."
     : sourceFlow === "ir"
       ? `Audition is temporary. Use IR keeps it and returns to ${sourceFlowOrigin}; Stop restores the previous IR.`
-      : `Audition is temporary and uses live guitar. Use Capture keeps it and returns to ${sourceFlowOrigin}; Stop restores the previous capture.`;
+      : `Audition is temporary and uses live input. Use Capture keeps it and returns to ${sourceFlowOrigin}; Stop restores the previous capture.`;
 
   const sourceFlowRackSlots = schema.uiState?.namRackSlots && typeof schema.uiState.namRackSlots === "object"
     ? schema.uiState.namRackSlots as Record<string, unknown>
@@ -6582,6 +6862,15 @@ export function NAMExplorer({
             .slice(0, 4),
           `Target: ${sourceFlowConfig.targetLabel}`,
         ],
+    captures: sourceFlow !== "fx" && sourceFlow !== "ir" && selectedCatalogRow
+      ? {
+        title: String(selectedCatalogRow.tone.title ?? selectedCatalogRow.tone.name ?? "NAM Capture Pack"),
+        items: selectedToneCaptureItems,
+        selectedId: selectedToneCaptureId,
+        busy: detailHydrating,
+        error: capturePickerError,
+      }
+      : undefined,
     previewBody: sourceFlowPreviewBody,
     controlAssetIds: getNAMSourceFlowControlAssetIds(sourceFlow),
     previewText: `${sourceFlowConfig.sourceLabel} \u2192 ${sourceFlowConfig.targetLabel}`,
@@ -6677,11 +6966,26 @@ export function NAMExplorer({
       return;
     }
     if (installedRecord) {
+      if (mode === "preview" && installedAuditionIsActive(installedRecord)) {
+        await revertAudition();
+        return;
+      }
       await auditionInstalled(installedRecord, "live-preview");
       return;
     }
     if (catalogRow) {
-      await auditionCatalogTone(catalogRow, "live-preview");
+      if (mode === "preview" && catalogAuditionIsActive(catalogRow)) {
+        await revertAudition();
+        return;
+      }
+      await auditionCatalogTone(catalogRow, "live-preview", Boolean(
+        rowId && isExplicitNAMCatalogCaptureSelection(
+          rowId,
+          catalogRow.key,
+          catalogRow.tone,
+          catalogRow.model,
+        ),
+      ));
       return;
     }
     setStatus("Select a source item first.");
@@ -6728,6 +7032,19 @@ export function NAMExplorer({
     if (!selected.installedRecord && !selected.catalogRow && !auditionRef.current?.record) {
       setStatus(sourceFlow === "ir" ? "Select an IR first." : "Select a capture first.");
       return;
+    }
+
+    if (selected.catalogRow && namToneRequiresExplicitCapture(selected.catalogRow.tone)) {
+      if (!isExplicitNAMCatalogCaptureSelection(
+        rowId || selectedKey,
+        selected.catalogRow.key,
+        selected.catalogRow.tone,
+        selected.catalogRow.model,
+      )) {
+        setSelectedKey(`${toneIdOf(selected.catalogRow.tone)}:0`);
+        setStatus("Choose a specific capture in this pack before using it. The current rack state is unchanged.");
+        return;
+      }
     }
 
     const generation = beginRackTransaction();
@@ -6790,8 +7107,14 @@ export function NAMExplorer({
       const selectedCatalogMatchesPreview = Boolean(
         selected.catalogRow
         && activePreview
-        && modelIdOf(selected.catalogRow.model) > 0
-        && modelIdOf(selected.catalogRow.model) === activePreview.modelId,
+        && (isExplicitNAMCatalogCaptureSelection(
+          activePreview.key,
+          selected.catalogRow.key,
+          selected.catalogRow.tone,
+          selected.catalogRow.model,
+        )
+          || (modelIdOf(selected.catalogRow.model) > 0
+            && modelIdOf(selected.catalogRow.model) === activePreview.modelId)),
       );
       const selectedPreview = selectedRecordMatchesPreview || selectedCatalogMatchesPreview
         ? activePreview
@@ -6900,12 +7223,17 @@ export function NAMExplorer({
             await failUse("No downloadable model is available for this capture.");
             return;
           }
-          const requestedTarget = forcedTarget ?? (sourceFlow === "ir" ? "cab" : sourceFlow === "pedal" ? "pedal" : "amp");
-          model = models.find((candidate) => preferredTargetForToneModel(tone, candidate) === requestedTarget)
-            ?? models.find((candidate) => preferredTargetForToneModel(tone, candidate) === "amp")
-            ?? models[0];
+          if (models.length > 1) {
+            if (canUpdateUI()) {
+              setSelectedKey(`${toneIdOf(tone)}:0`);
+              setCaptureUseProgress({ phase: "idle", rowId: "", message: "" });
+              setStatus(`Choose one of ${models.length} captures in this pack before using it. The current rack state is unchanged.`);
+            }
+            return;
+          }
+          model = models[0];
         }
-        const installedRecord = modelIdOf(model) > 0 ? installedByModelId.get(modelIdOf(model)) : undefined;
+        const installedRecord = installedRecordForCatalogModel(model);
         if (installedRecord && !installedRecord.missing) {
           durableRecord = installedRecord;
           durablePath = installedRecord.localPath;
@@ -6951,12 +7279,14 @@ export function NAMExplorer({
       const modelState = targetSlot === "pedal"
         ? {
             pedalModelPath: durablePath,
+            pedalModelSize: NAM_FULL_MODEL_SIZE,
             pedalDeclaredCaptureType: declaredCaptureType,
             cabRequestedEnabled: requestedCabEnabled,
           }
         : targetSlot === "amp"
           ? {
               ampModelPath: durablePath,
+              ampModelSize: NAM_FULL_MODEL_SIZE,
               ampDeclaredCaptureType: declaredCaptureType,
               cabRequestedEnabled: requestedCabEnabled,
             }
@@ -6968,7 +7298,7 @@ export function NAMExplorer({
       const liveInputReady = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
       if (!isCurrent()) return;
       if (!liveInputReady) {
-        await failUse("Live guitar input could not be restored before activating the selected component.");
+        await failUse("Live instrument input could not be restored before activating the selected component.");
         return;
       }
       const used = await nativeBridge.setBuiltInPluginState(address, {
@@ -7012,6 +7342,23 @@ export function NAMExplorer({
         if (!isCurrent()) return;
         await failUse(
           `${activation.reason || "The rack could not verify the selected capture."} `
+          + (restored ? "The previous rack was restored; retry Use." : "The previous rack could not be verified, so stay here and retry."),
+        );
+        return;
+      }
+      const activatedModelState = activation.state?.modelState && typeof activation.state.modelState === "object"
+        ? activation.state.modelState as Record<string, unknown>
+        : {};
+      const activatedModelSize = targetSlot === "amp"
+        ? Number(activatedModelState.ampModelSize)
+        : targetSlot === "pedal"
+          ? Number(activatedModelState.pedalModelSize)
+          : NAM_FULL_MODEL_SIZE;
+      if (!Number.isFinite(activatedModelSize) || Math.abs(activatedModelSize - NAM_FULL_MODEL_SIZE) > 0.0001) {
+        const restored = await restoreAuthoritativeRack();
+        if (!isCurrent()) return;
+        await failUse(
+          "The selected capture did not activate at Full model quality. "
           + (restored ? "The previous rack was restored; retry Use." : "The previous rack could not be verified, so stay here and retry."),
         );
         return;
@@ -7066,6 +7413,23 @@ export function NAMExplorer({
         await failUse(
           `${finalReadback.reason || "Final activation readback failed."} `
           + (restored ? "The previous rack was restored and verified; retry Use." : "The previous rack could not be verified; stay here and retry."),
+        );
+        return;
+      }
+      const finalModelState = finalReadback.state?.modelState && typeof finalReadback.state.modelState === "object"
+        ? finalReadback.state.modelState as Record<string, unknown>
+        : {};
+      const finalModelSize = targetSlot === "amp"
+        ? Number(finalModelState.ampModelSize)
+        : targetSlot === "pedal"
+          ? Number(finalModelState.pedalModelSize)
+          : NAM_FULL_MODEL_SIZE;
+      if (!Number.isFinite(finalModelSize) || Math.abs(finalModelSize - NAM_FULL_MODEL_SIZE) > 0.0001) {
+        const restored = await restoreAuthoritativeRack();
+        if (!isCurrent()) return;
+        await failUse(
+          "The selected capture did not retain Full model quality after activation. "
+          + (restored ? "The previous rack was restored; retry Use." : "The previous rack could not be verified, so stay here and retry."),
         );
         return;
       }
@@ -7202,7 +7566,7 @@ export function NAMExplorer({
       const liveInputRestored = await nativeBridge.setNAMRackInternalAuditionSource(address, false);
       if (!isCurrent()) return false;
       if (!liveInputRestored) {
-        if (canUpdateUI()) setStatus("The browser stayed open because live guitar input could not be restored.");
+        if (canUpdateUI()) setStatus("The browser stayed open because live instrument input could not be restored.");
         return false;
       }
       if (mountedRef.current) onReturn?.();
@@ -7264,9 +7628,19 @@ export function NAMExplorer({
       return;
     }
     if (action === "select-row") {
-      const { preset } = findSourceFlowRow(message.rowId);
+      const { preset, catalogRow } = findSourceFlowRow(message.rowId);
       if (preset) setSelectedFXPresetId(preset.id);
+      else if (catalogRow) void selectCatalogPack(catalogRow);
       else setSelectedKey(message.rowId || "");
+      return;
+    }
+    if (action === "select-capture") {
+      const { catalogRow } = findSourceFlowRow(message.rowId);
+      if (catalogRow) {
+        setCapturePickerError("");
+        setSelectedKey(catalogRow.key);
+        setStatus(`Selected ${modelTitle(catalogRow.model)}. The current sound is unchanged until Audition or Use.`);
+      }
       return;
     }
     if (action === "favorite") {
@@ -7351,6 +7725,11 @@ export function NAMExplorer({
             dspAlert: runtimeStatus?.dspAlert,
             inputLevelDb: runtimeStatus?.inputLevelDb ?? schema.visualization?.inputLevelDb,
             outputLevelDb: runtimeStatus?.outputLevelDb ?? schema.visualization?.outputLevelDb,
+            inputLeftLevelDb: runtimeStatus?.inputLeftLevelDb ?? schema.visualization?.inputLeftLevelDb,
+            inputRightLevelDb: runtimeStatus?.inputRightLevelDb ?? schema.visualization?.inputRightLevelDb,
+            outputLeftLevelDb: runtimeStatus?.outputLeftLevelDb ?? schema.visualization?.outputLeftLevelDb,
+            outputRightLevelDb: runtimeStatus?.outputRightLevelDb ?? schema.visualization?.outputRightLevelDb,
+            inputChannelCount: runtimeStatus?.inputChannelCount,
           }}
           onEnterSection={sourceFlowNavigationLocked ? undefined : onEnterRackSection}
           onCloseLibrary={rackActionsBusy ? undefined : () => void handleSourceFlowReturn()}
@@ -8044,7 +8423,13 @@ export function NAMExplorer({
                 <ChevronDown size={13} />
               </button>
               {sortMenuOpen && (
-                <div className="nam-sort-menu-popover" role="listbox" aria-label="Sort tones">
+                <div
+                  className="nam-sort-menu-popover"
+                  role="listbox"
+                  aria-label="Sort tones"
+                  onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+                  onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
+                >
                   {NAM_SORT_OPTIONS.map((option) => (
                     <button
                       key={option.value}
@@ -8251,6 +8636,30 @@ export function NAMExplorer({
             </div>
           )}
         </div>
+        {railMode && selectedCatalogRow && preferredTargetForToneModel(selectedCatalogRow.tone, selectedCatalogRow.model) !== "cab" && (
+          <NAMToneCapturePicker
+            title={String(selectedCatalogRow.tone.title ?? selectedCatalogRow.tone.name ?? "NAM Capture Pack")}
+            items={selectedToneCaptureItems}
+            selectedId={selectedToneCaptureId}
+            busy={detailHydrating}
+            error={capturePickerError}
+            compact
+            onSelect={(rowId) => {
+              const captureRow = rows.find((row) => row.key === rowId);
+              if (!captureRow) return;
+              setCapturePickerError("");
+              setSelectedKey(captureRow.key);
+              setStatus(`Selected ${modelTitle(captureRow.model)}. The current sound is unchanged until Audition.`);
+            }}
+            onAudition={(rowId) => {
+              const captureRow = rows.find((row) => row.key === rowId);
+              if (!captureRow) return;
+              setSelectedKey(captureRow.key);
+              if (catalogAuditionIsActive(captureRow)) void revertAudition();
+              else void auditionCatalogTone(captureRow, "live-preview", true);
+            }}
+          />
+        )}
         {catalogMode === "live" && (
           <div className="nam-live-pager nam-live-pager-footer" data-variant={railMode ? "rail" : "full"}>
             <span className="nam-live-page-label">
@@ -8489,6 +8898,37 @@ export function NAMExplorer({
             )}
             <h4>{toneTitle(selectedCatalogRow.tone, selectedCatalogRow.model)}</h4>
             <p>{selectedCatalogRow.tone.description || (selectedCatalogRow.tone.source === "tone3000-live" ? "Online TONE3000 result. Open the source page for full creator notes when available." : "Offline TONE3000 metadata. Open the source page for full creator notes when available.")}</p>
+            {preferredTargetForToneModel(selectedCatalogRow.tone, selectedCatalogRow.model) !== "cab" && (
+              <NAMToneCapturePicker
+                title={String(selectedCatalogRow.tone.title ?? selectedCatalogRow.tone.name ?? "NAM Capture Pack")}
+                items={selectedToneCaptureItems}
+                selectedId={selectedToneCaptureId}
+                busy={detailHydrating}
+                error={capturePickerError}
+                showUse={Boolean(sourceFlowConfig)}
+                compact
+                onSelect={(rowId) => {
+                  const captureRow = rows.find((row) => row.key === rowId);
+                  if (!captureRow) return;
+                  setCapturePickerError("");
+                  setSelectedKey(captureRow.key);
+                  setStatus(`Selected ${modelTitle(captureRow.model)}. The current sound is unchanged until Audition or Use.`);
+                }}
+                onAudition={(rowId) => {
+                  const captureRow = rows.find((row) => row.key === rowId);
+                  if (!captureRow) return;
+                  setSelectedKey(captureRow.key);
+                  if (catalogAuditionIsActive(captureRow)) void revertAudition();
+                  else void auditionCatalogTone(captureRow, "live-preview", true);
+                }}
+                onUse={sourceFlowConfig ? (rowId) => {
+                  const captureRow = rows.find((row) => row.key === rowId);
+                  if (!captureRow) return;
+                  setSelectedKey(captureRow.key);
+                  void useSourceFlowSelection(captureRow.key);
+                } : undefined}
+              />
+            )}
             <dl>
               <div>
                 <dt>Creator</dt>

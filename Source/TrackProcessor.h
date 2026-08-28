@@ -134,6 +134,8 @@ public:
     void resetRMS() { currentRMS.store (0.0f, std::memory_order_relaxed); meterPeakAccum = 0.0f; meterSampleCount = 0; }
     bool isClipLatched() const { return clipLatched.load(std::memory_order_relaxed); }
     void resetClipLatch() { clipLatched.store(false, std::memory_order_relaxed); }
+    void registerMIDIInputActivity(const juce::MidiMessage& message) noexcept;
+    float getMIDIInputActivityLevel() const noexcept;
     
     // Recording & Monitoring (Phase 1)
     void setRecordArmed(bool armed)
@@ -479,6 +481,11 @@ private:
         juce::String parameterId;
         bool isInputFX = false;
         int fxIndex = -1;
+        // Stable instance identity keeps automation attached to the intended
+        // processor while graph and route snapshots cross a publication
+        // boundary during reorder/removal. The callback compares this pointer
+        // only; the graph snapshot owns the processor for the reader epoch.
+        const juce::AudioProcessor* targetProcessor = nullptr;
         int paramIndex = -1;
         juce::String builtInParamId;
         float builtInMinimum = 0.0f;
@@ -524,6 +531,12 @@ private:
     void resetFXContinuityStates() noexcept;
     void publishPluginAutomationRoutes(
         std::shared_ptr<const PluginAutomationRouteSnapshot> snapshot);
+    static std::shared_ptr<PluginAutomationRoute>
+        clonePluginAutomationRoute(const PluginAutomationRoute& source);
+    void remapPluginAutomationRoutesForReorder(
+        bool isInputFX, int fromIndex, int toIndex);
+    void remapPluginAutomationRoutesForRemoval(
+        bool isInputFX, int removedIndex);
     void publishMIDICCAutomationRoutes(
         std::shared_ptr<const MIDICCAutomationRouteSnapshot> snapshot);
     std::shared_ptr<PluginAutomationRoute> getOrCreatePluginAutomationRoute(const juce::String& parameterId);
@@ -560,6 +573,10 @@ private:
     int  meterSampleCount { 0 };
     float meterPeakAccum  { 0.0f };
     std::atomic<bool> clipLatched { false };
+    // Raw MIDI input activity is deliberately separate from the audio meter.
+    // It is written by the MIDI input callback and sampled by the UI meter timer.
+    std::atomic<float> midiInputActivityLevel { 0.0f };
+    std::atomic<juce::uint32> midiInputActivityTimestampMs { 0 };
     
     // Recording state (Phase 1)
     std::atomic<bool> isRecordArmed { false };

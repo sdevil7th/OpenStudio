@@ -1,0 +1,447 @@
+/* Component-owned hardware-art styles; global ownership and visual-QA rules live in AGENTS.md. */
+.rack-title {
+  position: absolute;
+  left: 3.8%;
+  top: 4.8%;
+  z-index: 30;
+  color: #111827;
+  font-size: max(18px, 2.05cqw);
+  font-weight: 950;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.nav-glyph {
+  position: relative;
+  width: max(12px, 1.32cqw);
+  height: max(12px, 1.32cqw);
+  color: currentColor;
+}
+.nav-glyph::before,
+.nav-glyph::after {
+  content: "";
+  position: absolute;
+  inset: 18%;
+  border: 2px solid currentColor;
+}
+.nav-glyph.pre::before {
+  clip-path: polygon(44% 0,72% 0,54% 42%,78% 42%,31% 100%,43% 56%,22% 56%);
+  background: currentColor;
+  border: 0;
+}
+.nav-glyph.pre::after { display: none; }
+.nav-glyph.amp::before { border-left: 0; border-right: 0; transform: skewX(-12deg); }
+.nav-glyph.amp::after { inset: 42% 4% 38%; border-left: 0; border-right: 0; }
+.nav-glyph.cab::before { border-radius: 50%; }
+.nav-glyph.cab::after { inset: 58% 32% 6%; border-top: 0; border-radius: 0 0 10px 10px; }
+.nav-glyph.eq::before { inset: 12% 45%; }
+.nav-glyph.eq::after { inset: 26% 20%; border-left: 0; border-right: 0; }
+.nav-glyph.post::before { border-radius: 999px; transform: rotate(90deg); }
+.nav-glyph.post::after { inset: 10% 50% 10% 30%; border-left: 0; border-right: 0; }
+.actions {
+  margin-bottom: 3px;
+  text-align: center;
+  color: #27334a;
+  font-size: max(6px, .52cqw);
+  font-weight: 900;
+}
+.preset {
+  height: max(20px, 2.7cqw);
+  display: grid;
+  grid-template-columns: 24px 1fr 20px max(64px, 7cqw);
+  align-items: center;
+  border: 1px solid rgba(100,114,138,.24);
+  border-radius: 5px;
+  background: rgba(248,251,255,.76);
+  color: #0d1420;
+  font-size: max(8px, .7cqw);
+  font-weight: 900;
+}
+.preset span {
+  display: grid;
+  place-items: center;
+}
+.kicker { color: rgba(255,255,255,.66); font-size: max(6px, .4cqw); }
+.tiny { font-size: max(6px, .42cqw); opacity: .95; }
+.panel-title { font-size: max(8px, .64cqw); }
+.micro-label { font-size: max(7px, .5cqw); }
+.amp-label {
+  color: rgba(235,239,244,.82);
+  font-size: max(6px, .34cqw);
+}
+.eq-scale-grid {
+  position: absolute;
+  z-index: 4;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,.11) 0 1px, transparent 1px 9.5%);
+}
+.eq-lane-gridline {
+  position: absolute;
+  z-index: 4;
+  width: 1px;
+  transform: translateX(-.5px);
+  background: rgba(255,255,255,.065);
+  pointer-events: none;
+}
+.eq-level-separator {
+  position: absolute;
+  top: 20%;
+  z-index: 5;
+  width: 1px;
+  height: 61%;
+  background: linear-gradient(transparent, rgba(235,241,248,.24) 10%, rgba(235,241,248,.24) 90%, transparent);
+  pointer-events: none;
+}
+.eq-rack .eq-filter-readout {
+  z-index: 8;
+  min-width: 0;
+  padding: 0 1.1%;
+  overflow: hidden;
+  border-color: rgba(255, 214, 142, .2);
+  border-radius: 2px;
+  color: #e7b85e;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.035), transparent 38%),
+    linear-gradient(180deg, #020304, #080b0d);
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.04),
+    inset 0 -1px rgba(0,0,0,.72),
+    0 1px 2px rgba(0,0,0,.42);
+  text-shadow: none;
+}
+.eq-rack .eq-filter-readout-content {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5%;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.eq-rack .eq-filter-readout-content small {
+  color: rgba(231, 184, 94, .72);
+  font-size: max(6px, .43cqw);
+  font-weight: 760;
+  letter-spacing: .06em;
+}
+.eq-rack .eq-filter-readout-content strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #f1c779;
+  font-size: max(7px, .5cqw);
+  font-weight: 780;
+  letter-spacing: 0;
+  text-align: right;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.eq-rack .eq-filter-readout-content[data-filter-state="off"] strong {
+  color: rgba(231, 184, 94, .62);
+}
+
+/* Post-cab EQ v2: a quiet recessed fader bay with a hardware utility rail.
+   Cutoff values deliberately live in the shared hover/drag tooltip instead of
+   permanent digital readouts, keeping the faceplate legible at Size 100. */
+.nam-rack-design-port .eq-rack .eq-scale-grid {
+  box-sizing: border-box;
+  border: 1px solid rgba(214, 221, 229, .13);
+  border-radius: 4px;
+  background:
+    repeating-linear-gradient(0deg, rgba(225, 232, 240, .105) 0 1px, transparent 1px 10%),
+    linear-gradient(180deg, rgba(255,255,255,.018), rgba(0,0,0,.07));
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.025),
+    inset 0 0 20px rgba(0,0,0,.16);
+}
+.nam-rack-design-port .eq-rack .eq-lane-gridline {
+  background: linear-gradient(
+    transparent,
+    rgba(224, 230, 238, .075) 8%,
+    rgba(224, 230, 238, .075) 92%,
+    transparent
+  );
+}
+.nam-rack-design-port .eq-rack .eq-filter-utility-dock {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 1px solid rgba(208, 215, 224, .11);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.025), transparent 38%),
+    rgba(4, 6, 8, .43);
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.025),
+    inset 0 5px 14px rgba(0,0,0,.22);
+  pointer-events: none;
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon {
+  position: absolute;
+  z-index: 8;
+  transform: translate(-50%, -50%);
+  color: rgba(226, 174, 88, .9);
+  filter: drop-shadow(0 1px rgba(0,0,0,.7));
+  pointer-events: none;
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon::before,
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon::after {
+  content: "";
+  position: absolute;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  transform-origin: center;
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon-hpf::before {
+  left: 46%;
+  right: 2%;
+  top: 24%;
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon-hpf::after {
+  left: 1%;
+  top: 56%;
+  width: 52%;
+  transform: rotate(-38deg);
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon-lpf::before {
+  left: 2%;
+  right: 46%;
+  top: 24%;
+}
+.nam-rack-design-port .eq-rack .eq-filter-curve-icon-lpf::after {
+  right: 1%;
+  top: 56%;
+  width: 52%;
+  transform: rotate(38deg);
+}
+.nam-rack-design-port .eq-rack .eq-filter-knob {
+  filter:
+    brightness(.78)
+    saturate(.72)
+    drop-shadow(0 3px 3px rgba(0,0,0,.62));
+}
+.nam-rack-design-port .eq-rack .eq-power-label {
+  color: rgba(227, 184, 111, .86);
+  font-size: 7px;
+  letter-spacing: .08em;
+}
+.nam-rack-design-port .eq-rack .eq-level-lane .fader-track {
+  border-color: rgba(226, 174, 88, .4);
+  box-shadow: 0 0 5px rgba(206, 145, 54, .08);
+}
+
+/* Fixed-capture amp wrapper. The NAM remains a snapshot; these two rows expose
+   every existing host-side control without inventing capture-owned knobs. */
+.nam-rack-design-port .amp-wrapper-legend {
+  z-index: 7;
+  color: rgba(216, 179, 122, .78);
+  font-size: 7px;
+  font-weight: 680;
+  letter-spacing: .115em;
+  text-shadow: 0 1px 2px rgba(0,0,0,.92);
+}
+.nam-rack-design-port .amp-row-divider {
+  position: absolute;
+  z-index: 4;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(225, 218, 205, .13) 12%,
+    rgba(225, 218, 205, .13) 88%,
+    transparent
+  );
+  pointer-events: none;
+}
+.nam-rack-design-port .amp-row-divider-capture {
+  left: 5.5%;
+  right: 5.5%;
+  top: 56.2%;
+}
+.nam-rack-design-port .amp-row-divider-tone {
+  left: 20%;
+  right: 20%;
+  top: 70.8%;
+  opacity: .7;
+}
+.nam-rack-design-port .amp-head .amp-rail-label {
+  max-width: 13%;
+  overflow: visible;
+  color: rgba(235, 226, 211, .86);
+  font-size: 7.5px;
+  font-weight: 650;
+  letter-spacing: .035em;
+  text-align: center;
+}
+
+/* Precision/Screamer is a circuit voice, not another pedal power state. The
+   compact black display and mini-toggle therefore sit above the existing
+   LED/footswitch rhythm and leave Gate untouched. */
+.nam-rack-design-port .module[data-module="precision-drive"] .precision-drive-voice-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.11);
+  color: #efbd72;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.025), transparent 42%),
+    #030506;
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.035),
+    inset 0 -1px rgba(0,0,0,.75);
+  font-size: 6.7px;
+  font-weight: 760;
+  letter-spacing: .025em;
+  line-height: 1;
+  text-shadow: none;
+}
+
+/* EQ Boost hardware remains DOM-owned and pixel-aligned to its independent
+   white stompbox enclosure. */
+.nam-rack-design-port .combined-pre-eq-dark-label {
+  z-index: 10;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  color: #292a26;
+  text-shadow: 0 1px rgba(255,255,255,.34);
+}
+.nam-rack-design-port .combined-pre-eq-band-label {
+  width: 21px;
+  /* The layout coordinate is the caption's right edge, not its centre. */
+  transform: translate(-100%, -50%);
+  font-size: 5px;
+  font-weight: 720;
+  letter-spacing: .025em;
+  text-align: right;
+}
+.nam-rack-design-port .combined-drive-gate-label {
+  font-size: 5px;
+  font-weight: 710;
+  letter-spacing: .045em;
+}
+.nam-rack-design-port .horizontal-mini-fader {
+  position: absolute;
+  z-index: 12;
+  border-radius: 3px;
+  touch-action: none;
+  cursor: ew-resize;
+  outline: 0;
+}
+.nam-rack-design-port .horizontal-mini-fader:focus-visible {
+  outline: 1px solid rgba(222,163,58,.96);
+  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px rgba(255,235,178,.16);
+}
+.nam-rack-design-port .horizontal-mini-fader-track {
+  position: absolute;
+  left: var(--horizontal-fader-track-inset);
+  top: 50%;
+  width: calc(100% - 2 * var(--horizontal-fader-track-inset));
+  height: 4px;
+  transform: translateY(-50%);
+  border: 1px solid rgba(0,0,0,.68);
+  border-radius: 3px;
+  background: linear-gradient(180deg, #555752, #151716 44%, #080909 68%, #4c4e49);
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.8), 0 1px rgba(255,255,255,.26);
+  pointer-events: none;
+}
+.nam-rack-design-port .horizontal-mini-fader-track::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  width: 1px;
+  height: 8px;
+  background: rgba(100,94,82,.78);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.08);
+}
+.nam-rack-design-port .horizontal-mini-fader-cap {
+  position: absolute;
+  left: var(--horizontal-fader-value);
+  top: 50%;
+  z-index: 2;
+  width: 10px;
+  height: 15px;
+  object-fit: contain;
+  transform: translate(-50%, -50%) rotate(90deg);
+  filter: brightness(.93) contrast(1.04) drop-shadow(0 2px 2px rgba(0,0,0,.48));
+  pointer-events: none;
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon {
+  position: absolute;
+  z-index: 11;
+  width: 25px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  color: #625b4c;
+  filter: drop-shadow(0 1px rgba(255,255,255,.16));
+  pointer-events: none;
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon::before,
+.nam-rack-design-port .combined-pre-eq-filter-icon::after {
+  content: "";
+  position: absolute;
+  height: 1.4px;
+  border-radius: 999px;
+  background: currentColor;
+  transform-origin: center;
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon-hpf::before {
+  left: 38%; right: 2%; top: 22%;
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon-hpf::after {
+  left: 1%; top: 56%; width: 45%; transform: rotate(-38deg);
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon-lpf::before {
+  left: 2%; right: 38%; top: 22%;
+}
+.nam-rack-design-port .combined-pre-eq-filter-icon-lpf::after {
+  right: 1%; top: 56%; width: 45%; transform: rotate(38deg);
+}
+.nam-rack-design-port .eq-boost .combined-pre-eq-filter-icon {
+  color: rgba(67, 65, 59, .86);
+  filter: drop-shadow(0 1px rgba(255,255,255,.42));
+}
+.nam-rack-design-port .eq-boost .combined-pre-eq-filter-knob {
+  filter: brightness(.86) contrast(1.06) drop-shadow(0 3px 3px rgba(0,0,0,.52));
+}
+.nam-rack-design-port .stompbox.eq-boost .module-title {
+  color: #292a26;
+  letter-spacing: .07em;
+  text-shadow: 0 1px rgba(255,255,255,.42);
+}
+.nam-rack-design-port .eq-boost .foot-action-label {
+  color: rgba(42, 43, 39, .86);
+  text-shadow: 0 1px rgba(255,255,255,.42);
+}
+
+/* Premium NAM Rack: the active runtime shell. Kept as a final, tightly scoped
+   layer so the legacy design boards remain available to the source-flow view. */
+
+/* Premium composition v3: the concept-aligned runtime surface. */
+
+/* Tone Library v2: selected hardware is the focal point; browsing is a real,
+   compact tool rail. Every visible control below is wired to NAMExplorer. */
+@keyframes tone-library-shimmer { to { background-position-x: -220%; } }
+
+/* Hardware interaction feedback and faceplate hierarchy. These rules live last
+   in the design sheet so the physical states are not washed out by older skin
+   filters higher in the cascade. */
+
+/* Header utility compression preserves the rack-owned utility density.
+   Labels and values remain visible; only physical spacing and dial size reduce. */
+
+/* Responsive header contract. Complete hardware bays remain edge controls at
+   every supported width while both centre rails stay shell-centred. */
+
+/* The hardware surface is designed down to a 700px host height. Below that,
+   preserve readable controls and make the complete rack reachable instead of
+   continuously shrinking the gear, source results, or tuner into unusability. */
+/* NAM Rack header
+   One-dimensional composition belongs to Tailwind Flex utilities in TopShell.
+   This stylesheet owns only the shell surface, hardware spacing, and responsive
+   dimensions. Preset and Doubler internals remain grids because both align
+   controls across rows and columns. */
+/* At the smallest supported host width only the centre bay becomes two rows.
+   Input and Output remain fixed on the same header row. */

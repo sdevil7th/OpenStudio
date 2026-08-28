@@ -138,9 +138,9 @@ OpenStudio/
 ├── tools/                       # ffmpeg.exe, stem_separator.py, setup scripts
 ├── resources/                   # ONNX models, presets, resources
 ├── build/                       # CMake build output
-├── CMakeLists.txt               # C++ build: JUCE 8.0.0, ASIO SDK, WebView2, VST3, ONNX Runtime
+├── CMakeLists.txt               # C++ build: JUCE 9.0.1, ASIO SDK, WebView2, VST3, ONNX Runtime
 ├── build.py                     # Python orchestrator: cmake + npm + vite dev server
-├── pitch_corrector_feat_plan.md # Detailed pitch editor implementation plan (Melodyne/RePitch/VariAudio parity)
+├── docs/roadmap.md              # Open release/product work; completed implementation history stays in Git
 └── WORKFLOWS.md                 # Dev workflow docs
 ```
 
@@ -217,7 +217,7 @@ For **continuous edits** (faders, knobs), use the begin/commit pattern: `beginXE
 
 ### Pitch Editor Subsystem
 
-The pitch editor enables vocal pitch correction with both real-time (auto-tune style) and graphical (Melodyne-style) modes. The implementation plan for reaching Melodyne/RePitch/VariAudio quality is in `pitch_corrector_feat_plan.md`.
+The pitch editor enables vocal pitch correction with both real-time (auto-tune style) and graphical (Melodyne-style) modes. Current open work and release decisions live in `docs/roadmap.md`; renderer evidence is retained only in the dedicated pitch research notes.
 
 **Architecture**:
 ```
@@ -280,6 +280,23 @@ Real-time corrector:
 - Dark theme: `daw-dark` (#121212), `daw-panel` (#1a1a1a), `daw-accent` (#0078d4)
 - Semantic colors: `daw-record` (red), `daw-mute` (green), `daw-solo` (yellow), `daw-fx` (lime)
 - UI components in `components/ui/` use variant pattern (default, primary, success, danger, etc.)
+
+### Frontend Styling and Visual QA
+
+- Do not generate stylesheet strings at runtime, mount JSX `<style>` blocks, or use `!important`.
+- Use Tailwind for ordinary layout, spacing, sizing, typography, responsive, and state styling. Use component-owned CSS (or CSS Modules where practical) for hardware artwork, pseudo-elements, gradients, keyframes, and scene geometry; every component imports the stylesheet it owns.
+- Prefer Flexbox for one-dimensional layout and Grid only for genuinely two-dimensional relationships. Keep static layout out of JSX `style`; pass runtime geometry through typed CSS custom properties.
+- Resizable hosts should prefer container queries and fluid `clamp()` sizing. Keep one owner for each styling rule, remove superseded selectors in the same change, and do not build compensating override piles.
+- Bitmap-backed controls are authored in intrinsic source pixels. Safe zones are measured against the visible alpha bounds, not transparent canvas padding; both visual and hit envelopes must remain inside named zones. Stationary art, labels, wells, and recesses belong in the asset, with only moving or interactive DOM layered above it.
+- Validate responsive geometry, focus visibility, accessible names, hit targets, truncation, wrapping, overlap, clipping, and overflow in a real browser. Tests should assert behavior and geometry rather than exact CSS source text.
+- Do not bump a persistence schema or DSP version until migration and round-trip coverage exists for old project, preset, Compare, and portable state.
+
+### Embedded Browser, Window, and Dependency Reliability
+
+- A startup self-test proves prerequisites, not visible UI readiness. Every main or detached WebView role must reach the frontend `boot-ready` signal; Debug success is not evidence that the Windows Release WebView path works.
+- Preserve the shared embedded-browser option factory, startup watchdog, per-user writable WebView2 user-data directory, and delayed/retired teardown contract for closing browser-backed windows.
+- Treat JUCE upgrades as isolated dependency changes. The exact pin and realtime patches must fail closed, and compile success is insufficient: qualify audio devices, plugin hosting/editors, packaging, and main/detached window lifecycle on supported platforms.
+- Signed artifacts can still trigger reputation warnings, and removing quarantine is a diagnostic action rather than proof of a trustworthy first-launch flow.
 
 ## When You're Stuck
 

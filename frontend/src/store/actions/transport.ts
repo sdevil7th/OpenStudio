@@ -900,6 +900,14 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
     togglePlayPause: async () => {
       const { transport } = get();
+      // Recording cannot be paused like ordinary playback: stopping is what
+      // asks the backend for completed audio/MIDI takes and clears the active
+      // record session. This also keeps custom bindings and Command Palette
+      // execution safe, not only the factory Space binding.
+      if (transport.isRecording || get().recordSession) {
+        await get().stop();
+        return;
+      }
       if (transport.isPlaying) {
         get().pause();
       } else {
@@ -1035,10 +1043,15 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     setTimeSelection: (start, end) => {
+      const state = get();
+      if (state.globalLocked || state.lockSettings?.timeSelection) return;
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
       set({ timeSelection: { start, end } });
     },
 
     clearTimeSelection: () => {
+      const state = get();
+      if (state.globalLocked || state.lockSettings?.timeSelection) return;
       set({ timeSelection: null });
     },
 

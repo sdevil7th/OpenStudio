@@ -86,28 +86,30 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
     }
 
     // Create WAV file writer
-    auto* fileOutputStream = new juce::FileOutputStream(file);
-    if (!fileOutputStream->openedOk())
+    std::unique_ptr<juce::OutputStream> fileOutputStream = std::make_unique<juce::FileOutputStream>(file);
+    if (static_cast<juce::FileOutputStream&>(*fileOutputStream).failedToOpen())
     {
-        delete fileOutputStream;
         juce::Logger::writeToLog("AudioRecorder: Failed to create output file: " + file.getFullPathName());
         return false;
     }
 
     // Create WAV writer (16-bit PCM)
-    juce::AudioFormatWriter* rawWriter =
-        wavFormat.createWriterFor(fileOutputStream, sampleRate, (unsigned int)numChannels, 16, {}, 0);
+    auto writer = wavFormat.createWriterFor(
+        fileOutputStream,
+        juce::AudioFormatWriterOptions()
+            .withSampleRate(sampleRate)
+            .withNumChannels(numChannels)
+            .withBitsPerSample(16));
 
-    if (!rawWriter)
+    if (!writer)
     {
-        delete fileOutputStream;
         juce::Logger::writeToLog("AudioRecorder: Failed to create WAV writer");
         return false;
     }
 
     // Wrap in ThreadedWriter - moves disk I/O to background thread
     auto threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(
-        rawWriter, writerThread, 65536);
+        writer.release(), writerThread, 65536);
 
     // Pre-allocate incremental peak table for ~120 seconds of recording.
     // Entry layout: [min_ch0, max_ch0, min_ch1, max_ch1] per PEAK_STRIDE samples.

@@ -8,6 +8,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  verify-input-profiles:
+    name: Input profiles (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend unit tests
+        run: npm test
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run shortcut and input-profile browser tests
+        run: npm run test:e2e
+
   verify-windows:
     runs-on: windows-latest
     env:
@@ -112,8 +143,86 @@ jobs:
             throw "Windows startup self-test failed."
           }
 
+      - name: Regress WebView2 preflight from a non-writable install directory
+        shell: pwsh
+        run: |
+          $sourceBundle = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          $protectedBundle = Join-Path $env:RUNNER_TEMP "OpenStudio-Protected-Install"
+          Copy-Item -LiteralPath $sourceBundle -Destination $protectedBundle -Recurse
+
+          # Model Program Files precisely: the test identity may read and
+          # execute the bundle but may not write beside OpenStudio.exe.
+          $acl = New-Object System.Security.AccessControl.DirectorySecurity
+          $acl.SetAccessRuleProtection($true, $false)
+          $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+          $none = [System.Security.AccessControl.PropagationFlags]::None
+          $allow = [System.Security.AccessControl.AccessControlType]::Allow
+          $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentUser, 'ReadAndExecute, Synchronize', $inheritance, $none, $allow)))
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'NT AUTHORITY\SYSTEM', 'FullControl', $inheritance, $none, $allow)))
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'BUILTIN\Administrators', 'FullControl', $inheritance, $none, $allow)))
+          Set-Acl -LiteralPath $protectedBundle -AclObject $acl
+
+          $writeProbe = Join-Path $protectedBundle 'must-not-write.tmp'
+          $writeDenied = $false
+          try {
+            [System.IO.File]::WriteAllText($writeProbe, 'probe')
+          } catch [System.UnauthorizedAccessException] {
+            $writeDenied = $true
+          }
+          if ((Test-Path -LiteralPath $writeProbe) -or -not $writeDenied) {
+            throw "Staged install directory remained writable."
+          }
+
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_ProtectedInstallStartupSelfTest.txt"
+          $exePath = Join-Path $protectedBundle "OpenStudio.exe"
+          $process = Start-Process -FilePath $exePath -ArgumentList @("--startup-self-test", "--report", "`"$report`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $report) {
+              Get-Content -LiteralPath $report
+            }
+            throw "WebView2 preflight failed from a non-writable install directory."
+          }
+
+          $reportText = [System.IO.File]::ReadAllText($report)
+          $userDataMatch = [regex]::Match($reportText, '(?m)^webView2UserDataPath=(.+)$')
+          if (-not $userDataMatch.Success) {
+            throw "Protected-install self-test did not report its WebView2 user-data folder."
+          }
+          $userDataPath = [System.IO.Path]::GetFullPath($userDataMatch.Groups[1].Value.Trim())
+          $protectedRoot = [System.IO.Path]::GetFullPath($protectedBundle).TrimEnd('\') + '\'
+          if ($userDataPath.StartsWith($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "WebView2 user data incorrectly resolves inside the protected install tree: $userDataPath"
+          }
+
+      - name: Run Windows native-window lifecycle smoke test
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
+          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
+
+      - name: Run NAM Rack deterministic regression
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-nam-rack-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "ci-release" `
+            -TimeoutSeconds 360 `
+            -SkipBuild
+
   verify-macos:
-    runs-on: macos-14
+    name: macOS native windows (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
     env:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-macos
@@ -159,6 +268,14 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$env:APP_BUNDLE" -ExpectedVersion "$env:VERSION" -EnforceLeanBundle
 
+      - name: Validate universal macOS executable
+        shell: bash
+        run: |
+          ARCHS="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/OpenStudio")"
+          echo "OpenStudio architectures: $ARCHS"
+          [[ " $ARCHS " == *" arm64 "* ]]
+          [[ " $ARCHS " == *" x86_64 "* ]]
+
       - name: Run macOS startup self-test
         shell: bash
         run: |
@@ -170,6 +287,13 @@ jobs:
             fi
             exit 1
           fi
+
+      - name: Run macOS native-window lifecycle smoke test
+        shell: pwsh
+        run: |
+          $executable = Join-Path $env:APP_BUNDLE "Contents/MacOS/OpenStudio"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
+          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $executable -ReportPath $report -TimeoutSeconds 180
 
   verify-linux:
     runs-on: ubuntu-24.04

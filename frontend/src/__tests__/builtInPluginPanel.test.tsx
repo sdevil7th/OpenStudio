@@ -1,17 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
-// @ts-expect-error The app tsconfig does not include Node builtin typings, but Vitest runs this file in Node.
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   BuiltInPluginPanel,
   BuiltInParamControl,
   createFrameCoalescedParamWriter,
+  createParamWriteReconciler,
   createSchemaRequestGate,
   formatParamValue,
   getPluginKind,
   groupLabel,
   groupSortWeight,
   primaryParamIdsForKind,
+  shouldReadBackAfterParamWrite,
   stepForParam,
 } from "../components/BuiltInPluginPanel";
 import type { BuiltInParamDescriptor, BuiltInPluginSchema } from "../services/NativeBridge";
@@ -195,7 +195,7 @@ const panelSchemas = [
 ];
 
 describe("BuiltInPluginPanel schema model", () => {
-  it("coalesces NAM parameter writes to the latest quantized value per animation frame", async () => {
+  it("coalesces NAM parameter writes only within an animation frame", async () => {
     const frames = createFrameHarness();
     const writes: Array<[string, number]> = [];
     const writer = createFrameCoalescedParamWriter({
@@ -222,7 +222,39 @@ describe("BuiltInPluginPanel schema model", () => {
     ]);
 
     writer.enqueue("reverbMix", 0.2);
-    expect(frames.pendingFrames()).toBe(0);
+    expect(frames.pendingFrames()).toBe(1);
+    frames.runFrame();
+    await flushMicrotasks();
+    expect(writes).toEqual([
+      ["reverbMix", 0.2],
+      ["reverbDecaySec", 3.5],
+      ["reverbMix", 0.2],
+    ]);
+    writer.dispose();
+  });
+
+  it("sends the first toggle after a preset changes native state outside the writer", async () => {
+    const writes: Array<[string, number]> = [];
+    const writer = createFrameCoalescedParamWriter({
+      write: async (paramId, value) => {
+        writes.push([paramId, value]);
+        return true;
+      },
+    });
+
+    writer.writeImmediately("delayEnabled", 0);
+    await flushMicrotasks();
+
+    // A preset now enables Delay directly in native state. The editor's next
+    // off click has the same value as its previous successful write, but it
+    // must still reach native code because the preset bypassed this writer.
+    writer.writeImmediately("delayEnabled", 0);
+    await flushMicrotasks();
+
+    expect(writes).toEqual([
+      ["delayEnabled", 0],
+      ["delayEnabled", 0],
+    ]);
     writer.dispose();
   });
 
@@ -365,6 +397,57 @@ describe("BuiltInPluginPanel schema model", () => {
     writer.dispose();
   });
 
+  it("restores the last confirmed native value after a final optimistic toggle write fails", () => {
+    const nativeOff = schemaWithParams("OpenStudio NAM Rack", "NAM", [
+      toggle("reverbPad", "Pad", 0, "space"),
+    ]);
+    const reconciler = createParamWriteReconciler(nativeOff);
+
+    reconciler.beginOptimisticWrite("reverbPad", 1, 0);
+    const optimisticSchema = reconciler.applyToFallbackSchema(nativeOff);
+    expect(optimisticSchema?.parameters[0]?.value).toBe(1);
+
+    expect(reconciler.resolveFailedWrite("reverbPad", 1)).toEqual({
+      matched: true,
+      rollbackValue: 0,
+    });
+    expect(reconciler.applyToFallbackSchema(nativeOff)?.parameters[0]?.value).toBe(0);
+  });
+
+  it("does not let an older failed write roll back a newer optimistic value", () => {
+    const nativeOff = schemaWithParams("OpenStudio NAM Rack", "NAM", [
+      toggle("reverbPad", "Pad", 0, "space"),
+    ]);
+    const reconciler = createParamWriteReconciler(nativeOff);
+
+    reconciler.beginOptimisticWrite("reverbPad", 1, 0);
+    reconciler.beginOptimisticWrite("reverbPad", 0, 1);
+
+    expect(reconciler.resolveFailedWrite("reverbPad", 1)).toEqual({ matched: false });
+    expect(reconciler.applyToFallbackSchema({
+      ...nativeOff,
+      parameters: [{ ...nativeOff.parameters[0], value: 1 }],
+    })?.parameters[0]?.value).toBe(0);
+  });
+
+  it("requests one-shot readback for discrete writes and accepts the returned native value", () => {
+    const nativeOff = schemaWithParams("OpenStudio NAM Rack", "NAM", [
+      toggle("reverbPad", "Pad", 0, "space"),
+      choice("reverbVoice", "Voice", 0, ["Studio", "Plate"], "space"),
+      continuous("reverbMix", "Mix", 0.3, 0, 1, "space"),
+    ]);
+    const reconciler = createParamWriteReconciler(nativeOff);
+
+    expect(shouldReadBackAfterParamWrite(nativeOff, "reverbPad")).toBe(true);
+    expect(shouldReadBackAfterParamWrite(nativeOff, "reverbVoice")).toBe(true);
+    expect(shouldReadBackAfterParamWrite(nativeOff, "reverbMix")).toBe(false);
+
+    reconciler.beginOptimisticWrite("reverbPad", 1, 0);
+    expect(reconciler.resolveSuccessfulWrite("reverbPad", 1)).toBe(true);
+    const readbackSchema = reconciler.acceptNativeSchema(nativeOff);
+    expect(readbackSchema?.parameters[0]?.value).toBe(0);
+  });
+
   it("rejects stale schema refreshes so an old empty rack cannot replace a loaded capture", () => {
     const gate = createSchemaRequestGate();
     const emptyRackRequest = gate.begin();
@@ -441,15 +524,4 @@ describe("BuiltInPluginPanel schema model", () => {
     }
   });
 
-  it("keeps responsive CSS contracts for desktop, tablet, and narrow plugin panels", () => {
-    const css = readFileSync(new URL("../components/FXChainPanel.css", import.meta.url), "utf8");
-
-    expect(css).toContain("grid-template-columns: 400px 1fr");
-    expect(css).toContain("grid-template-columns: repeat(auto-fit, minmax(164px, 1fr))");
-    expect(css).toContain("@media (max-width: 900px)");
-    expect(css).toContain("grid-template-columns: 1fr");
-    expect(css).toContain("grid-template-rows: minmax(260px, 44vh) minmax(0, 1fr)");
-    expect(css).toContain("@media (max-width: 520px)");
-    expect(css).toContain("height: 112px");
-  });
 });

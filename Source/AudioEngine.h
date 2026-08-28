@@ -90,6 +90,8 @@ public:
         double sampleRate,
         int bufferSize,
         std::function<void(bool, const juce::String&)> completion = {});
+    int getNAMRackOversamplingFactor() const noexcept;
+    bool setNAMRackOversamplingFactor(int factor);
     
     // Track control (Phase 1) - ID-based
     void setTrackRecordArm(const juce::String& trackId, bool armed);
@@ -293,6 +295,7 @@ public:
     bool addMasterFX(const juce::String& pluginPath);
     juce::var getMasterFX();
     bool removeMasterFX(int fxIndex);
+    bool reorderMasterFX(int fromIndex, int toIndex);
     void openMasterFXEditor(int fxIndex);
     void bypassMasterFX(int fxIndex, bool bypassed);
     bool addMonitoringFX(const juce::String& pluginPath);
@@ -315,6 +318,7 @@ public:
 
     // Metering (Phase 4)
     juce::var getMeterLevels(); // Returns array of track RMS levels
+    juce::var getMIDIInputLevels(); // Returns raw MIDI input velocity/activity by track ID
     juce::var getMeterClipStates();
     float getMasterLevel() const; // Returns master output level
     bool getMasterClipLatched() const;
@@ -341,6 +345,9 @@ public:
     
     // Waveform Visualization
     juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels);
+    double getAudioPeakAmplitude(const juce::String& filePath,
+                                 double offsetSeconds,
+                                 double durationSeconds) const;
     bool refreshWaveformPeaks(const juce::String& filePath);
     juce::var getRecordingPeaks(const juce::String& trackId,
                                 int samplesPerPixel,
@@ -576,7 +583,8 @@ public:
                                     const juce::String& renderMode = "single",
                                     std::function<bool()> shouldCancel = {},
                                     double jobStartDelayMs = 0.0,
-                                    int previewRenderGenerationToken = 0);
+                                    int previewRenderGenerationToken = 0,
+                                    std::function<bool(const std::function<void()>&)> guardedCommit = {});
     juce::var previewPitchCorrection(const juce::String& trackId, const juce::String& clipId, const juce::var& notesJson);
     juce::var startPitchScrubPreview(const juce::String& trackId, const juce::String& clipId,
                                      const juce::var& noteJson, const juce::var& framesJson = juce::var());
@@ -930,6 +938,7 @@ private:
     std::atomic<juce::int64> currentSamplePosition { 0 };
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;  // Device buffer size for re-preparing plugins after render
+    std::atomic<int> namRackOversamplingFactor { 4 };
     int inputLatencySamples = 0;  // Device input latency for recording compensation
     std::atomic<double> lastAudioBlockWallTimeMs { 0.0 };
     std::atomic<double> lastAudioBlockDurationMs { 0.0 };

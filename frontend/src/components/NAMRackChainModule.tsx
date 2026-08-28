@@ -1,3 +1,4 @@
+import "./NAMRackChainModule.css";
 import { type DragEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowRight, GripVertical, Plus, Power, Star } from "lucide-react";
 

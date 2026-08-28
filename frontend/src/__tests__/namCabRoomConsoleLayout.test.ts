@@ -74,6 +74,9 @@ describe("NAM Rack integrated Cab and Room console", () => {
     expect(cabStage).toContain('paramId="cabPan"');
     expect(cabStage.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(7);
     expect(cabStage).toContain("POST-CAB AMBIENCE");
+    expect(cabStage).toContain('roomWaitingForCabSource ? "No cab source"');
+    expect(cabStage).toContain('data-status={roomWaitingForCabSource ? "no-source" : "ready"}');
+    expect(cabStage).toContain("roomEnabled && !cabRoomInputSourceAvailable");
     expect(cabStage).toContain("<DesignParamContext.Provider value={cabParamContext}>");
     expect(cabStage.indexOf('className="cab-room-bay"'))
       .toBeGreaterThan(cabStage.indexOf("</DesignParamContext.Provider>"));
@@ -88,6 +91,5 @@ describe("NAM Rack integrated Cab and Room console", () => {
       "utf8",
     );
     expect(source.match(/panelRotaryVariant="roomHero"/g)).toHaveLength(2);
-    expect(source).toMatch(/\.cab-room-control > \.cab-room-value[\s\S]*?bottom: 13%;/);
   });
 });

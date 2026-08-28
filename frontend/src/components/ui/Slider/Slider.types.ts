@@ -42,6 +42,12 @@ export interface SliderProps extends Omit<InputHTMLAttributes<HTMLInputElement>,
    */
   onChange?: (value: number) => void;
 
+  /** Called once when a wheel adjustment session starts (for undo snapshots). */
+  onBeginEdit?: () => void;
+
+  /** Called after wheel input has been idle briefly (for one undo command). */
+  onCommitEdit?: () => void;
+
   /**
    * Slider orientation
    * @default 'horizontal'

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Folder,
   File,
@@ -15,6 +15,12 @@ import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Input } from "./ui";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
 
 interface FileEntry {
   name: string;
@@ -68,6 +74,10 @@ export function MediaExplorer({ isVisible, onClose }: MediaExplorerProps) {
   const [previewingPath, setPreviewingPath] = useState<string | null>(null);
   const [showRecent, setShowRecent] = useState(false);
   const [, setDraggedFile] = useState<FileEntry | null>(null);
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const browserActionExecutorRef = useRef<(actionId: string) => "handled" | "claimed_noop" | "unmatched">(
+    () => "unmatched",
+  );
 
   const loadDirectory = useCallback(
     async (path: string) => {
@@ -106,6 +116,49 @@ export function MediaExplorer({ isVisible, onClose }: MediaExplorerProps) {
       loadDirectory(parent);
     }
   };
+
+  browserActionExecutorRef.current = (actionId) => {
+    if (actionId === "browser.close") {
+      onClose();
+      return "handled";
+    }
+    if (actionId === "browser.mediaNavigateUp") {
+      if (!mediaExplorerPath) return "claimed_noop";
+      handleNavigateUp();
+      return "handled";
+    }
+    if (actionId === "browser.mediaToggleRecent") {
+      setShowRecent((visible) => !visible);
+      return "handled";
+    }
+    if (actionId === "browser.mediaFocusFilter") {
+      filterInputRef.current?.focus();
+      filterInputRef.current?.select();
+      return filterInputRef.current ? "handled" : "claimed_noop";
+    }
+    return "unmatched";
+  };
+
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    const context = { kind: "browser" } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(context, () => "unmatched", fallback);
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => browserActionExecutorRef.current(actionId),
+      [
+        "browser.close",
+        "browser.mediaNavigateUp",
+        "browser.mediaToggleRecent",
+        "browser.mediaFocusFilter",
+      ],
+    );
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [isVisible]);
 
   const handleEntryClick = (entry: FileEntry) => {
     if (entry.isDirectory) {
@@ -164,7 +217,13 @@ export function MediaExplorer({ isVisible, onClose }: MediaExplorerProps) {
     : "Media Explorer";
 
   return (
-    <div className="w-[260px] bg-neutral-900 border-r border-neutral-700 flex flex-col shrink-0 h-full overflow-hidden">
+    <div
+      className="w-[260px] bg-neutral-900 border-r border-neutral-700 flex flex-col shrink-0 h-full overflow-hidden"
+      onPointerDownCapture={() => activateShortcutContext({ kind: "browser" })}
+      onContextMenuCapture={() => activateShortcutContext({ kind: "browser" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "browser" })}
+      data-shortcut-context="browser"
+    >
       {/* Header */}
       <div className="h-6 bg-neutral-800 border-b border-neutral-700 flex items-center justify-between px-2 shrink-0">
         <span className="text-[9px] font-semibold text-neutral-400 uppercase tracking-wider">
@@ -225,6 +284,7 @@ export function MediaExplorer({ isVisible, onClose }: MediaExplorerProps) {
             className="absolute left-1.5 top-1/2 -translate-y-1/2 text-neutral-500"
           />
           <Input
+            ref={filterInputRef}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Filter files..."

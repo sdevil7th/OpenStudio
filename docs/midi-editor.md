@@ -18,6 +18,24 @@ project/export serialization.
 - Project save/reload, backend synchronization, playback scheduling, render,
   freeze, and MIDI export preserve supported event metadata.
 
+## Grid, snap, and quantize contract
+
+- The arrange view and docked piano roll use one project-persisted Snap toggle,
+  Snap Type, Grid Type, active Quantize Preset, and custom preset collection.
+- Grid choices include Bar, Beat, straight, triplet, dotted, and time values;
+  Use Quantize resolves through the active preset, while Adapt to Zoom selects
+  a readable musical subdivision. Visual grid-line thinning must not change the
+  actual edit/snap interval.
+- Snap types cover Grid, Grid Relative, Events, Shuffle, Cursor, and their
+  supported combinations. MIDI draw, move, resize, split, and ruler gestures
+  use the selected grid when Snap is enabled; Ctrl/Command temporarily permits
+  off-grid placement.
+- Quantize applies the active preset to starts, ends, both, or note length and
+  supports strength, swing/groove, tuplets, catch/safe ranges, roughness, and
+  moving controllers. Length Quantize may use an explicit value or Quantize
+  Link, and factory/custom preset save, rename, remove, restore, and project
+  recall preserve the selected workflow.
+
 Automated browser/native coverage is `pass` for those deterministic contracts.
 Overall workflow parity remains `partial` until a musician completes the manual
 REAPER/Cubase-style acceptance below.
@@ -33,6 +51,9 @@ REAPER/Cubase-style acceptance below.
 - [ ] Save, close, reopen, and render a combined MIDI/instrument project.
 - [ ] Compare the complete interaction flow with the intended REAPER arrange
   and Cubase Key Editor references and record concrete remaining gaps.
+- [ ] In a browser/WebView interaction run, verify Snap on, Ctrl/Command-drag
+  off-grid placement, draw/resize/split on the selected grid, quantize with the
+  active preset, and Length Quantize with both a fixed value and Quantize Link.
 
 Implementation history and old screenshot-by-screenshot matrices belong in Git
 history. New behavior should be documented here with its test or manual

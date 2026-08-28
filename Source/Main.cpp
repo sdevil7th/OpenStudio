@@ -98,8 +98,8 @@ int runHeadlessPluginScanProbe(const juce::String& formatName,
                                const juce::File& reportFile)
 {
     juce::AudioPluginFormatManager formats;
-    formats.addDefaultFormats();
-    formats.addFormat(new CLAPPluginFormat());
+    juce::addDefaultFormatsToManager(formats);
+    formats.addFormat(std::make_unique<CLAPPluginFormat>());
 
     auto result = std::make_unique<juce::XmlElement>("PLUGIN_SCAN_RESULT");
     result->setAttribute("format", formatName);
@@ -1363,6 +1363,9 @@ private:
         auto* obj = new juce::DynamicObject();
         obj->setProperty("isOpen", mixerWindowManager != nullptr && mixerWindowManager->isOpen());
         obj->setProperty("state", mixerWindowManager != nullptr ? mixerWindowManager->getStateDescription() : juce::String("idle"));
+        obj->setProperty("frontendStartupState", mixerWindowManager != nullptr
+                                                   ? mixerWindowManager->getFrontendStartupStateDescription()
+                                                   : juce::String("not-created"));
         return juce::var(obj);
     }
 
@@ -1496,6 +1499,9 @@ private:
         obj->setProperty("state", existing != midiEditorWindowManagers.end() && existing->second != nullptr
                                     ? existing->second->getStateDescription()
                                     : juce::String("idle"));
+        obj->setProperty("frontendStartupState", existing != midiEditorWindowManagers.end() && existing->second != nullptr
+                                                   ? existing->second->getFrontendStartupStateDescription()
+                                                   : juce::String("not-created"));
         obj->setProperty("sessionId", safeSessionId);
         return juce::var(obj);
     }
@@ -1614,6 +1620,8 @@ private:
             juce::String id;
             int delayAfterMs = 400;
             std::function<bool()> action;
+            int maxAttempts = 1;
+            int retryDelayMs = 250;
         };
 
         const auto mixerBounds = juce::Rectangle<int>(120, 120, 1180, 520);
@@ -1625,6 +1633,12 @@ private:
         auto checks = std::make_shared<juce::Array<juce::var>>();
         auto steps = std::make_shared<std::vector<HarnessStep>>();
 
+        steps->push_back({ "main_frontend_ready", 0, [this]()
+        {
+            auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr;
+            return component != nullptr && component->hasFrontendStartupSucceeded();
+        }, 50, 250 });
+
         steps->push_back({ "mixer_prewarm", 700, [this, mixerBounds]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->prewarm(mixerBounds);
@@ -1633,6 +1647,10 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->open(mixerBounds);
         }});
+        steps->push_back({ "mixer_frontend_ready", 0, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "mixer_focus", 300, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->focus();
@@ -1645,6 +1663,10 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->open(mixerBounds);
         }});
+        steps->push_back({ "mixer_reopened_frontend_ready", 0, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "mixer_final_close", 2200, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->close();
@@ -1658,6 +1680,13 @@ private:
         {
             return focusMidiEditorWindow(midiSessionId);
         }});
+        steps->push_back({ "midi_frontend_ready", 0, [this, midiSessionId]()
+        {
+            const auto existing = midiEditorWindowManagers.find(midiSessionId);
+            return existing != midiEditorWindowManagers.end()
+                && existing->second != nullptr
+                && existing->second->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "midi_close", 50, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -1666,6 +1695,13 @@ private:
         {
             return openMidiEditorWindow(midiSessionId, rectangleToVar(midiBounds));
         }});
+        steps->push_back({ "midi_reopened_frontend_ready", 0, [this, midiSessionId]()
+        {
+            const auto existing = midiEditorWindowManagers.find(midiSessionId);
+            return existing != midiEditorWindowManagers.end()
+                && existing->second != nullptr
+                && existing->second->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "midi_final_close", 2200, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -1675,6 +1711,13 @@ private:
         {
             return openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
         }});
+        steps->push_back({ "plugin_frontend_ready", 0, [this, pluginSessionId]()
+        {
+            const auto existing = pluginEditorWindowManagers.find(pluginSessionId);
+            return existing != pluginEditorWindowManagers.end()
+                && existing->second != nullptr
+                && existing->second->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "plugin_close", 50, [this, pluginSessionId]()
         {
             return closePluginEditorWindow(pluginSessionId, "close");
@@ -1683,14 +1726,22 @@ private:
         {
             return openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
         }});
+        steps->push_back({ "plugin_reopened_frontend_ready", 0, [this, pluginSessionId]()
+        {
+            const auto existing = pluginEditorWindowManagers.find(pluginSessionId);
+            return existing != pluginEditorWindowManagers.end()
+                && existing->second != nullptr
+                && existing->second->isFrontendReady();
+        }, 50, 250 });
         steps->push_back({ "plugin_final_close", 2200, [this, pluginSessionId]()
         {
             return closePluginEditorWindow(pluginSessionId, "close");
         }});
 
         auto stepIndex = std::make_shared<size_t>(0);
+        auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
-        *runner = [this, reportFile, checks, steps, stepIndex, runner, midiSessionId]() mutable
+        *runner = [this, reportFile, checks, steps, stepIndex, stepAttempt, runner, midiSessionId]() mutable
         {
             if (*stepIndex >= steps->size())
             {
@@ -1721,6 +1772,7 @@ private:
             const auto& step = (*steps)[*stepIndex];
             bool ok = false;
             juce::String detail;
+            ++(*stepAttempt);
 
             try
             {
@@ -1733,8 +1785,25 @@ private:
                 detail = "exception";
             }
 
+            if (! ok && *stepAttempt < step.maxAttempts)
+            {
+                juce::Logger::writeToLog("[windowLifecycleHarness] " + step.id
+                                         + " waiting attempt=" + juce::String(*stepAttempt)
+                                         + "/" + juce::String(step.maxAttempts));
+                juce::Timer::callAfterDelay(step.retryDelayMs, [runner]()
+                {
+                    if (runner != nullptr && *runner)
+                        (*runner)();
+                });
+                return;
+            }
+
+            if (step.maxAttempts > 1)
+                detail = ok ? "frontend ready" : "frontend did not reach ready state";
+
             addHarnessCheck(*checks, step.id, ok ? "pass" : "fail", detail);
             juce::Logger::writeToLog("[windowLifecycleHarness] " + step.id + " " + detail);
+            *stepAttempt = 0;
             ++(*stepIndex);
 
             juce::Timer::callAfterDelay(step.delayAfterMs, [runner]()

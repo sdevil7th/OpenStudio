@@ -21,7 +21,7 @@ describe("NAM remote capture Use flow", () => {
     expect(explorerSource).not.toContain("demo-audition");
     expect(explorerSource).not.toContain("Preview with Demo");
     expect(explorerSource).not.toContain("clean demo riff");
-    expect(explorerSource).toContain('label: selectedSourceAuditionActive ? "Stop Audition" : "Audition"');
+    expect(explorerSource).toContain('label: selectedSourceAuditionActive ? "Stop Audition" : selectedCatalogNeedsCaptureChoice ? "Choose Capture" : "Audition"');
   });
 
   it("publishes the complete download, preparation, and activation lifecycle", () => {
@@ -36,6 +36,8 @@ describe("NAM remote capture Use flow", () => {
     expect(useFlowSource).toContain("applyDirectLoadPolicy: true");
     expect(useFlowSource).toContain("ampDeclaredCaptureType: declaredCaptureType");
     expect(useFlowSource).toContain("pedalDeclaredCaptureType: declaredCaptureType");
+    expect(useFlowSource).toContain("ampModelSize: NAM_FULL_MODEL_SIZE");
+    expect(useFlowSource).toContain("pedalModelSize: NAM_FULL_MODEL_SIZE");
     expect(useFlowSource).toContain("cabRequestedEnabled: requestedCabEnabled");
     expect(useFlowSource).toContain("ampEnabled: 1, ampMix: activatedAmpMix");
     expect(useFlowSource).toContain("expectedCabRequestedEnabled: requestedCabEnabled");
@@ -45,6 +47,7 @@ describe("NAM remote capture Use flow", () => {
     expect(useFlowSource).toContain("refreshedSchema = await Promise.resolve(onRefreshRack())");
     expect(useFlowSource).toContain("if (!refreshedSchemaInspection.verified)");
     expect(useFlowSource.indexOf("if (!finalReadback.verified)")).toBeGreaterThan(-1);
+    expect(useFlowSource).toContain("did not retain Full model quality after activation");
     expect(useFlowSource.lastIndexOf("onReturn?.()")).toBeGreaterThan(
       useFlowSource.indexOf("if (!refreshedSchemaInspection.verified)"),
     );
@@ -91,6 +94,9 @@ describe("NAM remote capture Use flow", () => {
     expect(explorerSource).toContain("expectedNAMEffectiveCabEnabled(");
     expect(explorerSource).toContain("effectiveCabMismatch");
     expect(explorerSource).toContain("verifiedModelState.ampIncludesCab === true");
+    expect(auditionPublishSource).toContain("Math.abs(verifiedModelSize - NAM_FULL_MODEL_SIZE)");
+    expect(explorerSource).toContain("snapshot.ampModelSize === undefined");
+    expect(explorerSource).toContain("snapshot.pedalModelSize === undefined");
   });
 
   it("keeps preview reconciliation locked until the parent accepts the new rack schema", () => {

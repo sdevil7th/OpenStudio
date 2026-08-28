@@ -29,6 +29,8 @@ import {
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
   TCP_HEADER_TOGGLE_BUTTON_CLASS,
 } from "./tcpHeaderButtonStyles";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 interface AITrackHeaderProps {
   track: Track;
@@ -330,6 +332,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     setAITrackModel,
     setAITrackWorkflow,
     setAITrackParams,
+    beginAITrackParamsEdit,
+    commitAITrackParamsEdit,
     setAITrackGenerationState,
     addGeneratedAudioClip,
     trackHeight,
@@ -337,6 +341,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     openAiToolsSetup,
     autoValues,
     meterLevel,
+    selectedTrackId,
   } = useDAWStore(
     useShallow((state) => ({
       updateTrack: state.updateTrack,
@@ -352,6 +357,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       setAITrackModel: state.setAITrackModel,
       setAITrackWorkflow: state.setAITrackWorkflow,
       setAITrackParams: state.setAITrackParams,
+      beginAITrackParamsEdit: state.beginAITrackParamsEdit,
+      commitAITrackParamsEdit: state.commitAITrackParamsEdit,
       setAITrackGenerationState: state.setAITrackGenerationState,
       addGeneratedAudioClip: state.addGeneratedAudioClip,
       trackHeight: state.trackHeight,
@@ -359,6 +366,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       openAiToolsSetup: state.openAiToolsSetup,
       autoValues: state.automatedParamValues[track.id],
       meterLevel: state.meterLevels[track.id] ?? 0,
+      selectedTrackId: state.selectedTrackId,
     })),
   );
 
@@ -369,6 +377,32 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showParams, setShowParams] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
+
+  useEffect(() => {
+    if (!isSelected || selectedTrackId !== track.id) return;
+    const execute = (actionId: string) => {
+      if (actionId !== "track.openSelectedFxChain") return "unmatched" as const;
+      const selectedId = useDAWStore.getState().selectedTrackId;
+      if (selectedId !== track.id) return "claimed_noop" as const;
+      setShowFXChain(true);
+      return "handled" as const;
+    };
+    const unregisterTrackHeader = registerScopedActionExecutor(
+      { kind: "track_control_panel" },
+      execute,
+      ["track.openSelectedFxChain"],
+    );
+    const unregisterMixer = registerScopedActionExecutor(
+      { kind: "mixer" },
+      execute,
+      ["track.openSelectedFxChain"],
+    );
+    return () => {
+      unregisterMixer();
+      unregisterTrackHeader();
+    };
+  }, [isSelected, selectedTrackId, track.id]);
+
   const modelId = resolveAiMusicModelId(track.aiMusicModelId);
   const model = getAiMusicModel(modelId);
   const workflow = getAIWorkflow(track.aiWorkflow, modelId, "ai-track");
@@ -778,6 +812,10 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     <>
       <div
         className={`flex flex-col border-b border-neutral-900 relative overflow-hidden box-border ${isSelected ? "bg-neutral-700" : "bg-neutral-800"}`}
+        onPointerDownCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        data-shortcut-context="track_control_panel"
         style={{ height: getEffectiveTrackHeight(track, trackHeight) }}
       >
         <div className="flex shrink-0 overflow-hidden" style={{ height: trackHeight }}>
@@ -1041,6 +1079,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         onModelChange={(nextModelId) => setAITrackModel(track.id, nextModelId)}
         onWorkflowChange={(workflowId) => setAITrackWorkflow(track.id, workflowId)}
         onParamsChange={(params) => setAITrackParams(track.id, params)}
+        onBeginParamsEdit={() => beginAITrackParamsEdit(track.id)}
+        onCommitParamsEdit={() => commitAITrackParamsEdit(track.id)}
       />
     </>
   );

@@ -22,6 +22,8 @@ describe("portable NAM Rack state", () => {
       laserEnvelopeMode: 1,
       laserTrigger: 1,
       precisionDriveMode: 1,
+      tapeEchoEnabled: 1,
+      tapeEchoMix: 0.6,
       reverbCharacter: 2,
       reverbFreeze: 1,
       inputTrimDb: 2,
@@ -40,6 +42,7 @@ describe("portable NAM Rack state", () => {
           laserMix: 0.4,
           laserTrigger: 1,
           precisionDriveMode: 1,
+          tapeEchoFeedback: 0.72,
           reverbWidth: 0.4,
           reverbShimmerRegen: 0.8,
           ampMix: 0.75,
@@ -53,6 +56,7 @@ describe("portable NAM Rack state", () => {
     expect(json).not.toContain("inputMode");
     expect(json).not.toContain("laser");
     expect(json).not.toContain("precisionDriveMode");
+    expect(json).not.toContain("tapeEcho");
     expect(json).not.toContain("reverbCharacter");
     expect(json).not.toContain("reverbFreeze");
     expect(json).not.toContain("reverbWidth");
@@ -70,7 +74,7 @@ describe("portable NAM Rack state", () => {
 
   it("also strips those keys while importing a bundle", () => {
     const imported = JSON.parse(
-      '{"state":{"auditionSource":1,"inputMode":2,"laserEnabled":1,"laserMode":5,"laserTrigger":1,"precisionDriveMode":1,"calibrationReferenceDbu":-18,"outputTrimDb":-1}}',
+      '{"state":{"auditionSource":1,"inputMode":2,"laserEnabled":1,"laserMode":5,"laserTrigger":1,"precisionDriveMode":1,"tapeEchoEnabled":1,"tapeEchoTimeMs":420,"calibrationReferenceDbu":-18,"outputTrimDb":-1}}',
       omitNAMNonPortableState,
     );
     expect(imported).toEqual({ state: { outputTrimDb: -1 } });
@@ -103,6 +107,8 @@ describe("portable NAM Rack state", () => {
       { param: "builtin_track_0_compressorDetail", points: [{ time: 4, value: 0.55 }] },
       { param: "builtin_track_0_auditionSource", points: [{ time: 5, value: 1 }] },
       { param: "builtin_track_0_inputMode", points: [{ time: 6, value: 2 }] },
+      { param: "builtin_track_0_tapeEchoEnabled", points: [{ time: 7, value: 1 }] },
+      { param: "builtin_input_12_tapeEchoTone", points: [{ time: 8, value: 0.5 }] },
     ];
 
     expect(legacyLanes.every((lane) => isRetiredNAMRackAutomationParamId(lane.param))).toBe(true);
@@ -113,30 +119,53 @@ describe("portable NAM Rack state", () => {
   });
 
   it("canonicalizes recognized portable NAM Rack selectors to the current DSP", () => {
-    expect(normalizeNAMEffectsDspVersion(1)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion("3")).toBe(11);
+    expect(normalizeNAMEffectsDspVersion(1)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion("3")).toBe(19);
     expect(normalizeNAMEffectsDspVersion(0)).toBeUndefined();
-    expect(normalizeNAMEffectsDspVersion(4)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(5)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(6)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(7)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(8)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(9)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(10)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(11)).toBe(11);
-    expect(normalizeNAMEffectsDspVersion(12)).toBeUndefined();
+    expect(normalizeNAMEffectsDspVersion(4)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(5)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(6)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(7)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(8)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(9)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(10)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(11)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(12)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(13)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(14)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(15)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(16)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(17)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(18)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(19)).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(20)).toBeUndefined();
     expect(sanitizeNAMRackDspState({
       reverbEngineVersion: 5,
-      namEffectsDspVersion: 11,
+      namEffectsDspVersion: 19,
       unknownEngineVersion: 99,
     })).toEqual({
       reverbEngineVersion: 5,
-      namEffectsDspVersion: 11,
+      namEffectsDspVersion: 19,
     });
     expect(sanitizeNAMRackDspState({
       reverbEngineVersion: 2,
       namEffectsDspVersion: 8,
-    })).toEqual({ reverbEngineVersion: 5, namEffectsDspVersion: 11 });
+    })).toEqual({ reverbEngineVersion: 5, namEffectsDspVersion: 19 });
+  });
+
+  it("keeps legacy PRE EQ bands alive until versioned preset migration runs", () => {
+    const parsed = JSON.parse(JSON.stringify({
+      values: {
+        preEq100Db: -3.5,
+        preEq6k4Db: 2.25,
+      },
+      dspState: { namEffectsDspVersion: 18 },
+    }), omitNAMNonPortableState) as Record<string, any>;
+
+    expect(parsed.values).toMatchObject({
+      preEq100Db: -3.5,
+      preEq6k4Db: 2.25,
+    });
   });
 
   it("does not invent DSP selectors on generic partial state patches", () => {
@@ -145,6 +174,6 @@ describe("portable NAM Rack state", () => {
     expect(sanitizeNAMRackPortableDspState({
       values: { ampMix: 0.5 },
       dspState: { namEffectsDspVersion: 9 },
-    })).toEqual({ values: { ampMix: 0.5 }, dspState: { namEffectsDspVersion: 11 } });
+    })).toEqual({ values: { ampMix: 0.5 }, dspState: { namEffectsDspVersion: 19 } });
   });
 });

@@ -4,8 +4,13 @@ import {
   normalizeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
-import { NAM_INSTRUMENT_PROFILE_OPTIONS } from "../utils/namInstrumentProfile";
 import {
+  NAM_INSTRUMENT_PROFILE_OPTIONS,
+  namPreEqBandLabelsForProfile,
+} from "../utils/namInstrumentProfile";
+import { NAM_FULL_MODEL_SIZE } from "../utils/namRackPresetTransactions";
+import {
+  NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS,
   normalizeNAMEffectsDspVersion,
   pruneRetiredNAMRackInputRoutingState,
   sanitizeNAMRackDspState,
@@ -13,6 +18,28 @@ import {
 
 // Type definitions for the JUCE backend
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
+
+export function isAllowedExternalBrowserURL(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+
+  const candidate = value.trim();
+  if (
+    !/^https?:\/\//i.test(candidate) ||
+    /[\u0000-\u001f\u007f]/.test(candidate)
+  ) {
+    return false;
+  }
+
+  try {
+    const url = new URL(candidate);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      url.hostname.length > 0
+    );
+  } catch {
+    return false;
+  }
+}
 
 function shouldLogPitchEditorFormant() {
   const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
@@ -54,6 +81,11 @@ export interface BuiltInPluginAddress {
   chain: BuiltInPluginChain;
   fxIndex?: number;
 }
+
+export type NAMModelLoadOptions = {
+  /** Explicit new-load quality. Preset/snapshot restore does not use this API. */
+  modelSize?: number;
+};
 
 export interface BuiltInParamDescriptor {
   id: string;
@@ -97,6 +129,12 @@ export interface BuiltInPluginSchema {
     cabRequestedEnabled?: boolean;
     pedalMetadataCaptureType?: string;
     ampMetadataCaptureType?: string;
+    pedalMetadataName?: string;
+    pedalMetadataGearMake?: string;
+    pedalMetadataGearModel?: string;
+    ampMetadataName?: string;
+    ampMetadataGearMake?: string;
+    ampMetadataGearModel?: string;
     pedalDeclaredCaptureType?: string;
     ampDeclaredCaptureType?: string;
     pedalCaptureType?: string;
@@ -134,6 +172,10 @@ export interface BuiltInPluginSchema {
     gainReductionDb?: number;
     inputLevelDb?: number;
     outputLevelDb?: number;
+    inputLeftLevelDb?: number;
+    inputRightLevelDb?: number;
+    outputLeftLevelDb?: number;
+    outputRightLevelDb?: number;
     gateOpen?: boolean;
     detectedHz?: number;
     correctedHz?: number;
@@ -184,7 +226,10 @@ export function resolveNAMRackCabinetSpaceActivity(
 export function projectNAMRackSchemaForUI(schema: BuiltInPluginSchema): BuiltInPluginSchema {
   const version = normalizeNAMEffectsDspVersion(schema.modelState?.namEffectsDspVersion);
   const publicParameters = schema.parameters.filter((parameter) => (
-    parameter.id !== "auditionSource" && parameter.id !== "inputMode"
+    parameter.id !== "auditionSource"
+    && parameter.id !== "inputMode"
+    && parameter.id !== "precisionDriveVoice"
+    && !NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS.has(parameter.id)
   ));
   if (version === undefined) {
     return publicParameters.length === schema.parameters.length
@@ -237,6 +282,15 @@ export interface PluginParameterInfo {
   type?: string;
   unit?: string;
   enumOptions?: Array<{ value: number; label: string }>;
+}
+
+export interface MasterFXInfo {
+  index: number;
+  name: string;
+  type?: string;
+  pluginPath?: string;
+  bypassed?: boolean;
+  precisionOverride?: "auto" | "float32";
 }
 
 export interface MIDILearnMappingInfo {
@@ -1933,6 +1987,8 @@ declare global {
         getAudioDeviceSetup?: () => Promise<AudioDeviceSetupResponse>;
         openAudioDeviceControlPanel?: () => Promise<AudioDeviceControlPanelResult>;
         setAudioDeviceSetup?: (config: any) => Promise<boolean>;
+        getNAMRackOversamplingFactor?: () => Promise<2 | 4 | 8>;
+        setNAMRackOversamplingFactor?: (factor: 2 | 4 | 8) => Promise<boolean>;
 
         // Track Control (Phase 1)
         setTrackRecordArm?: (
@@ -2059,6 +2115,7 @@ declare global {
         addMasterFX?: (pluginPath: string) => Promise<boolean>;
         getMasterFX?: () => Promise<any[]>;
         removeMasterFX?: (fxIndex: number) => Promise<boolean>;
+        reorderMasterFX?: (fromIndex: number, toIndex: number) => Promise<boolean>;
         openMasterFXEditor?: (fxIndex: number) => Promise<boolean>;
         setMasterVolume?: (volume: number) => Promise<boolean>;
         setMasterPan?: (pan: number) => Promise<boolean>;
@@ -2080,6 +2137,11 @@ declare global {
           startSample: number,
           numPixels: number,
         ) => Promise<WaveformPeak[]>;
+        getAudioPeakAmplitude?: (
+          filePath: string,
+          offsetSeconds: number,
+          durationSeconds: number,
+        ) => Promise<number>;
         refreshWaveformPeaks?: (filePath: string) => Promise<boolean>;
 
         // Playback clip management
@@ -2339,6 +2401,7 @@ declare global {
           size?: number,
         ) => Promise<any>;
         openExternalURL?: (url: string) => Promise<boolean>;
+        revealLocalPath?: (path: string) => Promise<boolean>;
 
         // Media Import (F10)
         importMediaFile?: (filePath: string) => Promise<MediaFileInfo>;
@@ -2618,6 +2681,7 @@ declare global {
         clearClipPitchPreview?: (clipId: string) => Promise<boolean>;
         clearClipRenderedPreviewSegments?: (clipId: string) => Promise<boolean>;
         clearAllPitchPreviewRoutes?: (clipId?: string) => Promise<boolean>;
+        cancelPitchCorrectionRequests?: (clipId: string, authoritativeFilePath?: string) => Promise<boolean>;
         clearPitchPreviewRoutesForCorrectedSources?: () => Promise<number>;
 
         // Source Separation (Phase 8 + Phase 10)
@@ -2718,6 +2782,7 @@ class NativeBridge {
   private devBuiltInPluginStates: Map<string, Record<string, any>> = new Map();
   private devNAMReadbackFailurePending = new Set<string>();
   private devNAMReadbackFailureConsumed = new Set<string>();
+  private mockNAMRackOversamplingFactor: 2 | 4 | 8 = 4;
 
   private getBackend() {
     return typeof window !== "undefined" ? window.__JUCE__?.backend : undefined;
@@ -2777,7 +2842,7 @@ class NativeBridge {
       ...sanitized,
       dspState: {
         ...dspState,
-        namEffectsDspVersion: dspState.namEffectsDspVersion ?? 11,
+        namEffectsDspVersion: dspState.namEffectsDspVersion ?? 19,
       },
     } as T;
   }
@@ -2948,8 +3013,8 @@ class NativeBridge {
         normalizedPatch.modelState,
         {
           ampModelPath: defaultAmpModelPath,
-          pedalModelSize: 0,
-          ampModelSize: 0,
+          pedalModelSize: NAM_FULL_MODEL_SIZE,
+          ampModelSize: NAM_FULL_MODEL_SIZE,
           pedalModelSlimmable: false,
           ampModelSlimmable: defaultAmpModelSlimmable,
           ...storedModelState,
@@ -3401,6 +3466,62 @@ class NativeBridge {
 
     const rackRailTones: NAMCatalogTone[] = [
       {
+        id: 67139,
+        title: "Headbangers Ball Amp Pack IR/RAW",
+        description: "Deterministic multi-capture QA pack with matched RAW amp-only and cab-embedded variants.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 4980,
+        favorites_count: 301,
+        a2_models_count: 4,
+        sortBucket: "trending high gain modern metal pack raw ir",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/67139",
+        character: ["metal", "high gain", "raw", "full rig"],
+        instrument: ["guitar"],
+        models: [
+          {
+            id: 6713901,
+            model_id: 6713901,
+            tone_id: 67139,
+            name: "Headbangers Ball 01 RAW",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-01-raw.nam",
+            size: "17 MB",
+          },
+          {
+            id: 6713902,
+            model_id: 6713902,
+            tone_id: 67139,
+            name: "Headbangers Ball 01 IR",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-01-ir.nam",
+            size: "19 MB",
+          },
+          {
+            id: 6713903,
+            model_id: 6713903,
+            tone_id: 67139,
+            name: "Headbangers Ball 02 RAW",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-02-raw.nam",
+            size: "17 MB",
+          },
+          {
+            id: 6713904,
+            model_id: 6713904,
+            tone_id: 67139,
+            name: "Headbangers Ball 02 IR",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-02-ir.nam",
+            size: "19 MB",
+          },
+        ],
+      },
+      {
         id: 53204,
         title: "Ambient Glow",
         description: "Wide clean-to-glow full rig with soft highs and a polished studio cabinet image.",
@@ -3514,7 +3635,7 @@ class NativeBridge {
       },
     ];
 
-    const generatedTones: NAMCatalogTone[] = Array.from({ length: 65 }, (_, index) => {
+    const generatedTones: NAMCatalogTone[] = Array.from({ length: 64 }, (_, index) => {
       const ordinal = index + 1;
       const toneId = 52000 - index;
       const modelId = 5200000 - index;
@@ -3767,7 +3888,8 @@ class NativeBridge {
   // Set callback for meter update events from C++
   onMeterUpdate(
     callback: (data: {
-      trackLevels: number[];
+      trackLevels: Record<string, number>;
+      midiInputLevels?: Record<string, number>;
       trackClipping?: Record<string, boolean>;
       masterLevel: number;
       masterClipping?: boolean;
@@ -4284,6 +4406,27 @@ class NativeBridge {
     return fallbackSnapshot;
   }
 
+  async getNAMRackOversamplingFactor(): Promise<2 | 4 | 8> {
+    if (this.isNative && window.__JUCE__?.backend.getNAMRackOversamplingFactor) {
+      const factor = Number(
+        await window.__JUCE__.backend.getNAMRackOversamplingFactor(),
+      );
+      return factor === 2 || factor === 8 ? factor : 4;
+    }
+    return this.mockNAMRackOversamplingFactor;
+  }
+
+  async setNAMRackOversamplingFactor(
+    factor: 2 | 4 | 8,
+  ): Promise<boolean> {
+    if (factor !== 2 && factor !== 4 && factor !== 8) return false;
+    if (this.isNative && window.__JUCE__?.backend.setNAMRackOversamplingFactor) {
+      return await window.__JUCE__.backend.setNAMRackOversamplingFactor(factor);
+    }
+    this.mockNAMRackOversamplingFactor = factor;
+    return true;
+  }
+
   async getRealtimeAudioTelemetry(): Promise<AudioDebugSnapshot> {
     if (this.isNative && window.__JUCE__?.backend.getRealtimeAudioTelemetry) {
       return await window.__JUCE__.backend.getRealtimeAudioTelemetry();
@@ -4645,7 +4788,7 @@ class NativeBridge {
   // Built-in FX Presets
   async getBuiltInFXPresets(
     pluginName: string,
-  ): Promise<{ name: string; path: string; metadataPath?: string; metadata?: any }[]> {
+  ): Promise<{ name: string; path: string; metadataPath?: string; metadata?: any; instrumentProfile?: "guitar" | "bass" }[]> {
     if (this.isNative && window.__JUCE__?.backend.getBuiltInFXPresets) {
       return await window.__JUCE__.backend.getBuiltInFXPresets(pluginName);
     }
@@ -4659,6 +4802,7 @@ class NativeBridge {
             kind: "openstudio.namRackPresetMetadata",
             metadata: { folder: "Studio", tags: ["tele", "clean"], notes: "Bright edge-clean preset kept for single-coil auditioning.", lastUsed: Date.now() - 3600000, updatedAt: Date.now() - 300000 },
           },
+          instrumentProfile: "guitar",
         },
         {
           name: "JC Chorus Wide",
@@ -4668,6 +4812,7 @@ class NativeBridge {
             kind: "openstudio.namRackPresetMetadata",
             metadata: { favorite: true, folder: "Clean", tags: ["chorus", "wide"], notes: "Wide chorus clean for DI guitar and glassy A2 captures.", lastUsed: Date.now() - 120000, updatedAt: Date.now() - 240000 },
           },
+          instrumentProfile: "guitar",
         },
       ];
     }
@@ -4869,7 +5014,7 @@ class NativeBridge {
     }
   }
 
-  async getMasterFX(): Promise<{ index: number; name: string; pluginPath?: string; bypassed?: boolean; precisionOverride?: "auto" | "float32" }[]> {
+  async getMasterFX(): Promise<MasterFXInfo[]> {
     if (this.isNative && window.__JUCE__?.backend.getMasterFX) {
       return await window.__JUCE__.backend.getMasterFX();
     }
@@ -4881,6 +5026,16 @@ class NativeBridge {
       return await window.__JUCE__.backend.removeMasterFX(fxIndex);
     }
     return false;
+  }
+
+  async reorderMasterFX(fromIndex: number, toIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.reorderMasterFX) {
+      return await window.__JUCE__.backend.reorderMasterFX(fromIndex, toIndex);
+    }
+    console.log(
+      `[NativeBridge] Mock reorderMasterFX: from ${fromIndex} to ${toIndex}`,
+    );
+    return true;
   }
 
   async openMasterFXEditor(fxIndex: number): Promise<boolean> {
@@ -5003,6 +5158,35 @@ class NativeBridge {
       }
       return peaks;
     }
+  }
+
+  /**
+   * Return the exact sample peak across every channel in a trimmed source
+   * range. Invalid/unreadable ranges return null; an exact zero is retained so
+   * callers can distinguish a silent range from an analysis failure.
+   */
+  async getAudioPeakAmplitude(
+    filePath: string,
+    offsetSeconds: number,
+    durationSeconds: number,
+  ): Promise<number | null> {
+    if (typeof filePath !== "string"
+      || filePath.trim().length === 0
+      || !Number.isFinite(offsetSeconds)
+      || offsetSeconds < 0
+      || !Number.isFinite(durationSeconds)
+      || durationSeconds <= 0) {
+      return null;
+    }
+    if (!this.isNative || !window.__JUCE__?.backend.getAudioPeakAmplitude) {
+      return null;
+    }
+    const peak = Number(await window.__JUCE__.backend.getAudioPeakAmplitude(
+      filePath,
+      offsetSeconds,
+      durationSeconds,
+    ));
+    return Number.isFinite(peak) && peak >= 0 ? peak : null;
   }
 
   async refreshWaveformPeaks(filePath: string): Promise<boolean> {
@@ -5424,15 +5608,25 @@ class NativeBridge {
   }
 
   async openExternalURL(url: string): Promise<boolean> {
+    if (!isAllowedExternalBrowserURL(url)) return false;
+
+    const safeURL = url.trim();
     if (this.isNative && window.__JUCE__?.backend.openExternalURL) {
-      return await window.__JUCE__.backend.openExternalURL(url);
+      return await window.__JUCE__.backend.openExternalURL(safeURL);
     }
 
     if (typeof window !== "undefined" && typeof window.open === "function") {
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(safeURL, "_blank", "noopener,noreferrer");
       return true;
     }
 
+    return false;
+  }
+
+  async revealLocalPath(path: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.revealLocalPath) {
+      return await window.__JUCE__.backend.revealLocalPath(path);
+    }
     return false;
   }
 
@@ -6599,7 +6793,7 @@ class NativeBridge {
         ],
         reverbVoice: [{ value: 0, label: "Studio" }, { value: 1, label: "Plate" }, { value: 2, label: "Hall" }, { value: 3, label: "Room" }],
         chaosMode: [{ value: 0, label: "Heavy" }, { value: 1, label: "Extreme" }, { value: 2, label: "Crunch" }],
-        compressorSidechainHPF: [{ value: 0, label: "Off" }, { value: 1, label: "120 Hz" }, { value: 2, label: "240 Hz" }],
+        compressorSidechainHPF: [{ value: 0, label: "Off" }, { value: 1, label: "80 Hz" }, { value: 2, label: "240 Hz" }],
       };
       const param = (
         id: string,
@@ -6646,20 +6840,26 @@ class NativeBridge {
           param("compressorAttackMs", "Attack", 21.9, 0.1, 50, "ms", "dynamics"),
           param("compressorReleaseMs", "Release", 149.1, 50, 1000, "ms", "dynamics"),
           param("compressorToneDb", "Tone", 0, -6, 6, "dB", "dynamics"),
+          param("compressorIntensity", "Intensity", 0, 0, 1, "", "dynamics", "toggle"),
           param("compressorSidechainHPF", "HPF", 1, 0, 2, "", "dynamics", "enum"),
           param("compressorMix", "Mix", 0.65, 0, 1, "", "dynamics"),
           param("compressorVolumeDb", "Level", 0, -18, 18, "dB", "dynamics"),
           param("compressorComp", "Comp", 0.35, 0, 1, "", "dynamics"),
-          param("tapeEchoEnabled", "Tape Echo", 0, 0, 1, "", "time", "toggle"),
-          param("tapeEchoMix", "Tape Mix", 0.28, 0, 1, "", "time"),
-          param("tapeEchoTimeMs", "Tape Time", 360, 20, 1200, "ms", "time"),
-          param("tapeEchoFeedback", "Tape Feed", 0.28, 0, 0.85, "", "time"),
-          param("tapeEchoMod", "Tape Mod", 0.18, 0, 1, "", "time"),
-          param("tapeEchoTone", "Tape Tone", 0.58, 0, 1, "", "time"),
           param("octaverEnabled", "Stereo Poly Octaver", 0, 0, 1, "", "pitch", "toggle"),
           param("octaverDownMix", "Oct -1", 0.32, 0, 1, "", "pitch"),
           param("octaverUpMix", "Oct +1", 0.18, 0, 1, "", "pitch"),
           param("octaverDirectMix", "Direct", 1, 0, 1.25, "", "pitch"),
+          param("preEqEnabled", "PRE EQ", 0, 0, 1, "", "preEq", "toggle"),
+          param("preEq120Db", "120 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq250Db", "250 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq500Db", "500 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq1kDb", "1 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq2k5Db", "2.5 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq5kDb", "5 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq8kDb", "8 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq12kDb", "12 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEqHPFHz", "PRE HPF", 0, 0, 180, "Hz", "preEq"),
+          param("preEqLPFHz", "PRE LPF", 24000, 3000, 24000, "Hz", "preEq"),
           param("precisionDriveEnabled", "Precision Drive", 0, 0, 1, "", "drive", "toggle"),
           param("precisionDriveVolumeDb", "PD Volume", 9, -12, 12, "dB", "drive"),
           param("precisionDriveBright", "PD Bright", 0.55, 0, 1, "", "drive"),
@@ -6676,15 +6876,16 @@ class NativeBridge {
           param("chaosLevelDb", "Dist Level", 0, -12, 12, "dB", "distortion"),
           param("pedalMix", "Pedal Mix", 1, 0, 1, "", "model"),
           param("ampEnabled", "Amp Power", 1, 0, 1, "", "model", "toggle"),
-          param("ampGainDb", "Capture Input", 0, -24, 24, "dB", "model"),
+          param("ampGainDb", "Gain", 0, -24, 24, "dB", "model"),
           param("ampBoost", "Tight Boost", 0, 0, 1, "", "model", "toggle"),
           param("ampVoice", "Bright Voice", 0, 0, 1, "", "model", "toggle"),
           param("ampMix", "Capture Mix", 1, 0, 1, "", "model"),
           param("ampOutputDb", "Post Level", 0, -24, 12, "dB", "model"),
-          param("bassDb", "Post Bass", 0.6, -12, 12, "dB", "tone"),
-          param("midDb", "Post Mid", -0.2, -12, 12, "dB", "tone"),
-          param("trebleDb", "Post Treble", 1.8, -12, 12, "dB", "tone"),
-          param("presenceDb", "Post Presence", 1.2, -12, 12, "dB", "tone"),
+          param("bassDb", "Bass", 0.6, -12, 12, "dB", "tone"),
+          param("midDb", "Mid", -0.2, -12, 12, "dB", "tone"),
+          param("trebleDb", "Treble", 1.8, -12, 12, "dB", "tone"),
+          param("presenceDb", "Presence", 1.2, -12, 12, "dB", "tone"),
+          param("eqHPFHz", "HPF", 0, 0, 500, "Hz", "graphicEq"),
           param("eq65Db", "65 Hz", 0, -12, 12, "dB", "graphicEq"),
           param("eq125Db", "125 Hz", 0, -12, 12, "dB", "graphicEq"),
           param("eq250Db", "250 Hz", 0, -12, 12, "dB", "graphicEq"),
@@ -6694,6 +6895,7 @@ class NativeBridge {
           param("eq4kDb", "4 kHz", 0, -12, 12, "dB", "graphicEq"),
           param("eq8kDb", "8 kHz", 0, -12, 12, "dB", "graphicEq"),
           param("eq16kDb", "16 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eqLPFHz", "LPF", 24000, 3000, 24000, "Hz", "graphicEq"),
           param("eqLevelDb", "Level", 0, -12, 12, "dB", "graphicEq"),
           param("eqEnabled", "EQ Power", 0, 0, 1, "", "graphicEq", "toggle"),
           param("cabEnabled", "Cab/IR", 1, 0, 1, "", "cab", "toggle"),
@@ -6710,6 +6912,7 @@ class NativeBridge {
           param("cabRoomWidth", "Room Width", 0.65, 0, 1, "", "cabinetSpace"),
           param("cabDoublerEnabled", "Doubler", 0, 0, 1, "", "cabinetSpace", "toggle"),
           param("cabDoublerMix", "Doubler Mix", 0.12, 0, 1, "", "cabinetSpace"),
+          param("cabDoublerDelayMs", "Doubler Delay", 4.5, 3, 20, "ms", "cabinetSpace"),
           param("cabDoublerSpread", "Doubler Spread", 0.65, 0, 1, "", "cabinetSpace"),
           param("cabPan", "Cab Pan", 0, -1, 1, "", "cab"),
           param("chorusMix", "Chorus Mix", 0.3, 0, 1, "", "modulation"),
@@ -6740,6 +6943,7 @@ class NativeBridge {
           param("reverbLowCutHz", "Low Cut", 120, 20, 500, "Hz", "space"),
           param("reverbTone", "Verb Tone", 0.62, 0, 1, "", "space"),
           param("reverbShimmer", "Shimmer", 0, 0, 1, "", "space"),
+          param("reverbPad", "Pad", 0, 0, 1, "", "space", "toggle"),
           param("outputTrimDb", "Output", -0.5, -24, 24, "dB", "output"),
         ],
         modelState: {
@@ -6749,12 +6953,12 @@ class NativeBridge {
           hasPedalModel: false,
           hasAmpModel: true,
           hasSlimmableNAMModel: true,
-          pedalModelSize: 0,
-          ampModelSize: 0,
+          pedalModelSize: NAM_FULL_MODEL_SIZE,
+          ampModelSize: NAM_FULL_MODEL_SIZE,
           pedalModelSlimmable: false,
           ampModelSlimmable: true,
-          pedalActiveModelSize: 0,
-          ampActiveModelSize: 0,
+          pedalActiveModelSize: NAM_FULL_MODEL_SIZE,
+          ampActiveModelSize: NAM_FULL_MODEL_SIZE,
           pedalModelSizeBreakpoints: [],
           ampModelSizeBreakpoints: [0.5],
           hasCabIR: true,
@@ -6767,7 +6971,7 @@ class NativeBridge {
           ampDeclaredCaptureType: "unknown",
           ampCaptureType: "amp",
           ampIncludesCab: false,
-          namEffectsDspVersion: 11,
+          namEffectsDspVersion: 19,
           inputRoutingAutomatic: true,
           automaticInputRoutingMode: 0,
           inputRoutingMode: 0,
@@ -6790,6 +6994,10 @@ class NativeBridge {
           gainReductionDb: 0,
           inputLevelDb: -4.2,
           outputLevelDb: -3.1,
+          inputLeftLevelDb: -4.2,
+          inputRightLevelDb: -10.8,
+          outputLeftLevelDb: -3.1,
+          outputRightLevelDb: -8.4,
         },
         uiState: {
           namRackSlots: {
@@ -6893,7 +7101,20 @@ class NativeBridge {
           lastLoadError: "NAM model file was not found: D:/Archived Sessions/Night Drive/Missing Modern Lead A2.nam",
         };
       }
-      return projectNAMRackSchemaForUI(this.applyDevBuiltInParamValues(address, schema));
+      const schemaWithValues = this.applyDevBuiltInParamValues(address, schema);
+      const activeProfile = schemaWithValues.parameters.find(
+        ({ id }) => id === "instrumentProfile",
+      )?.value;
+      const preEqLabels = namPreEqBandLabelsForProfile(activeProfile);
+      schemaWithValues.parameters = schemaWithValues.parameters.map((entry) => (
+        entry.id in preEqLabels
+          ? {
+              ...entry,
+              label: preEqLabels[entry.id as keyof typeof preEqLabels],
+            }
+          : entry
+      ));
+      return projectNAMRackSchemaForUI(schemaWithValues);
     }
     return {
       schemaVersion: 1,
@@ -6926,9 +7147,34 @@ class NativeBridge {
         })
       | undefined;
     const diagnostics = visualization?.diagnostics;
-    return diagnostics && typeof diagnostics === "object"
+    const hasBaseDiagnostics = Boolean(diagnostics && typeof diagnostics === "object");
+    const baseDiagnostics = hasBaseDiagnostics
       ? diagnostics as Record<string, unknown>
-      : null;
+      : {};
+    if (this.shouldUseDevNAMMock()) {
+      const state = await this.getBuiltInPluginState(address);
+      const values = this.isPlainDevStateObject(state?.values) ? state.values : {};
+      const hpfLastActiveHz = Number(values.eqHPFLastActiveHz);
+      const lpfLastActiveHz = Number(values.eqLPFLastActiveHz);
+      const preHpfLastActiveHz = Number(values.preEqHPFLastActiveHz);
+      const preLpfLastActiveHz = Number(values.preEqLPFLastActiveHz);
+      return {
+        ...baseDiagnostics,
+        ...(Number.isFinite(hpfLastActiveHz)
+          ? { eqHPFLastActiveHz: hpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(lpfLastActiveHz)
+          ? { eqLPFLastActiveHz: lpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(preHpfLastActiveHz)
+          ? { preEqHPFLastActiveHz: preHpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(preLpfLastActiveHz)
+          ? { preEqLPFLastActiveHz: preLpfLastActiveHz }
+          : {}),
+      };
+    }
+    return hasBaseDiagnostics ? baseDiagnostics : null;
   }
 
   async getBuiltInPluginState(address: BuiltInPluginAddress): Promise<any> {
@@ -6946,12 +7192,20 @@ class NativeBridge {
       const schema = await this.getBuiltInPluginSchema(address);
       const baseState = {
         schemaVersion: schema.schemaVersion,
-        values: Object.fromEntries(schema.parameters.map((param) => [param.id, param.value])),
+        values: {
+          // Private native recall memory: intentionally absent from the public
+          // schema while still present in complete NAM Rack state readback.
+          eqHPFLastActiveHz: 80,
+          eqLPFLastActiveHz: 12000,
+          preEqHPFLastActiveHz: 80,
+          preEqLPFLastActiveHz: 12000,
+          ...Object.fromEntries(schema.parameters.map((param) => [param.id, param.value])),
+        },
         modelState: schema.modelState ?? {},
         dspState: {
           namEffectsDspVersion: normalizeNAMEffectsDspVersion(
             schema.modelState?.namEffectsDspVersion,
-          ) ?? 11,
+          ) ?? 17,
           reverbEngineVersion: 5,
         },
         uiState: schema.uiState ?? {},
@@ -6983,12 +7237,23 @@ class NativeBridge {
     }
     console.log("[NativeBridge] Mock setBuiltInPluginParam:", address, paramId, value);
     const key = this.devBuiltInAddressKey(address);
+    const hiddenCutoffPatch: Record<string, number> = {};
+    if (paramId === "eqHPFHz" && Number.isFinite(value) && value >= 20 && value <= 500) {
+      hiddenCutoffPatch.eqHPFLastActiveHz = value;
+    } else if (paramId === "eqLPFHz" && Number.isFinite(value) && value >= 3000 && value <= 20000) {
+      hiddenCutoffPatch.eqLPFLastActiveHz = value;
+    } else if (paramId === "preEqHPFHz" && Number.isFinite(value) && value >= 35 && value <= 180) {
+      hiddenCutoffPatch.preEqHPFLastActiveHz = value;
+    } else if (paramId === "preEqLPFHz" && Number.isFinite(value) && value >= 3000 && value <= 20000) {
+      hiddenCutoffPatch.preEqLPFLastActiveHz = value;
+    }
+    const valuePatch = { [paramId]: value, ...hiddenCutoffPatch };
     const values = {
       ...(this.devBuiltInParamValues.get(key) ?? {}),
-      [paramId]: value,
+      ...valuePatch,
     };
     this.devBuiltInParamValues.set(key, values);
-    this.persistDevBuiltInState(address, { values: { [paramId]: value } });
+    this.persistDevBuiltInState(address, { values: valuePatch });
     return true;
   }
 
@@ -7408,10 +7673,23 @@ class NativeBridge {
     return { success: false, error: "NAM library removal is only available in the native app." };
   }
 
-  async loadNAMModelIntoRack(address: BuiltInPluginAddress, slot: "pedal" | "amp" | "cab", localPath: string): Promise<boolean> {
+  async loadNAMModelIntoRack(
+    address: BuiltInPluginAddress,
+    slot: "pedal" | "amp" | "cab",
+    localPath: string,
+    options: NAMModelLoadOptions = {},
+  ): Promise<boolean> {
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
+    const requestedModelSize = slot === "cab"
+      ? undefined
+      : Number.isFinite(options.modelSize)
+        ? Math.max(0, Math.min(1, Number(options.modelSize)))
+        : NAM_FULL_MODEL_SIZE;
     if (this.isNative && window.__JUCE__?.backend.loadNAMModelIntoRack) {
+      // Native direct-load policy owns the atomic path + Full-quality commit.
+      // `modelSize` remains explicit here for the browser mock and call-site
+      // contract without adding a second state mutation after native success.
       return await window.__JUCE__.backend.loadNAMModelIntoRack(trackId, address.chain, fxIndex, slot, localPath);
     }
     console.log("[NativeBridge] Mock loadNAMModelIntoRack:", address, slot, localPath);
@@ -7429,6 +7707,7 @@ class NativeBridge {
             pedalMetadataCaptureType: "pedal",
             pedalDeclaredCaptureType: "unknown",
             pedalCaptureType: "pedal",
+            pedalModelSize: requestedModelSize,
             cabRequestedEnabled: requestedCabEnabled,
           }
         : slot === "amp"
@@ -7439,6 +7718,7 @@ class NativeBridge {
               ampDeclaredCaptureType: "unknown",
               ampCaptureType: "amp",
               ampIncludesCab: false,
+              ampModelSize: requestedModelSize,
               cabRequestedEnabled: requestedCabEnabled,
             }
           : {
@@ -8276,6 +8556,12 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.clearAllPitchPreviewRoutes)
       return await window.__JUCE__.backend.clearAllPitchPreviewRoutes(clipId ?? "");
     return false;
+  }
+
+  async cancelPitchCorrectionRequests(clipId: string, authoritativeFilePath?: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.cancelPitchCorrectionRequests)
+      return await window.__JUCE__.backend.cancelPitchCorrectionRequests(clipId, authoritativeFilePath ?? "");
+    return true;
   }
 
   async clearPitchPreviewRoutesForCorrectedSources(): Promise<number> {

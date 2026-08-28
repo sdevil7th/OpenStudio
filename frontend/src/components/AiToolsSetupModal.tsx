@@ -75,17 +75,6 @@ const FEATURE_COPY: Record<AiFeatureId, { label: string; requirements: string; d
   },
 };
 
-function toFileUrl(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  return encodeURI(normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`);
-}
-
-function parentPath(path: string): string {
-  const segments = path.split(/[/\\]+/);
-  segments.pop();
-  return segments.join("/");
-}
-
 function formatElapsed(ms?: number): string {
   const totalSeconds = Math.max(0, Math.round((ms ?? 0) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -418,7 +407,7 @@ export default function AiToolsSetupModal() {
 
   const handleOpenInstallLog = async () => {
     if (!installLogPath) return;
-    await nativeBridge.openExternalURL(toFileUrl(parentPath(installLogPath)));
+    await nativeBridge.revealLocalPath(installLogPath);
   };
 
   const handleDownloadPython = async () => {

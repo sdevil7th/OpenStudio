@@ -26,6 +26,8 @@ public:
     bool hide();
     bool close();
     bool isOpen() const;
+    bool isFrontendReady() const;
+    juce::String getFrontendStartupStateDescription() const;
     juce::String getStateDescription() const;
 
 private:

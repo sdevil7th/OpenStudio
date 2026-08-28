@@ -8,22 +8,42 @@ import {
   buildNAMRackRollbackPatch,
   countNAMUserPresetFilters,
   createNAMPresetSessionCache,
+  deriveNAMRackPresetDirtyState,
   drainNAMPresetWriteQueue,
   getNAMUserPresetEmptyState,
   isNAMReservedPresetCollectionName,
   migrateLegacyNAMRackPresetDspState,
   migrateNAMRackModelQualityState,
+  NAM_RACK_DEFAULT_POST_FX_ORDER,
   NAM_UNFILED_PRESET_COLLECTION_ID,
   NAMPresetSessionInvalidatedError,
+  normalizeNAMRackSnapshotCaptureTypes,
   normalizeNAMUserPresetFolder,
   resolveNAMModelQualityOptionValue,
   resolveNAMHeaderPresetNavigation,
   runNAMHeaderPresetArrowAction,
+  shouldSynchronizeNAMRackPresetDirtyMarker,
   shouldClearNAMPresetIdentityForUnsavedAmpTransition,
   verifyNAMRackCompareReadback,
 } from "../utils/namRackPresetTransactions";
 
 describe("NAM Rack preset transactions", () => {
+  it("does not dirty a loaded preset with native capture-type sentinels for empty slots", () => {
+    expect(normalizeNAMRackSnapshotCaptureTypes({
+      pedalModelPath: "",
+      pedalDeclaredCaptureType: "unknown",
+      ampModelPath: " C:/NAM/Bass.nam ",
+      ampDeclaredCaptureType: " full_rig ",
+    })).toEqual({
+      ampDeclaredCaptureType: "full_rig",
+    });
+
+    expect(normalizeNAMRackSnapshotCaptureTypes({
+      ampModelPath: "",
+      ampDeclaredCaptureType: "amp_cab",
+    })).toEqual({});
+  });
+
   it("drains pending UI persistence before flushing coalesced parameter writes", async () => {
     const events: string[] = [];
     let releaseUiWrite!: () => void;
@@ -405,14 +425,50 @@ describe("NAM Rack preset transactions", () => {
     expect(resolveNAMModelQualityOptionValue(0.51, [0.5])).toBe(1);
   });
 
-  it("migrates old portable NAM rack states to full quality or their legacy global size", () => {
-    expect(migrateNAMRackModelQualityState({
+  it("derives edited state from an authoritative preset baseline instead of a stale marker", () => {
+    expect(deriveNAMRackPresetDirtyState({
+      activePresetKind: "user",
+      hasBaseline: true,
+      differsFromBaseline: true,
+      persistedDirty: false,
+    })).toBe(true);
+    expect(deriveNAMRackPresetDirtyState({
+      activePresetKind: "factory",
+      hasBaseline: true,
+      differsFromBaseline: false,
+      legacyFactoryDiffers: true,
+      persistedDirty: true,
+    })).toBe(false);
+    expect(deriveNAMRackPresetDirtyState({
+      activePresetKind: "user",
+      hasBaseline: false,
+      differsFromBaseline: true,
+      persistedDirty: false,
+    })).toBe(false);
+
+    expect(shouldSynchronizeNAMRackPresetDirtyMarker({
+      activePresetKind: "user",
+      hasBaseline: true,
+      derivedDirty: true,
+      persistedDirty: false,
+    })).toBe(true);
+    expect(shouldSynchronizeNAMRackPresetDirtyMarker({
+      activePresetKind: "user",
+      hasBaseline: false,
+      derivedDirty: true,
+      persistedDirty: false,
+    })).toBe(false);
+  });
+
+  it("migrates unsized legacy captures to Full and retires the legacy global size", () => {
+    const legacyWithoutQuality = {
       values: { ampMix: 1 },
       modelState: {
         pedalModelPath: "C:/NAM/Pedal.nam",
         ampModelPath: "C:/NAM/Amp.nam",
       },
-    })).toEqual({
+    };
+    expect(migrateNAMRackModelQualityState(legacyWithoutQuality)).toEqual({
       values: { ampMix: 1 },
       modelState: {
         pedalModelPath: "C:/NAM/Pedal.nam",
@@ -423,15 +479,59 @@ describe("NAM Rack preset transactions", () => {
     });
 
     expect(migrateNAMRackModelQualityState({
-      values: { namModelSize: 0.37 },
-      modelState: { ampModelPath: "C:/NAM/Amp.nam" },
-    })).toEqual({
-      values: { namModelSize: 0.37 },
+      values: { ampMix: 1, namModelSize: 0.37 },
+      parameters: [
+        { id: "ampMix", value: 1 },
+        { id: "namModelSize", value: 0.25 },
+      ],
       modelState: {
+        pedalModelPath: "C:/NAM/Pedal.nam",
+        pedalModelSize: Number.NaN,
+        ampModelPath: "C:/NAM/Amp.nam",
+      },
+    })).toEqual({
+      values: { ampMix: 1 },
+      parameters: [{ id: "ampMix", value: 1 }],
+      modelState: {
+        pedalModelPath: "C:/NAM/Pedal.nam",
+        pedalModelSize: 0.37,
         ampModelPath: "C:/NAM/Amp.nam",
         ampModelSize: 0.37,
       },
     });
+
+    expect(migrateNAMRackModelQualityState({
+      values: { ampMix: 1, namModelSize: 0.2 },
+      parameters: [{ id: "namModelSize", value: 0.2 }],
+    })).toEqual({
+      values: { ampMix: 1 },
+      parameters: [],
+    });
+  });
+
+  it("canonicalizes a legacy Compare quality selector before strict readback verification", () => {
+    const migrated = migrateLegacyNAMRackPresetDspState(
+      migrateNAMRackModelQualityState({
+        values: { ampMix: 1, namModelSize: 0.37 },
+        modelState: { ampModelPath: "C:/NAM/Amp.nam" },
+      }),
+      { completePreset: true },
+    ) as Record<string, any>;
+
+    expect(migrated.values).not.toHaveProperty("namModelSize");
+    expect(migrated.modelState.ampModelSize).toBe(0.37);
+    expect(verifyNAMRackCompareReadback({
+      values: migrated.values,
+      modelState: migrated.modelState,
+      dspState: migrated.dspState,
+    }, {
+      values: migrated.values,
+      modelState: {
+        ampModelPath: "C:/NAM/Amp.nam",
+        ampModelSize: 0.37,
+      },
+      dspState: migrated.dspState,
+    })).toBe(true);
   });
 
   it("migrates complete preset bundles to the one current rack DSP", () => {
@@ -447,7 +547,7 @@ describe("NAM Rack preset transactions", () => {
         chaosWeight: 0.5,
       },
       modelState: { ampModelPath: "C:/NAM/Amp.nam" },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 11 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 19 },
     });
 
     const legacyV9 = {
@@ -462,7 +562,7 @@ describe("NAM Rack preset transactions", () => {
       dspState: { reverbEngineVersion: 4 },
     }, { completePreset: true })).toMatchObject({
       values: { precisionDriveVolumeDb: 9, chaosMode: 0, chaosWeight: 0.5 },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 11 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 19 },
     });
   });
 
@@ -480,6 +580,16 @@ describe("NAM Rack preset transactions", () => {
       values: {
         auditionSource: 1,
         inputMode: 2,
+        tapeEchoEnabled: 1,
+        tapeEchoMix: 0.63,
+        tapeEchoTimeMs: 480,
+        tapeEchoFeedback: 0.44,
+        tapeEchoMod: 0.21,
+        tapeEchoTone: 0.58,
+        delayEnabled: 1,
+        delayMix: 0.27,
+        delayTimeMs: 640,
+        delayMode: 1,
         pedalMix: 0.37,
         ignored: "not-a-number",
       },
@@ -509,6 +619,10 @@ describe("NAM Rack preset transactions", () => {
       },
     })).toEqual({
       values: {
+        delayEnabled: 1,
+        delayMix: 0.27,
+        delayTimeMs: 640,
+        delayMode: 1,
         pedalMix: 0.37,
       },
       modelState: {
@@ -530,7 +644,7 @@ describe("NAM Rack preset transactions", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 11,
+        namEffectsDspVersion: 19,
       },
     });
   });
@@ -544,7 +658,7 @@ describe("NAM Rack preset transactions", () => {
         clearAmpModel: true,
         cabRequestedEnabled: false,
       },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 11 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 15 },
       postFxOrder: ["eq", "delay", "mod", "reverb"],
     };
     const readback = {
@@ -555,7 +669,7 @@ describe("NAM Rack preset transactions", () => {
         ampModelPath: "",
         cabRequestedEnabled: false,
       },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 11 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 15 },
     };
 
     expect(verifyNAMRackCompareReadback(
@@ -581,12 +695,23 @@ describe("NAM Rack preset transactions", () => {
     expect(verifyNAMRackCompareReadback(target, readback, ["eq", "mod", "delay", "reverb"])).toBe(false);
 
     expect(verifyNAMRackCompareReadback(
+      { ...target, postFxOrder: [...NAM_RACK_DEFAULT_POST_FX_ORDER] },
+      readback,
+      undefined,
+    )).toBe(true);
+    expect(verifyNAMRackCompareReadback(
+      target,
+      readback,
+      undefined,
+    )).toBe(false);
+
+    expect(verifyNAMRackCompareReadback(
       { values: { ampMix: 0.75 }, modelState: {} },
       { values: { ampMix: 0.75 }, modelState: {}, dspState: {} },
     )).toBe(true);
   });
 
-  it("migrates rollback state from older captures to full NAM model quality", () => {
+  it("does not invent model quality while preparing rollback state", () => {
     expect(buildNAMRackRollbackPatch({
       values: {},
       modelState: {
@@ -595,9 +720,7 @@ describe("NAM Rack preset transactions", () => {
       },
     })?.modelState).toEqual({
       pedalModelPath: "C:/NAM/Pedal.nam",
-      pedalModelSize: 1,
       ampModelPath: "C:/NAM/Amp.nam",
-      ampModelSize: 1,
       clearCabIR: true,
     });
   });
@@ -647,9 +770,55 @@ describe("NAM Rack preset transactions", () => {
     expect(panelSource).toContain('modelState: { [sizeKey]: Math.max(0, Math.min(1, requestedSize)) }');
     expect(panelSource).toContain("modelSnapshot.pedalModelSize");
     expect(panelSource).toContain("modelSnapshot.ampModelSize");
-    expect(panelSource).toContain("pedalModelSize: Number.isFinite(modelState.pedalModelSize)");
-    expect(panelSource).toContain("ampModelSize: Number.isFinite(modelState.ampModelSize)");
+    expect(panelSource).toContain("if (Number.isFinite(modelState?.pedalModelSize))");
+    expect(panelSource).toContain("if (Number.isFinite(modelState?.ampModelSize))");
     expect(panelSource).not.toContain('paramById(params, "namModelSize")');
+  });
+
+  it("keeps Full quality explicit to new model loads and preserves recall sizes", () => {
+    const panelSource = readFileSync(
+      new URL("../components/NAMRackPanel.tsx", import.meta.url),
+      "utf8",
+    );
+    const explorerSource = readFileSync(
+      new URL("../components/NAMExplorer.tsx", import.meta.url),
+      "utf8",
+    );
+    const bridgeSource = readFileSync(
+      new URL("../services/NativeBridge.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(panelSource).toContain('{ modelSize: NAM_FULL_MODEL_SIZE }');
+    expect(explorerSource).toContain("ampModelSize: NAM_FULL_MODEL_SIZE");
+    expect(explorerSource).toContain("pedalModelSize: NAM_FULL_MODEL_SIZE");
+    expect(explorerSource).toContain("snapshot.ampModelSize === undefined");
+    expect(explorerSource).toContain("snapshot.pedalModelSize === undefined");
+    expect(bridgeSource).toContain("requestedModelSize");
+    expect(bridgeSource).toContain("ampModelSize: requestedModelSize");
+    expect(bridgeSource).toContain("pedalModelSize: requestedModelSize");
+  });
+
+  it("stores and synchronizes factory and user dirty state from complete readback baselines", () => {
+    const panelSource = readFileSync(
+      new URL("../components/NAMRackPanel.tsx", import.meta.url),
+      "utf8",
+    );
+    const dirtyStart = panelSource.indexOf("const persistedPresetDirty");
+    const dirtyEnd = panelSource.indexOf("const currentCompareDirty", dirtyStart);
+    const dirtySource = panelSource.slice(dirtyStart, dirtyEnd);
+    const factoryStart = panelSource.indexOf("const applyPreset = async");
+    const factoryEnd = panelSource.indexOf("const currentRackToneSlot", factoryStart);
+    const factorySource = panelSource.slice(factoryStart, factoryEnd);
+
+    expect(dirtySource).toContain("deriveNAMRackPresetDirtyState({");
+    expect(dirtySource).toContain("differsFromBaseline: snapshotDiffers(currentSnapshot, activePresetBaseline)");
+    expect(dirtySource).not.toContain("snapshotDiffers(currentSnapshot, activePresetBaseline) ||");
+    expect(panelSource).toContain("shouldSynchronizeNAMRackPresetDirtyMarker({");
+    expect(panelSource).toContain('{ namPresetDirty: isPresetDirty }');
+    expect(factorySource).toContain("const loadedBaseline = presetBaselineFromState(loadedState)");
+    expect(factorySource).toContain("baseline: loadedBaseline");
+    expect(factorySource).toContain("verifyNAMRackCompareReadback(\n                loadedBaseline,");
   });
 
   it("drains parameter writes and publishes a native readback baseline before showing a saved preset as clean", () => {
@@ -697,7 +866,7 @@ describe("NAM Rack preset transactions", () => {
     expect(panelSource).toContain("schema.uiState?.namActiveFactoryPresetId");
     expect(factoryLoad).toContain("factoryId: nextPreset.id");
     expect(factoryLoad.indexOf("drainPendingWritesForPresetTransaction")).toBeLessThan(
-      factoryLoad.indexOf("getBuiltInPluginState(address)"),
+      factoryLoad.indexOf("readNAMRackPresetStateWithRetry("),
     );
     expect(factoryLoad).toContain("verifiedFactoryId !== nextPreset.id");
     expect(factoryLoad).toContain('publishActivePresetIdentity({ kind: "factory", id: nextPreset.id })');
@@ -709,7 +878,7 @@ describe("NAM Rack preset transactions", () => {
     );
     expect(userLoad).toContain("const verifiedState = identityUpdated");
     expect(userLoad.indexOf("drainPendingWritesForPresetTransaction")).toBeLessThan(
-      userLoad.indexOf("getBuiltInPluginState(address)"),
+      userLoad.indexOf("readNAMRackPresetStateWithRetry("),
     );
     expect(userLoad).toContain("const loadedBaseline = presetBaselineFromState(loadedState)");
     expect(userLoad).not.toContain("loadedBaseline ?? currentSnapshot");
@@ -762,7 +931,8 @@ describe("NAM Rack preset transactions", () => {
     const userLoad = panelSource.slice(userStart, userEnd);
 
     for (const loadSource of [factoryLoad, userLoad]) {
-      expect(loadSource).toContain("const rackStateBeforeLoad = await nativeBridge.getBuiltInPluginState(address)");
+      expect(loadSource).toContain("const rackStateBeforeLoad = await readNAMRackPresetStateWithRetry(");
+      expect(loadSource).not.toContain("const rackStateBeforeLoad = await nativeBridge.getBuiltInPluginState(address)");
       expect(loadSource).toContain("rollbackPatch = buildNAMRackRollbackPatch(rackStateBeforeLoad)");
       expect(loadSource).toContain("await recoverUnverifiedPresetMutation(");
       expect(loadSource.indexOf("buildNAMRackRollbackPatch(rackStateBeforeLoad)")).toBeLessThan(
@@ -808,11 +978,6 @@ describe("NAM Rack preset transactions", () => {
       new URL("../components/NAMPresetManagerModal.css", import.meta.url),
       "utf8",
     );
-    const rightRailSource = readFileSync(
-      new URL("../components/NAMRackRightRail.tsx", import.meta.url),
-      "utf8",
-    );
-
     expect(managerSource).not.toContain('role="listbox"');
     expect(managerSource).not.toContain('role="option"');
     expect(managerSource).toContain("aria-pressed={selected}");
@@ -831,9 +996,7 @@ describe("NAM Rack preset transactions", () => {
     expect(managerSource).toContain("portal");
     expect(managerCss).toContain(".nam-preset-library-action-menu");
     expect(managerCss).toContain("z-index: 10020");
-    expect(rightRailSource).toContain("aria-busy={presetBusy || undefined}");
-    expect(rightRailSource).toContain("disabled={presetBusy}");
-    expect(modalSource).toContain('className="relative z-[10000]"');
+    expect(modalSource).toContain('className="fixed inset-0 z-[10000]"');
     expect(modalSource).toContain('className="fixed inset-0 flex items-center justify-center p-4"');
   });
 

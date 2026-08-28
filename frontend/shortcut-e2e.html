@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenStudio shortcut foundations E2E harness</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        color: #f4f4f4;
+        background: #121212;
+        font-family: system-ui, sans-serif;
+      }
+
+      fieldset, section {
+        margin-block: 16px;
+        padding: 16px;
+        border: 1px solid #555;
+      }
+
+      .surfaces {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .surface {
+        min-height: 72px;
+        padding: 12px;
+        border: 2px solid #666;
+        border-radius: 4px;
+      }
+
+      .surface:focus {
+        border-color: #3da2ff;
+        outline: 2px solid #3da2ff;
+        outline-offset: 2px;
+      }
+
+      label {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        margin-inline-end: 16px;
+      }
+
+      output, pre {
+        display: block;
+        min-height: 1.5em;
+        padding: 8px;
+        color: #bde2ff;
+        background: #202020;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Shortcut and wheel test harness</h1>
+
+      <fieldset aria-labelledby="keyboard-settings-heading">
+        <legend id="keyboard-settings-heading">Keyboard matching</legend>
+        <label>
+          Platform
+          <select id="keyboard-platform" aria-label="Keyboard platform">
+            <option value="windows">Windows</option>
+            <option value="macos">macOS</option>
+            <option value="linux">Linux</option>
+          </select>
+        </label>
+        <label>
+          Keyboard profile
+          <select id="keyboard-profile" aria-label="Harness keyboard profile"></select>
+        </label>
+        <label>
+          Active binding
+          <select id="shortcut-binding" aria-label="Active shortcut binding">
+            <option value="">Disabled (registry dispatch)</option>
+            <option value="X" selected>X</option>
+            <option value="Ctrl+X">Ctrl+X (portable primary)</option>
+            <option value="Command+X">Command+X</option>
+            <option value="Option+Code:KeyX">Option+physical KeyX</option>
+            <option value="Control+X">Control+X</option>
+            <option value="Control+Code:KeyZ">Control+physical KeyZ</option>
+            <option value="Numpad1">Numpad 1</option>
+          </select>
+        </label>
+      </fieldset>
+
+      <fieldset aria-labelledby="focus-heading">
+        <legend id="focus-heading">Native focus owners</legend>
+        <label>
+          Text input
+          <input id="text-input" aria-label="Text input" value="select this text" />
+        </label>
+        <button id="native-button" type="button">Native button</button>
+        <span id="button-click-count" aria-live="polite">0</span>
+        <label>
+          Native range
+          <input id="native-slider" aria-label="Native range" type="range" min="0" max="10" step="1" value="5" />
+        </label>
+      </fieldset>
+
+      <section aria-labelledby="context-heading">
+        <h2 id="context-heading">Active shortcut contexts</h2>
+        <div class="surfaces">
+          <div id="application-surface" class="surface" role="region" aria-label="Application surface" tabindex="0" data-shortcut-context="application">Application</div>
+          <div id="timeline-surface" class="surface" role="region" aria-label="Timeline surface" tabindex="0" data-shortcut-context="timeline" data-wheel-surface="timeline">Timeline</div>
+          <div id="piano-surface" class="surface" role="region" aria-label="Piano roll surface" tabindex="0" data-shortcut-context="piano_roll" data-wheel-surface="piano_roll">Piano roll</div>
+          <div id="pitch-surface" class="surface" role="region" aria-label="Pitch editor surface" tabindex="0" data-shortcut-context="pitch_editor" data-wheel-surface="pitch_editor">Pitch editor</div>
+          <div id="automation-surface" class="surface" role="region" aria-label="Automation surface" tabindex="0" data-shortcut-context="automation" data-wheel-surface="timeline" data-wheel-subtarget="automation_lane">Automation</div>
+        </div>
+        <p>Active context: <output id="active-context" aria-label="Active context">application</output></p>
+        <p>Last shortcut result: <output id="shortcut-result" aria-label="Last shortcut result">none</output></p>
+        <pre id="context-hit-counts" aria-label="Context hit counts">{"timeline":0,"piano_roll":0,"pitch_editor":0}</pre>
+      </section>
+
+      <section aria-labelledby="wheel-heading">
+        <h2 id="wheel-heading">Wheel resolver</h2>
+        <label>
+          Platform
+          <select id="wheel-platform" aria-label="Wheel platform">
+            <option value="windows">Windows</option>
+            <option value="macos">macOS</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label>
+          Mouse profile
+          <select id="mouse-profile" aria-label="Mouse profile"></select>
+        </label>
+        <div class="surfaces">
+          <div id="wheel-timeline" class="surface" role="region" aria-label="Wheel timeline" tabindex="0" data-wheel-surface="timeline">Timeline wheel target</div>
+          <div id="wheel-ruler" class="surface" role="region" aria-label="Wheel ruler" tabindex="0" data-wheel-surface="timeline" data-wheel-subtarget="ruler">Timeline ruler wheel target</div>
+          <div id="wheel-track" class="surface" role="region" aria-label="Wheel track" tabindex="0" data-wheel-surface="timeline" data-wheel-subtarget="track" data-hovered-target-id="track-e2e">Timeline track wheel target</div>
+          <div id="wheel-clip" class="surface" role="region" aria-label="Wheel clip" tabindex="0" data-wheel-surface="timeline" data-wheel-subtarget="clip" data-hovered-target-id="clip-e2e">Timeline clip wheel target</div>
+          <div id="wheel-automation" class="surface" role="region" aria-label="Wheel automation lane" tabindex="0" data-wheel-surface="timeline" data-wheel-subtarget="automation_lane" data-hovered-target-id="track-e2e:lane-e2e">Automation lane wheel target</div>
+          <div id="wheel-piano" class="surface" role="region" aria-label="Wheel piano roll" tabindex="0" data-wheel-surface="piano_roll" data-wheel-subtarget="grid">Piano-roll wheel target</div>
+          <div id="wheel-pitch" class="surface" role="region" aria-label="Wheel pitch editor" tabindex="0" data-wheel-surface="pitch_editor">Pitch-editor wheel target</div>
+          <div id="wheel-browser-guard-zone" class="surface">
+            <div id="wheel-browser" role="region" aria-label="Wheel browser" tabindex="0" data-wheel-surface="browser">Browser wheel target</div>
+          </div>
+          <div id="wheel-parameter" class="surface" role="slider" aria-label="Wheel parameter" tabindex="0" data-wheel-surface="parameter">Parameter wheel target</div>
+          <div id="wheel-console-fader" class="surface" role="slider" aria-label="Wheel console fader" tabindex="0" data-wheel-surface="parameter" data-wheel-subtarget="console_fader">Console fader wheel target</div>
+          <div id="wheel-waveform-scale" class="surface" role="region" aria-label="Waveform scale" tabindex="0" data-wheel-surface="timeline" data-wheel-subtarget="waveform_scale" data-hovered-target-id="track-e2e">Waveform scale target</div>
+        </div>
+        <pre id="wheel-result" aria-label="Wheel result">none</pre>
+      </section>
+
+      <section aria-labelledby="pointer-heading">
+        <h2 id="pointer-heading">Pointer modifier resolver</h2>
+        <div id="pointer-clip-drag" class="surface" role="region" aria-label="Pointer clip drag" tabindex="0" data-pointer-context="clip_drag">Clip drag pointer target</div>
+        <pre id="pointer-result" aria-label="Pointer result">none</pre>
+      </section>
+
+      <section aria-labelledby="nested-editor-heading">
+        <h2 id="nested-editor-heading">Nested editor controls</h2>
+        <div class="surfaces">
+          <div id="nested-timeline-viewport" class="surface" role="region" aria-label="Nested timeline viewport" data-wheel-surface="timeline" data-wheel-subtarget="content" data-viewport-counter="timeline">
+            <div id="timeline-profiled-range-root"></div>
+          </div>
+          <div id="nested-piano-viewport" class="surface" role="region" aria-label="Nested piano roll viewport" data-wheel-surface="piano_roll" data-wheel-subtarget="grid" data-viewport-counter="piano_roll">
+            <div id="piano-profiled-range-root"></div>
+          </div>
+        </div>
+        <pre id="viewport-hit-counts" aria-label="Viewport wheel hit counts">{"timeline":0,"piano_roll":0}</pre>
+      </section>
+
+      <section aria-labelledby="profile-sync-heading">
+        <h2 id="profile-sync-heading">Detached profile snapshot parsing</h2>
+        <output id="profile-snapshot-result" aria-label="Profile snapshot result">none</output>
+      </section>
+
+      <section aria-labelledby="meter-heading">
+        <h2 id="meter-heading">Track meter presentation</h2>
+        <div id="midi-meter-root" style="width: 18px; height: 120px"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/e2e/shortcutHarness.ts"></script>
+  </body>
+</html>

@@ -2,7 +2,10 @@ param(
     [string]$AppPath,
     [string]$OutputRoot,
     [string]$Label = "nam-rack-regression",
-    [int]$TimeoutSeconds = 90,
+    # The complete deterministic rack matrix takes roughly three minutes in a
+    # Debug build on current developer hardware. Keep enough margin for CI and
+    # slower machines without weakening the process-exit gate.
+    [int]$TimeoutSeconds = 360,
     [switch]$SkipBuild
 )
 

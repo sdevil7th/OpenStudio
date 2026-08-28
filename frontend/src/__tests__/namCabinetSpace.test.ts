@@ -19,6 +19,7 @@ describe("NAM Rack Cabinet Space controls", () => {
       "cabRoomWidth",
       "cabDoublerEnabled",
       "cabDoublerMix",
+      "cabDoublerDelayMs",
       "cabDoublerSpread",
     ]);
     expect(NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[1]).toEqual({
@@ -29,7 +30,7 @@ describe("NAM Rack Cabinet Space controls", () => {
     expect(NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[2]).toEqual({
       id: "doubler",
       label: "Doubler",
-      paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerSpread"],
+      paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread"],
     });
     expect(NAM_RACK_ADVANCED_CONTROL_IDS.cab).toEqual([...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0].paramIds]);
     expect(NAM_RACK_ADVANCED_CONTROL_IDS.room).toEqual([...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[1].paramIds]);
@@ -48,6 +49,7 @@ describe("NAM Rack Cabinet Space controls", () => {
       'param("cabRoomWidth", "Room Width", 0.65, 0, 1',
       'param("cabDoublerEnabled", "Doubler", 0, 0, 1, "", "cabinetSpace", "toggle")',
       'param("cabDoublerMix", "Doubler Mix", 0.12, 0, 1',
+      'param("cabDoublerDelayMs", "Doubler Delay", 4.5, 3, 20, "ms", "cabinetSpace")',
       'param("cabDoublerSpread", "Doubler Spread", 0.65, 0, 1',
     ]) {
       expect(bridgeSource).toContain(expected);
@@ -57,6 +59,7 @@ describe("NAM Rack Cabinet Space controls", () => {
     expect(panelSource).toContain("cabRoomWidth: 0.65");
     expect(panelSource).toContain("cabDoublerEnabled: 0");
     expect(panelSource).toContain("cabDoublerMix: 0.12");
+    expect(panelSource).toContain("cabDoublerDelayMs: 4.5");
     expect(panelSource).toContain("cabDoublerSpread: 0.65");
     expect(panelSource).toContain("paramGroups: [NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0]]");
     expect(panelSource).toContain("Room has its own power switch");
@@ -76,6 +79,7 @@ describe("NAM Rack Cabinet Space controls", () => {
       cabRoomWidth: 0.65,
       cabDoublerEnabled: 0,
       cabDoublerMix: 0.12,
+      cabDoublerDelayMs: 4.5,
       cabDoublerSpread: 0.65,
     });
     expect(migrated.values).not.toHaveProperty("inputMode");
@@ -120,7 +124,7 @@ describe("NAM Rack Cabinet Space controls", () => {
     });
   });
 
-  it("keeps compact Cab/IR, Room, and Doubler as independently powered, directly editable stages", () => {
+  it("keeps compact Cab/IR, Room, and Doubler independently powered without duplicate advanced editors", () => {
     const panelSource = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
 
     expect(panelSource).toContain("const cabinetStageActive = embeddedCabCapture || cabActive || cabinetSpaceAudible");
@@ -133,21 +137,46 @@ describe("NAM Rack Cabinet Space controls", () => {
     expect(panelSource).not.toContain("toggleCabinetSpacePower");
     expect(panelSource).not.toContain("cabinetSpaceBusy");
     expect(panelSource).toContain('onToggle: !cabEnabledParam || !cabPresentation.canToggleExternalCab ? undefined : toggleCabPower');
-    expect(namRackAdvancedStageForCompactModule("cab-ir")).toBe("cab");
-    expect(namRackAdvancedStageForCompactModule("room")).toBe("room");
-    expect(namRackAdvancedStageForCompactModule("doubler")).toBe("doubler");
+    expect(namRackAdvancedStageForCompactModule("cab-ir")).toBeNull();
+    expect(namRackAdvancedStageForCompactModule("room")).toBeNull();
+    expect(namRackAdvancedStageForCompactModule("doubler")).toBeNull();
+  });
+
+  it("preserves an enabled Room while reporting that no speaker-voiced cab source is available", () => {
+    const panelSource = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
+
+    expect(panelSource).toContain('booleanFromRecord(rackDiagnostics, "cabRoomInputSourceAvailable")');
+    expect(panelSource).toContain("?? (cabActive || (ampActive && embeddedCabCapture))");
+    expect(panelSource).toContain("const roomWaitingForCabSource = roomActive && !cabRoomInputSourceAvailable");
+    expect(panelSource).toContain('roomWaitingForCabSource ? "No cab source"');
+    expect(panelSource).toContain("enabled: roomActive");
+    expect(panelSource).not.toContain("onParamChange(cabRoomEnabledParam, 0)");
   });
 
   it("keeps Doubler visible globally and pauses it in Stereo without rewriting its saved settings", () => {
     const panelSource = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
-    const cssSource = readFileSync(new URL("../components/NAMRackPanel.css", import.meta.url), "utf8");
 
     expect(panelSource).toContain("const doublerAudible = doublerActive && !stereoInputActive");
     expect(panelSource).toContain('className="nam-neural-global-knob nam-neural-global-doubler"');
     expect(panelSource).toContain("the DAW route is stereo");
     expect(panelSource).toContain("disabled={stereoInputActive}");
+    expect(panelSource).toContain('paramById(params, "cabDoublerDelayMs")');
+    expect(panelSource).toContain("Mix, Delay, and Spread are preserved");
     expect(panelSource).not.toContain("onParamChange(cabDoublerEnabledParam, 0)");
-    expect(cssSource).toContain('.nam-neural-global-doubler[data-paused="true"]');
+  });
+
+  it("binds an uncluttered 3-20 ms Delay control and explicit readout on the current Doubler asset", () => {
+    const designSource = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
+    const utilityStart = designSource.indexOf("function PremiumHeaderUtility(");
+    const utilityEnd = designSource.indexOf("function BoundDistortionModeDisplay", utilityStart);
+    const doublerUtility = designSource.slice(utilityStart, utilityEnd);
+
+    expect(doublerUtility).toContain('useBoundDesignParam("cabDoublerDelayMs")');
+    expect(doublerUtility).toContain('data-utility-rotary="delay"');
+    expect(doublerUtility).toContain('paramId="cabDoublerDelayMs"');
+    expect(doublerUtility).toContain("<span>Delay</span>");
+    expect(doublerUtility).toContain("<strong>{doublerDelayLabel}</strong>");
+    expect(doublerUtility).toContain('"4.5 ms"');
   });
 
   it("keeps legacy cabRoomSend named Bloom rather than misrepresenting it as the new room", () => {

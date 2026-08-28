@@ -5,6 +5,10 @@ import { useDAWStore } from "../store/useDAWStore";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import { snapToGrid } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
+import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
+import { getShortcutPlatform } from "../utils/platform";
+import { resolveWheelGesture } from "../utils/wheelGestureResolver";
+import { getTimelineHorizontalScrollMax } from "../utils/contextWheelBehaviors";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type KonvaEvent = any;
@@ -29,6 +33,11 @@ export function TimelineRuler() {
   const {
     pixelsPerSecond,
     scrollX,
+    scrollY,
+    setZoom,
+    setScroll,
+    trackHeight,
+    setTrackHeight,
     seekTo,
     markers,
     snapEnabled,
@@ -37,10 +46,16 @@ export function TimelineRuler() {
     projectRange,
     setProjectRange,
     setTimeSelection,
+    tempo,
   } = useDAWStore(
     useShallow((state) => ({
       pixelsPerSecond: state.pixelsPerSecond,
       scrollX: state.scrollX,
+      scrollY: state.scrollY,
+      setZoom: state.setZoom,
+      setScroll: state.setScroll,
+      trackHeight: state.trackHeight,
+      setTrackHeight: state.setTrackHeight,
       seekTo: state.seekTo,
       markers: state.markers,
       snapEnabled: state.snapEnabled,
@@ -49,9 +64,9 @@ export function TimelineRuler() {
       projectRange: state.projectRange,
       setProjectRange: state.setProjectRange,
       setTimeSelection: state.setTimeSelection,
+      tempo: state.transport.tempo,
     })),
   );
-  const tempo = useDAWStore((state) => state.transport.tempo);
 
   const projectRangeRef = useRef(projectRange);
   projectRangeRef.current = projectRange;
@@ -65,8 +80,14 @@ export function TimelineRuler() {
   timeSignatureRef.current = timeSignature;
   const scrollXRef = useRef(scrollX);
   scrollXRef.current = scrollX;
+  const scrollYRef = useRef(scrollY);
+  scrollYRef.current = scrollY;
   const pixelsPerSecondRef = useRef(pixelsPerSecond);
   pixelsPerSecondRef.current = pixelsPerSecond;
+  const trackHeightRef = useRef(trackHeight);
+  trackHeightRef.current = trackHeight;
+  const widthRef = useRef(width);
+  widthRef.current = width;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -87,6 +108,82 @@ export function TimelineRuler() {
       window.removeEventListener("resize", updateWidth);
     };
   }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      const shortcutPlatform = getShortcutPlatform();
+      const behaviorProfile = getMouseBehaviorProfile(
+        useDAWStore.getState().mouseBehaviorProfileId,
+        shortcutPlatform,
+      );
+      const gesture = resolveWheelGesture(event, {
+        surface: "timeline",
+        subtarget: "ruler",
+        platform: toMouseBehaviorPlatform(shortcutPlatform),
+      }, behaviorProfile.wheel);
+      if (gesture.preventDefault) event.preventDefault();
+      if (gesture.stopPropagation) event.stopPropagation();
+
+      if (gesture.target === "waveform-amplitude" && gesture.amount !== 0) {
+        const state = useDAWStore.getState();
+        const selectedIds = state.selectedTrackIds.length > 0
+          ? state.selectedTrackIds
+          : state.selectedTrackId ? [state.selectedTrackId] : [];
+        const factor = gesture.amount > 0 ? 0.9 : 1.1;
+        for (const trackId of selectedIds) {
+          const track = state.tracks.find((candidate) => candidate.id === trackId);
+          if (track) state.setTrackWaveformZoom(trackId, (track.waveformZoom ?? 1) * factor);
+        }
+      } else if (gesture.operation === "zoom" && gesture.target === "timeline") {
+        const rect = container.getBoundingClientRect();
+        const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+        const currentZoom = pixelsPerSecondRef.current;
+        const timeAtPointer = (scrollXRef.current + pointerX) / currentZoom;
+        const nextZoom = Math.max(1, Math.min(1000, currentZoom * Math.exp(-gesture.amount * 0.0015)));
+        const state = useDAWStore.getState();
+        const maxTimelineScroll = getTimelineHorizontalScrollMax(
+          state.tracks,
+          state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
+          nextZoom,
+          widthRef.current,
+        );
+        setZoom(nextZoom);
+        setScroll(
+          Math.max(0, Math.min(maxTimelineScroll, timeAtPointer * nextZoom - pointerX)),
+          scrollYRef.current,
+        );
+      } else if (gesture.operation === "resize" && gesture.target === "track-height") {
+        const factor = gesture.amount > 0 ? 0.9 : 1.1;
+        if (gesture.amount !== 0) setTrackHeight(trackHeightRef.current * factor);
+      } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
+        const state = useDAWStore.getState();
+        const maxTimelineScroll = getTimelineHorizontalScrollMax(
+          state.tracks,
+          state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
+          pixelsPerSecondRef.current,
+          widthRef.current,
+        );
+        setScroll(
+          Math.max(0, Math.min(maxTimelineScroll, scrollXRef.current + gesture.amount)),
+          scrollYRef.current,
+        );
+      } else if (gesture.operation === "scroll") {
+        const workspace = container.closest(".workspace") as HTMLElement | null;
+        if (workspace) {
+          const maxScrollY = Math.max(0, workspace.scrollHeight - workspace.clientHeight);
+          const nextScrollY = Math.max(0, Math.min(maxScrollY, workspace.scrollTop + gesture.amount));
+          workspace.scrollTop = nextScrollY;
+          setScroll(scrollXRef.current, nextScrollY);
+        }
+      }
+    };
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => container.removeEventListener("wheel", handleWheel);
+  }, [setScroll, setTrackHeight, setZoom]);
 
   const handleRulerMouseDown = (e: KonvaEvent) => {
     const stage = e.target.getStage();

@@ -8,6 +8,16 @@ import { TrackHeader } from "./TrackHeader";
 import { AITrackHeader } from "./AITrackHeader";
 import { TRACK_COLORS } from "./ColorPicker";
 import { useContextMenu, MenuItem } from "./ContextMenu";
+import { getShortcutPlatform } from "../utils/platform";
+import {
+  getMouseBehaviorProfile,
+  toMouseBehaviorPlatform,
+} from "../utils/mouseBehaviorProfiles";
+import {
+  resolveMouseModifierAction,
+  type MouseModifierOverrideMap,
+} from "../utils/mouseModifierResolver";
+import { getDisplayEffectiveShortcut } from "../store/actionRegistry";
 
 interface SortableTrackHeaderProps {
   track: Track;
@@ -55,6 +65,8 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     toggleFolderCollapsed,
     moveTracksToFolder,
     removeTrackFromFolder,
+    keyboardShortcutProfileId,
+    customShortcuts,
   } = useDAWStore(useShallow((s) => ({
     selectedTrackIds: s.selectedTrackIds,
     selectTrack: s.selectTrack,
@@ -73,7 +85,13 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     toggleFolderCollapsed: s.toggleFolderCollapsed,
     moveTracksToFolder: s.moveTracksToFolder,
     removeTrackFromFolder: s.removeTrackFromFolder,
+    keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+    customShortcuts: s.customShortcuts,
   })));
+  const shortcut = React.useCallback(
+    (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
+    [customShortcuts, keyboardShortcutProfileId],
+  );
 
   const nestingLevel = getTrackNestingLevel(track, tracks);
 
@@ -90,7 +108,29 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     ) {
       return;
     }
-    selectTrack(track.id, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
+    const state = useDAWStore.getState();
+    const platform = getShortcutPlatform();
+    const behaviorProfile = getMouseBehaviorProfile(
+      state.mouseBehaviorProfileId,
+      platform,
+    );
+    const action = resolveMouseModifierAction({
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      getModifierState: (key) => key === "AltGraph" && e.getModifierState("AltGraph"),
+    }, "track_header", {
+      platform: toMouseBehaviorPlatform(platform),
+      profile: behaviorProfile.modifiers,
+      overrides: state.mouseModifiers as MouseModifierOverrideMap,
+    });
+
+    if (action === "select") selectTrack(track.id);
+    else if (action === "toggle_select") selectTrack(track.id, { ctrl: true });
+    else if (action === "range_select") selectTrack(track.id, { shift: true });
+    else if (action === "solo") void toggleTrackSolo(track.id);
+    else if (action === "mute") void toggleTrackMute(track.id);
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
@@ -116,7 +156,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
       ? [
           {
             label: `Delete ${count} Tracks`,
-            shortcut: "Del",
+            shortcut: shortcut("track.deleteSelected", "Del"),
             onClick: () => deleteSelectedTracks(),
           },
           { divider: true, label: "" },
@@ -145,14 +185,17 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           { divider: true, label: "" },
           {
             label: `Mute ${count} Tracks`,
+            shortcut: shortcut("track.toggleSelectedMute", ""),
             onClick: () => selectedTrackIds.forEach((id) => toggleTrackMute(id)),
           },
           {
             label: `Solo ${count} Tracks`,
+            shortcut: shortcut("track.toggleSelectedSolo", ""),
             onClick: () => selectedTrackIds.forEach((id) => toggleTrackSolo(id)),
           },
           {
             label: `Arm ${count} Tracks`,
+            shortcut: shortcut("track.toggleSelectedArm", ""),
             onClick: () => selectedTrackIds.forEach((id) => toggleTrackArmed(id)),
           },
           { divider: true, label: "" },
@@ -180,27 +223,28 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
       : [
           {
             label: "Delete Track",
-            shortcut: "Del",
+            shortcut: shortcut("track.deleteSelected", "Del"),
             onClick: () => removeTrack(track.id),
           },
           {
             label: "Duplicate Track",
+            shortcut: shortcut("track.duplicateSelected", ""),
             onClick: async () => duplicateTrack(track.id),
           },
           { divider: true, label: "" },
           {
             label: track.muted ? "Unmute Track" : "Mute Track",
-            shortcut: "M",
+            shortcut: shortcut("track.toggleSelectedMute", "M"),
             onClick: () => toggleTrackMute(track.id),
           },
           {
             label: track.soloed ? "Unsolo Track" : "Solo Track",
-            shortcut: "S",
+            shortcut: shortcut("track.toggleSelectedSolo", "S"),
             onClick: () => toggleTrackSolo(track.id),
           },
           {
             label: track.armed ? "Disarm Record" : "Arm for Recording",
-            shortcut: "R",
+            shortcut: shortcut("track.toggleSelectedArm", "R"),
             onClick: () => toggleTrackArmed(track.id),
           },
           { divider: true, label: "" },

@@ -571,25 +571,19 @@ bool Metronome::renderToFile(const juce::File& outputFile, double startTimeSecon
         outputFile.deleteFile();
 
     juce::WavAudioFormat wavFormat;
-    auto outputStream = std::make_unique<juce::FileOutputStream>(outputFile);
-    if (outputStream->failedToOpen())
+    std::unique_ptr<juce::OutputStream> outputStream = std::make_unique<juce::FileOutputStream>(outputFile);
+    if (static_cast<juce::FileOutputStream&>(*outputStream).failedToOpen())
         return false;
 
-    std::unique_ptr<juce::AudioFormatWriter> writer(
-        wavFormat.createWriterFor(
-            outputStream.get(),
-            renderSampleRate,
-            2,  // stereo
-            16, // bit depth
-            {}, // metadata
-            0   // quality
-        )
-    );
+    auto writer = wavFormat.createWriterFor(
+        outputStream,
+        juce::AudioFormatWriterOptions()
+            .withSampleRate(renderSampleRate)
+            .withNumChannels(2)
+            .withBitsPerSample(16));
 
     if (!writer)
         return false;
-
-    outputStream.release(); // Writer takes ownership of the stream
 
     // Save and reset playback state for clean offline render
     int savedClickCounter = clickSampleCounter;

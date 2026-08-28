@@ -12,8 +12,6 @@ const outDir = path.join(repoRoot, "frontend", "src", "assets", "nam", "controls
 const KNOB_SIZE = 192;
 const KNOB_FRAMES = 121;
 const KNOB_ATLAS_COLUMNS = 11;
-const FOOTSWITCH_SIZE = 256;
-const LED_SIZE = 96;
 
 function polar(cx, cy, radius, angleDeg) {
   const radians = ((angleDeg - 90) * Math.PI) / 180;
@@ -180,110 +178,11 @@ async function writeKnobFilmstrip(themeName, fileName) {
     .toFile(path.join(outDir, fileName));
 }
 
-function footswitchSvg(state) {
-  const pressed = state !== "off";
-  const down = state === "pressed" ? 10 : pressed ? 6 : 0;
-  const glow = state === "off" ? 0 : state === "pressed" ? 0.22 : 0.12;
-  const marks = lineTicks(128, 128, 104, 118, 48, "rgba(255,255,255,0.28)", "rgba(0,0,0,0.42)", 2);
-  return `
-<svg xmlns="http://www.w3.org/2000/svg" width="${FOOTSWITCH_SIZE}" height="${FOOTSWITCH_SIZE}" viewBox="0 0 ${FOOTSWITCH_SIZE} ${FOOTSWITCH_SIZE}">
-  <defs>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="18" stdDeviation="12" flood-color="#000" flood-opacity="0.62"/>
-      <feDropShadow dx="0" dy="2" stdDeviation="1" flood-color="#fff" flood-opacity="0.18"/>
-    </filter>
-    <filter id="noise" x="-5%" y="-5%" width="110%" height="110%">
-      <feTurbulence type="fractalNoise" baseFrequency="0.78" numOctaves="3" seed="41" result="noise"/>
-      <feColorMatrix in="noise" type="matrix" values="0 0 0 0 0.6 0 0 0 0 0.6 0 0 0 0 0.6 0 0 0 0.12 0" result="grain"/>
-      <feBlend in="SourceGraphic" in2="grain" mode="overlay"/>
-    </filter>
-    <radialGradient id="washer" cx="35%" cy="21%" r="82%">
-      <stop offset="0%" stop-color="#fffbed"/>
-      <stop offset="22%" stop-color="#d6d2c7"/>
-      <stop offset="47%" stop-color="#8a8c87"/>
-      <stop offset="70%" stop-color="#393d3d"/>
-      <stop offset="88%" stop-color="#141717"/>
-      <stop offset="100%" stop-color="#050606"/>
-    </radialGradient>
-    <radialGradient id="button" cx="38%" cy="23%" r="74%">
-      <stop offset="0%" stop-color="#fffdf4"/>
-      <stop offset="24%" stop-color="#d7d3c8"/>
-      <stop offset="54%" stop-color="#8c8e88"/>
-      <stop offset="78%" stop-color="#464946"/>
-      <stop offset="100%" stop-color="#151716"/>
-    </radialGradient>
-    <linearGradient id="slash" x1="0" x2="1" y1="0" y2="1">
-      <stop offset="0%" stop-color="#fff" stop-opacity="0.56"/>
-      <stop offset="42%" stop-color="#fff" stop-opacity="0.08"/>
-      <stop offset="100%" stop-color="#000" stop-opacity="0.28"/>
-    </linearGradient>
-  </defs>
-  <g filter="url(#shadow)">
-    <ellipse cx="134" cy="156" rx="91" ry="56" fill="#000" opacity="0.2"/>
-    <circle cx="128" cy="128" r="112" fill="url(#washer)" filter="url(#noise)"/>
-    <circle cx="128" cy="128" r="101" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="3"/>
-    <circle cx="128" cy="128" r="91" fill="none" stroke="rgba(0,0,0,0.58)" stroke-width="7"/>
-    <g opacity="0.65">${marks}</g>
-    <circle cx="128" cy="${122 + down}" r="69" fill="url(#button)" stroke="rgba(255,255,255,0.42)" stroke-width="3.8" filter="url(#noise)"/>
-    <circle cx="128" cy="${122 + down}" r="50" fill="none" stroke="rgba(255,255,255,0.21)" stroke-width="3"/>
-    <ellipse cx="103" cy="${91 + down}" rx="25" ry="10" fill="#fff" opacity="0.42" transform="rotate(-24 103 ${91 + down})"/>
-    <path d="M74 ${100 + down} C96 ${74 + down}, 146 ${69 + down}, 177 ${101 + down}" fill="none" stroke="url(#slash)" stroke-width="18" opacity="0.56" stroke-linecap="round"/>
-    <ellipse cx="151" cy="${147 + down}" rx="28" ry="10" fill="#000" opacity="0.22" transform="rotate(-22 151 ${147 + down})"/>
-    <circle cx="128" cy="${122 + down}" r="83" fill="none" stroke="#f7d478" stroke-opacity="${glow}" stroke-width="8"/>
-  </g>
-</svg>`;
-}
-
-function ledSvg(active) {
-  const glass = active ? "#ffcf67" : "#2a3032";
-  const core = active ? "#fff6b8" : "#111415";
-  const glow = active ? 0.44 : 0;
-  return `
-<svg xmlns="http://www.w3.org/2000/svg" width="${LED_SIZE}" height="${LED_SIZE}" viewBox="0 0 ${LED_SIZE} ${LED_SIZE}">
-  <defs>
-    <filter id="ledShadow" x="-40%" y="-40%" width="180%" height="180%">
-      <feDropShadow dx="0" dy="7" stdDeviation="5" flood-color="#000" flood-opacity="0.6"/>
-      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#ffcf67" flood-opacity="${glow}"/>
-    </filter>
-    <radialGradient id="bezel" cx="35%" cy="25%" r="76%">
-      <stop offset="0%" stop-color="#f1ecdc"/>
-      <stop offset="35%" stop-color="#757a78"/>
-      <stop offset="70%" stop-color="#202425"/>
-      <stop offset="100%" stop-color="#050606"/>
-    </radialGradient>
-    <radialGradient id="glass" cx="38%" cy="26%" r="72%">
-      <stop offset="0%" stop-color="#fffdf4"/>
-      <stop offset="22%" stop-color="${core}"/>
-      <stop offset="62%" stop-color="${glass}"/>
-      <stop offset="100%" stop-color="#050606"/>
-    </radialGradient>
-  </defs>
-  <g filter="url(#ledShadow)">
-    <circle cx="48" cy="48" r="39" fill="url(#bezel)"/>
-    <circle cx="48" cy="48" r="27" fill="url(#glass)" stroke="rgba(255,255,255,0.32)" stroke-width="2.2"/>
-    <ellipse cx="39" cy="34" rx="11" ry="6" fill="#fff" opacity="${active ? 0.62 : 0.18}" transform="rotate(-26 39 34)"/>
-    <circle cx="48" cy="48" r="17" fill="${active ? "#ffb634" : "#121618"}" opacity="${active ? 0.38 : 0.42}"/>
-  </g>
-</svg>`;
-}
-
-async function writeSingle(svg, fileName, size) {
-  await sharp(Buffer.from(svg))
-    .resize(size, size)
-    .webp({ quality: 94, alphaQuality: 98, effort: 6 })
-    .toFile(path.join(outDir, fileName));
-}
-
 await mkdir(outDir, { recursive: true });
 await Promise.all([
   writeKnobFilmstrip("black", "knob-black-atlas.webp"),
   writeKnobFilmstrip("metal", "knob-metal-atlas.webp"),
   writeKnobFilmstrip("cream", "knob-cream-atlas.webp"),
-  writeSingle(footswitchSvg("off"), "footswitch-chrome-off.webp", FOOTSWITCH_SIZE),
-  writeSingle(footswitchSvg("on"), "footswitch-chrome-on.webp", FOOTSWITCH_SIZE),
-  writeSingle(footswitchSvg("pressed"), "footswitch-chrome-pressed.webp", FOOTSWITCH_SIZE),
-  writeSingle(ledSvg(false), "led-glass-off.webp", LED_SIZE),
-  writeSingle(ledSvg(true), "led-glass-on.webp", LED_SIZE),
 ]);
 
 console.log(`Generated NAM control assets in ${outDir}`);

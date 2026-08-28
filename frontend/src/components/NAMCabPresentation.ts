@@ -40,7 +40,9 @@ export function resolveNAMRackCabPresentation({
     return {
       mode: "embedded",
       label: "Cab included in amp capture",
-      status: "The full-rig capture already includes its cabinet.",
+      status: hasCabIR
+        ? "Embedded cab is active. The retained external IR is bypassed and will return with an amp-only Capture."
+        : "Embedded cab is active, so the external Cab/IR stage is bypassed.",
       recommendedAction: "browse-amp-only-captures",
       recommendedActionLabel: "Browse amp-only captures",
       needsCabIR: false,

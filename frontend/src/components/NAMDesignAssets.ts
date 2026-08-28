@@ -3,9 +3,11 @@
 export type NAMDesignBodyAssetId =
   | "amp-head-body"
   | "amp-head-body-wide"
+  | "amp-head-body-v5"
   | "cabinet-body"
   | "cab-room-integrated-body"
   | "expression-body"
+  | "graphic-eq-body-v6"
   | "ir-shaper-panel-body"
   | "mic-panel-body"
   | "rack-unit-body"
@@ -19,6 +21,7 @@ export type NAMDesignBodyAssetId =
   | "stompbox-body-red"
   | "stompbox-body-red-wide"
   | "stompbox-body-stone"
+  | "stompbox-body-white-wide"
   | "wide-pedal-body-copper"
   | "wide-pedal-body-copper-deep"
   | "wide-pedal-body-copper-tall"
@@ -35,16 +38,22 @@ export type NAMDesignControlAssetId =
   | "footswitch-chrome-on-top"
   | "footswitch-chrome-pressed-top"
   | "knob-black-top"
+  | "knob-black-panel-v4"
   | "knob-blue-steel-top"
+  | "knob-blue-steel-panel-v4"
   | "knob-cream-top"
   | "knob-metal-top"
   | "led-amber-off-top"
+  | "led-amber-off-panel-v4"
   | "led-amber-on-top"
+  | "led-amber-on-panel-v4"
   | "mic-dynamic-57"
   | "mic-ribbon-121"
   | "screw-phillips-top"
   | "slider-metal-top"
+  | "slider-metal-cap-v4"
   | "toggle-chrome-top"
+  | "toggle-chrome-panel-v4"
   | "washer-chrome-top";
 
 type NAMDesignAssetBase<TId extends string> = {
@@ -69,7 +78,13 @@ export type NAMDesignAsset = NAMDesignBodyAsset | NAMDesignControlAsset;
 // Keep the source PNG masters beside these runtime derivatives, but make the
 // Vite dependency set explicit. A dynamic `new URL(...${fileName})` causes Vite
 // to package every sibling (including the 40+ MB PNG masters).
-const designBodyHrefs = import.meta.glob("../assets/nam/design/bodies/*.webp", {
+const designBodyHrefs = import.meta.glob([
+  "../assets/nam/design/bodies/*.webp",
+  // Generator intermediates stay available to the asset-preparation tools,
+  // but only the approved faceplates belong in the runtime bundle.
+  "!../assets/nam/design/bodies/amp-head-body-v4.webp",
+  "!../assets/nam/design/bodies/graphic-eq-body-v3.webp",
+], {
   eager: true,
   import: "default",
   query: "?url",
@@ -111,9 +126,11 @@ const control = (id: NAMDesignControlAssetId, fileName: string, width: number, h
 export const NAM_DESIGN_BODY_ASSETS = {
   "amp-head-body": body("amp-head-body", "amp-head-body.webp", 1551, 598),
   "amp-head-body-wide": body("amp-head-body-wide", "amp-head-body-wide.webp", 2272, 598),
+  "amp-head-body-v5": body("amp-head-body-v5", "amp-head-body-v5.webp", 2160, 1035),
   "cabinet-body": body("cabinet-body", "cabinet-body.webp", 1328, 888),
   "cab-room-integrated-body": body("cab-room-integrated-body", "cab-room-integrated-body.webp", 1634, 962),
   "expression-body": body("expression-body", "expression-body.webp", 582, 1485),
+  "graphic-eq-body-v6": body("graphic-eq-body-v6", "graphic-eq-body-v6.webp", 2160, 720),
   "ir-shaper-panel-body": body("ir-shaper-panel-body", "ir-shaper-panel-body.webp", 1542, 710),
   "mic-panel-body": body("mic-panel-body", "mic-panel-body.webp", 1542, 710),
   "rack-unit-body": body("rack-unit-body", "rack-unit-body.webp", 2101, 434),
@@ -127,6 +144,7 @@ export const NAM_DESIGN_BODY_ASSETS = {
   "stompbox-body-red": body("stompbox-body-red", "stompbox-body-red.webp", 694, 1340),
   "stompbox-body-red-wide": body("stompbox-body-red-wide", "stompbox-body-red-wide.webp", 900, 1340),
   "stompbox-body-stone": body("stompbox-body-stone", "stompbox-body-stone.webp", 694, 1340),
+  "stompbox-body-white-wide": body("stompbox-body-white-wide", "stompbox-body-white-wide.webp", 900, 1340),
   "wide-pedal-body-copper": body("wide-pedal-body-copper", "wide-pedal-body-copper.webp", 1355, 662),
   "wide-pedal-body-copper-deep": body("wide-pedal-body-copper-deep", "wide-pedal-body-copper-deep.webp", 1355, 968),
   "wide-pedal-body-copper-tall": body("wide-pedal-body-copper-tall", "wide-pedal-body-copper-tall.webp", 1355, 1078),
@@ -144,16 +162,22 @@ export const NAM_DESIGN_CONTROL_ASSETS = {
   "footswitch-chrome-on-top": control("footswitch-chrome-on-top", "footswitch-chrome-on-top.webp", 512, 512),
   "footswitch-chrome-pressed-top": control("footswitch-chrome-pressed-top", "footswitch-chrome-pressed-top.webp", 512, 512),
   "knob-black-top": control("knob-black-top", "knob-black-top.webp", 512, 512),
+  "knob-black-panel-v4": control("knob-black-panel-v4", "knob-black-panel-v4.webp", 384, 384),
   "knob-blue-steel-top": control("knob-blue-steel-top", "knob-blue-steel-top.webp", 512, 512),
+  "knob-blue-steel-panel-v4": control("knob-blue-steel-panel-v4", "knob-blue-steel-panel-v4.webp", 384, 384),
   "knob-cream-top": control("knob-cream-top", "knob-cream-top.webp", 512, 512),
   "knob-metal-top": control("knob-metal-top", "knob-metal-top.webp", 512, 512),
   "led-amber-off-top": control("led-amber-off-top", "led-amber-off-top.webp", 512, 512),
+  "led-amber-off-panel-v4": control("led-amber-off-panel-v4", "led-amber-off-panel-v4.webp", 320, 320),
   "led-amber-on-top": control("led-amber-on-top", "led-amber-on-top.webp", 512, 512),
+  "led-amber-on-panel-v4": control("led-amber-on-panel-v4", "led-amber-on-panel-v4.webp", 320, 320),
   "mic-dynamic-57": control("mic-dynamic-57", "mic-dynamic-57.webp", 190, 700),
   "mic-ribbon-121": control("mic-ribbon-121", "mic-ribbon-121.webp", 190, 700),
   "screw-phillips-top": control("screw-phillips-top", "screw-phillips-top.webp", 512, 512),
   "slider-metal-top": control("slider-metal-top", "slider-metal-top.webp", 512, 512),
+  "slider-metal-cap-v4": control("slider-metal-cap-v4", "slider-metal-cap-v4.webp", 540, 280),
   "toggle-chrome-top": control("toggle-chrome-top", "toggle-chrome-top.webp", 512, 512),
+  "toggle-chrome-panel-v4": control("toggle-chrome-panel-v4", "toggle-chrome-panel-v4.webp", 320, 320),
   "washer-chrome-top": control("washer-chrome-top", "washer-chrome-top.webp", 512, 512),
 } as const satisfies Record<NAMDesignControlAssetId, NAMDesignControlAsset>;
 

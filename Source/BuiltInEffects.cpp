@@ -1662,6 +1662,14 @@ static void resetCompressorSmoother(
     smoother.setCurrentAndTargetValue(value);
 }
 
+static float sanitiseCompressorSidechainHPF(float frequency) noexcept
+{
+    if (! std::isfinite(frequency))
+        return 20.0f;
+
+    return frequency;
+}
+
 void S13Compressor::getStyleBallistics(float& atkMs, float& relMs) const
 {
     const auto styleVal = static_cast<Style>(static_cast<int>(style.load()));
@@ -1714,7 +1722,11 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
             0.0f, 24.0f,
             knee.load(std::memory_order_relaxed)));
 
-    lastSCHPFFreq = juce::jlimit(20.0f, 500.0f, sidechainHPF.load());
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
+    lastSCHPFFreq = juce::jlimit(20.0f, 500.0f, requestedSCHPF);
     auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastSCHPFFreq);
     scHPF_L.coefficients = hpfCoeffs;
     scHPF_R.coefficients = hpfCoeffs;
@@ -1739,6 +1751,9 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
     scHPFCoefficientsSmoothing = false;
     scHPF_L.reset();
     scHPF_R.reset();
+    smoothedSidechainHPFWet.reset(sampleRate, 0.005);
+    smoothedSidechainHPFWet.setCurrentAndTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
 
     juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 1 };
     lookaheadDelayL.prepare(spec);
@@ -1800,9 +1815,13 @@ void S13Compressor::reset()
         juce::jlimit(
             0.0f, 24.0f,
             knee.load(std::memory_order_relaxed)));
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
     lastSCHPFFreq = juce::jlimit(
         20.0f, 500.0f,
-        sidechainHPF.load(std::memory_order_relaxed));
+        requestedSCHPF);
     if (! scHPFCoefficientLut.empty())
     {
         targetSCHPFCoefficients =
@@ -1820,6 +1839,8 @@ void S13Compressor::reset()
     scHPFCoefficientsSmoothing = false;
     scHPF_L.reset();
     scHPF_R.reset();
+    smoothedSidechainHPFWet.setCurrentAndTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
     lookaheadDelayL.reset();
     lookaheadDelayR.reset();
     activeLookaheadSamples =
@@ -1854,9 +1875,15 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const int numChannels = buffer.getNumChannels();
     if (numChannels < 1 || numSamples == 0) return;
 
-    // Update sidechain HPF
-    const float scFreq = juce::jlimit(20.0f, 500.0f, sidechainHPF.load());
-    if (std::abs(scFreq - lastSCHPFFreq) > 1.0f)
+    // Keep the filter warm even while bypassed, then dezipper detector-path
+    // changes by crossfading between the dry and high-passed signals.
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
+    const float scFreq = juce::jlimit(20.0f, 500.0f, requestedSCHPF);
+    if (sidechainHPFEnabled
+        && std::abs(scFreq - lastSCHPFFreq) > 1.0f)
     {
         lastSCHPFFreq = scFreq;
         if (! scHPFCoefficientLut.empty())
@@ -1871,6 +1898,8 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
             scHPFCoefficientsSmoothing = true;
         }
     }
+    smoothedSidechainHPFWet.setTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
 
     float atkMs, relMs;
     getStyleBallistics(atkMs, relMs);
@@ -1949,8 +1978,17 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         const float dryL = dataL[i];
         const float dryR = dataR ? dataR[i] : dryL;
 
-        float scL = scHPF_L.processSample(dryL);
-        float scR = dataR ? scHPF_R.processSample(dryR) : scL;
+        const float filteredSCL = scHPF_L.processSample(dryL);
+        const float filteredSCR = dataR
+            ? scHPF_R.processSample(dryR)
+            : filteredSCL;
+        const float sidechainHPFWet =
+            smoothedSidechainHPFWet.getNextValue();
+        const float scL =
+            dryL + (filteredSCL - dryL) * sidechainHPFWet;
+        const float scR = dataR
+            ? dryR + (filteredSCR - dryR) * sidechainHPFWet
+            : scL;
         const float linkedPeak = juce::jmax(std::abs(scL), std::abs(scR));
         const float averagePeak = (std::abs(scL) + std::abs(scR)) * 0.5f;
         const float peakLevel = averagePeak + (linkedPeak - averagePeak) * link;

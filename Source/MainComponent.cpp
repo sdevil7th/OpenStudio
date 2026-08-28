@@ -473,6 +473,26 @@ juce::File getWebView2UserDataFolder()
         .getChildFile("WebView2UserData");
 }
 
+juce::WebBrowserComponent::Options getEmbeddedBrowserBaseOptions()
+{
+    auto options = juce::WebBrowserComponent::Options()
+                       .withBackend(getPreferredBrowserBackend())
+                       .withKeepPageLoadedWhenBrowserIsHidden();
+
+#if JUCE_WINDOWS
+    // This writable per-user location is part of the browser availability
+    // contract, not just a runtime preference.  A Win32 WebView2 without an
+    // explicit UDF tries to create one beside the executable, which fails for
+    // normal users when OpenStudio is installed under Program Files.
+    options = options.withWinWebView2Options(
+        juce::WebBrowserComponent::Options::WinWebView2()
+            .withUserDataFolder(getWebView2UserDataFolder())
+            .withStatusBarDisabled());
+#endif
+
+    return options;
+}
+
 juce::File getStartupLogFile()
 {
     auto logDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -2816,6 +2836,23 @@ bool isSecureNAMDownloadURL(const juce::URL& url)
     return url.getScheme().equalsIgnoreCase("https") && url.getDomain().isNotEmpty();
 }
 
+bool isAllowedExternalBrowserURL(juce::String rawURL)
+{
+    rawURL = rawURL.trim();
+    if (rawURL.isEmpty()
+        || rawURL.containsAnyOf("\r\n\t")
+        || (! rawURL.startsWithIgnoreCase("https://")
+            && ! rawURL.startsWithIgnoreCase("http://")))
+    {
+        return false;
+    }
+
+    const juce::URL url(rawURL);
+    const auto scheme = url.getScheme();
+    return (scheme.equalsIgnoreCase("https") || scheme.equalsIgnoreCase("http"))
+        && url.getDomain().isNotEmpty();
+}
+
 juce::URL resolveNAMDownloadRedirect(const juce::URL& currentURL, juce::String location)
 {
     location = location.trim();
@@ -3940,6 +3977,7 @@ juce::String buildStartupSelfTestText(const StartupDependencyStatus& dependencyS
     lines.add("missingFeatureRuntimeAssets=" + dependencyStatus.missingFeatureRuntimeAssets.joinIntoString(" | "));
     lines.add("startupLogPath=" + getStartupLogFile().getFullPathName());
 #if JUCE_WINDOWS
+    lines.add("webView2UserDataPath=" + getWebView2UserDataFolder().getFullPathName());
     lines.add("webView2RuntimeVersion=" + dependencyStatus.webView2RuntimeVersion);
     lines.add("vcRedistInstalled=" + juce::String(dependencyStatus.vcRedistInstalled ? "true" : "false"));
     lines.add("vcRedistVersion=" + dependencyStatus.vcRedistVersion);
@@ -4213,18 +4251,7 @@ juce::var MainComponent::discardNAMPreviewIfUnused(juce::var recordPayload,
 
 juce::var MainComponent::buildStartupSelfTestReport()
 {
-    const auto preferredBackend = getPreferredBrowserBackend();
-    auto checkOptions = juce::WebBrowserComponent::Options()
-                            .withBackend(preferredBackend)
-                            .withKeepPageLoadedWhenBrowserIsHidden();
-
-#if JUCE_WINDOWS
-    checkOptions = checkOptions.withWinWebView2Options(
-        juce::WebBrowserComponent::Options::WinWebView2()
-            .withUserDataFolder(getWebView2UserDataFolder())
-            .withStatusBarDisabled());
-#endif
-
+    const auto checkOptions = getEmbeddedBrowserBaseOptions();
     const auto supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
     const auto dependencyStatus = evaluateStartupDependencies(supported);
 
@@ -4242,6 +4269,7 @@ juce::var MainComponent::buildStartupSelfTestReport()
     report->setProperty("missingFeatureRuntimeAssets", dependencyStatus.missingFeatureRuntimeAssets.joinIntoString("\n"));
     report->setProperty("startupLogPath", getStartupLogFile().getFullPathName());
 #if JUCE_WINDOWS
+    report->setProperty("webView2UserDataPath", getWebView2UserDataFolder().getFullPathName());
     report->setProperty("webView2RuntimeVersion", dependencyStatus.webView2RuntimeVersion);
     report->setProperty("vcRedistInstalled", dependencyStatus.vcRedistInstalled);
     report->setProperty("vcRedistVersion", dependencyStatus.vcRedistVersion);
@@ -4281,17 +4309,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
       windowRole(roleIn),
       windowInstanceId(windowInstanceIdIn),
       windowCallbacks(std::move(callbacksIn)),
-      webView (juce::WebBrowserComponent::Options()
-                   .withBackend (getPreferredBrowserBackend())
-                   .withKeepPageLoadedWhenBrowserIsHidden()
-#if JUCE_WINDOWS
-                   .withWinWebView2Options (
-                       juce::WebBrowserComponent::Options::WinWebView2()
-                           .withUserDataFolder (juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                                                    .getChildFile ("OpenStudio")
-                                                    .getChildFile ("WebView2UserData"))
-                           .withStatusBarDisabled())
-#endif
+      webView (getEmbeddedBrowserBaseOptions()
                    .withNativeIntegrationEnabled()
                    .withResourceProvider ([this] (const juce::String& path) -> std::optional<juce::WebBrowserComponent::Resource> {
                        const auto requestedPath = path.upToFirstOccurrenceOf("?", false, false)
@@ -4471,6 +4489,22 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                          juce::ignoreUnused(args);
                          // Return the current audio setup as a JSON object
                          completion (audioEngine.getAudioDeviceSetup());
+                    })
+                    .withNativeFunction ("getNAMRackOversamplingFactor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                         juce::ignoreUnused(args);
+                         completion(audioEngine.getNAMRackOversamplingFactor());
+                    })
+                    .withNativeFunction ("setNAMRackOversamplingFactor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                         if (args.size() != 1)
+                         {
+                             completion(false);
+                             return;
+                         }
+                         const int factor = static_cast<int>(args[0]);
+                         juce::MessageManager::callAsync(
+                             [this, factor, completion = std::move(completion)]() mutable {
+                                 completion(audioEngine.setNAMRackOversamplingFactor(factor));
+                             });
                     })
                     .withNativeFunction ("openAudioDeviceControlPanel", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                          juce::ignoreUnused(args);
@@ -4797,6 +4831,17 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                            invalidateNAMRackTopology();
                            completion(audioEngine.removeMasterFX((int)args[0]));
+                       } else {
+                           completion(false);
+                       }
+                   })
+                   .withNativeFunction ("reorderMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 2
+                           && (args[0].isInt() || args[0].isDouble())
+                           && (args[1].isInt() || args[1].isDouble())) {
+                           const juce::ScopedLock processMutationLock(namModelMutationStateLock);
+                           invalidateNAMRackTopology();
+                           completion(audioEngine.reorderMasterFX((int)args[0], (int)args[1]));
                        } else {
                            completion(false);
                        }
@@ -5593,6 +5638,38 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            completion(juce::Array<juce::var>());
                        }
                    })
+                   .withNativeFunction ("getAudioPeakAmplitude", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() != 3
+                           || ! args[0].isString()
+                           || (! args[1].isDouble() && ! args[1].isInt())
+                           || (! args[2].isDouble() && ! args[2].isInt()))
+                       {
+                           completion(-1.0);
+                           return;
+                       }
+
+                       const juce::String filePath = args[0].toString();
+                       const double offsetSeconds = static_cast<double>(args[1]);
+                       const double durationSeconds = static_cast<double>(args[2]);
+                       juce::Component::SafePointer<MainComponent> safeThis(this);
+                       clipPeakAnalysisPool.addJob([
+                           safeThis,
+                           filePath,
+                           offsetSeconds,
+                           durationSeconds,
+                           completion]() mutable {
+                           if (safeThis == nullptr)
+                               return;
+                           const double peak = safeThis->audioEngine.getAudioPeakAmplitude(
+                               filePath,
+                               offsetSeconds,
+                               durationSeconds);
+                           juce::MessageManager::callAsync([safeThis, completion, peak]() mutable {
+                               if (safeThis != nullptr)
+                                   completion(peak);
+                           });
+                       });
+                   })
                    .withNativeFunction ("refreshWaveformPeaks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 1) {
                            completion(audioEngine.refreshWaveformPeaks(args[0].toString()));
@@ -5939,7 +6016,42 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             return;
                         }
 
-                        completion(juce::URL(args[0].toString()).launchInDefaultBrowser());
+                        const auto url = args[0].toString().trim();
+                        if (! isAllowedExternalBrowserURL(url))
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        completion(juce::URL(url).launchInDefaultBrowser());
+                    })
+                    .withNativeFunction ("revealLocalPath", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() == 0 || ! args[0].isString())
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        const auto path = args[0].toString();
+                        if (path.trim().isEmpty()
+                            || path.containsAnyOf("\r\n")
+                            || ! juce::File::isAbsolutePath(path))
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        const juce::File localPath(path);
+                        if (! localPath.existsAsFile() && ! localPath.isDirectory())
+                        {
+                            completion(false);
+                            return;
+                        }
+
+                        // revealToUser opens the containing file manager and never
+                        // executes the selected file.
+                        localPath.revealToUser();
+                        completion(true);
                     })
                     .withNativeFunction ("createTONE3000AuthRequest", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto clientId = args.size() > 0 ? args[0].toString() : juce::String();
@@ -6225,7 +6337,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             if (slot == "pedal")
                             {
                                 if (localPath.isNotEmpty())
+                                {
                                     state->setProperty("pedalModelPath", localPath);
+                                    // A fresh user-selected NAM should publish its
+                                    // highest-fidelity graph. Explicit preset/project
+                                    // recalls still carry and preserve their saved size.
+                                    state->setProperty("pedalModelSize", 1.0);
+                                }
                                 else
                                     state->setProperty("clearPedalModel", true);
                             }
@@ -6239,7 +6357,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             else
                             {
                                 if (localPath.isNotEmpty())
+                                {
                                     state->setProperty("ampModelPath", localPath);
+                                    state->setProperty("ampModelSize", 1.0);
+                                }
                                 else
                                     state->setProperty("clearAmpModel", true);
                             }
@@ -7522,7 +7643,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                                 juce::File outFile(outputPath);
                                 outFile.deleteFile();
-                                std::unique_ptr<juce::FileOutputStream> stream(outFile.createOutputStream());
+                                std::unique_ptr<juce::OutputStream> stream(outFile.createOutputStream());
 
                                 if (!stream) {
                                     juce::MessageManager::callAsync([completion]() { (*completion)(false); });
@@ -7533,15 +7654,17 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 int outSampleRate = targetSampleRate > 0 ? targetSampleRate : (int)reader->sampleRate;
                                 int outBitDepth = targetBitDepth > 0 ? targetBitDepth : (int)reader->bitsPerSample;
 
-                                std::unique_ptr<juce::AudioFormatWriter> writer(outputFormat->createWriterFor(
-                                    stream.get(), outSampleRate, (unsigned int)outChannels, outBitDepth, {}, 0));
+                                auto writer = outputFormat->createWriterFor(
+                                    stream,
+                                    juce::AudioFormatWriterOptions()
+                                        .withSampleRate(outSampleRate)
+                                        .withNumChannels(outChannels)
+                                        .withBitsPerSample(outBitDepth));
 
                                 if (!writer) {
                                     juce::MessageManager::callAsync([completion]() { (*completion)(false); });
                                     return;
                                 }
-
-                                stream.release(); // Writer takes ownership
 
                                 // Read and write in blocks
                                 const int blockSize = 8192;
@@ -9434,6 +9557,19 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                         return noteRenderGeneration.load() != renderGeneration || activeNoteRenderRequestGroup != requestGroupId;
                                     return fullClipRenderGeneration.load() != renderGeneration || activeFullClipRequestGroup != requestGroupId;
                                 };
+                                auto guardedCommit = [this, renderGeneration, requestGroupId, isPreviewSegment, isNoteRender]
+                                    (const std::function<void()>& commit) {
+                                        const juce::ScopedLock sl (pitchCorrectionJobLock);
+                                        const bool isCurrent = isPreviewSegment
+                                            ? previewRenderGeneration.load() == renderGeneration && activePreviewRequestGroup == requestGroupId
+                                            : (isNoteRender
+                                                ? noteRenderGeneration.load() == renderGeneration && activeNoteRenderRequestGroup == requestGroupId
+                                                : fullClipRenderGeneration.load() == renderGeneration && activeFullClipRequestGroup == requestGroupId);
+                                        if (! isCurrent)
+                                            return false;
+                                        commit();
+                                        return true;
+                                    };
                                 logPitchEditorFormant ("job starting clip=" + clipId
                                     + " requestId=" + requestId
                                     + " requestGroupId=" + requestGroupId
@@ -9443,7 +9579,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 const double jobStartDelayMs = static_cast<double> (juce::Time::currentTimeMillis() - queuedAtMs);
                                 auto result = shouldCancel()
                                     ? juce::var()
-                                    : audioEngine.applyPitchCorrection(trackId, clipId, notes, frames, globalFormantSemitones, windowStartSec, windowEndSec, renderMode, shouldCancel, jobStartDelayMs, isPreviewSegment ? renderGeneration : 0);
+                                    : audioEngine.applyPitchCorrection(trackId, clipId, notes, frames, globalFormantSemitones, windowStartSec, windowEndSec, renderMode, shouldCancel, jobStartDelayMs, isPreviewSegment ? renderGeneration : 0, guardedCommit);
                                 if (isNoteRender && pitchNoteHqPriorityGeneration.load() == renderGeneration)
                                     pitchNoteHqPriorityActive.store (false);
                                 bool success = result.isObject()
@@ -10246,6 +10382,42 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         audioEngine.getPlaybackEngine().clearAllPitchPreviewRoutes (args.size() >= 1 ? args[0].toString() : juce::String());
                         completion (true);
                     })
+                    .withNativeFunction ("cancelPitchCorrectionRequests", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.isEmpty())
+                        {
+                            completion (false);
+                            return;
+                        }
+
+                        const auto clipId = args[0].toString();
+                        const juce::File authoritativeFile (args.size() >= 2 ? args[1].toString() : juce::String());
+                        {
+                            // The same lock is held by the render commit callback. Therefore
+                            // cancellation either wins before a stale swap, or restores the
+                            // authoritative frontend source after a swap that just completed.
+                            const juce::ScopedLock sl (pitchCorrectionJobLock);
+                            ++previewRenderGeneration;
+                            ++noteRenderGeneration;
+                            ++fullClipRenderGeneration;
+                            activePreviewRequestGroup = {};
+                            activeNoteRenderRequestGroup = {};
+                            activeFullClipRequestGroup = {};
+
+                            auto& playbackEngine = audioEngine.getPlaybackEngine();
+                            playbackEngine.clearAllPitchPreviewRoutes (clipId);
+                            playbackEngine.cancelDeferredClipAudioFile (clipId);
+                            if (authoritativeFile.existsAsFile())
+                                playbackEngine.replaceClipAudioFile (clipId, authoritativeFile);
+                        }
+
+                        pitchNoteHqPriorityActive.store (false);
+                        previewSegmentPool.removeAllJobs (false, 0);
+                        noteRenderPool.removeAllJobs (false, 0);
+                        fullClipHQPool.removeAllJobs (false, 0);
+                        logPitchEditorFormant ("cancelled pitch correction requests clip=" + clipId
+                            + " authoritativeFile=" + authoritativeFile.getFullPathName());
+                        completion (true);
+                    })
                     .withNativeFunction ("clearPitchPreviewRoutesForCorrectedSources", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion (audioEngine.getPlaybackEngine().clearPitchPreviewRoutesForCorrectedSources());
                     })
@@ -10354,17 +10526,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     const auto packagedFrontend = getPackagedFrontendEntryPoint();
     const auto webViewUserDataDir = getWebView2UserDataFolder();
 
-    auto checkOptions = juce::WebBrowserComponent::Options()
-                            .withBackend(preferredBackend)
-                            .withKeepPageLoadedWhenBrowserIsHidden();
-
-#if JUCE_WINDOWS
-    checkOptions = checkOptions.withWinWebView2Options(
-        juce::WebBrowserComponent::Options::WinWebView2()
-            .withUserDataFolder(webViewUserDataDir)
-            .withStatusBarDisabled());
-#endif
-
+    const auto checkOptions = getEmbeddedBrowserBaseOptions();
     const bool supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
     const auto dependencyStatus = evaluateStartupDependencies(supported);
 
@@ -10905,6 +11067,11 @@ bool MainComponent::hasFrontendStartupReachedTerminalState() const
         || frontendStartupState == FrontendStartupState::timedOut;
 }
 
+bool MainComponent::hasFrontendStartupSucceeded() const
+{
+    return frontendStartupState == FrontendStartupState::ready;
+}
+
 juce::String MainComponent::getFrontendStartupStateDescription() const
 {
     return describeFrontendStartupState(frontendStartupState);
@@ -11350,18 +11517,8 @@ void MainComponent::repairWindowsPrerequisites()
 
 juce::var MainComponent::buildStartupDiagnostics() const
 {
-    auto checkOptions = juce::WebBrowserComponent::Options()
-                            .withBackend(getPreferredBrowserBackend())
-                            .withKeepPageLoadedWhenBrowserIsHidden();
-#if JUCE_WINDOWS
-    checkOptions = checkOptions.withWinWebView2Options(
-        juce::WebBrowserComponent::Options::WinWebView2()
-            .withUserDataFolder(getWebView2UserDataFolder())
-            .withStatusBarDisabled());
-#endif
-
     const auto dependencyStatus = evaluateStartupDependencies(
-        juce::WebBrowserComponent::areOptionsSupported(checkOptions));
+        juce::WebBrowserComponent::areOptionsSupported(getEmbeddedBrowserBaseOptions()));
     auto* diagnostics = new juce::DynamicObject();
     const auto selfTestReport = buildStartupSelfTestReport();
     diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
@@ -11397,11 +11554,11 @@ juce::Rectangle<int> MainComponent::getDesktopWorkAreaForCurrentWindow() const
     {
         const auto bounds = topLevel->getBounds();
         if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(bounds))
-            return display->userArea;
+            return display->userBounds.getSmallestIntegerContainer();
     }
 
     if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-        return display->userArea;
+        return display->userBounds.getSmallestIntegerContainer();
 
     return getScreenBounds();
 }
@@ -11656,6 +11813,9 @@ void MainComponent::timerCallback()
         obj->setProperty(
             "trackLevels",
             audioEngine.getMeterLevels());
+        obj->setProperty(
+            "midiInputLevels",
+            audioEngine.getMIDIInputLevels());
         obj->setProperty(
             "trackClipping",
             audioEngine.getMeterClipStates());

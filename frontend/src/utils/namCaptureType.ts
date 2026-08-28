@@ -45,24 +45,45 @@ function firstCaptureType(...values: unknown[]): NAMCaptureType {
   return "unknown";
 }
 
+function captureTypeFromModelLabel(...values: unknown[]): NAMCaptureType {
+  const label = values.map(text).filter(Boolean).join(" ").toLowerCase();
+  if (!label) return "unknown";
+  if (/\b(?:amp[ _-]?cab|cab(?:inet)? embedded|with cab|ir included|full[ _-]?rig)\b/.test(label)) {
+    return /\bfull[ _-]?rig\b/.test(label) ? "full_rig" : "amp_cab";
+  }
+  if (/\b(?:ir|raw\s*\+\s*ir)\b/.test(label)) return "amp_cab";
+  if (/\braw\b/.test(label)) return "amp";
+  return "unknown";
+}
+
 export function captureTypeForToneModel(tone: NAMCatalogTone, model: NAMCatalogModel): NAMCaptureType {
   const modelMetadata = record(model.metadata);
   const toneMetadata = record(tone.metadata);
-  const explicit = firstCaptureType(
+  const modelExplicit = firstCaptureType(
     modelMetadata.gear_type,
     modelMetadata.gearType,
     model.captureType,
     model.gear_type,
     model.gearType,
     model.gear,
+  );
+  if (modelExplicit !== "unknown") return modelExplicit;
+
+  // A pack may contain both RAW and cab-embedded child captures while the
+  // parent tone is broadly labelled "amp". Child naming is therefore more
+  // specific than pack-level metadata, but never overrides child metadata.
+  const modelLabelType = captureTypeFromModelLabel(model.name, model.title);
+  if (modelLabelType !== "unknown") return modelLabelType;
+
+  const toneExplicit = firstCaptureType(
     toneMetadata.gear_type,
     toneMetadata.gearType,
     tone.captureType,
     tone.gearType,
     tone.gear,
   );
-  if (explicit !== "unknown") return explicit;
-  return firstCaptureType(model.name, model.title, tone.title, tone.name, tone.description);
+  if (toneExplicit !== "unknown") return toneExplicit;
+  return firstCaptureType(tone.title, tone.name, tone.description);
 }
 
 export function captureTypeForInstalled(model: NAMInstalledModel): NAMCaptureType {

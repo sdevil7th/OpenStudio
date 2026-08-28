@@ -1,0 +1,428 @@
+/* NAMRackKnob component-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-rack-mixer-controls .nam-rack-control {
+  min-height: 104px;
+}
+
+.nam-rack-mixer-controls .nam-rack-control-knob {
+  padding: 9px 7px;
+}
+
+.nam-rack-mixer-controls .nam-rack-control {
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(13, 14, 13, 0.75), rgba(0, 0, 0, 0.22));
+}
+
+.nam-rack-mixer-controls .nam-rack-control {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.065), transparent 42%),
+    linear-gradient(180deg, rgba(23, 25, 22, 0.97), rgba(5, 6, 5, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    inset 0 -14px 24px rgba(0, 0, 0, 0.38),
+    0 10px 18px rgba(0, 0, 0, 0.2);
+}
+@media (max-width: 1100px) {
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control {
+    min-height: 96px;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-knob {
+    min-height: 96px;
+    padding: 8px 6px;
+  }
+}
+
+.nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 82px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.nam-neural-global-knob .nam-rack-knob-label,
+.nam-neural-global-knob .nam-rack-control strong {
+  color: rgba(36, 41, 54, 0.72);
+  font-size: 12px;
+}
+
+.nam-neural-control-anchor .nam-rack-control-knob {
+  width: 100%;
+  min-width: 62px;
+  min-height: 86px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.nam-neural-control-anchor .nam-rack-knob-label {
+  max-width: 86px;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: clamp(8px, 0.72vw, 11px);
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.nam-neural-control-anchor .nam-rack-control strong {
+  display: none;
+}
+
+.nam-neural-device[data-module="amp"] .nam-neural-control-anchor .nam-rack-control-knob {
+  min-width: 48px;
+  min-height: 72px;
+}
+
+.nam-neural-device[data-module="amp"] .nam-rack-knob-label {
+  max-width: 70px;
+  color: rgba(220, 222, 224, 0.78);
+  font-size: clamp(6.5px, 0.54vw, 8.5px);
+  letter-spacing: 0.08em;
+}
+
+.nam-neural-control-anchor .nam-rack-control-knob > strong {
+  display: none;
+  opacity: 0;
+}
+
+.nam-neural-device[data-skin="post-modulator-design-a"] .nam-rack-knob-label {
+  display: none;
+}
+
+.nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 72px;
+}
+
+.nam-neural-global-knob .nam-rack-knob-cap {
+  width: 62px;
+  height: 62px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 70px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+  width: 58px;
+  height: 58px;
+  border: 2px solid rgba(255, 255, 255, 0.66);
+  background:
+    radial-gradient(circle at 34% 24%, #fbfcff 0 18%, #dfe7f6 38%, #b5c0d2 68%, #798595 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.72),
+    inset 0 -7px 11px rgba(53, 64, 82, 0.24),
+    0 10px 13px rgba(70, 82, 106, 0.28);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap > span {
+  background: #242936;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-side-left .nam-neural-global-knob:nth-child(2) .nam-rack-knob-cap {
+  opacity: 0.72;
+  filter: saturate(0.75) brightness(0.92);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap {
+  width: 58px;
+  height: 58px;
+  border: 2px solid rgba(255, 255, 255, 0.66);
+  background:
+    radial-gradient(circle at 34% 24%, #fbfcff 0 18%, #dfe7f6 38%, #b5c0d2 68%, #798595 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.72),
+    inset 0 -7px 11px rgba(53, 64, 82, 0.24),
+    0 10px 13px rgba(70, 82, 106, 0.28);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap > span {
+  background: #242936;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-control-knob,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 66px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+  width: 54px;
+  height: 54px;
+  border-width: 2px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-control-knob,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 60px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+  width: 48px;
+  height: 48px;
+  border-width: 2px;
+  filter: saturate(0.82) contrast(0.88);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-label {
+  color: rgba(36, 41, 54, 0.66);
+  font-size: 11px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-disabled="true"] .nam-rack-knob-cap {
+  filter: saturate(0.42) contrast(0.72) brightness(1.12);
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-disabled="true"] .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob:not([data-bound="true"]) .nam-rack-knob-cap {
+  background:
+    radial-gradient(circle at 34% 24%, #eef3fb 0 16%, #c9d2df 42%, #8b96a7 100%);
+  filter: saturate(0.34) contrast(0.68) brightness(1.12);
+  box-shadow:
+    inset 0 1px 3px rgba(255, 255, 255, 0.52),
+    inset 0 -5px 9px rgba(50, 60, 78, 0.18),
+    0 6px 10px rgba(70, 82, 106, 0.16);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-disabled="true"] .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob:not([data-bound="true"]) .nam-rack-control strong {
+  color: rgba(35, 41, 54, 0.48);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-control-knob,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-control-knob {
+  min-height: 58px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+  width: 46px;
+  height: 46px;
+  border-width: 2px;
+  filter: saturate(0.86) contrast(0.92) brightness(1.03);
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.42),
+    inset 0 -4px 8px rgba(32, 39, 54, 0.22),
+    0 6px 10px rgba(53, 61, 76, 0.14);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-label,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-label {
+  font-size: 10px;
+  color: rgba(28, 35, 48, 0.72);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-active="false"] .nam-rack-control-knob,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob[data-active="false"] .nam-rack-control-knob {
+  min-height: 52px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-cap {
+  width: 38px;
+  height: 38px;
+  background:
+    radial-gradient(circle at 35% 24%, #f4f7fb 0 15%, #d6dee9 46%, #a9b3c2 100%);
+  filter: saturate(0.28) contrast(0.72) brightness(1.14);
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.62),
+    inset 0 -3px 7px rgba(56, 66, 84, 0.16),
+    0 4px 8px rgba(59, 70, 90, 0.1);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-active="false"] .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-label,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob[data-active="false"] .nam-rack-control strong,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-label {
+  color: rgba(45, 54, 70, 0.42);
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob .nam-rack-knob-cap {
+    width: 42px;
+    height: 42px;
+  }
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-cap,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-global-knob[data-active="false"] .nam-rack-knob-cap {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.nam-product[data-view="rack"] .nam-rack-knob-cap-raster,
+.nam-product[data-view="rack"] .nam-neural-global-knob .nam-rack-knob-cap-raster {
+  display: block;
+  width: clamp(46px, 4.2vw, 66px);
+  height: auto;
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  filter:
+    drop-shadow(0 7px 8px rgba(0, 0, 0, 0.58))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.08));
+  overflow: visible;
+  pointer-events: none;
+}
+
+.nam-product[data-view="rack"] .nam-rack-control-knob[data-size="large"] .nam-rack-knob-cap-raster,
+.nam-product[data-view="rack"] .nam-neural-control-anchor .nam-rack-control-knob[data-size="large"] .nam-rack-knob-cap-raster {
+  width: clamp(58px, 5.4vw, 86px);
+  max-width: 84%;
+}
+
+.nam-product[data-view="rack"] .nam-rack-knob-cap-raster > span {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background-repeat: no-repeat;
+  box-shadow: none;
+  transform: none;
+}
+
+.nam-product[data-view="rack"] .nam-rack-knob-cap-raster > span::before,
+.nam-product[data-view="rack"] .nam-rack-knob-cap-raster > span::after {
+  content: none;
+  display: none;
+}
+.nam-product[data-view="mixer"] .nam-rack-knob-cap-raster {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.nam-product[data-view="mixer"] .nam-rack-knob-cap-raster > span {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background-repeat: no-repeat;
+  box-shadow: none;
+  transform: none;
+}
+
+.nam-product[data-view="mixer"] .nam-rack-knob-cap-raster > span::before,
+.nam-product[data-view="mixer"] .nam-rack-knob-cap-raster > span::after {
+  content: none;
+  display: none;
+}
+@media (min-width: 1281px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control {
+    flex: 0 0 calc((100% - 16px) / 3);
+  }
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control {
+  min-width: 0;
+  min-height: 98px;
+  flex: 0 0 calc((100% - 8px) / 2);
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 5px;
+  color: #aeb5bc;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.2));
+  box-shadow: none;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-control[data-disabled="true"] {
+  filter: grayscale(0.82);
+  opacity: 0.42;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-control[data-disabled="true"] {
+  cursor: not-allowed;
+}
+
+@media (min-width: 1281px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control {
+    flex-basis: calc((100% - 16px) / 3);
+  }
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-select {
+  min-height: 72px;
+  display: grid;
+  align-content: center;
+  gap: 7px;
+  padding: 9px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-select select {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid rgba(218, 154, 69, 0.28);
+  border-radius: 4px;
+  color: #e5e8ea;
+  background: #0a0d0f;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-switch {
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  gap: 5px 7px;
+  padding: 9px;
+  text-align: left;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-switch strong {
+  grid-column: 2;
+  color: #747d86;
+  font-size: 9px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-switch > svg {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 14px;
+  height: 14px;
+  align-self: center;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-switch > span {
+  grid-column: 2;
+  min-width: 0;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls .nam-rack-control-switch[data-active="true"] {
+  border-color: rgba(218, 154, 69, 0.4);
+  color: #efb45d;
+  background: linear-gradient(180deg, rgba(218, 154, 69, 0.12), rgba(18, 14, 9, 0.9));
+}

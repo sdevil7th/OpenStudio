@@ -4,7 +4,7 @@ OpenStudio uses the following open-source libraries and dependencies.
 
 ---
 
-## JUCE 8.0.0
+## JUCE 9.0.1
 
 - **Website:** https://juce.com/
 - **License:** AGPLv3 / Commercial

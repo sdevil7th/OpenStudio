@@ -1,6 +1,7 @@
 # Pitch Renderer Research Notes
 
-Date: 2026-04-15
+- Started: 2026-04-15
+- Last consolidated: 2026-04-28
 
 Purpose:
 - capture primary-source research before more renderer implementation
@@ -82,6 +83,21 @@ Purpose:
   - onset stutter / seam artifact
   - formant/timbre drift on note changes
   - weak generalization from `pitchOrg` to `pitchTestOrg`
+
+## Consolidated architecture evidence
+
+The bounded root-cause and feasibility probes support three durable conclusions. Their numeric scores are historical, `diagnostic_only` evidence; they are useful for comparing the tested branches, but do not prove perceived quality or the absence of audible artifacts.
+
+1. Transition ownership is architectural, not another crossfade-tuning problem.
+   - The April 17 hard-case adaptive run still reported a `18.917 ms` maximum boundary/transient timing error, transient means of `1.598` at entry and `6.543` at exit, and `0.071` mean formant drift.
+   - The frozen `pitch_only_engine_v2_program` challenger reported `7.017` entry mel distance and `4.000` onset artifact even while its formant-drift diagnostic was `0.062`.
+   - The resulting design requirement is to own entry and exit as one transition pair, distinguish transient shell and first voiced cycles from the stable voiced core, and keep pitch-carrier ownership separate from timbre repair.
+2. The first clean-sheet decomposition probe was not a viable `engine-v3` starting point.
+   - Its shell/core/residual heuristic scored `0.511` on `pitchOrg_plus4` and `0.505` on `pitchTest_plus4`; both runs returned the probe's `stop` verdict.
+   - This rejects that specific heuristic, not every future redesign. Reopen a clean-sheet branch only after defining a materially stronger decomposition and transition-pair ownership model, then proving it in a bounded feasibility probe.
+3. Restoration remains a valid research direction, but the local proxy path is closed.
+   - The April 17 environment had a working CUDA runtime but no suitable note-local `voicefixer` or `demucs` restorer; `audio_separator` was available but did not meet the task, and `proxy_ml_restore_v1` had already been rejected.
+   - Do not treat package availability from that snapshot as a permanent dependency fact. The durable gate is that `FAM-ML-RESTORATION` may resume only with a materially stronger external, licensed, or research-backed restorer and a representative benchmark—not another local proxy.
 
 ## Primary-source findings
 
@@ -168,13 +184,15 @@ Source:
 - heuristic HPSS shell
 - scalar median HPSS shell
 - lightweight boundary-aligned phase-lock variant
+- the frozen `pitch_only_engine_v2_program` challenger
+- the first `engine-v3` shell/core/residual decomposition heuristic
 
 ### Still genuinely viable
 - a true research-grade phase-vocoder family:
   - identity / peak phase locking
   - or phase-gradient / RTPGHI-style integration
-- an offline restoration benchmark on top of the best current renderer
-- DDSP-style engine-v2 work if we accept a larger revamp
+- an offline restoration benchmark on top of the best current renderer, once a genuinely stronger restorer is available
+- DDSP-style or other conditioned source/filter redesign work if we accept a larger revamp and first pass a bounded decomposition/transition feasibility gate
 
 ### Lower priority or support only
 - WORLD as decomposition support only
@@ -182,15 +200,18 @@ Source:
 - more seam-only local overlap tweaks
 
 ## Recommended next queue
-1. `FAM-PVDR`
+1. Keep `pitch_only_adaptive_selector` as the production editor while alternatives remain benchmark-only.
+2. `FAM-PVDR`
    - proper phase-coherent phase-vocoder family
    - not another boundary-alignment patch
    - long/stable voiced regions first
-2. `FAM-ML-RESTORATION`
-   - offline benchmark on top of `pitch_only_adaptive_selector`
+3. `FAM-ML-RESTORATION`, conditional on acquiring a genuinely stronger restorer
+   - benchmark offline on top of `pitch_only_adaptive_selector`
    - treat artifacts as restoration rather than trying to make the base shifter perfect
-3. Broader validation sweep on `FAM-ADAPTIVE-SELECTOR`
+   - do not reopen with `proxy_ml_restore_v1` or a generic source separator
+4. Broader validation sweep on `FAM-ADAPTIVE-SELECTOR`
    - keep the current best editor stable while new work stays benchmark-only
+5. A clean-sheet engine only after a stronger decomposition/transition-pair design passes a small feasibility probe.
 
 ## Why this matters
 - The current repo pattern is clear:

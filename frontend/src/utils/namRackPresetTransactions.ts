@@ -3,8 +3,10 @@ import {
   NAM_RETIRED_COMPRESSOR_STATE_KEYS,
   NAM_RETIRED_INPUT_ROUTING_STATE_KEYS,
   NAM_RETIRED_LASER_STATE_KEYS,
+  NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS,
   NAM_RETIRED_PRECISION_DRIVE_STATE_KEYS,
   NAM_RETIRED_REVERB_V2_STATE_KEYS,
+  NAM_RETIRED_TAPE_ECHO_STATE_KEYS,
   pruneRetiredNAMRackInputRoutingState,
   sanitizeNAMRackDspState,
 } from "./namPortableState";
@@ -18,6 +20,49 @@ export type NAMModelQualityOption = {
   value: number;
   label: string;
 };
+
+export const NAM_FULL_MODEL_SIZE = 1 as const;
+export const NAM_RACK_DEFAULT_POST_FX_ORDER = [
+  "eq",
+  "mod",
+  "delay",
+  "reverb",
+] as const;
+
+export type NAMActivePresetKind = "factory" | "user" | null;
+
+/**
+ * The persisted edited bit is only a cache. Whenever a complete preset
+ * baseline exists, the audible/current snapshot is authoritative and can
+ * become clean again when an edit is returned exactly to its recalled value.
+ * Legacy identities without a baseline retain their old marker behaviour.
+ */
+export function deriveNAMRackPresetDirtyState(options: {
+  activePresetKind: NAMActivePresetKind;
+  hasBaseline: boolean;
+  differsFromBaseline: boolean;
+  legacyFactoryDiffers?: boolean;
+  persistedDirty: boolean;
+}): boolean {
+  if (options.activePresetKind && options.hasBaseline) {
+    return options.differsFromBaseline;
+  }
+  if (options.activePresetKind === "factory") {
+    return Boolean(options.legacyFactoryDiffers) || options.persistedDirty;
+  }
+  return options.persistedDirty;
+}
+
+export function shouldSynchronizeNAMRackPresetDirtyMarker(options: {
+  activePresetKind: NAMActivePresetKind;
+  hasBaseline: boolean;
+  derivedDirty: boolean;
+  persistedDirty: boolean;
+}): boolean {
+  return Boolean(options.activePresetKind)
+    && options.hasBaseline
+    && options.derivedDirty !== options.persistedDirty;
+}
 
 export type NAMHeaderPresetNavigation = {
   previous?: NAMHeaderPresetTarget;
@@ -277,6 +322,28 @@ function numericValues(value: unknown): Record<string, number> {
   return result;
 }
 
+/**
+ * A native model-state readback reports `unknown` capture types even for empty
+ * Pedal/Amp slots. Capture type is only part of a tone when that slot actually
+ * has a model; retaining the empty-slot sentinel in a preset baseline makes a
+ * freshly loaded preset appear edited against the equivalent live UI state.
+ */
+export function normalizeNAMRackSnapshotCaptureTypes(
+  value: unknown,
+): Partial<Record<"pedalDeclaredCaptureType" | "ampDeclaredCaptureType", string>> {
+  const source = asRecord(value);
+  const result: Partial<Record<"pedalDeclaredCaptureType" | "ampDeclaredCaptureType", string>> = {};
+  for (const [pathKey, typeKey] of [
+    ["pedalModelPath", "pedalDeclaredCaptureType"],
+    ["ampModelPath", "ampDeclaredCaptureType"],
+  ] as const) {
+    const modelPath = typeof source[pathKey] === "string" ? source[pathKey].trim() : "";
+    const captureType = typeof source[typeKey] === "string" ? source[typeKey].trim() : "";
+    if (modelPath && captureType) result[typeKey] = captureType;
+  }
+  return result;
+}
+
 export type NAMRackCompareReadbackTarget = {
   values: Readonly<Record<string, number>>;
   modelState?: Readonly<Record<string, unknown>>;
@@ -361,8 +428,13 @@ export function verifyNAMRackCompareReadback(
   }
 
   if (target.postFxOrder) {
-    if (!actualPostFxOrder || target.postFxOrder.length !== actualPostFxOrder.length) return false;
-    if (target.postFxOrder.some((moduleId, index) => moduleId !== actualPostFxOrder[index])) return false;
+    // Presets saved before rack-slot persistence have no namRackSlots.order.
+    // Native processing deliberately resolves that absence to the default
+    // post-FX order, so verification must compare against the same effective
+    // order instead of treating the missing legacy UI field as load failure.
+    const effectiveActualOrder = actualPostFxOrder ?? NAM_RACK_DEFAULT_POST_FX_ORDER;
+    if (target.postFxOrder.length !== effectiveActualOrder.length) return false;
+    if (target.postFxOrder.some((moduleId, index) => moduleId !== effectiveActualOrder[index])) return false;
   }
   return true;
 }
@@ -419,11 +491,14 @@ export function resolveNAMModelQualityOptionValue(
 export function migrateNAMRackModelQualityState(state: unknown): unknown {
   if (!state || typeof state !== "object" || Array.isArray(state)) return state;
   const root = state as Record<string, unknown>;
-  if (!root.modelState || typeof root.modelState !== "object" || Array.isArray(root.modelState)) {
-    return state;
-  }
-
-  const modelState = root.modelState as Record<string, unknown>;
+  const hasModelState = Boolean(
+    root.modelState
+      && typeof root.modelState === "object"
+      && !Array.isArray(root.modelState),
+  );
+  const modelState = hasModelState
+    ? root.modelState as Record<string, unknown>
+    : {};
   const values = asRecord(root.values);
   let legacySize: number | undefined;
   if (typeof values.namModelSize === "number" && Number.isFinite(values.namModelSize)) {
@@ -439,23 +514,92 @@ export function migrateNAMRackModelQualityState(state: unknown): unknown {
 
   const nextModelState = { ...modelState };
   let changed = false;
+  let modelStateChanged = false;
   for (const [pathKey, sizeKey] of [
     ["pedalModelPath", "pedalModelSize"],
     ["ampModelPath", "ampModelSize"],
   ] as const) {
     if (typeof modelState[pathKey] !== "string" || !modelState[pathKey].trim()) continue;
-    const normalizedSize = normalizedNAMModelSize(modelState[sizeKey], legacySize ?? 1);
+    const hasExplicitSize = typeof modelState[sizeKey] === "number"
+      && Number.isFinite(modelState[sizeKey]);
+    const normalizedSize = normalizedNAMModelSize(
+      hasExplicitSize ? modelState[sizeKey] : legacySize,
+      NAM_FULL_MODEL_SIZE,
+    );
     if (modelState[sizeKey] !== normalizedSize) {
       nextModelState[sizeKey] = normalizedSize;
       changed = true;
+      modelStateChanged = true;
     }
   }
 
-  return changed ? { ...root, modelState: nextModelState } : state;
+  const hasLegacyValue = Object.prototype.hasOwnProperty.call(values, "namModelSize");
+  const parameters = Array.isArray(root.parameters) ? root.parameters : undefined;
+  const nextParameters = parameters?.filter((parameter) => (
+    asRecord(parameter).id !== "namModelSize"
+  ));
+  const removedLegacyParameter = Boolean(
+    parameters && nextParameters && nextParameters.length !== parameters.length,
+  );
+  if (hasLegacyValue || removedLegacyParameter) changed = true;
+  if (!changed) return state;
+
+  const migrated: Record<string, unknown> = { ...root };
+  if (modelStateChanged) migrated.modelState = nextModelState;
+  if (hasLegacyValue) {
+    const nextValues = { ...values };
+    delete nextValues.namModelSize;
+    migrated.values = nextValues;
+  }
+  if (removedLegacyParameter) migrated.parameters = nextParameters;
+  return migrated;
 }
 
-export const CURRENT_NAM_EFFECTS_DSP_VERSION = 11 as const;
+export const CURRENT_NAM_EFFECTS_DSP_VERSION = 19 as const;
 export const CURRENT_NAM_REVERB_ENGINE_VERSION = 5 as const;
+
+/** The migrated native values are authoritative over optional sidecar tags. */
+export function namInstrumentProfileMetadataFromRackState(
+  state: unknown,
+): "guitar" | "bass" {
+  const root = asRecord(state);
+  const values = asRecord(root.values);
+  return normalizeNAMInstrumentProfile(values.instrumentProfile) === 1
+    ? "bass"
+    : "guitar";
+}
+
+export const NAM_RACK_PRIVATE_EQ_RECALL_VALUE_KEYS = new Set([
+  "eqHPFLastActiveHz",
+  "eqLPFLastActiveHz",
+  "preEqHPFLastActiveHz",
+  "preEqLPFLastActiveHz",
+]);
+
+/**
+ * Compares public/current rack values with a stored snapshot. Private cutoff
+ * memories are meaningful only when both snapshots came from authoritative
+ * native state; a public schema snapshot cannot observe them and must not
+ * manufacture a zero value that permanently dirties the preset.
+ */
+export function namRackSnapshotValuesDiffer(
+  current: Readonly<Record<string, number>>,
+  saved: Readonly<Record<string, number>>,
+) {
+  const ids = new Set([...Object.keys(current), ...Object.keys(saved)]);
+  for (const id of ids) {
+    const currentHasValue = Object.prototype.hasOwnProperty.call(current, id);
+    const savedHasValue = Object.prototype.hasOwnProperty.call(saved, id);
+    if (
+      NAM_RACK_PRIVATE_EQ_RECALL_VALUE_KEYS.has(id)
+      && (!currentHasValue || !savedHasValue)
+    ) {
+      continue;
+    }
+    if (Math.abs((current[id] ?? 0) - (saved[id] ?? 0)) > 0.0001) return true;
+  }
+  return false;
+}
 
 export const NAM_REVERB_VOICE_LABELS = ["Studio", "Plate", "Hall", "Room"] as const;
 
@@ -471,25 +615,35 @@ export function normalizeNAMReverbVoice(value: unknown): 0 | 1 | 2 | 3 {
 // from whichever rack instance happens to receive it.
 const CURRENT_NAM_RACK_COMPONENT_DEFAULTS: Readonly<Record<string, number>> = {
   instrumentProfile: 0,
+  eqHPFHz: 0,
+  eqLPFHz: 24000,
   eqLevelDb: 0,
   compressorEnabled: 0,
   compressorAttackMs: 21.9,
   compressorReleaseMs: 149.1,
   compressorToneDb: 0,
+  compressorIntensity: 0,
   compressorSidechainHPF: 1,
   compressorMix: 0.65,
   compressorVolumeDb: 0,
   compressorComp: 0.35,
-  tapeEchoEnabled: 0,
-  tapeEchoMix: 0.28,
-  tapeEchoTimeMs: 360,
-  tapeEchoFeedback: 0.28,
-  tapeEchoMod: 0.18,
-  tapeEchoTone: 0.58,
   octaverEnabled: 0,
   octaverDownMix: 0.32,
   octaverUpMix: 0.18,
   octaverDirectMix: 1,
+  preEqEnabled: 0,
+  preEq120Db: 0,
+  preEq250Db: 0,
+  preEq500Db: 0,
+  preEq1kDb: 0,
+  preEq2k5Db: 0,
+  preEq5kDb: 0,
+  preEq8kDb: 0,
+  preEq12kDb: 0,
+  preEqHPFHz: 0,
+  preEqLPFHz: 24000,
+  preEqHPFLastActiveHz: 80,
+  preEqLPFLastActiveHz: 12000,
   precisionDriveEnabled: 0,
   precisionDriveVolumeDb: 9,
   precisionDriveBright: 0.55,
@@ -509,6 +663,7 @@ const CURRENT_NAM_RACK_COMPONENT_DEFAULTS: Readonly<Record<string, number>> = {
   cabRoomWidth: 0.65,
   cabDoublerEnabled: 0,
   cabDoublerMix: 0.12,
+  cabDoublerDelayMs: 4.5,
   cabDoublerSpread: 0.65,
   chorusMix: 0.3,
   chorusRateHz: 0.75,
@@ -537,14 +692,18 @@ const CURRENT_NAM_RACK_COMPONENT_DEFAULTS: Readonly<Record<string, number>> = {
   reverbPreDelayMs: 18,
   reverbLowCutHz: 120,
   reverbShimmer: 0,
+  reverbPad: 0,
   reverbEnabled: 0,
 };
 
 const RETIRED_NAM_RACK_VALUE_KEYS = [
+  "namModelSize",
+  ...NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS,
   ...NAM_RETIRED_LASER_STATE_KEYS,
   ...NAM_RETIRED_REVERB_V2_STATE_KEYS,
   ...NAM_RETIRED_PRECISION_DRIVE_STATE_KEYS,
   ...NAM_RETIRED_COMPRESSOR_STATE_KEYS,
+  ...NAM_RETIRED_TAPE_ECHO_STATE_KEYS,
   ...NAM_RETIRED_AUDITION_STATE_KEYS,
   ...NAM_RETIRED_INPUT_ROUTING_STATE_KEYS,
 ] as const;
@@ -572,6 +731,47 @@ function clampNAMDelayValue(value: unknown, min: number, max: number, fallback: 
 function normalizeNAMDelayToggle(value: unknown, fallback: 0 | 1): 0 | 1 {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? (numeric >= 0.5 ? 1 : 0) : fallback;
+}
+
+function normalizeNAMGraphicEqHPF(value: unknown) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 20
+    ? Math.min(500, numeric)
+    : 0;
+}
+
+function normalizeNAMGraphicEqLPF(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric >= 22000) return 24000;
+  return Math.min(20000, Math.max(3000, numeric));
+}
+
+function normalizeNAMPreEqHPF(value: unknown) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 35
+    ? Math.min(180, numeric)
+    : 0;
+}
+
+function normalizeNAMPreEqLPF(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric >= 22000) return 24000;
+  return Math.min(20000, Math.max(3000, numeric));
+}
+
+function hasCurrentNAMPreEqValues(values: Record<string, unknown>) {
+  return normalizeNAMDelayToggle(values.preEqEnabled, 0) === values.preEqEnabled
+    && normalizeNAMPreEqHPF(values.preEqHPFHz) === values.preEqHPFHz
+    && normalizeNAMPreEqLPF(values.preEqLPFHz) === values.preEqLPFHz
+    && [
+      "preEq120Db", "preEq250Db", "preEq500Db", "preEq1kDb",
+      "preEq2k5Db", "preEq5kDb", "preEq8kDb", "preEq12kDb",
+    ].every((id) => clampNAMDelayValue(values[id], -12, 12, 0) === values[id]);
+}
+
+function hasCurrentNAMGraphicEqFilterValues(values: Record<string, unknown>) {
+  return normalizeNAMGraphicEqHPF(values.eqHPFHz) === values.eqHPFHz
+    && normalizeNAMGraphicEqLPF(values.eqLPFHz) === values.eqLPFHz;
 }
 
 export const NAM_DELAY_MODE_LABELS = ["Digital", "Tape", "Analog", "Multi", "Dual"] as const;
@@ -625,9 +825,17 @@ export function migrateLegacyNAMRackPresetDspState(
   options: { completePreset?: boolean; sourceEffectsVersion?: number } = {},
 ): unknown {
   if (!state || typeof state !== "object" || Array.isArray(state)) return state;
-  const root = state as Record<string, unknown>;
+  // Complete snapshots predate per-slot quality selectors. Fan the retired
+  // global size out first (or choose Full when no quality was stored), then
+  // let the normal value migration remove the retired global key. This keeps
+  // import, preset baselines, and Compare A/B on one deterministic policy.
+  const qualityState = options.completePreset
+    ? migrateNAMRackModelQualityState(state)
+    : state;
+  const root = qualityState as Record<string, unknown>;
   const dspState = asRecord(root.dspState);
-  const values = numericValues(root.values);
+  const rawValues = asRecord(root.values);
+  const values = numericValues(rawValues);
   const completePreset = options.completePreset === true;
 
   if (!completePreset) {
@@ -643,9 +851,16 @@ export function migrateLegacyNAMRackPresetDspState(
   }
 
   const ownRawEffectsVersion = Number(dspState.namEffectsDspVersion);
-  const rawEffectsVersion = Number.isFinite(ownRawEffectsVersion)
+  const storedEffectsVersion = Number.isFinite(ownRawEffectsVersion)
     ? ownRawEffectsVersion
     : options.sourceEffectsVersion;
+  // V13 was an accidental development-only serialization marker for an
+  // internal DSP refinement and carries the exact V12 preset schema. Keep it
+  // on the V12 side of the V14 filter migration so colliding keys cannot turn
+  // either new filter on unexpectedly.
+  const rawEffectsVersion = storedEffectsVersion === 13
+    ? 12
+    : storedEffectsVersion;
   const instrumentProfileRecognized = Number.isInteger(rawEffectsVersion)
     && rawEffectsVersion! >= 8
     && rawEffectsVersion! <= CURRENT_NAM_EFFECTS_DSP_VERSION;
@@ -653,6 +868,16 @@ export function migrateLegacyNAMRackPresetDspState(
     && rawEffectsVersion! >= 9
     && rawEffectsVersion! <= CURRENT_NAM_EFFECTS_DSP_VERSION;
   const requiresV8Migration = !instrumentProfileRecognized;
+  // Graphic-EQ cutoff state first shipped in V14 and remains unchanged.
+  const graphicEqFiltersRecognized = Number.isInteger(rawEffectsVersion)
+    && rawEffectsVersion! >= 14
+    && rawEffectsVersion! <= CURRENT_NAM_EFFECTS_DSP_VERSION;
+  const preEqRecognized = Number.isInteger(rawEffectsVersion)
+    && rawEffectsVersion! >= 16
+    && rawEffectsVersion! <= CURRENT_NAM_EFFECTS_DSP_VERSION;
+  const eightBandPreEqRecognized = Number.isInteger(rawEffectsVersion)
+    && rawEffectsVersion! >= 19
+    && rawEffectsVersion! <= CURRENT_NAM_EFFECTS_DSP_VERSION;
   const hasLegacyCompressorDetail = Object.prototype.hasOwnProperty.call(values, "compressorDetail");
   const hasCompressorAttack = Object.prototype.hasOwnProperty.call(values, "compressorAttackMs");
   const hasCompressorRelease = Object.prototype.hasOwnProperty.call(values, "compressorReleaseMs");
@@ -669,6 +894,45 @@ export function migrateLegacyNAMRackPresetDspState(
     values, "precisionDriveVolumeDb",
   ) ? values.precisionDriveVolumeDb : 0;
   const migratedValues = { ...CURRENT_NAM_RACK_COMPONENT_DEFAULTS, ...values };
+  migratedValues.preEqEnabled = preEqRecognized
+    ? normalizeNAMDelayToggle(values.preEqEnabled, 0)
+    : 0;
+  const currentPreEqBandIds = [
+    "preEq120Db", "preEq250Db", "preEq500Db", "preEq1kDb",
+    "preEq2k5Db", "preEq5kDb", "preEq8kDb", "preEq12kDb",
+  ] as const;
+  const legacyPreEqBandIds = [
+    "preEq100Db", "preEq200Db", "preEq400Db", "preEq800Db",
+    "preEq1k6Db", "preEq3k2Db", "preEq6k4Db",
+  ] as const;
+  currentPreEqBandIds.forEach((id, index) => {
+    const sourceId = eightBandPreEqRecognized ? id : legacyPreEqBandIds[index];
+    migratedValues[id] = preEqRecognized
+      ? clampNAMDelayValue(sourceId ? values[sourceId] : 0, -12, 12, 0)
+      : 0;
+  });
+  migratedValues.preEqHPFHz = preEqRecognized
+    ? normalizeNAMPreEqHPF(values.preEqHPFHz)
+    : 0;
+  migratedValues.preEqLPFHz = preEqRecognized
+    ? normalizeNAMPreEqLPF(values.preEqLPFHz)
+    : 24000;
+  migratedValues.preEqHPFLastActiveHz = !preEqRecognized
+    ? 80
+    : migratedValues.preEqHPFHz >= 35
+      ? migratedValues.preEqHPFHz
+      : clampNAMDelayValue(values.preEqHPFLastActiveHz, 35, 180, 80);
+  migratedValues.preEqLPFLastActiveHz = !preEqRecognized
+    ? 12000
+    : migratedValues.preEqLPFHz < 22000
+      ? migratedValues.preEqLPFHz
+      : clampNAMDelayValue(values.preEqLPFLastActiveHz, 3000, 20000, 12000);
+  migratedValues.eqHPFHz = graphicEqFiltersRecognized
+    ? normalizeNAMGraphicEqHPF(values.eqHPFHz)
+    : 0;
+  migratedValues.eqLPFHz = graphicEqFiltersRecognized
+    ? normalizeNAMGraphicEqLPF(values.eqLPFHz)
+    : 24000;
   // Instrument Profile first shipped with V8. Any earlier/unknown marker must
   // ignore a colliding legacy value and migrate deterministically to Guitar.
   migratedValues.instrumentProfile = requiresV8Migration
@@ -679,6 +943,7 @@ export function migrateLegacyNAMRackPresetDspState(
   migratedValues.reverbVoice = reverbVoiceRecognized
     ? normalizeNAMReverbVoice(values.reverbVoice)
     : 0;
+  migratedValues.reverbPad = normalizeNAMDelayToggle(values.reverbPad, 0);
   // V9 is the first complete-preset contract that validates the entire public
   // Delay schema. Keep every saved, baseline, and A/B snapshot inside the
   // exact native ranges and canonicalize selector/toggle state.
@@ -783,6 +1048,9 @@ export function isCurrentNAMRackPresetState(state: unknown): boolean {
   const values = asRecord(root.values);
   return normalizeNAMInstrumentProfile(values.instrumentProfile) === values.instrumentProfile
     && normalizeNAMReverbVoice(values.reverbVoice) === values.reverbVoice
+    && normalizeNAMDelayToggle(values.reverbPad, 0) === values.reverbPad
+    && hasCurrentNAMPreEqValues(values)
+    && hasCurrentNAMGraphicEqFilterValues(values)
     && hasCurrentNAMDelayPresetValues(values)
     && Object.keys(CURRENT_NAM_RACK_COMPONENT_DEFAULTS)
     .every((id) => typeof values[id] === "number" && Number.isFinite(values[id]))
@@ -842,13 +1110,21 @@ function resourceRestoreState(value: unknown): Record<string, unknown> {
   if (result.pedalModelPath && typeof source.pedalDeclaredCaptureType === "string") {
     result.pedalDeclaredCaptureType = source.pedalDeclaredCaptureType.trim() || "unknown";
   }
-  if (result.pedalModelPath) {
+  if (
+    result.pedalModelPath
+    && typeof source.pedalModelSize === "number"
+    && Number.isFinite(source.pedalModelSize)
+  ) {
     result.pedalModelSize = normalizedNAMModelSize(source.pedalModelSize);
   }
   if (result.ampModelPath && typeof source.ampDeclaredCaptureType === "string") {
     result.ampDeclaredCaptureType = source.ampDeclaredCaptureType.trim() || "unknown";
   }
-  if (result.ampModelPath) {
+  if (
+    result.ampModelPath
+    && typeof source.ampModelSize === "number"
+    && Number.isFinite(source.ampModelSize)
+  ) {
     result.ampModelSize = normalizedNAMModelSize(source.ampModelSize);
   }
   if (typeof source.cabRequestedEnabled === "boolean") {
@@ -869,6 +1145,12 @@ export function buildNAMRackRollbackPatch(state: unknown): NAMRackRollbackPatch 
   if (Object.keys(source).length === 0) return null;
   const values = numericValues(source.values);
   delete values.auditionSource;
+  // A rollback captured from an older native instance must not resurrect the
+  // removed Pre-FX Tape Echo.  In particular, never reinterpret these values
+  // as the still-supported post-FX `delay*` controls.
+  for (const retiredKey of NAM_RETIRED_TAPE_ECHO_STATE_KEYS) {
+    delete values[retiredKey];
+  }
   const patch: NAMRackRollbackPatch = {
     values,
     modelState: resourceRestoreState(source.modelState),

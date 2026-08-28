@@ -5,6 +5,11 @@ import { useDAWStore, type AutomationWriteBehavior } from "../store/useDAWStore"
 import { nativeBridge, type PluginParameterInfo } from "../services/NativeBridge";
 import { Modal } from "./ui";
 import { builtInAutomationParamId, getTrackAutomationParams, getMasterAutomationParams, pluginAutomationParamId } from "../store/automationParams";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
 
 type PluginParam = PluginParameterInfo;
 
@@ -91,6 +96,18 @@ export function EnvelopeManagerModal() {
   const [fxSlots, setFxSlots] = useState<FXSlotInfo[]>([]);
   const [pluginParams, setPluginParams] = useState<Map<string, PluginParam[]>>(new Map());
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!showEnvelopeManager) return;
+    const fallback = getActiveShortcutContext();
+    const unregister = registerShortcutSurface(
+      { kind: "automation" },
+      () => "unmatched",
+      fallback,
+    );
+    activateShortcutContext({ kind: "automation" });
+    return unregister;
+  }, [showEnvelopeManager]);
 
   // Fetch FX chain + plugin params on open
   useEffect(() => {
@@ -222,12 +239,27 @@ export function EnvelopeManagerModal() {
   // Handlers — dispatch to master or track actions
   const trackId = envelopeManagerTrackId!;
 
+  const selectLane = (laneId: string | null) => {
+    if (!laneId) return;
+    activateShortcutContext({ kind: "automation" });
+    const state = useDAWStore.getState();
+    if (isMaster) state.setSelectedAutomationLane({ kind: "master", laneId });
+    else state.setSelectedAutomationLane({ kind: "track", trackId, laneId });
+  };
+
   const ensureLane = (row: EnvelopeRow): string | null => {
-    if (row.laneId) return row.laneId;
-    if (isMaster) {
-      return addMasterAutomationLane(row.paramId);
+    if (row.laneId) {
+      selectLane(row.laneId);
+      return row.laneId;
     }
-    return addAutomationLane(trackId, row.paramId, row.label);
+    let laneId: string | null;
+    if (isMaster) {
+      laneId = addMasterAutomationLane(row.paramId);
+    } else {
+      laneId = addAutomationLane(trackId, row.paramId, row.label);
+    }
+    selectLane(laneId);
+    return laneId;
   };
 
   const handleToggleVisible = (row: EnvelopeRow) => {
@@ -280,6 +312,13 @@ export function EnvelopeManagerModal() {
 
   return (
     <Modal isOpen={showEnvelopeManager} onClose={closeEnvelopeManager} size="lg" title={title} fullHeight>
+      <div
+        className="contents"
+        data-shortcut-context="automation"
+        onPointerDownCapture={() => activateShortcutContext({ kind: "automation" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "automation" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "automation" })}
+      >
       {/* Top controls */}
       <div className="flex items-center gap-2 flex-wrap mb-3">
         <label className="text-[11px] text-neutral-400">Write:</label>
@@ -351,6 +390,9 @@ export function EnvelopeManagerModal() {
                   <div
                     key={row.paramId}
                     className="flex items-center px-3 py-1 border-b border-neutral-800/80 hover:bg-neutral-700/20 text-[11px]"
+                    tabIndex={row.laneId ? 0 : -1}
+                    onPointerDown={() => selectLane(row.laneId)}
+                    onFocus={() => selectLane(row.laneId)}
                   >
                     <span className="flex-1 text-neutral-300 truncate pl-4" title={row.label}>
                       {row.label}
@@ -412,6 +454,7 @@ export function EnvelopeManagerModal() {
             {filter ? "No parameters match filter" : "No parameters available"}
           </div>
         )}
+      </div>
       </div>
     </Modal>
   );

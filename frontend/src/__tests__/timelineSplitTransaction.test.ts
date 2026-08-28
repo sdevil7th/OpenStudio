@@ -829,13 +829,14 @@ describe("playback clip sync identity", () => {
     ].sort());
   });
 
-  it("deletes an identity-aware same-file clip without targeting its sibling", async () => {
+  it("deletes an identity-aware same-file clip while rebuilding only its sibling", async () => {
     const track = createDefaultTrack("track-audio", "Audio", "#38bdf8", "audio");
     track.clips = [
       audioClip({ id: "delete-a" }),
       audioClip({ id: "keep-b" }),
     ];
-    const removePlaybackClipById = vi.spyOn(nativeBridge, "removePlaybackClipById").mockResolvedValue(true);
+    const clearPlaybackClips = vi.spyOn(nativeBridge, "clearPlaybackClips").mockResolvedValue(true);
+    const addPlaybackClipsBatch = vi.spyOn(nativeBridge, "addPlaybackClipsBatch").mockResolvedValue(true);
     useDAWStore.setState({
       tracks: [track],
       selectedClipIds: ["delete-a"],
@@ -844,9 +845,12 @@ describe("playback clip sync identity", () => {
     });
 
     useDAWStore.getState().deleteClip("delete-a");
-    await Promise.resolve();
+    await vi.waitFor(() => expect(addPlaybackClipsBatch).toHaveBeenCalledTimes(1));
 
     expect(useDAWStore.getState().tracks[0].clips.map((clip) => clip.id)).toEqual(["keep-b"]);
-    expect(removePlaybackClipById).toHaveBeenCalledWith("track-audio", "delete-a");
+    expect(clearPlaybackClips).toHaveBeenCalledTimes(1);
+    expect(addPlaybackClipsBatch).toHaveBeenCalledWith([
+      expect.objectContaining({ trackId: "track-audio", clipId: "keep-b" }),
+    ]);
   });
 });

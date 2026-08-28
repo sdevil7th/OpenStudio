@@ -11,6 +11,7 @@ import {
   Settings,
 } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { MetronomeSettings } from "./MetronomeSettings";
 import { MetronomeIcon } from "./icons";
 import { Button, Input, TimeSignatureInput } from "./ui";
@@ -152,6 +153,16 @@ export function TransportBar() {
   const [tempTempo, setTempTempo] = useState(tempo.toString());
   const [showMetronomeSettings, setShowMetronomeSettings] = useState(false);
 
+  useEffect(() => registerScopedActionExecutor(
+    { kind: "application" },
+    (actionId) => {
+      if (actionId !== "transport.metronomeSettings") return "unmatched";
+      setShowMetronomeSettings(true);
+      return "handled";
+    },
+    ["transport.metronomeSettings"],
+  ), []);
+
   useEffect(() => {
     setTempTempo(tempo.toString());
   }, [tempo]);
@@ -285,7 +296,7 @@ export function TransportBar() {
             active={isPaused}
             disabled={!isPlaying}
             onClick={handlePause}
-            title="Pause (Space)"
+            title="Pause"
             aria-label="Pause"
           >
             <Pause size={16} fill="currentColor" />

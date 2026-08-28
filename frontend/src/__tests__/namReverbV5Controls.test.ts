@@ -28,11 +28,11 @@ describe("NAM Rack Reverb V5 voice contract", () => {
       dspState: { namEffectsDspVersion: 8, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
 
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(11);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
     expect(CURRENT_NAM_REVERB_ENGINE_VERSION).toBe(5);
     expect(migrated.values.reverbVoice).toBe(0);
     expect(migrated.values.reverbDecaySec).toBe(3.4);
-    expect(migrated.dspState).toEqual({ namEffectsDspVersion: 11, reverbEngineVersion: 5 });
+    expect(migrated.dspState).toEqual({ namEffectsDspVersion: 19, reverbEngineVersion: 5 });
     expect(isCurrentNAMRackPresetState(migrated)).toBe(true);
   });
 
@@ -73,7 +73,9 @@ describe("NAM Rack Reverb V5 voice contract", () => {
     };
     for (const source of Object.values(sources)) expect(source).toContain("reverbVoice");
     expect(sources.design).toContain("<ReverbVoiceDisplay paramId=\"reverbVoice\"");
-    expect(sources.design).toContain("<FourPositionRotarySelector {...postLayout.reverb.voiceSelector} paramId=\"reverbVoice\"");
+    expect(sources.design).toContain("<FourPositionRotarySelector");
+    expect(sources.design).toContain("postLayout.reverb.voiceSelector");
+    expect(sources.design).toContain('paramId="reverbVoice"');
     expect(sources.design).toContain("enableButtonDrag");
     expect(sources.design.match(/NAM_REVERB_VOICE_LABELS/g)?.length).toBeGreaterThan(0);
     expect(sources.bridge).toContain("reverbEngineVersion: 5");
@@ -111,6 +113,7 @@ describe("NAM Rack Reverb V5 voice contract", () => {
       "reverbPreDelayMs: 18",
       "reverbLowCutHz: 120",
       "reverbShimmer: 0",
+      "reverbPad: 0",
       "reverbEnabled: 0",
     ]) expect(defaults).toContain(line);
 
@@ -121,6 +124,7 @@ describe("NAM Rack Reverb V5 voice contract", () => {
     expect(platePreset).toContain("reverbVoice: 1");
     expect(platePreset).toContain("reverbLowCutHz: 120");
     expect(platePreset).toContain("reverbShimmer: 0");
+    expect(platePreset).toContain("reverbPad: 0");
   });
 
   it("keeps the shared macros stable and gives every voice truthful texture labels", () => {
@@ -135,6 +139,9 @@ describe("NAM Rack Reverb V5 voice contract", () => {
     const design = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
     expect(design).toContain("labelText={reverbLabels.decay}");
     expect(design).toContain("labelText={reverbLabels.texture}");
+    expect(design).toContain("value={`${reverbLabels.texture}: 0%`}");
+    expect(design).not.toContain('reverbPadActive ? "PAD" : reverbLabels.texture');
+    expect(design).not.toContain("Pad Intensity");
     expect(design).toContain("semanticLabel={reverbLabels.decay === \"SIZE\" ? \"Room Size\" : \"Decay\"}");
     expect(design).not.toContain("labelText=\"VOICE\"");
   });

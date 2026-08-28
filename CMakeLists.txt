@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Produce one macOS application that can run natively on both Apple Silicon and
+# Intel.  Setting these before project() ensures that compiler checks and every
+# source-built dependency use the same deployment contract.  Callers can still
+# override either cache value explicitly for a developer-only single-arch build.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+            "Oldest macOS version supported by OpenStudio")
+    endif()
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING
+            "macOS architectures built into OpenStudio")
+    endif()
+endif()
+
 if(POLICY CMP0184)
     cmake_policy(SET CMP0184 NEW)
 endif()
@@ -73,13 +88,16 @@ if(WIN32)
     endif()
 endif()
 
-# Check if JUCE folder exists, otherwise fetch it (or use CPM if preferred, but standard FetchContent is fine)
-# For this setup, we'll fetch JUCE 8.0.0
+# Check if JUCE folder exists, otherwise fetch it (or use CPM if preferred, but standard FetchContent is fine).
+# JUCE is intentionally pinned to one repository-wide release.  Dependency
+# upgrades must change this tag directly and pass the complete platform matrix;
+# a cache override is deliberately not exposed because it allows local and CI
+# builds to silently use different framework versions.
 include(FetchContent)
 FetchContent_Declare(
     juce
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.0
+    GIT_TAG        9.0.1
     GIT_SHALLOW    TRUE
     PATCH_COMMAND
         "${CMAKE_COMMAND}"
@@ -88,10 +106,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(juce)
 if(MSVC)
-    # JUCE 8.0.0's VST3 wrapper has two benign C4458 warnings in vendor code.
+    # JUCE's VST3 wrapper has two benign C4458 warnings in vendor code.
     set_source_files_properties(
         "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
         PROPERTIES COMPILE_OPTIONS "/wd4458"
+    )
+
+    # MSVC /O2 and /Ox can break WRL callback dispatch in JUCE's WebView2
+    # resource-provider path, leaving Release builds on about:blank even though
+    # the controller was created successfully.  Restrict /O1 to JUCE's GUI-extra
+    # translation unit so audio/DSP code keeps the normal Release optimisation.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_gui_extra/juce_gui_extra.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/O1>
     )
 endif()
 
@@ -930,7 +958,7 @@ endif()
 # juce_add_binary_data(FrontendAssets
 #     SOURCES
 #         frontend/dist/index.html
-#         # Add other assets here or point to a directory if JUCE 8 supports it better now,
+#         # Add other assets here or point to a directory if JUCE supports it better now,
 #         # but typically we list files or use a helper to glob.
 #         # For now, placeholder.
 # )

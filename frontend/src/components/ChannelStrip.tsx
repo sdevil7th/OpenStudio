@@ -1,8 +1,9 @@
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import classNames from "classnames";
 import { ChevronDown, Power } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
 import { MasterPeakMeterCluster } from "./MasterPeakMeterCluster";
+import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
 import {
   useDAWStore,
   Track,
@@ -15,6 +16,11 @@ import { Button, Slider } from "./ui";
 import { useContextMenu, MenuItem } from "./ContextMenu";
 import { automationToBackend } from "../store/automationParams";
 import { nativeBridge } from "../services/NativeBridge";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  getParameterWheelValue,
+  resolveProfiledParameterWheel,
+} from "../utils/parameterWheel";
 import {
   CHANNEL_STRIP_DB_LABEL_FONT_CLASS,
   CHANNEL_STRIP_DB_LABEL_WIDTH_CLASS,
@@ -60,8 +66,15 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   // This component re-renders at 10Hz for metering; keeping it isolated from
   // the tracks array means Timeline/App never see those re-renders.
   const meterLevel = useDAWStore((s) => s.meterLevels[track.id] ?? 0);
+  const midiInputLevel = useDAWStore((s) => s.midiInputLevels[track.id] ?? 0);
   const clipping = useDAWStore((s) => s.clippingStates[track.id] ?? false);
   const autoValues = useDAWStore((s) => s.automatedParamValues[track.id]);
+  const meterPresentation = resolveTrackMeterPresentation(
+    meterLevel,
+    midiInputLevel,
+    track.armed,
+    track.type,
+  );
 
   const {
     toggleTrackMute,
@@ -75,10 +88,15 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     setMasterPan,
     beginTrackVolumeEdit,
     commitTrackVolumeEdit,
+    beginTrackVolumeBatchEdit,
+    adjustTrackVolumeBatch,
+    commitTrackVolumeBatchEdit,
     beginTrackPanEdit,
     commitTrackPanEdit,
-    beginAutomationParamTouch,
-    endAutomationParamTouch,
+    beginMasterVolumeEdit,
+    commitMasterVolumeEdit,
+    beginMasterPanEdit,
+    commitMasterPanEdit,
     selectedTrackIds,
     trackGroups,
     addTrackGroup,
@@ -111,10 +129,15 @@ export const ChannelStrip = React.memo(function ChannelStrip({
       setMasterPan: s.setMasterPan,
       beginTrackVolumeEdit: s.beginTrackVolumeEdit,
       commitTrackVolumeEdit: s.commitTrackVolumeEdit,
+      beginTrackVolumeBatchEdit: s.beginTrackVolumeBatchEdit,
+      adjustTrackVolumeBatch: s.adjustTrackVolumeBatch,
+      commitTrackVolumeBatchEdit: s.commitTrackVolumeBatchEdit,
       beginTrackPanEdit: s.beginTrackPanEdit,
       commitTrackPanEdit: s.commitTrackPanEdit,
-      beginAutomationParamTouch: s.beginAutomationParamTouch,
-      endAutomationParamTouch: s.endAutomationParamTouch,
+      beginMasterVolumeEdit: s.beginMasterVolumeEdit,
+      commitMasterVolumeEdit: s.commitMasterVolumeEdit,
+      beginMasterPanEdit: s.beginMasterPanEdit,
+      commitMasterPanEdit: s.commitMasterPanEdit,
       selectedTrackIds: s.selectedTrackIds,
       trackGroups: s.trackGroups,
       addTrackGroup: s.addTrackGroup,
@@ -146,6 +169,25 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   }, [track.id]);
 
   const [showFXChain, setShowFXChain] = useState(false);
+  useEffect(() => {
+    if (!isMaster && !isSelected) return undefined;
+    return registerScopedActionExecutor(
+      { kind: "mixer" },
+      (actionId) => {
+        if (isMaster && actionId === "mixer.openMasterFxChain") {
+          setShowFXChain(true);
+          return "handled";
+        }
+        if (!isMaster && actionId === "track.openSelectedFxChain") {
+          if (useDAWStore.getState().selectedTrackId !== track.id) return "claimed_noop";
+          setShowFXChain(true);
+          return "handled";
+        }
+        return "unmatched";
+      },
+      isMaster ? ["mixer.openMasterFxChain"] : ["track.openSelectedFxChain"],
+    );
+  }, [isMaster, isSelected, track.id]);
   const hasBypassableFx = track.inputFxCount + track.trackFxCount > 0;
   const hasFx = hasBypassableFx || Boolean(track.instrumentPlugin) || (track.type === "instrument" && !track.instrumentPlugin);
 
@@ -301,42 +343,98 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     }
   };
 
-  // Undo/redo: capture starting value on pointer down, commit on pointer up
-  const handleVolumePointerDown = useCallback(() => {
+  const beginVolumeEdit = useCallback(() => {
     if (isMaster) {
-      beginAutomationParamTouch("master", "volume");
-      const endTouchOnUp = () => {
-        document.removeEventListener("pointerup", endTouchOnUp);
-        endAutomationParamTouch("master", "volume");
-      };
-      document.addEventListener("pointerup", endTouchOnUp);
+      beginMasterVolumeEdit();
       return;
     }
     beginTrackVolumeEdit(track.id);
-    const commitOnUp = () => {
-      document.removeEventListener("pointerup", commitOnUp);
-      commitTrackVolumeEdit(track.id);
-    };
-    document.addEventListener("pointerup", commitOnUp);
-  }, [isMaster, track.id, beginTrackVolumeEdit, commitTrackVolumeEdit, beginAutomationParamTouch, endAutomationParamTouch]);
+  }, [beginMasterVolumeEdit, beginTrackVolumeEdit, isMaster, track.id]);
 
-  const handlePanPointerDown = useCallback(() => {
+  const commitVolumeEdit = useCallback(() => {
     if (isMaster) {
-      beginAutomationParamTouch("master", "pan");
-      const endTouchOnUp = () => {
-        document.removeEventListener("pointerup", endTouchOnUp);
-        endAutomationParamTouch("master", "pan");
-      };
-      document.addEventListener("pointerup", endTouchOnUp);
+      commitMasterVolumeEdit();
+      return;
+    }
+    commitTrackVolumeEdit(track.id);
+  }, [commitMasterVolumeEdit, commitTrackVolumeEdit, isMaster, track.id]);
+
+  const beginPanEdit = useCallback(() => {
+    if (isMaster) {
+      beginMasterPanEdit();
       return;
     }
     beginTrackPanEdit(track.id);
-    const commitOnUp = () => {
-      document.removeEventListener("pointerup", commitOnUp);
-      commitTrackPanEdit(track.id);
-    };
-    document.addEventListener("pointerup", commitOnUp);
-  }, [isMaster, track.id, beginTrackPanEdit, commitTrackPanEdit, beginAutomationParamTouch, endAutomationParamTouch]);
+  }, [beginMasterPanEdit, beginTrackPanEdit, isMaster, track.id]);
+
+  const commitPanEdit = useCallback(() => {
+    if (isMaster) {
+      commitMasterPanEdit();
+      return;
+    }
+    commitTrackPanEdit(track.id);
+  }, [commitMasterPanEdit, commitTrackPanEdit, isMaster, track.id]);
+
+  const groupedVolumeWheelTimerRef = useRef<number | null>(null);
+  const groupedVolumeWheelModeRef = useRef<"all" | "selected" | null>(null);
+  const commitGroupedVolumeWheel = useCallback(() => {
+    if (groupedVolumeWheelTimerRef.current !== null) {
+      window.clearTimeout(groupedVolumeWheelTimerRef.current);
+      groupedVolumeWheelTimerRef.current = null;
+    }
+    if (groupedVolumeWheelModeRef.current === null) return;
+    groupedVolumeWheelModeRef.current = null;
+    commitTrackVolumeBatchEdit();
+  }, [commitTrackVolumeBatchEdit]);
+
+  useEffect(() => () => commitGroupedVolumeWheel(), [commitGroupedVolumeWheel]);
+
+  const handleGroupedVolumeWheel = useCallback((event: React.WheelEvent<HTMLInputElement>) => {
+    if (isMaster) return;
+    const gesture = resolveProfiledParameterWheel(event.nativeEvent, "console_fader");
+    const mode = gesture.ruleId === "cakewalk-sonar.console-all-faders"
+      ? "all"
+      : gesture.ruleId === "cakewalk-sonar.console-selected-faders"
+        ? "selected"
+        : null;
+    if (!mode) return;
+
+    if (gesture.preventDefault) event.preventDefault();
+    if (gesture.stopPropagation) event.stopPropagation();
+
+    if (groupedVolumeWheelModeRef.current !== null && groupedVolumeWheelModeRef.current !== mode) {
+      commitGroupedVolumeWheel();
+    }
+    if (groupedVolumeWheelModeRef.current === null) {
+      const state = useDAWStore.getState();
+      const targetIds = mode === "all"
+        ? state.tracks.map((candidate) => candidate.id)
+        : state.selectedTrackIds;
+      if (!beginTrackVolumeBatchEdit(targetIds)) return;
+      groupedVolumeWheelModeRef.current = mode;
+    }
+
+    // Cakewalk's grouped rules intentionally remain `suppress` in the generic
+    // Slider resolver. Convert only their signed wheel amount here, so the
+    // hovered Slider cannot also apply a second, single-fader adjustment.
+    const deltaDB = getParameterWheelValue(
+      { ...gesture, operation: "adjust" },
+      { min: -60, max: 12, value: 0, step: 0.1 },
+    );
+    adjustTrackVolumeBatch(deltaDB);
+    if (groupedVolumeWheelTimerRef.current !== null) {
+      window.clearTimeout(groupedVolumeWheelTimerRef.current);
+    }
+    groupedVolumeWheelTimerRef.current = window.setTimeout(
+      commitGroupedVolumeWheel,
+      180,
+    );
+  }, [
+    adjustTrackVolumeBatch,
+    beginTrackVolumeBatchEdit,
+    commitGroupedVolumeWheel,
+    isMaster,
+  ]);
 
   const formatVolume = (db: number) => {
     if (db <= -60) return "-∞";
@@ -634,10 +732,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         </div>
 
         {/* Pan Section */}
-        <div
-          className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}
-          onPointerDown={handlePanPointerDown}
-        >
+        <div className={classNames("px-1 shrink-0", isMaster ? "pb-1" : "pb-0.5")}>
           <div className="flex flex-col items-center gap-0.5">
             <Slider
               orientation="horizontal"
@@ -646,6 +741,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               max={100}
               value={effectivePan * 100}
               onChange={handlePanChange}
+              onBeginEdit={beginPanEdit}
+              onCommitEdit={commitPanEdit}
               defaultValue={0}
               className="w-full"
               title={panDisplay}
@@ -670,6 +767,9 @@ export const ChannelStrip = React.memo(function ChannelStrip({
             ) : (
               <PeakMeter
                 level={meterLevel}
+                midiInputLevel={meterPresentation.normalizedLevel}
+                meterSource={meterPresentation.source}
+                ariaLabel={`${track.name} meter: ${meterPresentation.source === "midi_input" ? "MIDI input activity" : "audio output"}`}
                 stereo={true}
                 clipping={clipping}
                 onReset={handleResetMeterClip}
@@ -700,10 +800,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
           </div>
 
           {/* Vertical Fader */}
-          <div
-            className="flex-1 flex justify-center h-full"
-            onPointerDown={handleVolumePointerDown}
-          >
+          <div className="flex-1 flex justify-center h-full">
             <Slider
               orientation="vertical"
               variant="fader"
@@ -712,6 +809,9 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               step={0.1}
               value={effectiveVolumeDB}
               onChange={handleVolumeChange}
+              onWheel={handleGroupedVolumeWheel}
+              onBeginEdit={beginVolumeEdit}
+              onCommitEdit={commitVolumeEdit}
               defaultValue={0}
               height="100%"
               width="18px"

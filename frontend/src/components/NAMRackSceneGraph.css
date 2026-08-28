@@ -1,0 +1,736 @@
+/* NAMRackSceneGraph component-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-scene-device {
+  display: grid;
+  place-items: center;
+  overflow: visible;
+  cursor: pointer;
+  filter: drop-shadow(0 34px 34px rgba(38, 45, 59, 0.34));
+}
+
+.nam-scene-device::before,
+.nam-scene-device::after {
+  display: none;
+}
+
+.nam-scene-device-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  contain: paint;
+}
+
+.nam-scene-device[data-material="pedal"] .nam-scene-device-svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.nam-neural-section-suite[data-section="pre"] .nam-scene-device[data-material="pedal"] {
+  height: min(100%, 506px);
+}
+
+.nam-neural-post-suite .nam-scene-device[data-module="delay"] {
+  transform: translateY(-4px);
+}
+
+.nam-scene-hitbox {
+  pointer-events: all;
+  cursor: ns-resize;
+}
+
+.nam-scene-switch .nam-scene-hitbox,
+.nam-scene-button .nam-scene-hitbox,
+.nam-scene-footswitch .nam-scene-hitbox {
+  cursor: pointer;
+}
+
+.nam-scene-title {
+  fill: rgba(255, 255, 255, 0.72);
+  font-size: 38px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.24);
+  stroke-width: 2px;
+}
+
+.nam-scene-title-pedal {
+  font-size: 34px;
+  fill: rgba(255, 255, 255, 0.66);
+}
+
+.nam-scene-title-rack,
+.nam-scene-title-amp,
+.nam-scene-title-cab {
+  font-size: 28px;
+  fill: rgba(255, 255, 255, 0.62);
+}
+
+.nam-scene-subtitle {
+  fill: rgba(255, 255, 255, 0.48);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+}
+
+.nam-scene-label,
+.nam-scene-value,
+.nam-scene-button-label,
+.nam-scene-display-text {
+  fill: rgba(255, 255, 255, 0.86);
+  font-weight: 760;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.nam-scene-label {
+  font-size: 19px;
+  letter-spacing: 0.04em;
+}
+
+.nam-scene-label-large {
+  font-size: 28px;
+  fill: rgba(34, 38, 47, 0.88);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.nam-scene-value {
+  fill: rgba(255, 255, 255, 0.48);
+  font-size: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.nam-scene-button-label {
+  fill: rgba(255, 255, 255, 0.74);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+
+.nam-scene-display-text {
+  fill: rgba(255, 119, 119, 0.9);
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 24px;
+  letter-spacing: 0.03em;
+}
+
+.nam-scene-knob,
+.nam-scene-switch,
+.nam-scene-button,
+.nam-scene-display,
+.nam-scene-footswitch,
+.nam-scene-fader,
+.nam-scene-treadle,
+.nam-scene-mic,
+.nam-scene-meter,
+.nam-scene-led,
+.nam-scene-text-anchor {
+  transition: opacity 140ms ease, filter 140ms ease;
+}
+
+.nam-scene-control[data-bound="false"] {
+  opacity: 0.48;
+}
+
+.nam-scene-control-visual {
+  filter:
+    drop-shadow(0 12px 12px rgba(0, 0, 0, 0.5))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.14));
+}
+
+.nam-scene-display .nam-scene-control-visual,
+.nam-scene-meter .nam-scene-control-visual {
+  filter: drop-shadow(0 7px 8px rgba(0, 0, 0, 0.34));
+}
+
+.nam-scene-debug-layer {
+  pointer-events: none;
+}
+
+.nam-scene-debug-rect {
+  fill: rgba(40, 255, 92, 0.12);
+  stroke: rgba(40, 255, 92, 0.9);
+  stroke-width: 3;
+  stroke-dasharray: 8 6;
+}
+
+.nam-scene-screen-reader {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device {
+  filter: drop-shadow(0 32px 30px rgba(32, 39, 54, 0.34));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="mod"],
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="reverb"] {
+  height: min(100%, 536px);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="delay"] {
+  height: min(100%, 438px);
+  transform: translateY(-23px);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-title-pedal {
+  font-size: 32px;
+  fill: rgba(255, 255, 255, 0.72);
+  letter-spacing: 0.11em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-title-rack {
+  font-size: 30px;
+  fill: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.14em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-label {
+  font-size: 16px;
+  fill: rgba(255, 255, 255, 0.82);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-value {
+  font-size: 12px;
+  fill: rgba(255, 255, 255, 0.54);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-knob .nam-scene-control-visual {
+  filter:
+    drop-shadow(0 10px 9px rgba(0, 0, 0, 0.58))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.2));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-display .nam-scene-control-visual {
+  fill: #050506;
+  filter:
+    drop-shadow(0 12px 12px rgba(0, 0, 0, 0.54))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.1));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-digit {
+  fill: #ff5f62;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 38px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  text-shadow:
+    0 0 9px rgba(255, 84, 86, 0.82),
+    0 0 22px rgba(255, 84, 86, 0.32);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-status text {
+  fill: rgba(235, 238, 244, 0.72);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-status circle {
+  fill: rgba(255, 96, 100, 0.28);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-status circle[data-on="true"] {
+  fill: #ff5f62;
+  filter: drop-shadow(0 0 8px rgba(255, 95, 98, 0.8));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-kicker {
+  fill: rgba(232, 236, 240, 0.64);
+  font-size: 18px;
+  font-weight: 860;
+  letter-spacing: 0.2em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-delay-brand {
+  fill: rgba(238, 240, 243, 0.76);
+  font-size: 36px;
+  font-weight: 520;
+  letter-spacing: 0.18em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-mod-display .nam-scene-control-visual {
+  filter:
+    drop-shadow(0 8px 8px rgba(0, 0, 0, 0.4))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.1));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-reverb-kicker {
+  fill: rgba(232, 242, 252, 0.72);
+  font-size: 21px;
+  font-weight: 850;
+  letter-spacing: 0.22em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-reverb-title {
+  fill: rgba(238, 245, 252, 0.84);
+  font-size: 64px;
+  font-weight: 520;
+  letter-spacing: 0.2em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-reverb-footswitch-label {
+  fill: rgba(238, 245, 252, 0.74);
+  font-size: 15px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-treadle-skin-hitbox .nam-scene-control-visual {
+  filter: none;
+}
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device {
+  aspect-ratio: var(--nam-scene-aspect);
+  overflow: hidden;
+  contain: layout paint;
+  isolation: isolate;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  contain: paint;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-artboard,
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-control {
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="cab-room-design-a"] .nam-scene-title,
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="cab-room-design-a"] .nam-scene-subtitle {
+  display: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="mod"],
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="reverb"] {
+  height: 100%;
+  max-height: 100%;
+  filter: drop-shadow(0 28px 28px rgba(32, 39, 54, 0.3));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="delay"] {
+  height: 82%;
+  align-self: center;
+  transform: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-knob .nam-scene-control-visual {
+  filter:
+    drop-shadow(0 6px 5px rgba(0, 0, 0, 0.48))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.12));
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-scene-button-label {
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="amp"] .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="cab"] .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="eq"] .nam-scene-device {
+  position: relative;
+  align-self: start;
+  height: 100%;
+  max-height: 100%;
+  overflow: visible;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="amp"] .nam-scene-device-svg,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="cab"] .nam-scene-device-svg,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="eq"] .nam-scene-device-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-device[data-material="pedal"] {
+  height: 100%;
+  max-height: 370px;
+}
+
+.nam-scene-badge-text,
+.nam-scene-panel-text,
+.nam-scene-mic-card-title,
+.nam-scene-modulator-selector,
+.nam-scene-mic-card-subtitle,
+.nam-scene-mixer-strip-title,
+.nam-scene-modulator-title,
+.nam-scene-eq-title,
+.nam-scene-eq-scale,
+.nam-scene-eq-band,
+.nam-scene-eq-section-title,
+.nam-scene-eq-section-label {
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.nam-scene-badge-text {
+  fill: #111417;
+  font-size: 26px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+}
+
+.nam-scene-panel-text,
+.nam-scene-modulator-selector,
+.nam-scene-mic-card-title {
+  fill: rgba(238, 243, 250, 0.82);
+  font-size: 19px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+
+.nam-scene-modulator-selector {
+  fill: rgba(238, 243, 250, 0.72);
+  font-size: 13px;
+  font-weight: 880;
+  letter-spacing: 0.02em;
+}
+
+.nam-scene-mic-card-title {
+  fill: rgba(31, 36, 46, 0.72);
+  font-size: 18px;
+}
+
+.nam-scene-mic-card-subtitle,
+.nam-scene-mixer-strip-title {
+  fill: rgba(31, 36, 46, 0.62);
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.nam-scene-modulator-title {
+  fill: rgba(255, 255, 255, 0.76);
+  font-size: 26px;
+  font-weight: 880;
+  letter-spacing: 0.16em;
+}
+
+.nam-scene-modulator-title {
+  font-size: 35px;
+  font-weight: 760;
+  letter-spacing: 0.13em;
+}
+
+.nam-scene-eq-title {
+  fill: rgba(30, 34, 42, 0.82);
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.nam-scene-eq-scale,
+.nam-scene-eq-band,
+.nam-scene-eq-section-label {
+  fill: rgba(28, 33, 40, 0.72);
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.nam-scene-eq-section-title {
+  fill: rgba(245, 248, 252, 0.86);
+  font-size: 32px;
+  font-weight: 920;
+  letter-spacing: 0.12em;
+}
+
+.nam-scene-label-inside {
+  fill: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-device[data-material="pedal"] {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  justify-self: stretch;
+  align-self: end;
+  filter: drop-shadow(0 30px 28px rgba(30, 38, 52, 0.32));
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-device-svg {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+}
+
+.nam-scene-pre-family-text,
+.nam-scene-pre-title {
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.nam-scene-pre-family-text {
+  fill: rgba(255, 255, 255, 0.72);
+  font-size: 19px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+}
+
+.nam-scene-pre-title {
+  fill: rgba(255, 255, 255, 0.86);
+  font-size: 41px;
+  font-weight: 640;
+  letter-spacing: 0.14em;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.22);
+  stroke-width: 2px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-title-pedal {
+  display: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-label {
+  font-size: 22px;
+  font-weight: 850;
+  fill: rgba(255, 255, 255, 0.82);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-display-text {
+  font-size: 25px;
+  font-weight: 850;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-footswitch .nam-scene-label {
+  font-size: 18px;
+  fill: rgba(255, 255, 255, 0.74);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="cab-room-design-a"] .nam-scene-label {
+  font-size: 15px;
+  font-weight: 850;
+  fill: rgba(28, 34, 42, 0.68);
+  stroke-width: 0;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="cab-room-design-a"] .nam-scene-value {
+  display: none;
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-scene-pre-title {
+    font-size: 38px;
+  }
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="delay"] {
+  height: 76%;
+  width: min(100%, 640px);
+  align-self: center;
+  justify-self: center;
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="delay"] {
+    height: 78%;
+    width: min(100%, 560px);
+  }
+}
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="amp-head-design-a"] .nam-scene-label {
+  fill: rgba(238, 241, 234, 0.72);
+  font-size: 15px;
+  font-weight: 760;
+  letter-spacing: 0.035em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="amp-head-design-a"] .nam-scene-panel-text {
+  fill: rgba(238, 241, 234, 0.74);
+  font-size: 16px;
+  font-weight: 780;
+  letter-spacing: 0.06em;
+}
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] {
+  filter: drop-shadow(0 28px 26px rgba(31, 39, 52, 0.26));
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-title {
+  fill: rgba(224, 231, 238, 0.78);
+  font-size: 18px;
+  font-weight: 860;
+  letter-spacing: 0.12em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-scale,
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-band,
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-section-label {
+  fill: rgba(225, 232, 238, 0.62);
+  font-size: 18px;
+  font-weight: 780;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-section-title {
+  fill: rgba(245, 248, 252, 0.82);
+  font-size: 30px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-filter-name {
+  fill: rgba(231, 184, 94, 0.72);
+  font-size: 15px;
+  font-weight: 820;
+  letter-spacing: 0.08em;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-eq-filter-value {
+  fill: #f1c779;
+  font-size: 17px;
+  font-weight: 840;
+  font-variant-numeric: tabular-nums;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device[data-skin="eq-rack-design-a"] .nam-scene-fader .nam-scene-control-visual + rect {
+  stroke: rgba(255, 255, 255, 0.18);
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="mod"] {
+  width: 100%;
+  height: 62%;
+  max-height: 292px;
+  align-self: end;
+  justify-self: center;
+}
+
+.nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-skin="post-modulator-design-a"] .nam-scene-label {
+  fill: rgba(255, 244, 234, 0.76);
+  font-size: 15px;
+  font-weight: 780;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="mod"] {
+    height: 64%;
+    max-height: 228px;
+  }
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+
+  .nam-product.nam-neural-product[data-view="rack"][data-rack-section="post"] .nam-neural-post-suite .nam-scene-device[data-module="mod"] {
+    max-height: 260px;
+  }
+
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-pre-family-text {
+  fill: rgba(244, 247, 250, 0.72);
+  font-size: 18px;
+  font-weight: 880;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-pre-title {
+  fill: rgba(248, 250, 252, 0.84);
+  font-size: 38px;
+  font-weight: 700;
+  stroke: rgba(0, 0, 0, 0.28);
+  stroke-width: 1.6px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-label {
+  fill: rgba(248, 250, 252, 0.78);
+  font-size: 20px;
+  font-weight: 880;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.28);
+  stroke-width: 1.4px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-display-text.nam-scene-pre-plaque-text {
+  fill: var(--scene-accent, #f07b72);
+  font-size: 21px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.24);
+  stroke-width: 1px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-footswitch .nam-scene-label {
+  display: none;
+}
+
+@media (max-width: 1400px) and (min-width: 1181px) {
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-pre-title {
+    font-size: 35px;
+  }
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-label {
+    font-size: 18px;
+  }
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="pre"] .nam-scene-display-text.nam-scene-pre-plaque-text {
+    font-size: 19px;
+  }
+}
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-post-suite .nam-scene-device {
+  aspect-ratio: var(--nam-scene-aspect);
+  overflow: hidden;
+  contain: layout paint;
+  isolation: isolate;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite .nam-scene-device-svg,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-post-suite .nam-scene-device-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  contain: paint;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-post-suite .nam-scene-device {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="amp"] .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="cab"] .nam-scene-device,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="eq"] .nam-scene-device {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="amp"] .nam-scene-device-svg,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="cab"] .nam-scene-device-svg,
+.nam-product.nam-neural-product[data-view="rack"] .nam-neural-section-suite[data-section="eq"] .nam-scene-device-svg {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}

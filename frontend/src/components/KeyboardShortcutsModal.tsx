@@ -1,11 +1,31 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { Search, Printer } from "lucide-react";
 import { useShallow } from "zustand/shallow";
-import { getActionShortcutScopeLabel, getRegisteredActions } from "../store/actionRegistry";
+import {
+  getActionShortcutScopeLabel,
+  getActionShortcutScopes,
+  getRegisteredActions,
+} from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
-import { Button, Input } from "./ui";
+import { Button, Input, NativeSelect } from "./ui";
+import { InputProfileSelectors } from "./InputProfileSelectors";
+import { CustomKeyboardProfileManager } from "./CustomKeyboardProfileManager";
 import { Modal } from "./ui/Modal/Modal";
-import { formatShortcut } from "../utils/platform";
+import { formatShortcut, getShortcutPlatform } from "../utils/platform";
+import {
+  getKeyboardShortcutProfilePresentation,
+  getProfileActionBindings,
+} from "../utils/shortcutProfiles";
+import { findShortcutAssignmentConflicts } from "../utils/shortcutAssignmentConflicts";
+import {
+  MAX_CUSTOM_KEYBOARD_PROFILES,
+  MAX_CUSTOM_SHORTCUT_BINDINGS_PER_TARGET,
+  getCustomShortcutTargetBindings,
+  hasCustomShortcutOverride,
+  resolveCustomShortcutBindings,
+  type CustomShortcutTarget,
+} from "../utils/customShortcutProfiles";
+import keyboardShortcutsPrintCssUrl from "./KeyboardShortcutsPrint.css?url";
 import {
   activateShortcutContext,
   getActiveShortcutContext,
@@ -17,6 +37,15 @@ import {
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+export function escapePrintHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
@@ -32,41 +61,68 @@ export function KeyboardShortcutsModal({
     null
   );
   const [capturedShortcut, setCapturedShortcut] = useState<string>("");
+  const [bindingTarget, setBindingTarget] = useState<CustomShortcutTarget>("common");
 
-  const { customShortcuts, setCustomShortcut, resetCustomShortcuts } =
+  const {
+    customShortcuts,
+    customKeyboardProfiles,
+    activeCustomKeyboardProfileId,
+    keyboardShortcutProfileId,
+    addCustomShortcutBinding,
+    removeCustomShortcutBinding,
+    setCustomShortcutBindings,
+    removeCustomShortcut,
+    resetCustomShortcuts,
+  } =
     useDAWStore(
       useShallow((s) => ({
         customShortcuts: s.customShortcuts,
-        setCustomShortcut: s.setCustomShortcut,
+        customKeyboardProfiles: s.customKeyboardProfiles,
+        activeCustomKeyboardProfileId: s.activeCustomKeyboardProfileId,
+        keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+        addCustomShortcutBinding: s.addCustomShortcutBinding,
+        removeCustomShortcutBinding: s.removeCustomShortcutBinding,
+        setCustomShortcutBindings: s.setCustomShortcutBindings,
+        removeCustomShortcut: s.removeCustomShortcut,
         resetCustomShortcuts: s.resetCustomShortcuts,
       }))
     );
 
   const actions = useMemo(() => getRegisteredActions(), []);
+  const implicitProfileCreationBlocked = activeCustomKeyboardProfileId === null
+    && customKeyboardProfiles.length >= MAX_CUSTOM_KEYBOARD_PROFILES;
 
-  // Compute effective shortcut for each action (custom overrides default)
-  const getEffectiveShortcut = useCallback(
-    (actionId: string, defaultShortcut?: string): string | undefined => {
-      if (customShortcuts[actionId] !== undefined) {
-        return customShortcuts[actionId];
-      }
-      return defaultShortcut;
+  // Compute every effective binding in dispatch precedence order.
+  const getEffectiveShortcuts = useCallback(
+    (actionId: string, defaultShortcut?: string, shortcutAliases: readonly string[] = []): string[] => {
+      const platform = getShortcutPlatform();
+      const custom = resolveCustomShortcutBindings(customShortcuts, actionId, platform);
+      if (custom !== undefined) return [...custom];
+      const profileBindings = getProfileActionBindings(
+        keyboardShortcutProfileId,
+        actionId,
+        platform,
+      );
+      if (profileBindings !== undefined) return [...profileBindings];
+      return [defaultShortcut, ...shortcutAliases].filter(
+        (shortcut): shortcut is string => typeof shortcut === "string" && Boolean(shortcut) && !shortcut.includes("("),
+      );
     },
-    [customShortcuts]
+    [customShortcuts, keyboardShortcutProfileId]
   );
 
   const filtered = useMemo(() => {
     if (!search) return actions;
     const q = search.toLowerCase();
     return actions.filter((a) => {
-      const effectiveShortcut = getEffectiveShortcut(a.id, a.shortcut);
+      const effectiveShortcuts = getEffectiveShortcuts(a.id, a.shortcut, a.shortcutAliases);
       return (
         a.name.toLowerCase().includes(q) ||
         a.category.toLowerCase().includes(q) ||
-        (effectiveShortcut && effectiveShortcut.toLowerCase().includes(q))
+        effectiveShortcuts.some((shortcut) => shortcut.toLowerCase().includes(q))
       );
     });
-  }, [actions, search, getEffectiveShortcut]);
+  }, [actions, search, getEffectiveShortcuts]);
 
   // Group by category
   const grouped = useMemo(() => {
@@ -95,7 +151,23 @@ export function KeyboardShortcutsModal({
         const shortcut = toPressedShortcut(event);
         if (!shortcut) return "claimed_noop";
         setCapturedShortcut(shortcut);
-        setCustomShortcut(listeningActionId, shortcut);
+        const conflicts = findShortcutAssignmentConflicts(
+          listeningActionId,
+          shortcut,
+          bindingTarget,
+        );
+        if (conflicts.length > 0) {
+          const conflictSummary = conflicts
+            .map((conflict) => (
+              `${conflict.actionName} (${conflict.sharedScopes.join(", ")}; ${conflict.platforms.join(", ")})`
+            ))
+            .join("\n");
+          const confirmed = window.confirm(
+            `${formatShortcut(shortcut)} is already used by:\n\n${conflictSummary}\n\nAssign it anyway?`,
+          );
+          if (!confirmed) return "handled";
+        }
+        addCustomShortcutBinding(listeningActionId, shortcut, bindingTarget);
         setListeningActionId(null);
         setCapturedShortcut("");
         return "handled";
@@ -104,7 +176,7 @@ export function KeyboardShortcutsModal({
     );
     activateShortcutContext({ kind: "application" });
     return unregister;
-  }, [listeningActionId, setCustomShortcut]);
+  }, [addCustomShortcutBinding, bindingTarget, listeningActionId]);
 
   // Cancel listening when modal closes
   useEffect(() => {
@@ -120,14 +192,7 @@ export function KeyboardShortcutsModal({
   };
 
   const handleResetSingle = (actionId: string) => {
-    // Remove only this action's custom shortcut
-    const updated = { ...customShortcuts };
-    delete updated[actionId];
-    // We need to set it via the store; since there's no "remove single" action,
-    // we'll just set it to the empty object minus this key
-    // Actually we can overwrite by setting the full map
-    useDAWStore.setState({ customShortcuts: updated });
-    localStorage.setItem("s13_customShortcuts", JSON.stringify(updated));
+    removeCustomShortcut(actionId, bindingTarget);
   };
 
   const hasAnyCustomShortcuts = Object.keys(customShortcuts).length > 0;
@@ -135,14 +200,23 @@ export function KeyboardShortcutsModal({
   const handlePrintCheatSheet = useCallback(() => {
     // Build grouped data for the printable view using all actions (not filtered by search)
     const allActions = getRegisteredActions();
+    const platform = getShortcutPlatform();
+    const profilePresentation = getKeyboardShortcutProfilePresentation(
+      keyboardShortcutProfileId,
+      platform,
+    );
+    const activeCustomProfile = customKeyboardProfiles.find(
+      (profile) => profile.id === activeCustomKeyboardProfileId,
+    );
+    const printedProfileName = activeCustomProfile?.name ?? profilePresentation.profile.name;
     const printGroups: Record<string, { name: string; shortcut: string }[]> = {};
     for (const action of allActions) {
-      const effectiveShortcut = getEffectiveShortcut(action.id, action.shortcut);
-      if (!effectiveShortcut) continue; // Only include actions that have shortcuts
+      const effectiveShortcuts = getEffectiveShortcuts(action.id, action.shortcut, action.shortcutAliases);
+      if (effectiveShortcuts.length === 0) continue; // Only include actions that have shortcuts
       if (!printGroups[action.category]) printGroups[action.category] = [];
       printGroups[action.category].push({
         name: action.name,
-        shortcut: formatShortcut(effectiveShortcut),
+        shortcut: effectiveShortcuts.map((shortcut) => formatShortcut(shortcut)).join(" / "),
       });
     }
 
@@ -150,14 +224,14 @@ export function KeyboardShortcutsModal({
       .map(
         ([category, items]) => `
         <div class="category">
-          <h2>${category}</h2>
+          <h2>${escapePrintHtml(category)}</h2>
           <table>
             ${items
               .map(
                 (item) => `
               <tr>
-                <td class="action-name">${item.name}</td>
-                <td class="shortcut"><kbd>${item.shortcut}</kbd></td>
+                <td class="action-name">${escapePrintHtml(item.name)}</td>
+                <td class="shortcut"><kbd>${escapePrintHtml(item.shortcut)}</kbd></td>
               </tr>`
               )
               .join("")}
@@ -170,69 +244,14 @@ export function KeyboardShortcutsModal({
 <html>
 <head>
   <title>OpenStudio - Keyboard Shortcuts</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      padding: 24px;
-      color: #1a1a1a;
-      max-width: 900px;
-      margin: 0 auto;
-    }
-    h1 {
-      font-size: 20px;
-      margin-bottom: 4px;
-      text-align: center;
-    }
-    .subtitle {
-      text-align: center;
-      font-size: 11px;
-      color: #888;
-      margin-bottom: 20px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-    }
-    .category {
-      break-inside: avoid;
-      margin-bottom: 8px;
-    }
-    h2 {
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #555;
-      border-bottom: 1px solid #ddd;
-      padding-bottom: 3px;
-      margin-bottom: 4px;
-    }
-    table { width: 100%; border-collapse: collapse; }
-    tr { border-bottom: 1px solid #f0f0f0; }
-    td { padding: 2px 4px; font-size: 11px; vertical-align: middle; }
-    .action-name { color: #333; }
-    .shortcut { text-align: right; white-space: nowrap; }
-    kbd {
-      font-family: "SF Mono", "Consolas", "Monaco", monospace;
-      font-size: 10px;
-      background: #f0f0f0;
-      border: 1px solid #ccc;
-      border-radius: 3px;
-      padding: 1px 5px;
-      color: #333;
-    }
-    @media print {
-      body { padding: 12px; }
-      .no-print { display: none; }
-    }
-  </style>
+  <link rel="stylesheet" href="${escapePrintHtml(keyboardShortcutsPrintCssUrl)}">
 </head>
 <body>
   <h1>OpenStudio Keyboard Shortcuts</h1>
-  <p class="subtitle">Generated on ${new Date().toLocaleDateString()}</p>
-  <div class="no-print" style="text-align:center;margin-bottom:16px;">
-    <button onclick="window.print()" style="padding:6px 20px;font-size:13px;cursor:pointer;border:1px solid #ccc;border-radius:4px;background:#f8f8f8;">
+  <p class="subtitle">${escapePrintHtml(printedProfileName)} &middot; ${escapePrintHtml(profilePresentation.policyLabel)} &middot; ${escapePrintHtml(profilePresentation.availabilityLabel)}</p>
+  <p class="subtitle">Generated on ${escapePrintHtml(new Date().toLocaleDateString())}</p>
+  <div class="no-print print-actions">
+    <button class="print-button" onclick="window.print()">
       Print / Save as PDF
     </button>
   </div>
@@ -244,10 +263,16 @@ export function KeyboardShortcutsModal({
 
     const printWindow = window.open("", "_blank");
     if (printWindow) {
+      printWindow.opener = null;
       printWindow.document.write(html);
       printWindow.document.close();
     }
-  }, [getEffectiveShortcut]);
+  }, [
+    activeCustomKeyboardProfileId,
+    customKeyboardProfiles,
+    getEffectiveShortcuts,
+    keyboardShortcutProfileId,
+  ]);
 
   if (!isOpen) return null;
 
@@ -257,18 +282,51 @@ export function KeyboardShortcutsModal({
       onClose={onClose}
       title="Keyboard Shortcuts"
       size="lg"
+      className="!w-[calc(100vw-2rem)] max-w-[700px]"
     >
-      <div className="flex flex-col gap-3 max-h-[70vh]">
+      <div className="flex max-h-[calc(100vh-8rem)] min-w-0 flex-col gap-3 overflow-y-auto pr-1">
         {/* Search */}
+        <div className="rounded-lg border border-daw-border bg-daw-dark/40 p-3">
+          <InputProfileSelectors compact />
+        </div>
+        <CustomKeyboardProfileManager />
+
+        <div className="grid gap-2 rounded-lg border border-daw-border bg-daw-dark/40 p-3 sm:grid-cols-[minmax(0,220px)_1fr] sm:items-end">
+          <NativeSelect
+            label="Edit overrides for"
+            options={[
+              { value: "common", label: "All platforms" },
+              { value: "macos", label: "macOS" },
+              { value: "windows", label: "Windows" },
+              { value: "linux", label: "Linux" },
+              { value: "other", label: "Other / fallback" },
+            ]}
+            value={bindingTarget}
+            onChange={(value) => {
+              if (["common", "macos", "windows", "linux", "other"].includes(String(value))) {
+                setBindingTarget(String(value) as CustomShortcutTarget);
+              }
+            }}
+            size="sm"
+            fullWidth
+            showPlaceholder={false}
+          />
+          <p className="text-[11px] leading-relaxed text-neutral-500">
+            A platform-specific list replaces All platforms on that platform. An empty list intentionally disables the action there.
+          </p>
+        </div>
+
         <div className="relative">
           <Search
             size={14}
             className="absolute left-2 top-1/2 -translate-y-1/2 text-neutral-500"
+            aria-hidden="true"
           />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search shortcuts..."
+            aria-label="Search keyboard shortcuts"
             className="pl-7"
             autoFocus={!listeningActionId}
           />
@@ -276,7 +334,12 @@ export function KeyboardShortcutsModal({
 
         {/* Listening overlay */}
         {listeningActionId && (
-          <div className="bg-daw-accent/20 border border-daw-accent rounded px-3 py-2 text-sm text-center">
+          <div
+            className="bg-daw-accent/20 border border-daw-accent rounded px-3 py-2 text-sm text-center"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
             <span className="text-daw-accent font-semibold">
               Press a key combination...
             </span>
@@ -292,108 +355,192 @@ export function KeyboardShortcutsModal({
         )}
 
         <div className="text-xs text-neutral-500 px-1">
-          Rebinding currently applies to global shortcuts. Timeline- and editor-scoped shortcuts are shown here for reference but cannot be rebound yet.
+          Select an action name to run it, or add one or more keys for the selected platform target. Scoped bindings apply only in their named editors; a custom list overrides the selected base profile.
         </div>
 
         {/* Shortcuts List */}
-        <div className="overflow-y-auto flex-1 min-h-0">
+        <div className="min-w-0 flex-none">
           {Object.entries(grouped).map(([category, categoryActions]) => (
             <div key={category} className="mb-3">
-              <h3 className="text-xs font-semibold uppercase text-daw-text-muted px-2 py-1 bg-neutral-800 rounded sticky top-0 z-10">
+              <h3 className="pointer-events-none sticky top-0 z-10 rounded bg-neutral-800 px-2 py-1 text-xs font-semibold uppercase text-daw-text-muted">
                 {category} ({categoryActions.length})
               </h3>
               <div className="mt-1">
                 {categoryActions.map((action) => {
-                  const isCustom =
-                    customShortcuts[action.id] !== undefined;
-                  const effectiveShortcut = getEffectiveShortcut(
+                  const currentPlatform = getShortcutPlatform();
+                  const isCustom = hasCustomShortcutOverride(
+                    customShortcuts,
                     action.id,
-                    action.shortcut
+                    currentPlatform,
                   );
-                  const shortcutScope = action.shortcutScope ?? "global";
-                  const shortcutScopeLabel = getActionShortcutScopeLabel(shortcutScope);
-                  const canRebind = shortcutScope === "global";
+                  const targetBindings = getCustomShortcutTargetBindings(
+                    customShortcuts[action.id],
+                    bindingTarget,
+                  );
+                  const hasTargetOverride = targetBindings !== undefined;
+                  const targetBindingList = targetBindings ?? [];
+                  const targetBindingCapacityReached =
+                    targetBindingList.length >= MAX_CUSTOM_SHORTCUT_BINDINGS_PER_TARGET;
+                  const effectiveShortcuts = getEffectiveShortcuts(
+                    action.id,
+                    action.shortcut,
+                    action.shortcutAliases,
+                  );
+                  const profileShortcuts = getProfileActionBindings(
+                    keyboardShortcutProfileId,
+                    action.id,
+                    getShortcutPlatform(),
+                  ) ?? [action.shortcut, ...(action.shortcutAliases ?? [])].filter(
+                    (shortcut): shortcut is string => typeof shortcut === "string" && Boolean(shortcut) && !shortcut.includes("("),
+                  );
+                  const shortcutScopeLabels = getActionShortcutScopes(action, keyboardShortcutProfileId).map(
+                    (scope) => getActionShortcutScopeLabel(scope),
+                  );
+                  const shortcutScopeLabel = shortcutScopeLabels.join(", ");
+                  const canRebind = true;
                   const isListening = listeningActionId === action.id;
 
                   return (
                     <div
                       key={action.id}
-                      className={`flex items-center justify-between px-2 py-1 text-sm rounded group ${
+                      className={`group flex flex-col items-stretch gap-1 rounded px-2 py-1 text-sm sm:flex-row sm:items-center sm:justify-between ${
                         isListening
                           ? "bg-daw-accent/10 ring-1 ring-daw-accent"
                           : "hover:bg-neutral-800"
                       }`}
                     >
-                      <span
-                        className="text-daw-text cursor-pointer flex-1 min-w-0 truncate"
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate rounded text-left text-daw-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent disabled:cursor-default"
                         onClick={() => {
                           if (!listeningActionId) {
                             action.execute();
                             onClose();
                           }
                         }}
+                        disabled={Boolean(listeningActionId)}
                         title={action.name}
                       >
                         {action.name}
-                      </span>
+                      </button>
 
-                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:ml-2 sm:shrink-0 sm:justify-end">
                         {/* Shortcut badge */}
-                        {effectiveShortcut ? (
+                        {effectiveShortcuts.length > 0 ? (
                           <>
-                            <span
-                              className={`text-xs px-1.5 py-0.5 rounded font-mono ${
-                                isCustom
-                                  ? "bg-daw-accent/30 text-daw-accent font-bold border border-daw-accent/50"
-                                  : "text-daw-text-muted bg-neutral-700"
-                              }`}
-                              title={
-                                isCustom
-                                  ? `Custom (default: ${formatShortcut(action.shortcut) || "none"})`
-                                  : undefined
-                              }
-                            >
-                              {formatShortcut(effectiveShortcut)}
-                            </span>
-                            <span className="text-[10px] uppercase tracking-wide text-daw-text-muted/70">
-                              {shortcutScopeLabel}
+                            <span className="flex items-center gap-1">
+                              {effectiveShortcuts.map((shortcut, index) => (
+                                <span
+                                  key={`${shortcut}-${index}`}
+                                  className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                                    isCustom
+                                      ? "bg-daw-accent/30 text-daw-accent font-bold border border-daw-accent/50"
+                                      : "text-daw-text-muted bg-neutral-700"
+                                  }`}
+                                  title={
+                                    isCustom
+                                      ? `Custom (profile: ${profileShortcuts.map((binding) => formatShortcut(binding)).join(" / ") || "none"})`
+                                      : undefined
+                                  }
+                                >
+                                  {formatShortcut(shortcut)}
+                                </span>
+                              ))}
                             </span>
                           </>
                         ) : (
-                          <span className="text-xs text-neutral-600 w-6 text-center">
-                            —
+                          <span
+                            className={`text-xs ${isCustom ? "text-orange-300" : "text-neutral-500"}`}
+                            title={isCustom ? "Intentionally unassigned by custom binding" : "Unassigned in the selected profile"}
+                          >
+                            {isCustom ? "Unassigned (custom)" : "Unassigned"}
+                          </span>
+                        )}
+                        <span className="text-[10px] uppercase tracking-wide text-daw-text-muted/70">
+                          {shortcutScopeLabel}
+                        </span>
+
+                        {hasTargetOverride && (
+                          <span className="flex flex-wrap items-center gap-1" aria-label={`${bindingTarget} custom bindings`}>
+                            <span className="text-[10px] uppercase text-daw-accent/80">
+                              {bindingTarget === "common" ? "All" : bindingTarget}
+                            </span>
+                            {targetBindingList.length > 0 ? targetBindingList.map((shortcut) => (
+                              <button
+                                key={shortcut}
+                                type="button"
+                                className="rounded border border-daw-accent/50 bg-daw-accent/20 px-1.5 py-0.5 font-mono text-[10px] text-daw-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  removeCustomShortcutBinding(action.id, shortcut, bindingTarget);
+                                }}
+                                disabled={Boolean(listeningActionId)}
+                                aria-label={`Remove ${formatShortcut(shortcut)} from ${action.name} for ${bindingTarget}`}
+                                title="Remove this binding"
+                              >
+                                {formatShortcut(shortcut)} ×
+                              </button>
+                            )) : (
+                              <span className="text-[10px] text-orange-300">Disabled here</span>
+                            )}
                           </span>
                         )}
 
-                        {/* Rebind button */}
+                        {/* Add another binding */}
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-1.5 py-0.5 h-auto"
+                          className="h-auto px-1.5 py-0.5 text-[10px] opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
                           onClick={(e) => {
                             e.stopPropagation();
                             if (!canRebind) return;
                             handleStartRebind(action.id);
                           }}
-                          disabled={!!listeningActionId || !canRebind}
-                          title={canRebind ? "Rebind" : `${shortcutScopeLabel} shortcut`}
+                          disabled={!!listeningActionId
+                            || !canRebind
+                            || targetBindingCapacityReached
+                            || implicitProfileCreationBlocked}
+                          title={implicitProfileCreationBlocked
+                            ? `Delete a custom profile before adding bindings (limit ${MAX_CUSTOM_KEYBOARD_PROFILES})`
+                            : targetBindingCapacityReached
+                            ? `Maximum of ${MAX_CUSTOM_SHORTCUT_BINDINGS_PER_TARGET} bindings for this target`
+                            : canRebind
+                              ? `Add a ${bindingTarget} binding`
+                              : `${shortcutScopeLabel} shortcut`}
+                          aria-label={`Rebind ${action.name}`}
                         >
-                          Rebind
+                          Add key
                         </Button>
 
-                        {/* Reset button (only visible for custom shortcuts) */}
-                        {isCustom && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-auto px-1.5 py-0.5 text-[10px] text-orange-300 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setCustomShortcutBindings(action.id, [], bindingTarget);
+                          }}
+                          disabled={Boolean(listeningActionId) || implicitProfileCreationBlocked}
+                          aria-label={`Disable ${action.name} for ${bindingTarget}`}
+                          title={`Intentionally unassign for ${bindingTarget}`}
+                        >
+                          Disable
+                        </Button>
+
+                        {/* Inherit button (only visible for the selected target override) */}
+                        {hasTargetOverride && (
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-1.5 py-0.5 h-auto text-orange-400 hover:text-orange-300"
+                            className="h-auto px-1.5 py-0.5 text-[10px] text-orange-400 opacity-70 transition-opacity hover:text-orange-300 hover:opacity-100 focus-visible:opacity-100"
                             onClick={(e) => {
                               e.stopPropagation();
                               handleResetSingle(action.id);
                             }}
                             disabled={!!listeningActionId}
+                            aria-label={`Remove ${bindingTarget} override for ${action.name}`}
                           >
-                            Reset
+                            Inherit
                           </Button>
                         )}
                       </div>
@@ -411,8 +558,8 @@ export function KeyboardShortcutsModal({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-between items-center pt-2 border-t border-daw-border">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-2 border-t border-daw-border pt-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-neutral-500">
               {filtered.length} action{filtered.length !== 1 ? "s" : ""}
             </span>
@@ -424,7 +571,7 @@ export function KeyboardShortcutsModal({
                 onClick={() => {
                   if (
                     window.confirm(
-                      "Reset all custom shortcuts to defaults?"
+                      "Reset all custom shortcuts to the selected profile?"
                     )
                   ) {
                     resetCustomShortcuts();
@@ -435,9 +582,9 @@ export function KeyboardShortcutsModal({
               </Button>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button variant="default" size="sm" onClick={handlePrintCheatSheet}>
-              <Printer size={12} className="mr-1.5" />
+              <Printer size={12} className="mr-1.5" aria-hidden="true" />
               Print Cheat Sheet
             </Button>
             <Button variant="default" size="sm" onClick={onClose}>

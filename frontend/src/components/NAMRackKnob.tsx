@@ -1,3 +1,4 @@
+import "./NAMRackKnob.css";
 import {
   type CSSProperties,
   type PointerEvent,
@@ -23,6 +24,10 @@ import {
 } from "../utils/builtInParamValue";
 import { knobAssetForVariant, knobAtlasFrame, knobFrameIndex } from "./NAMRackControlAssets";
 import { NAMRackControlTooltip } from "./NAMRackControlTooltip";
+import {
+  getParameterWheelStepCount,
+  resolveProfiledParameterWheel,
+} from "../utils/parameterWheel";
 
 type TooltipActivity = "hovered" | "focused" | "dragging";
 
@@ -247,11 +252,14 @@ export function RackKnob({
         }}
         onWheel={(event) => {
           if (disabled) return;
-          event.preventDefault();
+          const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+          if (gesture.preventDefault) event.preventDefault();
+          if (gesture.stopPropagation) event.stopPropagation();
+          if (gesture.operation !== "adjust") return;
+          const stepCount = getParameterWheelStepCount(gesture);
+          if (stepCount === 0) return;
           showTooltipNow();
-          const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-          const direction = event.deltaY > 0 ? -1 : 1;
-          setValue(offsetParamValue(param, param.value, fine * direction));
+          setValue(offsetParamValue(param, param.value, stepCount));
         }}
         onDoubleClick={(event) => {
           if (disabled) return;

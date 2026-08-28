@@ -33,6 +33,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   } | null>(null);
   const [audioDiagnostics, setAudioDiagnostics] =
     useState<AudioDebugSnapshot | null>(null);
+  const [oversamplingFactor, setOversamplingFactor] =
+    useState<2 | 4 | 8>(4);
   const { refreshAudioDeviceSetup, stop } = useDAWStore(useShallow((s) => ({
     refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
     stop: s.stop,
@@ -72,6 +74,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       }
 
       setConfig(data);
+      setOversamplingFactor(
+        await nativeBridge
+          .getNAMRackOversamplingFactor()
+          .catch((): 2 | 4 | 8 => 4),
+      );
       const diagnostics = await nativeBridge.getAudioDebugSnapshot()
         .catch((diagnosticError) => {
           console.warn(
@@ -110,6 +117,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       console.log("[SettingsModal] Applying config:", backendConfig);
       await stop();
       await nativeBridge.panicMIDI().catch(() => false);
+      const oversamplingApplied =
+        await nativeBridge.setNAMRackOversamplingFactor(oversamplingFactor);
+      if (!oversamplingApplied) {
+        throw new Error("NAM Rack rejected the requested oversampling factor");
+      }
       const applied = await nativeBridge.setAudioDeviceSetup(backendConfig);
       if (!applied) {
         throw new Error("Audio device rejected the requested configuration");
@@ -385,6 +397,34 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 loading={isLoading}
                 fullWidth
               />
+
+              <div>
+                <NativeSelect
+                  label="Oversampling"
+                  options={[2, 4, 8]}
+                  value={oversamplingFactor}
+                  onChange={(val) => {
+                    const factor = Number(val);
+                    if (factor === 2 || factor === 4 || factor === 8) {
+                      setOversamplingFactor(factor);
+                    }
+                  }}
+                  formatLabel={(val) => `${val}x`}
+                  loading={isLoading}
+                  fullWidth
+                />
+                <div className="mt-2 text-xs leading-relaxed text-neutral-500">
+                  Controls internal oversampling for NAM Rack Precision Drive and
+                  Distortion. Higher values reduce aliasing and increase CPU use.
+                </div>
+                {deadlineStatus.shouldWarn && oversamplingFactor > 2 && (
+                  <div className="mt-2 text-xs leading-relaxed text-amber-300">
+                    The current audio callback has recently missed its deadline.
+                    Lower Oversampling if this continues; OpenStudio will not
+                    reduce it automatically.
+                  </div>
+                )}
+              </div>
 
               {/* Buffer Size */}
               <div>

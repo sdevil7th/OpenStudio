@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useDAWStore } from "../store/useDAWStore";
+import { createDefaultTrack, useDAWStore } from "../store/useDAWStore";
 import {
   dispatchGlobalShortcut,
   matchesActionShortcut,
@@ -8,6 +8,8 @@ import {
   activateShortcutContext,
   dispatchActiveShortcut,
   getActiveShortcutContext,
+  isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
   registerShortcutSurface,
   resetShortcutContextForTests,
   shortcutExactlyMatches,
@@ -33,6 +35,9 @@ const originalSelectionState = {
   selectedClipId: useDAWStore.getState().selectedClipId,
   selectedClipIds: useDAWStore.getState().selectedClipIds,
   selectedNoteIds: useDAWStore.getState().selectedNoteIds,
+  tracks: useDAWStore.getState().tracks,
+  globalLocked: useDAWStore.getState().globalLocked,
+  lockSettings: useDAWStore.getState().lockSettings,
 };
 
 afterEach(() => {
@@ -90,6 +95,59 @@ describe("shortcut edit-context routing", () => {
     expect(secondSession).toHaveBeenCalledTimes(1);
   });
 
+  it("restores the previous handler when a same-context owner unmounts", () => {
+    const baseHandler = vi.fn(() => "handled" as const);
+    const temporaryHandler = vi.fn(() => "claimed_noop" as const);
+    const unregisterBase = registerShortcutSurface(
+      { kind: "timeline" },
+      baseHandler,
+    );
+    const unregisterTemporary = registerShortcutSurface(
+      { kind: "timeline" },
+      temporaryHandler,
+    );
+    activateShortcutContext({ kind: "timeline" });
+
+    expect(dispatchActiveShortcut({ key: "s", repeat: true })).toBe("claimed_noop");
+    expect(temporaryHandler).toHaveBeenCalledWith({ key: "s", repeat: true });
+    expect(baseHandler).not.toHaveBeenCalled();
+
+    unregisterTemporary();
+    expect(getActiveShortcutContext()).toEqual({ kind: "timeline" });
+    expect(dispatchActiveShortcut({ key: "s" })).toBe("handled");
+    expect(baseHandler).toHaveBeenCalledTimes(1);
+
+    unregisterBase();
+    expect(getActiveShortcutContext()).toEqual({ kind: "application" });
+  });
+
+  it("classifies text editors and non-text controls without requiring DOM globals", () => {
+    const targetMatching = (fragment: string) => ({
+      closest: (selectors: string) => selectors.includes(fragment) ? {} : null,
+    }) as unknown as EventTarget;
+
+    const textInput = targetMatching("input[type='text']");
+    const select = targetMatching("select");
+    const range = targetMatching("input[type='range']");
+    const button = targetMatching("button");
+    const contentEditable = targetMatching("[contenteditable='true']");
+    const generic = targetMatching("[data-not-a-control]");
+
+    expect(isEditableShortcutTarget(textInput)).toBe(true);
+    expect(isNonTextControlShortcutTarget(textInput)).toBe(false);
+    expect(isEditableShortcutTarget(select)).toBe(true);
+    expect(isNonTextControlShortcutTarget(select)).toBe(false);
+    expect(isEditableShortcutTarget(range)).toBe(false);
+    expect(isNonTextControlShortcutTarget(range)).toBe(true);
+    expect(isEditableShortcutTarget(button)).toBe(false);
+    expect(isNonTextControlShortcutTarget(button)).toBe(true);
+    expect(isEditableShortcutTarget(contentEditable)).toBe(true);
+    expect(isEditableShortcutTarget(generic)).toBe(false);
+    expect(isNonTextControlShortcutTarget(generic)).toBe(false);
+    expect(isEditableShortcutTarget(null)).toBe(false);
+    expect(isNonTextControlShortcutTarget(null)).toBe(false);
+  });
+
   it("requires exact modifiers and preserves native editing chords", () => {
     expect(shortcutExactlyMatches({ key: "z", ctrlKey: true }, "Ctrl+Z")).toBe(true);
     expect(shortcutExactlyMatches(
@@ -107,7 +165,7 @@ describe("shortcut edit-context routing", () => {
     expect(shouldPreserveNonTextControlShortcut({ key: "l" })).toBe(false);
   });
 
-  it("keeps macOS Control and Option distinct during exact matching", () => {
+  it("keeps macOS Command, Control, and Option distinct during exact matching", () => {
     expect(canonicalizeShortcutEvent({ key: "z", metaKey: true }, "macos")).toBe("Ctrl+Z");
     expect(canonicalizeShortcutEvent({ key: "z", ctrlKey: true }, "macos")).toBe("Alt+Z");
     expect(canonicalizeShortcutEvent({
@@ -115,25 +173,60 @@ describe("shortcut edit-context routing", () => {
       metaKey: true,
       ctrlKey: true,
     }, "macos")).toBe("Ctrl+Alt+Z");
-    expect(canonicalizeShortcutEvent({ key: "z", altKey: true }, "macos")).toBeNull();
+    expect(canonicalizeShortcutEvent({ key: "z", altKey: true }, "macos")).toBe("Option+Z");
     expect(canonicalizeShortcutEvent({
       key: "z",
       ctrlKey: true,
       altKey: true,
-    }, "macos")).toBeNull();
+    }, "macos")).toBe("Alt+Option+Z");
     expect(canonicalizeShortcutEvent({
       key: "z",
       metaKey: true,
       ctrlKey: true,
       altKey: true,
-    }, "macos")).toBeNull();
+    }, "macos")).toBe("Ctrl+Alt+Option+Z");
     expect(canonicalizeShortcutEvent({
       key: "z",
       ctrlKey: true,
       altKey: true,
     }, "other")).toBe("Ctrl+Alt+Z");
     expect(canonicalizeShortcutEvent({ key: "Alt", altKey: true }, "macos")).toBeNull();
-    expect(canonicalizeShortcutEvent({ key: "å", altKey: true }, "macos")).toBeNull();
+    expect(canonicalizeShortcutEvent({ key: "å", altKey: true }, "macos")).toBe("Option+Å");
+  });
+
+  it("preserves composition and native macOS text-editing chords", () => {
+    expect(shouldPreserveEditableShortcut(
+      { key: "a", metaKey: true },
+      false,
+      "macos",
+    )).toBe(true);
+    expect(shouldPreserveEditableShortcut(
+      { key: "e", ctrlKey: true },
+      true,
+      "macos",
+    )).toBe(true);
+    expect(shouldPreserveEditableShortcut(
+      { key: "e", altKey: true },
+      false,
+      "macos",
+    )).toBe(true);
+    expect(shouldPreserveEditableShortcut(
+      { key: "Enter", altKey: true },
+      true,
+      "macos",
+    )).toBe(false);
+    expect(shouldPreserveEditableShortcut({
+      key: "@",
+      ctrlKey: true,
+      altKey: true,
+      getModifierState: (modifier) => modifier === "AltGraph",
+    })).toBe(true);
+    expect(shouldPreserveEditableShortcut({ key: "z", isComposing: true })).toBe(true);
+    expect(shouldPreserveNonTextControlShortcut({ key: "Tab" })).toBe(true);
+    expect(shouldPreserveNonTextControlShortcut({
+      key: "ArrowLeft",
+      ctrlKey: true,
+    })).toBe(false);
   });
 
   it("claims empty editor undo without falling through to project history", () => {
@@ -176,10 +269,106 @@ describe("shortcut edit-context routing", () => {
     expect(toggleMixer).toHaveBeenCalledTimes(1);
   });
 
+  it("dispatches explicit physical-position and Windows-key custom bindings", () => {
+    const toggleMixer = vi.fn();
+    useDAWStore.setState({
+      toggleMixer,
+      customShortcuts: { "view.toggleMixer": "Control+Code:KeyZ" },
+    });
+
+    expect(dispatchGlobalShortcut({
+      key: "y",
+      code: "KeyZ",
+      ctrlKey: true,
+      source: "browser",
+    })).toBe(true);
+    expect(toggleMixer).toHaveBeenCalledTimes(1);
+    expect(dispatchGlobalShortcut({
+      key: "z",
+      code: "KeyY",
+      ctrlKey: true,
+      source: "browser",
+    })).toBe(false);
+
+    useDAWStore.setState({
+      customShortcuts: { "view.toggleMixer": "Meta+Code:KeyM" },
+    });
+    expect(dispatchGlobalShortcut({
+      key: "m",
+      code: "KeyM",
+      metaKey: true,
+      source: "browser",
+    })).toBe(true);
+    expect(toggleMixer).toHaveBeenCalledTimes(2);
+    expect(dispatchGlobalShortcut({
+      key: "m",
+      code: "KeyM",
+      ctrlKey: true,
+      source: "browser",
+    })).toBe(false);
+  });
+
+  it("accepts multiple custom bindings at runtime without conflating numpad keys", () => {
+    const toggleMixer = vi.fn();
+    useDAWStore.setState({
+      toggleMixer,
+      customShortcuts: {
+        "view.toggleMixer": ["Ctrl+M", "Control+Code:KeyZ"],
+      } as unknown as Record<string, string>,
+    });
+
+    expect(dispatchGlobalShortcut({
+      key: "m",
+      code: "KeyM",
+      ctrlKey: true,
+      source: "browser",
+    })).toBe(true);
+    expect(dispatchGlobalShortcut({
+      key: "y",
+      code: "KeyZ",
+      ctrlKey: true,
+      source: "browser",
+    })).toBe(true);
+    expect(toggleMixer).toHaveBeenCalledTimes(2);
+
+    useDAWStore.setState({
+      customShortcuts: { "view.toggleMixer": "Ctrl+1" },
+    });
+    expect(matchesActionShortcut(
+      { key: "1", code: "Numpad1", ctrlKey: true, location: 3 },
+      "view.toggleMixer",
+    )).toBe(false);
+    expect(matchesActionShortcut(
+      { key: "1", code: "Digit1", ctrlKey: true },
+      "view.toggleMixer",
+    )).toBe(true);
+  });
+
   it("consumes repeated one-shot bindings but executes repeatable actions", () => {
     const toggleMixer = vi.fn();
     const nudgeClips = vi.fn();
-    useDAWStore.setState({ toggleMixer, nudgeClips });
+    const track = createDefaultTrack("nudge-track", "Nudge", "#123456", "audio", []);
+    track.clips = [{
+      id: "nudge-clip",
+      filePath: "C:/nudge.wav",
+      name: "Nudge",
+      startTime: 1,
+      duration: 1,
+      offset: 0,
+      color: "#123456",
+      volumeDB: 0,
+      fadeIn: 0,
+      fadeOut: 0,
+    }];
+    useDAWStore.setState({
+      toggleMixer,
+      nudgeClips,
+      tracks: [track],
+      selectedClipId: "nudge-clip",
+      selectedClipIds: ["nudge-clip"],
+      globalLocked: false,
+      lockSettings: { ...useDAWStore.getState().lockSettings, items: false },
+    });
 
     expect(dispatchGlobalShortcut({
       key: "m",

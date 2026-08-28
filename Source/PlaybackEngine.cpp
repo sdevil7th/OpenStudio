@@ -1346,6 +1346,12 @@ void PlaybackEngine::queueDeferredClipAudioFile(const juce::String& clipId, cons
         + " -> " + newFile.getFullPathName());
 }
 
+void PlaybackEngine::cancelDeferredClipAudioFile(const juce::String& clipId)
+{
+    juce::ScopedLock sl(lock);
+    deferredClipSwaps.erase(clipId);
+}
+
 bool PlaybackEngine::commitDeferredClipAudioFile(const juce::String& clipId)
 {
     juce::File fileToCommit;

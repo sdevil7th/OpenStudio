@@ -12,7 +12,7 @@
  *
  * The processor adds two parallel, wet-only components to an unchanged close
  * cabinet signal:
- *   - a sparse true-stereo 2x2 early-reflection field; and
+ *   - a true-stereo 2x2 early-reflection field feeding a short late room; and
  *   - a deterministic, transient-protected two-voice doubler.
  *
  * prepare() and reset() are message-thread operations. process() performs no
@@ -29,6 +29,8 @@ public:
         float roomWidth = 0.65f;       // 0..1; maps to 0..135% wet side
         float doublerMix = 0.0f;       // 0..1; zero is exact bypass
         float doublerSpread = 0.65f;   // 0..1
+        bool roomInputSendEnabled = true; // false drains the existing room tail
+        float doublerDelayMs = 4.5f;   // 3..20 ms; independent of Spread
     };
 
     struct DiagnosticSnapshot
@@ -69,6 +71,9 @@ public:
         bool transientProtectionValid = false;
         bool nonFiniteRecoveryValid = false;
         bool tailDecayValid = false;
+        bool roomInputSendGateValid = false;
+        bool lateRoomFieldValid = false;
+        bool doublerDelayControlValid = false;
         float zeroEffectMaximumError = 0.0f;
         float deterministicResetMaximumError = 0.0f;
         float blockPartitionMaximumError = 0.0f;
@@ -86,6 +91,9 @@ public:
         float roomTransientRecoveredGain = 1.0f;
         float doublerTransientRecoveredGain = 1.0f;
         float tailEndPeak = 0.0f;
+        float gatedRoomTailPeak = 0.0f;
+        float gatedRoomNewInputMaximumError = 0.0f;
+        float lateRoom150msRms = 0.0f;
         float lowFrequencySideToMidLimitDb = -18.0f;
         float highFrequencySideRmsMinimum = 1.0e-4f;
         float automationOutputPeakLimit = 4.0f;
@@ -131,8 +139,10 @@ public:
 
     void setRoomAmount(float amount) noexcept;
     void setRoomWidth(float width) noexcept;
+    void setRoomInputSendEnabled(bool enabled) noexcept;
     void setDoublerMix(float mix) noexcept;
     void setDoublerSpread(float spread) noexcept;
+    void setDoublerDelayMs(float delayMs) noexcept;
 
     /**
      * Adds the presentation field in place while preserving the direct signal
@@ -144,7 +154,7 @@ public:
 
     [[nodiscard]] bool isPrepared() const noexcept { return prepared; }
     [[nodiscard]] int getLatencySamples() const noexcept { return 0; }
-    [[nodiscard]] double getMaximumTailSeconds() const noexcept { return 0.064; }
+    [[nodiscard]] double getMaximumTailSeconds() const noexcept { return 0.80; }
 
     [[nodiscard]] DiagnosticSnapshot getDiagnostics() const noexcept;
     void resetDiagnostics() noexcept;
@@ -195,16 +205,22 @@ private:
     };
 
     static constexpr std::size_t roomTapCount = 8;
+    static constexpr std::size_t lateRoomLineCount = 4;
     static constexpr float parameterSmoothingSeconds = 0.020f;
     static constexpr float delayMorphSeconds = 0.030f;
-    static constexpr float roomFieldNormalisation = 0.35f;
-    static constexpr float roomMidScale = 0.35f;
-    static constexpr float doublerMidScale = 0.20f;
+    static constexpr float roomFieldNormalisation = 0.42f;
+    static constexpr float roomMidScale = 0.62f;
+    static constexpr float lateRoomInputGain = 0.32f;
+    static constexpr float lateRoomOutputGain = 0.58f;
+    static constexpr float doublerMidScale = 0.55f;
 
     static float clampUnit(float value) noexcept;
     static float nextRandomSigned(std::uint32_t& state) noexcept;
     static float smootherStep(float value) noexcept;
     static float raisedCosine(float value) noexcept;
+    static float mapRoomGain(float amount) noexcept;
+    static float mapDoublerGain(float amount) noexcept;
+    static float clampDoublerDelayMs(float delayMs) noexcept;
 
     void configureFilters() noexcept;
     void resetRoomRuntimeState(bool clearStorage) noexcept;
@@ -218,7 +234,12 @@ private:
                                           float delaySamples) const noexcept;
     void advanceDoublerDrift(DoublerDriftState& state,
                              float spread) noexcept;
-    void startDelaySpreadMorph(float requestedSpread) noexcept;
+    void startDoublerDelayMorph(float requestedDelayMs,
+                                float requestedSpread) noexcept;
+    void processLateRoom(float inputL,
+                         float inputR,
+                         float& outputL,
+                         float& outputR) noexcept;
 
     double currentSampleRate = 48000.0;
     int preparedMaximumBlockSize = 0;
@@ -226,8 +247,10 @@ private:
 
     std::atomic<float> targetRoomAmount { 0.0f };
     std::atomic<float> targetRoomWidth { 0.65f };
+    std::atomic<bool> targetRoomInputSendEnabled { true };
     std::atomic<float> targetDoublerMix { 0.0f };
     std::atomic<float> targetDoublerSpread { 0.65f };
+    std::atomic<float> targetDoublerDelayMs { 4.5f };
 
     float currentRoomGain = 0.0f;
     float currentRoomWidth = 0.65f;
@@ -244,6 +267,12 @@ private:
     std::array<int, roomTapCount> roomDirectTapSamplesR {};
     std::array<int, roomTapCount> roomCrossTapSamplesL {};
     std::array<int, roomTapCount> roomCrossTapSamplesR {};
+    std::array<std::vector<float>, lateRoomLineCount> lateRoomRings;
+    std::array<int, lateRoomLineCount> lateRoomWriteIndices {};
+    std::array<int, lateRoomLineCount> lateRoomValidSamples {};
+    std::array<float, lateRoomLineCount> lateRoomDampingStates {};
+    float lateRoomDampingCoefficient = 1.0f;
+    float currentLateRoomFeedback = 0.25f;
 
     Biquad roomWetHighPassL;
     Biquad roomWetHighPassR;
@@ -274,6 +303,9 @@ private:
     float activeDelaySpread = 0.65f;
     float morphTargetDelaySpread = 0.65f;
     float requestedDelaySpread = 0.65f;
+    float activeDoublerDelayMs = 4.5f;
+    float morphTargetDoublerDelayMs = 4.5f;
+    float requestedDoublerDelayMs = 4.5f;
     int delayMorphPosition = 0;
     int delayMorphLength = 1;
     bool delayMorphActive = false;
@@ -290,6 +322,8 @@ private:
 
     static_assert(std::atomic<float>::is_always_lock_free,
                   "NAM Cab Presentation parameter and metric floats must be lock-free");
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "NAM Cab Presentation switches must be lock-free");
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
                   "NAM Cab Presentation counters must be lock-free");
 

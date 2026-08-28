@@ -6,7 +6,10 @@ import { PianoRoll } from "./components/PianoRoll";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
-import { isEditableShortcutTarget } from "./utils/shortcutContext";
+import {
+  isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
+} from "./utils/shortcutContext";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import { windowSessionId } from "./utils/windowEnvironment";
 import {
@@ -15,9 +18,13 @@ import {
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
+import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
+import { startDetachedInputProfileSync } from "./utils/inputProfileWindowSync";
 
 export default function MidiEditorWindowApp() {
   const [hydrated, setHydrated] = useState(false);
+  useEffect(() => installBrowserZoomWheelGuard(document), []);
+  useEffect(() => startDetachedInputProfileSync(), []);
   const {
     tracks,
     pianoRollTrackId,
@@ -77,6 +84,7 @@ export default function MidiEditorWindowApp() {
         repeat: e.repeat,
         source: "browser",
         targetIsEditable: isEditableShortcutTarget(e.target),
+        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
         stopImmediatePropagation: () => e.stopImmediatePropagation(),

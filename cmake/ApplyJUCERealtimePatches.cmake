@@ -70,7 +70,7 @@ else()
             JUCE_ASIO_UNPATCHED_SNIPPET_AT)
         if(JUCE_ASIO_UNPATCHED_SNIPPET_AT LESS 0)
             message(FATAL_ERROR
-                "JUCE 8.0.0 ASIO x-run counter patch context changed at ${UNPATCHED_SNIPPET}; refusing an unverified dependency rewrite")
+                "Pinned JUCE ASIO x-run counter patch context changed at ${UNPATCHED_SNIPPET}; refusing an unverified dependency rewrite")
         endif()
     endforeach()
 
@@ -295,7 +295,7 @@ string(FIND
     JUCE_UNPATCHED_AT)
 if(JUCE_UNPATCHED_AT LESS 0)
     message(FATAL_ERROR
-        "JUCE 8.0.0 BufferingAudioReader patch context changed; refusing an unverified dependency rewrite")
+        "Pinned JUCE BufferingAudioReader patch context changed; refusing an unverified dependency rewrite")
 endif()
 
 string(REPLACE

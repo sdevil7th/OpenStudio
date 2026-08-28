@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -30,8 +30,18 @@ const TYPE_COLORS: Record<string, string> = {
  * color-coded flow, and send level adjustment.
  */
 export function RoutingMatrix({ isOpen, onClose }: RoutingMatrixProps) {
-  const { tracks } = useDAWStore(
-    useShallow((s) => ({ tracks: s.tracks })),
+  const {
+    tracks,
+    beginTrackSendLevelEdit,
+    setTrackSendLevel,
+    commitTrackSendLevelEdit,
+  } = useDAWStore(
+    useShallow((s) => ({
+      tracks: s.tracks,
+      beginTrackSendLevelEdit: s.beginTrackSendLevelEdit,
+      setTrackSendLevel: s.setTrackSendLevel,
+      commitTrackSendLevelEdit: s.commitTrackSendLevelEdit,
+    })),
   );
 
   const [editingSend, setEditingSend] = useState<{
@@ -94,12 +104,26 @@ export function RoutingMatrix({ isOpen, onClose }: RoutingMatrixProps) {
     }
   };
 
-  const handleLevelChange = (level: number) => {
-    if (!editingSend) return;
-    const store = useDAWStore.getState();
-    void store.setTrackSendLevel(editingSend.sourceId, editingSend.index, level / 100);
-    setEditingSend((prev) => prev ? { ...prev, level: level / 100 } : null);
-  };
+  const editingSourceId = editingSend?.sourceId;
+  const editingSendIndex = editingSend?.index;
+  const handleLevelEditBegin = useCallback(() => {
+    if (editingSourceId === undefined || editingSendIndex === undefined) return;
+    beginTrackSendLevelEdit(editingSourceId, editingSendIndex);
+  }, [beginTrackSendLevelEdit, editingSendIndex, editingSourceId]);
+  const handleLevelChange = useCallback((level: number) => {
+    if (editingSourceId === undefined || editingSendIndex === undefined) return;
+    const normalizedLevel = level / 100;
+    void setTrackSendLevel(editingSourceId, editingSendIndex, normalizedLevel);
+    setEditingSend((previous) => (
+      previous?.sourceId === editingSourceId && previous.index === editingSendIndex
+        ? { ...previous, level: normalizedLevel }
+        : previous
+    ));
+  }, [editingSendIndex, editingSourceId, setTrackSendLevel]);
+  const handleLevelEditCommit = useCallback(() => {
+    if (editingSourceId === undefined || editingSendIndex === undefined) return;
+    commitTrackSendLevelEdit(editingSourceId, editingSendIndex);
+  }, [commitTrackSendLevelEdit, editingSendIndex, editingSourceId]);
 
   const getLevelColor = (level: number, type: string) => {
     const baseColor = TYPE_COLORS[type] || "#22c55e";
@@ -275,7 +299,10 @@ export function RoutingMatrix({ isOpen, onClose }: RoutingMatrixProps) {
                   value={editingSend.level * 100}
                   min={0}
                   max={100}
+                  defaultValue={50}
                   onChange={handleLevelChange}
+                  onBeginEdit={handleLevelEditBegin}
+                  onCommitEdit={handleLevelEditCommit}
                 />
                 <span className="text-xs text-daw-text tabular-nums w-10">
                   {Math.round(editingSend.level * 100)}%

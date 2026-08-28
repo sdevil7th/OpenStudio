@@ -1,5 +1,6 @@
 import { Activity, Plus, Trash2 } from "lucide-react";
 import type { PianoRollVisibleLane } from "../store/useDAWStore";
+import { ProfiledRangeInput } from "./ui";
 
 interface PianoRollControllerLaneSectionProps {
   readonly visibleLanes: readonly PianoRollVisibleLane[];
@@ -60,13 +61,12 @@ export function PianoRollControllerLaneSection({
             }}
           >
             <span>{lane.label}</span>
-            <input
-              type="range"
+            <ProfiledRangeInput
               min={laneHeightMin(lane)}
               max={laneHeightMax(lane)}
               value={lane.height}
               onClick={(event) => event.stopPropagation()}
-              onChange={(event) => onLaneHeightChange(lane, Number(event.target.value))}
+              onValueChange={(value) => onLaneHeightChange(lane, value)}
               title="Lane height"
             />
             <select

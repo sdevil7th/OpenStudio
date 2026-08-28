@@ -27,6 +27,12 @@ Version 3.0 -- Comprehensive Reference Guide
 
 ---
 
+> **Shortcut notation:** Inline shortcuts in this manual show the OpenStudio
+> default keyboard and mouse profiles. The active profile, operating system,
+> editor scope, and custom overrides can change them. **Help > Keyboard
+> Shortcuts** is authoritative for keys and selected base profiles; the
+> fine-grained mouse-gesture overrides are shown in **Preferences > Mouse**.
+
 ## 1. Getting Started
 
 ### 1.1 System Requirements
@@ -220,20 +226,20 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
   - Trim handles on the left and right edges (in Select or Smart tool mode)
 - **Grid lines**: Vertical lines aligned to the current grid setting (bar, beat, subdivision).
 - **Automation lanes**: Per-track lanes below the track that display automation curves.
-- **Time selection**: A highlighted region created by clicking and dragging on the ruler or timeline background.
-- **Razor edits**: Semi-transparent selection areas created with Alt+drag for precise non-destructive editing.
+- **Time selection**: A highlighted region created with Primary+drag on the timeline background or Shift+drag on the ruler (`Primary` is Ctrl on Windows/Linux and Command on macOS).
+- **Razor edits**: Semi-transparent selection areas created with Alt/Option+drag on the timeline background for precise non-destructive editing.
 
 **Essential Navigation:**
 - **Scroll**: native vertical scrolling through the workspace.
 - **Ctrl+Scroll**: horizontal timeline zoom around the mouse pointer.
 - **Shift+Scroll**: horizontal timeline scroll.
 - **Alt+Scroll**: track height resize.
-- **Ctrl+Shift+Scroll**: track-height zoom style adjustment for faster resizing.
+- **Ctrl+Shift+Scroll**: waveform-height zoom for the hovered track.
 - **First-session hotkeys**: `Space`, `Ctrl+R`, `Ctrl+T`, `Ctrl+M`, `S`, `B`, `Delete`, `Ctrl+S`, `F1`, `Ctrl+Shift+P`.
-- **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard Shortcuts** for the full shortcut list and custom global rebinding.
+- **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard Shortcuts** for the full shortcut list and custom scoped rebinding.
 
 **Zoom and Scroll:**
-- **Horizontal zoom**: `Ctrl+Scroll wheel` (or `Ctrl+Plus` / `Ctrl+Minus`). Zoom range: 1 to 1000 pixels per second.
+- **Horizontal zoom**: `Ctrl+Scroll wheel` (or `Ctrl++` / `Ctrl+-`). Zoom range: 1 to 1000 pixels per second.
 - **Horizontal scroll**: Shift+scroll wheel, or use the horizontal scrollbar.
 - **Vertical scroll**: Scroll wheel when hovering over the track area.
 - **Zoom to Fit**: `Ctrl+0` resets zoom to a standard overview level.
@@ -256,9 +262,9 @@ The Transport Bar runs along the bottom of the window and provides:
 **Center Section - Transport Controls:**
 - **Go to Start** (skip back icon): Returns the playhead to the beginning.
 - **Record** (red circle): Starts recording on armed tracks. `Ctrl+R`
-- **Play** (green triangle): Starts playback. `Space`
-- **Stop** (square): Stops playback/recording. `Space` (while playing)
-- **Pause** (parallel bars): Pauses playback.
+- **Play / Pause** (green triangle): Starts or pauses playback. `Space`
+- **Stop** (square): Stops playback or recording. There is no separate default keyboard shortcut; `Space` stops an active recording through the Play / Pause action.
+- **Pause** (parallel bars): Pauses playback in place.
 - **Loop** (repeat icon): Toggles loop playback mode. `L`
 - **Metronome** (metronome icon): Toggles the click track.
 
@@ -301,8 +307,8 @@ OpenStudio includes several additional panels accessible via the View menu:
 | Big Clock                | View menu               | Large timecode display                          |
 | Render Queue             | View menu               | Queue and manage multiple render jobs           |
 | Routing Matrix           | View menu               | Visual signal routing between tracks/buses      |
-| Media Explorer           | View menu               | Browse and preview media files                  |
-| Media Pool               | View menu               | All media files used in the current project     |
+| Media Explorer           | View menu               | Browse/import media; backend audio preview is partial |
+| Media Pool               | View menu               | State/actions exist; the full panel is not mounted yet |
 | Loudness Meter           | View > Metering         | LUFS loudness measurement                       |
 | Spectrum Analyzer        | View > Metering         | Frequency spectrum display                      |
 | Phase Correlation Meter  | View > Metering         | Stereo phase correlation                        |
@@ -311,7 +317,7 @@ OpenStudio includes several additional panels accessible via the View menu:
 | Toolbar Editor           | View menu               | Customize toolbar layout                        |
 | Command Palette          | `Ctrl+Shift+P`          | Fuzzy search for any action in the application  |
 | Help Reference           | `F1`                    | Searchable in-app reference for controls and features |
-| Keyboard Shortcuts       | Help menu               | Searchable shortcut reference and custom global rebinding |
+| Keyboard Shortcuts       | Help menu               | Searchable reference, input profiles, and custom scoped rebinding |
 
 ---
 
@@ -616,8 +622,8 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 
 **Clip selection:**
 - Click a clip to select it.
-- `Ctrl+Click` to add/remove clips from the selection.
-- `Shift+Click` for range selection.
+- Primary+click to add/remove a clip from the selection (`Primary` is Ctrl on Windows/Linux and Command on macOS).
+- Plain-drag empty timeline space to marquee-select every audio or MIDI clip intersecting the rectangle.
 - Click empty timeline background to deselect all clips.
 - `Ctrl+Shift+A` to select all clips.
 - `Esc` to deselect all.
@@ -629,7 +635,7 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 - `Ctrl+A` to select all tracks.
 
 **Time selection:**
-- Click and drag on the timeline ruler to create a time selection.
+- Primary+drag on the timeline background, or Shift+drag on the ruler, to create a time selection (`Primary` is Ctrl on Windows/Linux and Command on macOS).
 - The time selection is highlighted as a shaded region.
 - Time selections are used for punch recording, rendering bounds, and editing operations.
 
@@ -637,8 +643,9 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 
 - Click and drag a clip to move it to a new position or track.
 - When snap is enabled, the clip snaps to grid lines.
-- Hold `Ctrl` while dragging to copy the clip instead of moving it.
-- Hold `Shift` while dragging to constrain movement to horizontal only (time axis).
+- Hold `Primary` while dragging to copy the clip instead of moving it.
+- Hold `Shift` while dragging to lock movement to the first axis that crosses the drag threshold.
+- Hold `Alt`/`Option` while dragging to bypass snapping.
 - Multi-selected clips move together as a group.
 
 ### 6.3 Splitting Clips
@@ -665,7 +672,7 @@ Trim the start or end of a clip to reveal or hide content:
 
 Slip editing moves the audio content within a clip without changing the clip's position on the timeline:
 
-1. Hold `Ctrl+Shift` and drag within a clip.
+1. Hold `Primary+Shift` and drag within a clip (`Primary` is Ctrl on Windows/Linux and Command on macOS).
 2. The clip's boundaries stay fixed, but the audio content slides earlier or later within the clip.
 3. This is useful for adjusting the timing of audio relative to the clip boundaries.
 
@@ -679,6 +686,9 @@ Each clip has adjustable fade-in and fade-out regions:
 4. The fade is displayed as a curved line on the clip.
 
 **Auto-Crossfade**: When enabled (toggle in Main Toolbar or View menu), overlapping clips on the same track automatically create crossfades.
+
+For an audio clip's gain envelope, Shift+click the clip to add a point. Drag an
+existing point to change its time and gain; right-click a point to remove it.
 
 ### 6.7 Undo and Redo
 
@@ -738,12 +748,12 @@ When a time selection is active, the following operations are available:
 
 Razor editing provides a fast way to select and delete specific regions across multiple tracks:
 
-1. Hold `Alt` and drag on the timeline to create a razor selection area.
+1. Hold `Alt`/`Option` and drag on the timeline background to create a razor selection area.
 2. The razor area appears as a semi-transparent highlight.
 3. Press `Delete` or use **Edit > Delete Razor Edit Content** to remove the content within the razor areas.
-4. Use **Edit > Clear Razor Edits** to dismiss the razor selection without deleting.
+4. Run **Clear Razor Edits** from the Command Palette to dismiss the razor selection without deleting.
 
-Razor edits respect ripple mode settings.
+Deleting razor-edit content currently leaves a gap; it does not apply ripple mode.
 
 ### 6.12 Ripple Editing
 
@@ -869,8 +879,8 @@ MIDI Continuous Controller (CC) messages can be drawn and edited in CC lanes:
 Align note start times to the grid:
 
 1. Select notes (or select all with `Ctrl+A` in the Piano Roll).
-2. Press `Q` or go to **MIDI > Quantize Notes...**
-3. The quantize dialog allows setting the quantize grid, strength, and whether to quantize note ends.
+2. Open **MIDI > Quantize Notes...** to choose the grid, strength, and whether to quantize note ends.
+3. Press `Q` to reapply the last-used MIDI quantize settings without reopening the panel.
 
 ### 7.9 MIDI Transform Operations
 
@@ -905,7 +915,9 @@ The Piano Roll can highlight notes that belong to a specific musical scale:
 
 ### 7.11 Drum Editor
 
-Toggle the Drum Editor mode via **View > Toggle Drum Editor**. The drum editor provides a grid-based view optimized for drum programming, where each row represents a drum instrument rather than a pitch.
+The Drum Editor action/state is present, but a complete mounted drum-grid editor
+is not part of the current workspace. Use the Piano Roll for MIDI drum-note
+editing in this build.
 
 ### 7.12 Multi-Clip MIDI Editing
 
@@ -1115,7 +1127,9 @@ Bypass all effects on a track without removing them:
 
 ### 9.8 FX Chain Reordering
 
-Drag and drop effects within the FX Chain Panel to change their order. The signal flows from top to bottom through the chain.
+Drag and drop effects within track and input FX chains to change their order.
+The signal flows from top to bottom. Master-FX reordering is not supported in
+the current UI.
 
 ### 9.9 Safe Mode (Bypass FX on Load)
 
@@ -1124,6 +1138,52 @@ If a project with heavy or problematic plugins is slow to load, open it in Safe 
 - **File > Open Project (Safe Mode)...** (`Ctrl+Shift+O`)
 - All FX plugins are bypassed on load, allowing the project to open quickly.
 - You can then selectively enable plugins as needed.
+
+### 9.10 NAM Rack
+
+**OpenStudio NAM Rack** is the built-in Guitar/Bass workspace for NAM A1/A2
+pedal, amp, and full-rig captures.
+
+1. Add **OpenStudio NAM Rack** from the built-in effects list and select the
+   live instrument input.
+2. Choose **Guitar** or **Bass**. The profile changes appropriate hidden
+   tracking/frequency voicing and library filtering without replacing the
+   current capture, IR, or visible control values.
+3. Load a local `.nam` file, or connect TONE3000 and open a tone pack.
+4. If a pack contains multiple captures, choose **View Captures**, select the
+   exact child capture, and check its topology badge. **RAW / AMP ONLY** needs
+   an external cabinet IR; **CAB EMBEDDED** is a full rig and bypasses the
+   external cabinet stage while preserving the selected IR for later.
+5. **Selecting** a row changes only the pending choice. **Audition** temporarily
+   routes that capture through live input. Audition another child to compare,
+   or choose **Stop**/Cancel to restore the previous rack state.
+6. Choose **Use** to commit that exact capture. Reopen the capture selector and
+   use another child to replace it.
+7. Use the Amp power control to bypass/enable the capture without unloading it,
+   or use **Unload** to clear the slot. The immediate rack recovery card handles
+   missing Amp/Cab assets with Locate, Replace, and Bypass. Project-open
+   missing-media recovery also covers Pedal NAM assets and can offer Search in
+   Folder, a library copy, Locate, and supported TONE3000 Re-download.
+8. Save a rack tone or project to recall the complete creative state. Device
+   calibration remains local playback-environment state rather than silently
+   travelling as part of a tone.
+
+Factory effect templates contain control settings only: they do not include a
+NAM capture or cabinet IR and use the Amp/Full-Rig that is already loaded.
+Exported rack presets reference local NAM/IR files instead of embedding those
+binaries, so another machine may require Locate, Search, or supported
+Re-download recovery.
+
+Local `.nam` loading works without TONE3000. Public-build TONE3000 availability
+depends on the partner-approved integration and release configuration.
+
+Audition and Use/Cancel are transactional, and prepared model swaps reject
+stale requests. Perceived click/noise behavior on a real interface is still a
+release audition item, especially at small buffers; automation alone is not a
+substitute for listening to the exact build.
+
+See the [NAM Rack guide](nam-rack.md) for the complete signal chain,
+Guitar/Bass mapping, state migration, TONE3000 connection, and QA contract.
 
 ---
 
@@ -1248,16 +1308,18 @@ Open the Render dialog via **File > Render...** or press `Ctrl+Alt+R`.
 
 ### 12.2 Render Source
 
-Choose what to render:
+Choose the required source. Master and track-stem paths are active; the two
+selected-item choices are visible but do not yet filter the backend to the
+selected clips:
 
-| Source                      | Description                                           |
-|-----------------------------|-------------------------------------------------------|
-| **Master mix**              | Full stereo mix of all tracks through the master bus   |
-| **Selected tracks (stems)** | Individual stems for each selected track               |
-| **Master mix + all stems**  | Master mix plus individual stems for every track       |
-| **Selected media items**    | Only the selected clips, direct output                 |
-| **Selected items via master** | Selected clips routed through the master FX chain    |
-| **Razor edit areas**        | Render each razor edit area as a separate file         |
+| Source | Current status |
+|---|---|
+| **Master mix** | Full mix of all tracks through the master bus |
+| **Selected tracks (stems)** | Individual stems for selected tracks |
+| **Master mix + all stems** | Master mix plus a stem for every track |
+| **Selected media items** | UI choice only; selected-clip filtering is pending |
+| **Selected items via master** | UI choice only; selected-clip filtering is pending |
+| **Razor edit areas** | Renders each razor-area time range as a separate stem from the track that owns the area |
 
 ### 12.3 Render Bounds
 
@@ -1292,16 +1354,16 @@ Choose the time range to render:
 
 **Primary output format:**
 
-| Format          | Description                          | Bit Depth Options          |
-|-----------------|--------------------------------------|----------------------------|
-| **WAV**         | Standard uncompressed audio          | 16-bit, 24-bit, 32-bit float |
-| **AIFF**        | Apple uncompressed audio             | 16-bit, 24-bit, 32-bit float |
-| **FLAC**        | Lossless compressed audio            | 16-bit, 24-bit             |
-| **MP3**         | Lossy compressed (128-320 kbps)      | N/A (bitrate-based)        |
-| **OGG Vorbis**  | Lossy compressed (quality 3-10)      | N/A (quality-based)        |
+| Format | Current status |
+|---|---|
+| **WAV** | Uncompressed output with the available bit-depth selection |
+| **AIFF** | Uncompressed output with the available bit-depth selection |
+| **FLAC** | Lossless compressed output with the available bit-depth selection |
+| **MP3** | FFmpeg-encoded output using the selected bitrate |
+| **OGG Vorbis** | FFmpeg-encoded output using the selected quality |
 
-**Sample rate**: 44100, 48000, 88200, 96000, or 192000 Hz.
-**Note**: Rendering processes through the current engine/device configuration, then post-processes when a target sample-rate conversion is requested.
+**Sample rate**: Select the target render rate. The offline engine renders at
+that rate while the playback path converts source files as required.
 
 **Channels**: Stereo or Mono.
 
@@ -1310,16 +1372,13 @@ Choose the time range to render:
 | Option          | Description                                                      |
 |-----------------|------------------------------------------------------------------|
 | **Normalize**   | Peak-normalizes the output to 0 dBFS                             |
-| **Dither**      | Applies dither when reducing bit depth. Types: TPDF, Noise Shaped. Only available for 16-bit and 24-bit output. |
+| **Dither**      | Applies TPDF or first-order noise-shaped dither before integer bit-depth output |
 | **Resample Quality** | UI placeholder only in the current build; backend support is pending |
 
 ### 12.7 Secondary Output
 
-Enable **Secondary output** to simultaneously render a second format (e.g., render WAV master + MP3 reference):
-
-1. Check "Secondary output".
-2. Select the secondary format (MP3, OGG, FLAC, WAV, AIFF).
-3. Select the secondary bit depth.
+Enable **Secondary output** to run a second render pass in another format after
+each primary file. Select its format and bit depth/codec quality independently.
 
 ### 12.8 Metadata
 
@@ -1414,11 +1473,9 @@ Archive your entire session (project file + all referenced media) into a single 
 
 ### 13.8 Media Pool
 
-The Media Pool (**View > Media Pool** or **File > Media Pool**) lists all audio and MIDI files used in the current project:
-
-- View file paths, durations, sample rates, and channel counts.
-- Identify missing media files.
-- Remove unused media references.
+Media-pool state and menu actions are present, but the full Media Pool panel is
+not mounted in the current workspace. Use the Missing Media Resolver for broken
+paths and the Media Explorer for browsing/import.
 
 ### 13.9 Missing Media Resolver
 
@@ -1645,15 +1702,30 @@ For custom theming, open **View > Theme Editor...**. The Theme Editor allows you
 
 ### 15.3 Keyboard Shortcuts
 
-Open the **Keyboard Shortcuts** window from the **Help** menu to browse the searchable shortcut reference, print a cheat sheet, and rebind supported shortcuts.
+Open **Help > Keyboard Shortcuts** to browse the searchable action reference,
+print a cheat sheet for the current platform, choose input profiles, and rebind
+supported actions.
 
 Press `F1` for the **Help Reference**, which is separate from the Keyboard Shortcuts window.
 
 Use **Help > Getting Started Guide** for the built-in first-session walkthrough covering navigation gestures, essential hotkeys, track creation, recording, and export.
 
-Custom shortcut rebinding currently lives in the **Keyboard Shortcuts** window, not in Preferences.
+Keyboard and **Mouse & scroll** profiles are selected independently. The 19
+built-in profile families are OpenStudio, Pro Tools, Cubase/Nuendo, REAPER,
+Audacity, Logic Pro, FL Studio, Ableton Live, Studio One, Bitwig Studio,
+Reason, Cakewalk/Sonar, GarageBand, Digital Performer, Ardour, Adobe Audition,
+Mixcraft, Waveform, and Renoise.
 
-Custom rebinding currently applies to **global shortcuts**. Timeline- and editor-scoped shortcuts are documented in the reference but are not rebindable in this pass.
+Create named custom keyboard profiles to add multiple bindings, set separate
+macOS/Windows/Linux/fallback overrides, intentionally unassign an action,
+inherit its base mapping again, and import/export the profile as JSON. Conflict
+checks run before an overlapping key is accepted.
+
+Bindings can be scoped to global, Timeline/ruler, track controls, Mixer, Piano
+Roll, Pitch Editor, automation, browser, plug-in, modal, and contextual
+surfaces. Custom shortcut editing lives in the Keyboard Shortcuts window, not
+in Preferences. See [Keyboard, Hotkey, Mouse, and Scroll
+Profiles](input-profiles.md) for the full behavior and safety rules.
 
 ### 15.4 Preferences
 
@@ -1677,10 +1749,12 @@ Open **Options > Preferences** (`Ctrl+,`) to access the full preferences dialog:
 - Panel visibility settings
 
 **Mouse tab:**
+- Choose the active **Mouse & scroll profile** independently from the keyboard map.
 - Configure what happens when you click with different modifier keys in various contexts:
   - Clip Drag, Clip Resize, Timeline Click, Track Header, Automation Point, Fade Handle, Ruler Click
-  - Each context can have different actions for: Click, Ctrl+Click, Shift+Click, Alt+Click
-- Reset to defaults button
+  - Each context exposes all 16 combinations of semantic Primary, Secondary, Alt/Option, and Shift
+- **Clear Custom Overrides** removes the persisted fine-grained overrides and returns to the selected base profile.
+- The selected mouse/scroll base profile and validated per-gesture overrides persist and are shared with detached windows.
 
 **Backup tab:**
 - Enable/disable auto-backup
@@ -1730,7 +1804,7 @@ Open **View > Toolbar Editor...** to customize the Main Toolbar:
 
 ### 15.8 Command Palette
 
-Press `Ctrl+Shift+P` to open the Command Palette. Type to fuzzy-search through all available actions. Press Enter to execute the selected action. This is the fastest way to access any feature without memorizing its shortcut or menu location.
+Press `Ctrl+Shift+P` to open the Command Palette. Type to fuzzy-search through all available actions. Press Enter to execute the selected action. This lets you access actions without memorizing their shortcut or menu location.
 
 ### 15.9 Plugin Bridge (32-bit)
 
@@ -1743,14 +1817,19 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 
 ## 16. Keyboard Shortcuts
 
+The tables below show the **OpenStudio default keyboard profile**. Other
+built-in profiles, platform-specific bindings, custom overrides, and active
+editor scopes can change or intentionally unassign these keys. Use **Help >
+Keyboard Shortcuts** for the effective map.
+
 ### 16.1 Transport
 
 | Action                | Shortcut                |
 |-----------------------|-------------------------|
 | Play / Pause          | `Space`                 |
-| Stop                  | `Space` (while playing) |
+| Stop                  | No separate default    |
 | Record                | `Ctrl+R`                |
-| Go to Start           | Transport button / command palette |
+| Go to Start           | `Home`                  |
 | Toggle Loop           | `L`                     |
 | Set Loop to Selection | `Ctrl+L`                |
 | Tap Tempo             | `T`                     |
@@ -1823,8 +1902,8 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 | Help Reference                  | `F1`                 |
 | Keyboard Shortcuts              | Help menu            |
 | Zoom to Time Selection          | `Ctrl+Shift+E`       |
-| Zoom In                         | `Ctrl+Plus`          |
-| Zoom Out                        | `Ctrl+Minus`         |
+| Zoom In                         | `Ctrl++`             |
+| Zoom Out                        | `Ctrl+-`             |
 | Zoom to Fit                     | `Ctrl+0`             |
 | Save Screenset 1                | `Ctrl+Shift+1`       |
 | Save Screenset 2                | `Ctrl+Shift+2`       |
@@ -1852,7 +1931,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 
 | Action                     | Shortcut |
 |----------------------------|----------|
-| Quantize Notes             | Quantize dialog / command palette |
+| Quantize Notes Using Last Settings | `Q` |
 | Transpose +1 Semitone      | (via menu/command palette) |
 | Transpose -1 Semitone      | (via menu/command palette) |
 | Transpose Octave Up (+12)  | (via menu/command palette) |
@@ -1861,31 +1940,37 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 | Velocity -10%              | (via menu/command palette) |
 | Reverse MIDI Notes         | (via menu/command palette) |
 | Invert MIDI Note Pitches   | (via menu/command palette) |
-| Select All Notes           | (via menu/command palette) |
+| Select All Notes           | `Ctrl+A` |
 
-### 16.10 Mouse Shortcuts
+### 16.10 Mouse Shortcuts (OpenStudio Profile)
 
-| Action                    | Mouse Gesture                          |
-|---------------------------|----------------------------------------|
-| Vertical navigate         | Scroll                                 |
-| Timeline zoom             | Ctrl+Scroll                            |
-| Horizontal navigate       | Shift+Scroll                           |
-| Resize track height       | Alt+Scroll                             |
-| Faster track-height zoom  | Ctrl+Shift+Scroll                      |
-| Move clip                 | Drag clip                              |
-| Copy clip                 | Ctrl+Drag clip                         |
-| Constrain to horizontal   | Shift+Drag clip                        |
-| Slip edit                 | Alt+Drag inside clip                   |
-| Trim clip edge            | Drag left/right edge of clip           |
-| Create fade               | Drag top-left or top-right corner      |
-| Add gain point            | Shift+Click in clip                    |
-| Rubber-band select clips  | Drag on empty timeline space           |
-| Create razor edit         | Alt+Drag on timeline                   |
-| Horizontal zoom           | Ctrl+Scroll wheel (on timeline)        |
-| Horizontal scroll         | Shift+Scroll wheel                     |
-| Move playhead             | Click on ruler                         |
-| Create time selection     | Drag on ruler                          |
-| Context menu              | Right-click                            |
+`Primary` means Ctrl on Windows/Linux and Command on macOS.
+
+| Surface / action | OpenStudio mouse gesture |
+|---|---|
+| Vertical workspace scroll | Scroll |
+| Timeline zoom | Primary+Scroll |
+| Horizontal timeline scroll | Shift+Scroll |
+| Resize track height | Alt/Option+Scroll |
+| Zoom waveform height | Primary+Shift+Scroll |
+| Move / copy clip | Drag / Primary+Drag |
+| Slip-edit clip contents | Primary+Shift+Drag |
+| Axis-lock clip move | Shift+Drag; locks to the first axis that crosses the threshold |
+| Move clip without snap | Alt/Option+Drag |
+| Resize / fine resize clip edge | Drag / Primary+Drag edge |
+| Symmetric resize / stretch clip | Shift+Drag / Alt/Option+Drag edge |
+| Seek on empty timeline | Click |
+| Select range / extend selection | Primary+Click-drag / Shift+Click-drag |
+| Create a razor edit | Alt/Option+Drag empty timeline |
+| Select / toggle / range-select track | Click / Primary+Click / Shift+Click track header |
+| Solo track | Alt/Option+Click track header |
+| Move / fine-move automation point | Drag / Primary+Drag |
+| Constrain automation point vertically / delete | Shift+Drag / Alt/Option+Click point |
+| Adjust / fine-adjust fade handle | Drag / Primary+Drag |
+| Symmetric fade / cycle fade shape | Shift+Drag / Alt/Option+Click handle |
+| Seek from ruler | Click ruler |
+| Set loop / time selection / zoom range | Primary+Drag / Shift+Drag / Alt/Option+Drag ruler |
+| Context menu | Right-click |
 
 ---
 
@@ -1951,7 +2036,8 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 **Solutions**:
 1. When prompted, use the Missing Media dialog to browse for the moved files.
 2. If files were moved, point to their new location.
-3. Use **File > Media Pool** to view all referenced files and their status.
+3. Use the Missing Media dialog to resolve each referenced path; the full Media
+   Pool panel is not mounted in the current workspace.
 4. If original files are lost, re-record or re-import the audio.
 
 ### 17.7 Recording Issues
@@ -1964,6 +2050,32 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 3. Verify the input channel assignment on the armed track's Track Header.
 4. Confirm audio signal is reaching the track (check the activity meter on the Track Header).
 5. Check **Record Safe** is not enabled on the track (prevents recording).
+
+#### macOS microphone permission recovery
+
+macOS uses the **Microphone** privacy permission for every audio input,
+including built-in microphones and USB/Thunderbolt audio interfaces. A device
+can appear in Audio Settings while its captured samples remain silent if access
+was denied.
+
+1. Quit OpenStudio.
+2. Open **System Settings > Privacy & Security > Microphone** and enable
+   OpenStudio.
+3. Reopen OpenStudio, select the input device again, arm a track, and verify the
+   input meter.
+
+If OpenStudio is missing from that list or the stored decision appears stuck,
+you can optionally reset permission for only the installed OpenStudio bundle:
+
+```bash
+bundle_id="$(defaults read /Applications/OpenStudio.app/Contents/Info CFBundleIdentifier)"
+tccutil reset Microphone "$bundle_id"
+```
+
+If the app is installed elsewhere, adjust the path in the first command. Then
+relaunch OpenStudio and choose **Allow** when macOS asks. Avoid the broader
+`tccutil reset Microphone` command unless you intentionally want to reset
+microphone permission for every application.
 
 ### 17.8 Project Won't Save
 
@@ -2024,15 +2136,21 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 **Solutions**:
 1. Ensure the main OpenStudio window has focus (click on the timeline or a panel).
 2. If a text input field is focused (e.g., renaming a track), keyboard shortcuts are temporarily disabled. Press `Esc` to defocus.
-3. Check the keyboard shortcuts reference (`F1`) to confirm the correct binding.
-4. Open **Help > Keyboard Shortcuts** to confirm whether a global shortcut was customized or reset it to the default binding.
-5. Some shortcuts are context-dependent (e.g., MIDI shortcuts only work when the Piano Roll is open).
+3. Open **Help > Keyboard Shortcuts**. `F1` opens the separate Help Reference,
+   not the active key map.
+4. Confirm the selected keyboard profile, the current platform override, and
+   whether the action is intentionally unassigned.
+5. Check the action's scope. Timeline, Piano Roll, Pitch Editor, Mixer,
+   automation, browser, plug-in, track-control, and modal bindings run only in
+   their matching context.
+6. If a custom profile is active, choose **Inherit** for one target or reset the
+   profile to compare against its built-in base map.
 
 ---
 
 ## 18. AI Music and Assisted Audio
 
-OpenStudio includes optional AI-assisted workflows that live inside the normal DAW session. These features are not bundled into the base app by default; install the required AI Tools runtime from inside the app when prompted.
+OpenStudio includes AI-assisted workflows that live inside the normal DAW session. Basic Pitch audio-to-MIDI support is bundled; generation and stem workflows use optional AI Tools runtimes and large model assets installed on demand.
 
 ### 18.1 AI Tools Setup
 
@@ -2163,12 +2281,12 @@ OpenStudio generates `.ospeaks` sidecar files alongside audio files for efficien
 
 - OpenStudio handles sample rate conversion automatically when importing audio files recorded at different rates than the project's device rate.
 - Linear interpolation is used for real-time sample rate conversion during playback.
-- For rendering, the "Resample Quality" setting (Fast/Good/Best) controls the quality of the conversion algorithm.
+- Offline rendering supports the selected target sample rate. The **Resample Quality** selector is currently a UI placeholder and does not yet change the backend conversion algorithm.
 
 ### Audio Thread Safety
 
-OpenStudio uses professional-grade audio thread safety patterns:
-- Non-blocking locks on the audio thread (try-lock pattern) ensure glitch-free playback.
+OpenStudio uses the following audio-thread safety patterns:
+- Non-blocking locks on the audio thread (try-lock pattern) reduce the risk of callback stalls.
 - Pre-allocated audio buffers avoid heap allocations during audio processing.
 - Pre-loaded audio file readers prevent disk I/O on the audio thread.
 - Atomic operations for parameter updates (volume, pan) avoid mutex contention.

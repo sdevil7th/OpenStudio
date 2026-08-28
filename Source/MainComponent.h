@@ -84,6 +84,7 @@ public:
     void timerCallback() override;
     void requestFrontendAppClose();
     void prepareForSecondaryWindowClose();
+    bool hasFrontendStartupSucceeded() const;
     bool hasFrontendStartupReachedTerminalState() const;
     juce::String getFrontendStartupStateDescription() const;
 
@@ -193,6 +194,11 @@ private:
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
+    juce::ThreadPool clipPeakAnalysisPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
     juce::ThreadPool pluginScanPool {
         1,
         juce::Thread::osDefaultStackSize,

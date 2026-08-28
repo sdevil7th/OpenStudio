@@ -1,9 +1,18 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { getRegisteredActions, ActionDef } from "../store/actionRegistry";
+import {
+  getDisplayEffectiveShortcut,
+  getRegisteredActions,
+  ActionDef,
+} from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import {
+  routeModalShortcutEvent,
+  useModalShortcutScope,
+} from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -17,9 +26,17 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const listRef = useRef<HTMLDivElement>(null);
 
   const actions = useMemo(() => getRegisteredActions(), []);
-  const { recentActionIds } = useDAWStore(useShallow((state) => ({
+  const {
+    recentActionIds,
+    keyboardShortcutProfileId,
+    customShortcuts,
+  } = useDAWStore(useShallow((state) => ({
     recentActionIds: state.recentActions,
+    keyboardShortcutProfileId: state.keyboardShortcutProfileId,
+    customShortcuts: state.customShortcuts,
   })));
+
+  useModalShortcutScope(isOpen, onClose);
 
   const filtered = useMemo(() => {
     if (!query.trim()) {
@@ -38,9 +55,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       (a) =>
         a.name.toLowerCase().includes(lower) ||
         a.category.toLowerCase().includes(lower) ||
-        a.shortcut?.toLowerCase().includes(lower)
+        getDisplayEffectiveShortcut(a.id)?.toLowerCase().includes(lower)
     );
-  }, [query, actions, recentActionIds]);
+  }, [query, actions, recentActionIds, keyboardShortcutProfileId, customShortcuts]);
 
   // Reset selection when filter changes
   useEffect(() => {
@@ -75,6 +92,12 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    const modalRoute = routeModalShortcutEvent(e.nativeEvent);
+    if (modalRoute.result !== "unmatched" || modalRoute.suppressedHeadlessEscape) {
+      if (modalRoute.result !== "unmatched") e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setSelectedIndex((prev) => Math.min(prev + 1, filtered.length - 1));
@@ -84,9 +107,6 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     } else if (e.key === "Enter" && filtered[selectedIndex]) {
       e.preventDefault();
       executeAction(filtered[selectedIndex]);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
@@ -113,6 +133,8 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       data-modal-root="true"
       onClick={onClose}
       onContextMenu={guardModalContextMenu}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
     >
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50" />
@@ -151,6 +173,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                 {categoryActions.map((action) => {
                   const thisIndex = flatIndex++;
                   const isSelected = thisIndex === selectedIndex;
+                  const effectiveShortcut = getDisplayEffectiveShortcut(action.id);
                   return (
                     <div
                       key={action.id}
@@ -163,13 +186,13 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                       onMouseEnter={() => setSelectedIndex(thisIndex)}
                     >
                       <span>{action.name}</span>
-                      {action.shortcut && (
+                      {effectiveShortcut && (
                         <span
                           className={`text-xs ${
                             isSelected ? "text-blue-200" : "text-neutral-500"
                           }`}
                         >
-                          {action.shortcut}
+                          {effectiveShortcut}
                         </span>
                       )}
                     </div>
@@ -189,7 +212,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             <kbd className="bg-neutral-800 px-1 rounded">Enter</kbd> execute
           </span>
           <span>
-            <kbd className="bg-neutral-800 px-1 rounded">Esc</kbd> close
+            <kbd className="bg-neutral-800 px-1 rounded">
+              {getDisplayEffectiveShortcut("modal.close") || "Unassigned"}
+            </kbd> close
           </span>
         </div>
       </div>

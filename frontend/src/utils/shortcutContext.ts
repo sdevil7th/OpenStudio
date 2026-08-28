@@ -1,38 +1,60 @@
-import { canonicalizeShortcutEvent, isMac } from "./platform";
+import {
+  canonicalizeShortcutEvent,
+  getShortcutPlatform,
+  shortcutMatchesEvent,
+  type ShortcutCanonicalizationOptions,
+  type ShortcutKeyEventLike,
+  type ShortcutPlatform,
+} from "./platform";
 
 export type ShortcutHandlerResult = "handled" | "claimed_noop" | "unmatched";
 
-export type EditShortcutContext =
-  | { kind: "application" }
-  | { kind: "timeline" }
-  | { kind: "pitch_editor" }
-  | { kind: "piano_roll"; sessionId: string };
+type BasicShortcutContextKind =
+  | "application"
+  | "timeline"
+  | "timeline_ruler"
+  | "track_control_panel"
+  | "mixer"
+  | "pitch_editor"
+  | "automation"
+  | "browser"
+  | "modal";
 
-export interface ShortcutEventLike {
-  key?: string;
-  code?: string;
-  ctrlKey?: boolean;
-  shiftKey?: boolean;
-  altKey?: boolean;
-  metaKey?: boolean;
-  repeat?: boolean;
+export type EditShortcutContext =
+  | { kind: BasicShortcutContextKind }
+  | { kind: "piano_roll"; sessionId: string }
+  | { kind: "plugin"; sessionId?: string };
+
+export interface ShortcutEventLike extends ShortcutKeyEventLike {}
+
+export interface PressedShortcutOptions extends ShortcutCanonicalizationOptions {
+  platform?: ShortcutPlatform;
 }
 
 export type ShortcutSurfaceHandler = (
   event: ShortcutEventLike,
 ) => ShortcutHandlerResult;
 
+interface ShortcutSurfaceRegistration {
+  token: symbol;
+  handler: ShortcutSurfaceHandler;
+  fallback: EditShortcutContext;
+}
+
 const APPLICATION_CONTEXT: EditShortcutContext = { kind: "application" };
 let activeContext: EditShortcutContext = APPLICATION_CONTEXT;
 const contextListeners = new Set<() => void>();
-const handlers = new Map<
-  string,
-  { token: symbol; handler: ShortcutSurfaceHandler; fallback: EditShortcutContext }
->();
+// A stack preserves an existing owner if a modal or replacement surface
+// temporarily registers the same context key.
+const handlers = new Map<string, ShortcutSurfaceRegistration[]>();
+
+function currentPlatform(): ShortcutPlatform {
+  return getShortcutPlatform();
+}
 
 export function shortcutContextKey(context: EditShortcutContext): string {
-  return context.kind === "piano_roll"
-    ? `piano_roll:${context.sessionId}`
+  return "sessionId" in context && context.sessionId
+    ? `${context.kind}:${context.sessionId}`
     : context.kind;
 }
 
@@ -58,14 +80,26 @@ export function registerShortcutSurface(
 ): () => void {
   const key = shortcutContextKey(context);
   const token = Symbol(key);
-  handlers.set(key, { token, handler, fallback });
+  const registration = { token, handler, fallback };
+  const stack = handlers.get(key) ?? [];
+  stack.push(registration);
+  handlers.set(key, stack);
 
   return () => {
-    const registered = handlers.get(key);
-    if (!registered || registered.token !== token) return;
-    handlers.delete(key);
-    if (shortcutContextKey(activeContext) === key) {
-      activateShortcutContext(registered.fallback);
+    const registrations = handlers.get(key);
+    if (!registrations) return;
+    const index = registrations.findIndex((item) => item.token === token);
+    if (index < 0) return;
+    const wasTopRegistration = index === registrations.length - 1;
+    registrations.splice(index, 1);
+
+    if (registrations.length === 0) handlers.delete(key);
+    if (
+      wasTopRegistration
+      && registrations.length === 0
+      && shortcutContextKey(activeContext) === key
+    ) {
+      activateShortcutContext(registration.fallback);
     }
   };
 }
@@ -73,28 +107,115 @@ export function registerShortcutSurface(
 export function dispatchActiveShortcut(
   event: ShortcutEventLike,
 ): ShortcutHandlerResult {
-  const registered = handlers.get(shortcutContextKey(activeContext));
-  return registered?.handler(event) ?? "unmatched";
+  const registrations = handlers.get(shortcutContextKey(activeContext));
+  const activeRegistration = registrations?.[registrations.length - 1];
+  return activeRegistration?.handler(event) ?? "unmatched";
 }
 
-/** Canonical shortcut spelling used by actionRegistry (for example Ctrl+Shift+Z). */
-export function toPressedShortcut(event: ShortcutEventLike): string | null {
-  return canonicalizeShortcutEvent(event, isMac ? "macos" : "other");
+/** Canonical shortcut spelling used by the current action registry. */
+export function toPressedShortcut(
+  event: ShortcutEventLike,
+  options: PressedShortcutOptions = {},
+): string | null {
+  const { platform = currentPlatform(), ...canonicalizationOptions } = options;
+  return canonicalizeShortcutEvent(event, platform, canonicalizationOptions);
+}
+
+export function shortcutExactlyMatchesForPlatform(
+  event: ShortcutEventLike,
+  platform: ShortcutPlatform,
+  ...shortcuts: readonly string[]
+): boolean {
+  return shortcuts.some((shortcut) => shortcutMatchesEvent(event, shortcut, platform));
 }
 
 export function shortcutExactlyMatches(
   event: ShortcutEventLike,
   ...shortcuts: readonly string[]
 ): boolean {
-  const pressed = toPressedShortcut(event);
-  return pressed !== null && shortcuts.includes(pressed);
+  return shortcutExactlyMatchesForPlatform(event, currentPlatform(), ...shortcuts);
 }
 
+interface ClosestCapableTarget {
+  closest: (selectors: string) => unknown;
+}
+
+function hasClosest(target: EventTarget | null): target is EventTarget & ClosestCapableTarget {
+  return target !== null
+    && typeof (target as Partial<ClosestCapableTarget>).closest === "function";
+}
+
+const EDITABLE_SHORTCUT_TARGET_SELECTOR = [
+  "textarea",
+  "select",
+  "input:not([type])",
+  "input[type='text']",
+  "input[type='search']",
+  "input[type='email']",
+  "input[type='url']",
+  "input[type='tel']",
+  "input[type='password']",
+  "input[type='number']",
+  "input[type='date']",
+  "input[type='datetime-local']",
+  "input[type='month']",
+  "input[type='time']",
+  "input[type='week']",
+  "[contenteditable='true']",
+  "[contenteditable='']",
+  "[role='textbox']",
+  "[role='searchbox']",
+  "[role='combobox']",
+].join(", ");
+
+const NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR = [
+  "button",
+  "summary",
+  "a[href]",
+  "input[type='button']",
+  "input[type='checkbox']",
+  "input[type='color']",
+  "input[type='file']",
+  "input[type='image']",
+  "input[type='radio']",
+  "input[type='range']",
+  "input[type='reset']",
+  "input[type='submit']",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='menuitem']",
+  "[role='menuitemcheckbox']",
+  "[role='menuitemradio']",
+  "[role='radio']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='switch']",
+  "[role='tab']",
+].join(", ");
+
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {
-  if (typeof Element === "undefined" || !(target instanceof Element)) return false;
-  return Boolean(target.closest(
-    "input, textarea, select, [contenteditable='true'], [contenteditable=''], [role='textbox']",
-  ));
+  return hasClosest(target)
+    && Boolean(target.closest(EDITABLE_SHORTCUT_TARGET_SELECTOR));
+}
+
+/**
+ * Detect focused controls whose native Space/Enter/arrow behavior takes
+ * precedence over DAW surface shortcuts. Kept separate from editable text so
+ * plain letter commands may still reach the DAW while a button or slider owns
+ * focus.
+ */
+export function isNonTextControlShortcutTarget(target: EventTarget | null): boolean {
+  return hasClosest(target)
+    && Boolean(target.closest(NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR));
+}
+
+function eventUsesAltGraph(event: ShortcutEventLike): boolean {
+  if (event.key === "AltGraph") return true;
+  try {
+    return event.getModifierState?.("AltGraph") === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -105,7 +226,10 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
 export function shouldPreserveEditableShortcut(
   event: ShortcutEventLike,
   hasRegisteredApplicationShortcut = false,
+  platform: ShortcutPlatform = currentPlatform(),
 ): boolean {
+  if (event.isComposing || eventUsesAltGraph(event)) return true;
+
   const key = event.key ?? "";
   const hasCommandModifier = Boolean(event.ctrlKey || event.metaKey || event.altKey);
 
@@ -113,8 +237,9 @@ export function shouldPreserveEditableShortcut(
     return !/^F\d{1,2}$/i.test(key);
   }
 
-  if (shortcutExactlyMatches(
+  if (shortcutExactlyMatchesForPlatform(
     event,
+    platform,
     "Ctrl+A",
     "Ctrl+C",
     "Ctrl+X",
@@ -123,6 +248,17 @@ export function shouldPreserveEditableShortcut(
     "Ctrl+Y",
     "Ctrl+Shift+Z",
   )) {
+    return true;
+  }
+
+  // Cocoa text fields use physical Control chords for cursor/edit operations.
+  if (
+    platform === "macos"
+    && event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+    && /^[ABDEFHKNPTUVWY]$/i.test(key)
+  ) {
     return true;
   }
 
@@ -141,11 +277,13 @@ export function shouldPreserveEditableShortcut(
     return true;
   }
 
-  if ([
-    "Enter",
-    "Escape",
-    "Tab",
-  ].includes(key)) {
+  if (["Enter", "Escape", "Tab"].includes(key)) {
+    return !hasRegisteredApplicationShortcut;
+  }
+
+  // Option is frequently used to compose text on macOS. Only an exact known
+  // application binding may take it away from the editor.
+  if (platform === "macos" && event.altKey) {
     return !hasRegisteredApplicationShortcut;
   }
 
@@ -158,6 +296,7 @@ export function shouldPreserveNonTextControlShortcut(event: ShortcutEventLike): 
   return [
     " ",
     "Enter",
+    "Tab",
     "ArrowLeft",
     "ArrowRight",
     "ArrowUp",

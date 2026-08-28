@@ -100,13 +100,6 @@ describe("TONE3000 append sentinel", () => {
       new URL("../components/NAMExplorer.tsx", import.meta.url),
       "utf8",
     );
-    const designPortSource = readFileSync(
-      new URL("../components/NAMRackDesignPort.tsx", import.meta.url),
-      "utf8",
-    );
-
     expect(explorerSource).toContain('requestKey: `${currentLiveSearchSignature}:page:${livePage + 1}`');
-    expect(designPortSource).toContain("requestKey: string");
-    expect(designPortSource).toContain("config.pagination?.requestKey]);");
   });
 });

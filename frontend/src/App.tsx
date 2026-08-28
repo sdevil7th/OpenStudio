@@ -3,7 +3,10 @@ import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
-import { getGlobalShortcutConflicts } from "./store/actionRegistry";
+import {
+  getGlobalShortcutConflicts,
+  getRegisteredAction,
+} from "./store/actionRegistry";
 import {
   useDAWStore,
   getEffectiveTrackHeight,
@@ -15,21 +18,34 @@ import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
   activateShortcutContext,
   isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
 } from "./utils/shortcutContext";
 import {
   installModalContextMenuLeakGuard,
   shouldSuppressWorkspaceContextMenu,
 } from "./utils/modalEventGuards";
 import {
+  flushPendingMixerRemoteEdit,
   publishCurrentMixerUISnapshot,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
 import {
+  flushPendingMidiRemoteEdits,
   publishMidiEditorSessionSnapshot,
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
+import {
+  applyDetachedMidiQuantizeRequest,
+  applyDetachedLoopRegionRequest,
+  executeDetachedMainActionRequest,
+  isLiveDetachedMidiSessionId,
+} from "./utils/detachedMainActionRouting";
 import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
 import { shouldAutoStopPlayback } from "./utils/transportAutoStop";
+import { getShortcutPlatform } from "./utils/platform";
+import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "./utils/mouseBehaviorProfiles";
+import { resolveWheelGesture } from "./utils/wheelGestureResolver";
+import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { TimelineRuler } from "./components/TimelineRuler";
@@ -45,6 +61,7 @@ import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import { AddMultipleTracksModal } from "./components/AddMultipleTracksModal";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { EssentialControlsCard } from "./components/EssentialControlsCard";
+import { InputProfileOnboardingCard } from "./components/InputProfileOnboardingCard";
 import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
 import {
   createMultipleTracks,
@@ -786,12 +803,35 @@ function App() {
         return;
       }
 
-      const state = useDAWStore.getState();
       const command = typeof payload.command === "string" ? payload.command : "";
+      const flushDetachedEdits = () => {
+        flushPendingMixerRemoteEdit();
+        flushPendingMidiRemoteEdits();
+      };
+      if (command === "action.execute") {
+        executeDetachedMainActionRequest(payload, getRegisteredAction, {
+          flushPendingEdits: flushDetachedEdits,
+        });
+        return;
+      }
+
+      if (command === "transport.setLoopRegion") {
+        applyDetachedLoopRegionRequest(payload);
+        return;
+      }
+
+      if (command === "automation.action") {
+        // Legacy senders are accepted only when they provide the same explicit
+        // selection payload as action.execute. Target-less packets are unsafe.
+        executeDetachedMainActionRequest({
+          ...payload,
+          command: "action.execute",
+        }, getRegisteredAction, { flushPendingEdits: flushDetachedEdits });
+        return;
+      }
+
+      const state = useDAWStore.getState();
       const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
-      const session = sessionId
-        ? state.midiEditorSessions.find((candidate) => candidate.sessionId === sessionId)
-        : null;
 
       if (command === "transport.toggle") {
         if (state.transport.isRecording || state.transport.isPlaying) void state.stop();
@@ -810,12 +850,14 @@ function App() {
       }
 
       if (command === "transport.seek") {
+        if (sessionId && !isLiveDetachedMidiSessionId(sessionId)) return;
         const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
         void state.seekTo(Math.max(0, time));
         return;
       }
 
       if (command === "transport.seekPreview") {
+        if (sessionId && !isLiveDetachedMidiSessionId(sessionId)) return;
         const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
         const clampedTime = Math.max(0, time);
         state.setCurrentTime(clampedTime);
@@ -824,19 +866,20 @@ function App() {
       }
 
       if (command === "edit.undo") {
-        state.undo();
+        flushDetachedEdits();
+        useDAWStore.getState().undo();
         return;
       }
 
       if (command === "edit.redo") {
-        state.redo();
+        flushDetachedEdits();
+        useDAWStore.getState().redo();
         return;
       }
 
       if (command === "midi.quantize") {
-        const targetTrackId = session?.trackId || state.pianoRollTrackId || undefined;
-        const targetClipId = session?.clipId || state.pianoRollClipId || undefined;
-        state.quantizeSelectedMIDINotesUsingLast(targetTrackId, targetClipId);
+        flushDetachedEdits();
+        applyDetachedMidiQuantizeRequest(payload);
       }
     });
 
@@ -1054,9 +1097,12 @@ function App() {
       const trackClipping: Record<string, boolean> = data.trackClipping && typeof data.trackClipping === "object" && !Array.isArray(data.trackClipping)
         ? data.trackClipping
         : {};
+      const midiInputLevels: Record<string, number> = data.midiInputLevels && typeof data.midiInputLevels === "object" && !Array.isArray(data.midiInputLevels)
+        ? data.midiInputLevels
+        : {};
       const masterLevel = typeof data.masterLevel === "number" ? data.masterLevel : 0;
       const masterClipping = data.masterClipping === true;
-      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping);
+      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping, midiInputLevels);
     });
   }, [batchUpdateMeterLevels]);
 
@@ -1084,6 +1130,7 @@ function App() {
         repeat: e.repeat,
         source: "browser",
         targetIsEditable: isEditableShortcutTarget(e.target),
+        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
         stopImmediatePropagation: () => e.stopImmediatePropagation(),
@@ -1253,21 +1300,11 @@ function App() {
     return () => ro.disconnect();
   }, []);
 
-  // Workspace wheel handler — only prevents browser default zoom (Ctrl+scroll).
+  // App-wide wheel guard — prevents WebView/browser zoom (Ctrl/Cmd+scroll)
+  // even when focus is in a modal, browser, detached-style panel, or control.
   // Actual zoom logic is handled by Timeline's RAF-batched handler.
   useEffect(() => {
-    const workspace = workspaceRef.current;
-    if (!workspace) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) {
-        // Prevent browser zoom / native scroll — let Timeline handle the rest
-        e.preventDefault();
-      }
-    };
-
-    workspace.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    return () => workspace.removeEventListener("wheel", handleWheel, { capture: true });
+    return installBrowserZoomWheelGuard(document);
   }, []);
 
   const [showAddMultipleTracksModal, setShowAddMultipleTracksModal] =
@@ -1432,6 +1469,7 @@ function App() {
         onFocusCapture={() => activateShortcutContext({ kind: "timeline" })}
         data-shortcut-context="timeline"
       >
+        <InputProfileOnboardingCard />
         <EssentialControlsCard />
         <div className="workspace-sticky-header">
           <div className="workspace-sticky-tcp-header" style={{ width: tcpWidth }}>
@@ -1457,14 +1495,23 @@ function App() {
             useDAWStore.getState().deselectAllTracks();
           }
         }} onWheel={(e) => {
-          // Alt+scroll to resize track height (mirrors Timeline behavior)
-          if (e.altKey) {
-            e.preventDefault();
-            e.stopPropagation();
+          const shortcutPlatform = getShortcutPlatform();
+          const behaviorProfile = getMouseBehaviorProfile(
+            useDAWStore.getState().mouseBehaviorProfileId,
+            shortcutPlatform,
+          );
+          const gesture = resolveWheelGesture(e, {
+            surface: "tcp",
+            subtarget: "track",
+            platform: toMouseBehaviorPlatform(shortcutPlatform),
+          }, behaviorProfile.wheel);
+          if (gesture.preventDefault) e.preventDefault();
+          if (gesture.stopPropagation) e.stopPropagation();
+          if (gesture.operation === "resize" && gesture.target === "track-height" && gesture.amount !== 0) {
             const store = useDAWStore.getState();
             const curHeight = store.trackHeight;
-            const delta = e.deltaY > 0 ? 0.9 : 1.1;
-            store.setTrackHeight(curHeight * delta);
+            const factor = gesture.amount > 0 ? 0.9 : 1.1;
+            store.setTrackHeight(curHeight * factor);
           }
         }}>
           <div className="tcp-tracks z-20 min-h-0" onClick={(e) => {

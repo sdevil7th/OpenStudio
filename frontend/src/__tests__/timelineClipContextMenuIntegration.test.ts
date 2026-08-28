@@ -43,25 +43,27 @@ describe("timeline clip context-menu integration", () => {
       "onContextMenu={(e: KonvaEvent) => {",
     );
 
-    expect(audioClick.indexOf(guard)).toBeLessThan(audioClick.indexOf("shiftKey"));
+    expect(audioClick.indexOf(guard)).toBeLessThan(
+      audioClick.indexOf("resolveLiveMouseModifierAction"),
+    );
     expect(midiClick.indexOf(guard)).toBeLessThan(midiClick.indexOf("selectClip"));
     expect(mainStagePrelude.match(/if \(\(e\.evt\?\.button \?\? 0\) !== 0\) return;/g)).toHaveLength(2);
   });
 
-  it("links Shift-drag click suppression to the originating native event", () => {
+  it("routes modified clip clicks through the selected semantic profile action", () => {
     const audioClick = sourceBetween(
       "const handleClipClick = (e: KonvaEvent) => {",
-      "const handleDragStart =",
+      "const handleDragStart = (e: KonvaEvent) => {",
     );
-    const audioDragEnd = sourceBetween(
-      "const handleDragEnd = async (e: KonvaEvent) => {",
-      "// Mouse handlers for edge resize",
+    const audioMouseDown = sourceBetween(
+      "const handleMouseDown = (e: KonvaEvent) => {",
+      "// Modified drag move to handle resize",
     );
 
-    expect(audioClick).toContain("suppressShiftGainClickRef.current = null");
-    expect(audioClick).toContain("suppressed.nativeEvent === e.evt");
-    expect(audioDragEnd).toContain("nativeEvent: e.evt");
-    expect(timelineSource).not.toContain("Date.now() - suppressed.at");
+    expect(audioClick).toContain('resolveLiveMouseModifierAction(e.evt || {}, "clip_drag")');
+    expect(audioMouseDown).toContain('modifierAction === "constrain"');
+    expect(audioMouseDown).toContain("axisLockRequested:");
+    expect(timelineSource).not.toContain("suppressShiftGainClickRef");
   });
 
   it("routes all clip context entry points through shared selection and snapped-time capture", () => {
@@ -86,7 +88,7 @@ describe("timeline clip context-menu integration", () => {
     expect(menuSource).toContain('label: "Split"');
     expect(menuSource).toContain('label: "Here"');
     expect(menuSource).toContain('label: "At Playhead"');
-    expect(menuSource).toContain('shortcut: "S"');
+    expect(menuSource).toContain('shortcut: shortcut("edit.splitAtCursor", "S")');
     expect(menuSource).toContain("st.splitMIDIClipAtPosition(menu.clipId, splitTime)");
     expect(menuSource).toContain("st.splitClipAtPosition(menu.clipId, splitTime)");
     expect(menuSource).toContain("useDAWStore.getState().splitClipAtPlayhead()");

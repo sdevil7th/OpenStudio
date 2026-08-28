@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Check, ChevronRight } from "lucide-react";
 import { Button } from "../ui";
+import { useTransientOverlayShortcutScope } from "../../utils/modalShortcutScope";
+import { activateShortcutContext } from "../../utils/shortcutContext";
 
 interface MenuItemProps {
   label: string;
@@ -31,6 +33,10 @@ export function MenuDropdown({
   const [activeSubmenu, setActiveSubmenu] = useState<number | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const submenuTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useTransientOverlayShortcutScope(isOpen, () => {
+    setIsOpen(false);
+    setActiveSubmenu(null);
+  });
 
   // Close on outside click
   useEffect(() => {
@@ -48,21 +54,6 @@ export function MenuDropdown({
       document.addEventListener("mousedown", handleClickOutside);
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen]);
-
-  // Close on escape
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setIsOpen(false);
-        setActiveSubmenu(null);
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener("keydown", handleEscape);
-    }
-    return () => document.removeEventListener("keydown", handleEscape);
   }, [isOpen]);
 
   const clearSubmenuTimeout = useCallback(() => {
@@ -193,7 +184,13 @@ export function MenuDropdown({
       </Button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-[9999]" role="menu" aria-label={`${label} menu`}>
+        <div
+          className="absolute top-full left-0 mt-0.5 bg-daw-panel border border-daw-border rounded shadow-lg min-w-48 py-1 z-[9999]"
+          role="menu"
+          aria-label={`${label} menu`}
+          onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+          onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
+        >
           {items.map((item, index) => (
             <div key={index} className="relative">
               {renderMenuItem(item, index)}

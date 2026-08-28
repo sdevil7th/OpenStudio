@@ -604,10 +604,10 @@ private:
 PluginManager::PluginManager()
 {
     // Add default formats (VST3, LV2, AU, etc.)
-    formatManager.addDefaultFormats();
+    juce::addDefaultFormatsToManager(formatManager);
 
     // Add CLAP hosting (not built into JUCE — custom format)
-    formatManager.addFormat(new CLAPPluginFormat());
+    formatManager.addFormat(std::make_unique<CLAPPluginFormat>());
 
     // Debug: Log how many formats were added
     juce::Logger::writeToLog("PluginManager: Constructor - formatManager has " +
@@ -679,8 +679,8 @@ juce::var PluginManager::scanForPlugins(bool forceRescan)
     }
 
     juce::AudioPluginFormatManager scanFormatManager;
-    scanFormatManager.addDefaultFormats();
-    scanFormatManager.addFormat(new CLAPPluginFormat());
+    juce::addDefaultFormatsToManager(scanFormatManager);
+    scanFormatManager.addFormat(std::make_unique<CLAPPluginFormat>());
 
     const auto debugLog = getOpenStudioDocumentsDirectory().getChildFile("plugin_scan_debug.txt");
     debugLog.getParentDirectory().createDirectory();

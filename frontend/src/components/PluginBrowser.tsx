@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/shallow";
 import {
@@ -38,6 +38,12 @@ import {
   waitForInstrumentPlugin,
 } from "../utils/fxChain";
 import { Button, Input, Select } from "./ui";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
 
 // Persist favorites in localStorage
 const FAVORITES_KEY = "studio13_plugin_favorites";
@@ -300,6 +306,10 @@ export function PluginBrowser({
   const [retryingBlacklistedPlugin, setRetryingBlacklistedPlugin] = useState<
     string | null
   >(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const browserActionExecutorRef = useRef<(actionId: string) => "handled" | "claimed_noop" | "unmatched">(
+    () => "unmatched",
+  );
   const { currentInstrumentPlugin, removeInstrumentWithUndo } = useDAWStore(
     useShallow((state) => {
       const track = state.tracks.find((candidate) => candidate.id === trackId);
@@ -452,6 +462,74 @@ export function PluginBrowser({
       setLoading(false);
     }
   };
+
+  browserActionExecutorRef.current = (actionId) => {
+    if (actionId === "browser.close") {
+      onClose();
+      return "handled";
+    }
+    if (actionId === "browser.focusSearch") {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+      return searchInputRef.current ? "handled" : "claimed_noop";
+    }
+    if (actionId === "browser.toggleFavorites") {
+      setShowFavoritesOnly((visible) => !visible);
+      return "handled";
+    }
+    if (actionId === "browser.openUserEffectsFolder") {
+      void nativeBridge.openUserEffectsFolder();
+      return "handled";
+    }
+    if (actionId === "browser.toggleScanFolders") {
+      handleToggleScanFolders();
+      return "handled";
+    }
+    if (actionId === "browser.addScanFolder") {
+      if (scanFolderBusy || scanConfigurationLoading) return "claimed_noop";
+      void handleAddScanFolder();
+      return "handled";
+    }
+    if (actionId === "browser.scanPlugins" || actionId === "browser.deepScanPlugins") {
+      if (loading) return "claimed_noop";
+      void handleScan(actionId === "browser.deepScanPlugins");
+      return "handled";
+    }
+    if (actionId === "browser.removeCurrentInstrument") {
+      if (targetChain !== "instrument" || !currentInstrumentPlugin) return "claimed_noop";
+      void removeInstrumentWithUndo(trackId);
+      return "handled";
+    }
+    return "unmatched";
+  };
+
+  useEffect(() => {
+    const context = { kind: "browser" } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(context, () => "unmatched", fallback);
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => browserActionExecutorRef.current(actionId),
+      [
+        "browser.close",
+        "browser.focusSearch",
+        "browser.toggleFavorites",
+        "browser.openUserEffectsFolder",
+        "browser.toggleScanFolders",
+        "browser.addScanFolder",
+        "browser.scanPlugins",
+        "browser.deepScanPlugins",
+        ...(targetChain === "instrument" && currentInstrumentPlugin
+          ? ["browser.removeCurrentInstrument"]
+          : []),
+      ],
+    );
+    activateShortcutContext(context);
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [currentInstrumentPlugin, targetChain]);
 
   const handleRetryBlacklistedPlugin = async (path: string) => {
     setRetryingBlacklistedPlugin(path);
@@ -742,6 +820,7 @@ export function PluginBrowser({
             className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-300 pointer-events-none"
           />
           <Input
+            ref={searchInputRef}
             type="text"
             variant="default"
             size="md"
@@ -1199,13 +1278,25 @@ export function PluginBrowser({
   );
 
   if (embedded) {
-    return <div className="flex flex-col h-full">{content}</div>;
+    return (
+      <div
+        className="flex flex-col h-full"
+        onPointerDownCapture={() => activateShortcutContext({ kind: "browser" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "browser" })}
+        data-shortcut-context="browser"
+      >
+        {content}
+      </div>
+    );
   }
 
   return createPortal(
     <div
       className="fixed inset-0 bg-black/80 flex items-center justify-center z-[10000]"
       data-modal-root="true"
+      onPointerDownCapture={() => activateShortcutContext({ kind: "browser" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "browser" })}
+      data-shortcut-context="browser"
       onClick={onClose}
       onContextMenu={guardModalContextMenu}
     >

@@ -1,7 +1,13 @@
-import { useState, useCallback, useMemo } from "react";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { useShallow } from "zustand/shallow";
 import {
-  X,
   ChevronLeft,
   ChevronRight,
   Sparkles,
@@ -15,11 +21,27 @@ import {
   Download,
   Wand2,
   HelpCircle,
+  X,
 } from "lucide-react";
-import { getEffectiveActionShortcut } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
+import {
+  getKeyboardShortcutProfile,
+  getKeyboardShortcutProfilePresentation,
+  KEYBOARD_SHORTCUT_PROFILES,
+} from "../utils/shortcutProfiles";
+import {
+  getEffectiveShortcutLabel,
+  getTimelineWheelHelp,
+} from "../utils/inputProfileHelp";
+import { getShortcutPlatform } from "../utils/platform";
+import { getMouseBehaviorProfile } from "../utils/mouseBehaviorProfiles";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import {
+  routeModalShortcutEvent,
+  useModalShortcutScope,
+} from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 interface GuideStep {
   icon: React.ReactNode;
@@ -30,10 +52,25 @@ interface GuideStep {
 }
 
 function shortcut(actionId: string, fallback: string): string {
-  return getEffectiveActionShortcut(actionId) ?? fallback;
+  return getEffectiveShortcutLabel(actionId, fallback);
 }
 
 function buildGuideSteps(): GuideStep[] {
+  const state = useDAWStore.getState();
+  const shortcutPlatform = getShortcutPlatform();
+  const keyboardProfile = getKeyboardShortcutProfile(state.keyboardShortcutProfileId);
+  const keyboardPresentation = getKeyboardShortcutProfilePresentation(
+    state.keyboardShortcutProfileId,
+    shortcutPlatform,
+  );
+  const mouseProfile = getMouseBehaviorProfile(
+    state.mouseBehaviorProfileId,
+    shortcutPlatform,
+  );
+  const wheelHelp = getTimelineWheelHelp(
+    state.mouseBehaviorProfileId,
+    shortcutPlatform,
+  );
   const commandPaletteShortcut = shortcut("view.commandPalette", "Ctrl+Shift+P");
   const audioTrackShortcut = shortcut("insert.audioTrack", "Ctrl+T");
   const midiTrackShortcut = shortcut("insert.midiTrack", "Ctrl+Shift+T");
@@ -49,6 +86,9 @@ function buildGuideSteps(): GuideStep[] {
   const playShortcut = shortcut("transport.play", "Space");
   const mixerShortcut = shortcut("view.toggleMixer", "Ctrl+M");
   const virtualKeyboardShortcut = shortcut("view.toggleVirtualKeyboard", "Alt+B");
+  const availableProfileNames = KEYBOARD_SHORTCUT_PROFILES
+    .map((profile) => profile.shortName)
+    .join(", ");
 
   return [
     {
@@ -65,16 +105,27 @@ function buildGuideSteps(): GuideStep[] {
       tip: `Press ${commandPaletteShortcut} at any time to search for actions instead of hunting through menus.`,
     },
     {
+      icon: <Keyboard size={32} className="text-daw-accent" />,
+      title: "Choose Familiar Controls",
+      description:
+        "Keyboard shortcuts and mouse behavior are independent profiles, so you can use the key map from one DAW and the scroll or drag conventions from another.",
+      details: [
+        `Current keyboard profile: ${keyboardProfile.name}`,
+        `Current mouse & scroll profile: ${mouseProfile.name}`,
+        `Choose from ${availableProfileNames}`,
+        "Custom action bindings override the selected keyboard profile",
+        keyboardPresentation.policyLabel,
+        keyboardPresentation.availabilityLabel,
+      ],
+      tip: "Open Keyboard Shortcuts to switch profiles or rebind any global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, or plug-in scoped action.",
+    },
+    {
       icon: <Navigation size={32} className="text-daw-accent" />,
       title: "Essential Navigation Gestures & Hotkeys",
       description:
-        "Learn these controls first. They cover most of what a new user needs in the first two minutes and match the current app behavior exactly.",
+        `Learn these controls first. The displayed hotkeys follow ${keyboardProfile.name}, and the gestures follow ${mouseProfile.name}.`,
       details: [
-        "Scroll: native vertical scrolling through the workspace",
-        "Ctrl+Scroll: zoom the timeline horizontally around the pointer",
-        "Shift+Scroll: move horizontally through the timeline",
-        "Alt+Scroll: resize track height",
-        "Ctrl+Shift+Scroll: zoom track height more aggressively",
+        ...wheelHelp.items.map((item) => `${item.gesture}: ${item.action}`),
         `${playShortcut}: Play / Stop`,
         `${recordShortcut}: Start recording on armed tracks`,
         `${audioTrackShortcut}: New audio track`,
@@ -198,32 +249,47 @@ function buildGuideSteps(): GuideStep[] {
         "Once you know the core gestures and shortcuts, the fastest next step is to use the built-in references instead of memorizing everything immediately.",
       details: [
         `${helpShortcut}: Help Reference for searchable feature guidance`,
-        "Keyboard Shortcuts window for the full shortcut list and custom global rebinding",
+        "Keyboard Shortcuts window for profiles, the full shortcut list, and scoped rebinding",
         `Preferences (${preferencesShortcut}) for editing, display, mouse, and backup settings`,
         `Command Palette (${commandPaletteShortcut}) to find actions by name`,
       ],
-      tip: "If a shortcut behaves differently than expected, check the Keyboard Shortcuts window first because global bindings may have been customized.",
+      tip: "If a shortcut behaves differently than expected, check the Keyboard Shortcuts window first because its scoped binding or selected profile may have changed.",
     },
   ];
 }
 
 const LS_KEY = "openstudio_gettingStartedDismissed";
+const GUIDE_FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 export function GettingStartedGuide() {
-  const { showGettingStarted, toggleGettingStarted } = useDAWStore(
+  const { showGettingStarted, toggleGettingStarted, customShortcuts, keyboardShortcutProfileId, mouseBehaviorProfileId } = useDAWStore(
     useShallow((s) => ({
       showGettingStarted: s.showGettingStarted,
       toggleGettingStarted: s.toggleGettingStarted,
+      customShortcuts: s.customShortcuts,
+      keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+      mouseBehaviorProfileId: s.mouseBehaviorProfileId,
     })),
   );
-  const customShortcuts = useDAWStore((s) => s.customShortcuts);
 
   const [currentStep, setCurrentStep] = useState(0);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [dontShowAgain, setDontShowAgain] = useState(
     () => localStorage.getItem(LS_KEY) === "true",
   );
 
-  const steps = useMemo(() => buildGuideSteps(), [customShortcuts]);
+  const steps = useMemo(
+    () => buildGuideSteps(),
+    [customShortcuts, keyboardShortcutProfileId, mouseBehaviorProfileId],
+  );
   const step = steps[currentStep];
   const isFirst = currentStep === 0;
   const isLast = currentStep === steps.length - 1;
@@ -231,10 +297,14 @@ export function GettingStartedGuide() {
   const handleClose = useCallback(() => {
     if (dontShowAgain) {
       localStorage.setItem(LS_KEY, "true");
+    } else {
+      localStorage.removeItem(LS_KEY);
     }
     setCurrentStep(0);
     toggleGettingStarted();
   }, [dontShowAgain, toggleGettingStarted]);
+
+  useModalShortcutScope(showGettingStarted, handleClose);
 
   const handleNext = useCallback(() => {
     if (isLast) {
@@ -248,6 +318,49 @@ export function GettingStartedGuide() {
     setCurrentStep((s) => Math.max(0, s - 1));
   }, []);
 
+  useEffect(() => {
+    if (!showGettingStarted) return;
+    returnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      const returnTarget = returnFocusRef.current;
+      returnFocusRef.current = null;
+      if (returnTarget?.isConnected) returnTarget.focus({ preventScroll: true });
+    };
+  }, [showGettingStarted]);
+
+  const handleDialogKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const modalRoute = routeModalShortcutEvent(event.nativeEvent);
+    if (modalRoute.result !== "unmatched" || modalRoute.suppressedHeadlessEscape) {
+      if (modalRoute.result !== "unmatched") event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(GUIDE_FOCUSABLE_SELECTOR),
+    ).filter((element) => element.offsetParent !== null);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, []);
+
   if (!showGettingStarted) return null;
 
   return (
@@ -255,13 +368,30 @@ export function GettingStartedGuide() {
       className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
       data-modal-root="true"
       onContextMenu={guardModalContextMenu}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
     >
-      <div className="absolute inset-0 bg-black/60" onClick={handleClose} onContextMenu={guardModalContextMenu} />
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={handleClose}
+        onContextMenu={guardModalContextMenu}
+        aria-hidden="true"
+      />
 
-      <div className="relative w-[680px] bg-daw-panel border border-daw-border rounded-lg shadow-2xl flex flex-col overflow-hidden" onContextMenu={guardModalContextMenu}>
-        <div className="flex items-center justify-between px-5 py-3 border-b border-daw-border">
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-daw-text">Getting Started</h2>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="getting-started-title"
+        aria-describedby="getting-started-step-description"
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
+        onContextMenu={guardModalContextMenu}
+        className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-[680px] flex-col overflow-hidden rounded-lg border border-daw-border bg-daw-panel shadow-2xl outline-none"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-daw-border px-4 py-3 sm:px-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 id="getting-started-title" className="text-lg font-semibold text-daw-text">Getting Started</h2>
             <span className="text-xs text-neutral-500">
               Step {currentStep + 1} of {steps.length}
             </span>
@@ -281,16 +411,21 @@ export function GettingStartedGuide() {
           <div
             className="h-full bg-daw-accent transition-all duration-300 ease-out"
             style={{ width: `${((currentStep + 1) / steps.length) * 100}%` }}
+            role="progressbar"
+            aria-label="Guide progress"
+            aria-valuemin={1}
+            aria-valuemax={steps.length}
+            aria-valuenow={currentStep + 1}
           />
         </div>
 
-        <div className="px-6 py-5 space-y-4 min-h-[420px]">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:min-h-[420px] sm:px-6 sm:py-5">
           <div className="flex items-center gap-3">
-            {step.icon}
+            <span aria-hidden="true">{step.icon}</span>
             <h3 className="text-xl font-semibold text-daw-text">{step.title}</h3>
           </div>
 
-          <p className="text-sm text-neutral-300 leading-relaxed">{step.description}</p>
+          <p id="getting-started-step-description" className="text-sm text-neutral-300 leading-relaxed">{step.description}</p>
 
           <div className="bg-daw-dark/50 border border-daw-border/50 rounded-md p-4">
             <ul className="space-y-2">
@@ -305,7 +440,7 @@ export function GettingStartedGuide() {
 
           {step.tip && (
             <div className="flex items-start gap-2 px-3 py-2.5 bg-daw-accent/10 border border-daw-accent/20 rounded-md">
-              <Sparkles size={14} className="text-daw-accent mt-0.5 shrink-0" />
+              <Sparkles size={14} aria-hidden="true" className="text-daw-accent mt-0.5 shrink-0" />
               <p className="text-xs text-daw-accent leading-relaxed">
                 <span className="font-semibold">Tip: </span>
                 {step.tip}
@@ -314,24 +449,31 @@ export function GettingStartedGuide() {
           )}
         </div>
 
-        <div className="flex items-center justify-center gap-1.5 pb-3">
+        <div className="flex items-center justify-center gap-0.5 pb-2" aria-label="Guide steps">
           {steps.map((_, i) => (
             <button
               key={i}
-              className={`w-2 h-2 rounded-full transition-colors ${
-                i === currentStep
-                  ? "bg-daw-accent"
-                  : i < currentStep
-                    ? "bg-daw-accent/40"
-                    : "bg-neutral-600"
-              }`}
+              className="inline-flex h-7 w-7 items-center justify-center rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent"
               onClick={() => setCurrentStep(i)}
               title={`Go to step ${i + 1}`}
-            />
+              aria-label={`Go to step ${i + 1}: ${steps[i].title}`}
+              aria-current={i === currentStep ? "step" : undefined}
+            >
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 rounded-full transition-colors ${
+                  i === currentStep
+                    ? "bg-daw-accent"
+                    : i < currentStep
+                      ? "bg-daw-accent/40"
+                      : "bg-neutral-600"
+                }`}
+              />
+            </button>
           ))}
         </div>
 
-        <div className="flex items-center justify-between px-5 py-3 border-t border-daw-border">
+        <div className="flex flex-col gap-3 border-t border-daw-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
               type="checkbox"
@@ -342,7 +484,7 @@ export function GettingStartedGuide() {
             <span className="text-xs text-neutral-400">Don&apos;t show again</span>
           </label>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2">
             <Button
               variant="ghost"
               size="sm"

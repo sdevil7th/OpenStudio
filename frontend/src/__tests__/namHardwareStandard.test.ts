@@ -26,7 +26,9 @@ describe("NAM physical pedal hardware standard", () => {
     // The layout conversion protects declarative geometry; the actual asset
     // renderer is the final authority and must not fall back to local `%`.
     const source = (await import("../components/NAMRackDesignPort.tsx?raw")).default as string;
-    expect(source).toContain("const visualSize = panelRotaryVariant");
+    expect(source).toContain("const visualSize = exactSizeVariant");
+    expect(source).toMatch(/: panelRotaryVariant\s+\? `\$\{NAM_PANEL_ROTARY_VARIANT_PX/);
+    expect(source).toMatch(/: hardwareKind\s+\? `\$\{NAM_PEDAL_HARDWARE_STANDARD_PX/);
     expect(source).toContain('hardwareKind="knob"');
     expect(source).toContain('hardwareKind="footswitch"');
     expect(source).toContain('hardwareKind="toggle"');
@@ -38,13 +40,12 @@ describe("NAM physical pedal hardware standard", () => {
     expect(NAM_PANEL_ROTARY_VARIANT_PX).toEqual({
       cabPanel: 42,
       roomHero: 68,
-      ampPanel: 44,
+      eqPanel: 44,
     });
 
     const source = (await import("../components/NAMRackDesignPort.tsx?raw")).default as string;
     expect(source.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(7);
     expect(source.match(/panelRotaryVariant="roomHero"/g)).toHaveLength(2);
-    expect(source.match(/panelRotaryVariant="ampPanel"/g)).toHaveLength(1);
     expect(source).toContain('"data-nam-panel-rotary-variant"');
   });
 
@@ -91,6 +92,13 @@ describe("NAM physical pedal hardware standard", () => {
     }
     expect(diameter(modules.modulator.box.w, modulator.headerToggleSize)).toBeCloseTo(24, 8);
     expect(diameter(modules.modulator.box.w, modulator.footerToggleSize)).toBeCloseTo(24, 8);
+    expect(modulator.characterDisplay.x + modulator.characterDisplay.w / 2)
+      .toBe(modulator.secondaryX);
+    const characterDisplayBottom = modulator.characterDisplay.y
+      + modulator.characterDisplay.h;
+    const characterToggleTop = modulator.footY
+      - (NAM_PEDAL_HARDWARE_STANDARD_PX.toggle / modules.modulator.box.h) * 50;
+    expect(characterToggleTop - characterDisplayBottom).toBeGreaterThan(1);
     expect(diameter(modules.delay.box.w, delay.secondaryFootSize)).toBeCloseTo(25, 8);
     expect(diameter(modules.delay.box.w, delay.secondaryLedSize)).toBeCloseTo(12, 8);
   });

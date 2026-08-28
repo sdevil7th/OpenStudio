@@ -277,7 +277,7 @@ public:
     std::atomic<float> style { 0.0f };         // Style as float
     std::atomic<float> autoMakeup { 0.0f };    // 0 = off, 1 = on
     std::atomic<float> autoRelease { 0.0f };   // 0 = off, 1 = on
-    std::atomic<float> sidechainHPF { 20.0f }; // 20-500 Hz
+    std::atomic<float> sidechainHPF { 20.0f }; // <= 0 = bypass, otherwise 20-500 Hz
     std::atomic<float> lookaheadMs { 0.0f };   // 0-20 ms
     std::atomic<float> detectorMode { 0.0f };  // 0=Peak, 1=RMS, 2=Auto
     std::atomic<float> stereoLink { 1.0f };    // 0=average detector, 1=linked peak detector
@@ -297,6 +297,7 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedThresholdDb;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCompressionSlope;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedKneeDb;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedSidechainHPFWet;
     double cachedSampleRate = 44100.0;
 
     juce::dsp::IIR::Filter<float> scHPF_L;

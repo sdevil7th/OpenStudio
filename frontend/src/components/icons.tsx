@@ -73,10 +73,52 @@ export function MicrophoneIcon({ size = 16, className }: IconProps) {
 
 export function GuitarIcon({ size = 16, className }: IconProps) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M20 2l-2 2m0 0l-2.5 2.5L18 9l2.5-2.5L23 4l-3-2z" />
-      <path d="M15.5 6.5l-5.5 5.5a4.5 4.5 0 1 0 2 2l5.5-5.5" />
-      <circle cx="9" cy="15" r="1" fill="currentColor" />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="m11.9 12.1 2.6-2.6" />
+      <path d="M20.1 2.3a1 1 0 0 0-1.4 0l-1.114 1.114A2 2 0 0 0 17 4.828v1.344a2 2 0 0 1-.586 1.414A2 2 0 0 1 17.828 7h1.344a2 2 0 0 0 1.414-.586L21.7 5.3a1 1 0 0 0 0-1.4z" />
+      <path d="m6 16 2 2" />
+      <path d="M8.23 9.85A3 3 0 0 1 11 8a5 5 0 0 1 5 5 3 3 0 0 1-1.85 2.77l-.92.38A2 2 0 0 0 12 18a4 4 0 0 1-4 4 6 6 0 0 1-6-6 4 4 0 0 1 4-4 2 2 0 0 0 1.85-1.23z" />
+      <line x1="11.5" y1="12.0" x2="15.1" y2="8.4" strokeWidth="1" />
+      <line x1="11.8" y1="12.5" x2="15.4" y2="8.9" strokeWidth="1" />
+      <line x1="12.1" y1="13.0" x2="15.7" y2="9.4" strokeWidth="1" />
+      <line x1="12.4" y1="13.5" x2="16.0" y2="9.9" strokeWidth="1" />
+      <line x1="12.7" y1="14.0" x2="16.3" y2="10.4" strokeWidth="1" />
+      <line x1="13.0" y1="14.5" x2="16.6" y2="10.9" strokeWidth="1" />
+    </svg>
+  );
+}
+
+export function BassGuitarIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="m11.7 12 4.7-4.7" />
+      <path d="M20.1 2.3a1 1 0 0 0-1.4 0l-1.114 1.114A2 2 0 0 0 17 4.828v1.344a2 2 0 0 1-.586 1.414A2 2 0 0 1 17.828 7h1.344a2 2 0 0 0 1.414-.586L21.7 5.3a1 1 0 0 0 0-1.4z" />
+      <path d="m6 16 2 2" />
+      <path d="M8.23 9.85A3 3 0 0 1 11 8a5 5 0 0 1 5 5 3 3 0 0 1-1.85 2.77l-.92.38A2 2 0 0 0 12 18a4 4 0 0 1-4 4 6 6 0 0 1-6-6 4 4 0 0 1 4-4 2 2 0 0 0 1.85-1.23z" />
+      <line x1="11.0" y1="12.0" x2="16.4" y2="6.6" strokeWidth="1.2" />
+      <line x1="11.4" y1="12.8" x2="17.0" y2="7.2" strokeWidth="1.2" />
+      <line x1="11.8" y1="13.6" x2="17.6" y2="7.8" strokeWidth="1.2" />
+      <line x1="12.2" y1="14.4" x2="18.2" y2="8.4" strokeWidth="1.2" />
     </svg>
   );
 }
@@ -185,6 +227,7 @@ export function AIIcon({ size = 16, className }: IconProps) {
 export const TRACK_ICONS: Record<string, React.FC<IconProps>> = {
   microphone: MicrophoneIcon,
   guitar: GuitarIcon,
+  "bass-guitar": BassGuitarIcon,
   drums: DrumsIcon,
   keys: KeysIcon,
   bus: BusIcon,
@@ -199,6 +242,7 @@ export const TRACK_ICONS: Record<string, React.FC<IconProps>> = {
 export const TRACK_ICON_LABELS: Record<string, string> = {
   microphone: "Microphone",
   guitar: "Guitar",
+  "bass-guitar": "Bass Guitar",
   drums: "Drums",
   keys: "Keys",
   bus: "Bus",

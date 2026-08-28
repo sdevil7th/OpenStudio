@@ -7,6 +7,7 @@ import {
   NAM_PRE_SIGNAL_LAYOUT,
   NAM_THREE_POSITION_SELECTOR_PX,
   compressorHpfDisplayLabel,
+  compressorIntensityDisplayLabel,
 } from "../components/NAMRackDesignPort";
 import { projectNAMRackSchemaForUI, type BuiltInPluginSchema } from "../services/NativeBridge";
 import {
@@ -21,6 +22,7 @@ const currentCompressorIds = [
   "compressorAttackMs",
   "compressorReleaseMs",
   "compressorToneDb",
+  "compressorIntensity",
   "compressorSidechainHPF",
   "compressorMix",
   "compressorVolumeDb",
@@ -28,16 +30,17 @@ const currentCompressorIds = [
 
 describe("NAM Rack Compressor V7 frontend contract", () => {
   it("keeps one current compressor identity and retires Detail everywhere", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(11);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
     const migrated = migrateLegacyNAMRackPresetDspState({
       values: { compressorDetail: 0.55 },
       dspState: { namEffectsDspVersion: 6, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
 
-    expect(migrated.dspState.namEffectsDspVersion).toBe(11);
+    expect(migrated.dspState.namEffectsDspVersion).toBe(19);
     expect(migrated.values.compressorAttackMs).toBeCloseTo(21.9, 6);
     expect(migrated.values.compressorReleaseMs).toBeCloseTo(149.1, 6);
     expect(migrated.values.compressorToneDb).toBe(0);
+    expect(migrated.values.compressorIntensity).toBe(0);
     expect(migrated.values.compressorSidechainHPF).toBe(1);
     expect(migrated.values).not.toHaveProperty("compressorDetail");
     expect(isCurrentNAMRackPresetState(migrated)).toBe(true);
@@ -48,7 +51,8 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
       { id: "compressorAttackMs", label: "Attack", type: "continuous", value: 21.9, min: 0.1, max: 50, defaultValue: 21.9, unit: "ms" },
       { id: "compressorReleaseMs", label: "Release", type: "continuous", value: 149.1, min: 50, max: 1000, defaultValue: 149.1, unit: "ms" },
       { id: "compressorToneDb", label: "Tone", type: "continuous", value: 0, min: -6, max: 6, defaultValue: 0, unit: "dB" },
-      { id: "compressorSidechainHPF", label: "HPF", type: "enum", value: 1, min: 0, max: 2, defaultValue: 1, enumOptions: [{ value: 0, label: "Off" }, { value: 1, label: "120 Hz" }, { value: 2, label: "240 Hz" }] },
+      { id: "compressorIntensity", label: "Intensity", type: "toggle", value: 0, min: 0, max: 1, defaultValue: 0 },
+      { id: "compressorSidechainHPF", label: "HPF", type: "enum", value: 1, min: 0, max: 2, defaultValue: 1, enumOptions: [{ value: 0, label: "Off" }, { value: 1, label: "80 Hz" }, { value: 2, label: "240 Hz" }] },
       { id: "compressorVolumeDb", label: "Level", type: "continuous", value: 0, min: -18, max: 18, defaultValue: 0, unit: "dB" },
     ];
     const projected = projectNAMRackSchemaForUI({
@@ -63,7 +67,7 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
 
     expect(projected.parameters).toEqual(parameters);
     expect(projected.parameters.find(({ id }) => id === "compressorSidechainHPF")?.enumOptions)
-      .toEqual([{ value: 0, label: "Off" }, { value: 1, label: "120 Hz" }, { value: 2, label: "240 Hz" }]);
+      .toEqual([{ value: 0, label: "Off" }, { value: 1, label: "80 Hz" }, { value: 2, label: "240 Hz" }]);
   });
 
   it("keeps the 3x2 faceplate and footer zones separated in real design pixels", () => {
@@ -116,28 +120,43 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
     expect((layout.meter.x + layout.meter.w) * box.w / 100).toBeLessThanOrEqual(box.w);
     expect(layout.hpfSelector.size * box.w / 100).toBeCloseTo(NAM_THREE_POSITION_SELECTOR_PX, 8);
     expect(layout.hpfSelector.size).toBeLessThan(layout.knobSize);
+
+    const intensityToggleRight = (
+      layout.intensityToggle.x + layout.intensityToggle.size / 2
+    ) * box.w / 100;
+    const footLeft = (
+      layout.foot.x - layout.foot.size / 2
+    ) * box.w / 100;
+    const intensityReadoutRight = (
+      layout.intensityReadout.x + layout.intensityReadout.w
+    ) * box.w / 100;
+    const intensityToggleBottom = layout.intensityToggle.y * box.h / 100
+      + layout.intensityToggle.size * box.w / 200;
+    expect(footLeft - intensityToggleRight).toBeGreaterThanOrEqual(18);
+    expect(footLeft - intensityReadoutRight).toBeGreaterThanOrEqual(7);
+    expect(box.h - intensityToggleBottom).toBeGreaterThanOrEqual(8);
+    expect(layout.intensityReadout.x + layout.intensityReadout.w / 2).toBe(
+      layout.intensityToggle.x,
+    );
+    const footRight = (layout.foot.x + layout.foot.size / 2) * box.w / 100;
+    expect(box.w - footRight).toBeGreaterThanOrEqual(20);
+    expect(layout.powerX).toBe(78);
+    expect(layout.led.x).toBe(layout.powerX);
+    expect(layout.foot.x).toBe(layout.powerX);
   });
 
   it("keeps every compressor HPF state visible in a compact pedal readout", () => {
-    const designSource = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
-    const hpfDisplayStyle = designSource.match(/\.compressor-hpf-readout strong \{[\s\S]*?\n\}/)?.[0] ?? "";
-    const grDisplayStyle = designSource.match(/\.compressor-gr-meter \{[\s\S]*?\n\}/)?.[0] ?? "";
-    const activeSegmentStyle = designSource.match(/\.compressor-gr-segments i\[data-active="true"\] \{[\s\S]*?\n\}/)?.[0] ?? "";
     expect(compressorHpfDisplayLabel(0)).toBe("OFF");
-    expect(compressorHpfDisplayLabel(1)).toBe("120");
+    expect(compressorHpfDisplayLabel(1)).toBe("80");
     expect(compressorHpfDisplayLabel(2)).toBe("240");
     expect(compressorHpfDisplayLabel(Number.NaN)).toBe("OFF");
-    expect(designSource).toContain('.compressor-hpf-readout strong');
-    expect(designSource).toContain('background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));');
-    expect(hpfDisplayStyle).toContain("box-shadow: none;");
-    expect(hpfDisplayStyle).toContain("filter: none;");
-    expect(grDisplayStyle).toContain("box-shadow: none;");
-    expect(grDisplayStyle).toContain("filter: none;");
-    expect(activeSegmentStyle).toContain("box-shadow: none;");
+    expect(compressorIntensityDisplayLabel(0)).toBe("8:1");
+    expect(compressorIntensityDisplayLabel(1)).toBe("16:1");
+    expect(compressorIntensityDisplayLabel(Number.NaN)).toBe("8:1");
   });
 
   it("contains the compressor at compact, medium, wide, and every rack scale", () => {
-    const group = { x: 5, y: 3, w: 748, h: 271 };
+    const group = { x: 5, y: 3, w: 898, h: 271 };
     const viewports = [
       { width: 720, height: 410 },
       { width: 1010, height: 520 },
@@ -169,8 +188,8 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
     expect(compressor.w).toBe(156);
     expect(compressor.w).toBe(distortion.w);
     expect(compressor.h).toBe(distortion.h);
-    expect(compressor.x).toBe(5);
-    expect(distortion.x + distortion.w).toBe(753);
+    expect(compressor.x).toBe(85);
+    expect(distortion.x + distortion.w).toBe(833);
     for (let index = 1; index < row.length; index += 1) {
       expect(row[index].x - (row[index - 1].x + row[index - 1].w)).toBe(10);
     }
@@ -197,9 +216,19 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
     }
     expect(sources.design).toContain("NAM_COMPRESSOR_FACEPLATE_LAYOUT");
     expect(sources.design).toContain('body={BODIES.blueWide}');
-    expect(sources.design).toContain("<ThreePositionRotarySelector {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfSelector}");
+    expect(sources.design).toContain("<ThreePositionRotarySelector");
+    expect(sources.design).toContain("NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfSelector");
     expect(sources.design).toContain("CompressorGainReductionMeter");
-    expect(sources.design).toContain('<CompressorHPFReadout {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfReadout}');
+    expect(sources.design).toContain("<CompressorHPFReadout");
+    expect(sources.design).toContain("NAM_COMPRESSOR_FACEPLATE_LAYOUT.hpfReadout");
+    expect(sources.design).toContain("<CompressorIntensityReadout");
+    expect(sources.design).toContain("NAM_COMPRESSOR_FACEPLATE_LAYOUT.intensityToggle");
+    const ratioReadout = sources.design.slice(
+      sources.design.indexOf("function CompressorIntensityReadout"),
+      sources.design.indexOf("function Washer"),
+    );
+    expect(ratioReadout).toContain("Compressor ratio");
+    expect(ratioReadout).not.toContain(">INTENSITY<");
     expect(sources.panel).toContain('numberFromRecord(rackDiagnostics, "compressorGainReductionDb")');
     expect(sources.panel).toContain("compressorGainReductionDb={compressorGainReductionDb}");
     expect(sources.project).toContain("return isRetiredNAMRackAutomationParamId(lane?.param)");

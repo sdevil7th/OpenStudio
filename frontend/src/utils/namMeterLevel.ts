@@ -2,6 +2,7 @@ export const NAM_METER_FLOOR_DB = -60;
 export const NAM_METER_CEILING_DB = 6;
 
 export type NAMMeterSide = "input" | "output";
+export type NAMMeterChannel = "left" | "right";
 
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -25,9 +26,9 @@ export const namMeterFraction = (levelDb: unknown) => {
 };
 
 /**
- * Live diagnostics win over the one-time schema snapshot. The native values
- * are linked peaks (maximum across the processor buffer's active channels), so
- * one truthful meter works for both mono and stereo without fabricating L/R.
+ * Live diagnostics win over the one-time schema snapshot. This linked maximum
+ * remains part of the contract for mixed-version clients and numeric readouts;
+ * the current hardware display resolves independent channel values below.
  */
 export const resolveNAMLinkedMeterDb = (
   side: NAMMeterSide,
@@ -39,5 +40,29 @@ export const resolveNAMLinkedMeterDb = (
     finiteNumber(diagnostics?.[`${side}LevelDb`])
     ?? finiteNumber(diagnostics?.[`last${prefix}PeakDb`])
     ?? finiteNumber(schemaLevelDb)
+  );
+};
+
+/**
+ * Resolves one true channel peak. A legacy native build may only publish its
+ * linked maximum, so that value is the final live fallback until both halves
+ * of the app have updated. A current schema channel value still wins over a
+ * stale linked schema snapshot before live diagnostics begin polling.
+ */
+export const resolveNAMChannelMeterDb = (
+  side: NAMMeterSide,
+  channel: NAMMeterChannel,
+  diagnostics: Record<string, unknown> | null | undefined,
+  schemaChannelLevelDb: unknown,
+  linkedFallbackDb: unknown,
+) => {
+  const prefix = side === "input" ? "Input" : "Output";
+  const channelName = channel === "left" ? "Left" : "Right";
+  return (
+    finiteNumber(diagnostics?.[`${side}${channelName}LevelDb`])
+    ?? finiteNumber(diagnostics?.[`${side}LevelDb`])
+    ?? finiteNumber(diagnostics?.[`last${prefix}PeakDb`])
+    ?? finiteNumber(schemaChannelLevelDb)
+    ?? finiteNumber(linkedFallbackDb)
   );
 };

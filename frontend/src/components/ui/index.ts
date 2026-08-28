@@ -43,6 +43,10 @@ export type { TextareaProps, TextareaSize } from './Textarea';
 export { Slider } from './Slider';
 export type { SliderProps, SliderOrientation, SliderVariant } from './Slider';
 
+// Bare native range input with profile-aware wheel behavior
+export { ProfiledRangeInput } from './ProfiledRangeInput';
+export type { ProfiledRangeInputProps } from './ProfiledRangeInput';
+
 // TimeSignatureInput
 export { TimeSignatureInput } from './TimeSignatureInput';
 export type { TimeSignatureInputProps, TimeSignatureInputSize } from './TimeSignatureInput';

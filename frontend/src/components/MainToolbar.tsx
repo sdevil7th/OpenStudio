@@ -18,14 +18,20 @@ import {
   Wand2,
 } from "lucide-react";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
-import { getDisplayShortcut, getActionShortcutScopeLabel } from "../store/actionRegistry";
+import {
+  getActionShortcutScopeLabel,
+  registerScopedActionExecutor,
+} from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, NativeSelect } from "./ui";
+import { getEffectiveShortcutLabel } from "../utils/inputProfileHelp";
 import {
+  activateShortcutContext,
   getActiveShortcutContext,
   subscribeShortcutContext,
 } from "../utils/shortcutContext";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
 import {
   calculateGridInterval,
   GRID_TYPE_MODE_OPTIONS,
@@ -52,15 +58,50 @@ export function MainToolbar({
   const [quantizeApplyState, setQuantizeApplyState] = useState<"idle" | "applied">("idle");
   const gridPanelRef = useRef<HTMLSpanElement | null>(null);
   const applyCloseTimerRef = useRef<number | null>(null);
-  const mixerShortcut = getDisplayShortcut("view.toggleMixer") ?? "Ctrl+M";
-  const loopShortcut = getDisplayShortcut("transport.loop") ?? "L";
-  const recordShortcut = getDisplayShortcut("transport.record") ?? "Ctrl+R";
-  const undoShortcut = getDisplayShortcut("edit.undo") ?? "Ctrl+Z";
-  const redoShortcut = getDisplayShortcut("edit.redo") ?? "Ctrl+Shift+Z";
-  const selectToolShortcut = getDisplayShortcut("tools.selectTool") ?? "V";
-  const splitToolShortcut = getDisplayShortcut("tools.splitTool") ?? "B";
-  const muteToolShortcut = getDisplayShortcut("tools.muteTool") ?? "X";
-  const smartToolShortcut = getDisplayShortcut("tools.smartTool") ?? "Y";
+  useTransientOverlayShortcutScope(
+    showQuantizePanel,
+    () => setShowQuantizePanel(false),
+  );
+
+  useEffect(() => registerScopedActionExecutor(
+    { kind: "application" },
+    (actionId) => {
+      if (actionId === "view.openGridQuantizePanel") {
+        setShowQuantizePanel(true);
+        return "handled";
+      }
+      if (actionId === "edit.applyCurrentQuantize") {
+        handleApplyQuantize();
+        return "handled";
+      }
+      return "unmatched";
+    },
+    ["view.openGridQuantizePanel", "edit.applyCurrentQuantize"],
+  ), []);
+  const { keyboardShortcutProfileId, customShortcuts } = useDAWStore(useShallow((s) => ({
+    keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+    customShortcuts: s.customShortcuts,
+  })));
+  const shortcuts = useMemo(() => ({
+    mixer: getEffectiveShortcutLabel("view.toggleMixer", "Ctrl+M"),
+    loop: getEffectiveShortcutLabel("transport.loop", "L"),
+    record: getEffectiveShortcutLabel("transport.record", "Ctrl+R"),
+    undo: getEffectiveShortcutLabel("edit.undo", "Ctrl+Z"),
+    redo: getEffectiveShortcutLabel("edit.redo", "Ctrl+Shift+Z"),
+    selectTool: getEffectiveShortcutLabel("tools.selectTool", "V"),
+    splitTool: getEffectiveShortcutLabel("tools.splitTool", "B"),
+    muteTool: getEffectiveShortcutLabel("tools.muteTool", "X"),
+    smartTool: getEffectiveShortcutLabel("tools.smartTool", "Y"),
+  }), [keyboardShortcutProfileId, customShortcuts]);
+  const mixerShortcut = shortcuts.mixer;
+  const loopShortcut = shortcuts.loop;
+  const recordShortcut = shortcuts.record;
+  const undoShortcut = shortcuts.undo;
+  const redoShortcut = shortcuts.redo;
+  const selectToolShortcut = shortcuts.selectTool;
+  const splitToolShortcut = shortcuts.splitTool;
+  const muteToolShortcut = shortcuts.muteTool;
+  const smartToolShortcut = shortcuts.smartTool;
   const timelineScopeLabel = getActionShortcutScopeLabel("timeline");
   const {
     isPlaying,
@@ -180,14 +221,9 @@ export function MainToolbar({
         setShowQuantizePanel(false);
       }
     };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowQuantizePanel(false);
-    };
     document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [showQuantizePanel]);
 
@@ -498,7 +534,11 @@ export function MainToolbar({
             <ChevronDown size={14} />
           </Button>
           {showQuantizePanel && (
-            <div className="absolute right-0 top-full z-[3000] mt-2 w-[320px] rounded-md border border-neutral-700 bg-neutral-950 p-3 text-xs text-neutral-200 shadow-2xl shadow-black/70 ring-1 ring-black/50">
+            <div
+              className="absolute right-0 top-full z-[3000] mt-2 w-[320px] rounded-md border border-neutral-700 bg-neutral-950 p-3 text-xs text-neutral-200 shadow-2xl shadow-black/70 ring-1 ring-black/50"
+              onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+              onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
+            >
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-[10px] uppercase tracking-normal text-neutral-500">Grid / Snap</div>

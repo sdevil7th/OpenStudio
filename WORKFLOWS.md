@@ -83,8 +83,17 @@ git push origin ai-runtime-v0.0.31
 
 ```
 
-## This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
-## Otherwise the app would be shown as damaged or broken in macOS
+## macOS first launch
+
+The normal first-launch path is:
+
+1. Verify the downloaded DMG against the published SHA-256 checksum.
+2. Drag `OpenStudio.app` to `/Applications` and attempt to open it.
+3. If macOS blocks the unsigned build, use **System Settings > Privacy &
+   Security > Open Anyway** for that app, then confirm the launch.
+
+## If that also doesn't work, then run this command to un-quarantine the app and use it
+## Otherwise the app might be shown as damaged or broken in macOS
 ```bash
 xattr -dr com.apple.quarantine /Applications/OpenStudio.app
 ```

@@ -1,3 +1,4 @@
+import "./NAMRackDiagnostics.css";
 import { Cable, Gauge, Library } from "lucide-react";
 
 export type NAMRackDiagnosticTone = "error" | "warning" | "success" | "info" | "idle";

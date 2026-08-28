@@ -1,6 +1,20 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import classNames from "classnames";
 import { KnobProps, knobSizeMap } from "./Knob.types";
+import {
+  accumulateParameterWheelGesture,
+  getParameterWheelValue,
+  resolveProfiledParameterWheel,
+} from "../../../utils/parameterWheel";
+import {
+  createWheelDeltaAccumulator,
+  type WheelDeltaAccumulator,
+} from "../../../utils/wheelDeltaAccumulator";
+import {
+  beginEditTransaction,
+  commitEditTransaction,
+  createEditTransactionLifecycle,
+} from "../editTransactionLifecycle";
 
 // --- Arc geometry constants ---
 // 270° sweep with a gap at the bottom (6-o'clock area)
@@ -75,6 +89,13 @@ export function Knob({
   const dragStartY = useRef(0);
   const dragStartValue = useRef(0);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const wheelValueRef = useRef(value);
+  const wheelEditingRef = useRef(false);
+  const wheelCommitCallbackRef = useRef<(() => void) | undefined>(undefined);
+  const wheelAccumulatorRef = useRef<WheelDeltaAccumulator | null>(null);
+  const commitWheelEditRef = useRef<() => void>(() => undefined);
+  const dragEditRef = useRef(createEditTransactionLifecycle());
+  wheelValueRef.current = value;
 
   const fillColor = FILL_COLORS[variant] || FILL_COLORS.default;
   const currentAngle = valueToAngle(value, min, max);
@@ -112,43 +133,56 @@ export function Knob({
 
       // Ctrl+Click → reset to default
       if (e.ctrlKey || e.metaKey) {
+        wheelAccumulatorRef.current?.reset();
         onBeginEdit?.();
         onChange(defaultValue);
         onCommitEdit?.();
         return;
       }
 
-      onBeginEdit?.();
+      wheelAccumulatorRef.current?.reset();
+      beginEditTransaction(dragEditRef.current, onBeginEdit, onCommitEdit);
       setIsDragging(true);
       dragStartY.current = e.clientY;
       dragStartValue.current = value;
 
       // Capture pointer for smooth dragging even outside the element
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      e.currentTarget.setPointerCapture(e.pointerId);
     },
     [disabled, value, defaultValue, onChange, onBeginEdit, onCommitEdit],
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (!isDragging) return;
+      if (!dragEditRef.current.active) return;
       const deltaY = dragStartY.current - e.clientY; // up = positive
       const range = max - min;
       const newValue = dragStartValue.current + (deltaY / sensitivity) * range;
       onChange(Math.max(min, Math.min(max, newValue)));
     },
-    [isDragging, min, max, sensitivity, onChange],
+    [min, max, sensitivity, onChange],
   );
+
+  const commitDragEdit = useCallback(() => {
+    commitEditTransaction(dragEditRef.current);
+  }, []);
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
-      if (!isDragging) return;
+      if (!dragEditRef.current.active) return;
       setIsDragging(false);
-      onCommitEdit?.();
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      commitDragEdit();
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
     },
-    [isDragging, onCommitEdit],
+    [commitDragEdit],
   );
+
+  const handlePointerCancel = useCallback(() => {
+    setIsDragging(false);
+    commitDragEdit();
+  }, [commitDragEdit]);
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -156,12 +190,80 @@ export function Knob({
       if (defaultValue === undefined) return;
       e.preventDefault();
       e.stopPropagation();
+      wheelAccumulatorRef.current?.reset();
       onBeginEdit?.();
       onChange(defaultValue);
       onCommitEdit?.();
     },
     [defaultValue, disabled, onBeginEdit, onChange, onCommitEdit],
   );
+
+  const commitWheelEdit = useCallback(() => {
+    if (!wheelEditingRef.current) return;
+    wheelEditingRef.current = false;
+    const commit = wheelCommitCallbackRef.current;
+    wheelCommitCallbackRef.current = undefined;
+    commit?.();
+  }, []);
+  commitWheelEditRef.current = commitWheelEdit;
+
+  useEffect(() => {
+    const accumulator = createWheelDeltaAccumulator({
+      quantum: 1,
+      idleMs: 180,
+      onReset: () => commitWheelEditRef.current(),
+    });
+    wheelAccumulatorRef.current = accumulator;
+    return () => {
+      accumulator.dispose();
+      if (wheelAccumulatorRef.current === accumulator) wheelAccumulatorRef.current = null;
+    };
+  }, []);
+  useEffect(() => () => commitDragEdit(), [commitDragEdit]);
+
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+    if (gesture.preventDefault) event.preventDefault();
+    if (gesture.stopPropagation) event.stopPropagation();
+    const accumulatedGesture = wheelAccumulatorRef.current
+      ? accumulateParameterWheelGesture(wheelAccumulatorRef.current, gesture, "control")
+      : null;
+    if (!accumulatedGesture) return;
+    const nextValue = getParameterWheelValue(accumulatedGesture, {
+      min,
+      max,
+      value: wheelValueRef.current,
+      step: (max - min) / 100,
+    });
+    if (nextValue === wheelValueRef.current) return;
+    if (!wheelEditingRef.current) {
+      wheelEditingRef.current = true;
+      wheelCommitCallbackRef.current = onCommitEdit;
+      onBeginEdit?.();
+    }
+    wheelValueRef.current = nextValue;
+    onChange(nextValue);
+  }, [disabled, max, min, onBeginEdit, onChange, onCommitEdit]);
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const normalStep = (max - min) / 100;
+    const step = event.shiftKey ? normalStep * 0.1 : normalStep;
+    let next: number | undefined;
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") next = value + step;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowDown") next = value - step;
+    else if (event.key === "PageUp") next = value + (max - min) / 10;
+    else if (event.key === "PageDown") next = value - (max - min) / 10;
+    else if (event.key === "Home") next = min;
+    else if (event.key === "End") next = max;
+    else return;
+    event.preventDefault();
+    wheelAccumulatorRef.current?.reset();
+    onBeginEdit?.();
+    onChange(Math.max(min, Math.min(max, next)));
+    onCommitEdit?.();
+  }, [disabled, max, min, onBeginEdit, onChange, onCommitEdit, value]);
 
   // Indicator endpoints
   const indicatorInner = angleToPoint(currentAngle, indicatorInnerR, cx, cy);
@@ -185,7 +287,11 @@ export function Knob({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
       onDoubleClick={handleDoubleClick}
+      onWheel={handleWheel}
+      onKeyDown={handleKeyDown}
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => {
         if (!isDragging) setIsHovered(false);
@@ -193,6 +299,13 @@ export function Knob({
       title={label ? `${label}: ${tooltipText}` : tooltipText}
       data-no-drag
       data-no-select
+      role="slider"
+      aria-label={label ?? "Parameter"}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      aria-disabled={disabled}
+      tabIndex={disabled ? -1 : 0}
     >
       <svg
         width={diameter}

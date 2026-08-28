@@ -35,7 +35,6 @@ void NAMDelayRegression::configureNeutralRack(S13NAMRack& rack)
     rack.outputTrimDb.store(0.0f);
     rack.gateThresholdDb.store(-100.0f);
     rack.compressorEnabled.store(0.0f);
-    rack.tapeEchoEnabled.store(0.0f);
     rack.octaverEnabled.store(0.0f);
     rack.precisionDriveEnabled.store(0.0f);
     rack.chaosEnabled.store(0.0f);
@@ -201,10 +200,23 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && tape.flutterDepthMs > 0.0f
         && digital.flutterDepthMs == 0.0f
         && analog.flutterDepthMs == 0.0f
-        && bassTape.highPassHz < tape.highPassHz
+        // Bass retains the fundamental through its unity dry path while the
+        // repeat path is filtered more aggressively to prevent low buildup.
+        && bassTape.highPassHz > tape.highPassHz
         && bassTape.lowPassHz > tape.lowPassHz
         && std::abs(bassTape.dryGain - 1.0f) <= 1.0e-6f
-        && std::abs(tape.dryGain - 0.65f) <= 1.0e-6f
+        && std::abs(
+               tape.dryGain
+               - std::cos(
+                   0.35f
+                   * juce::MathConstants<float>::halfPi))
+            <= 1.0e-6f
+        && std::abs(
+               tape.mix
+               - std::sin(
+                   0.35f
+                   * juce::MathConstants<float>::halfPi))
+            <= 1.0e-6f
         && std::abs(multi.multiTapRatios[0] - 1.0f) <= 1.0e-7f
         && std::abs(multi.multiTapRatios[1] - 0.726f) <= 1.0e-6f
         && std::abs(multi.multiTapRatios[2] - 0.546f) <= 1.0e-6f
@@ -357,6 +369,8 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     const double v10Mode = migrateModeFixture(
         S13NAMRack::delayV10IntroducedNAMEffectsDspVersion,
         true);
+    const double developmentAliasMode = migrateModeFixture(
+        S13NAMRack::developmentNAMEffectsDspVersionAlias, true);
     const double futureVersionMode = migrateModeFixture(
         S13NAMRack::currentNAMEffectsDspVersion + 1, true);
     const double fractionalVersionMode = migrateModeFixture(
@@ -420,14 +434,19 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     const double nestedCurrentMode =
         migrateNestedModeFixture(
             S13NAMRack::currentNAMEffectsDspVersion);
+    const double nestedDevelopmentAliasMode =
+        migrateNestedModeFixture(
+            S13NAMRack::developmentNAMEffectsDspVersionAlias);
     const bool versionMigrationContractPassed =
         std::abs(missingVersionMode - 1.0) <= 1.0e-7
         && std::abs(v10Mode - 4.0) <= 1.0e-7
+        && std::abs(developmentAliasMode - 4.0) <= 1.0e-7
         && std::abs(futureVersionMode - 1.0) <= 1.0e-7
         && std::abs(fractionalVersionMode - 1.0) <= 1.0e-7
         && std::abs(nestedLegacyMode - 2.0) <= 1.0e-7
         && std::abs(nestedV10Mode - 4.0) <= 1.0e-7
-        && std::abs(nestedCurrentMode - 4.0) <= 1.0e-7;
+        && std::abs(nestedCurrentMode - 4.0) <= 1.0e-7
+        && std::abs(nestedDevelopmentAliasMode - 4.0) <= 1.0e-7;
 
     S13NAMRack malformedSaveRack;
     const float nonFinite =
@@ -491,6 +510,8 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     value->setProperty(
         "missingVersionMode", missingVersionMode);
     value->setProperty(
+        "developmentAliasMode", developmentAliasMode);
+    value->setProperty(
         "futureVersionMode", futureVersionMode);
     value->setProperty(
         "fractionalVersionMode", fractionalVersionMode);
@@ -498,6 +519,9 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         "nestedLegacyMode", nestedLegacyMode);
     value->setProperty(
         "nestedCurrentMode", nestedCurrentMode);
+    value->setProperty(
+        "nestedDevelopmentAliasMode",
+        nestedDevelopmentAliasMode);
     value->setProperty(
         "digitalLowPassHz", digital.lowPassHz);
     value->setProperty(

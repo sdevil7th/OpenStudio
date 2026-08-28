@@ -16,9 +16,48 @@ static constexpr int kRealtimeFXTailTimerMilliseconds = 250;
 static constexpr double kRealtimeFXTailSafetySeconds = 1.0;
 static constexpr double kRealtimeFXTailQuietWindowSeconds = 0.65;
 static constexpr float kRealtimeFXTailQuietPeak = 3.1622776601683795e-5f; // -90 dBFS
+static constexpr juce::uint32 kMIDIActivityHoldMilliseconds = 90;
+static constexpr juce::uint32 kMIDIActivityDecayMilliseconds = 360;
 
 namespace
 {
+float decayMIDIActivity(float level, juce::uint32 ageMilliseconds) noexcept
+{
+    if (ageMilliseconds <= kMIDIActivityHoldMilliseconds)
+        return level;
+
+    const auto decayAge = ageMilliseconds - kMIDIActivityHoldMilliseconds;
+    if (decayAge >= kMIDIActivityDecayMilliseconds)
+        return 0.0f;
+
+    return level * (1.0f - static_cast<float>(decayAge)
+        / static_cast<float>(kMIDIActivityDecayMilliseconds));
+}
+
+float getMIDIMessageActivity(const juce::MidiMessage& message) noexcept
+{
+    if (message.isNoteOn())
+        return juce::jlimit(0.0f, 1.0f, message.getFloatVelocity());
+    if (message.isController())
+        return juce::jmax(0.12f, juce::jlimit(0.0f, 1.0f,
+            static_cast<float>(message.getControllerValue()) / 127.0f));
+    if (message.isAftertouch())
+        return juce::jmax(0.12f, juce::jlimit(0.0f, 1.0f,
+            static_cast<float>(message.getAfterTouchValue()) / 127.0f));
+    if (message.isChannelPressure())
+        return juce::jmax(0.12f, juce::jlimit(0.0f, 1.0f,
+            static_cast<float>(message.getChannelPressureValue()) / 127.0f));
+    if (message.isPitchWheel())
+        return juce::jmax(0.12f, juce::jlimit(0.0f, 1.0f,
+            static_cast<float>(message.getPitchWheelValue()) / 16383.0f));
+    if (message.isProgramChange())
+        return 0.5f;
+
+    // Note-off and transport/clock/active-sensing messages must not keep an
+    // armed track's input meter illuminated.
+    return 0.0f;
+}
+
 class ScopedTrackRealtimeReader final
 {
 public:
@@ -599,6 +638,41 @@ static void applyStereoWidthToBuffer(juce::AudioBuffer<float>& buffer,
     }
 }
 
+void TrackProcessor::registerMIDIInputActivity(
+    const juce::MidiMessage& message) noexcept
+{
+    const auto activity = getMIDIMessageActivity(message);
+    if (activity <= 0.0f)
+        return;
+
+    const auto now = juce::Time::getMillisecondCounter();
+    const auto previousTimestamp = midiInputActivityTimestampMs.load(
+        std::memory_order_acquire);
+    const auto previousLevel = midiInputActivityLevel.load(
+        std::memory_order_acquire);
+    const auto decayedPrevious = previousTimestamp == 0
+        ? 0.0f
+        : decayMIDIActivity(previousLevel, now - previousTimestamp);
+
+    midiInputActivityLevel.store(
+        juce::jmax(activity, decayedPrevious),
+        std::memory_order_release);
+    midiInputActivityTimestampMs.store(now, std::memory_order_release);
+}
+
+float TrackProcessor::getMIDIInputActivityLevel() const noexcept
+{
+    const auto timestamp = midiInputActivityTimestampMs.load(
+        std::memory_order_acquire);
+    if (timestamp == 0)
+        return 0.0f;
+
+    const auto level = midiInputActivityLevel.load(std::memory_order_acquire);
+    return decayMIDIActivity(
+        level,
+        juce::Time::getMillisecondCounter() - timestamp);
+}
+
 TrackProcessor::TrackProcessor()
      : AudioProcessor (BusesProperties()
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
@@ -770,6 +844,28 @@ std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::findPlugi
     return nullptr;
 }
 
+std::shared_ptr<TrackProcessor::PluginAutomationRoute>
+TrackProcessor::clonePluginAutomationRoute(
+    const PluginAutomationRoute& source)
+{
+    auto clone = std::make_shared<PluginAutomationRoute>();
+    clone->parameterId = source.parameterId;
+    clone->isInputFX = source.isInputFX;
+    clone->fxIndex = source.fxIndex;
+    clone->targetProcessor = source.targetProcessor;
+    clone->paramIndex = source.paramIndex;
+    clone->builtInParamId = source.builtInParamId;
+    clone->builtInMinimum = source.builtInMinimum;
+    clone->builtInMaximum = source.builtInMaximum;
+    clone->builtInDiscrete = source.builtInDiscrete;
+    clone->builtInCurve = source.builtInCurve;
+    clone->automation = source.automation;
+    clone->lastAppliedValue.store(
+        source.lastAppliedValue.load(std::memory_order_acquire),
+        std::memory_order_relaxed);
+    return clone;
+}
+
 void TrackProcessor::publishPluginAutomationRoutes(
     std::shared_ptr<const PluginAutomationRouteSnapshot> snapshot)
 {
@@ -801,6 +897,109 @@ void TrackProcessor::publishPluginAutomationRoutes(
     hasPublishedPluginAutomationRoutes.store(hasRoutes, std::memory_order_release);
 }
 
+void TrackProcessor::remapPluginAutomationRoutesForReorder(
+    bool isInputFX, int fromIndex, int toIndex)
+{
+    const juce::ScopedLock routeGuard(pluginAutomationRouteLock);
+    const auto snapshot = std::atomic_load_explicit(
+        &pluginAutomationSnapshot, std::memory_order_acquire);
+    if (snapshot == nullptr || snapshot->empty())
+        return;
+
+    auto nextSnapshot = std::make_shared<PluginAutomationRouteSnapshot>();
+    nextSnapshot->reserve(snapshot->size());
+    for (const auto& route : *snapshot)
+    {
+        if (route == nullptr)
+        {
+            nextSnapshot->push_back(route);
+            continue;
+        }
+
+        // Route objects already visible to the callback are immutable. Clone
+        // before changing Strings or indices so the old reader epoch remains
+        // race-free until retirement.
+        auto nextRoute = clonePluginAutomationRoute(*route);
+        if (route->isInputFX != isInputFX)
+        {
+            nextSnapshot->push_back(std::move(nextRoute));
+            continue;
+        }
+
+        int mappedIndex = route->fxIndex;
+        if (mappedIndex == fromIndex)
+            mappedIndex = toIndex;
+        else if (fromIndex < toIndex
+                 && mappedIndex > fromIndex
+                 && mappedIndex <= toIndex)
+            --mappedIndex;
+        else if (fromIndex > toIndex
+                 && mappedIndex >= toIndex
+                 && mappedIndex < fromIndex)
+            ++mappedIndex;
+
+        nextRoute->fxIndex = mappedIndex;
+        const auto chain = isInputFX ? "input" : "track";
+        nextRoute->parameterId = nextRoute->builtInParamId.isNotEmpty()
+            ? "builtin_" + juce::String(chain) + "_" + juce::String(mappedIndex)
+                + "_" + juce::URL::addEscapeChars(nextRoute->builtInParamId, true)
+            : "plugin_" + juce::String(chain) + "_" + juce::String(mappedIndex)
+                + "_" + juce::String(nextRoute->paramIndex);
+        nextRoute->lastAppliedValue.store(
+            std::numeric_limits<float>::quiet_NaN(),
+            std::memory_order_release);
+        nextSnapshot->push_back(std::move(nextRoute));
+    }
+
+    publishPluginAutomationRoutes(
+        std::static_pointer_cast<const PluginAutomationRouteSnapshot>(nextSnapshot));
+}
+
+void TrackProcessor::remapPluginAutomationRoutesForRemoval(
+    bool isInputFX, int removedIndex)
+{
+    const juce::ScopedLock routeGuard(pluginAutomationRouteLock);
+    const auto snapshot = std::atomic_load_explicit(
+        &pluginAutomationSnapshot, std::memory_order_acquire);
+    if (snapshot == nullptr || snapshot->empty())
+        return;
+
+    auto nextSnapshot = std::make_shared<PluginAutomationRouteSnapshot>();
+    nextSnapshot->reserve(snapshot->size());
+    for (const auto& route : *snapshot)
+    {
+        if (route == nullptr)
+        {
+            nextSnapshot->push_back(route);
+            continue;
+        }
+        if (route->isInputFX == isInputFX
+            && route->fxIndex == removedIndex)
+            continue;
+
+        auto nextRoute = clonePluginAutomationRoute(*route);
+
+        if (route->isInputFX == isInputFX
+            && route->fxIndex > removedIndex)
+        {
+            --nextRoute->fxIndex;
+            const auto chain = isInputFX ? "input" : "track";
+            nextRoute->parameterId = nextRoute->builtInParamId.isNotEmpty()
+                ? "builtin_" + juce::String(chain) + "_" + juce::String(nextRoute->fxIndex)
+                    + "_" + juce::URL::addEscapeChars(nextRoute->builtInParamId, true)
+                : "plugin_" + juce::String(chain) + "_" + juce::String(nextRoute->fxIndex)
+                    + "_" + juce::String(nextRoute->paramIndex);
+            nextRoute->lastAppliedValue.store(
+                std::numeric_limits<float>::quiet_NaN(),
+                std::memory_order_release);
+        }
+        nextSnapshot->push_back(std::move(nextRoute));
+    }
+
+    publishPluginAutomationRoutes(
+        std::static_pointer_cast<const PluginAutomationRouteSnapshot>(nextSnapshot));
+}
+
 std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCreatePluginAutomationRoute(const juce::String& parameterId)
 {
     if (auto existing = findPluginAutomationRoute(parameterId))
@@ -827,6 +1026,7 @@ std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCrea
     auto* processor = route->isInputFX
         ? getInputFXProcessor(route->fxIndex)
         : getTrackFXProcessor(route->fxIndex);
+    route->targetProcessor = processor;
     if (route->builtInParamId.isNotEmpty())
     {
         OpenStudioBuiltInAutomationDescriptor descriptor;
@@ -1503,9 +1703,13 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
 
     for (const auto& route : *routes)
     {
+        const bool processorMatches = route != nullptr
+            && (route->targetProcessor != nullptr
+                    ? route->targetProcessor == proc
+                    : (route->isInputFX == isInputFX
+                       && route->fxIndex == fxIndex));
         if (!route
-            || route->isInputFX != isInputFX
-            || route->fxIndex != fxIndex
+            || ! processorMatches
             || route->automation == nullptr)
         {
             continue;
@@ -1620,10 +1824,6 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
         &pluginAutomationSnapshot, std::memory_order_acquire);
     const auto getNAMTailAutomationModule = [] (const juce::String& parameterId)
     {
-        if (parameterId == "tapeEchoEnabled" || parameterId == "tapeEchoMix"
-            || parameterId == "tapeEchoTimeMs" || parameterId == "tapeEchoFeedback"
-            || parameterId == "tapeEchoMod")
-            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationTapeEcho);
         if (parameterId == "delayEnabled" || parameterId == "delayMix"
             || parameterId == "delayTimeMs" || parameterId == "delayFeedback"
             || parameterId == "delayMod" || parameterId == "delayMode"
@@ -1632,12 +1832,20 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
         if (parameterId == "reverbEnabled" || parameterId == "reverbMix"
             || parameterId == "reverbDecaySec" || parameterId == "reverbPreDelayMs"
             || parameterId == "reverbTone" || parameterId == "reverbLowCutHz"
-            || parameterId == "reverbShimmer" || parameterId == "reverbVoice")
+            || parameterId == "reverbShimmer" || parameterId == "reverbVoice"
+            || parameterId == "reverbPad")
             return static_cast<std::uint32_t>(S13NAMRack::tailAutomationReverb);
         if (parameterId == "modulatorEnabled" || parameterId == "chorusMix"
             || parameterId == "modulatorMode" || parameterId == "modulatorFeedback")
             return static_cast<std::uint32_t>(S13NAMRack::tailAutomationModulator);
-        if (parameterId == "cabEnabled")
+        if (parameterId == "cabEnabled"
+            || parameterId == "cabRoomEnabled"
+            || parameterId == "cabRoomAmount"
+            || parameterId == "cabRoomWidth"
+            || parameterId == "cabDoublerEnabled"
+            || parameterId == "cabDoublerMix"
+            || parameterId == "cabDoublerDelayMs"
+            || parameterId == "cabDoublerSpread")
             return static_cast<std::uint32_t>(S13NAMRack::tailAutomationCab);
         return static_cast<std::uint32_t>(S13NAMRack::tailAutomationNone);
     };
@@ -1778,10 +1986,17 @@ void TrackProcessor::changeProgramName (int index, const juce::String& newName)
 // empty, so getSampleRate()/getBlockSize() returned 0/0 and plugins ignored the call.
 // Now that we call prepareToPlay with valid values, we must restore the layout.
 static void preparePluginPreservingLayout(juce::AudioProcessor* plugin, double sampleRate,
-                                          int maxBlock, ProcessingPrecisionMode precisionMode)
+                                          int maxBlock, ProcessingPrecisionMode precisionMode,
+                                          int routedInputChannels = 2)
 {
     const juce::ScopedLock pluginCallbackGuard(plugin->getCallbackLock());
     const int safeMaxBlock = getSafeHostedPluginBlockSize(maxBlock);
+
+    // NAM graph topology depends on the host route width. Publish it before
+    // prepare/reset so a newly inserted mono guitar Rack cannot begin in its
+    // default stereo topology and perform an avoidable first-callback handoff.
+    if (auto* const rack = dynamic_cast<S13NAMRack*>(plugin))
+        rack->setRoutedInputChannelCount(routedInputChannels);
 
     if (plugin->supportsDoublePrecisionProcessing())
     {
@@ -1883,7 +2098,8 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         {
             preparePluginPreservingLayout(plugin.get(), sampleRate, pluginMaxBlock,
                                           resolvePluginPrecisionMode(processingPrecisionMode,
-                                                                     getInputFXPrecisionOverride(index)));
+                                                                     getInputFXPrecisionOverride(index)),
+                                          inputChannelCount.load(std::memory_order_acquire));
             plugin->reset();
         }
     }
@@ -1897,7 +2113,8 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
             const int pluginBlockSize = pluginMaxBlock;
             preparePluginPreservingLayout(plugin.get(), sampleRate, pluginBlockSize,
                                           resolvePluginPrecisionMode(processingPrecisionMode,
-                                                                     getTrackFXPrecisionOverride(index)));
+                                                                     getTrackFXPrecisionOverride(index)),
+                                          inputChannelCount.load(std::memory_order_acquire));
             plugin->reset();
         }
     }
@@ -3881,7 +4098,8 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
 
     // Prepare while preserving bus layout (see preparePluginPreservingLayout).
     preparePluginPreservingLayout(plugin.get(), sr, bs,
-                                  resolvePluginPrecisionMode(processingPrecisionMode, false));
+                                  resolvePluginPrecisionMode(processingPrecisionMode, false),
+                                  inputChannelCount.load(std::memory_order_acquire));
 
     juce::Logger::writeToLog("TrackProcessor: Added Input FX plugin (" + plugin->getName() +
                              ") prepared at " + juce::String(sr) + "Hz / " + juce::String(bs) + " samples" +
@@ -3919,7 +4137,8 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
 
     // Prepare while preserving bus layout (see preparePluginPreservingLayout).
     preparePluginPreservingLayout(plugin.get(), sr, bs,
-                                  resolvePluginPrecisionMode(processingPrecisionMode, false));
+                                  resolvePluginPrecisionMode(processingPrecisionMode, false),
+                                  inputChannelCount.load(std::memory_order_acquire));
 
     juce::Logger::writeToLog("TrackProcessor: Added Track FX plugin (" + plugin->getName() +
                              ") prepared at " + juce::String(sr) + "Hz / " + juce::String(bs) + " samples" +
@@ -3953,6 +4172,7 @@ void TrackProcessor::removeInputFX(int index)
         }
         inputFXForceFloatOverrides = std::move(updatedOverrides);
         inputFXBypassedState = std::move(updatedBypass);
+        remapPluginAutomationRoutesForRemoval(true, index);
         publishRealtimeStateSnapshots();
         juce::Logger::writeToLog("TrackProcessor: Removed Input FX at index " + juce::String(index));
     }
@@ -4002,6 +4222,7 @@ void TrackProcessor::removeTrackFX(int index)
         }
         trackFXForceFloatOverrides = std::move(updatedOverrides);
         trackFXBypassedState = std::move(updatedBypass);
+        remapPluginAutomationRoutesForRemoval(false, index);
         publishRealtimeStateSnapshots();
         juce::Logger::writeToLog("TrackProcessor: Removed Track FX at index " + juce::String(index));
     }
@@ -4217,6 +4438,7 @@ bool TrackProcessor::reorderInputFX(int fromIndex, int toIndex)
     }
     inputFXForceFloatOverrides = std::move(updatedOverrides);
     inputFXBypassedState = std::move(updatedBypass);
+    remapPluginAutomationRoutesForReorder(true, fromIndex, toIndex);
     publishRealtimeStateSnapshots();
 
     juce::Logger::writeToLog("TrackProcessor: Reordered input FX from " +
@@ -4261,6 +4483,7 @@ bool TrackProcessor::reorderTrackFX(int fromIndex, int toIndex)
     }
     trackFXForceFloatOverrides = std::move(updatedOverrides);
     trackFXBypassedState = std::move(updatedBypass);
+    remapPluginAutomationRoutesForReorder(false, fromIndex, toIndex);
     if (araFXIndex == fromIndex)
         araFXIndex = toIndex;
     else if (fromIndex < toIndex && araFXIndex > fromIndex && araFXIndex <= toIndex)
@@ -5913,7 +6136,8 @@ void TrackProcessor::setInputFXPrecisionOverride(int index, bool forceFloat)
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
         int bs = getSafeHostedPluginBlockSize(getBlockSize());
         preparePluginPreservingLayout(plugin, sr, bs,
-                                      resolvePluginPrecisionMode(processingPrecisionMode, forceFloat));
+                                      resolvePluginPrecisionMode(processingPrecisionMode, forceFloat),
+                                      inputChannelCount.load(std::memory_order_acquire));
     }
     publishRealtimeStateSnapshots();
 }
@@ -5930,7 +6154,8 @@ void TrackProcessor::setTrackFXPrecisionOverride(int index, bool forceFloat)
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
         int bs = getSafeHostedPluginBlockSize(getBlockSize());
         preparePluginPreservingLayout(plugin, sr, bs,
-                                      resolvePluginPrecisionMode(processingPrecisionMode, forceFloat));
+                                      resolvePluginPrecisionMode(processingPrecisionMode, forceFloat),
+                                      inputChannelCount.load(std::memory_order_acquire));
     }
     publishRealtimeStateSnapshots();
 }
@@ -5987,13 +6212,15 @@ void TrackProcessor::setProcessingPrecisionMode(ProcessingPrecisionMode mode)
         if (auto* plugin = inputFXPlugins[static_cast<size_t>(index)].get())
             preparePluginPreservingLayout(plugin, sr, bs,
                                           resolvePluginPrecisionMode(processingPrecisionMode,
-                                                                     getInputFXPrecisionOverride(index)));
+                                                                     getInputFXPrecisionOverride(index)),
+                                          inputChannelCount.load(std::memory_order_acquire));
 
     for (int index = 0; index < static_cast<int>(trackFXPlugins.size()); ++index)
         if (auto* plugin = trackFXPlugins[static_cast<size_t>(index)].get())
             preparePluginPreservingLayout(plugin, sr, bs,
                                           resolvePluginPrecisionMode(processingPrecisionMode,
-                                                                     getTrackFXPrecisionOverride(index)));
+                                                                     getTrackFXPrecisionOverride(index)),
+                                          inputChannelCount.load(std::memory_order_acquire));
 
     if (instrumentPlugin)
         preparePluginPreservingLayout(instrumentPlugin.get(), sr, bs,

@@ -75,6 +75,32 @@ OpenStudio now follows the policy documented in `docs/runtime-dependency-contrac
 - Optional feature prerequisites, including Python for AI tools, must never block base app launch.
 - AI tools setup runs in the background and surfaces progress through the toolbar AI button plus a lightweight in-app popup.
 
+## Release decision rules
+
+- A passing `--startup-self-test` proves dependency and asset preflight, not a
+  rendered UI. The packaged main shell, detached Mixer, detached MIDI editor,
+  and built-in effect editor must each report `boot-ready` through close/reopen
+  cycles; native third-party editor lifecycle is checked separately.
+- A Debug pass is not a Windows Release pass. The installed Release executable
+  is the browser/window approval artifact.
+- Preserve the browser startup watchdog and the shared writable
+  `%APPDATA%\OpenStudio\WebView2UserData` configuration used by both WebView2
+  preflight and construction.
+- Upgrade JUCE only as an isolated dependency change. Require Debug and Release
+  compilation plus audio-device, plug-in-host, window-lifecycle, and packaging
+  gates. Realtime JUCE patches must fail closed if their expected upstream
+  source context changes.
+- Treat code signing, notarization, and download reputation as separate
+  evidence. A signed Windows binary may still lack SmartScreen reputation, and
+  a valid macOS signature is not a substitute for the intended notarization and
+  Gatekeeper assessment.
+
+Before publication, complete the real-machine matrix in
+`docs/release-smoke-checklist.md`: Windows 10 and 11 standard-user installs,
+Apple Silicon plus Intel macOS (including the oldest supported macOS), actual
+audio-device reconfiguration/record/render/sleep-wake checks, and available
+VST3/CLAP/AU editor lifecycle checks while audio is active.
+
 ## Local Windows release flow
 
 The local Windows RC gate is now the required no-surprises check before any push/tag for release:
@@ -124,14 +150,14 @@ If you want one command for the guarded macOS path, use:
 3. Validate the app bundle: `./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath build-release-macos/<path-to-OpenStudio.app> -ExpectedVersion 1.0.0 -EnforceLeanBundle`
 4. Package the DMG:
    `./tools/package-macos-release.sh build-release-macos/<path-to-OpenStudio.app> 1.0.0`
-   If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign` and `spctl`. If notarization credentials are present, it also staples and validates the notarized DMG.
-   For the zero-cost v1 path, leave those signing variables unset and ship the unsigned DMG with manual Gatekeeper override instructions on the download page.
+   If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign`. If notarization credentials are present, it also staples and validates the notarized DMG and requires Gatekeeper (`spctl`) acceptance.
+   For the zero-cost v1 path, leave those signing variables unset, publish the generated SHA-256 checksum, and document Apple's per-app **Privacy & Security > Open Anyway** flow. Recursive quarantine removal is a diagnostic fallback, not the normal installation path.
 5. Prepare and package the macOS AI runtime archive for Apple Silicon:
    `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements-macos.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
    `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -ExpectedRuntimeVersion 1.0.0`
    Intel macOS AI runtime support is currently disabled because the pinned `audio-separator` dependency stack does not publish a satisfiable Intel macOS wheel set for the release path.
 6. Generate updater metadata with the DMG path and URL included.
-   For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 13.0`.
+   For Sparkle-ready appcasts, also pass `-MacEdSignature <signature>` and optionally `-MacMinimumSystemVersion 12.0`.
 7. Validate the generated metadata:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -MacAssetPath dist/macos/OpenStudio-macOS.dmg -MacArm64AiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip`
 8. Stage the uniquely named GitHub Release metadata assets:

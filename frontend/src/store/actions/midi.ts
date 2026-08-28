@@ -4,6 +4,7 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { getMIDIClipSourceLoopLength, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
 import {
   MIDI_NOTE_MIN_DURATION as SHARED_MIDI_NOTE_MIN_DURATION,
+  buildGluedSelectedMIDINotes,
   clampMIDINote as clampSharedMIDINote,
   clampMIDIVelocity as clampSharedMIDIVelocity,
   clipboardItemsFromPairs,
@@ -323,6 +324,27 @@ function getClip(get: GetFn, trackId: string, clipId: string) {
   return getTrack(get, trackId)?.midiClips.find((clip: any) => clip.id === clipId);
 }
 
+/**
+ * Authoritative MIDI item edit gate shared by direct store calls and editor
+ * gesture/shortcut dispatch.  Read-only selection/copy operations continue to
+ * use getClip so Global Lock never prevents inspection.
+ */
+export function getEditableMidiClip(state: any, trackId: string, clipId: string) {
+  const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+  const clip = track?.midiClips.find((candidate: any) => candidate.id === clipId);
+  if (!track
+      || !clip
+      || state.globalLocked
+      || state.lockSettings?.items
+      || track.frozen
+      || clip.locked) return null;
+  return clip;
+}
+
+function getEditableClip(get: GetFn, trackId: string, clipId: string) {
+  return getEditableMidiClip(get(), trackId, clipId);
+}
+
 function setClipPatch(set: SetFn, trackId: string, clipId: string, patch: any) {
   set((state: any) => ({
     tracks: state.tracks.map((track: any) =>
@@ -483,7 +505,7 @@ function applySelectedNoteTransform(
   type: string,
   transform: (pair: any, index: number, pairs: any[]) => any | null,
 ) {
-  const clip = getClip(get, trackId, clipId);
+  const clip = getEditableClip(get, trackId, clipId);
   const selectedIds = get().selectedNoteIds || [];
   if (!clip || selectedIds.length === 0) return [];
 
@@ -930,50 +952,64 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     addMIDIClip: (trackId, startTime, duration = 4) => {
       const clipId = crypto.randomUUID();
-      const track = get().tracks.find((t) => t.id === trackId);
+      const state = get();
+      const track = state.tracks.find((t) => t.id === trackId);
+      if (!track || state.globalLocked || state.lockSettings?.items || track.frozen) return "";
       const clipColor = track?.color || "#4361ee";
-
-      set((state) => ({
-        tracks: state.tracks.map((t) =>
-          t.id === trackId
+      const midiClip = {
+        id: clipId,
+        name: `MIDI Clip ${track.midiClips.length + 1}`,
+        startTime,
+        duration,
+        offset: 0,
+        sourceStart: 0,
+        sourceLength: duration,
+        loopEnabled: true,
+        loopOffset: 0,
+        loopLength: duration,
+        events: [],
+        ccEvents: [],
+        color: clipColor,
+      };
+      const apply = (insert: boolean) => {
+        set((current) => ({
+          tracks: current.tracks.map((candidate) => candidate.id === trackId
             ? {
-                ...t,
-                midiClips: [
-                  ...t.midiClips,
-                  {
-                    id: clipId,
-                    name: `MIDI Clip ${t.midiClips.length + 1}`,
-                    startTime,
-                    duration,
-                    offset: 0,
-                    sourceStart: 0,
-                    sourceLength: duration,
-                    loopEnabled: true,
-                    loopOffset: 0,
-                    loopLength: duration,
-                    events: [],
-                    ccEvents: [],
-                    color: clipColor,
-                  },
-                ],
+                ...candidate,
+                midiClips: insert
+                  ? candidate.midiClips.some((entry) => entry.id === clipId)
+                    ? candidate.midiClips
+                    : [...candidate.midiClips, midiClip]
+                  : candidate.midiClips.filter((entry) => entry.id !== clipId),
               }
-            : t
-        ),
-        isModified: true,
-      }));
-      scheduleMIDITrackSync(get, trackId, false);
+            : candidate),
+          isModified: true,
+        }));
+        scheduleMIDITrackSync(get, trackId, false);
+      };
+      commandManager.execute({
+        type: "ADD_MIDI_CLIP",
+        description: `Add MIDI clip to ${track.name}`,
+        timestamp: Date.now(),
+        execute: () => apply(true),
+        undo: () => apply(false),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
 
       return clipId;
     },
 
     previewMIDIClipEvents: (trackId, clipId, events) => {
+      if (!getEditableClip(get, trackId, clipId)) return false;
       const sortedEvents = sortMIDIEvents(events);
       setClipPatch(set, trackId, clipId, { events: sortedEvents });
       scheduleMIDITrackSync(get, trackId, true);
+      return true;
     },
 
     commitMIDIClipEvents: (trackId, clipId, oldEvents, newEvents, description = "Edit MIDI notes") => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
+      if (!clip) return false;
       const sortedOld = sortMIDIEvents(oldEvents);
       const sortedNew = sortMIDIEvents(newEvents);
       const requiredEnd = getMIDIClipContentEnd(sortedNew, clip?.ccEvents || []);
@@ -981,10 +1017,21 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       setClipPatch(set, trackId, clipId, { ...patches.newPatch, events: sortedNew });
       pushEventsUndoCommand(set, get, trackId, clipId, sortedOld, sortedNew, description, "midi_notes_edit", patches);
       scheduleMIDITrackSync(get, trackId, true);
+      return true;
+    },
+
+    glueSelectedMIDINotes: (trackId, clipId, noteIds) => {
+      const clip = getEditableClip(get, trackId, clipId);
+      if (!clip || noteIds.length < 2) return [];
+      const oldEvents = cloneEvents(clip.events);
+      const glued = buildGluedSelectedMIDINotes(clipId, oldEvents, noteIds);
+      if (!glued) return [];
+      get().commitMIDIClipEvents(trackId, clipId, oldEvents, glued.events, "Glue MIDI notes");
+      return glued.selectedNoteIds;
     },
 
     addMIDINote: (trackId, clipId, startTime, noteNumber, duration, velocity = 80) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return "";
 
       const note = clampMidiNote(noteNumber);
@@ -1008,7 +1055,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     removeMIDINotes: (trackId, clipId, noteIds) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip || noteIds.length === 0) return [];
 
       const oldEvents = cloneEvents(clip.events);
@@ -1020,7 +1067,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     moveMIDINotes: (trackId, clipId, noteIds, deltaTime, deltaNote) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip || noteIds.length === 0) return [];
 
       const oldEvents = cloneEvents(clip.events);
@@ -1045,7 +1092,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     resizeMIDINote: (trackId, clipId, noteId, startTime, duration) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return [];
 
       const oldEvents = cloneEvents(clip.events);
@@ -1068,7 +1115,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     updateMIDINoteVelocity: (trackId, clipId, noteTimestamp, noteNumber, velocity, options = {}) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return;
 
       const noteId = noteIdFor(clipId, noteTimestamp, noteNumber);
@@ -1087,7 +1134,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     updateMIDICCEvents: (trackId, clipId, newCCEvents, options = {}) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return;
 
       const oldCCEvents = sortCCEvents(options.oldCCEvents || clip.ccEvents || []);
@@ -1108,7 +1155,8 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     commitMIDICCEvents: (trackId, clipId, oldCCEvents, newCCEvents, description = "Update MIDI CC events") => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
+      if (!clip) return false;
       const sortedOld = sortCCEvents(oldCCEvents);
       const sortedNew = sortCCEvents(newCCEvents);
       const patches = clip
@@ -1117,6 +1165,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       setClipPatch(set, trackId, clipId, { ...patches.newPatch, ccEvents: sortedNew });
       pushCCUndoCommand(set, get, trackId, clipId, sortedOld, sortedNew, description, patches);
       scheduleMIDITrackSync(get, trackId, true);
+      return true;
     },
 
     copySelectedMIDINotes: (trackId, clipId) => {
@@ -1135,7 +1184,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     cutSelectedMIDINotes: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return;
       const selected = selectedPairsForClip(get, clipId, clip.events);
       if (selected.length === 0) return;
@@ -1169,7 +1218,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     cutMIDIRange: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const range = normalizeMIDIEditRange(get().midiEditRange, clip ? getMIDIClipSourceLength(clip) : 0);
       if (!clip || !range) return;
 
@@ -1220,7 +1269,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     deleteMIDIRange: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const range = normalizeMIDIEditRange(get().midiEditRange, clip ? getMIDIClipSourceLength(clip) : 0);
       if (!clip || !range) return;
 
@@ -1260,7 +1309,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     pasteMIDINotes: (trackId, clipId, pasteTime) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const clipboard = get().midiNoteClipboard;
       if (!clip || !clipboard?.notes?.length) return [];
 
@@ -1305,7 +1354,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     pasteMIDIRange: (trackId, clipId, pasteTime) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const clipboard = get().midiRangeClipboard;
       if (!clip || !clipboard?.rangeLength) return [];
 
@@ -1363,7 +1412,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     duplicateSelectedMIDINotes: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const selected = clip ? selectedPairsForClip(get, clipId, clip.events) : [];
       if (!clip || selected.length === 0) return [];
       const earliest = Math.min(...selected.map((pair: any) => pair.startTime));
@@ -1381,7 +1430,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     duplicateMIDIRange: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const range = normalizeMIDIEditRange(get().midiEditRange, clip ? getMIDIClipSourceLength(clip) : 0);
       if (!clip || !range) return [];
       get().copyMIDIRange(trackId, clipId);
@@ -1446,7 +1495,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     quantizeSelectedMIDINotes: (trackId, clipId, gridSeconds, strength = 1, options = {}) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip) return [];
       const requestedSelectedIds = get().selectedNoteIds || [];
 
@@ -1669,7 +1718,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     resetMIDIQuantize: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip?.quantizeBackup) return false;
       const oldEvents = cloneEvents(clip.events || []);
       const oldCCEvents = cloneCCEvents(clip.ccEvents || []);
@@ -1712,7 +1761,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     },
 
     freezeMIDIQuantize: (trackId, clipId) => {
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       if (!clip?.quantizeBackup) return false;
       const oldBackup = {
         events: cloneEvents(clip.quantizeBackup.events || []),
@@ -1848,20 +1897,51 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     insertMIDIChord: (trackId, clipId, startTime, rootNote, chordType = "major") => {
       const state = get();
+      const clip = getEditableMidiClip(state, trackId, clipId);
+      if (!clip) return [];
       const notes = chordType === "diatonic"
         ? buildDiatonicChordNotes(rootNote, state.pianoRollScaleRoot, state.pianoRollScaleType)
         : (chordType === "minor" ? [0, 3, 7] : chordType === "power" ? [0, 7] : [0, 4, 7])
           .map((interval) => clampSharedMIDINote(rootNote + interval));
-      const ids = notes.map((note) =>
-        get().addMIDINote(trackId, clipId, startTime, note, 0.5, 80),
-      ).filter(Boolean);
+      const start = Math.max(0, Number(startTime) || 0);
+      const duration = 0.5;
+      const oldEvents = cloneEvents(clip.events);
+      const additions = notes.flatMap((note) => [
+        { timestamp: start, type: "noteOn", note, velocity: 80 },
+        { timestamp: start + duration, type: "noteOff", note, velocity: 0 },
+      ]);
+      const newEvents = sortMIDIEvents([...oldEvents, ...additions]);
+      const ids = notes.map((note) => noteIdFor(clipId, start, note));
+      const oldSelectedNoteIds = [...(state.selectedNoteIds || [])];
+      const patches = buildMIDIClipSourceLengthPatches(
+        clip,
+        getMIDIClipContentEnd(newEvents, clip.ccEvents || []),
+      );
+      setClipPatch(set, trackId, clipId, { ...patches.newPatch, events: newEvents });
       set({ selectedNoteIds: ids });
+      commandManager.push({
+        type: "midi_chord_insert",
+        description: "Insert MIDI chord",
+        timestamp: Date.now(),
+        execute: () => {
+          setClipPatch(set, trackId, clipId, { ...patches.newPatch, events: cloneEvents(newEvents) });
+          set({ selectedNoteIds: ids });
+          scheduleMIDITrackSync(get, trackId, true);
+        },
+        undo: () => {
+          setClipPatch(set, trackId, clipId, { ...patches.oldPatch, events: cloneEvents(oldEvents) });
+          set({ selectedNoteIds: oldSelectedNoteIds });
+          scheduleMIDITrackSync(get, trackId, true);
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      scheduleMIDITrackSync(get, trackId, true);
       return ids;
     },
 
     cropMIDIClipToSelectedNotes: (trackId, clipId) => {
       const track = getTrack(get, trackId);
-      const clip = getClip(get, trackId, clipId);
+      const clip = getEditableClip(get, trackId, clipId);
       const selected = clip ? selectedPairsForClip(get, clipId, clip.events) : [];
       if (!track || !clip || selected.length === 0) return;
 
@@ -1917,6 +1997,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     toggleStep: (pitch, step) => {
       const s = get();
+      if (s.globalLocked || s.lockSettings?.items) return;
       const oldSteps = s.stepSequencer.steps;
       const oldValue = oldSteps[pitch]?.[step] ?? false;
       const newValue = !oldValue;
@@ -1941,6 +2022,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     setStepVelocity: (pitch, step, velocity) => {
       const s = get();
+      if (s.globalLocked || s.lockSettings?.items) return;
       const newVelocities = s.stepSequencer.velocities.map((row, r) =>
         r === pitch ? row.map((v, c) => (c === step ? Math.max(0, Math.min(127, velocity)) : v)) : row,
       );
@@ -1974,6 +2056,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     clearStepSequencer: () => {
       const s = get();
+      if (s.globalLocked || s.lockSettings?.items) return;
       const oldSteps = s.stepSequencer.steps;
       const oldVelocities = s.stepSequencer.velocities;
       const { stepCount, pitchCount } = s.stepSequencer;
@@ -1998,6 +2081,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
 
     generateMIDIClipFromSteps: () => {
       const s = get();
+      if (s.globalLocked || s.lockSettings?.items) return "";
       const { steps, velocities, stepCount, stepSize, pitchCount } = s.stepSequencer;
       const tempo = s.transport.tempo;
       let beatsPerStep = 0.25;
@@ -2025,7 +2109,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       if (!selectedTrackId) return;
 
       const track = s.tracks.find((t) => t.id === selectedTrackId);
-      if (!track || (track.type !== "midi" && track.type !== "instrument")) return;
+      if (!track || track.frozen || (track.type !== "midi" && track.type !== "instrument")) return "";
 
       const clipId = crypto.randomUUID();
       const midiClip = {
@@ -2100,7 +2184,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     transposeMIDINotes: (clipId, semitones) => {
       const { pianoRollTrackId } = get();
       if (!pianoRollTrackId) return;
-      const clip = getClip(get, pianoRollTrackId, clipId);
+      const clip = getEditableClip(get, pianoRollTrackId, clipId);
       if (!clip) return;
       const oldEvents = cloneEvents(clip.events);
       const newEvents = sortMIDIEvents(clip.events.map((event) => {
@@ -2118,7 +2202,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     scaleMIDINoteVelocity: (clipId, factor) => {
       const { pianoRollTrackId } = get();
       if (!pianoRollTrackId) return;
-      const clip = getClip(get, pianoRollTrackId, clipId);
+      const clip = getEditableClip(get, pianoRollTrackId, clipId);
       if (!clip) return;
       const oldEvents = cloneEvents(clip.events);
       const newEvents = sortMIDIEvents(clip.events.map((event) => {
@@ -2136,7 +2220,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     reverseMIDINotes: (clipId) => {
       const { pianoRollTrackId } = get();
       if (!pianoRollTrackId) return;
-      const clip = getClip(get, pianoRollTrackId, clipId);
+      const clip = getEditableClip(get, pianoRollTrackId, clipId);
       if (!clip) return;
       const oldEvents = cloneEvents(clip.events);
       const pairs = parseNotePairs(oldEvents, clipId);
@@ -2163,7 +2247,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     invertMIDINotes: (clipId) => {
       const { pianoRollTrackId } = get();
       if (!pianoRollTrackId) return;
-      const clip = getClip(get, pianoRollTrackId, clipId);
+      const clip = getEditableClip(get, pianoRollTrackId, clipId);
       if (!clip) return;
       const oldEvents = cloneEvents(clip.events);
       const noteOnPitches = clip.events
@@ -2186,7 +2270,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
     setNoteExpression: (clipId, noteId, expr) => {
       const { pianoRollTrackId } = get();
       if (!pianoRollTrackId) return;
-      const clip = getClip(get, pianoRollTrackId, clipId);
+      const clip = getEditableClip(get, pianoRollTrackId, clipId);
       if (!clip) return;
       const parsed = parseNoteIdentity(noteId);
       if (!parsed) return;

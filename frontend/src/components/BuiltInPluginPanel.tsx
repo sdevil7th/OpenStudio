@@ -9,11 +9,19 @@ import {
 import { ParametricGraph } from "./ParametricGraph";
 import type { GraphAxis, GraphNode, GraphNodeConfig } from "./ParametricGraph";
 import { NAMRackPanel } from "./NAMRackPanel";
-import { Button } from "./ui";
+import { Button, ProfiledRangeInput } from "./ui";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
+import { windowRole } from "../utils/windowEnvironment";
 import {
   clampNumber as clamp,
   formatParamValue,
   isChorusRateParam,
+  isNAMGraphicEqFilterParam,
   normalizeParam as normalize,
   normalizeParamValue,
   paramValueFromRangeInput,
@@ -32,6 +40,7 @@ interface BuiltInPluginPanelProps {
   fallbackName: string;
   onClose?: () => void;
   initialSchema?: BuiltInPluginSchema;
+  shortcutSessionId?: string;
 }
 
 function getParam(params: BuiltInParamDescriptor[], id: string) {
@@ -91,20 +100,56 @@ export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName:
       makeFallbackParam("compressorAttackMs", "Attack", 21.9, 0.1, 50, 21.9, "ms", "dynamics"),
       makeFallbackParam("compressorReleaseMs", "Release", 149.1, 50, 1000, 149.1, "ms", "dynamics"),
       makeFallbackParam("compressorToneDb", "Tone", 0, -6, 6, 0, "dB", "dynamics"),
+      makeFallbackParam("compressorIntensity", "Intensity", 0, 0, 1, 0, "", "dynamics", "toggle"),
       makeFallbackParam("compressorSidechainHPF", "HPF", 1, 0, 2, 1, "", "dynamics", "enum", [
         { value: 0, label: "Off" },
-        { value: 1, label: "120 Hz" },
+        { value: 1, label: "80 Hz" },
         { value: 2, label: "240 Hz" },
       ]),
       makeFallbackParam("compressorMix", "Mix", 0.65, 0, 1, 0.65, "", "dynamics"),
       makeFallbackParam("compressorVolumeDb", "Level", 0, -18, 18, 0, "dB", "dynamics"),
       makeFallbackParam("compressorComp", "Comp", 0.35, 0, 1, 0.35, "", "dynamics"),
+      makeFallbackParam("preEqEnabled", "PRE EQ", 0, 0, 1, 0, "", "preEq", "toggle"),
+      makeFallbackParam("preEq120Db", "120 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq250Db", "250 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq500Db", "500 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq1kDb", "1 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq2k5Db", "2.5 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq5kDb", "5 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq8kDb", "8 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq12kDb", "12 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEqHPFHz", "PRE HPF", 0, 0, 180, 0, "Hz", "preEq"),
+      makeFallbackParam("preEqLPFHz", "PRE LPF", 24000, 3000, 24000, 24000, "Hz", "preEq"),
+      makeFallbackParam("precisionDriveEnabled", "Precision Drive", 0, 0, 1, 0, "", "drive", "toggle"),
+      makeFallbackParam("precisionDriveVolumeDb", "PD Volume", 9, -12, 12, 9, "dB", "drive"),
+      makeFallbackParam("precisionDriveBright", "PD Bright", 0.55, 0, 1, 0.55, "", "drive"),
+      makeFallbackParam("precisionDriveAttack", "PD Attack", 0.5, 0, 1, 0.5, "", "drive"),
+      makeFallbackParam("precisionDriveGate", "PD Gate", 0, 0, 1, 0, "", "drive"),
+      makeFallbackParam("precisionDriveDrive", "PD Drive", 0.35, 0, 1, 0.35, "", "drive"),
       makeFallbackParam("pedalMix", "Pedal Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("ampEnabled", "Amp Power", 1, 0, 1, 1, "", "model", "toggle"),
+      makeFallbackParam("ampGainDb", "Gain", 0, -24, 24, 0, "dB", "model"),
+      makeFallbackParam("ampBoost", "Tight Boost", 0, 0, 1, 0, "", "model", "toggle"),
+      makeFallbackParam("ampVoice", "Bright Voice", 0, 0, 1, 0, "", "model", "toggle"),
       makeFallbackParam("ampMix", "Amp Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("ampOutputDb", "Post Level", 0, -24, 12, 0, "dB", "model"),
       makeFallbackParam("bassDb", "Bass", 0, -12, 12, 0, "dB", "tone"),
       makeFallbackParam("midDb", "Mid", 0, -12, 12, 0, "dB", "tone"),
       makeFallbackParam("trebleDb", "Treble", 0, -12, 12, 0, "dB", "tone"),
       makeFallbackParam("presenceDb", "Presence", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("eqHPFHz", "HPF", 0, 0, 500, 0, "Hz", "graphicEq"),
+      makeFallbackParam("eq65Db", "65 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq125Db", "125 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq250Db", "250 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq500Db", "500 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq1kDb", "1 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq2kDb", "2 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq4kDb", "4 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq8kDb", "8 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq16kDb", "16 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eqLPFHz", "LPF", 24000, 3000, 24000, 24000, "Hz", "graphicEq"),
+      makeFallbackParam("eqLevelDb", "Level", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eqEnabled", "EQ Power", 0, 0, 1, 0, "", "graphicEq", "toggle"),
       makeFallbackParam("cabEnabled", "Cab/IR", 0, 0, 1, 0, "", "cab", "toggle"),
       makeFallbackParam("cabLevelDb", "Cab Level", 0, -24, 12, 0, "dB", "cab"),
       makeFallbackParam("cabHPFHz", "Cab HPF", 80, 20, 500, 80, "Hz", "cab"),
@@ -141,6 +186,7 @@ export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName:
       makeFallbackParam("reverbLowCutHz", "Low Cut", 120, 20, 500, 120, "Hz", "space"),
       makeFallbackParam("reverbTone", "Verb Tone", 0.62, 0, 1, 0.62, "", "space"),
       makeFallbackParam("reverbShimmer", "Shimmer", 0, 0, 1, 0, "", "space"),
+      makeFallbackParam("reverbPad", "Pad", 0, 0, 1, 0, "", "space", "toggle"),
       makeFallbackParam("outputTrimDb", "Output", 0, -24, 24, 0, "dB", "gain"),
     ],
     modelState: {
@@ -151,7 +197,7 @@ export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName:
       hasAmpModel: false,
       hasSlimmableNAMModel: false,
       hasCabIR: false,
-      namEffectsDspVersion: 11,
+      namEffectsDspVersion: 19,
       lastLoadError: "",
     },
     visualization: {
@@ -167,7 +213,7 @@ function isUsableSchema(schema: BuiltInPluginSchema | null | undefined) {
 }
 
 function valuesClose(param: BuiltInParamDescriptor, value: number) {
-  if (isChorusRateParam(param)) {
+  if (isChorusRateParam(param) || isNAMGraphicEqFilterParam(param)) {
     return Math.abs(normalize(param) - normalizeParamValue(param, value)) <= 1 / 1000;
   }
   return Math.abs(param.value - value) <= Math.max(stepForParam(param), 0.0001) * 0.5;
@@ -199,6 +245,117 @@ export function createSchemaRequestGate() {
   };
 }
 
+type FailedParamWriteResolution = {
+  matched: boolean;
+  rollbackValue?: number;
+};
+
+/**
+ * Keeps local parameter feedback responsive without treating that optimistic
+ * value as native truth. Native schemas are remembered separately so a failed
+ * write can restore the last value actually observed from the processor.
+ */
+export function createParamWriteReconciler(initialNativeSchema?: BuiltInPluginSchema | null) {
+  let optimisticValues: Record<string, number> = {};
+  let confirmedValues: Record<string, number> = {};
+  let preWriteValues: Record<string, number> = {};
+
+  const rememberNativeSchema = (nextSchema: BuiltInPluginSchema | null | undefined) => {
+    if (!isUsableSchema(nextSchema)) return;
+    const nextConfirmed = { ...confirmedValues };
+    for (const param of nextSchema!.parameters) {
+      if (Number.isFinite(param.value)) nextConfirmed[param.id] = param.value;
+    }
+    confirmedValues = nextConfirmed;
+  };
+
+  const clearOptimisticValue = (paramId: string) => {
+    const { [paramId]: _optimistic, ...remainingOptimistic } = optimisticValues;
+    const { [paramId]: _preWrite, ...remainingPreWrite } = preWriteValues;
+    optimisticValues = remainingOptimistic;
+    preWriteValues = remainingPreWrite;
+  };
+
+  const overlayOptimisticValues = (
+    nextSchema: BuiltInPluginSchema | null | undefined,
+    confirmMatchingValues: boolean,
+  ) => {
+    if (!nextSchema || !isUsableSchema(nextSchema)) return nextSchema ?? null;
+    if (Object.keys(optimisticValues).length === 0) return nextSchema;
+
+    let schemaChanged = false;
+    const parameters = nextSchema.parameters.map((entry) => {
+      const optimisticValue = optimisticValues[entry.id];
+      if (typeof optimisticValue !== "number" || !Number.isFinite(optimisticValue)) return entry;
+      const value = entry.type === "toggle"
+        ? (optimisticValue >= 0.5 ? 1 : 0)
+        : clamp(optimisticValue, entry.min, entry.max);
+
+      if (valuesClose(entry, value)) {
+        // Only a real native response may confirm an optimistic value. A boot
+        // or cached schema can already contain the local value after setState.
+        if (confirmMatchingValues) clearOptimisticValue(entry.id);
+        return entry;
+      }
+
+      schemaChanged = true;
+      return { ...entry, value };
+    });
+
+    return schemaChanged ? { ...nextSchema, parameters } : nextSchema;
+  };
+
+  rememberNativeSchema(initialNativeSchema);
+
+  return {
+    beginOptimisticWrite(paramId: string, value: number, previousDisplayedValue?: number) {
+      if (
+        optimisticValues[paramId] === undefined
+        && typeof previousDisplayedValue === "number"
+        && Number.isFinite(previousDisplayedValue)
+      ) {
+        preWriteValues = { ...preWriteValues, [paramId]: previousDisplayedValue };
+      }
+      optimisticValues = { ...optimisticValues, [paramId]: value };
+    },
+
+    applyToFallbackSchema(nextSchema: BuiltInPluginSchema | null | undefined) {
+      return overlayOptimisticValues(nextSchema, false);
+    },
+
+    acceptNativeSchema(nextSchema: BuiltInPluginSchema | null | undefined) {
+      rememberNativeSchema(nextSchema);
+      return overlayOptimisticValues(nextSchema, true);
+    },
+
+    resolveSuccessfulWrite(paramId: string, value: number) {
+      confirmedValues = { ...confirmedValues, [paramId]: value };
+      if (!Object.is(optimisticValues[paramId], value)) return false;
+      clearOptimisticValue(paramId);
+      return true;
+    },
+
+    resolveFailedWrite(paramId: string, value: number): FailedParamWriteResolution {
+      if (!Object.is(optimisticValues[paramId], value)) return { matched: false };
+      const confirmedValue = confirmedValues[paramId];
+      const preWriteValue = preWriteValues[paramId];
+      clearOptimisticValue(paramId);
+      const rollbackValue = Number.isFinite(confirmedValue) ? confirmedValue : preWriteValue;
+      return Number.isFinite(rollbackValue)
+        ? { matched: true, rollbackValue }
+        : { matched: true };
+    },
+  };
+}
+
+export function shouldReadBackAfterParamWrite(
+  currentSchema: BuiltInPluginSchema | null | undefined,
+  paramId: string,
+) {
+  const type = currentSchema?.parameters.find((param) => param.id === paramId)?.type;
+  return type === "toggle" || type === "enum";
+}
+
 type FrameCoalescedParamWriterOptions = {
   write: (paramId: string, value: number) => Promise<boolean>;
   onSuccess?: (paramId: string, value: number) => void;
@@ -210,7 +367,6 @@ type FrameCoalescedParamWriterOptions = {
 type PendingParamWrite = {
   pendingValue?: number;
   inFlightValue?: number;
-  lastSuccessfulValue?: number;
   frameId: number | null;
 };
 
@@ -267,7 +423,6 @@ export function createFrameCoalescedParamWriter({
 
     entry.inFlightValue = undefined;
     if (ok) {
-      entry.lastSuccessfulValue = value;
       // Repeated pointer events may have queued the same quantized value while
       // this write was in flight. The completed write already delivered it.
       if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) {
@@ -311,14 +466,12 @@ export function createFrameCoalescedParamWriter({
     if (!acceptingWrites) return;
     const entry = entryFor(paramId);
     if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) return;
-    if (
-      entry.pendingValue === undefined
-      && entry.inFlightValue === undefined
-      && entry.lastSuccessfulValue !== undefined
-      && Object.is(entry.lastSuccessfulValue, value)
-    ) {
-      return;
-    }
+    // Do not suppress a value merely because this editor wrote it previously.
+    // Preset recall, A/B compare, project restore, and automation can all change
+    // the native parameter without passing through this writer. Treating the
+    // last successful UI write as authoritative made the first toggle after a
+    // preset recall update only the optimistic UI while leaving the DSP in its
+    // recalled state.
     entry.pendingValue = value;
     if (dispatchNow && entry.frameId !== null) {
       cancelFrame(entry.frameId);
@@ -531,15 +684,14 @@ export function BuiltInParamControl({
           <span className="builtin-control-label">{param.label}</span>
           <span className="builtin-param-value">{formatParamValue(param)}</span>
         </span>
-        <input
-          type="range"
+        <ProfiledRangeInput
           min={rangeInputMin(param)}
           max={rangeInputMax(param)}
           step={rangeInputStep(param)}
           value={rangeInputValue(param)}
-          onChange={(event) => onChange(
+          onValueChange={(value) => onChange(
             param,
-            paramValueFromRangeInput(param, Number(event.currentTarget.value)),
+            paramValueFromRangeInput(param, value),
           )}
         />
       </span>
@@ -940,6 +1092,7 @@ export function BuiltInPluginPanel({
   fallbackName,
   onClose,
   initialSchema,
+  shortcutSessionId,
 }: BuiltInPluginPanelProps) {
   const bootSchema = useMemo(
     () => (isNAMPluginName(fallbackName) ? createNAMBootSchema(address, fallbackName) : null),
@@ -947,39 +1100,45 @@ export function BuiltInPluginPanel({
   );
   const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? bootSchema);
   const [loading, setLoading] = useState(false);
-  const optimisticParamValuesRef = useRef<Record<string, number>>({});
+  const paramWriteReconcilerRef = useRef<ReturnType<typeof createParamWriteReconciler> | null>(null);
+  if (!paramWriteReconcilerRef.current) {
+    paramWriteReconcilerRef.current = createParamWriteReconciler(initialSchema);
+  }
   const schemaRequestGateRef = useRef(createSchemaRequestGate());
   const schemaRef = useRef(schema);
+  const closeRef = useRef(onClose);
   schemaRef.current = schema;
+  closeRef.current = onClose;
+  const pluginShortcutSessionId = shortcutSessionId
+    ?? `builtin:${address.chain}:${address.trackId ?? "master"}:${address.fxIndex ?? -1}`;
+
+  useEffect(() => {
+    const context = { kind: "plugin", sessionId: pluginShortcutSessionId } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      () => "unmatched",
+      fallback,
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => {
+        if (actionId !== "fx.close") return "unmatched";
+        if (!closeRef.current) return "claimed_noop";
+        closeRef.current();
+        return "handled";
+      },
+      ["fx.close"],
+    );
+    if (windowRole !== "main") activateShortcutContext(context);
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [pluginShortcutSessionId]);
 
   const applyOptimisticParamValues = useCallback((nextSchema: BuiltInPluginSchema | null | undefined) => {
-    if (!nextSchema || !isUsableSchema(nextSchema)) return nextSchema ?? null;
-    const optimisticValues = optimisticParamValuesRef.current;
-    if (Object.keys(optimisticValues).length === 0) return nextSchema;
-
-    const remainingOptimistic = { ...optimisticValues };
-    let schemaChanged = false;
-    const parameters = nextSchema.parameters.map((entry) => {
-      const optimisticValue = optimisticValues[entry.id];
-      if (typeof optimisticValue !== "number" || !Number.isFinite(optimisticValue)) return entry;
-      const value = entry.type === "toggle"
-        ? (optimisticValue >= 0.5 ? 1 : 0)
-        : clamp(optimisticValue, entry.min, entry.max);
-
-      if (valuesClose(entry, value)) {
-        delete remainingOptimistic[entry.id];
-        return entry;
-      }
-
-      schemaChanged = true;
-      return { ...entry, value };
-    });
-
-    if (Object.keys(remainingOptimistic).length !== Object.keys(optimisticValues).length) {
-      optimisticParamValuesRef.current = remainingOptimistic;
-    }
-
-    return schemaChanged ? { ...nextSchema, parameters } : nextSchema;
+    return paramWriteReconcilerRef.current!.applyToFallbackSchema(nextSchema);
   }, []);
 
   const loadSchema = useCallback(async (showLoading = true) => {
@@ -990,7 +1149,7 @@ export function BuiltInPluginPanel({
       if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
 
       const acceptedSchema = isUsableSchema(nextSchema)
-        ? applyOptimisticParamValues(nextSchema)
+        ? paramWriteReconcilerRef.current!.acceptNativeSchema(nextSchema)
         : bootSchema
           ? (isUsableSchema(schemaRef.current)
               ? applyOptimisticParamValues(schemaRef.current)
@@ -1024,20 +1183,42 @@ export function BuiltInPluginPanel({
   const loadSchemaRef = useRef(loadSchema);
   loadSchemaRef.current = loadSchema;
 
-  const clearMatchingOptimisticValue = useCallback((paramId: string, value: number) => {
-    if (!Object.is(optimisticParamValuesRef.current[paramId], value)) return false;
-    const { [paramId]: _discarded, ...remaining } = optimisticParamValuesRef.current;
-    optimisticParamValuesRef.current = remaining;
-    return true;
+  const applyLocalParamValue = useCallback((paramId: string, value: number) => {
+    const current = schemaRef.current;
+    if (!current) return;
+    const currentParam = current.parameters.find((param) => param.id === paramId);
+    if (!currentParam || Object.is(currentParam.value, value)) return;
+    const nextSchema = {
+      ...current,
+      parameters: current.parameters.map((param) => (
+        param.id === paramId ? { ...param, value } : param
+      )),
+    };
+    schemaRef.current = nextSchema;
+    setSchema(nextSchema);
   }, []);
 
   const recoverFailedParamWrite = useCallback((paramId: string, value: number, error?: unknown) => {
     if (error !== undefined) {
       console.error("[BuiltInPluginPanel] Failed to set built-in parameter:", error);
     }
-    if (!clearMatchingOptimisticValue(paramId, value)) return;
+    const resolution = paramWriteReconcilerRef.current!.resolveFailedWrite(paramId, value);
+    if (!resolution.matched) return;
+    if (resolution.rollbackValue !== undefined) {
+      applyLocalParamValue(paramId, resolution.rollbackValue);
+    }
     void loadSchemaRef.current(false);
-  }, [clearMatchingOptimisticValue]);
+  }, [applyLocalParamValue]);
+
+  const confirmSuccessfulParamWrite = useCallback((paramId: string, value: number) => {
+    paramWriteReconcilerRef.current!.resolveSuccessfulWrite(paramId, value);
+    // NAM deliberately has no recurring full-schema poll. Discrete controls get
+    // one readback after their acknowledged write so the UI follows automation,
+    // preset recall, or a processor that resolved the requested value differently.
+    if (shouldReadBackAfterParamWrite(schemaRef.current, paramId)) {
+      void loadSchemaRef.current(false);
+    }
+  }, []);
 
   const writeAddress = useMemo<BuiltInPluginAddress>(
     () => ({
@@ -1051,17 +1232,18 @@ export function BuiltInPluginPanel({
   const paramWriter = useMemo(
     () => createFrameCoalescedParamWriter({
       write: (paramId, value) => nativeBridge.setBuiltInPluginParam(writeAddress, paramId, value),
-      onSuccess: clearMatchingOptimisticValue,
+      onSuccess: confirmSuccessfulParamWrite,
       onFailure: recoverFailedParamWrite,
     }),
-    [clearMatchingOptimisticValue, recoverFailedParamWrite, writeAddress],
+    [confirmSuccessfulParamWrite, recoverFailedParamWrite, writeAddress],
   );
 
   useEffect(() => {
     if (initialSchema) {
       schemaRequestGateRef.current.invalidate();
-      schemaRef.current = initialSchema;
-      setSchema(initialSchema);
+      const acceptedSchema = paramWriteReconcilerRef.current!.acceptNativeSchema(initialSchema);
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
       setLoading(false);
       return;
     }
@@ -1127,20 +1309,15 @@ export function BuiltInPluginPanel({
     const value = param.type === "toggle"
       ? (rawValue >= 0.5 ? 1 : 0)
       : quantizeParamValue(param, clamp(rawValue, param.min, param.max));
-    optimisticParamValuesRef.current = {
-      ...optimisticParamValuesRef.current,
-      [param.id]: value,
-    };
-    setSchema((current) =>
-      current
-        ? {
-            ...current,
-            parameters: current.parameters.map((entry) =>
-              entry.id === param.id ? { ...entry, value } : entry,
-            ),
-          }
-        : current,
+    const previousDisplayedValue = schemaRef.current?.parameters.find(
+      (entry) => entry.id === param.id,
+    )?.value ?? param.value;
+    paramWriteReconcilerRef.current!.beginOptimisticWrite(
+      param.id,
+      value,
+      previousDisplayedValue,
     );
+    applyLocalParamValue(param.id, value);
 
     if (param.type === "continuous") {
       paramWriter.enqueue(param.id, value);
@@ -1154,7 +1331,14 @@ export function BuiltInPluginPanel({
   const displayTitle = pluginKind === "nam" ? "NAM Rack" : title;
 
   return (
-    <section className="builtin-plugin-panel" data-kind={pluginKind} onClick={(event) => event.stopPropagation()}>
+    <section
+      className="builtin-plugin-panel"
+      data-kind={pluginKind}
+      data-shortcut-context={`plugin:${pluginShortcutSessionId}`}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+      onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+    >
       <div className="builtin-panel-header">
         <div className="builtin-panel-title">
           <Activity size={14} />

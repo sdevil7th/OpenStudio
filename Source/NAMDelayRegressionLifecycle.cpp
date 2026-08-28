@@ -177,21 +177,10 @@ juce::var NAMDelayRegression::runDelayPlayHeadLifecycleProbe()
     const double maximumAutomatedDelayTail =
         rack.getAutomatedTailLengthSeconds(
             S13NAMRack::tailAutomationDelay);
-    const double maximumAutomatedTapeTail =
-        rack.getAutomatedTailLengthSeconds(
-            S13NAMRack::tailAutomationTapeEcho);
     const double actualQuarterWidth = 1.08;
     const double actualQuarterTailAtTenBpm =
         (6.0 + 1.0 / fixtureSampleRate)
         * (std::log(0.001 / actualQuarterWidth)
-               / std::log(0.85)
-           + 1.0);
-    const double maximumTapeModulationMs =
-        1.8 * (0.25 + (0.16 + 0.46) * 0.75);
-    const double maximumWidthTapeTail =
-        ((1200.0 + maximumTapeModulationMs) * 0.001
-             + 1.0 / fixtureSampleRate)
-        * (std::log(0.001 / 1.16)
                / std::log(0.85)
            + 1.0);
     rackBlock.clear();
@@ -220,8 +209,6 @@ juce::var NAMDelayRegression::runDelayPlayHeadLifecycleProbe()
             >= rackTenBpmPublishedTail
         && maximumAutomatedDelayTail
             >= actualQuarterTailAtTenBpm
-        && maximumAutomatedTapeTail + 1.0e-6
-            >= maximumWidthTapeTail
         && std::abs(
                rackSnappedSamplesAt60
                - expectedQuarterNoteSamples) <= 1.0f
@@ -346,12 +333,6 @@ juce::var NAMDelayRegression::runDelayPlayHeadLifecycleProbe()
     value->setProperty(
         "actualQuarterTailAtTenBpmSeconds",
         actualQuarterTailAtTenBpm);
-    value->setProperty(
-        "maximumAutomatedTapeTailSeconds",
-        maximumAutomatedTapeTail);
-    value->setProperty(
-        "maximumWidthTapeTailSeconds",
-        maximumWidthTapeTail);
     value->setProperty(
         "rackLifecyclePassed", rackLifecyclePassed);
     value->setProperty(

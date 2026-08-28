@@ -22,6 +22,11 @@ import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { Button } from "./ui";
 import { useCallback, useState, useEffect } from "react";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
 
 interface MixerPanelProps {
   isVisible: boolean;
@@ -212,6 +217,41 @@ export function MixerPanel({
     setShowMonitorPluginPicker(true);
   }, [refreshAvailableMonitorPlugins]);
 
+  const handleCloseMixer = useCallback(() => {
+    if (onClose) onClose();
+    else toggleMixer();
+  }, [onClose, toggleMixer]);
+
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    const context = { kind: "mixer" } as const;
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      () => "unmatched",
+      isDetached ? { kind: "application" } : { kind: "timeline" },
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => {
+        if (actionId === "mixer.addMonitorFx") {
+          void handleOpenMonitorPluginPicker();
+          return "handled";
+        }
+        if (actionId === "mixer.close") {
+          handleCloseMixer();
+          return "handled";
+        }
+        return "unmatched";
+      },
+      ["mixer.addMonitorFx", "mixer.close"],
+    );
+    if (isDetached) activateShortcutContext(context);
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [handleCloseMixer, handleOpenMonitorPluginPicker, isDetached, isVisible]);
+
   useEffect(() => {
     const handleCatalogChanged = () => {
       if (showMonitorPluginPicker) {
@@ -286,6 +326,10 @@ export function MixerPanel({
   const mixerContent = (
     <section
       aria-label="Mixer"
+      onPointerDownCapture={() => activateShortcutContext({ kind: "mixer" })}
+      onContextMenuCapture={() => activateShortcutContext({ kind: "mixer" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "mixer" })}
+      data-shortcut-context="mixer"
       className="bg-neutral-800 border-t-2 border-neutral-950 flex flex-col shrink-0 overflow-hidden min-h-0 min-w-0"
       style={isDetached
         ? { height: "100%", width: "100%", flex: "1 1 auto" }
@@ -327,7 +371,7 @@ export function MixerPanel({
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={onClose || toggleMixer}
+              onClick={handleCloseMixer}
               title="Close Mixer"
               aria-label="Close mixer panel"
             >

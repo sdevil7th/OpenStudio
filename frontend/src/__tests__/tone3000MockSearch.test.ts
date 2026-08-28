@@ -8,6 +8,7 @@ import {
   tone3000LivePageSizing,
 } from "../components/NAMExplorer";
 import { nativeBridge } from "../services/NativeBridge";
+import { namCatalogCaptureSelectionKey } from "../utils/namToneCaptureSelection";
 
 describe("TONE3000 dev NAM search mock", () => {
   beforeEach(() => {
@@ -133,10 +134,10 @@ describe("TONE3000 dev NAM search mock", () => {
     expect(payload.total).toBe(72);
     expect(payload.total_pages).toBe(18);
     expect(payload.tones?.map((tone) => tone.title)).toEqual([
+      "Headbangers Ball Amp Pack IR/RAW",
       "Ambient Glow",
       "Classic Crunch",
       "High Gain Modern",
-      "Blues Breaker",
     ]);
   });
 
@@ -274,6 +275,23 @@ describe("TONE3000 dev NAM search mock", () => {
     )?.key).toBe("53101:5310103:trending:0:1");
   });
 
+  it("resolves an exact URL-only capture instead of falling back to the first pack row", () => {
+    const tone = { id: 88001, title: "URL-only pack" };
+    const clean = { name: "Clean", model_url: "https://example.invalid/captures/clean.nam" };
+    const lead = { name: "Lead", model_url: "https://example.invalid/captures/lead.nam" };
+    const rows = [
+      { key: "88001:0:latest:0:0", tone, model: clean },
+      { key: "88001:0:latest:0:1", tone, model: lead },
+    ];
+
+    expect(resolveNAMCatalogSelection(
+      rows,
+      namCatalogCaptureSelectionKey(tone, lead),
+      rows[0],
+    )?.key).toBe(rows[1].key);
+    expect(resolveNAMCatalogSelection(rows, "88001:0", rows[1])?.key).toBe(rows[0].key);
+  });
+
   it("returns not found for missing mock tone details", async () => {
     const detail = await nativeBridge.getTONE3000ToneDetail(999999, "all");
 
@@ -306,5 +324,11 @@ describe("TONE3000 dev NAM search mock", () => {
       trackId: "track-1",
       fxIndex: 0,
     }, "amp", result.record!.localPath)).resolves.toBe(true);
+    const loadedState = await nativeBridge.getBuiltInPluginState({
+      chain: "track",
+      trackId: "track-1",
+      fxIndex: 0,
+    });
+    expect(loadedState.modelState?.ampModelSize).toBe(1);
   });
 });

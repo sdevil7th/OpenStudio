@@ -31,6 +31,8 @@ export const METER_COLORS = {
   peakSafe: "#ffffff",
   peakWarning: "#f97316",
   peakDanger: "#ef4444",
+  midiInput: "#67e8f9",
+  midiInputDim: "#164e63",
 } as const;
 
 export const CENTER_METER_COLORS = {

@@ -1,0 +1,73 @@
+/* NAMRackControlTooltip component-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-rack-control-tooltip {
+  position: fixed;
+  z-index: 2147483000;
+  box-sizing: border-box;
+  min-width: min(70px, calc(100vw - 16px));
+  max-width: min(240px, calc(100vw - 16px));
+  display: grid;
+  gap: 2px;
+  padding: 6px 9px 7px;
+  border: 1px solid rgba(239, 186, 104, 0.54);
+  border-radius: 5px;
+  color: #f4c77f;
+  background: rgba(11, 13, 15, 0.97);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 8px 18px rgba(0, 0, 0, 0.56);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.nam-rack-control-tooltip small {
+  overflow: hidden;
+  color: #9da2a7;
+  font-size: 9px;
+  font-weight: 690;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.nam-rack-control-tooltip strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: #f4c77f;
+  font-size: 11px;
+  font-weight: 740;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rack-control-tooltip[data-kind="reason"] {
+  min-width: min(98px, calc(100vw - 16px));
+}
+
+.nam-rack-control-tooltip[data-kind="reason"] small {
+  display: none;
+}
+
+.nam-rack-control-tooltip[data-kind="reason"] strong {
+  color: #d7c19d;
+  font-size: 9px;
+  line-height: 1.3;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nam-rack-control-tooltip {
+    animation: nam-rack-tooltip-in 90ms ease-out both;
+    transform-origin: 50% 100%;
+  }
+
+  .nam-rack-control-tooltip[data-placement="below"] {
+    transform-origin: 50% 0;
+  }
+}

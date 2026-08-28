@@ -51,6 +51,13 @@ constexpr std::array<float, 8> roomCrossTapGainR {
     -0.091f, -0.078f, -0.065f, 0.051f
 };
 
+// Mutually incommensurate short delays make a compact four-line Householder
+// FDN dense quickly without modulation. The feedback range below gives an
+// approximate 180..650 ms RT60 around the mean line length.
+constexpr std::array<float, 4> lateRoomDelayMilliseconds {
+    29.7f, 34.9f, 41.3f, 47.9f
+};
+
 constexpr float butterworthQ = 0.7071067811865475f;
 // 2^(6 cents / 1200) - 1. Kept as a literal so the realtime drift segment
 // setup never evaluates pow().
@@ -63,10 +70,10 @@ constexpr float selfTestTolerance = 2.0e-6f;
 constexpr float lowFrequencySideToMidLimitDb = -18.0f;
 constexpr float highFrequencySideRmsMinimum = 1.0e-4f;
 // This is a deterministic post-arrival automation residual, not an audible
-// quality threshold.  The measured reference path settles below -106 dBFS;
-// leave a small cross-platform floating-point margin while still rejecting a
-// sample-scale discontinuity.
-constexpr float automationDezipperErrorLimit = 5.0e-6f;
+// quality threshold. The audible linear wet laws intentionally produce more
+// signal during a 20 ms move than the retired squared laws; -74 dBFS remains
+// a conservative ceiling for a one-sample residual step.
+constexpr float automationDezipperErrorLimit = 2.0e-4f;
 constexpr float automationOutputPeakLimit = 4.0f;
 
 float maximumAbsoluteDifference(const juce::AudioBuffer<float>& first,
@@ -236,6 +243,27 @@ float NAMCabPresentation::raisedCosine(float value) noexcept
     return 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * x);
 }
 
+float NAMCabPresentation::mapRoomGain(float amount) noexcept
+{
+    // Linear amplitude mapping keeps the useful lower half of the control
+    // audible. The former squared law attenuated the factory 0.22 setting by
+    // more than 31 dB before the field's own normalisation.
+    return 0.85f * clampUnit(amount);
+}
+
+float NAMCabPresentation::mapDoublerGain(float amount) noexcept
+{
+    // The doubler is a parallel voice against a unity direct signal. A linear
+    // law gives the default 0.12 setting an audible but still subordinate
+    // contribution while retaining headroom at the top of the control.
+    return 0.90f * clampUnit(amount);
+}
+
+float NAMCabPresentation::clampDoublerDelayMs(float delayMs) noexcept
+{
+    return std::isfinite(delayMs) ? juce::jlimit(3.0f, 20.0f, delayMs) : 4.5f;
+}
+
 void NAMCabPresentation::prepare(double sampleRate, int maximumBlockSize)
 {
     prepared = false;
@@ -249,6 +277,19 @@ void NAMCabPresentation::prepare(double sampleRate, int maximumBlockSize)
         static_cast<int>(std::ceil(currentSampleRate * 0.064)) + 8);
     roomRingL.assign(static_cast<std::size_t>(roomRingSamples), 0.0f);
     roomRingR.assign(static_cast<std::size_t>(roomRingSamples), 0.0f);
+
+    for (std::size_t line = 0; line < lateRoomLineCount; ++line)
+    {
+        const int lineSamples = juce::jmax(
+            8,
+            juce::roundToInt(
+                lateRoomDelayMilliseconds[line]
+                * 0.001f
+                * static_cast<float>(currentSampleRate)));
+        lateRoomRings[line].assign(
+            static_cast<std::size_t>(lineSamples),
+            0.0f);
+    }
 
     const int doublerRingSamples = juce::jmax(
         16,
@@ -301,6 +342,9 @@ void NAMCabPresentation::prepare(double sampleRate, int maximumBlockSize)
         -1.0f / static_cast<float>(currentSampleRate * 0.080));
     transientDuckReleaseCoefficient = 1.0f - std::exp(
         -1.0f / static_cast<float>(currentSampleRate * 0.060));
+    lateRoomDampingCoefficient = 1.0f - std::exp(
+        -2.0f * juce::MathConstants<float>::pi * 5600.0f
+        / static_cast<float>(currentSampleRate));
     delayMorphLength = juce::jmax(
         1,
         juce::roundToInt(
@@ -336,9 +380,14 @@ void NAMCabPresentation::resetRoomRuntimeState(bool clearStorage) noexcept
     {
         std::fill(roomRingL.begin(), roomRingL.end(), 0.0f);
         std::fill(roomRingR.begin(), roomRingR.end(), 0.0f);
+        for (auto& ring : lateRoomRings)
+            std::fill(ring.begin(), ring.end(), 0.0f);
     }
     roomWriteIndex = 0;
     validRoomHistorySamples = 0;
+    lateRoomWriteIndices.fill(0);
+    lateRoomValidSamples.fill(0);
+    lateRoomDampingStates.fill(0.0f);
     roomWetHighPassL.reset();
     roomWetHighPassR.reset();
     roomWetLowPassL.reset();
@@ -375,6 +424,10 @@ void NAMCabPresentation::resetDoublerRuntimeState(bool clearStorage) noexcept
         targetDoublerSpread.load(std::memory_order_relaxed));
     activeDelaySpread = requestedDelaySpread;
     morphTargetDelaySpread = requestedDelaySpread;
+    requestedDoublerDelayMs = clampDoublerDelayMs(
+        targetDoublerDelayMs.load(std::memory_order_relaxed));
+    activeDoublerDelayMs = requestedDoublerDelayMs;
+    morphTargetDoublerDelayMs = requestedDoublerDelayMs;
     delayMorphPosition = 0;
     delayMorphActive = false;
     doublerDormant = true;
@@ -396,10 +449,11 @@ void NAMCabPresentation::reset() noexcept
         targetRoomAmount.load(std::memory_order_relaxed));
     const float doublerAmount = clampUnit(
         targetDoublerMix.load(std::memory_order_relaxed));
-    currentRoomGain = 0.55f * roomAmount * roomAmount;
+    currentRoomGain = mapRoomGain(roomAmount);
     currentRoomWidth = clampUnit(
         targetRoomWidth.load(std::memory_order_relaxed));
-    currentDoublerGain = 0.35f * doublerAmount * doublerAmount;
+    currentLateRoomFeedback = 0.23f + 0.43f * roomAmount;
+    currentDoublerGain = mapDoublerGain(doublerAmount);
     currentDoublerSpread = clampUnit(
         targetDoublerSpread.load(std::memory_order_relaxed));
     resetRoomRuntimeState(true);
@@ -410,8 +464,10 @@ void NAMCabPresentation::setParameters(const Parameters& newParameters) noexcept
 {
     setRoomAmount(newParameters.roomAmount);
     setRoomWidth(newParameters.roomWidth);
+    setRoomInputSendEnabled(newParameters.roomInputSendEnabled);
     setDoublerMix(newParameters.doublerMix);
     setDoublerSpread(newParameters.doublerSpread);
+    setDoublerDelayMs(newParameters.doublerDelayMs);
 }
 
 NAMCabPresentation::Parameters NAMCabPresentation::getParameters() const noexcept
@@ -419,8 +475,12 @@ NAMCabPresentation::Parameters NAMCabPresentation::getParameters() const noexcep
     Parameters result;
     result.roomAmount = targetRoomAmount.load(std::memory_order_relaxed);
     result.roomWidth = targetRoomWidth.load(std::memory_order_relaxed);
+    result.roomInputSendEnabled =
+        targetRoomInputSendEnabled.load(std::memory_order_relaxed);
     result.doublerMix = targetDoublerMix.load(std::memory_order_relaxed);
     result.doublerSpread = targetDoublerSpread.load(std::memory_order_relaxed);
+    result.doublerDelayMs =
+        targetDoublerDelayMs.load(std::memory_order_relaxed);
     return result;
 }
 
@@ -434,6 +494,11 @@ void NAMCabPresentation::setRoomWidth(float width) noexcept
     targetRoomWidth.store(clampUnit(width), std::memory_order_relaxed);
 }
 
+void NAMCabPresentation::setRoomInputSendEnabled(bool enabled) noexcept
+{
+    targetRoomInputSendEnabled.store(enabled, std::memory_order_relaxed);
+}
+
 void NAMCabPresentation::setDoublerMix(float mix) noexcept
 {
     targetDoublerMix.store(clampUnit(mix), std::memory_order_relaxed);
@@ -442,6 +507,13 @@ void NAMCabPresentation::setDoublerMix(float mix) noexcept
 void NAMCabPresentation::setDoublerSpread(float spread) noexcept
 {
     targetDoublerSpread.store(clampUnit(spread), std::memory_order_relaxed);
+}
+
+void NAMCabPresentation::setDoublerDelayMs(float delayMs) noexcept
+{
+    targetDoublerDelayMs.store(
+        clampDoublerDelayMs(delayMs),
+        std::memory_order_relaxed);
 }
 
 float NAMCabPresentation::readRoomSample(const std::vector<float>& ring,
@@ -549,11 +621,16 @@ void NAMCabPresentation::advanceDoublerDrift(DoublerDriftState& state,
     ++state.segmentPosition;
 }
 
-void NAMCabPresentation::startDelaySpreadMorph(float requestedSpreadValue) noexcept
+void NAMCabPresentation::startDoublerDelayMorph(float requestedDelayMsValue,
+                                                float requestedSpreadValue) noexcept
 {
+    const float safeDelayMs = clampDoublerDelayMs(requestedDelayMsValue);
     const float safeSpread = clampUnit(requestedSpreadValue);
-    if (std::abs(safeSpread - activeDelaySpread) <= 1.0e-5f)
+    if (std::abs(safeDelayMs - activeDoublerDelayMs) <= 1.0e-4f
+        && std::abs(safeSpread - activeDelaySpread) <= 1.0e-5f)
     {
+        activeDoublerDelayMs = safeDelayMs;
+        morphTargetDoublerDelayMs = safeDelayMs;
         activeDelaySpread = safeSpread;
         morphTargetDelaySpread = safeSpread;
         delayMorphActive = false;
@@ -561,9 +638,77 @@ void NAMCabPresentation::startDelaySpreadMorph(float requestedSpreadValue) noexc
         return;
     }
 
+    morphTargetDoublerDelayMs = safeDelayMs;
     morphTargetDelaySpread = safeSpread;
     delayMorphPosition = 0;
     delayMorphActive = true;
+}
+
+void NAMCabPresentation::processLateRoom(float inputL,
+                                         float inputR,
+                                         float& outputL,
+                                         float& outputR) noexcept
+{
+    std::array<float, lateRoomLineCount> delayed {};
+    for (std::size_t line = 0; line < lateRoomLineCount; ++line)
+    {
+        auto& ring = lateRoomRings[line];
+        if (ring.empty())
+            continue;
+
+        const int writeIndex = lateRoomWriteIndices[line];
+        const float rawDelayed = lateRoomValidSamples[line]
+                >= static_cast<int>(ring.size())
+            ? ring[static_cast<std::size_t>(writeIndex)]
+            : 0.0f;
+        float damped = lateRoomDampingStates[line]
+            + (rawDelayed - lateRoomDampingStates[line])
+                * lateRoomDampingCoefficient;
+        if (! std::isfinite(damped))
+            damped = 0.0f;
+        lateRoomDampingStates[line] = damped;
+        delayed[line] = damped;
+    }
+
+    // 2/N Householder feedback is orthogonal before damping. It distributes
+    // every arrival to all four unequal lines without growing field energy.
+    const float householderSum = 0.5f
+        * (delayed[0] + delayed[1] + delayed[2] + delayed[3]);
+    const std::array<float, lateRoomLineCount> injection {
+        inputL,
+        inputR,
+        -inputL,
+        -inputR
+    };
+    for (std::size_t line = 0; line < lateRoomLineCount; ++line)
+    {
+        auto& ring = lateRoomRings[line];
+        if (ring.empty())
+            continue;
+
+        float writeValue = injection[line] * lateRoomInputGain
+            + (householderSum - delayed[line]) * currentLateRoomFeedback;
+        if (! std::isfinite(writeValue))
+            writeValue = 0.0f;
+        ring[static_cast<std::size_t>(lateRoomWriteIndices[line])] = writeValue;
+        ++lateRoomWriteIndices[line];
+        if (lateRoomWriteIndices[line] >= static_cast<int>(ring.size()))
+            lateRoomWriteIndices[line] = 0;
+        lateRoomValidSamples[line] = juce::jmin(
+            static_cast<int>(ring.size()),
+            lateRoomValidSamples[line] + 1);
+    }
+
+    outputL = (delayed[0] + delayed[1] - delayed[2] - delayed[3])
+        * 0.5f
+        * lateRoomOutputGain;
+    outputR = (delayed[0] - delayed[1] + delayed[2] - delayed[3])
+        * 0.5f
+        * lateRoomOutputGain;
+    if (! std::isfinite(outputL))
+        outputL = 0.0f;
+    if (! std::isfinite(outputR))
+        outputR = 0.0f;
 }
 
 void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
@@ -583,15 +728,21 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
 
     const float roomAmount = clampUnit(
         targetRoomAmount.load(std::memory_order_relaxed));
-    const float roomGainTarget = 0.55f * roomAmount * roomAmount;
+    const float roomGainTarget = mapRoomGain(roomAmount);
     const float roomWidthTarget = clampUnit(
         targetRoomWidth.load(std::memory_order_relaxed));
+    const bool roomInputSendEnabled =
+        targetRoomInputSendEnabled.load(std::memory_order_relaxed);
+    const float lateRoomFeedbackTarget = 0.23f + 0.43f * roomAmount;
     const float doublerAmount = clampUnit(
         targetDoublerMix.load(std::memory_order_relaxed));
-    const float doublerGainTarget = 0.35f * doublerAmount * doublerAmount;
+    const float doublerGainTarget = mapDoublerGain(doublerAmount);
     const float doublerSpreadTarget = clampUnit(
         targetDoublerSpread.load(std::memory_order_relaxed));
+    const float doublerDelayMsTarget = clampDoublerDelayMs(
+        targetDoublerDelayMs.load(std::memory_order_relaxed));
     requestedDelaySpread = doublerSpreadTarget;
+    requestedDoublerDelayMs = doublerDelayMsTarget;
 
     constexpr float dormantThreshold = 1.0e-8f;
     if (roomGainTarget <= 0.0f
@@ -610,6 +761,9 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
         activeDelaySpread = doublerSpreadTarget;
         morphTargetDelaySpread = doublerSpreadTarget;
         requestedDelaySpread = doublerSpreadTarget;
+        activeDoublerDelayMs = doublerDelayMsTarget;
+        morphTargetDoublerDelayMs = doublerDelayMsTarget;
+        requestedDoublerDelayMs = doublerDelayMsTarget;
         delayMorphActive = false;
         transientFastEnvelope = 0.0f;
         transientSlowEnvelope = 0.0f;
@@ -657,6 +811,9 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
         activeDelaySpread = doublerSpreadTarget;
         morphTargetDelaySpread = doublerSpreadTarget;
         requestedDelaySpread = doublerSpreadTarget;
+        activeDoublerDelayMs = doublerDelayMsTarget;
+        morphTargetDoublerDelayMs = doublerDelayMsTarget;
+        requestedDoublerDelayMs = doublerDelayMsTarget;
     }
 
     float dryPeak = 0.0f;
@@ -670,6 +827,9 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
         currentRoomGain += (roomGainTarget - currentRoomGain)
             * smoothingCoefficient;
         currentRoomWidth += (roomWidthTarget - currentRoomWidth)
+            * smoothingCoefficient;
+        currentLateRoomFeedback +=
+            (lateRoomFeedbackTarget - currentLateRoomFeedback)
             * smoothingCoefficient;
         currentDoublerGain += (doublerGainTarget - currentDoublerGain)
             * smoothingCoefficient;
@@ -709,7 +869,11 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
         }
         if (roomShouldRun || doublerShouldRun)
         {
-            const float detectorInput = juce::jmax(std::abs(dryL), std::abs(dryR));
+            // A disabled room send must not let unrelated raw input duck a
+            // draining tail. The doubler continues to use the direct source.
+            const float detectorInput = roomInputSendEnabled || doublerShouldRun
+                ? juce::jmax(std::abs(dryL), std::abs(dryR))
+                : 0.0f;
             transientFastEnvelope = juce::jmax(
                 detectorInput,
                 transientFastEnvelope * fastEnvelopeRelease);
@@ -740,10 +904,12 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
         float roomSideContribution = 0.0f;
         if (roomShouldRun && ! roomRingL.empty())
         {
+            const float roomInputL = roomInputSendEnabled ? dryL : 0.0f;
+            const float roomInputR = roomInputSendEnabled ? dryR : 0.0f;
             roomRingL[static_cast<std::size_t>(roomWriteIndex)] =
-                dryL * roomTransientDuck;
+                roomInputL * roomTransientDuck;
             roomRingR[static_cast<std::size_t>(roomWriteIndex)] =
-                dryR * roomTransientDuck;
+                roomInputR * roomTransientDuck;
             float earlyL = 0.0f;
             float earlyR = 0.0f;
             for (std::size_t tap = 0; tap < roomTapCount; ++tap)
@@ -761,8 +927,13 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
                 roomWetHighPassL.processSample(earlyL * roomFieldNormalisation));
             earlyR = roomWetLowPassR.processSample(
                 roomWetHighPassR.processSample(earlyR * roomFieldNormalisation));
-            float roomMid = (earlyL + earlyR) * 0.5f;
-            float roomSide = (earlyL - earlyR) * 0.5f;
+            float lateL = 0.0f;
+            float lateR = 0.0f;
+            processLateRoom(earlyL, earlyR, lateL, lateR);
+            const float roomFieldL = earlyL + lateL;
+            const float roomFieldR = earlyR + lateR;
+            float roomMid = (roomFieldL + roomFieldR) * 0.5f;
+            float roomSide = (roomFieldL - roomFieldR) * 0.5f;
             roomSide = roomSideHighPass[0].processSample(roomSide);
             roomSide = roomSideHighPass[1].processSample(roomSide);
 
@@ -799,22 +970,35 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
             advanceDoublerDrift(doublerDriftL, currentDoublerSpread);
             advanceDoublerDrift(doublerDriftR, currentDoublerSpread);
             if (! delayMorphActive
-                && std::abs(requestedDelaySpread - activeDelaySpread) > 1.0e-5f)
+                && (std::abs(
+                        requestedDoublerDelayMs - activeDoublerDelayMs)
+                        > 1.0e-4f
+                    || std::abs(requestedDelaySpread - activeDelaySpread)
+                        > 1.0e-5f))
             {
-                startDelaySpreadMorph(requestedDelaySpread);
+                startDoublerDelayMorph(
+                    requestedDoublerDelayMs,
+                    requestedDelaySpread);
             }
 
-            const auto leftBaseDelaySamples = [this] (float spreadValue) noexcept
+            const auto voiceDelaySamples = [this] (float delayMs,
+                                                    float spreadValue,
+                                                    bool leftVoice,
+                                                    float driftSamples) noexcept
             {
-                return (12.0f - 4.0f * spreadValue)
-                    * 0.001f
-                    * static_cast<float>(currentSampleRate);
-            };
-            const auto rightBaseDelaySamples = [this] (float spreadValue) noexcept
-            {
-                return (12.0f + 6.0f * spreadValue)
-                    * 0.001f
-                    * static_cast<float>(currentSampleRate);
+                const float separationMs = 3.0f * clampUnit(spreadValue);
+                const float voiceDelayMs = clampDoublerDelayMs(
+                    delayMs + separationMs * (leftVoice ? -0.4f : 0.6f));
+                const float minimumSamples = static_cast<float>(currentSampleRate)
+                    * 0.003f;
+                const float maximumSamples = static_cast<float>(currentSampleRate)
+                    * 0.020f;
+                return juce::jlimit(
+                    minimumSamples,
+                    maximumSamples,
+                    voiceDelayMs * 0.001f
+                        * static_cast<float>(currentSampleRate)
+                        + driftSamples);
             };
 
             float voiceL = 0.0f;
@@ -826,25 +1010,38 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
                 const float morphWeight = raisedCosine(morphProgress);
                 const float oldVoiceL = readDoublerSample(
                     doublerRingL,
-                    leftBaseDelaySamples(activeDelaySpread)
-                        + doublerDriftL.currentOffsetSamples);
+                    voiceDelaySamples(
+                        activeDoublerDelayMs,
+                        activeDelaySpread,
+                        true,
+                        doublerDriftL.currentOffsetSamples));
                 const float newVoiceL = readDoublerSample(
                     doublerRingL,
-                    leftBaseDelaySamples(morphTargetDelaySpread)
-                        + doublerDriftL.currentOffsetSamples);
+                    voiceDelaySamples(
+                        morphTargetDoublerDelayMs,
+                        morphTargetDelaySpread,
+                        true,
+                        doublerDriftL.currentOffsetSamples));
                 const float oldVoiceR = readDoublerSample(
                     doublerRingR,
-                    rightBaseDelaySamples(activeDelaySpread)
-                        + doublerDriftR.currentOffsetSamples);
+                    voiceDelaySamples(
+                        activeDoublerDelayMs,
+                        activeDelaySpread,
+                        false,
+                        doublerDriftR.currentOffsetSamples));
                 const float newVoiceR = readDoublerSample(
                     doublerRingR,
-                    rightBaseDelaySamples(morphTargetDelaySpread)
-                        + doublerDriftR.currentOffsetSamples);
+                    voiceDelaySamples(
+                        morphTargetDoublerDelayMs,
+                        morphTargetDelaySpread,
+                        false,
+                        doublerDriftR.currentOffsetSamples));
                 voiceL = oldVoiceL + (newVoiceL - oldVoiceL) * morphWeight;
                 voiceR = oldVoiceR + (newVoiceR - oldVoiceR) * morphWeight;
                 ++delayMorphPosition;
                 if (delayMorphPosition >= delayMorphLength)
                 {
+                    activeDoublerDelayMs = morphTargetDoublerDelayMs;
                     activeDelaySpread = morphTargetDelaySpread;
                     delayMorphPosition = 0;
                     delayMorphActive = false;
@@ -854,12 +1051,18 @@ void NAMCabPresentation::process(juce::AudioBuffer<float>& buffer) noexcept
             {
                 voiceL = readDoublerSample(
                     doublerRingL,
-                    leftBaseDelaySamples(activeDelaySpread)
-                        + doublerDriftL.currentOffsetSamples);
+                    voiceDelaySamples(
+                        activeDoublerDelayMs,
+                        activeDelaySpread,
+                        true,
+                        doublerDriftL.currentOffsetSamples));
                 voiceR = readDoublerSample(
                     doublerRingR,
-                    rightBaseDelaySamples(activeDelaySpread)
-                        + doublerDriftR.currentOffsetSamples);
+                    voiceDelaySamples(
+                        activeDoublerDelayMs,
+                        activeDelaySpread,
+                        false,
+                        doublerDriftR.currentOffsetSamples));
             }
             voiceL *= doublerDriftL.currentLevel;
             voiceR *= doublerDriftR.currentLevel;
@@ -1006,11 +1209,30 @@ NAMCabPresentation::SelfTestResult NAMCabPresentation::runDeterministicSelfTest(
     result.zeroEffectMaximumError = maximumAbsoluteDifference(unityInput, unityOutput);
     result.zeroEffectUnity = result.zeroEffectMaximumError == 0.0f;
 
+    NAMCabPresentation delayControlProcessor;
+    const bool defaultDelayValid =
+        delayControlProcessor.getParameters().doublerDelayMs == 4.5f;
+    delayControlProcessor.setDoublerDelayMs(-100.0f);
+    const bool minimumDelayValid =
+        delayControlProcessor.getParameters().doublerDelayMs == 3.0f;
+    delayControlProcessor.setDoublerDelayMs(100.0f);
+    const bool maximumDelayValid =
+        delayControlProcessor.getParameters().doublerDelayMs == 20.0f;
+    delayControlProcessor.setDoublerDelayMs(
+        std::numeric_limits<float>::quiet_NaN());
+    const bool malformedDelayValid =
+        delayControlProcessor.getParameters().doublerDelayMs == 4.5f;
+    result.doublerDelayControlValid = defaultDelayValid
+        && minimumDelayValid
+        && maximumDelayValid
+        && malformedDelayValid;
+
     Parameters activeParameters;
     activeParameters.roomAmount = 0.65f;
     activeParameters.roomWidth = 0.82f;
     activeParameters.doublerMix = 0.72f;
     activeParameters.doublerSpread = 0.78f;
+    activeParameters.doublerDelayMs = 4.5f;
 
     juce::AudioBuffer<float> firstPass;
     firstPass.makeCopyOf(unityInput);
@@ -1101,7 +1323,7 @@ NAMCabPresentation::SelfTestResult NAMCabPresentation::runDeterministicSelfTest(
     NAMCabPresentation roomProcessor;
     roomProcessor.setParameters(roomOnly);
     roomProcessor.prepare(sampleRate, 64);
-    constexpr int impulseSamples = 4096;
+    constexpr int impulseSamples = 12000;
     juce::AudioBuffer<float> impulse(2, impulseSamples);
     impulse.clear();
     impulse.setSample(0, 0, 1.0f);
@@ -1136,6 +1358,66 @@ NAMCabPresentation::SelfTestResult NAMCabPresentation::runDeterministicSelfTest(
     }
     result.preArrivalDirectMaximumError = preArrivalError;
     result.preArrivalDirectExact = preArrivalError == 0.0f;
+
+    constexpr int lateRoomMeasurementStart = sampleRate * 3 / 20;
+    constexpr int lateRoomMeasurementEnd = sampleRate / 5;
+    double lateRoomEnergy = 0.0;
+    int lateRoomMeasurementSamples = 0;
+    for (int sample = lateRoomMeasurementStart;
+         sample < lateRoomMeasurementEnd;
+         ++sample)
+    {
+        const double left = static_cast<double>(impulse.getSample(0, sample));
+        const double right = static_cast<double>(impulse.getSample(1, sample));
+        lateRoomEnergy += left * left + right * right;
+        lateRoomMeasurementSamples += 2;
+    }
+    result.lateRoom150msRms = lateRoomMeasurementSamples > 0
+        ? static_cast<float>(std::sqrt(
+            lateRoomEnergy / static_cast<double>(lateRoomMeasurementSamples)))
+        : 0.0f;
+    result.lateRoomFieldValid = result.lateRoom150msRms >= 1.0e-7f;
+
+    Parameters gatedRoom = roomOnly;
+    gatedRoom.roomInputSendEnabled = false;
+    NAMCabPresentation gatedNewInputProcessor;
+    gatedNewInputProcessor.setParameters(gatedRoom);
+    gatedNewInputProcessor.prepare(sampleRate, 64);
+    juce::AudioBuffer<float> gatedNewInputReference;
+    gatedNewInputReference.makeCopyOf(unityInput);
+    juce::AudioBuffer<float> gatedNewInputOutput;
+    gatedNewInputOutput.makeCopyOf(unityInput);
+    processInPartitions(gatedNewInputProcessor, gatedNewInputOutput, 8);
+    result.gatedRoomNewInputMaximumError = maximumAbsoluteDifference(
+        gatedNewInputReference,
+        gatedNewInputOutput);
+
+    NAMCabPresentation gatedTailProcessor;
+    gatedTailProcessor.setParameters(roomOnly);
+    gatedTailProcessor.prepare(sampleRate, 64);
+    juce::AudioBuffer<float> gatedTailExcitation(2, sampleRate / 8);
+    gatedTailExcitation.clear();
+    gatedTailExcitation.setSample(0, 0, 1.0f);
+    gatedTailExcitation.setSample(1, 0, 1.0f);
+    processInPartitions(gatedTailProcessor, gatedTailExcitation, 8);
+    gatedTailProcessor.setRoomInputSendEnabled(false);
+    juce::AudioBuffer<float> gatedTailDrain(2, sampleRate / 4);
+    gatedTailDrain.clear();
+    processInPartitions(gatedTailProcessor, gatedTailDrain, 8);
+    float gatedTailPeak = 0.0f;
+    for (int channel = 0; channel < 2; ++channel)
+    {
+        for (int sample = 0; sample < gatedTailDrain.getNumSamples(); ++sample)
+        {
+            gatedTailPeak = juce::jmax(
+                gatedTailPeak,
+                std::abs(gatedTailDrain.getSample(channel, sample)));
+        }
+    }
+    result.gatedRoomTailPeak = gatedTailPeak;
+    result.roomInputSendGateValid =
+        result.gatedRoomNewInputMaximumError == 0.0f
+        && result.gatedRoomTailPeak >= 1.0e-7f;
     bool multiRateTimingValid = true;
     constexpr std::array<int, 3> roomTimingSampleRates { 44100, 48000, 96000 };
     for (const int timingSampleRate : roomTimingSampleRates)
@@ -1473,7 +1755,7 @@ NAMCabPresentation::SelfTestResult NAMCabPresentation::runDeterministicSelfTest(
     NAMCabPresentation tailProcessor;
     tailProcessor.setParameters(automationMaximum);
     tailProcessor.prepare(sampleRate, 64);
-    constexpr int tailTestSamples = sampleRate / 2;
+    constexpr int tailTestSamples = sampleRate * 2;
     juce::AudioBuffer<float> tailSignal(2, tailTestSamples);
     tailSignal.clear();
     tailSignal.setSample(0, 0, 1.0f);
@@ -1511,7 +1793,10 @@ NAMCabPresentation::SelfTestResult NAMCabPresentation::runDeterministicSelfTest(
         && result.multiRateRoomTimingValid
         && result.transientProtectionValid
         && result.nonFiniteRecoveryValid
-        && result.tailDecayValid;
+        && result.tailDecayValid
+        && result.roomInputSendGateValid
+        && result.lateRoomFieldValid
+        && result.doublerDelayControlValid;
     return result;
 }
 

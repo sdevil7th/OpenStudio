@@ -157,13 +157,44 @@ describe("NAM Rack tall Post FX faceplates", () => {
       .toBeCloseTo(NAM_PEDAL_HARDWARE_STANDARD_PX.toggle, 8);
   });
 
-  it("shares one optical centreline across the Modulator display and header toggles", () => {
+  it("mirrors the Modulator status screens and header toggles without collisions", () => {
     const { modulator } = NAM_POST_FX_FACEPLATE_LAYOUT;
-    const displayCenterY = modulator.headerDisplayY + modulator.headerDisplayH / 2;
+    const { modeDisplay, pedalModeDisplay } = modulator;
+    const displayCenterY = modeDisplay.y + modeDisplay.h / 2;
+    const toggleRadius = modulator.headerToggleSize / 2;
+    const leftScreenGap = modulator.modeToggleX - toggleRadius
+      - (modeDisplay.x + modeDisplay.w);
+    const rightScreenGap = pedalModeDisplay.x
+      - (modulator.pedalToggleX + toggleRadius);
 
     expect(displayCenterY).toBeCloseTo(modulator.headerCenterY, 5);
-    expect(modulator.headerDisplayY).toBeGreaterThan(14);
+    expect(pedalModeDisplay.y + pedalModeDisplay.h / 2)
+      .toBeCloseTo(modulator.headerCenterY, 5);
+    expect(modeDisplay.y).toBeGreaterThan(14);
     expect(modulator.headerCenterY).toBeLessThan(modulator.topRowY - 12);
+    expect(modeDisplay.w).toBe(pedalModeDisplay.w);
+    expect(modeDisplay.h).toBe(pedalModeDisplay.h);
+    expect(modeDisplay.x).toBe(100 - pedalModeDisplay.x - pedalModeDisplay.w);
+    expect(modulator.modeToggleX).toBe(100 - modulator.pedalToggleX);
+    expect(leftScreenGap).toBeGreaterThan(0);
+    expect(rightScreenGap).toBeCloseTo(leftScreenGap, 8);
+  });
+
+  it("puts both Modulator states inside screens while preserving their toggles", () => {
+    const source = readFileSync(
+      new URL("../components/NAMRackDesignPort.tsx", import.meta.url),
+      "utf8",
+    );
+    const stage = source.match(/function PostFxStage\(\)[\s\S]*?function SectionStage\(/)?.[0] ?? "";
+
+    expect(stage).toContain('className="mod-header-display mod-mode-display"');
+    expect(stage).toContain('className="mod-header-display mod-pedal-mode-display"');
+    expect(stage).toContain('paramId="modulatorMode"');
+    expect(stage).toContain('paramId="modulatorPedalMode"');
+    expect(stage).toContain('offLabel="PEDAL"');
+    expect(stage).toContain('onLabel="AUTO"');
+    expect(stage).not.toMatch(/<Label[\s\S]*?>\s*MODE\s*<\/Label>/);
+    expect(stage).not.toContain("mod-switch-state");
   });
 
   it("fits all three taller bodies within compact through Max stage placements", () => {

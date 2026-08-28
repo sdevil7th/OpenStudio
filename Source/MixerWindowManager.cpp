@@ -17,7 +17,7 @@ juce::Rectangle<int> sanitiseWindowBounds(const juce::Rectangle<int>& requested,
 
     if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
     {
-        const auto area = display->userArea;
+        const auto area = display->userBounds.getSmallestIntegerContainer();
         if (bounds.getWidth() > area.getWidth())
             bounds.setWidth(area.getWidth());
         if (bounds.getHeight() > area.getHeight())
@@ -302,6 +302,28 @@ bool MixerWindowManager::isOpen() const
     return mixerWindow != nullptr && mixerWindow->isVisible() && state == WindowState::visible;
 }
 
+bool MixerWindowManager::isFrontendReady() const
+{
+    if (mixerWindow != nullptr)
+        if (auto* hosted = mixerWindow->getHostedComponent())
+            return hosted->hasFrontendStartupSucceeded();
+
+    return false;
+}
+
+juce::String MixerWindowManager::getFrontendStartupStateDescription() const
+{
+    if (mixerWindow != nullptr)
+        if (auto* hosted = mixerWindow->getHostedComponent())
+            return hosted->getFrontendStartupStateDescription();
+
+    if (closingWindow != nullptr)
+        if (auto* hosted = closingWindow->getHostedComponent())
+            return hosted->getFrontendStartupStateDescription();
+
+    return "not-created";
+}
+
 juce::String MixerWindowManager::getStateDescription() const
 {
     return stateToString(state);
@@ -461,20 +483,20 @@ void MixerWindowManager::beginClose(bool notifyClosed)
     if (closeStartedMs == 0)
         closeStartedMs = juce::Time::currentTimeMillis();
 
-    // WebView2 construction in JUCE keeps raw pointers in a static creation queue.
-    // A normal user close must therefore keep the secondary WebView alive and reusable
-    // instead of destroying it while another WebView may still be starting up.
+    // JUCE 9.0.1 removes a destroyed WebView2 from its construction queue and
+    // disconnects WKWebView delegates during teardown.  Retire the native window
+    // first, then destroy it after the cross-window settle period so user-driven
+    // close/reopen bursts remain ordered without retaining one browser forever for
+    // every MIDI clip or built-in plug-in session.
     mixerWindow->setVisible(false);
-    setState(WindowState::readyHidden, "close hidden for reuse bounds=" + describeBounds(bounds));
+    closingWindow = std::move(mixerWindow);
+    setState(WindowState::retired, "close retired bounds=" + describeBounds(bounds));
 
     if (notifyClosed && closedCallback)
         closedCallback(bounds);
 
-    closeStartedMs = 0;
     closePendingUntilStartupSettles = false;
-    stopTimer();
-    releaseGlobalCloseSlot();
-    drainGlobalPendingRequests();
+    startTimer(closeDestroyDelayMs);
 }
 
 void MixerWindowManager::finishClose()

@@ -873,7 +873,7 @@ juce::AudioProcessorEditor* ARAHostController::createEditor()
 {
     if (! araActive || ! araProcessor) return nullptr;
     if (! araProcessor->hasEditor()) return nullptr;
-    return araProcessor->createEditor();
+    return araProcessor->createEditorAndMakeActive();
 }
 
 void ARAHostController::updateMusicalContext (double bpm, int timeSigNumerator, int timeSigDenominator)

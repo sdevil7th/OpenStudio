@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBridge } from "../services/NativeBridge";
 import { createDefaultTrack, type Track, useDAWStore } from "../store/useDAWStore";
 import transportBarSource from "../components/TransportBar.tsx?raw";
+import { dispatchGlobalShortcut } from "../utils/globalShortcutDispatcher";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+  resetShortcutContextForTests,
+} from "../utils/shortcutContext";
 
 const initialState = useDAWStore.getState();
 
@@ -44,6 +50,7 @@ describe("transport recording", () => {
   });
 
   afterEach(() => {
+    resetShortcutContextForTests();
     vi.restoreAllMocks();
     useDAWStore.setState(initialState);
   });
@@ -168,7 +175,28 @@ describe("transport recording", () => {
     expect(stop).toHaveBeenCalled();
   });
 
-  it("selects newly completed recorded clips after stop", async () => {
+  it("uses the full stop path when Play/Pause is invoked during recording", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+    useDAWStore.setState({
+      stop,
+      pause,
+      recordSession: { id: "record-session", startTime: 3, trackIds: ["track-midi"] },
+      transport: {
+        ...useDAWStore.getState().transport,
+        isPlaying: true,
+        isPaused: false,
+        isRecording: true,
+      },
+    });
+
+    await useDAWStore.getState().togglePlayPause();
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it("Space stops and finalizes audio and MIDI takes from the active Timeline", async () => {
     const audioTrack = {
       ...createDefaultTrack("track-audio", "Audio", "#f97316", "audio"),
       armed: true,
@@ -210,10 +238,38 @@ describe("transport recording", () => {
         currentTime: 5,
       },
       playStartPosition: 2,
+      recordSession: {
+        id: "space-stop-record-session",
+        startTime: 2,
+        trackIds: [audioTrack.id, midiTrack.id],
+      },
+      recordingClips: [
+        { trackId: audioTrack.id, startTime: 2 },
+        { trackId: midiTrack.id, startTime: 2 },
+      ],
       syncMIDITrackToBackend: vi.fn().mockResolvedValue(undefined),
     });
 
-    await useDAWStore.getState().stop();
+    registerShortcutSurface({ kind: "timeline" }, () => "unmatched");
+    activateShortcutContext({ kind: "timeline" });
+
+    expect(dispatchGlobalShortcut({
+      key: " ",
+      code: "Space",
+      source: "browser",
+    }, "windows")).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(nativeBridge.getLastCompletedClips).toHaveBeenCalledTimes(1);
+      expect(nativeBridge.getLastCompletedMIDIClips).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => {
+      const completedState = useDAWStore.getState();
+      expect(completedState.tracks.find((track) => track.id === audioTrack.id)?.clips)
+        .toHaveLength(1);
+      expect(completedState.tracks.find((track) => track.id === midiTrack.id)?.midiClips)
+        .toHaveLength(1);
+    });
 
     const state = useDAWStore.getState();
     const recordedAudioClip = state.tracks.find((track) => track.id === audioTrack.id)?.clips[0];
@@ -226,6 +282,15 @@ describe("transport recording", () => {
     expect(state.selectedTrackId).toBeNull();
     expect(state.selectedTrackIds).toEqual([]);
     expect(state.lastSelectedTrackId).toBeNull();
+    expect(state.transport).toMatchObject({
+      isPlaying: false,
+      isPaused: false,
+      isRecording: false,
+    });
+    expect(state.recordSession).toBeNull();
+    expect(state.recordingClips).toEqual([]);
+    expect(nativeBridge.setTransportPlaying).toHaveBeenCalledWith(false);
+    expect(nativeBridge.setTransportRecording).toHaveBeenCalledWith(false);
   });
 
   it("finalizes completed clips when transport sync cleared isRecording but a record session remains", async () => {

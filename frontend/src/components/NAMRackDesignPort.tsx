@@ -1,3 +1,9 @@
+import "./NAMRackDesignPort.css";
+import "./NAMRackStage.css";
+import "./NAMRackHardware.css";
+import "./NAMRackDesignPortSourceFlow.css";
+import "./NAMRackFooter.css";
+import "./NAMRackHeader.css";
 import {
   type CSSProperties,
   createContext,
@@ -50,13 +56,28 @@ import {
   quantizeParamValue,
   stepForParam,
 } from "../utils/builtInParamValue";
-import type { RackModuleId } from "./NAMRackPedalHardware";
-import type { RackSectionId } from "./NAMRackNeuralSkinRegistry";
+import type { NAMRackOversamplingFactor, RackModuleId, RackSectionId } from "./NAMSignalChainTypes";
 import type { NAMRackCabMode } from "./NAMCabPresentation";
 import type { NAMRackAdvancedStageId } from "./NAMRackMixer";
 import { namMeterFraction } from "../utils/namMeterLevel";
 import { observeTONE3000AppendSentinel } from "../utils/tone3000InfiniteAppend";
 import { NAMRackControlTooltip } from "./NAMRackControlTooltip";
+import {
+  NAMToneCapturePicker,
+  type NAMToneCapturePickerItem,
+} from "./NAMToneCapturePicker";
+import {
+  getParameterWheelStepCount,
+  resolveProfiledParameterWheel,
+} from "../utils/parameterWheel";
+import {
+  NAM_AMP_V4_FACEPLATE,
+  NAM_EQ_V4_FACEPLATE,
+  type FaceplateCircleControl,
+  type FaceplateFaderControl,
+  type FaceplateManifest,
+} from "./namRackFaceplateGeometry";
+import { namPreEqBandsForProfile } from "../utils/namInstrumentProfile";
 
 type DesignBoardId =
   | "03-pre-fx-section"
@@ -87,6 +108,7 @@ export type NAMSourceFlowDesignActionId =
   | "favorite"
   | "clear-filters"
   | "select-row"
+  | "select-capture"
   | "preview"
   | "load"
   | "save-preset"
@@ -179,6 +201,13 @@ export type NAMSourceFlowDesignConfig = {
   selectedTags: string[];
   selectedStats: string[];
   detailMeta: string[];
+  captures?: {
+    title: string;
+    items: NAMToneCapturePickerItem[];
+    selectedId?: string;
+    busy?: boolean;
+    error?: string;
+  };
   previewBody: string;
   controlAssetIds: string[];
   previewText: string;
@@ -221,6 +250,37 @@ type DesignSectionId = Extract<
 type DesignBox = { x: number; y: number; w: number; h: number };
 type NativeStyle = CSSProperties & Record<`--${string}`, string | number>;
 
+function revealControlInNearestStageScroller(control: HTMLElement) {
+  const scroller = control.closest<HTMLElement>(".nam-pre-stage-scroll");
+  if (!scroller) {
+    control.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return;
+  }
+
+  const controlRect = control.getBoundingClientRect();
+  const scrollerRect = scroller.getBoundingClientRect();
+  const revealMargin = 8;
+  if (
+    controlRect.left >= scrollerRect.left + revealMargin
+    && controlRect.right <= scrollerRect.right - revealMargin
+  ) return;
+
+  // Centre the whole pedal, not just the focused hit region. Small incremental
+  // adjustments can be pulled back to the previous anchor by mandatory snap.
+  const module = control.closest<HTMLElement>("[data-module]");
+  const revealRect = module?.getBoundingClientRect() ?? controlRect;
+  const centredScrollLeft = scroller.scrollLeft
+    + revealRect.left
+    + revealRect.width / 2
+    - scrollerRect.left
+    - scrollerRect.width / 2;
+  scroller.scrollLeft = clampNumber(
+    centredScrollLeft,
+    0,
+    Math.max(0, scroller.scrollWidth - scroller.clientWidth),
+  );
+}
+
 const SECTION_TO_BOARD: Record<DesignSectionId, DesignBoardId> = {
   pre: "03-pre-fx-section",
   amp: "04-amp-section",
@@ -253,7 +313,6 @@ const MODULE_NAME_TO_ID: Record<string, RackModuleId> = {
   tone: "pedal",
   compressor: "pedal",
   overdrive: "pedal",
-  "tape-echo": "pedal",
   octaver: "pedal",
   "precision-drive": "pedal",
   "amp-head": "amp",
@@ -277,6 +336,15 @@ export const NAM_PEDAL_HARDWARE_STANDARD_PX = {
   led: 12,
 } as const;
 
+// Precision Drive follows the reference pedal's smaller centre Gate rotary.
+// Keep it outside the shared pedal-hardware contract: the four main controls
+// remain standard 28 px knobs while this one deliberate exception stays 18 px.
+export const NAM_PRECISION_DRIVE_GATE_KNOB_PX = 18;
+
+// The approved two-tier Graphic EQ uses full studio-panel rotaries for HPF,
+// Level, and LPF. Keep this named exception separate from pedal hardware.
+export const NAM_GRAPHIC_EQ_FILTER_KNOB_PX = 50;
+
 export type NAMPedalHardwareKind = keyof typeof NAM_PEDAL_HARDWARE_STANDARD_PX;
 
 // These rotaries are deliberately not pedal hardware. The Cab IR Shaper uses
@@ -287,7 +355,7 @@ export type NAMPedalHardwareKind = keyof typeof NAM_PEDAL_HARDWARE_STANDARD_PX;
 export const NAM_PANEL_ROTARY_VARIANT_PX = {
   cabPanel: 42,
   roomHero: 68,
-  ampPanel: 44,
+  eqPanel: 44,
 } as const;
 
 export type NAMPanelRotaryVariant = keyof typeof NAM_PANEL_ROTARY_VARIANT_PX;
@@ -300,15 +368,24 @@ export function namPedalHardwareSizePercent(
 }
 
 export const NAM_PRE_SIGNAL_LAYOUT = {
-  // The two six-control pedals use matching wide enclosures and faceplate
-  // rhythm. Ten artboard pixels between every sibling keep the full row
-  // centred while preserving the same physical hardware size contract.
-  compressor: { x: 5, y: 42, w: 156, h: 232 },
-  tapeEcho: { x: 171, y: 42, w: 156, h: 232 },
-  octaver: { x: 337, y: 42, w: 120, h: 232 },
-  precisionDrive: { x: 467, y: 42, w: 120, h: 232 },
-  distortion: { x: 597, y: 42, w: 156, h: 232 },
+  // Five independent pedals occupy the same 748 px row that previously held
+  // Tape Echo. EQ Boost is immediately before Precision Drive in the signal
+  // path, while the wider 918 px artboard keeps the complete row centred.
+  compressor: { x: 85, y: 42, w: 156, h: 232 },
+  octaver: { x: 251, y: 42, w: 120, h: 232 },
+  eqBoost: { x: 381, y: 42, w: 156, h: 232 },
+  precisionDrive: { x: 547, y: 42, w: 120, h: 232 },
+  distortion: { x: 677, y: 42, w: 156, h: 232 },
 } as const satisfies Record<string, DesignBox>;
+
+export const NAM_PRE_LOGICAL_SURFACE = {
+  width: 918,
+  height: 341,
+  row: { x: 85, y: 3, w: 748, h: 271 },
+  // Fit and overflow must be computed from the same row. The former mismatched
+  // 748/898 widths manufactured a scrollbar even when every pedal was visible.
+  scaleReference: { x: 85, y: 3, w: 748, h: 271 },
+} as const;
 
 export const NAM_PRE_FX_HARDWARE_LAYOUT = {
   compressor: {
@@ -329,24 +406,6 @@ export const NAM_PRE_FX_HARDWARE_LAYOUT = {
       "led",
     ),
   },
-  tapeEcho: {
-    knobSize: namPedalHardwareSizePercent(
-      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
-      "knob",
-    ),
-    footSize: namPedalHardwareSizePercent(
-      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
-      "footswitch",
-    ),
-    toggleSize: namPedalHardwareSizePercent(
-      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
-      "toggle",
-    ),
-    ledSize: namPedalHardwareSizePercent(
-      NAM_PRE_SIGNAL_LAYOUT.tapeEcho.w,
-      "led",
-    ),
-  },
   octaver: {
     knobSize: namPedalHardwareSizePercent(
       NAM_PRE_SIGNAL_LAYOUT.octaver.w,
@@ -362,6 +421,24 @@ export const NAM_PRE_FX_HARDWARE_LAYOUT = {
     ),
     ledSize: namPedalHardwareSizePercent(
       NAM_PRE_SIGNAL_LAYOUT.octaver.w,
+      "led",
+    ),
+  },
+  eqBoost: {
+    knobSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.eqBoost.w,
+      "knob",
+    ),
+    footSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.eqBoost.w,
+      "footswitch",
+    ),
+    toggleSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.eqBoost.w,
+      "toggle",
+    ),
+    ledSize: namPedalHardwareSizePercent(
+      NAM_PRE_SIGNAL_LAYOUT.eqBoost.w,
       "led",
     ),
   },
@@ -420,10 +497,13 @@ export const NAM_POST_FX_FACEPLATE_LAYOUT = {
     reverb: { box: { x: 528, y: 29, w: 220, h: 195 }, titleY: 9.8 },
   },
   modulator: {
-    // Displays use a top edge while asset controls use centre coordinates.
-    // Keeping both values explicit guarantees one optical header centreline.
-    headerDisplayY: 16,
-    headerDisplayH: 9.5,
+    // The header is deliberately mirrored from both enclosure borders:
+    // [mode screen][mode toggle] ... [pedal toggle][pedal/auto screen].
+    // Displays use top-left coordinates while asset controls use centres.
+    modeDisplay: { x: 7, y: 16, w: 28, h: 9.5 },
+    modeToggleX: 41,
+    pedalToggleX: 59,
+    pedalModeDisplay: { x: 65, y: 16, w: 28, h: 9.5 },
     headerCenterY: 20.75,
     headerToggleSize: namPedalHardwareSizePercent(220, "toggle"),
     topRowY: 33.714286,
@@ -443,6 +523,7 @@ export const NAM_POST_FX_FACEPLATE_LAYOUT = {
     footY: 89.4,
     footSize: namPedalHardwareSizePercent(220, "footswitch"),
     footerToggleSize: namPedalHardwareSizePercent(220, "toggle"),
+    characterDisplay: { x: 61, y: 72.2, w: 26, h: 8.5 },
   },
   delay: {
     headerDisplayY: 16,
@@ -477,35 +558,100 @@ export const NAM_POST_FX_FACEPLATE_LAYOUT = {
     lowerRowY: 56.307692,
     lowerKnobSize: namPedalHardwareSizePercent(220, "knob"),
     lowerLabelOffset: 9.794872,
-    primaryX: 50,
+    secondaryX: 34,
+    primaryX: 66,
     ledY: 71.179487,
     ledSize: namPedalHardwareSizePercent(220, "led"),
+    secondaryLedSize: namPedalHardwareSizePercent(220, "led"),
     stateLabelY: 76.871795,
     footY: 85.871795,
     footSize: namPedalHardwareSizePercent(220, "footswitch"),
+    padToggleSize: namPedalHardwareSizePercent(220, "toggle"),
   },
 } as const;
 
-// All ten Graphic EQ gain stages share one recessed fader bay.  Output Level
-// is deliberately the final lane rather than a rotary mounted on the rack
-// cheek: this keeps the control type, +/-12 dB scale, hit target, and visual
-// baseline consistent at every responsive stage scale.
+function faceplateControlById<TControl extends FaceplateCircleControl | FaceplateFaderControl>(
+  manifest: FaceplateManifest,
+  id: string,
+  kind: TControl["kind"],
+) {
+  const control = manifest.controls.find(
+    (candidate) => candidate.id === id && candidate.kind === kind,
+  );
+  if (!control) throw new Error(`Missing ${manifest.id} control: ${id}`);
+  return control as TControl;
+}
+
+const ampV4Circle = (id: string) =>
+  faceplateControlById<FaceplateCircleControl>(
+    NAM_AMP_V4_FACEPLATE,
+    id,
+    id === "amp-power" || id === "amp-tight" || id === "amp-bright"
+      ? "toggle"
+      : "knob",
+  );
+const ampV4Led = (id: string) =>
+  faceplateControlById<FaceplateCircleControl>(
+    NAM_AMP_V4_FACEPLATE,
+    id,
+    "led",
+  );
+const eqV4Circle = (id: string, kind: FaceplateCircleControl["kind"]) =>
+  faceplateControlById<FaceplateCircleControl>(NAM_EQ_V4_FACEPLATE, id, kind);
+const eqV4Faders = NAM_EQ_V4_FACEPLATE.controls.filter(
+  (control): control is FaceplateFaderControl => control.kind === "fader",
+);
+const intrinsicPercent = (value: number, extent: number) => value / extent * 100;
+
+// V4 post-cab EQ: the body owns the recessed wells, tick ladders, frequency
+// legends, and utility printing. Runtime DOM owns only moving caps and real
+// hardware. Source-pixel manifests are the single positioning authority.
 export const NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT = {
-  // The power stack is a separate fixed rail.  The recessed plotting bay is
-  // centred on the chassis, so its ten equal cells and both scale columns must
-  // share that same optical centre instead of inheriting a second right shift.
-  contentCenterX: 50,
-  title: { x: 50, y: 8.5 },
-  grid: { x: 14.44, y: 20, w: 71.12, h: 61 },
-  laneXs: [18, 25.11, 32.22, 39.33, 46.44, 53.56, 60.67, 67.78, 74.89, 82],
-  valueY: 20.8,
-  faderY: 52,
-  faderH: 46,
-  labelY: 80.5,
-  scaleXs: { left: 11.9, right: 88.1 },
-  scaleYs: { high: 25, unity: 52, low: 78 },
-  levelSeparatorX: 78.45,
-  powerStackX: 5.5,
+  power: {
+    toggle: {
+      x: intrinsicPercent(eqV4Circle("eq-power", "toggle").center.x, 2160),
+      y: intrinsicPercent(eqV4Circle("eq-power", "toggle").center.y, 720),
+      size: intrinsicPercent(eqV4Circle("eq-power", "toggle").visualDiameter, 2160),
+      hitSize: intrinsicPercent(eqV4Circle("eq-power", "toggle").hitDiameter, 2160),
+    },
+    led: {
+      x: intrinsicPercent(eqV4Circle("eq-led", "led").center.x, 2160),
+      y: intrinsicPercent(eqV4Circle("eq-led", "led").center.y, 720),
+      size: intrinsicPercent(eqV4Circle("eq-led", "led").visualDiameter, 2160),
+      hitSize: intrinsicPercent(eqV4Circle("eq-led", "led").hitDiameter, 2160),
+    },
+  },
+  laneXs: eqV4Faders.map((fader) => intrinsicPercent(fader.centerX, 2160)),
+  fader: {
+    y: intrinsicPercent(
+      eqV4Faders[0].hitRect.y + eqV4Faders[0].hitRect.height / 2,
+      720,
+    ),
+    travelTop: intrinsicPercent(eqV4Faders[0].capTravel.top, 720),
+    travelBottom: intrinsicPercent(eqV4Faders[0].capTravel.bottom, 720),
+    hitWidthPx: eqV4Faders[0].hitRect.width / 3,
+    hitHeightPx: eqV4Faders[0].hitRect.height / 3,
+    trackTopPx:
+      (eqV4Faders[0].capTravel.top - eqV4Faders[0].hitRect.y) / 3,
+    trackWidthPx: eqV4Faders[0].bakedWell.width / 3,
+    trackHeightPx:
+      (eqV4Faders[0].capTravel.bottom - eqV4Faders[0].capTravel.top) / 3,
+    capSizePx: eqV4Faders[0].capSize.width / 3,
+  },
+  utility: {
+    hpfX: intrinsicPercent(eqV4Circle("eq-hpf", "knob").center.x, 2160),
+    hpfY: intrinsicPercent(eqV4Circle("eq-hpf", "knob").center.y, 720),
+    hpfSize: intrinsicPercent(eqV4Circle("eq-hpf", "knob").visualDiameter, 2160),
+    hpfHitSize: intrinsicPercent(eqV4Circle("eq-hpf", "knob").hitDiameter, 2160),
+    levelX: intrinsicPercent(eqV4Circle("eq-level", "knob").center.x, 2160),
+    levelY: intrinsicPercent(eqV4Circle("eq-level", "knob").center.y, 720),
+    levelSize: intrinsicPercent(eqV4Circle("eq-level", "knob").visualDiameter, 2160),
+    levelHitSize: intrinsicPercent(eqV4Circle("eq-level", "knob").hitDiameter, 2160),
+    lpfX: intrinsicPercent(eqV4Circle("eq-lpf", "knob").center.x, 2160),
+    lpfY: intrinsicPercent(eqV4Circle("eq-lpf", "knob").center.y, 720),
+    lpfSize: intrinsicPercent(eqV4Circle("eq-lpf", "knob").visualDiameter, 2160),
+    lpfHitSize: intrinsicPercent(eqV4Circle("eq-lpf", "knob").hitDiameter, 2160),
+  },
 } as const;
 
 export const NAM_CAB_ROOM_CONSOLE_LAYOUT = {
@@ -538,7 +684,7 @@ const LAYOUT = {
     micPanel: NAM_CAB_ROOM_CONSOLE_LAYOUT.console,
   },
   eq: {
-    rack: { x: 24, y: 20, w: 720, h: 300 },
+    rack: { x: 24, y: 50, w: 720, h: 240 },
   },
   post: {
     modulator: NAM_POST_FX_FACEPLATE_LAYOUT.modules.modulator.box,
@@ -548,10 +694,10 @@ const LAYOUT = {
 } as const;
 
 const SECTION_GROUP_BOX: Record<DesignSectionId, DesignBox> = {
-  pre: { x: 5, y: 3, w: 748, h: 271 },
+  pre: NAM_PRE_LOGICAL_SURFACE.row,
   amp: { x: 24, y: -2, w: 720, h: 345 },
   cab: NAM_CAB_ROOM_CONSOLE_LAYOUT.group,
-  eq: { x: 24, y: 20, w: 720, h: 300 },
+  eq: { x: 24, y: 50, w: 720, h: 240 },
   post: NAM_POST_FX_FACEPLATE_LAYOUT.group,
 };
 
@@ -560,8 +706,107 @@ const LABEL_OFFSET = {
   below: 11.2,
 };
 
-// Follow the wide Tape Echo's visual hierarchy: a dedicated hardware header,
-// two control rows, then an isolated title/footer zone.  Displays use a top/
+const eqBoostX = (pixels: number) =>
+  (pixels / NAM_PRE_SIGNAL_LAYOUT.eqBoost.w) * 100;
+const prePedalY = (pixels: number) =>
+  (pixels / NAM_PRE_SIGNAL_LAYOUT.eqBoost.h) * 100;
+
+export const NAM_EQ_BOOST_FACEPLATE_LAYOUT = {
+  title: { x: 50, y: 70 },
+  // Frequency captions use this as their right edge.  The first version
+  // centred a left-aligned 21 px text box at x=27.5, which left most of that
+  // box as dead space between the glyphs and the rail.  The wider 72 px fader
+  // keeps its former right boundary while extending the rail and cap travel
+  // into that unused left field.  Captions remain three design pixels before
+  // the visible track at every responsive scale.
+  bandLabelX: eqBoostX(30),
+  faderX: eqBoostX(64),
+  faderWidth: eqBoostX(72),
+  faderHeight: prePedalY(16),
+  faderTrackInsetPercent: 6.896552,
+  // The cap is 15 px wide after its 90-degree artwork rotation. Keeping its
+  // centre between x=39 and x=89 prevents the minimum position from touching
+  // the right-aligned caption while still increasing useful travel by 13.6%.
+  faderCapMinPercent: 15.277778,
+  faderCapTravelPercent: 69.444444,
+  bandYs: [25, 42, 59, 76, 93, 110, 127, 144].map(prePedalY),
+  hpf: { x: eqBoostX(124), y: prePedalY(55), iconY: prePedalY(35) },
+  lpf: { x: eqBoostX(124), y: prePedalY(119), iconY: prePedalY(99) },
+  filterSize: eqBoostX(20),
+  filterHitSize: eqBoostX(28),
+  led: {
+    x: 50,
+    y: 76.5,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.eqBoost.ledSize,
+  },
+  stateLabelY: 82,
+  foot: {
+    x: 50,
+    y: 90.75,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.eqBoost.footSize,
+    hitSize: eqBoostX(28),
+  },
+} as const;
+
+// Standalone Precision Drive restores the original four-control faceplate and
+// keeps the reference pedal's smaller Gate control between the two rows.
+export const NAM_PRECISION_DRIVE_FACEPLATE_LAYOUT = {
+  columns: [30, 70],
+  topY: 19.5,
+  lowerY: 49,
+  knobSize: NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize,
+  knobHitSize: (28 / NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w) * 100,
+  gate: {
+    x: 50,
+    y: 33,
+    size: (NAM_PRECISION_DRIVE_GATE_KNOB_PX / NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w) * 100,
+    hitSize: (20 / NAM_PRE_SIGNAL_LAYOUT.precisionDrive.w) * 100,
+  },
+  gateLabelY: 27.5,
+  titleY: 66.8,
+  led: {
+    x: 50,
+    y: 73.2,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.ledSize,
+  },
+  foot: {
+    x: 50,
+    y: 88.3,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.footSize,
+    hitSize: 23,
+  },
+} as const;
+
+export const NAM_AMP_FACEPLATE_LAYOUT = {
+  controlY: intrinsicPercent(ampV4Circle("amp-input").center.y, 1035),
+  labelY: intrinsicPercent(634, 1035),
+  knobSize: intrinsicPercent(ampV4Circle("amp-input").visualDiameter, 2160),
+  knobHitSize: intrinsicPercent(ampV4Circle("amp-input").hitDiameter, 2160),
+  toggleSize: intrinsicPercent(ampV4Circle("amp-power").visualDiameter, 2160),
+  toggleHitSize: intrinsicPercent(ampV4Circle("amp-power").hitDiameter, 2160),
+  ledY: intrinsicPercent(ampV4Led("amp-power-led").center.y, 1035),
+  ledSize: intrinsicPercent(ampV4Led("amp-power-led").visualDiameter, 2160),
+  ledHitSize: intrinsicPercent(ampV4Led("amp-power-led").hitDiameter, 2160),
+  powerX: intrinsicPercent(ampV4Circle("amp-power").center.x, 2160),
+  inputX: intrinsicPercent(ampV4Circle("amp-input").center.x, 2160),
+  boostX: intrinsicPercent(ampV4Circle("amp-tight").center.x, 2160),
+  voiceX: intrinsicPercent(ampV4Circle("amp-bright").center.x, 2160),
+  bassX: intrinsicPercent(ampV4Circle("amp-bass").center.x, 2160),
+  midX: intrinsicPercent(ampV4Circle("amp-mid").center.x, 2160),
+  trebleX: intrinsicPercent(ampV4Circle("amp-treble").center.x, 2160),
+  presenceX: intrinsicPercent(ampV4Circle("amp-presence").center.x, 2160),
+  mixX: intrinsicPercent(ampV4Circle("amp-mix").center.x, 2160),
+  outputX: intrinsicPercent(ampV4Circle("amp-output").center.x, 2160),
+  captureContent: {
+    x: intrinsicPercent(NAM_AMP_V4_FACEPLATE.safeZones.captureContent.x, 2160),
+    y: intrinsicPercent(NAM_AMP_V4_FACEPLATE.safeZones.captureContent.y, 1035),
+    width: intrinsicPercent(NAM_AMP_V4_FACEPLATE.safeZones.captureContent.width, 2160),
+    height: intrinsicPercent(NAM_AMP_V4_FACEPLATE.safeZones.captureContent.height, 1035),
+  },
+} as const;
+
+// Use a dedicated hardware header, two control rows, then an isolated
+// title/footer zone. Displays use a top/
 // left anchor while hardware controls use their centre. The selector's visible
 // lower edge shares the display baseline rather than merely sharing its top.
 export const NAM_DISTORTION_FACEPLATE_LAYOUT = {
@@ -613,10 +858,23 @@ export const NAM_COMPRESSOR_FACEPLATE_LAYOUT = {
   topLabelOffset: 11,
   lowerLabelOffset: 10.5,
   titleY: 70,
-  led: { x: 50, y: 76.5, size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.ledSize },
+  // Keep only the former black value row after removing the redundant
+  // INTENSITY caption; stretching it into the caption's old space would turn
+  // a slim hardware display into an oversized square plate.
+  intensityReadout: { x: 6, y: 77.6, w: 30, h: 5.4 },
+  intensityToggle: {
+    x: 21,
+    y: 90.75,
+    size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.toggleSize,
+  },
+  // Keep the chrome power cluster comfortably inside the photographed rim.
+  // The slight inward move preserves the left/right footer balance while
+  // leaving visible painted padding to the right of the footswitch hit area.
+  powerX: 78,
+  led: { x: 78, y: 76.5, size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.ledSize },
   stateLabelY: 82,
   foot: {
-    x: 50,
+    x: 78,
     y: 90.75,
     size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.footSize,
     hitSize: 18.5,
@@ -713,7 +971,7 @@ export function reverbVoiceControlLabels(value: number, min = 0) {
   return NAM_REVERB_VOICE_CONTROL_LABELS[index];
 }
 
-const COMPRESSOR_HPF_DISPLAY_LABELS = ["OFF", "120", "240"] as const;
+const COMPRESSOR_HPF_DISPLAY_LABELS = ["OFF", "80", "240"] as const;
 
 export function compressorHpfDisplayLabel(value: number, min = 0) {
   const index = clamp(
@@ -722,6 +980,10 @@ export function compressorHpfDisplayLabel(value: number, min = 0) {
     COMPRESSOR_HPF_DISPLAY_LABELS.length - 1,
   );
   return COMPRESSOR_HPF_DISPLAY_LABELS[index];
+}
+
+export function compressorIntensityDisplayLabel(value: number) {
+  return Number.isFinite(value) && value >= 0.5 ? "16:1" : "8:1";
 }
 
 type DesignParamChangeHandler = (
@@ -946,14 +1208,15 @@ function verticalRotaryValueFromDrag(
 }
 
 const BODIES = {
-  amp: "amp-head-body",
+  amp: "amp-head-body-v5",
   cab: "cabinet-body",
   cabRoomIntegrated: "cab-room-integrated-body",
   irShaper: "ir-shaper-panel-body",
   mic: "mic-panel-body",
-  eq: "rack-unit-body-deep",
+  eq: "graphic-eq-body-v6",
   blue: "stompbox-body-blue",
   blueWide: "stompbox-body-blue-wide",
+  whiteWide: "stompbox-body-white-wide",
   dark: "stompbox-body-dark",
   darkWide: "stompbox-body-dark-wide",
   olive: "stompbox-body-olive",
@@ -974,15 +1237,21 @@ const CONTROLS = {
   footOn: "footswitch-chrome-on-top",
   footPressed: "footswitch-chrome-pressed-top",
   knobBlack: "knob-black-top",
+  knobBlackPanel: "knob-black-panel-v4",
   knobBlueSteel: "knob-blue-steel-top",
+  knobBlueSteelPanel: "knob-blue-steel-panel-v4",
   knobCream: "knob-cream-top",
   knobMetal: "knob-metal-top",
   ledOff: "led-amber-off-top",
+  ledOffPanel: "led-amber-off-panel-v4",
   ledOn: "led-amber-on-top",
+  ledOnPanel: "led-amber-on-panel-v4",
   mic57: "mic-dynamic-57",
   mic121: "mic-ribbon-121",
   slider: "slider-metal-top",
+  sliderPanel: "slider-metal-cap-v4",
   toggle: "toggle-chrome-top",
+  togglePanel: "toggle-chrome-panel-v4",
   washer: "washer-chrome-top",
 } as const satisfies Record<string, NAMDesignControlAssetId>;
 
@@ -1144,6 +1413,39 @@ export function computePremiumStagePlacement(
   };
 }
 
+export function computePremiumPreStagePlacement(
+  viewport: { width: number; height: number },
+  rackSizePercent: number,
+) {
+  const scaleReferencePlacement = computePremiumStagePlacement(
+    viewport,
+    NAM_PRE_LOGICAL_SURFACE.scaleReference,
+    rackSizePercent,
+  );
+  const marginX = clamp(viewport.width * 0.035, 22, 46);
+  const rowWidth = NAM_PRE_LOGICAL_SURFACE.row.w * scaleReferencePlacement.scale;
+  const fitsWithoutScroll = rowWidth + marginX * 2 <= viewport.width;
+  const left = fitsWithoutScroll
+    ? (viewport.width - rowWidth) / 2
+      - NAM_PRE_LOGICAL_SURFACE.row.x * scaleReferencePlacement.scale
+    : marginX;
+  const contentWidth = fitsWithoutScroll
+    ? viewport.width
+    : Math.ceil(
+        left
+          + NAM_PRE_LOGICAL_SURFACE.width * scaleReferencePlacement.scale
+          + marginX,
+      );
+
+  return {
+    ...scaleReferencePlacement,
+    left,
+    contentWidth,
+    contentHeight: viewport.height,
+    fitsWithoutScroll,
+  };
+}
+
 type NAMRackDesignRigSummary = {
   presetName: string;
   presetEyebrow: string;
@@ -1157,6 +1459,7 @@ type NAMRackDesignRigSummary = {
   ampCaptureMissing: boolean;
   hasCabIR: boolean;
   cabMode: NAMRackCabMode;
+  cabRoomInputSourceAvailable?: boolean;
 };
 
 export type NAMRackDesignLibraryItem = {
@@ -1186,6 +1489,11 @@ export type NAMRackDesignRuntimeStatus = {
   diagnosticMessage?: string;
   inputLevelDb?: number;
   outputLevelDb?: number;
+  inputLeftLevelDb?: number;
+  inputRightLevelDb?: number;
+  outputLeftLevelDb?: number;
+  outputRightLevelDb?: number;
+  inputChannelCount?: number;
 };
 
 export type NAMRackDesignUtilityControls = {
@@ -1324,6 +1632,7 @@ function AssetControl({
   stateRotations,
   hardwareKind,
   panelRotaryVariant,
+  exactSizeVariant,
 }: {
   assetId: NAMDesignControlAssetId;
   className: string;
@@ -1350,6 +1659,12 @@ function AssetControl({
   stateRotations?: readonly number[];
   hardwareKind?: NAMPedalHardwareKind;
   panelRotaryVariant?: NAMPanelRotaryVariant;
+  exactSizeVariant?:
+    | "eq-filter"
+    | "mini-toggle"
+    | "panel-toggle"
+    | "panel-knob"
+    | "panel-led";
 }) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
@@ -1404,11 +1719,13 @@ function AssetControl({
         : param && !isButtonLike
           ? -135 + pct * 270
           : rot;
-  const visualSize = panelRotaryVariant
-    ? `${NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant]}px`
-    : hardwareKind
-      ? `${NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind]}px`
-      : `${size}%`;
+  const visualSize = exactSizeVariant
+    ? `${size}%`
+    : panelRotaryVariant
+      ? `${NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant]}px`
+      : hardwareKind
+        ? `${NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind]}px`
+        : `${size}%`;
   const resolvedControlLabel =
     semanticLabel ?? param?.label ?? labelText ?? "Control";
   const title = param ? `${resolvedControlLabel}: ${valueLabel}` : valueLabel;
@@ -1606,11 +1923,14 @@ function AssetControl({
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLElement>) => {
       if (!interactive || !param || (isButtonLike && !enableButtonDrag)) return;
-      event.preventDefault();
-      event.stopPropagation();
+      const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+      if (gesture.preventDefault) event.preventDefault();
+      if (gesture.stopPropagation) event.stopPropagation();
+      if (gesture.operation !== "adjust") return;
+      const stepCount = getParameterWheelStepCount(gesture);
+      if (stepCount === 0) return;
       showFeedbackNow();
-      const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-      stepParam(event.deltaY > 0 ? -1 : 1, fine);
+      stepParam(Math.sign(stepCount), Math.abs(stepCount));
     },
     [
       enableButtonDrag,
@@ -1768,9 +2088,12 @@ function AssetControl({
           onPointerLeave={() => {
             if (showsControlFeedback) setFeedbackActivity("hovered", false);
           }}
-          onFocus={() => {
-            if (showsControlFeedback && !pointerInitiatedFocusRef.current) {
-              setFeedbackActivity("focused", true);
+          onFocus={(event) => {
+            if (!pointerInitiatedFocusRef.current) {
+              revealControlInNearestStageScroller(event.currentTarget);
+              if (showsControlFeedback) {
+                setFeedbackActivity("focused", true);
+              }
             }
           }}
           onBlur={() => {
@@ -1801,21 +2124,27 @@ function AssetControl({
           size: visualSize,
           rot: `${visualRot}deg`,
         })}
-        qa={
-          panelRotaryVariant
+        qa={{
+          "data-param-id": paramId,
+          ...(exactSizeVariant
             ? {
-                "data-nam-panel-rotary-variant": panelRotaryVariant,
-                "data-nam-panel-rotary-px":
-                  NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant],
+                "data-nam-exact-size-variant": exactSizeVariant,
+                "data-nam-exact-size-percent": size,
               }
-            : hardwareKind
+            : panelRotaryVariant
               ? {
-                  "data-nam-hardware-kind": hardwareKind,
-                  "data-nam-hardware-standard-px":
-                    NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind],
+                  "data-nam-panel-rotary-variant": panelRotaryVariant,
+                  "data-nam-panel-rotary-px":
+                    NAM_PANEL_ROTARY_VARIANT_PX[panelRotaryVariant],
                 }
-              : undefined
-        }
+              : hardwareKind
+                ? {
+                    "data-nam-hardware-kind": hardwareKind,
+                    "data-nam-hardware-standard-px":
+                      NAM_PEDAL_HARDWARE_STANDARD_PX[hardwareKind],
+                  }
+                : {}),
+        }}
       />
       {controlClasses.includes("knob") &&
         !controlClasses.includes("enum-position-rotary") && (
@@ -1859,6 +2188,8 @@ function Knob({
   allowInteraction = true,
   disabledReason,
   panelRotaryVariant,
+  assetIdOverride,
+  exactSizeVariant,
 }: {
   kind: "black" | "blue-steel" | "cream" | "metal";
   x: number;
@@ -1875,15 +2206,18 @@ function Knob({
   allowInteraction?: boolean;
   disabledReason?: string;
   panelRotaryVariant?: NAMPanelRotaryVariant;
+  assetIdOverride?: NAMDesignControlAssetId;
+  exactSizeVariant?: "eq-filter" | "panel-knob";
 }) {
-  const assetId =
+  const assetId = assetIdOverride ?? (
     kind === "metal"
       ? CONTROLS.knobMetal
       : kind === "cream"
         ? CONTROLS.knobCream
         : kind === "blue-steel"
           ? CONTROLS.knobBlueSteel
-          : CONTROLS.knobBlack;
+          : CONTROLS.knobBlack
+  );
   return (
     <AssetControl
       assetId={assetId}
@@ -1903,6 +2237,135 @@ function Knob({
       disabledReason={disabledReason}
       hardwareKind="knob"
       panelRotaryVariant={panelRotaryVariant}
+      exactSizeVariant={exactSizeVariant}
+    />
+  );
+}
+
+function EqFilterKnob({
+  x,
+  y,
+  size,
+  hitSize,
+  rot,
+  paramId,
+  semanticLabel,
+  assetId = CONTROLS.knobBlueSteel,
+}: {
+  x: number;
+  y: number;
+  size: number;
+  hitSize: number;
+  rot: number;
+  paramId: "eqHPFHz" | "eqLevelDb" | "eqLPFHz";
+  semanticLabel: string;
+  assetId?: NAMDesignControlAssetId;
+}) {
+  const side =
+    paramId === "eqHPFHz" ? "hpf" : paramId === "eqLPFHz" ? "lpf" : "level";
+  return (
+    <AssetControl
+      assetId={assetId}
+      className={`knob blue-steel eq-filter-knob eq-filter-knob-${side}`}
+      x={x}
+      y={y}
+      size={size}
+      hitSize={hitSize}
+      rot={rot}
+      paramId={paramId}
+      semanticLabel={semanticLabel}
+      panelRotaryVariant={
+        assetId === CONTROLS.knobBlueSteelPanel ? undefined : "eqPanel"
+      }
+      exactSizeVariant={
+        assetId === CONTROLS.knobBlueSteelPanel ? "panel-knob" : undefined
+      }
+    />
+  );
+}
+
+function PreEqFilterKnob({
+  x,
+  y,
+  size,
+  hitSize,
+  rot,
+  paramId,
+  semanticLabel,
+}: {
+  x: number;
+  y: number;
+  size: number;
+  hitSize: number;
+  rot: number;
+  paramId: "preEqHPFHz" | "preEqLPFHz";
+  semanticLabel: string;
+}) {
+  const side = paramId === "preEqHPFHz" ? "hpf" : "lpf";
+  return (
+    <AssetControl
+      assetId={CONTROLS.knobBlack}
+      className={`knob black combined-pre-eq-filter-knob combined-pre-eq-filter-knob-${side}`}
+      x={x}
+      y={y}
+      size={size}
+      hitSize={hitSize}
+      rot={rot}
+      paramId={paramId}
+      semanticLabel={semanticLabel}
+      hardwareKind="knob"
+      exactSizeVariant="eq-filter"
+    />
+  );
+}
+
+function CompactKnob({
+  kind,
+  x,
+  y,
+  size,
+  rot,
+  paramId,
+  labelText,
+  semanticLabel,
+  labelOffset,
+  labelClass,
+  hitSize,
+}: {
+  kind: "black" | "blue-steel" | "cream" | "metal";
+  x: number;
+  y: number;
+  size: number;
+  rot: number;
+  paramId: string;
+  labelText: string;
+  semanticLabel?: string;
+  labelOffset?: number;
+  labelClass?: string;
+  hitSize: number;
+}) {
+  const assetId =
+    kind === "metal"
+      ? CONTROLS.knobMetal
+      : kind === "cream"
+        ? CONTROLS.knobCream
+        : kind === "blue-steel"
+          ? CONTROLS.knobBlueSteel
+          : CONTROLS.knobBlack;
+  return (
+    <AssetControl
+      assetId={assetId}
+      className={`knob compact-knob ${kind}`}
+      x={x}
+      y={y}
+      size={size}
+      rot={rot}
+      paramId={paramId}
+      labelText={labelText}
+      semanticLabel={semanticLabel}
+      labelOffset={labelOffset}
+      labelClass={labelClass}
+      hitSize={hitSize}
     />
   );
 }
@@ -2010,6 +2473,9 @@ function Led({
   hitSize,
   interactive = false,
   activeThreshold,
+  onAssetId = CONTROLS.ledOn,
+  offAssetId = CONTROLS.ledOff,
+  exactSizeVariant,
 }: {
   x: number;
   y: number;
@@ -2020,6 +2486,9 @@ function Led({
   hitSize?: number;
   interactive?: boolean;
   activeThreshold?: number;
+  onAssetId?: NAMDesignControlAssetId;
+  offAssetId?: NAMDesignControlAssetId;
+  exactSizeVariant?: "panel-led";
 }) {
   const param = useBoundDesignParam(paramId);
   const active = param
@@ -2027,7 +2496,7 @@ function Led({
     : on;
   return (
     <AssetControl
-      assetId={active ? CONTROLS.ledOn : CONTROLS.ledOff}
+      assetId={active ? onAssetId : offAssetId}
       className={`led ${active ? "on" : "off"}`}
       x={x}
       y={y}
@@ -2039,6 +2508,7 @@ function Led({
       allowInteraction={interactive}
       visuallyDisabled={false}
       hardwareKind="led"
+      exactSizeVariant={exactSizeVariant}
     />
   );
 }
@@ -2051,8 +2521,12 @@ function Toggle({
   labelText,
   labelOffset,
   labelClass,
+  compact = false,
+  panelSized = false,
+  hitSize,
   allowInteraction = true,
   disabledReason,
+  assetId = CONTROLS.toggle,
 }: {
   x: number;
   y: number;
@@ -2061,13 +2535,17 @@ function Toggle({
   labelText?: string;
   labelOffset?: number;
   labelClass?: string;
+  compact?: boolean;
+  panelSized?: boolean;
+  hitSize?: number;
   allowInteraction?: boolean;
   disabledReason?: string;
+  assetId?: NAMDesignControlAssetId;
 }) {
   return (
     <AssetControl
-      assetId={CONTROLS.toggle}
-      className="toggle"
+      assetId={assetId}
+      className={`toggle${compact ? " compact-toggle" : ""}`}
       x={x}
       y={y}
       size={size}
@@ -2076,9 +2554,13 @@ function Toggle({
       labelText={labelText}
       labelOffset={labelOffset}
       labelClass={labelClass}
+      hitSize={hitSize}
       allowInteraction={allowInteraction}
       disabledReason={disabledReason}
       hardwareKind="toggle"
+      exactSizeVariant={
+        compact ? "mini-toggle" : panelSized ? "panel-toggle" : undefined
+      }
     />
   );
 }
@@ -2253,32 +2735,31 @@ function CompressorHPFReadout({
   );
 }
 
-function Washer({
+function CompressorIntensityReadout({
   x,
   y,
-  size,
-  labelText,
-  labelOffset,
-  labelClass,
+  w,
+  h,
+  paramId,
 }: {
   x: number;
   y: number;
-  size: number;
-  labelText?: string;
-  labelOffset?: number;
-  labelClass?: string;
+  w: number;
+  h: number;
+  paramId: string;
 }) {
+  const param = useBoundDesignParam(paramId);
+  const valueLabel = compressorIntensityDisplayLabel(param?.value ?? 0);
   return (
-    <AssetControl
-      assetId={CONTROLS.washer}
-      className="washer"
-      x={x}
-      y={y}
-      size={size}
-      labelText={labelText}
-      labelOffset={labelOffset}
-      labelClass={labelClass}
-    />
+    <div
+      className="compressor-hpf-readout compressor-intensity-readout"
+      style={{ left: `${x}%`, top: `${y}%`, width: `${w}%`, height: `${h}%` }}
+      data-param-id={paramId}
+      data-param-value={param?.value ?? 0}
+      aria-label={`Compressor ratio ${valueLabel}`}
+    >
+      <strong>{valueLabel}</strong>
+    </div>
   );
 }
 
@@ -2417,6 +2898,9 @@ function Fader({
   labelText,
   value = 52,
   className = "",
+  physicalGeometry,
+  showValueTooltip = false,
+  capAssetId = CONTROLS.slider,
 }: {
   x: number;
   y: number;
@@ -2425,13 +2909,25 @@ function Fader({
   labelText?: string;
   value?: number;
   className?: string;
+  physicalGeometry?: {
+    hitWidthPx: number;
+    hitHeightPx: number;
+    trackTopPx?: number;
+    trackWidthPx: number;
+    trackHeightPx: number;
+    capSizePx: number;
+  };
+  showValueTooltip?: boolean;
+  capAssetId?: NAMDesignControlAssetId;
 }) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
   const commitParamValue = useDesignParamCommit(param);
   const interactive = Boolean(param && context?.onParamChange);
   const faderRef = useRef<HTMLDivElement | null>(null);
+  const trackRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number } | null>(null);
+  const [feedbackVisible, setFeedbackVisible] = useState(false);
   const pct = param ? normalizeParam(param) : undefined;
   const visualValue = pct === undefined ? value : (1 - pct) * 100;
   const valueLabel = param ? formatParamValue(param) : undefined;
@@ -2439,7 +2935,9 @@ function Fader({
     (event: PointerEvent<HTMLDivElement>) => {
       if (!param) return;
       const rect =
-        faderRef.current?.getBoundingClientRect() ??
+        (physicalGeometry
+          ? trackRef.current?.getBoundingClientRect()
+          : faderRef.current?.getBoundingClientRect()) ??
         event.currentTarget.getBoundingClientRect();
       const nextPct = clampNumber(
         1 - (event.clientY - rect.top) / Math.max(rect.height, 1),
@@ -2448,7 +2946,7 @@ function Fader({
       );
       commitParamValue(denormalizeParamValue(param, nextPct));
     },
-    [commitParamValue, param],
+    [commitParamValue, param, physicalGeometry],
   );
   const dragToValue = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -2461,12 +2959,21 @@ function Fader({
   return (
     <>
       <div
-        className={`fader ${className} ${interactive ? "interactive" : ""}`.trim()}
+        className={`fader ${className} ${physicalGeometry ? "physical-fader" : ""} ${interactive ? "interactive" : ""}`.trim()}
         style={percentStyle({
           x: `${x}%`,
           y: `${y}%`,
-          h: `${h}%`,
+          h: physicalGeometry ? `${physicalGeometry.hitHeightPx}px` : `${h}%`,
           value: `${visualValue}%`,
+          ...(physicalGeometry
+            ? {
+                "fader-hit-width": `${physicalGeometry.hitWidthPx}px`,
+                "fader-track-top": `${physicalGeometry.trackTopPx ?? 0}px`,
+                "fader-track-width": `${physicalGeometry.trackWidthPx}px`,
+                "fader-track-height": `${physicalGeometry.trackHeightPx}px`,
+                "fader-cap-size": `${physicalGeometry.capSizePx}px`,
+              }
+            : {}),
         })}
         data-param-id={param?.id}
         data-param-value={param?.value}
@@ -2477,7 +2984,9 @@ function Fader({
         aria-valuemax={param?.max}
         aria-valuenow={param?.value}
         aria-valuetext={valueLabel}
-        title={param ? `${param.label}: ${valueLabel}` : undefined}
+        title={
+          param && !showValueTooltip ? `${param.label}: ${valueLabel}` : undefined
+        }
         ref={faderRef}
         onPointerDown={(event) => {
           if (!interactive || !param || event.button !== 0) return;
@@ -2485,6 +2994,7 @@ function Fader({
           event.stopPropagation();
           pointerToValue(event);
           dragRef.current = { pointerId: event.pointerId };
+          if (showValueTooltip) setFeedbackVisible(true);
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
@@ -2501,6 +3011,18 @@ function Fader({
             event.currentTarget.releasePointerCapture(event.pointerId);
           }
         }}
+        onPointerEnter={() => {
+          if (showValueTooltip && interactive) setFeedbackVisible(true);
+        }}
+        onPointerLeave={() => {
+          if (showValueTooltip && !dragRef.current) setFeedbackVisible(false);
+        }}
+        onFocus={() => {
+          if (showValueTooltip && interactive) setFeedbackVisible(true);
+        }}
+        onBlur={() => {
+          if (showValueTooltip) setFeedbackVisible(false);
+        }}
         onPointerCancel={(event) => {
           if (dragRef.current?.pointerId === event.pointerId)
             dragRef.current = null;
@@ -2510,14 +3032,17 @@ function Fader({
         }}
         onWheel={(event) => {
           if (!interactive || !param) return;
-          event.preventDefault();
-          event.stopPropagation();
-          const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
+          const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+          if (gesture.preventDefault) event.preventDefault();
+          if (gesture.stopPropagation) event.stopPropagation();
+          if (gesture.operation !== "adjust") return;
+          const stepCount = getParameterWheelStepCount(gesture);
+          if (stepCount === 0) return;
           commitParamValue(
             offsetParamValue(
               param,
               param.value,
-              fine * (event.deltaY > 0 ? -1 : 1),
+              stepCount,
             ),
           );
         }}
@@ -2551,8 +3076,14 @@ function Fader({
           }
         }}
       >
-        <div className="fader-track" />
-        <DesignAssetImage assetId={CONTROLS.slider} className="fader-cap" />
+        <div className="fader-track" ref={trackRef}>
+          {physicalGeometry ? (
+            <DesignAssetImage assetId={capAssetId} className="fader-cap" />
+          ) : null}
+        </div>
+        {!physicalGeometry ? (
+          <DesignAssetImage assetId={capAssetId} className="fader-cap" />
+        ) : null}
       </div>
       {labelText && (
         <Label
@@ -2563,6 +3094,178 @@ function Fader({
           {labelText}
         </Label>
       )}
+      {showValueTooltip && param ? (
+        <NAMRackControlTooltip
+          anchor={faderRef.current}
+          open={feedbackVisible}
+          label={param.label}
+          value={valueLabel}
+          kind="value"
+        />
+      ) : null}
+    </>
+  );
+}
+
+function HorizontalMiniFader({
+  x,
+  y,
+  w,
+  h,
+  paramId,
+  semanticLabel,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paramId: string;
+  semanticLabel: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  const context = useContext(DesignParamContext);
+  const commitParamValue = useDesignParamCommit(param);
+  const hitRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ pointerId: number } | null>(null);
+  const activityRef = useRef({ hovered: false, focused: false, dragging: false });
+  const [feedbackVisible, setFeedbackVisible] = useState(false);
+  const interactive = Boolean(param && context?.onParamChange);
+  const pct = param ? normalizeParam(param) : 0.5;
+  const valueLabel = param ? formatParamValue(param) : "0.0 dB";
+
+  const updateFeedback = useCallback(
+    (activity: keyof typeof activityRef.current, active: boolean) => {
+      activityRef.current[activity] = active;
+      setFeedbackVisible(Object.values(activityRef.current).some(Boolean));
+    },
+    [],
+  );
+  const pointerToValue = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (!param) return;
+      const rect =
+        hitRef.current?.getBoundingClientRect() ??
+        event.currentTarget.getBoundingClientRect();
+      const nextPct = clampNumber(
+        (event.clientX - rect.left) / Math.max(rect.width, 1),
+        0,
+        1,
+      );
+      commitParamValue(denormalizeParamValue(param, nextPct));
+    },
+    [commitParamValue, param],
+  );
+
+  return (
+    <>
+      <div
+        ref={hitRef}
+        className={`horizontal-mini-fader ${interactive ? "interactive" : ""}`.trim()}
+        style={
+          {
+            left: `${x - w / 2}%`,
+            top: `${y - h / 2}%`,
+            width: `${w}%`,
+            height: `${h}%`,
+            "--horizontal-fader-track-inset": `${NAM_EQ_BOOST_FACEPLATE_LAYOUT.faderTrackInsetPercent}%`,
+            "--horizontal-fader-value": `${NAM_EQ_BOOST_FACEPLATE_LAYOUT.faderCapMinPercent + pct * NAM_EQ_BOOST_FACEPLATE_LAYOUT.faderCapTravelPercent}%`,
+          } as NativeStyle
+        }
+        data-param-id={param?.id ?? paramId}
+        data-param-value={param?.value}
+        role={interactive ? "slider" : undefined}
+        tabIndex={interactive ? 0 : undefined}
+        aria-label={param?.label ?? semanticLabel}
+        aria-valuemin={param?.min}
+        aria-valuemax={param?.max}
+        aria-valuenow={param?.value}
+        aria-valuetext={valueLabel}
+        title={param ? `${semanticLabel}: ${valueLabel}` : semanticLabel}
+        onPointerEnter={() => updateFeedback("hovered", true)}
+        onPointerLeave={() => updateFeedback("hovered", false)}
+        onFocus={(event) => {
+          updateFeedback("focused", true);
+          revealControlInNearestStageScroller(event.currentTarget);
+        }}
+        onBlur={() => updateFeedback("focused", false)}
+        onPointerDown={(event) => {
+          if (!interactive || !param || event.button !== 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          pointerToValue(event);
+          dragRef.current = { pointerId: event.pointerId };
+          updateFeedback("dragging", true);
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (dragRef.current?.pointerId !== event.pointerId) return;
+          event.stopPropagation();
+          pointerToValue(event);
+        }}
+        onPointerUp={(event) => {
+          if (dragRef.current?.pointerId === event.pointerId) {
+            pointerToValue(event);
+            dragRef.current = null;
+            updateFeedback("dragging", false);
+          }
+          if (event.currentTarget.hasPointerCapture(event.pointerId))
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onPointerCancel={(event) => {
+          if (dragRef.current?.pointerId === event.pointerId) {
+            dragRef.current = null;
+            updateFeedback("dragging", false);
+          }
+          if (event.currentTarget.hasPointerCapture(event.pointerId))
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onWheel={(event) => {
+          if (!interactive || !param) return;
+          const gesture = resolveProfiledParameterWheel(event.nativeEvent, "control");
+          if (gesture.preventDefault) event.preventDefault();
+          if (gesture.stopPropagation) event.stopPropagation();
+          if (gesture.operation !== "adjust") return;
+          const steps = getParameterWheelStepCount(gesture);
+          if (steps !== 0)
+            commitParamValue(offsetParamValue(param, param.value, steps));
+        }}
+        onDoubleClick={(event) => {
+          if (!interactive || !param) return;
+          event.preventDefault();
+          event.stopPropagation();
+          commitParamValue(param.defaultValue ?? 0);
+        }}
+        onKeyDown={(event) => {
+          if (!interactive || !param) return;
+          const fine = event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
+          if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+            event.preventDefault();
+            commitParamValue(offsetParamValue(param, param.value, fine));
+          } else if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+            event.preventDefault();
+            commitParamValue(offsetParamValue(param, param.value, -fine));
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            commitParamValue(param.min);
+          } else if (event.key === "End") {
+            event.preventDefault();
+            commitParamValue(param.max);
+          }
+        }}
+      >
+        <span className="horizontal-mini-fader-track" aria-hidden="true" />
+        <DesignAssetImage
+          assetId={CONTROLS.slider}
+          className="horizontal-mini-fader-cap"
+        />
+      </div>
+      <NAMRackControlTooltip
+        anchor={hitRef.current}
+        open={feedbackVisible && interactive}
+        label={semanticLabel}
+        value={valueLabel}
+        kind="value"
+      />
     </>
   );
 }
@@ -2635,6 +3338,7 @@ function Stompbox({
   bodyFit = "contain",
   title,
   titleY,
+  className = "",
   children,
 }: {
   box: DesignBox;
@@ -2644,6 +3348,7 @@ function Stompbox({
   bodyFit?: "contain" | "fill";
   title: string;
   titleY: number;
+  className?: string;
   children: ReactNode;
 }) {
   return (
@@ -2652,7 +3357,7 @@ function Stompbox({
       name={name}
       body={body ?? BODIES[tone ?? "dark"]}
       bodyFit={bodyFit}
-      className="stompbox"
+      className={`stompbox ${className}`.trim()}
       title={title}
       titleY={titleY}
     >
@@ -2703,9 +3408,14 @@ function TopShell({
   compareSlot = "A",
   inputLevelDb = -90,
   outputLevelDb = -90,
-  calibrationLabel = "No data",
-  calibrationStatus = "unavailable",
-  calibrationOpen = false,
+  inputLeftLevelDb,
+  inputRightLevelDb,
+  outputLeftLevelDb,
+  outputRightLevelDb,
+  inputChannelCount = 1,
+  oversamplingFactor = 4,
+  oversamplingBusy = false,
+  onOversamplingFactorChange,
   onEnterSection,
   onOpenLibrary,
   onPreviousPreset,
@@ -2715,7 +3425,6 @@ function TopShell({
   onSaveTone,
   onOpenPresetManager,
   onRecallCompare,
-  onOpenCalibration,
   utilityControls,
 }: {
   active: string;
@@ -2727,9 +3436,14 @@ function TopShell({
   compareSlot?: "A" | "B";
   inputLevelDb?: number;
   outputLevelDb?: number;
-  calibrationLabel?: string;
-  calibrationStatus?: string;
-  calibrationOpen?: boolean;
+  inputLeftLevelDb?: number;
+  inputRightLevelDb?: number;
+  outputLeftLevelDb?: number;
+  outputRightLevelDb?: number;
+  inputChannelCount?: number;
+  oversamplingFactor?: NAMRackOversamplingFactor;
+  oversamplingBusy?: boolean;
+  onOversamplingFactorChange?: (factor: NAMRackOversamplingFactor) => void;
   onEnterSection?: (sectionId: DesignSectionId) => void;
   onOpenLibrary?: () => void;
   onPreviousPreset?: () => void;
@@ -2739,7 +3453,6 @@ function TopShell({
   onSaveTone?: () => void;
   onOpenPresetManager?: () => void;
   onRecallCompare?: (slot: "A" | "B") => void;
-  onOpenCalibration?: () => void;
   utilityControls?: NAMRackDesignUtilityControls;
 }) {
   const displayPresetName = presetName.replace(/^Current Capture\s*·\s*/i, "");
@@ -2772,38 +3485,23 @@ function TopShell({
   ];
   return (
     <>
-      <div className="global-strip">
-        <div className="premium-brand" aria-label="OpenStudio NAM Rack">
-          <span>OpenStudio</span>
-          <strong>NAM RACK</strong>
-          <em>Neural guitar suite</em>
-        </div>
-        {onOpenCalibration && (
-          <button
-            type="button"
-            className="premium-calibration-launch"
-            data-qa="nam-premium-calibration"
-            data-status={calibrationStatus}
-            data-active={calibrationOpen}
-            onClick={onOpenCalibration}
-            title="Open NAM capture level calibration"
-            aria-controls="nam-calibration-dialog"
-            aria-expanded={calibrationOpen}
-            aria-haspopup="dialog"
-          >
-            <Gauge aria-hidden="true" />
-            <span>CAL</span>
-            <strong>{calibrationLabel}</strong>
-          </button>
-        )}
-        <div className="global-block left" data-qa="nam-input-control-bay">
+      <div
+        className="nam-header-row flex min-w-0 items-center"
+        data-qa="nam-header-row"
+      >
+        <div
+          className="global-block left flex min-w-max shrink-0 items-center justify-start"
+          data-qa="nam-input-control-bay"
+        >
           <CompactLevelMeter
             meterId="input"
             label="Pre-trim input level"
             levelDb={inputLevelDb}
+            channelLevelsDb={[inputLeftLevelDb, inputRightLevelDb]}
+            channelCount={inputChannelCount >= 2 ? 2 : 1}
           />
           <MiniParam
-            name="INPUT TRIM"
+            name="INPUT"
             value="0.0 dB"
             kind="black"
             rot={32}
@@ -2817,7 +3515,7 @@ function TopShell({
             paramId="gateThresholdDb"
           />
         </div>
-        <div className="preset-area">
+        <div className="preset-area flex min-w-0 flex-1 items-center">
           {utilityControls ? (
             <PremiumHeaderUtility controls={utilityControls} />
           ) : null}
@@ -2825,7 +3523,7 @@ function TopShell({
             <i />
             {previewText}
           </div>
-          <div className="preset-console">
+          <div className="preset-console order-1 min-w-0 flex-1">
             <button
               type="button"
               className="preset-arrow"
@@ -2919,7 +3617,11 @@ function TopShell({
             {libraryActive ? "Library open" : "Browse captures"}
           </button>
         </div>
-        <div className="global-block right" data-qa="nam-output-control-bay">
+        <div
+          className="global-block right flex min-w-max shrink-0 items-center justify-end"
+          data-qa="nam-output-control-bay"
+        >
+          {utilityControls ? <PremiumInstrumentProfileSwitch /> : null}
           <MiniParam
             name="OUTPUT"
             value="-1.3 dB"
@@ -2927,10 +3629,19 @@ function TopShell({
             rot={35}
             paramId="outputTrimDb"
           />
+          {onOversamplingFactorChange ? (
+            <PremiumOversamplingSelector
+              factor={oversamplingFactor}
+              busy={oversamplingBusy}
+              onFactorChange={onOversamplingFactorChange}
+            />
+          ) : null}
           <CompactLevelMeter
             meterId="output"
             label="Output level"
             levelDb={outputLevelDb}
+            channelLevelsDb={[outputLeftLevelDb, outputRightLevelDb]}
+            channelCount={2}
           />
         </div>
       </div>
@@ -2957,6 +3668,51 @@ function TopShell({
         ))}
       </div>
     </>
+  );
+}
+
+function PremiumOversamplingSelector({
+  factor,
+  busy,
+  onFactorChange,
+}: {
+  factor: NAMRackOversamplingFactor;
+  busy: boolean;
+  onFactorChange: (factor: NAMRackOversamplingFactor) => void;
+}) {
+  return (
+    <div
+      className="premium-oversampling-selector"
+      data-busy={busy || undefined}
+      role="radiogroup"
+      aria-label="Drive oversampling for all NAM Rack instances"
+      aria-busy={busy}
+      title={`Drive oversampling: Precision Drive and Distortion. This application-wide setting applies to every NAM Rack instance. Higher values reduce drive-stage aliasing and increase CPU use. Current setting: ${factor}x.`}
+    >
+      <strong aria-hidden="true">OS</strong>
+      <div className="premium-oversampling-track">
+        {([8, 4, 2] as const).map((option) => (
+          <button
+            key={option}
+            type="button"
+            data-qa={`nam-oversampling-${option}x`}
+            data-active={factor === option}
+            role="radio"
+            aria-checked={factor === option}
+            aria-label={`${option}x oversampling`}
+            disabled={busy}
+            title={`Use ${option}x internal oversampling${option === 4 ? " (recommended)" : ""}`}
+            onClick={() => onFactorChange(option)}
+          >
+            <i aria-hidden="true" />
+            <span>{option}x</span>
+          </button>
+        ))}
+      </div>
+      <span className="premium-oversampling-stage-label" aria-hidden="true">
+        DRIVE
+      </span>
+    </div>
   );
 }
 
@@ -3019,20 +3775,42 @@ function CompactLevelMeter({
   meterId,
   label,
   levelDb,
+  channelLevelsDb,
+  channelCount,
 }: {
   meterId: "input" | "output";
   label: string;
   levelDb: number;
+  channelLevelsDb: readonly [number | undefined, number | undefined];
+  channelCount: 1 | 2;
 }) {
-  const safeDb = Number.isFinite(levelDb) ? clamp(levelDb, -90, 6) : -90;
-  const levelRatio = namMeterFraction(safeDb);
+  const safeLinkedDb = Number.isFinite(levelDb) ? clamp(levelDb, -90, 6) : -90;
+  const safeChannelLevels = channelLevelsDb
+    .slice(0, channelCount)
+    .map((channelLevelDb) =>
+      Number.isFinite(channelLevelDb)
+        ? clamp(channelLevelDb as number, -90, 6)
+        : safeLinkedDb,
+    );
+  // The numeric readout follows exactly the lanes being shown. In particular,
+  // a configured mono input must not display an unrelated hidden bus-channel
+  // peak from the legacy linked maximum.
+  const displayDb = Math.max(...safeChannelLevels);
+  const levelRatio = namMeterFraction(displayDb);
+  const meterChannels = channelCount === 1
+    ? (["mono"] as const)
+    : (["left", "right"] as const);
+  const levelDescription = channelCount === 1
+    ? `mono peak ${safeChannelLevels[0].toFixed(1)} dBFS`
+    : `left ${safeChannelLevels[0].toFixed(1)} dBFS, right ${safeChannelLevels[1].toFixed(1)} dBFS`;
   return (
     <div
       className="premium-level-meter"
       data-qa={`nam-${meterId}-peak-meter`}
       data-meter-id={meterId}
-      data-clip={safeDb >= 0}
-      data-meter-mode="linked-peak"
+      data-clip={safeChannelLevels.some((channelLevelDb) => channelLevelDb >= 0)}
+      data-channel-count={channelCount}
+      data-meter-mode={channelCount === 1 ? "mono-peak" : "stereo-peak"}
       style={
         {
           "--premium-meter-ratio": levelRatio,
@@ -3040,12 +3818,30 @@ function CompactLevelMeter({
           "--premium-meter-inset": `${(1 - levelRatio) * 100}%`,
         } as NativeStyle
       }
-      title={`${label}: linked peak ${safeDb.toFixed(1)} dBFS`}
-      aria-label={`${label}: linked peak ${safeDb.toFixed(1)} dBFS`}
+      title={`${label}: ${levelDescription}`}
+      aria-label={`${label}: ${levelDescription}`}
     >
       <span />
-      <i />
-      <strong>{safeDb <= -71.9 ? "\u2212\u221e" : safeDb.toFixed(1)}</strong>
+      {meterChannels.map((channel, index) => {
+        const channelDb = safeChannelLevels[index];
+        const channelRatio = namMeterFraction(channelDb);
+        return (
+          <i
+            key={channel}
+            data-meter-channel={channel}
+            data-clip={channelDb >= 0}
+            aria-hidden="true"
+            style={
+              {
+                "--premium-meter-ratio": channelRatio,
+                "--premium-meter-pct": `${channelRatio * 100}%`,
+                "--premium-meter-inset": `${(1 - channelRatio) * 100}%`,
+              } as NativeStyle
+            }
+          />
+        );
+      })}
+      <strong>{displayDb <= -71.9 ? "\u2212\u221e" : displayDb.toFixed(1)}</strong>
     </div>
   );
 }
@@ -3085,17 +3881,6 @@ function MiniParam({
       <strong>{param ? formatParamValue(param) : value}</strong>
     </div>
   );
-}
-
-function BoundParamValue({
-  paramId,
-  fallback,
-}: {
-  paramId: string;
-  fallback: string;
-}) {
-  const param = useBoundDesignParam(paramId);
-  return <>{param ? formatParamValue(param) : fallback}</>;
 }
 
 function BoundCabRoomPercent({
@@ -3156,16 +3941,70 @@ function CabRoomPowerSwitch() {
   );
 }
 
+function PremiumInstrumentProfileSwitch() {
+  const instrumentProfileParam = useBoundDesignParam("instrumentProfile");
+  const commitInstrumentProfile = useDesignParamCommit(instrumentProfileParam);
+  const isBassProfile = (instrumentProfileParam?.value ?? 0) >= 0.5;
+  const activeProfile = isBassProfile ? "Bass" : "Guitar";
+  const inactiveProfile = isBassProfile ? "Guitar" : "Bass";
+
+  return (
+    <button
+      type="button"
+      className="premium-output-instrument-switch"
+      data-qa="nam-instrument-profile"
+      data-param-id="instrumentProfile"
+      data-state={isBassProfile ? "bass" : "guitar"}
+      aria-label={`${activeProfile} instrument profile. Changes component voicing and compatible library filtering without overwriting controls.`}
+      disabled={!instrumentProfileParam}
+      title={`${activeProfile} instrument profile. Click to switch to ${inactiveProfile}.`}
+      onClick={() => {
+        if (!instrumentProfileParam) {
+          return;
+        }
+
+        commitInstrumentProfile(isBassProfile ? 0 : 1);
+      }}
+    >
+      <span className="premium-output-instrument-switch-title global-label">
+        Inst
+      </span>
+      <span
+        className="premium-output-instrument-switch-toggle"
+        aria-hidden="true"
+      >
+        <span className="premium-output-instrument-switch-toggle-labels">
+          <span
+            className="premium-output-instrument-switch-toggle-label"
+            data-label="gtr"
+          >
+            G
+          </span>
+          <span
+            className="premium-output-instrument-switch-toggle-label"
+            data-label="bass"
+          >
+            B
+          </span>
+        </span>
+        <span className="premium-output-instrument-switch-toggle-thumb" />
+      </span>
+      <strong className="premium-output-instrument-switch-value">
+        {activeProfile}
+      </strong>
+    </button>
+  );
+}
+
 function PremiumHeaderUtility({
   controls,
 }: {
   controls: NAMRackDesignUtilityControls;
 }) {
-  const instrumentProfileParam = useBoundDesignParam("instrumentProfile");
   const doublerEnabledParam = useBoundDesignParam("cabDoublerEnabled");
   const doublerMixParam = useBoundDesignParam("cabDoublerMix");
+  const doublerDelayParam = useBoundDesignParam("cabDoublerDelayMs");
   const doublerSpreadParam = useBoundDesignParam("cabDoublerSpread");
-  const commitInstrumentProfile = useDesignParamCommit(instrumentProfileParam);
   const commitDoublerEnabled = useDesignParamCommit(doublerEnabledParam);
   const doublerActive = Boolean(
     doublerEnabledParam &&
@@ -3176,59 +4015,21 @@ function PremiumHeaderUtility({
   const doublerMixLabel = doublerMixParam
     ? `${Math.round(normalizeParam(doublerMixParam) * 100)}%`
     : "--";
+  const doublerDelayLabel = doublerDelayParam
+    ? formatParamValue(doublerDelayParam)
+    : "4.5 ms";
   const doublerSpreadLabel = doublerSpreadParam
     ? `${Math.round(normalizeParam(doublerSpreadParam) * 100)}%`
     : "--";
   const pausedReason =
-    "Doubler is paused while the DAW track route is stereo. Its Mix and Spread are preserved.";
+    "Doubler is paused while the DAW track route is stereo. Its Mix, Delay, and Spread are preserved.";
 
   return (
     <div
-      className="premium-routing-utility"
+      className="premium-routing-utility order-2 shrink-0"
       data-qa="nam-header-utility"
-      aria-label="Instrument profile and mono widening"
+      aria-label="Doubler utility"
     >
-      <section
-        className="premium-instrument-choice"
-        data-param-id="instrumentProfile"
-        data-qa="nam-instrument-profile"
-        aria-label="Instrument profile"
-      >
-        <span className="premium-utility-heading" aria-hidden="true">
-          <span className="instrument-heading-long">Instrument</span>
-          <span className="instrument-heading-short">Instr</span>
-        </span>
-        <div role="group" aria-label="Instrument profile selection">
-          {([0, 1] as const).map((profile) => {
-            const label = profile === 0 ? "Guitar" : "Bass";
-            const active =
-              (instrumentProfileParam?.value ?? controls.instrumentProfile) >=
-              0.5
-                ? profile === 1
-                : profile === 0;
-            return (
-              <button
-                key={profile}
-                type="button"
-                data-active={active}
-                aria-pressed={active}
-                aria-label={`${label} instrument profile. Changes component voicing, library filtering, and starting points.`}
-                disabled={!instrumentProfileParam}
-                title={`${label} component voicing and library profile`}
-                onClick={() => commitInstrumentProfile(profile)}
-              >
-                <span className="instrument-label-long" aria-hidden="true">
-                  {label}
-                </span>
-                <span className="instrument-label-short" aria-hidden="true">
-                  {profile === 0 ? "GTR" : "BASS"}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <small>Component voicing, library &amp; starting points</small>
-      </section>
       <section
         className="premium-doubler-utility"
         data-active={doublerActive}
@@ -3236,29 +4037,31 @@ function PremiumHeaderUtility({
         data-paused={doublerPaused}
         aria-label="Doubler"
       >
-        <span className="premium-utility-heading">Doubler</span>
-        <button
-          type="button"
-          className="premium-doubler-power"
-          data-active={doublerActive}
-          aria-pressed={doublerActive}
-          disabled={!doublerEnabledParam}
-          title={
-            doublerPaused
-              ? "Doubler is enabled but paused while the DAW track route is stereo. Its Mix is preserved."
-              : doublerActive
-                ? "Bypass Doubler"
-                : "Enable Doubler"
-          }
-          onClick={() =>
-            doublerEnabledParam && commitDoublerEnabled(doublerActive ? 0 : 1)
-          }
-        >
-          <Power aria-hidden="true" />
-          <strong>
-            {doublerPaused ? "Paused" : doublerActive ? "On" : "Off"}
-          </strong>
-        </button>
+        <div className="premium-doubler-power-group">
+          <span className="premium-utility-heading">Doubler</span>
+          <button
+            type="button"
+            className="premium-doubler-power"
+            data-active={doublerActive}
+            aria-pressed={doublerActive}
+            disabled={!doublerEnabledParam}
+            title={
+              doublerPaused
+                ? "Doubler is enabled but paused while the DAW track route is stereo. Its Mix, Delay, and Spread are preserved."
+                : doublerActive
+                  ? "Bypass Doubler"
+                  : "Enable Doubler"
+            }
+            onClick={() =>
+              doublerEnabledParam && commitDoublerEnabled(doublerActive ? 0 : 1)
+            }
+          >
+            <Power aria-hidden="true" />
+            <strong>
+              {doublerPaused ? "Paused" : doublerActive ? "On" : "Off"}
+            </strong>
+          </button>
+        </div>
         <div className="premium-utility-rotary" data-utility-rotary="mix">
           <span>Mix</span>
           <div className="premium-utility-knob-well">
@@ -3275,6 +4078,23 @@ function PremiumHeaderUtility({
             />
           </div>
           <strong>{doublerMixLabel}</strong>
+        </div>
+        <div className="premium-utility-rotary" data-utility-rotary="delay">
+          <span>Delay</span>
+          <div className="premium-utility-knob-well">
+            <Knob
+              kind="black"
+              x={50}
+              y={50}
+              size={92}
+              rot={-54}
+              paramId="cabDoublerDelayMs"
+              hitSize={96}
+              allowInteraction={!doublerPaused}
+              disabledReason={doublerPaused ? pausedReason : undefined}
+            />
+          </div>
+          <strong>{doublerDelayLabel}</strong>
         </div>
         <div
           className="premium-utility-rotary premium-utility-rotary-spread"
@@ -3382,12 +4202,16 @@ function Footer({
   dspAlert = false,
   tunerOpen = false,
   signalChainOpen = false,
+  calibrationLabel = "No data",
+  calibrationStatus = "unavailable",
+  calibrationOpen = false,
   onOpenTuner,
   onOpenPedalboard,
   onOpenSettings,
   onOpenAdvanced,
   onCycleSize,
   onMaxSize,
+  onOpenCalibration,
 }: {
   rackSizePercent: number;
   tempo?: number;
@@ -3401,12 +4225,16 @@ function Footer({
   dspAlert?: boolean;
   tunerOpen?: boolean;
   signalChainOpen?: boolean;
+  calibrationLabel?: string;
+  calibrationStatus?: string;
+  calibrationOpen?: boolean;
   onOpenTuner?: () => void;
   onOpenPedalboard?: () => void;
   onOpenSettings?: () => void;
   onOpenAdvanced?: () => void;
   onCycleSize?: () => void;
   onMaxSize?: () => void;
+  onOpenCalibration?: () => void;
 }) {
   const rackSizeLabel =
     rackSizePercent >= 220
@@ -3481,6 +4309,25 @@ function Footer({
       </span>
       <span>{timeSignatureLabel}</span>
       <i />
+      {onOpenCalibration && (
+        <button
+          type="button"
+          className="premium-calibration-launch"
+          data-qa="nam-premium-calibration"
+          data-status={calibrationStatus}
+          data-active={calibrationOpen}
+          onClick={onOpenCalibration}
+          title="Open NAM capture level calibration"
+          aria-controls="nam-calibration-dialog"
+          aria-expanded={calibrationOpen}
+          aria-haspopup="dialog"
+        >
+          <Gauge aria-hidden="true" />
+          <span>CAL</span>
+          <strong>{calibrationLabel}</strong>
+        </button>
+      )}
+      <i />
       <span className="footer-runtime">
         {sampleRateLabel !== "--" && <strong>{sampleRateLabel}</strong>}
         {bufferLabel !== "--" && <strong>{bufferLabel}</strong>}
@@ -3523,7 +4370,9 @@ function AmpCaptureSelector({
   missing,
   onBrowse,
   onBrowseLocal,
+  onClear,
   recovery,
+  faceplateStyle,
 }: {
   ampLabel: string;
   hasCapture: boolean;
@@ -3531,7 +4380,9 @@ function AmpCaptureSelector({
   missing?: boolean;
   onBrowse?: () => void;
   onBrowseLocal?: () => void;
+  onClear?: () => void;
   recovery?: NAMRackDesignRecovery;
+  faceplateStyle?: CSSProperties;
 }) {
   const libraryActionLabel = hasCapture || missing ? "Replace" : "Library";
   const displayLabel =
@@ -3540,18 +4391,22 @@ function AmpCaptureSelector({
     ? "File missing"
     : hasCapture
       ? includesCab
-        ? "Full-rig · cab embedded"
+        ? "Full-rig \u00b7 cab embedded"
         : "Amp capture"
       : "Empty capture slot";
   return (
     <div
       className="amp-capture-nameplate"
+      style={faceplateStyle}
       data-qa="nam-amp-capture-nameplate"
       data-state={missing ? "missing" : hasCapture ? "loaded" : "empty"}
       data-includes-cab={includesCab}
       role="group"
       aria-label={`${stateLabel}. Current: ${displayLabel}`}
     >
+      <span className="amp-capture-brand">
+        OpenStudio <small>NAM WRAPPER</small>
+      </span>
       <span className="amp-capture-state">
         <i aria-hidden="true" />
         {stateLabel}
@@ -3639,6 +4494,22 @@ function AmpCaptureSelector({
                 Local
               </button>
             ) : null}
+            {hasCapture && onClear ? (
+              <button
+                type="button"
+                data-qa="nam-amp-capture-unload"
+                data-rack-action="unload-amp-capture"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onClear();
+                }}
+                title="Unload the current Amp NAM capture"
+                aria-label={`Unload Amp NAM capture. Current: ${displayLabel}`}
+              >
+                <X aria-hidden="true" />
+                Unload
+              </button>
+            ) : null}
           </>
         )}
       </span>
@@ -3652,9 +4523,13 @@ function PreFxStage({
   compressorGainReductionDb?: number;
 }) {
   const octaverParam = useBoundDesignParam("octaverEnabled");
+  const instrumentProfile = useBoundDesignParam("instrumentProfile");
   const octaverLabel = octaverParam?.label ?? "Octaver";
   const octaverHardwareTitle =
     octaverLabel === "Stereo Poly Octaver" ? "POLY OCTAVER" : "OCTAVER";
+  const eqBoostLayout = NAM_EQ_BOOST_FACEPLATE_LAYOUT;
+  const driveLayout = NAM_PRECISION_DRIVE_FACEPLATE_LAYOUT;
+  const preEqBands = namPreEqBandsForProfile(instrumentProfile?.value);
   return (
     <>
       <Stompbox
@@ -3737,6 +4612,14 @@ function PreFxStage({
           {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.meter}
           gainReductionDb={compressorGainReductionDb}
         />
+        <CompressorIntensityReadout
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.intensityReadout}
+          paramId="compressorIntensity"
+        />
+        <Toggle
+          {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.intensityToggle}
+          paramId="compressorIntensity"
+        />
         <Led
           {...NAM_COMPRESSOR_FACEPLATE_LAYOUT.led}
           on
@@ -3748,84 +4631,6 @@ function PreFxStage({
           showStateLabel
           stateLabelY={NAM_COMPRESSOR_FACEPLATE_LAYOUT.stateLabelY}
           value="Compressor on / off"
-        />
-      </Stompbox>
-      <Stompbox
-        box={NAM_PRE_SIGNAL_LAYOUT.tapeEcho}
-        name="tape-echo"
-        body={BODIES.darkWide}
-        title="TAPE ECHO"
-        titleY={68.5}
-      >
-        <Display x={23} y={11.5} w={54} h={8.8} className="tone-display">
-          <BoundParamValue paramId="tapeEchoTimeMs" fallback="360 ms" />
-        </Display>
-        <Knob
-          kind="black"
-          x={23}
-          y={31.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
-          rot={-30}
-          paramId="tapeEchoTimeMs"
-          labelText="TIME"
-          labelOffset={11.8}
-        />
-        <Knob
-          kind="black"
-          x={50}
-          y={31.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
-          rot={0}
-          paramId="tapeEchoFeedback"
-          labelText="FDBK"
-          labelOffset={11.8}
-        />
-        <Knob
-          kind="black"
-          x={77}
-          y={31.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
-          rot={30}
-          paramId="tapeEchoMix"
-          labelText="LEVEL"
-          labelOffset={11.8}
-        />
-        <Knob
-          kind="black"
-          x={34}
-          y={52.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
-          rot={-12}
-          paramId="tapeEchoMod"
-          labelText="MOD"
-          labelOffset={10.2}
-        />
-        <Knob
-          kind="black"
-          x={66}
-          y={52.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.knobSize}
-          rot={16}
-          paramId="tapeEchoTone"
-          labelText="TONE"
-          labelOffset={10.2}
-        />
-        <Led
-          x={50}
-          y={74.3}
-          on
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.ledSize}
-          paramId="tapeEchoEnabled"
-        />
-        <Foot
-          x={50}
-          y={88.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.tapeEcho.footSize}
-          paramId="tapeEchoEnabled"
-          hitSize={20}
-          showStateLabel
-          stateLabelY={79.8}
-          value="Tape Echo on / off"
         />
       </Stompbox>
       <Stompbox
@@ -3884,17 +4689,93 @@ function PreFxStage({
         />
       </Stompbox>
       <Stompbox
+        box={NAM_PRE_SIGNAL_LAYOUT.eqBoost}
+        name="eq-boost"
+        body={BODIES.whiteWide}
+        bodyFit="fill"
+        className="eq-boost"
+        title="EQ BOOST"
+        titleY={eqBoostLayout.title.y}
+      >
+        {preEqBands.map((band, index) => (
+          <span key={band.paramId} className="combined-pre-eq-band">
+            <Label
+              x={eqBoostLayout.bandLabelX}
+              y={eqBoostLayout.bandYs[index]}
+              className="combined-pre-eq-band-label combined-pre-eq-dark-label"
+            >
+              {band.faceplateLabel}
+            </Label>
+            <HorizontalMiniFader
+              x={eqBoostLayout.faderX}
+              y={eqBoostLayout.bandYs[index]}
+              w={eqBoostLayout.faderWidth}
+              h={eqBoostLayout.faderHeight}
+              paramId={band.paramId}
+              semanticLabel={`${band.accessibleLabel} EQ Boost`}
+            />
+          </span>
+        ))}
+        <span
+          className="combined-pre-eq-filter-icon combined-pre-eq-filter-icon-hpf"
+          style={{
+            left: `${eqBoostLayout.hpf.x}%`,
+            top: `${eqBoostLayout.hpf.iconY}%`,
+          }}
+          aria-hidden="true"
+        />
+        <PreEqFilterKnob
+          x={eqBoostLayout.hpf.x}
+          y={eqBoostLayout.hpf.y}
+          size={eqBoostLayout.filterSize}
+          hitSize={eqBoostLayout.filterHitSize}
+          rot={-32}
+          paramId="preEqHPFHz"
+          semanticLabel="EQ Boost high-pass filter"
+        />
+        <span
+          className="combined-pre-eq-filter-icon combined-pre-eq-filter-icon-lpf"
+          style={{
+            left: `${eqBoostLayout.lpf.x}%`,
+            top: `${eqBoostLayout.lpf.iconY}%`,
+          }}
+          aria-hidden="true"
+        />
+        <PreEqFilterKnob
+          x={eqBoostLayout.lpf.x}
+          y={eqBoostLayout.lpf.y}
+          size={eqBoostLayout.filterSize}
+          hitSize={eqBoostLayout.filterHitSize}
+          rot={32}
+          paramId="preEqLPFHz"
+          semanticLabel="EQ Boost low-pass filter"
+        />
+        <Led
+          {...eqBoostLayout.led}
+          on
+          paramId="preEqEnabled"
+        />
+        <Foot
+          {...eqBoostLayout.foot}
+          paramId="preEqEnabled"
+          showStateLabel
+          stateLabelY={eqBoostLayout.stateLabelY}
+          value="EQ Boost on / off"
+        />
+      </Stompbox>
+      <Stompbox
         box={NAM_PRE_SIGNAL_LAYOUT.precisionDrive}
         name="precision-drive"
         tone="stone"
         title="PRECISION DRIVE"
-        titleY={66.8}
+        titleY={driveLayout.titleY}
       >
         <Knob
           kind="black"
-          x={30}
-          y={22.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          x={driveLayout.columns[0]}
+          y={driveLayout.topY}
+          size={driveLayout.knobSize}
+          hitSize={driveLayout.knobHitSize}
           rot={-22}
           paramId="precisionDriveDrive"
           labelText="DRIVE"
@@ -3902,19 +4783,39 @@ function PreFxStage({
         />
         <Knob
           kind="black"
-          x={70}
-          y={22.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          x={driveLayout.columns[1]}
+          y={driveLayout.topY}
+          size={driveLayout.knobSize}
+          hitSize={driveLayout.knobHitSize}
           rot={22}
           paramId="precisionDriveVolumeDb"
           labelText="LEVEL"
           labelOffset={LABEL_OFFSET.above}
         />
+        <CompactKnob
+          kind="black"
+          x={driveLayout.gate.x}
+          y={driveLayout.gate.y}
+          size={driveLayout.gate.size}
+          hitSize={driveLayout.gate.hitSize}
+          rot={-12}
+          paramId="precisionDriveGate"
+          semanticLabel="Drive Gate"
+          labelText=""
+        />
+        <Label
+          x={driveLayout.gate.x}
+          y={driveLayout.gateLabelY}
+          className="combined-drive-gate-label"
+        >
+          GATE
+        </Label>
         <Knob
           kind="black"
-          x={30}
-          y={43.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          x={driveLayout.columns[0]}
+          y={driveLayout.lowerY}
+          size={driveLayout.knobSize}
+          hitSize={driveLayout.knobHitSize}
           rot={-10}
           paramId="precisionDriveBright"
           labelText="BRIGHT"
@@ -3922,27 +4823,23 @@ function PreFxStage({
         />
         <Knob
           kind="black"
-          x={70}
-          y={43.5}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.knobSize}
+          x={driveLayout.columns[1]}
+          y={driveLayout.lowerY}
+          size={driveLayout.knobSize}
+          hitSize={driveLayout.knobHitSize}
           rot={16}
           paramId="precisionDriveAttack"
           labelText="ATTACK"
           labelOffset={LABEL_OFFSET.below}
         />
         <Led
-          x={50}
-          y={73.2}
+          {...driveLayout.led}
           on
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.ledSize}
           paramId="precisionDriveEnabled"
         />
         <Foot
-          x={50}
-          y={88.3}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.precisionDrive.footSize}
+          {...driveLayout.foot}
           paramId="precisionDriveEnabled"
-          hitSize={23}
           showStateLabel
           stateLabelY={79.4}
           value="Precision Drive on / off"
@@ -4046,6 +4943,7 @@ function PreFxStage({
 function AmpStage({
   onBrowseAmpCapture,
   onBrowseLocalAmpCapture,
+  onClearAmpCapture,
   ampLabel,
   hasAmpCapture,
   ampIncludesCab,
@@ -4054,36 +4952,36 @@ function AmpStage({
 }: {
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
+  onClearAmpCapture?: () => void;
   ampLabel: string;
   hasAmpCapture: boolean;
   ampIncludesCab: boolean;
   ampCaptureMissing: boolean;
   recovery?: NAMRackDesignRecovery;
 }) {
-  const names = ["GAIN", "BASS", "MID", "TREBLE", "PRESENCE", "LEVEL"];
-  const paramIds = [
-    "ampGainDb",
-    "bassDb",
-    "midDb",
-    "trebleDb",
-    "presenceDb",
-    "ampOutputDb",
-  ];
-  const railY = 71.5;
-  const labelBaseline = 79.2;
-  const labelOffsetPx = labelBaseline - railY;
+  const layout = NAM_AMP_FACEPLATE_LAYOUT;
+  const controls = [
+    { kind: "toggle", paramId: "ampEnabled", label: "POWER", x: layout.powerX },
+    { kind: "knob", paramId: "ampGainDb", label: "GAIN", semantic: "Capture Gain", x: layout.inputX, rot: -10 },
+    { kind: "toggle", paramId: "ampBoost", label: "TIGHT", x: layout.boostX },
+    { kind: "toggle", paramId: "ampVoice", label: "BRIGHT", x: layout.voiceX },
+    { kind: "knob", paramId: "bassDb", label: "BASS", semantic: "Bass", x: layout.bassX, rot: -25 },
+    { kind: "knob", paramId: "midDb", label: "MID", semantic: "Mid", x: layout.midX, rot: 6 },
+    { kind: "knob", paramId: "trebleDb", label: "TREBLE", semantic: "Treble", x: layout.trebleX, rot: 23 },
+    { kind: "knob", paramId: "presenceDb", label: "PRESENCE", semantic: "Presence", x: layout.presenceX, rot: 36 },
+    { kind: "knob", paramId: "ampMix", label: "MIX", semantic: "Capture Mix", x: layout.mixX, rot: 13 },
+    { kind: "knob", paramId: "ampOutputDb", label: "OUTPUT", semantic: "Output Level", x: layout.outputX, rot: 31 },
+  ] as const;
+  const disabledReason = !hasAmpCapture ? "Load an Amp capture." : undefined;
   return (
     <Module
       box={LAYOUT.amp.head}
       name="amp-head"
       body={BODIES.amp}
-      className={`amp-head ${hasAmpCapture ? "" : "amp-capture-unavailable"}`}
+      className={`amp-head amp-head-v4 amp-head-v5 ${hasAmpCapture ? "" : "amp-capture-unavailable"}`}
       bodyFit="fill"
       controlsName="Amp"
     >
-      <div className="amp-brand">
-        OpenStudio <small>NAM WRAPPER</small>
-      </div>
       <AmpCaptureSelector
         ampLabel={ampLabel}
         hasCapture={hasAmpCapture}
@@ -4091,7 +4989,14 @@ function AmpStage({
         missing={ampCaptureMissing}
         onBrowse={onBrowseAmpCapture}
         onBrowseLocal={onBrowseLocalAmpCapture}
+        onClear={onClearAmpCapture}
         recovery={recovery}
+        faceplateStyle={{
+          left: `${layout.captureContent.x + layout.captureContent.width / 2}%`,
+          top: `${layout.captureContent.y + layout.captureContent.height / 2}%`,
+          width: `${layout.captureContent.width}%`,
+          height: `${layout.captureContent.height}%`,
+        }}
       />
       <div
         className="amp-control-rail"
@@ -4104,57 +5009,56 @@ function AmpStage({
             : "Amp controls"
         }
       >
-        <Toggle
-          x={8.8}
-          y={railY}
-          size={4.8}
-          paramId="ampEnabled"
-          labelText="POWER"
-          labelOffset={labelOffsetPx}
-          labelClass="amp-label amp-rail-label"
-          allowInteraction={hasAmpCapture}
-          disabledReason={!hasAmpCapture ? "Load an Amp capture." : undefined}
-        />
-        <Led
-          x={13.4}
-          y={railY}
-          on={false}
-          paramId={hasAmpCapture ? "ampEnabled" : undefined}
-          size={4.1}
-          value="Amp power engaged"
-          hitSize={5.2}
-        />
-        <Washer
-          x={19.2}
-          y={railY}
-          size={5.1}
-          labelText="INPUT"
-          labelOffset={labelOffsetPx}
-          labelClass="amp-label amp-rail-label"
-        />
-        {names.map((name, index) => {
-          const x = 30.4 + index * 11.9;
-          return (
-            <span key={name} className="amp-control-cluster">
-              <Knob
-                kind="black"
-                x={x}
-                y={railY}
-                size={7.7}
-                rot={index * 18 - 38}
-                paramId={paramIds[index]}
-                labelText={name}
-                labelOffset={labelOffsetPx}
-                labelClass="amp-label amp-rail-label"
-                allowInteraction={hasAmpCapture}
-                disabledReason={
-                  !hasAmpCapture ? "Load an Amp capture." : undefined
-                }
-                panelRotaryVariant="ampPanel"
-              />
-            </span>
-          );
-        })}
+        {controls.map((control) =>
+          control.kind === "toggle" ? (
+            <Toggle
+              key={control.paramId}
+              x={control.x}
+              y={layout.controlY}
+              size={layout.toggleSize}
+              hitSize={layout.toggleHitSize}
+              paramId={control.paramId}
+              panelSized
+              assetId={CONTROLS.togglePanel}
+              allowInteraction={hasAmpCapture}
+              disabledReason={disabledReason}
+            />
+          ) : (
+            <Knob
+              key={control.paramId}
+              kind="black"
+              x={control.x}
+              y={layout.controlY}
+              size={layout.knobSize}
+              hitSize={layout.knobHitSize}
+              rot={control.rot}
+              paramId={control.paramId}
+              semanticLabel={control.semantic}
+              allowInteraction={hasAmpCapture}
+              disabledReason={disabledReason}
+              assetIdOverride={CONTROLS.knobBlackPanel}
+              exactSizeVariant="panel-knob"
+            />
+          ),
+        )}
+        {[
+          { paramId: "ampEnabled", x: layout.powerX },
+          { paramId: "ampBoost", x: layout.boostX },
+          { paramId: "ampVoice", x: layout.voiceX },
+        ].map((statusLed) => (
+          <Led
+            key={`${statusLed.paramId}-status-led`}
+            x={statusLed.x}
+            y={layout.ledY}
+            size={layout.ledSize}
+            hitSize={layout.ledHitSize}
+            on
+            paramId={statusLed.paramId}
+            onAssetId={CONTROLS.ledOnPanel}
+            offAssetId={CONTROLS.ledOffPanel}
+            exactSizeVariant="panel-led"
+          />
+        ))}
       </div>
     </Module>
   );
@@ -4163,12 +5067,14 @@ function AmpStage({
 function CabSourceSelector({
   cabLabel,
   cabMode,
+  hasRetainedExternalIR,
   onBrowseCabIR,
   onBrowseLocalCabIR,
   onBrowseAmpOnlyCapture,
 }: {
   cabLabel: string;
   cabMode: NAMRackCabMode;
+  hasRetainedExternalIR: boolean;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
@@ -4182,7 +5088,9 @@ function CabSourceSelector({
         ? "CABINET IR REQUIRED"
         : "CABINET SLOT";
   const sourceLabel = embedded
-    ? "CABINET INCLUDED"
+    ? hasRetainedExternalIR
+      ? "CAB INCLUDED / IR BYPASSED"
+      : "CABINET INCLUDED"
     : cabMode === "loaded"
       ? cabLabel
       : cabMode === "required"
@@ -4253,12 +5161,16 @@ function CabSourceSelector({
 function CabStage({
   cabLabel,
   cabMode,
+  hasCabIR,
+  cabRoomInputSourceAvailable,
   onBrowseCabIR,
   onBrowseLocalCabIR,
   onBrowseAmpOnlyCapture,
 }: {
   cabLabel: string;
   cabMode: NAMRackCabMode;
+  hasCabIR: boolean;
+  cabRoomInputSourceAvailable: boolean;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
@@ -4271,6 +5183,12 @@ function CabStage({
         ? "Load a cabinet IR."
         : "Load an amp capture.";
   const designParamContext = useContext(DesignParamContext);
+  const roomEnabledParam = useBoundDesignParam("cabRoomEnabled");
+  const roomEnabled = Boolean(
+    roomEnabledParam
+      && roomEnabledParam.value >= (roomEnabledParam.min + roomEnabledParam.max) / 2,
+  );
+  const roomWaitingForCabSource = roomEnabled && !cabRoomInputSourceAvailable;
   const cabParamContext =
     controlsLocked && designParamContext
       ? { ...designParamContext, onParamChange: undefined }
@@ -4287,6 +5205,7 @@ function CabStage({
       <CabSourceSelector
         cabLabel={cabLabel}
         cabMode={cabMode}
+        hasRetainedExternalIR={hasCabIR && cabMode === "embedded"}
         onBrowseCabIR={onBrowseCabIR}
         onBrowseLocalCabIR={onBrowseLocalCabIR}
         onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
@@ -4482,7 +5401,12 @@ function CabStage({
               <BoundCabRoomPercent paramId="cabRoomWidth" fallback="65%" />
             </span>
           </div>
-          <div className="cab-room-purpose">POST-CAB AMBIENCE</div>
+          <div
+            className="cab-room-purpose"
+            data-status={roomWaitingForCabSource ? "no-source" : "ready"}
+          >
+            {roomWaitingForCabSource ? "No cab source" : "POST-CAB AMBIENCE"}
+          </div>
         </div>
       </div>
     </Module>
@@ -4491,16 +5415,15 @@ function CabStage({
 
 function EqStage() {
   const lanes = [
-    { label: "65", paramId: "eq65Db", fallback: 51, output: false },
-    { label: "125", paramId: "eq125Db", fallback: 58, output: false },
-    { label: "250", paramId: "eq250Db", fallback: 47, output: false },
-    { label: "500", paramId: "eq500Db", fallback: 52, output: false },
-    { label: "1K", paramId: "eq1kDb", fallback: 58, output: false },
-    { label: "2K", paramId: "eq2kDb", fallback: 48, output: false },
-    { label: "4K", paramId: "eq4kDb", fallback: 53, output: false },
-    { label: "8K", paramId: "eq8kDb", fallback: 59, output: false },
-    { label: "16K", paramId: "eq16kDb", fallback: 45, output: false },
-    { label: "LEVEL", paramId: "eqLevelDb", fallback: 50, output: true },
+    { label: "65", paramId: "eq65Db", fallback: 51 },
+    { label: "125", paramId: "eq125Db", fallback: 58 },
+    { label: "250", paramId: "eq250Db", fallback: 47 },
+    { label: "500", paramId: "eq500Db", fallback: 52 },
+    { label: "1K", paramId: "eq1kDb", fallback: 58 },
+    { label: "2K", paramId: "eq2kDb", fallback: 48 },
+    { label: "4K", paramId: "eq4kDb", fallback: 53 },
+    { label: "8K", paramId: "eq8kDb", fallback: 59 },
+    { label: "16K", paramId: "eq16kDb", fallback: 45 },
   ] as const;
   const layout = NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT;
   return (
@@ -4509,117 +5432,72 @@ function EqStage() {
       name="eq-rack"
       body={BODIES.eq}
       bodyFit="fill"
-      className="rack-unit eq-rack"
+      className="rack-unit eq-rack eq-rack-v4"
       controlsName="Graphic EQ"
     >
-      <Label
-        x={layout.title.x}
-        y={layout.title.y}
-        className="rack-big eq-rack-title"
-      >
-        POST-CAB GRAPHIC EQ
-      </Label>
-      <div
-        className="eq-scale-grid"
-        style={{
-          left: `${layout.grid.x}%`,
-          top: `${layout.grid.y}%`,
-          width: `${layout.grid.w}%`,
-          height: `${layout.grid.h}%`,
-        }}
-      />
-      {layout.laneXs.map((x) => (
-        <span
-          key={`eq-gridline-${x}`}
-          className="eq-lane-gridline"
-          style={{
-            left: `${x}%`,
-            top: `${layout.grid.y}%`,
-            height: `${layout.grid.h}%`,
-          }}
-          aria-hidden="true"
-        />
-      ))}
-      <div
-        className="eq-level-separator"
-        style={{ left: `${layout.levelSeparatorX}%` }}
-      />
-      <Label
-        x={layout.scaleXs.left}
-        y={layout.scaleYs.high}
-        className="eq-scale"
-      >
-        +12
-      </Label>
-      <Label
-        x={layout.scaleXs.left}
-        y={layout.scaleYs.unity}
-        className="eq-scale"
-      >
-        0
-      </Label>
-      <Label
-        x={layout.scaleXs.left}
-        y={layout.scaleYs.low}
-        className="eq-scale"
-      >
-        -12
-      </Label>
-      <Label
-        x={layout.scaleXs.right}
-        y={layout.scaleYs.high}
-        className="eq-scale"
-      >
-        +12
-      </Label>
-      <Label
-        x={layout.scaleXs.right}
-        y={layout.scaleYs.unity}
-        className="eq-scale"
-      >
-        0
-      </Label>
-      <Label
-        x={layout.scaleXs.right}
-        y={layout.scaleYs.low}
-        className="eq-scale"
-      >
-        -12
-      </Label>
-      <Label x={layout.powerStackX} y={49} className="rack-big">
-        EQ ON
-      </Label>
-      <Led x={layout.powerStackX} y={58.5} on size={4.3} paramId="eqEnabled" />
       <Toggle
-        x={layout.powerStackX}
-        y={73.2}
-        size={4.3}
+        {...layout.power.toggle}
         paramId="eqEnabled"
-        labelText="BYPASS"
-        labelOffset={9.2}
-        labelClass="rack-small"
+        panelSized
+        assetId={CONTROLS.togglePanel}
+      />
+      <Led
+        {...layout.power.led}
+        on
+        paramId="eqEnabled"
+        hitSize={layout.power.led.hitSize}
+        onAssetId={CONTROLS.ledOnPanel}
+        offAssetId={CONTROLS.ledOffPanel}
+        exactSizeVariant="panel-led"
+      />
+      <EqFilterKnob
+        x={layout.utility.hpfX}
+        y={layout.utility.hpfY}
+        size={layout.utility.hpfSize}
+        hitSize={layout.utility.hpfHitSize}
+        rot={-135}
+        paramId="eqHPFHz"
+        semanticLabel="High-pass filter"
+        assetId={CONTROLS.knobBlueSteelPanel}
+      />
+      <EqFilterKnob
+        x={layout.utility.levelX}
+        y={layout.utility.levelY}
+        size={layout.utility.levelSize}
+        hitSize={layout.utility.levelHitSize}
+        rot={0}
+        paramId="eqLevelDb"
+        semanticLabel="Output level"
+        assetId={CONTROLS.knobBlueSteelPanel}
+      />
+      <EqFilterKnob
+        x={layout.utility.lpfX}
+        y={layout.utility.lpfY}
+        size={layout.utility.lpfSize}
+        hitSize={layout.utility.lpfHitSize}
+        rot={135}
+        paramId="eqLPFHz"
+        semanticLabel="Low-pass filter"
+        assetId={CONTROLS.knobBlueSteelPanel}
       />
       {lanes.map((lane, index) => {
         const x = layout.laneXs[index];
         return (
           <span
             key={lane.paramId}
-            className={`eq-band${lane.output ? " eq-level-lane" : ""}`}
+            className="eq-band"
           >
-            <Label x={x} y={layout.valueY} className="eq-band-value">
-              <BoundParamValue paramId={lane.paramId} fallback="0.0 dB" />
-            </Label>
             <Fader
               x={x}
-              y={layout.faderY}
-              h={layout.faderH}
+              y={layout.fader.y}
+              h={layout.fader.travelBottom - layout.fader.travelTop}
               paramId={lane.paramId}
               value={lane.fallback}
-              className="eq-fader"
+              className="eq-fader eq-v4-fader"
+              physicalGeometry={layout.fader}
+              showValueTooltip
+              capAssetId={CONTROLS.sliderPanel}
             />
-            <Label x={x} y={layout.labelY} className="eq-frequency">
-              {lane.label}
-            </Label>
           </span>
         );
       })}
@@ -4649,10 +5527,8 @@ function PostFxStage() {
         titleY={postLayout.modules.modulator.titleY}
       >
         <Display
-          x={7}
-          y={postLayout.modulator.headerDisplayY}
-          w={28}
-          h={postLayout.modulator.headerDisplayH}
+          {...postLayout.modulator.modeDisplay}
+          className="mod-header-display mod-mode-display"
         >
           <BoundParamChoice
             paramId="modulatorMode"
@@ -4661,35 +5537,27 @@ function PostFxStage() {
           />
         </Display>
         <Toggle
-          x={40}
+          x={postLayout.modulator.modeToggleX}
           y={postLayout.modulator.headerCenterY}
           size={postLayout.modulator.headerToggleSize}
           paramId="modulatorMode"
         />
-        <Label
-          x={49}
-          y={postLayout.modulator.headerCenterY}
-          className="mod-switch-label"
-        >
-          MODE
-        </Label>
         <Toggle
-          x={68}
+          x={postLayout.modulator.pedalToggleX}
           y={postLayout.modulator.headerCenterY}
           size={postLayout.modulator.headerToggleSize}
           paramId="modulatorPedalMode"
         />
-        <Label
-          x={81}
-          y={postLayout.modulator.headerCenterY}
-          className="mod-switch-label mod-switch-state"
+        <Display
+          {...postLayout.modulator.pedalModeDisplay}
+          className="mod-header-display mod-pedal-mode-display"
         >
           <BoundParamChoice
             paramId="modulatorPedalMode"
             offLabel="PEDAL"
             onLabel="AUTO"
           />
-        </Label>
+        </Display>
         <Knob
           kind="black"
           x={20}
@@ -4772,17 +5640,16 @@ function PostFxStage() {
           showStateLabel
           stateLabelY={postLayout.modulator.stateLabelY}
         />
-        <Label
-          x={postLayout.modulator.secondaryX}
-          y={postLayout.modulator.stateLabelY}
-          className="mod-switch-label mod-switch-state"
+        <Display
+          {...postLayout.modulator.characterDisplay}
+          className="mod-character-display"
         >
           <BoundParamChoice
             paramId="chorusCharacter"
             offLabel="CLEAN"
             onLabel="ENS"
           />
-        </Label>
+        </Display>
         <Toggle
           x={postLayout.modulator.secondaryX}
           y={postLayout.modulator.footY}
@@ -5038,6 +5905,15 @@ function PostFxStage() {
           value={`${reverbLabels.texture}: 0%`}
         />
         <Led
+          x={postLayout.reverb.secondaryX}
+          y={postLayout.reverb.ledY}
+          on
+          size={postLayout.reverb.secondaryLedSize}
+          paramId="reverbPad"
+          value="Reverb Pad"
+          hitSize={8.2}
+        />
+        <Led
           x={postLayout.reverb.primaryX}
           y={postLayout.reverb.ledY}
           on
@@ -5045,6 +5921,12 @@ function PostFxStage() {
           paramId="reverbEnabled"
           value="Reverb on"
           hitSize={8.2}
+        />
+        <Toggle
+          x={postLayout.reverb.secondaryX}
+          y={postLayout.reverb.footY}
+          size={postLayout.reverb.padToggleSize}
+          paramId="reverbPad"
         />
         <Foot
           x={postLayout.reverb.primaryX}
@@ -5057,6 +5939,13 @@ function PostFxStage() {
           showStateLabel
           stateLabelY={postLayout.reverb.stateLabelY}
         />
+        <Label
+          x={postLayout.reverb.secondaryX}
+          y={postLayout.reverb.stateLabelY}
+          className="post-label"
+        >
+          PAD
+        </Label>
       </WidePedal>
     </>
   );
@@ -5067,6 +5956,7 @@ function SectionStage({
   compressorGainReductionDb,
   onBrowseAmpCapture,
   onBrowseLocalAmpCapture,
+  onClearAmpCapture,
   onBrowseAmpOnlyCapture,
   onBrowseCabIR,
   onBrowseLocalCabIR,
@@ -5077,6 +5967,7 @@ function SectionStage({
   compressorGainReductionDb?: number;
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
+  onClearAmpCapture?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
@@ -5090,6 +5981,8 @@ function SectionStage({
       <CabStage
         cabLabel={rig.cabLabel}
         cabMode={rig.cabMode}
+        hasCabIR={rig.hasCabIR}
+        cabRoomInputSourceAvailable={rig.cabRoomInputSourceAvailable ?? true}
         onBrowseCabIR={onBrowseCabIR}
         onBrowseLocalCabIR={onBrowseLocalCabIR}
         onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
@@ -5101,6 +5994,7 @@ function SectionStage({
     <AmpStage
       onBrowseAmpCapture={onBrowseAmpCapture}
       onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
+      onClearAmpCapture={onClearAmpCapture}
       ampLabel={rig.ampLabel}
       hasAmpCapture={rig.hasAmpCapture}
       ampIncludesCab={rig.cabMode === "embedded"}
@@ -5360,6 +6254,7 @@ function SourceFlowSurface({
       <div className="tone-source-v2-workspace">
         <main
           className="tone-selected-stage"
+          data-has-captures={Boolean(config.captures) || undefined}
           aria-label={
             config.selectedAvailable
               ? `Selected ${sourceResourceLabel}`
@@ -5412,6 +6307,19 @@ function SourceFlowSurface({
                 ))}
               </div>
             </div>
+          ) : null}
+          {config.selectedAvailable && config.captures ? (
+            <NAMToneCapturePicker
+              title={config.captures.title}
+              items={config.captures.items}
+              selectedId={config.captures.selectedId}
+              busy={config.captures.busy}
+              error={config.captures.error}
+              showUse
+              onSelect={(rowId) => emit("select-capture", "", rowId)}
+              onAudition={(rowId) => emit("preview", "", rowId)}
+              onUse={(rowId) => emit("use-selection", "", rowId)}
+            />
           ) : null}
           {config.selectedAvailable ? (
             <div
@@ -5580,6 +6488,22 @@ function SourceFlowSurface({
                   </button>
                 ))}
               </div>
+            </div>
+          ) : null}
+          {config.selectedAvailable && config.captures ? (
+            <div className="tone-compact-capture-picker">
+              <NAMToneCapturePicker
+                title={config.captures.title}
+                items={config.captures.items}
+                selectedId={config.captures.selectedId}
+                busy={config.captures.busy}
+                error={config.captures.error}
+                showUse
+                compact
+                onSelect={(rowId) => emit("select-capture", "", rowId)}
+                onAudition={(rowId) => emit("preview", "", rowId)}
+                onUse={(rowId) => emit("use-selection", "", rowId)}
+              />
             </div>
           ) : null}
           <div
@@ -5830,7 +6754,17 @@ function PremiumRigDrawer({
   onOpenLibrary: (sectionId: DesignSectionId) => void;
   onBrowseAmpOnlyCapture?: () => void;
 }) {
+  const [visibleLibraryItemCount, setVisibleLibraryItemCount] = useState(12);
+  useEffect(() => {
+    setVisibleLibraryItemCount(12);
+  }, [sectionId, libraryItems.length]);
+
   if (tunerOpen) return null;
+
+  const installedAmpItems = libraryItems.filter((item) => item.id.startsWith("installed:"));
+  const installedCabIRItems = libraryItems.filter((item) => item.id.startsWith("installed-ir:"));
+  const showCabSourceItem = installedCabIRItems.length === 0
+    || (rig.cabMode === "loaded" && !installedCabIRItems.some((item) => item.active));
 
   const sectionItems: Array<{
     id: string;
@@ -5844,7 +6778,7 @@ function PremiumRigDrawer({
   }> =
     sectionId === "cab"
       ? [
-          {
+          ...(showCabSourceItem ? [{
             id: "cab-source",
             eyebrow:
               rig.cabMode === "embedded"
@@ -5856,44 +6790,48 @@ function PremiumRigDrawer({
             detail: rig.cabStatus,
             asset: BODIES.cab,
             active: rig.cabMode === "embedded" || rig.cabMode === "loaded",
-            actionLabel: "Open Cab / IR controls",
-            onClick: () => onOpenAdvancedStage("cab"),
-          },
-          {
-            id: "cab-filter",
-            eyebrow: "Native cabinet stage",
-            label:
-              rig.cabMode === "embedded"
-                ? "External IR shaper bypassed"
-                : "IR shaper & filters",
-            detail:
-              rig.cabMode === "embedded"
-                ? "Load an amp-only Capture to enable it"
-                : "Edge / damp / blend / low bloom / HPF / LPF",
-            asset: BODIES.mic,
-            actionLabel: "Open Cab / IR controls",
-            onClick: () => onOpenAdvancedStage("cab"),
-          },
+            actionLabel:
+              rig.cabMode === "empty"
+                ? "Browse Amp Captures"
+                : "Choose Cabinet IR",
+            onClick: () =>
+              rig.cabMode === "empty"
+                ? onOpenLibrary("amp")
+                : onOpenLibrary("cab"),
+          }] : []),
+          ...installedCabIRItems.map((item) => ({
+            id: item.id,
+            eyebrow: item.active ? "Active cabinet IR" : "Installed cabinet IR",
+            label: item.name,
+            detail: item.subtitle,
+            asset: BODIES.cab,
+            active: item.active,
+            actionLabel: `Load ${item.name}`,
+            onClick: () => onSelectLibraryItem?.(item.id),
+          })),
         ]
-      : sectionId === "eq" || sectionId === "post"
+      : sectionId === "eq"
         ? [
             {
               id: "eq",
-              eyebrow: "Post-cab",
+              eyebrow: "Post-cab equalizer",
               label: "Graphic EQ",
-              detail: "Nine supported bands",
+              detail: "Nine bands and output level",
               asset: BODIES.eq,
-              active: sectionId === "eq",
+              active: true,
               actionLabel: "Open Graphic EQ controls",
               onClick: () => onOpenAdvancedStage("eq"),
             },
+          ]
+      : sectionId === "post"
+        ? [
             {
               id: "mod",
               eyebrow: "OpenStudio effect",
               label: "Modulator",
               detail: "Chorus / flanger",
               asset: BODIES.copperWide,
-              active: sectionId === "post",
+              active: true,
               actionLabel: "Open Modulator controls",
               onClick: () => onOpenAdvancedStage("mod"),
             },
@@ -5917,7 +6855,7 @@ function PremiumRigDrawer({
             },
           ]
         : [
-            {
+            ...((sectionId === "amp" && installedAmpItems.length > 0) ? [] : [{
               id: sectionId === "pre" ? "drive-pedals" : "amp-capture",
               eyebrow:
                 sectionId === "pre" ? "Native pre effects" : "Amp capture",
@@ -5933,43 +6871,47 @@ function PremiumRigDrawer({
               active: sectionId === "amp" && rig.hasAmpCapture,
               actionLabel:
                 sectionId === "pre"
-                  ? "Open drive controls"
-                  : "Open Amp controls",
+                  ? "View drive pedals"
+                  : rig.hasAmpCapture
+                    ? "Open Amp controls"
+                    : "Open Amp Capture Library",
               onClick: () =>
-                onOpenAdvancedStage(
-                  sectionId === "pre" ? "precision-drive" : "amp",
-                ),
-            },
-            ...(sectionId === "amp" && !rig.hasAmpCapture
-              ? [
-                  {
-                    id: "templates-locked",
-                    eyebrow: "Next step",
-                    label: "Templates locked",
-                    detail: "Load an amp or full-rig .nam first",
-                    asset: BODIES.darkWide,
-                    active: false,
-                    actionLabel: "Open Amp Capture Library",
-                    onClick: () => onOpenLibrary("amp"),
-                  },
-                ]
-              : libraryItems.slice(0, 3).map((item, index) => ({
+                sectionId === "pre"
+                  ? onOpenAdvancedStage("precision-drive")
+                  : onOpenLibrary("amp"),
+            }]),
+            ...(sectionId === "amp"
+              ? installedAmpItems
+              : libraryItems.filter((item) => !item.id.startsWith("installed:")).slice(0, 3)
+            ).map((item, index) => ({
                   id: item.id,
-                  eyebrow: "Template for current capture",
+                  eyebrow: item.id.startsWith("installed:")
+                    ? item.active ? "Active amp capture" : "Installed amp capture"
+                    : "Template for current capture",
                   label: item.name,
                   detail: item.subtitle,
-                  asset: (
-                    [
-                      BODIES.darkWide,
-                      BODIES.blue,
-                      BODIES.stone,
-                    ] as NAMDesignBodyAssetId[]
-                  )[index % 3],
+                  asset: item.id.startsWith("installed:")
+                    ? BODIES.amp
+                    : (
+                        [
+                          BODIES.darkWide,
+                          BODIES.blue,
+                          BODIES.stone,
+                        ] as NAMDesignBodyAssetId[]
+                      )[index % 3],
                   active: item.active,
-                  actionLabel: `Apply ${item.name} template`,
+                  actionLabel: item.id.startsWith("installed:")
+                    ? `Load ${item.name}`
+                    : `Apply ${item.name} template`,
                   onClick: () => onSelectLibraryItem?.(item.id),
-                }))),
+                })),
           ];
+  const progressiveLibrary = sectionId === "amp" || sectionId === "cab";
+  const visibleSectionItems = progressiveLibrary
+    ? sectionItems.slice(0, visibleLibraryItemCount)
+    : sectionItems;
+  const hasMoreLibraryItems = progressiveLibrary && visibleSectionItems.length < sectionItems.length;
+  const cabinetIRItemCount = installedCabIRItems.length || sectionItems.length;
   const libraryTarget =
     sectionId === "cab" &&
     (rig.cabMode === "embedded" || rig.cabMode === "empty")
@@ -5979,20 +6921,26 @@ function PremiumRigDrawer({
         : sectionId;
   const libraryTitle =
     sectionId === "cab"
-      ? rig.cabMode === "embedded" || rig.cabMode === "empty"
-        ? "Capture Library"
-        : "IR Library"
-      : sectionId === "eq" || sectionId === "post"
-        ? "Effects & Presets"
-        : "Capture Library";
+      ? "Cabinet & IRs"
+      : sectionId === "eq"
+        ? "EQ Presets"
+        : sectionId === "post"
+          ? "Post Effects"
+          : sectionId === "pre"
+            ? "Pedals & Presets"
+            : "My Amps";
   const libraryEyebrow =
     sectionId === "cab"
       ? rig.cabMode === "embedded"
         ? "Full-rig cabinet"
         : "Cabinet source"
-      : sectionId === "eq" || sectionId === "post"
-        ? "Supported OpenStudio effects"
-        : "Captures & templates";
+      : sectionId === "eq"
+        ? "Post-cab equalizer"
+        : sectionId === "post"
+          ? "Current post chain"
+          : sectionId === "pre"
+            ? "Pre-amp effects"
+            : "Installed Amp captures";
   const librarySearchLabel =
     sectionId === "cab"
       ? rig.cabMode === "embedded"
@@ -6002,9 +6950,13 @@ function PremiumRigDrawer({
           : rig.cabMode === "loaded"
             ? "Replace cabinet IR..."
             : "Choose cabinet IR..."
-      : sectionId === "eq" || sectionId === "post"
-        ? "Browse effect presets..."
-        : "Browse NAM captures / Local .nam...";
+      : sectionId === "eq"
+        ? "Browse EQ presets..."
+        : sectionId === "post"
+          ? "Browse post-effect presets..."
+          : sectionId === "pre"
+            ? "Browse pedal presets..."
+            : "Browse captures or choose Local .nam...";
   const libraryActionLabel =
     sectionId === "cab"
       ? rig.cabMode === "embedded"
@@ -6052,20 +7004,34 @@ function PremiumRigDrawer({
       </button>
       <div className="premium-library-filter">
         <span>
-          {sectionId === "amp" && !rig.hasAmpCapture
-            ? "Capture required"
-            : sectionId === "amp" || sectionId === "pre"
+          {sectionId === "amp"
+            ? "Installed captures"
+            : sectionId === "cab"
+              ? "Installed cabinet IRs"
+            : sectionId === "pre"
               ? "Capture + templates"
               : "Loaded and supported"}
         </span>
         <strong>
-          {sectionId === "amp" && !rig.hasAmpCapture
-            ? "Setup"
+          {sectionId === "amp"
+            ? `${installedAmpItems.length || sectionItems.length} amps`
+            : sectionId === "cab"
+              ? `${cabinetIRItemCount} ${cabinetIRItemCount === 1 ? "IR" : "IRs"}`
             : `${sectionItems.length} items`}
         </strong>
       </div>
-      <div className="premium-rig-list">
-        {sectionItems.map((item) => (
+      <div
+        className="premium-rig-list"
+        data-progressive={progressiveLibrary || undefined}
+        onScroll={(event) => {
+          if (!hasMoreLibraryItems) return;
+          const list = event.currentTarget;
+          if (list.scrollTop + list.clientHeight >= list.scrollHeight - 96) {
+            setVisibleLibraryItemCount((count) => Math.min(count + 12, sectionItems.length));
+          }
+        }}
+      >
+        {visibleSectionItems.map((item) => (
           <button
             key={item.id}
             type="button"
@@ -6087,6 +7053,11 @@ function PremiumRigDrawer({
             <i aria-hidden="true" />
           </button>
         ))}
+        {hasMoreLibraryItems && (
+          <div className="premium-rig-more" aria-live="polite">
+            Scroll for {sectionItems.length - visibleSectionItems.length} more
+          </div>
+        )}
       </div>
       <button
         type="button"
@@ -6096,19 +7067,8 @@ function PremiumRigDrawer({
         <Library aria-hidden="true" />
         {libraryActionLabel}
       </button>
-      <p>
-        {sectionId === "amp" || sectionId === "pre"
-          ? "Templates for Current Capture adjust supported effect settings while keeping the loaded Capture and IR identities. Local .nam is available in the Capture Library."
-          : sectionId === "cab" && rig.cabMode === "embedded"
-            ? "The retained external IR stays bypassed and returns automatically when an amp-only Capture is loaded."
-            : "Only configured IRs and OpenStudio-owned effects are shown here."}
-      </p>
     </aside>
   );
-}
-
-function NativeDesignStyles() {
-  return <style>{`${NATIVE_DESIGN_CSS}\n${NATIVE_PREMIUM_DARK_CSS}`}</style>;
 }
 
 export function NAMRackDesignPort({
@@ -6122,6 +7082,9 @@ export function NAMRackDesignPort({
   tuner,
   calibration,
   utilityControls,
+  oversamplingFactor = 4,
+  oversamplingBusy = false,
+  onOversamplingFactorChange,
   libraryItems,
   compareSlot,
   tunerOpen,
@@ -6131,6 +7094,7 @@ export function NAMRackDesignPort({
   onOpenAdvancedStage,
   onBrowseAmpCapture,
   onBrowseLocalAmpCapture,
+  onClearAmpCapture,
   onBrowseAmpOnlyCapture,
   onBrowseCabIR,
   onBrowseLocalCabIR,
@@ -6162,6 +7126,9 @@ export function NAMRackDesignPort({
   tuner: NAMRackDesignTunerSummary;
   calibration?: NAMRackDesignCalibrationSummary;
   utilityControls?: NAMRackDesignUtilityControls;
+  oversamplingFactor?: NAMRackOversamplingFactor;
+  oversamplingBusy?: boolean;
+  onOversamplingFactorChange?: (factor: NAMRackOversamplingFactor) => void;
   libraryItems?: NAMRackDesignLibraryItem[];
   compareSlot: "A" | "B";
   tunerOpen: boolean;
@@ -6174,6 +7141,7 @@ export function NAMRackDesignPort({
   onOpenAdvancedStage: (stageId: NAMRackAdvancedStageId) => void;
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
+  onClearAmpCapture?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
@@ -6215,15 +7183,20 @@ export function NAMRackDesignPort({
             height: Math.max(120, stageSize.height - recoveryInset),
           }
         : stageSize;
-    const next = computePremiumStagePlacement(
-      availableStage,
-      SECTION_GROUP_BOX[designSection],
-      rackSizePercent,
-    );
+    const next = designSection === "pre"
+      ? computePremiumPreStagePlacement(availableStage, rackSizePercent)
+      : computePremiumStagePlacement(
+          availableStage,
+          SECTION_GROUP_BOX[designSection],
+          rackSizePercent,
+        );
     return recoveryInset > 0
       ? { ...next, top: next.top + recoveryInset }
       : next;
   }, [designSection, rackSizePercent, recoveryInset, stageSize]);
+  const prePlacement = designSection === "pre"
+    ? placement as ReturnType<typeof computePremiumPreStagePlacement>
+    : undefined;
   const activeLabel =
     designSection === "pre"
       ? "PEDALS"
@@ -6284,6 +7257,41 @@ export function NAMRackDesignPort({
     }),
     [effectsDisabled, localValues, onParamChange, paramsById, setLocalValue],
   );
+  const rackSectionStage = (
+    <SectionStage
+      sectionId={designSection}
+      compressorGainReductionDb={compressorGainReductionDb}
+      onBrowseAmpCapture={onBrowseAmpCapture}
+      onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
+      onClearAmpCapture={onClearAmpCapture}
+      onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+      onBrowseCabIR={onBrowseCabIR}
+      onBrowseLocalCabIR={onBrowseLocalCabIR}
+      rig={rig}
+      recovery={inlineAmpRecovery ? recovery : undefined}
+    />
+  );
+  const rackArtboard = (
+    <div
+      className="nam-rack-artboard"
+      data-design-board={boardId}
+      data-effects-disabled={effectsDisabled}
+      aria-disabled={effectsDisabled || undefined}
+      style={{
+        width:
+          designSection === "pre"
+            ? `${NAM_PRE_LOGICAL_SURFACE.width}px`
+            : undefined,
+        height:
+          designSection === "pre"
+            ? `${NAM_PRE_LOGICAL_SURFACE.height}px`
+            : undefined,
+        transform: `translate(${placement.left}px, ${placement.top}px) scale(${placement.scale})`,
+      }}
+    >
+      {rackSectionStage}
+    </div>
+  );
   return (
     <DesignParamContext.Provider value={paramContext}>
       <section
@@ -6292,7 +7300,6 @@ export function NAMRackDesignPort({
         data-design-board={boardId}
         data-design-section={designSection}
       >
-        <NativeDesignStyles />
         <div
           className="screen-shell nam-native-shell premium-nam-shell"
           data-section={designSection}
@@ -6319,9 +7326,11 @@ export function NAMRackDesignPort({
               compareSlot={compareSlot}
               inputLevelDb={runtime.inputLevelDb}
               outputLevelDb={runtime.outputLevelDb}
-              calibrationLabel={calibration?.label}
-              calibrationStatus={calibration?.status}
-              calibrationOpen={calibration?.open}
+              inputLeftLevelDb={runtime.inputLeftLevelDb}
+              inputRightLevelDb={runtime.inputRightLevelDb}
+              outputLeftLevelDb={runtime.outputLeftLevelDb}
+              outputRightLevelDb={runtime.outputRightLevelDb}
+              inputChannelCount={runtime.inputChannelCount}
               previewText={`${rig.ampLabel || "No Amp Capture"} \u2192 ${rig.cabLabel || "No IR loaded"}`}
               onEnterSection={(nextSection) =>
                 onEnterSection(nextSection, SECTION_TARGET_MODULE[nextSection])
@@ -6334,14 +7343,17 @@ export function NAMRackDesignPort({
               onSaveTone={onSaveTone}
               onOpenPresetManager={onOpenPresetManager}
               onRecallCompare={onRecallCompare}
-              onOpenCalibration={onOpenCalibration}
               utilityControls={utilityControls}
+              oversamplingFactor={oversamplingFactor}
+              oversamplingBusy={oversamplingBusy}
+              onOversamplingFactorChange={onOversamplingFactorChange}
             />
           </div>
           <div className="hardware-stage" data-tuner-open={tunerOpen}>
             <div
               ref={stageRef}
               className="premium-stage-canvas"
+              data-design-section={designSection}
               data-recovery={recovery && !tunerOpen ? recovery.slot : undefined}
               style={
                 {
@@ -6369,28 +7381,54 @@ export function NAMRackDesignPort({
               ) : null}
               {tunerOpen ? (
                 <PremiumTunerStage tuner={tuner} onClose={onOpenTuner} />
-              ) : (
+              ) : prePlacement ? (
                 <div
-                  className="nam-rack-artboard"
-                  data-design-board={boardId}
-                  data-effects-disabled={effectsDisabled}
-                  aria-disabled={effectsDisabled || undefined}
-                  style={{
-                    transform: `translate(${placement.left}px, ${placement.top}px) scale(${placement.scale})`,
+                  className="nam-pre-stage-scroll"
+                  data-qa="nam-pre-stage-scroll"
+                  data-scroll-required={!prePlacement.fitsWithoutScroll}
+                  role="region"
+                  aria-label="Pre effects pedal row"
+                  onWheel={(event) => {
+                    if (prePlacement.fitsWithoutScroll) return;
+                    const target = event.target as HTMLElement;
+                    if (target.closest(".control-hit, .horizontal-mini-fader"))
+                      return;
+                    const delta =
+                      Math.abs(event.deltaX) > Math.abs(event.deltaY)
+                        ? event.deltaX
+                        : event.shiftKey
+                          ? event.deltaY
+                          : 0;
+                    if (Math.abs(delta) < 0.01) return;
+                    event.preventDefault();
+                    event.currentTarget.scrollLeft += delta;
                   }}
                 >
-                  <SectionStage
-                    sectionId={designSection}
-                    compressorGainReductionDb={compressorGainReductionDb}
-                    onBrowseAmpCapture={onBrowseAmpCapture}
-                    onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
-                    onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
-                    onBrowseCabIR={onBrowseCabIR}
-                    onBrowseLocalCabIR={onBrowseLocalCabIR}
-                    rig={rig}
-                    recovery={inlineAmpRecovery ? recovery : undefined}
-                  />
+                  <div
+                    className="nam-pre-stage-scroll-content"
+                    style={{
+                      width: prePlacement.fitsWithoutScroll
+                        ? "100%"
+                        : `${prePlacement.contentWidth}px`,
+                      height: `${Math.max(stageSize.height, prePlacement.contentHeight)}px`,
+                    }}
+                  >
+                    {Object.entries(NAM_PRE_SIGNAL_LAYOUT).map(([name, box]) => (
+                      <span
+                        key={`pre-snap-${name}`}
+                        className="nam-pre-stage-snap-anchor"
+                        data-snap-module={name}
+                        style={{
+                          left: `${prePlacement.left + (box.x + box.w / 2) * prePlacement.scale}px`,
+                        }}
+                        aria-hidden="true"
+                      />
+                    ))}
+                    {rackArtboard}
+                  </div>
                 </div>
+              ) : (
+                rackArtboard
               )}
               {!recovery &&
                 !tunerOpen &&
@@ -6408,16 +7446,19 @@ export function NAMRackDesignPort({
                   </div>
                 )}
             </div>
-            <PremiumRigDrawer
-              sectionId={designSection}
-              rig={rig}
-              tunerOpen={tunerOpen}
-              libraryItems={libraryItems}
-              onOpenAdvancedStage={onOpenAdvancedStage}
-              onSelectLibraryItem={onSelectLibraryItem}
-              onOpenLibrary={onOpenLibrary}
-              onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
-            />
+            {(designSection === "amp" ||
+              (designSection === "cab" && rig.cabMode !== "embedded")) && (
+              <PremiumRigDrawer
+                sectionId={designSection}
+                rig={rig}
+                tunerOpen={tunerOpen}
+                libraryItems={libraryItems}
+                onOpenAdvancedStage={onOpenAdvancedStage}
+                onSelectLibraryItem={onSelectLibraryItem}
+                onOpenLibrary={onOpenLibrary}
+                onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+              />
+            )}
           </div>
           <Footer
             rackSizePercent={rackSizePercent}
@@ -6432,12 +7473,16 @@ export function NAMRackDesignPort({
             dspAlert={runtime.dspAlert}
             tunerOpen={tunerOpen}
             signalChainOpen={signalChainOpen}
+            calibrationLabel={calibration?.label}
+            calibrationStatus={calibration?.status}
+            calibrationOpen={calibration?.open}
             onOpenTuner={onOpenTuner}
             onOpenPedalboard={onOpenSignalChain ?? onOpenPedalboard}
             onOpenSettings={onOpenSettings}
             onOpenAdvanced={onOpenAdvanced}
             onCycleSize={onCycleSize}
             onMaxSize={onMaxSize}
+            onOpenCalibration={onOpenCalibration}
           />
         </div>
       </section>
@@ -6526,7 +7571,6 @@ export function NAMRackSourceFlowDesignPort({
           } as NativeStyle
         }
       >
-        <NativeDesignStyles />
         <div
           className="screen-shell nam-native-shell premium-nam-shell premium-source-shell"
           data-section={config.originId}
@@ -6548,9 +7592,11 @@ export function NAMRackSourceFlowDesignPort({
               compareSlot={compareSlot}
               inputLevelDb={runtime?.inputLevelDb}
               outputLevelDb={runtime?.outputLevelDb}
-              calibrationLabel={calibration?.label}
-              calibrationStatus={calibration?.status}
-              calibrationOpen={calibration?.open}
+              inputLeftLevelDb={runtime?.inputLeftLevelDb}
+              inputRightLevelDb={runtime?.inputRightLevelDb}
+              outputLeftLevelDb={runtime?.outputLeftLevelDb}
+              outputRightLevelDb={runtime?.outputRightLevelDb}
+              inputChannelCount={runtime?.inputChannelCount}
               onEnterSection={onEnterSection}
               onOpenLibrary={onCloseLibrary}
               onPreviousPreset={onPreviousPreset}
@@ -6560,7 +7606,6 @@ export function NAMRackSourceFlowDesignPort({
               onSaveTone={onSavePreset}
               onOpenPresetManager={onOpenPresetManager}
               onRecallCompare={onRecallCompare}
-              onOpenCalibration={onOpenCalibration}
             />
           </div>
           <div
@@ -6582,5558 +7627,19 @@ export function NAMRackSourceFlowDesignPort({
             dspAlert={runtime?.dspAlert}
             tunerOpen={tunerOpen}
             signalChainOpen={signalChainOpen}
+            calibrationLabel={calibration?.label}
+            calibrationStatus={calibration?.status}
+            calibrationOpen={calibration?.open}
             onOpenTuner={onOpenTuner}
             onOpenPedalboard={onOpenSignalChain}
             onOpenSettings={onOpenSettings}
             onOpenAdvanced={onOpenAdvanced}
             onCycleSize={onCycleSize}
             onMaxSize={onMaxSize}
+            onOpenCalibration={onOpenCalibration}
           />
         </div>
       </section>
     </DesignParamContext.Provider>
   );
 }
-
-const NATIVE_DESIGN_CSS = `
-.nam-native-design-surface {
-  --ink: #101722;
-  --stage-top: #eef4fd;
-  --stage-mid: #dce7f3;
-  --stage-low: #b6c3d2;
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  display: block;
-  overflow: hidden;
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.48), transparent 31%),
-    linear-gradient(180deg, var(--stage-top) 0%, var(--stage-mid) 47%, var(--stage-low) 100%);
-}
-.nam-native-design-surface * { box-sizing: border-box; }
-.nam-native-design-surface button {
-  font-family: inherit !important;
-  letter-spacing: 0 !important;
-  text-transform: none;
-}
-.nam-native-shell {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  color: var(--ink);
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.48), transparent 31%),
-    linear-gradient(180deg, var(--stage-top) 0%, var(--stage-mid) 47%, var(--stage-low) 100%);
-}
-.nam-native-shell::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: var(--native-top-height, clamp(180px, 29vh, 318px));
-  z-index: 1;
-  height: 1px;
-  background: rgba(79,91,111,.18);
-}
-.nam-top-artboard,
-.nam-rack-artboard {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 768px;
-  height: 341px;
-  transform-origin: left top;
-  container-type: inline-size;
-}
-.nam-top-artboard {
-  z-index: 30;
-  height: 341px;
-  overflow: visible;
-  pointer-events: none;
-}
-.nam-top-artboard button,
-.nam-top-artboard [role="button"] {
-  pointer-events: auto;
-}
-.hardware-stage {
-  position: absolute;
-  inset: 0 0 var(--native-footer-height, 56px) 0;
-  z-index: 10;
-  overflow: hidden;
-  pointer-events: none;
-}
-.source-flow-workspace {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: var(--native-top-height, clamp(180px, 29vh, 318px));
-  bottom: var(--native-footer-height, 56px);
-  z-index: 14;
-  overflow: hidden;
-  container-type: inline-size;
-  pointer-events: none;
-}
-.source-flow-workspace .tone-rack-flow {
-  pointer-events: auto;
-}
-.nam-rack-artboard {
-  z-index: 12;
-  pointer-events: none;
-}
-.rack-title {
-  position: absolute;
-  left: 3.8%;
-  top: 4.8%;
-  z-index: 30;
-  color: #111827;
-  font-size: max(18px, 2.05cqw);
-  font-weight: 950;
-  line-height: 1;
-  letter-spacing: 0;
-  white-space: nowrap;
-}
-.top-nav {
-  position: absolute;
-  left: 35.5%;
-  top: 3.5%;
-  z-index: 30;
-  width: 31%;
-  height: 9.8%;
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 1.2%;
-}
-.nav-item {
-  display: grid;
-  justify-items: center;
-  align-content: center;
-  gap: 0;
-  padding: 0;
-  border: 0;
-  color: rgba(18,27,41,.42);
-  background: transparent;
-  font-size: max(4px, .38cqw) !important;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: 0;
-  line-height: 1 !important;
-  cursor: pointer;
-}
-.nav-item b {
-  max-width: 100%;
-  overflow: visible;
-  line-height: .96;
-  text-align: center;
-  white-space: normal;
-}
-.nav-item[data-active="true"] { color: #0f1723; }
-.nav-glyph {
-  position: relative;
-  width: max(12px, 1.32cqw);
-  height: max(12px, 1.32cqw);
-  color: currentColor;
-}
-.nav-glyph::before,
-.nav-glyph::after {
-  content: "";
-  position: absolute;
-  inset: 18%;
-  border: 2px solid currentColor;
-}
-.nav-glyph.pre::before {
-  clip-path: polygon(44% 0,72% 0,54% 42%,78% 42%,31% 100%,43% 56%,22% 56%);
-  background: currentColor;
-  border: 0;
-}
-.nav-glyph.pre::after { display: none; }
-.nav-glyph.amp::before { border-left: 0; border-right: 0; transform: skewX(-12deg); }
-.nav-glyph.amp::after { inset: 42% 4% 38%; border-left: 0; border-right: 0; }
-.nav-glyph.cab::before { border-radius: 50%; }
-.nav-glyph.cab::after { inset: 58% 32% 6%; border-top: 0; border-radius: 0 0 10px 10px; }
-.nav-glyph.eq::before { inset: 12% 45%; }
-.nav-glyph.eq::after { inset: 26% 20%; border-left: 0; border-right: 0; }
-.nav-glyph.post::before { border-radius: 999px; transform: rotate(90deg); }
-.nav-glyph.post::after { inset: 10% 50% 10% 30%; border-left: 0; border-right: 0; }
-.nav-item i {
-  width: 3px;
-  height: 3px;
-  border-radius: 99px;
-  background: currentColor;
-}
-.global-strip {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 13.4%;
-  height: 16.2%;
-  z-index: 30;
-  border-bottom: 1px solid rgba(75,88,110,.15);
-}
-.global-block {
-  position: absolute;
-  top: 2%;
-  display: flex;
-  gap: max(7px, 1cqw);
-}
-.global-block.left { left: 4.6%; }
-.global-block.right { right: 4.2%; }
-.mini-param {
-  position: relative;
-  width: max(46px, 5.35cqw);
-  height: max(46px, 5.55cqw);
-  display: grid;
-  justify-items: center;
-  align-content: end;
-}
-.mini-param > .asset-control { top: 46% !important; }
-.mini-param strong {
-  color: #101722;
-  font-size: max(7px, .58cqw);
-  font-weight: 950;
-  white-space: nowrap;
-}
-.preset-area {
-  position: absolute;
-  left: 50%;
-  top: 2%;
-  width: 43%;
-  transform: translateX(-50%);
-}
-.actions {
-  margin-bottom: 3px;
-  text-align: center;
-  color: #27334a;
-  font-size: max(6px, .52cqw);
-  font-weight: 900;
-}
-.preset {
-  height: max(20px, 2.7cqw);
-  display: grid;
-  grid-template-columns: 24px 1fr 20px max(64px, 7cqw);
-  align-items: center;
-  border: 1px solid rgba(100,114,138,.24);
-  border-radius: 5px;
-  background: rgba(248,251,255,.76);
-  color: #0d1420;
-  font-size: max(8px, .7cqw);
-  font-weight: 900;
-}
-.preset span,
-.tone-library-mark {
-  display: grid;
-  place-items: center;
-}
-.tone-library-mark {
-  height: 70%;
-  margin-right: 3px;
-  border: 1px solid rgba(15,23,35,.36);
-  border-radius: 3px;
-  color: #101722;
-  background: rgba(255,255,255,.36);
-  font-size: max(6px, .48cqw) !important;
-  font-weight: 950;
-  cursor: pointer;
-}
-.tone-library-mark[data-active="true"] {
-  border-color: rgba(245,158,11,.7);
-  color: #3f2500;
-  background: rgba(255,236,189,.9);
-}
-.tone-preview-pill {
-  margin-top: 3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: #142033;
-  font-size: max(6px, .5cqw);
-  font-weight: 900;
-  white-space: nowrap;
-}
-.tone-preview-pill i {
-  width: max(6px, .55cqw);
-  height: max(6px, .55cqw);
-  border-radius: 99px;
-  background: #f59e0b;
-}
-.footer {
-  position: absolute;
-  left: 1.35%;
-  right: 1.35%;
-  bottom: 0;
-  height: var(--native-footer-height, 56px);
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: clamp(9px, 1.1vw, 22px);
-  padding: 0 clamp(12px, 1.2vw, 28px);
-  color: white;
-  background: #020407;
-  font-size: clamp(10px, .62vw, 16px);
-  font-weight: 850;
-}
-.footer b { font-size: clamp(15px, .9vw, 22px); }
-.footer i { width: 1px; height: 45%; background: rgba(255,255,255,.32); }
-.footer em { margin-left: auto; display: flex; gap: 6px; font-style: normal; }
-.footer em span {
-  border: 1px solid rgba(255,255,255,.2);
-  border-radius: 2px;
-  padding: 1px 4px;
-}
-.module {
-  position: absolute;
-  z-index: 10;
-  pointer-events: auto;
-}
-.module-frame {
-  position: absolute;
-  overflow: visible;
-}
-.stompbox .module-frame,
-.wide-pedal .module-frame {
-  overflow: hidden;
-}
-.module-skin {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  object-position: center;
-  pointer-events: none;
-  user-select: none;
-}
-.module-title {
-  position: absolute;
-  left: 50%;
-  top: 66%;
-  z-index: 6;
-  max-width: 84%;
-  transform: translate(-50%, -50%);
-  color: rgba(248,252,255,.9);
-  font-size: max(9px, .7cqw);
-  font-weight: 950;
-  letter-spacing: 0;
-  text-align: center;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.label {
-  position: absolute;
-  z-index: 8;
-  transform: translate(-50%, -50%);
-  color: rgba(246,250,255,.85);
-  font-size: max(7px, .52cqw);
-  font-weight: 900;
-  letter-spacing: 0;
-  text-transform: uppercase;
-  white-space: nowrap;
-  pointer-events: none;
-}
-.label.dark { color: #273247; }
-.label.center { transform: translateX(-50%); }
-.kicker { color: rgba(255,255,255,.66); font-size: max(6px, .4cqw); }
-.tiny { font-size: max(6px, .42cqw); opacity: .95; }
-.control-label { font-size: max(7px, .5cqw); }
-.panel-title { font-size: max(8px, .64cqw); }
-.micro-label { font-size: max(7px, .5cqw); }
-.mic-panel .label {
-  color: #172033;
-  font-size: max(7px, .52cqw);
-  font-weight: 950;
-}
-.amp-label {
-  color: rgba(235,239,244,.82);
-  font-size: max(6px, .34cqw);
-}
-.rack-small {
-  color: rgba(235,239,244,.86);
-  font-size: max(6px, .4cqw);
-}
-.rack-big {
-  color: rgba(235,239,244,.88);
-  font-size: max(8px, .7cqw);
-}
-.asset-control {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 7;
-  width: var(--size);
-  height: auto;
-  transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
-  transform-origin: center;
-  pointer-events: none;
-  user-select: none;
-}
-.asset-control.toggle {
-  /* A real photographed toggle has two discrete orientations. Snap between
-     them without tweening through a knob-like rotation. */
-  transition: filter 130ms ease;
-}
-.asset-control.control-disabled,
-.control-label.control-disabled {
-  filter: grayscale(.82) saturate(.24);
-  opacity: .32;
-}
-.control-hit {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 40;
-  width: var(--hit);
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%);
-  pointer-events: auto;
-}
-.control-hit.interactive {
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-}
-.control-hit.interactive:active { cursor: grabbing; }
-.wide-pedal .post-label {
-  color: rgba(248,252,255,.92);
-  font-size: max(6px, .42cqw);
-  font-weight: 950;
-}
-.stompbox .control-label,
-.stompbox .value-label {
-  font-size: max(5px, .34cqw);
-}
-.stompbox .kicker {
-  font-size: max(4px, .33cqw);
-}
-.stompbox .module-title {
-  font-size: max(7px, .48cqw);
-}
-.wide-pedal .module-title {
-  font-size: max(8px, .58cqw);
-}
-.delay-rack .module-title {
-  font-size: max(5px, .42cqw);
-}
-.delay-rack .post-label,
-.delay-rack .foot-action-label {
-  font-size: max(4px, .36cqw);
-}
-.foot-action-label {
-  z-index: 12;
-  color: rgba(248,252,255,.9);
-  font-size: max(6px, .44cqw);
-  font-weight: 950;
-}
-.asset-button {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 7;
-  width: var(--w);
-  height: var(--h);
-  transform: translate(-50%, -50%);
-}
-.asset-button img { width: 100%; height: 100%; object-fit: contain; }
-.asset-button span {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #f5656c;
-  overflow: hidden;
-  font-size: max(5px, .42cqw);
-  font-weight: 950;
-  line-height: 1;
-  text-transform: uppercase;
-}
-.module-display {
-  position: absolute;
-  z-index: 5;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 2px;
-  color: #ff6268;
-  background: #030506;
-  font-size: max(8px, .52cqw);
-  font-weight: 950;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.amp-brand {
-  position: absolute;
-  left: 50%;
-  top: 25.8%;
-  z-index: 5;
-  transform: translate(-50%, -50%);
-  color: rgba(230,234,238,.62);
-  font-size: max(7px, .58cqw);
-  font-weight: 950;
-  text-transform: uppercase;
-}
-.amp-badge {
-  position: absolute;
-  left: 50%;
-  top: 34%;
-  z-index: 5;
-  transform: translate(-50%, -50%);
-  max-width: 34%;
-  padding: 3px 11px;
-  border: 1px solid rgba(240,240,225,.36);
-  border-radius: 3px;
-  color: #d8dcd5;
-  background: rgba(14,17,18,.82);
-  font-size: max(10px, .82cqw);
-  font-weight: 950;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cab-badge {
-  position: absolute;
-  left: 50%;
-  top: 50.8%;
-  z-index: 5;
-  transform: translate(-50%, -50%);
-  width: auto;
-  min-width: 31%;
-  height: 7%;
-  padding: 0 3.6%;
-  display: grid;
-  place-items: center;
-  color: #cfd3cc;
-  background: rgba(20,22,22,.9);
-  border: 1px solid rgba(245,245,232,.35);
-  border-radius: 2px;
-  font-size: max(5px, .48cqw);
-  font-weight: 950;
-  line-height: 1;
-  white-space: nowrap;
-}
-.mic-panel .panel-title { font-size: max(6px, .48cqw); }
-.mic-panel .micro-label,
-.mic-panel .control-label,
-.mic-panel .value-label {
-  font-size: max(5px, .42cqw);
-}
-.mic-panel .asset-button span {
-  font-size: max(4px, .34cqw);
-}
-.mic-panel .mix-fader-label {
-  font-size: max(5px, .4cqw);
-}
-.mic-asset {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 7;
-  height: var(--h);
-  width: auto;
-  transform: translate(-50%, -50%);
-}
-.fader {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  z-index: 6;
-  width: 4.4%;
-  height: var(--h);
-  transform: translate(-50%, -50%);
-}
-.fader-track {
-  position: absolute;
-  left: 48%;
-  top: 0;
-  width: 15%;
-  height: 100%;
-  border-radius: 999px;
-  background: #050709;
-  border: 1px solid rgba(255,255,255,.12);
-}
-.fader-cap {
-  position: absolute;
-  left: 50%;
-  top: var(--value);
-  width: 146%;
-  transform: translate(-50%, -50%);
-}
-.mix-fader { width: 4.05%; }
-.eq-scale-grid {
-  position: absolute;
-  z-index: 4;
-  background: repeating-linear-gradient(0deg, rgba(255,255,255,.11) 0 1px, transparent 1px 9.5%);
-}
-.eq-lane-gridline {
-  position: absolute;
-  z-index: 4;
-  width: 1px;
-  transform: translateX(-.5px);
-  background: rgba(255,255,255,.065);
-  pointer-events: none;
-}
-.eq-level-separator {
-  position: absolute;
-  top: 20%;
-  z-index: 5;
-  width: 1px;
-  height: 61%;
-  background: linear-gradient(transparent, rgba(235,241,248,.24) 10%, rgba(235,241,248,.24) 90%, transparent);
-  pointer-events: none;
-}
-.eq-rack .fader { width: 1.95%; }
-.eq-rack .fader-cap { width: 145%; }
-.eq-rack .eq-scale,
-.eq-rack .eq-band-value,
-.eq-rack .eq-frequency {
-  color: rgba(242,247,253,.9);
-  font-size: max(8px, .6cqw);
-  font-weight: 950;
-}
-.eq-rack .eq-frequency { font-size: max(8px, .58cqw); }
-.eq-rack .eq-level-lane .eq-band-value,
-.eq-rack .eq-level-lane .eq-frequency { color: #e7b85e; }
-.eq-rack .eq-level-lane .fader-track { border-color: rgba(231,184,94,.36); }
-.eq-rack .label.dark { color: rgba(242,247,253,.86); }
-.tone-rack-flow {
-  position: absolute;
-  inset: 0;
-  z-index: 22;
-  color: #111827;
-  pointer-events: auto;
-}
-.tone-source-flow {
-  left: 8.8%;
-  right: 8.8%;
-  top: 32.1%;
-  bottom: 8.7%;
-  display: grid;
-  grid-template-columns: minmax(0,.88fr) minmax(0,1.55fr) minmax(0,1.03fr);
-  grid-template-rows: 15% minmax(0,1fr) 12.5%;
-  gap: max(5px,.58cqw);
-  padding: max(5px,.6cqw);
-  border: 1px solid rgba(72,86,108,.25);
-  border-radius: 5px;
-  background: rgba(229,239,250,.78);
-}
-.source-flow-workspace .tone-source-flow {
-  left: clamp(44px, 7.2cqw, 190px);
-  right: clamp(44px, 7.2cqw, 190px);
-  top: clamp(28px, 7vh, 104px);
-  bottom: clamp(18px, 4.8vh, 76px);
-  grid-template-columns: minmax(210px, .92fr) minmax(360px, 1.54fr) minmax(260px, 1.05fr);
-  grid-template-rows: clamp(72px, 12vh, 118px) minmax(0, 1fr) clamp(52px, 8vh, 82px);
-  gap: clamp(8px, .7cqw, 18px);
-  padding: clamp(8px, .75cqw, 18px);
-  border-radius: 8px;
-}
-.source-flow-workspace .tone-source-flow .tone-target-rail,
-.source-flow-workspace .tone-source-flow .tone-browser-feed,
-.source-flow-workspace .tone-source-flow .tone-detail-panel,
-.source-flow-workspace .tone-source-flow .tone-audition-status {
-  padding: clamp(8px, .62cqw, 16px);
-  gap: clamp(5px, .45cqw, 12px);
-}
-.source-flow-workspace .tone-source-flow button {
-  min-height: clamp(24px, 1.4cqw, 38px) !important;
-  font-size: clamp(10px, .56cqw, 15px) !important;
-}
-.source-flow-workspace .tone-breadcrumb b,
-.source-flow-workspace .tone-detail-heading b {
-  font-size: clamp(17px, .98cqw, 28px);
-}
-.source-flow-workspace .tone-feed-head b,
-.source-flow-workspace .tone-rail-heading b {
-  font-size: clamp(14px, .78cqw, 22px);
-}
-.source-flow-workspace .tone-row-main strong {
-  font-size: clamp(12px, .68cqw, 18px);
-}
-.source-flow-workspace .tone-feed-row {
-  min-height: clamp(48px, 3.4cqw, 74px);
-  gap: clamp(6px, .48cqw, 12px);
-}
-.source-flow-workspace .tone-action-grid {
-  grid-auto-rows: clamp(28px, 1.6cqw, 42px);
-  gap: clamp(6px, .46cqw, 12px) !important;
-}
-.source-flow-workspace .tone-hardware-preview {
-  min-height: clamp(140px, 13.2cqw, 260px);
-}
-.tone-source-header {
-  grid-column: 1/-1;
-  display: grid;
-  grid-template-columns: auto minmax(0,1fr) auto;
-  align-items: center;
-  gap: max(6px,.68cqw);
-  min-width: 0;
-  padding: max(4px,.46cqw) max(6px,.68cqw);
-  border: 1px solid rgba(61,76,99,.18);
-  border-radius: 4px;
-  background: rgba(244,249,255,.74);
-}
-.tone-source-flow .tone-target-rail { grid-column: 1; grid-row: 2; }
-.tone-source-flow .tone-browser-feed { grid-column: 2; grid-row: 2; }
-.tone-source-flow .tone-detail-panel { grid-column: 3; grid-row: 2; }
-.tone-source-flow .tone-audition-status { grid-column: 1/-1; grid-row: 3; }
-.tone-return-button,
-.tone-source-flow button {
-  min-height: max(11px,.86cqw) !important;
-  border: 1px solid rgba(31,42,58,.22);
-  border-radius: 3px;
-  padding: 0 max(3px,.36cqw);
-  color: #111827;
-  background: rgba(255,255,255,.52);
-  font-size: max(5px,.43cqw) !important;
-  font-weight: 950;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.tone-return-button {
-  border-color: rgba(245,158,11,.6);
-  color: #3f2500;
-  background: rgba(255,236,189,.88);
-}
-.tone-breadcrumb { min-width: 0; display: grid; gap: 1px; }
-.tone-breadcrumb span,
-.tone-breadcrumb em {
-  overflow: hidden;
-  color: rgba(20,31,48,.64);
-  font-size: max(5px,.41cqw);
-  font-style: normal;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.tone-breadcrumb b {
-  overflow: hidden;
-  color: #111827;
-  font-size: max(9px,.72cqw);
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-connection-state {
-  display: grid;
-  grid-template-columns: auto auto;
-  grid-template-rows: auto auto;
-  column-gap: 4px;
-  align-items: center;
-  color: rgba(20,31,48,.72);
-}
-.tone-connection-state i {
-  width: 7px;
-  height: 7px;
-  border-radius: 99px;
-  background: #22c55e;
-  grid-row: 1 / span 2;
-}
-.tone-connection-state[data-auth="local"] i { background: #3b82f6; }
-.tone-connection-state[data-auth="offline"] i { background: #ef4444; }
-.tone-connection-state b,
-.tone-connection-state span { font-size: max(5px,.42cqw); font-weight: 900; white-space: nowrap; }
-.tone-source-flow .tone-target-rail,
-.tone-source-flow .tone-browser-feed,
-.tone-source-flow .tone-detail-panel,
-.tone-source-flow .tone-audition-status {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  gap: max(3px,.34cqw);
-  padding: max(5px,.5cqw);
-  border: 1px solid rgba(61,76,99,.18);
-  border-radius: 4px;
-  background: rgba(244,249,255,.72);
-  overflow: hidden;
-}
-.tone-rail-heading,
-.tone-feed-head,
-.tone-detail-heading {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-.tone-rail-heading span,
-.tone-feed-head span,
-.tone-detail-heading span {
-  color: rgba(20,31,48,.62);
-  font-size: max(5px,.42cqw);
-  font-weight: 900;
-  text-transform: uppercase;
-}
-.tone-rail-heading b,
-.tone-feed-head b,
-.tone-detail-heading b {
-  overflow: hidden;
-  color: #111827;
-  font-size: max(8px,.64cqw);
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-feed-head em,
-.tone-detail-heading em {
-  overflow: hidden;
-  color: rgba(20,31,48,.62);
-  font-size: max(5px,.4cqw);
-  font-style: normal;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-target-list,
-.tone-chain-list,
-.tone-feed-list {
-  display: grid;
-  gap: max(3px,.32cqw);
-  min-height: 0;
-  overflow: hidden;
-}
-.tone-target-card,
-.tone-chain-node,
-.tone-local-path,
-.tone-feed-row {
-  min-width: 0;
-  border: 1px solid rgba(31,42,58,.14);
-  border-radius: 4px;
-  background: rgba(243,249,255,.72);
-}
-.tone-target-card {
-  display: grid;
-  gap: 1px;
-  padding: max(4px,.38cqw);
-}
-.tone-target-card[data-active="true"] {
-  border-color: rgba(245,158,11,.72);
-  background: rgba(255,239,197,.92);
-}
-.tone-target-card span,
-.tone-target-card em,
-.tone-chain-node span {
-  overflow: hidden;
-  color: rgba(23,32,51,.68);
-  font-size: max(4px,.34cqw);
-  font-style: normal;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-target-card b,
-.tone-chain-node b {
-  overflow: hidden;
-  color: #172033;
-  font-size: max(5px,.43cqw);
-  font-weight: 950;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.tone-chain-node {
-  position: relative;
-  display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: 1px;
-  min-height: max(15px,1.42cqw);
-  text-align: center;
-}
-.tone-chain-node[data-target="true"] {
-  border-color: rgba(245,158,11,.72);
-  background: rgba(255,239,197,.92);
-}
-.tone-local-path {
-  display: grid;
-  gap: 1px;
-  padding: max(4px,.42cqw);
-  text-align: left;
-  font-size: max(5px,.43cqw) !important;
-  line-height: 1.1 !important;
-}
-.tone-local-path b,
-.tone-local-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tone-local-path b { font-size: max(5px,.43cqw); font-weight: 950; }
-.tone-local-path span { font-size: max(4px,.34cqw); font-weight: 850; color: rgba(23,32,51,.68); }
-.tone-browser-feed { grid-template-rows: auto auto auto auto minmax(0,1fr); }
-.tone-search-panel {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) auto;
-  gap: max(4px,.42cqw);
-  align-items: center;
-}
-.tone-search-panel label {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-  padding: max(4px,.42cqw);
-  border: 1px solid rgba(31,42,58,.14);
-  border-radius: 4px;
-  background: rgba(255,255,255,.5);
-}
-.tone-search-panel label span,
-.tone-search-panel label b {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-search-panel label span { color: rgba(20,31,48,.62); font-size: max(4px,.34cqw); font-weight: 900; text-transform: uppercase; }
-.tone-search-panel label b { color: #111827; font-size: max(6px,.52cqw); font-weight: 950; }
-.tone-search-panel button,
-.tone-tab-row button,
-.tone-filter-row button,
-.tone-feed-row button,
-.tone-action-grid button {
-  font-size: max(5px,.43cqw) !important;
-  line-height: 1.1 !important;
-}
-.tone-tab-row,
-.tone-filter-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: max(3px,.28cqw);
-  min-width: 0;
-}
-.tone-tab-row button[data-active="true"],
-.tone-filter-row button[data-active="true"] {
-  border-color: rgba(245,158,11,.58);
-  color: #3f2500;
-  background: rgba(255,236,189,.84);
-}
-.tone-feed-row {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0,1.34fr) minmax(0,1fr) auto auto auto;
-  align-items: center;
-  gap: max(3px,.32cqw);
-  min-height: max(23px,2.08cqw);
-  padding: max(4px,.38cqw);
-}
-.tone-row-select-target {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: inherit;
-  background: transparent;
-  pointer-events: none;
-}
-.tone-row-select-target:focus-visible {
-  outline: 2px solid rgba(245,158,11,.88);
-  outline-offset: -3px;
-}
-.tone-feed-row[data-active="true"] {
-  border-color: rgba(245,158,11,.58);
-  background: rgba(255,246,224,.8);
-}
-.tone-feed-row[data-source="openstudio"] { border-color: rgba(59,130,246,.22); }
-.tone-feed-row[data-source="external"] { border-style: dashed; }
-.tone-feed-row[data-category="space-ir"],
-.tone-feed-row[data-category="external-space-ir"] { background: rgba(232,240,249,.72); }
-.tone-row-main,
-.tone-row-tags,
-.tone-row-stats {
-  min-width: 0;
-  display: flex;
-  gap: 3px;
-  align-items: center;
-  overflow: hidden;
-}
-.tone-row-main { display: grid; gap: 1px; }
-.tone-row-main strong,
-.tone-row-main span,
-.tone-row-tags i,
-.tone-row-stats span,
-.tone-feed-row em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-row-main strong { color: #111827; font-size: max(6px,.52cqw); font-weight: 950; }
-.tone-row-main span,
-.tone-row-stats span,
-.tone-feed-row em { color: rgba(20,31,48,.65); font-size: max(5px,.34cqw); font-style: normal; font-weight: 850; }
-.tone-row-tags i {
-  padding: 1px 3px;
-  border-radius: 3px;
-  color: #283449;
-  background: rgba(31,42,58,.08);
-  font-size: max(4px,.32cqw);
-  font-style: normal;
-  font-weight: 850;
-}
-.tone-detail-panel {
-  grid-template-rows: auto minmax(38px,.74fr) auto auto;
-}
-.tone-hardware-preview {
-  position: relative;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-  border: 1px solid rgba(31,42,58,.12);
-  border-radius: 4px;
-  background: rgba(203,218,235,.56);
-}
-.tone-hardware-preview > img:first-child {
-  position: absolute;
-  left: 8%;
-  top: 13%;
-  width: 84%;
-  height: 76%;
-  object-fit: contain;
-}
-.tone-hardware-preview[data-preview-kind="pedal"] > img:first-child {
-  left: 50%;
-  top: 51%;
-  width: 34%;
-  height: 88%;
-  transform: translate(-50%, -50%);
-}
-.tone-hardware-preview[data-preview-kind="delay"] > img:first-child,
-.tone-hardware-preview[data-preview-kind="mod"] > img:first-child,
-.tone-hardware-preview[data-preview-kind="reverb"] > img:first-child {
-  left: 6%;
-  top: 20%;
-  width: 88%;
-  height: 64%;
-}
-.tone-preview-control {
-  position: absolute;
-  height: auto;
-  transform: translate(-50%, -50%);
-  object-fit: contain;
-  pointer-events: none;
-  filter: drop-shadow(0 1px 2px rgba(0,0,0,.42));
-}
-.tone-hardware-badge {
-  position: absolute;
-  left: 50%;
-  bottom: 10%;
-  z-index: 4;
-  display: grid;
-  min-width: 44%;
-  transform: translateX(-50%);
-  padding: 3px 6px;
-  border: 1px solid rgba(240,240,225,.36);
-  border-radius: 3px;
-  color: #d8dcd5;
-  background: rgba(14,17,18,.82);
-  text-align: center;
-}
-.tone-hardware-badge span,
-.tone-hardware-badge b {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-hardware-badge span { font-size: max(4px,.32cqw); font-weight: 850; text-transform: uppercase; }
-.tone-hardware-badge b { font-size: max(5px,.42cqw); font-weight: 950; }
-.tone-detail-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1px max(4px,.34cqw);
-  max-height: max(24px,1.9cqw);
-  min-height: 0;
-  overflow: hidden;
-}
-.tone-detail-meta span {
-  flex: 1 1 42%;
-  min-width: 0;
-  overflow: hidden;
-  color: rgba(20,31,48,.72);
-  font-size: max(5px,.4cqw);
-  font-weight: 850;
-  line-height: 1.06;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-detail-heading em {
-  line-height: 1.1;
-  white-space: normal;
-}
-.tone-action-grid {
-  display: grid;
-  grid-template-columns: repeat(3,minmax(0,1fr));
-  grid-auto-rows: max(11px,.82cqw);
-  align-content: start;
-  gap: max(3px,.32cqw);
-  min-height: max(25px,1.96cqw);
-  overflow: visible;
-}
-.nam-source-flow-host .nam-native-design-surface .tone-action-grid,
-.nam-native-design-surface .tone-source-flow .tone-action-grid {
-  grid-template-columns: repeat(3,minmax(0,1fr));
-  gap: max(3px,.32cqw) !important;
-}
-.tone-action-grid button {
-  min-height: max(11px,.82cqw) !important;
-  min-width: 0;
-  padding: 0 3px;
-}
-.tone-action-grid button[data-primary="true"] {
-  border-color: rgba(245,158,11,.58);
-  color: #3f2500;
-  background: rgba(255,236,189,.84);
-}
-.tone-audition-status {
-  grid-template-columns: auto minmax(0,1.1fr) minmax(0,1.25fr);
-  align-items: center;
-}
-.tone-audition-status span,
-.tone-audition-status b,
-.tone-audition-status em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tone-audition-status span { color: rgba(20,31,48,.62); font-size: max(5px,.42cqw); font-weight: 900; text-transform: uppercase; }
-.tone-audition-status b { color: #111827; font-size: max(6px,.5cqw); font-weight: 950; }
-.tone-audition-status em { color: rgba(20,31,48,.62); font-size: max(5px,.38cqw); font-style: normal; font-weight: 850; }
-@container (max-width: 1180px) {
-  .tone-source-flow {
-    left: 8.8%;
-    right: 8.8%;
-    grid-template-columns: minmax(0,.86fr) minmax(0,1.45fr) minmax(0,.94fr);
-    gap: 4px;
-    padding: 5px;
-  }
-  .tone-source-flow .tone-feed-row {
-    grid-template-columns: minmax(0,1.2fr) minmax(0,.84fr) auto auto;
-    min-height: 21px;
-  }
-  .tone-source-flow .tone-row-stats { display: none; }
-  .tone-source-flow .tone-row-tags i:nth-child(n + 3),
-  .tone-detail-meta span:nth-child(n + 3) { display: none; }
-  .tone-source-flow .tone-audition-status { grid-template-columns: auto minmax(0,1fr); }
-  .tone-source-flow .tone-audition-status em { display: none; }
-}
-`;
-
-const NATIVE_PREMIUM_DARK_CSS = `
-/* Premium NAM Rack: the active runtime shell. Kept as a final, tightly scoped
-   layer so the legacy design boards remain available to the source-flow view. */
-.nam-rack-design-port.nam-native-design-surface {
-  --premium-bg: #080a0e;
-  --premium-panel: #101319;
-  --premium-panel-raised: #171b22;
-  --premium-line: rgba(255,255,255,.095);
-  --premium-line-strong: rgba(255,255,255,.16);
-  --premium-text: #f2f3f5;
-  --premium-muted: #8d949f;
-  --premium-dim: #5d6470;
-  --premium-accent: #e0a149;
-  --premium-accent-hot: #ffc36c;
-  --premium-green: #55d28b;
-  position: absolute;
-  inset: 0;
-  min-width: 0;
-  min-height: 0;
-  color: var(--premium-text);
-  background: var(--premium-bg);
-}
-.nam-rack-design-port .premium-nam-shell {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  grid-template: 116px 54px minmax(0, 1fr) 44px / minmax(0, 1fr);
-  overflow: hidden;
-  color: var(--premium-text);
-  background:
-    radial-gradient(circle at 44% -20%, rgba(209,145,62,.13), transparent 38%),
-    #080a0e;
-}
-.nam-rack-design-port .premium-nam-shell::before {
-  display: none;
-}
-.nam-rack-design-port .nam-top-artboard {
-  position: static !important;
-  display: contents !important;
-  width: auto !important;
-  height: auto !important;
-  transform: none !important;
-  pointer-events: auto;
-  container-type: normal;
-}
-.nam-rack-design-port .global-strip {
-  position: relative !important;
-  inset: auto !important;
-  grid-row: 1;
-  z-index: 30;
-  width: auto !important;
-  height: auto !important;
-  display: grid;
-  grid-template-columns: 174px minmax(286px, .9fr) minmax(390px, 1.42fr) minmax(132px, .42fr);
-  align-items: stretch;
-  gap: clamp(10px, 1vw, 20px);
-  padding: 14px clamp(18px, 1.55vw, 30px) 12px;
-  border: 0;
-  border-bottom: 1px solid var(--premium-line);
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.026), transparent 48%),
-    rgba(10,12,16,.985);
-  box-shadow: 0 16px 40px rgba(0,0,0,.26);
-}
-.nam-rack-design-port .premium-brand {
-  min-width: 0;
-  display: grid;
-  align-content: center;
-  justify-items: start;
-  border-right: 1px solid var(--premium-line);
-}
-.nam-rack-design-port .premium-brand > span {
-  color: var(--premium-muted);
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-brand > strong {
-  margin-top: 3px;
-  color: #fff;
-  font-size: clamp(19px, 1.45vw, 25px);
-  font-weight: 840;
-  letter-spacing: -.035em;
-  line-height: 1;
-}
-.nam-rack-design-port .premium-brand > strong::after {
-  content: none;
-}
-.nam-rack-design-port .premium-brand > em {
-  margin-top: 8px;
-  color: var(--premium-dim);
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 650;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .global-block {
-  position: static !important;
-  inset: auto !important;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: clamp(6px, .65vw, 13px);
-}
-.nam-rack-design-port .global-block.left { grid-column: 2; }
-.nam-rack-design-port .global-block.right {
-  grid-column: 4;
-  justify-content: flex-end;
-}
-.nam-rack-design-port .mini-param {
-  width: clamp(58px, 4.8vw, 76px);
-  height: 86px;
-  display: grid;
-  grid-template-rows: 13px 53px 18px;
-  place-items: center;
-  align-content: center;
-}
-.nam-rack-design-port .mini-param > .asset-control {
-  top: 43px !important;
-  width: 50px !important;
-  height: 50px !important;
-  filter: drop-shadow(0 7px 7px rgba(0,0,0,.42));
-}
-.nam-rack-design-port .mini-param > .knob-position-indicator {
-  top: 43px !important;
-  width: 50px !important;
-}
-.nam-rack-design-port .mini-param .global-label {
-  position: static !important;
-  transform: none !important;
-  color: #8f96a0 !important;
-  font-size: 9px !important;
-  font-weight: 760;
-  letter-spacing: .075em !important;
-}
-.nam-rack-design-port .mini-param strong {
-  color: #e8eaed;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 720;
-}
-.nam-rack-design-port .premium-level-meter {
-  position: relative;
-  width: 22px;
-  height: 72px;
-  flex: 0 0 22px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 4px;
-  background: #06080b;
-  box-shadow: inset 0 0 0 2px rgba(0,0,0,.28);
-}
-.nam-rack-design-port .premium-level-meter > span {
-  position: absolute;
-  inset: 4px;
-  border-radius: 2px;
-  background:
-    repeating-linear-gradient(180deg, rgba(0,0,0,.82) 0 2px, transparent 2px 5px),
-    linear-gradient(180deg, #20262d, #11161b);
-  opacity: .9;
-}
-.nam-rack-design-port .premium-level-meter > i {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  right: 4px;
-  bottom: 4px;
-  height: auto;
-  border-radius: 2px;
-  background:
-    repeating-linear-gradient(180deg, rgba(0,0,0,.72) 0 2px, transparent 2px 5px),
-    linear-gradient(180deg, #ef6760 0 11%, #e2ad50 11% 30%, #52c783 30% 100%);
-  box-shadow: 0 0 8px rgba(82,199,131,.18);
-  clip-path: inset(var(--premium-meter-inset, 100%) 0 0 0);
-  transition: clip-path 100ms linear;
-  will-change: clip-path;
-}
-.nam-rack-design-port .premium-level-meter[data-clip="true"] {
-  border-color: rgba(239,103,96,.72);
-  box-shadow: inset 0 0 0 2px rgba(0,0,0,.28), 0 0 9px rgba(239,103,96,.28);
-}
-.nam-rack-design-port .premium-level-meter > strong {
-  position: absolute;
-  left: 50%;
-  bottom: -1px;
-  z-index: 2;
-  min-width: 20px;
-  transform: translateX(-50%);
-  color: rgba(255,255,255,.72);
-  background: rgba(3,4,6,.78);
-  font-size: 7px;
-  font-weight: 750;
-  line-height: 11px;
-  text-align: center;
-}
-.nam-rack-design-port .preset-area {
-  position: static !important;
-  grid-column: 3;
-  width: auto !important;
-  min-width: 0;
-  transform: none !important;
-  display: grid;
-  align-content: center;
-  gap: 7px;
-}
-.nam-rack-design-port .preset-actions {
-  display: grid;
-  grid-template-columns: 28px 28px minmax(0, 1fr) 28px auto;
-  align-items: center;
-  gap: 5px;
-}
-.nam-rack-design-port .preset-actions > button,
-.nam-rack-design-port .premium-compare button {
-  width: 28px;
-  height: 25px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--premium-line);
-  border-radius: 4px;
-  color: #9ca3ad;
-  background: #15181e;
-  cursor: pointer;
-}
-.nam-rack-design-port .preset-actions > button:hover,
-.nam-rack-design-port .premium-compare button:hover {
-  color: #fff;
-  border-color: var(--premium-line-strong);
-  background: #1c2028;
-}
-.nam-rack-design-port .preset-actions svg { width: 13px; height: 13px; }
-.nam-rack-design-port .preset-context {
-  min-width: 0;
-  overflow: hidden;
-  color: #717985;
-  font-size: 10px;
-  font-weight: 630;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .preset-context i {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-radius: 50%;
-  background: var(--premium-green);
-  box-shadow: 0 0 8px rgba(85,210,139,.55);
-}
-.nam-rack-design-port .premium-compare {
-  display: flex;
-  gap: 3px;
-  padding-left: 3px;
-}
-.nam-rack-design-port .premium-compare button {
-  width: 25px;
-  color: #747b85;
-  font-size: 10px;
-  font-weight: 820;
-}
-.nam-rack-design-port .premium-compare button[data-active="true"] {
-  color: #17100a;
-  border-color: #e3a651;
-  background: linear-gradient(180deg, #f1b962, #c98132);
-  box-shadow: 0 0 13px rgba(224,161,73,.2);
-}
-.nam-rack-design-port .preset {
-  height: 42px;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 18px auto;
-  gap: 4px;
-  padding: 0 6px 0 8px;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 6px;
-  color: #f5f6f7;
-  background: linear-gradient(180deg, #1b1f26, #12151a);
-  box-shadow: inset 0 1px rgba(255,255,255,.035), 0 8px 18px rgba(0,0,0,.2);
-}
-.nam-rack-design-port .preset > b {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 720;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .preset-dirty {
-  color: var(--premium-accent-hot);
-  opacity: 0;
-}
-.nam-rack-design-port .preset-dirty[data-active="true"] { opacity: 1; }
-.nam-rack-design-port .tone-library-mark {
-  width: auto;
-  min-width: 112px;
-  height: 30px;
-  display: flex;
-  gap: 7px;
-  padding: 0 11px;
-  margin: 0;
-  border-color: rgba(224,161,73,.32);
-  border-radius: 4px;
-  color: #f1c384;
-  background: rgba(224,161,73,.075);
-  font-size: 10px !important;
-  font-weight: 720;
-}
-.nam-rack-design-port .tone-library-mark:hover {
-  border-color: rgba(224,161,73,.7);
-  color: #fff0d9;
-  background: rgba(224,161,73,.14);
-}
-.nam-rack-design-port .tone-library-mark svg { width: 13px; height: 13px; }
-.nam-rack-design-port .top-nav {
-  position: relative !important;
-  inset: auto !important;
-  grid-row: 2;
-  z-index: 28;
-  width: auto !important;
-  height: auto !important;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(86px, 126px));
-  justify-content: center;
-  gap: clamp(6px, 1.2vw, 24px);
-  padding: 0 20px;
-  border-bottom: 1px solid var(--premium-line);
-  background: rgba(13,15,20,.98);
-}
-.nam-rack-design-port .nav-item {
-  position: relative;
-  display: grid;
-  grid-template-columns: 18px auto 4px;
-  justify-content: center;
-  align-items: center;
-  gap: 8px;
-  padding: 0 9px;
-  border: 0;
-  color: #666e79;
-  background: transparent;
-  font-size: 10px !important;
-  font-weight: 740;
-  cursor: pointer;
-}
-.nam-rack-design-port .nav-item::after {
-  content: "";
-  position: absolute;
-  left: 13%;
-  right: 13%;
-  bottom: -1px;
-  height: 2px;
-  transform: scaleX(0);
-  background: var(--premium-accent);
-  box-shadow: 0 -2px 10px rgba(224,161,73,.45);
-  transition: transform 140ms ease;
-}
-.nam-rack-design-port .nav-item:hover { color: #b5bac2; }
-.nam-rack-design-port .nav-item[data-active="true"] { color: #f3f4f5; }
-.nam-rack-design-port .nav-item[data-active="true"]::after { transform: scaleX(1); }
-.nam-rack-design-port .premium-nav-icon,
-.nam-rack-design-port .premium-nav-icon svg {
-  width: 15px;
-  height: 15px;
-}
-.nam-rack-design-port .nav-item > i {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #343a43;
-}
-.nam-rack-design-port .nav-item[data-active="true"] > i {
-  background: var(--premium-accent-hot);
-  box-shadow: 0 0 7px rgba(255,195,108,.7);
-}
-.nam-rack-design-port .hardware-stage {
-  position: relative !important;
-  inset: auto !important;
-  grid-row: 3;
-  z-index: 10;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(270px, 20.5vw, 320px);
-  overflow: hidden;
-  pointer-events: auto;
-  background: #080a0d;
-}
-.nam-rack-design-port .premium-stage-canvas {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  container-type: inline-size;
-  background:
-    radial-gradient(ellipse at 51% 37%, rgba(225,159,74,.21), transparent 31%),
-    radial-gradient(ellipse at 50% 54%, rgba(255,255,255,.045), transparent 52%),
-    linear-gradient(90deg, rgba(0,0,0,.25), transparent 13% 87%, rgba(0,0,0,.35)),
-    repeating-linear-gradient(135deg, rgba(255,255,255,.012) 0 1px, transparent 1px 6px),
-    #0a0c10;
-}
-.nam-rack-design-port .premium-stage-canvas::before {
-  content: "";
-  position: absolute;
-  inset: 5.5% 4.2%;
-  border: 1px solid rgba(255,255,255,.045);
-  border-radius: 10px;
-  box-shadow: inset 0 0 90px rgba(0,0,0,.35), 0 26px 80px rgba(0,0,0,.35);
-  pointer-events: none;
-}
-.nam-rack-design-port .premium-stage-canvas::after {
-  content: "";
-  position: absolute;
-  left: 10%;
-  right: 10%;
-  bottom: 7%;
-  z-index: 1;
-  height: 17%;
-  border-radius: 50%;
-  background: radial-gradient(ellipse, rgba(0,0,0,.82), transparent 68%);
-  filter: blur(13px);
-  pointer-events: none;
-}
-.nam-rack-design-port .premium-stage-status {
-  position: absolute;
-  left: clamp(18px, 2.3vw, 36px);
-  bottom: clamp(15px, 2vh, 24px);
-  z-index: 18;
-  max-width: min(68%, 720px);
-  height: 30px;
-  display: grid;
-  grid-template-columns: 7px minmax(0,1fr);
-  align-items: center;
-  gap: 9px;
-  padding: 0 12px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 999px;
-  color: #7e8691;
-  background: rgba(8,10,14,.82);
-  box-shadow: 0 8px 22px rgba(0,0,0,.26);
-  backdrop-filter: blur(8px);
-  pointer-events: none;
-}
-.nam-rack-design-port .premium-stage-status > i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #59616c;
-}
-.nam-rack-design-port .premium-stage-status > span {
-  overflow: hidden;
-  font-size: 10px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-stage-status[data-tone="info"] > i { background: #5a9fe8; box-shadow: 0 0 8px rgba(90,159,232,.55); }
-.nam-rack-design-port .premium-stage-status[data-tone="success"] > i { background: var(--premium-green); box-shadow: 0 0 8px rgba(85,210,139,.55); }
-.nam-rack-design-port .premium-stage-status[data-tone="warning"] {
-  color: #dfbb83;
-  border-color: rgba(224,161,73,.24);
-}
-.nam-rack-design-port .premium-stage-status[data-tone="warning"] > i { background: var(--premium-accent-hot); box-shadow: 0 0 8px rgba(255,195,108,.6); }
-.nam-rack-design-port .premium-stage-status[data-tone="error"] {
-  color: #eca49b;
-  border-color: rgba(239,101,86,.3);
-}
-.nam-rack-design-port .premium-stage-status[data-tone="error"] > i { background: #ef6556; box-shadow: 0 0 8px rgba(239,101,86,.6); }
-}
-.nam-rack-design-port .nam-rack-artboard {
-  position: absolute !important;
-  left: 0;
-  top: 0;
-  z-index: 12;
-  width: 768px;
-  height: 341px;
-  transform-origin: left top;
-  pointer-events: none;
-  container-type: inline-size;
-}
-.nam-rack-design-port .module {
-  filter: drop-shadow(0 26px 22px rgba(0,0,0,.5));
-  transition: filter 140ms ease, transform 140ms ease;
-}
-.nam-rack-design-port .module-skin {
-  filter: saturate(.9) contrast(1.04) brightness(.87);
-}
-.nam-rack-design-port .asset-control {
-  filter: drop-shadow(0 4px 4px rgba(0,0,0,.4));
-}
-.nam-rack-design-port .asset-control.knob {
-  /* The source knob artwork's visible gear ring is centered at 47.5586% Y
-     inside its transparent square. Anchor and rotate around that physical
-     center so the knob cannot orbit by a pixel or two while turning. */
-  transform-origin: 50% 47.5586%;
-  transform: translate(-50%, -47.5586%) rotate(var(--rot, 0deg));
-}
-.nam-rack-design-port .knob-position-indicator {
-  display: none;
-}
-.nam-rack-design-port .knob-position-indicator::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 11%;
-  width: max(1px, 4%);
-  height: 18%;
-  transform: translateX(-50%);
-  border-radius: 999px;
-  background: rgba(245,238,220,.88);
-  box-shadow: 0 1px 2px rgba(0,0,0,.72);
-}
-.nam-rack-design-port .control-label,
-.nam-rack-design-port .value-label,
-.nam-rack-design-port .module-title,
-.nam-rack-design-port .label {
-  text-shadow: 0 1px 1px rgba(0,0,0,.52);
-}
-.nam-rack-design-port .asset-button span,
-.nam-rack-design-port .foot-action-label,
-.nam-rack-design-port .delay-rack .foot-action-label {
-  font-size: max(8px, .55cqw) !important;
-  letter-spacing: .01em;
-}
-.nam-rack-design-port .stompbox .control-label,
-.nam-rack-design-port .stompbox .value-label,
-.nam-rack-design-port .wide-pedal .control-label,
-.nam-rack-design-port .wide-pedal .value-label {
-  font-size: max(8px, .62cqw) !important;
-  font-weight: 780 !important;
-  letter-spacing: .03em !important;
-}
-.nam-rack-design-port .stompbox .module-title,
-.nam-rack-design-port .wide-pedal .module-title {
-  font-size: max(9px, .76cqw) !important;
-  font-weight: 860 !important;
-  letter-spacing: .04em !important;
-}
-.nam-rack-design-port .module[data-module="precision-drive"] .module-title {
-  width: 96%;
-  max-width: 96%;
-  font-size: max(8px, .68cqw) !important;
-  letter-spacing: .015em !important;
-}
-.nam-rack-design-port .stompbox .kicker {
-  font-size: max(7px, .5cqw) !important;
-  opacity: .58;
-}
-.nam-rack-design-port .pedal-model-display,
-.nam-rack-design-port .tone-display,
-.nam-rack-design-port .delay-display,
-.nam-rack-design-port .cab-model-display {
-  overflow: hidden;
-  padding: 0 4%;
-  color: #ffd78e !important;
-  font-size: max(7px, .62cqw) !important;
-  text-overflow: ellipsis;
-  text-shadow: none;
-  white-space: nowrap;
-}
-.nam-rack-design-port .delay-display i {
-  color: rgba(255, 215, 142, .52);
-  font-style: normal;
-}
-.nam-rack-design-port .pedal-capture-selector {
-  z-index: 56;
-  grid-template-columns: minmax(0,1fr);
-  grid-template-rows: 1fr 1fr;
-  gap: 0;
-  align-items: center;
-  padding: 0 5px;
-  border-color: rgba(255,211,139,.34);
-  color: #f0c879 !important;
-  cursor: pointer;
-  pointer-events: auto;
-}
-.nam-rack-design-port .pedal-capture-selector:hover:not(:disabled),
-.nam-rack-design-port .pedal-capture-selector:focus-visible {
-  border-color: rgba(255,208,126,.8);
-  outline: 1px solid rgba(255,208,126,.7);
-  outline-offset: 2px;
-  background: #0c0b08;
-}
-.nam-rack-design-port .pedal-capture-selector:disabled { cursor: default; opacity: .72; }
-.nam-rack-design-port .pedal-capture-selector > span {
-  min-width: 0;
-  overflow: hidden;
-  font-size: max(6.5px, .5cqw);
-  line-height: 1;
-  text-overflow: ellipsis;
-}
-.nam-rack-design-port .pedal-capture-selector > strong {
-  color: #fff1cf;
-  font-size: max(6px, .43cqw);
-  font-weight: 820;
-  letter-spacing: .08em;
-  line-height: 1;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .cab-source-selector {
-  position: absolute;
-  box-sizing: border-box;
-  overflow: hidden;
-  z-index: 76;
-  left: 4.5%;
-  top: 4.5%;
-  width: 91%;
-  max-width: none;
-  min-width: 0;
-  height: 15%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 3px 2px 7px;
-  transform: none;
-  border-color: rgba(228,188,126,.25);
-  border-radius: 3px;
-  background: linear-gradient(180deg, rgba(12,14,16,.96), rgba(5,7,8,.98));
-  box-shadow: inset 0 1px rgba(255,255,255,.04), 0 2px 7px rgba(0,0,0,.45);
-  pointer-events: auto;
-}
-.nam-rack-design-port .cab-source-copy {
-  min-width: 0;
-  display: grid;
-  align-content: center;
-  gap: 1px;
-  overflow: hidden;
-  text-align: left;
-}
-.nam-rack-design-port .cab-source-copy > small {
-  color: rgba(210,172,112,.72);
-  font-size: max(6px, .34cqw);
-  font-weight: 720;
-  letter-spacing: .08em;
-  line-height: 1;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-source-copy > strong {
-  max-width: 100%;
-  overflow: hidden;
-  color: #e9e2d4;
-  font-size: max(7.5px, .5cqw);
-  font-weight: 680;
-  letter-spacing: .025em;
-  line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-source-actions {
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
-  height: calc(100% - 2px);
-}
-.nam-rack-design-port .cab-source-actions > button {
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  padding: 0 6px;
-  border: 1px solid rgba(229,166,77,.25);
-  border-radius: 2px;
-  color: #e7b86e;
-  background: rgba(224,161,73,.07);
-  font-size: max(6px, .36cqw);
-  font-weight: 780;
-  letter-spacing: .055em;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.nam-rack-design-port .cab-source-actions > button svg {
-  width: 8px;
-  height: 8px;
-}
-.nam-rack-design-port .cab-source-actions > button:hover:not(:disabled),
-.nam-rack-design-port .cab-source-actions > button:focus-visible {
-  border-color: rgba(255,208,126,.72);
-  color: #ffd48f;
-  background: rgba(224,161,73,.14);
-  outline: 1px solid rgba(255,208,126,.45);
-  outline-offset: 1px;
-}
-.nam-rack-design-port .cab-source-actions > button:disabled {
-  cursor: default;
-  opacity: .42;
-}
-.nam-rack-design-port .cab-source-actions > .cab-source-local {
-  padding-inline: 4px;
-  color: #9aa0a8;
-  border-color: rgba(255,255,255,.08);
-  background: rgba(255,255,255,.025);
-}
-.nam-rack-design-port .cab-controls-locked .cab-control-deck .knob-position-indicator { opacity: .24; }
-.nam-rack-design-port .cab-controls-locked .cab-control-deck .asset-control.led {
-  filter: grayscale(.9) saturate(.18);
-  opacity: .28;
-}
-.nam-rack-design-port .cab-controls-locked .cab-room-bay .knob-position-indicator { opacity: 1; }
-.nam-rack-design-port .cab-controls-locked .cab-room-bay .asset-control.led {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .cabinet.cab-mode-empty .module-frame { filter: brightness(.38) saturate(.45); }
-.nam-rack-design-port .cabinet.cab-mode-required .module-frame { filter: brightness(.55) saturate(.62); }
-.nam-rack-design-port .cabinet.cab-mode-embedded .module-frame { filter: brightness(.82) saturate(.78); }
-.nam-rack-design-port .ir-shaper-panel.cab-controls-locked .module-skin {
-  filter: brightness(.68) contrast(1.08) saturate(.42) drop-shadow(0 18px 15px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .amp-brand {
-  color: rgba(255,255,255,.84) !important;
-  font-size: max(17px, 1.65cqw) !important;
-  letter-spacing: -.035em !important;
-  text-shadow: 0 2px 3px rgba(0,0,0,.65) !important;
-}
-.nam-rack-design-port .amp-badge {
-  max-width: 56%;
-  overflow: hidden;
-  color: #f2d5a7 !important;
-  font-size: max(11px, 1.02cqw) !important;
-  text-overflow: ellipsis;
-  text-shadow: 0 2px 3px rgba(0,0,0,.7);
-  white-space: nowrap;
-}
-.nam-rack-design-port .amp-tone-note {
-  color: rgba(245,224,190,.66) !important;
-  font-size: max(8px, .6cqw) !important;
-  letter-spacing: .02em;
-}
-.nam-rack-design-port .amp-rail-label {
-  color: rgba(251,237,213,.82) !important;
-  font-size: max(8px, .58cqw) !important;
-}
-.nam-rack-design-port .amp-control-rail {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  transition: filter 140ms ease, opacity 140ms ease;
-}
-.nam-rack-design-port .amp-control-rail[data-disabled="true"] {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .amp-control-rail[data-disabled="true"] .asset-control.led,
-.nam-rack-design-port .amp-control-rail[data-disabled="true"] .asset-control.washer,
-.nam-rack-design-port .amp-control-rail[data-disabled="true"] .control-label:not(.control-disabled) {
-  filter: grayscale(.82) saturate(.24);
-  opacity: .32;
-}
-.nam-rack-design-port .pedal-nam-control-group {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  transition: filter 140ms ease, opacity 140ms ease;
-}
-.nam-rack-design-port .pedal-nam-control-group[data-disabled="true"] {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .pedal-nam-control-group[data-disabled="true"] .asset-control.led {
-  filter: grayscale(.82) saturate(.24);
-  opacity: .32;
-}
-.nam-rack-design-port .amp-tone-caption {
-  position: absolute;
-  left: 50%;
-  top: 67%;
-  z-index: 5;
-  transform: translateX(-50%);
-  color: rgba(226,220,208,.5) !important;
-  font-size: 7.5px !important;
-  letter-spacing: .14em;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-badge,
-.nam-rack-design-port .cab-status-badge {
-  max-width: 78%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-badge {
-  color: rgba(255,241,219,.9) !important;
-  font-size: max(10px, .82cqw) !important;
-}
-.nam-rack-design-port .cab-status-badge {
-  color: rgba(255,255,255,.52) !important;
-  font-size: max(8px, .58cqw) !important;
-}
-.nam-rack-design-port .mic-panel .panel-title,
-.nam-rack-design-port .mic-panel .control-label,
-.nam-rack-design-port .mic-panel .rack-small {
-  font-size: max(8px, .58cqw) !important;
-}
-.nam-rack-design-port .eq-rack-title {
-  color: #e7eaee !important;
-  font-size: max(9px, .74cqw) !important;
-}
-.nam-rack-design-port .eq-frequency,
-.nam-rack-design-port .eq-scale,
-.nam-rack-design-port .eq-band-value,
-.nam-rack-design-port .rack-small,
-.nam-rack-design-port .rack-big {
-  font-size: max(8px, .58cqw) !important;
-}
-.nam-rack-design-port .eq-rack .fader { width: 2.6%; }
-.nam-rack-design-port .premium-rig-drawer {
-  position: relative;
-  z-index: 25;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
-  gap: 12px;
-  padding: 22px 18px 17px;
-  overflow: hidden;
-  border-left: 1px solid var(--premium-line);
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.024), transparent 34%),
-    #0e1116;
-  box-shadow: -22px 0 50px rgba(0,0,0,.3);
-}
-.nam-rack-design-port .premium-drawer-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-}
-.nam-rack-design-port .premium-drawer-heading > div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-.nam-rack-design-port .premium-drawer-heading span {
-  color: var(--premium-muted);
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-drawer-heading strong {
-  color: #f5f6f7;
-  font-size: 18px;
-  font-weight: 770;
-  letter-spacing: -.025em;
-}
-.nam-rack-design-port .premium-drawer-heading > i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--premium-green);
-  box-shadow: 0 0 10px rgba(85,210,139,.55);
-}
-.nam-rack-design-port .premium-drawer-heading button {
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--premium-line-strong);
-  border-radius: 4px;
-  color: #c9cdd3;
-  background: #181c22;
-  font-size: 10px;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-library-search {
-  min-width: 0;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 11px;
-  border: 1px solid var(--premium-line);
-  border-radius: 5px;
-  color: #858d98;
-  background: #080a0e;
-  font-size: 10px;
-  text-align: left;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-library-search:hover {
-  color: #daddE1;
-  border-color: rgba(224,161,73,.38);
-}
-.nam-rack-design-port .premium-library-search svg { width: 13px; height: 13px; }
-.nam-rack-design-port .premium-rig-list {
-  min-height: 0;
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #323844 transparent;
-}
-.nam-rack-design-port .premium-rig-card {
-  position: relative;
-  min-width: 0;
-  min-height: 70px;
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) 5px;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px 8px 8px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 6px;
-  color: #b6bbc2;
-  background: rgba(255,255,255,.018);
-  text-align: left;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-rig-card:hover {
-  border-color: rgba(255,255,255,.14);
-  background: rgba(255,255,255,.035);
-}
-.nam-rack-design-port .premium-rig-card[data-active="true"] {
-  border-color: rgba(224,161,73,.48);
-  background: linear-gradient(90deg, rgba(224,161,73,.1), rgba(255,255,255,.023));
-  box-shadow: inset 2px 0 var(--premium-accent);
-}
-.nam-rack-design-port .premium-rig-thumb {
-  position: relative;
-  width: 58px;
-  height: 46px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.06);
-  border-radius: 4px;
-  background: #090b0e;
-}
-.nam-rack-design-port .premium-rig-thumb img {
-  width: 90%;
-  height: 90%;
-  object-fit: contain;
-  filter: brightness(.74) saturate(.82);
-}
-.nam-rack-design-port .premium-rig-copy {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-.nam-rack-design-port .premium-rig-copy small {
-  color: #6e7682;
-  font-size: 9px;
-  font-weight: 730;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-rig-copy strong {
-  overflow: hidden;
-  color: #eceef0;
-  font-size: 12px;
-  font-weight: 730;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-rig-copy em {
-  overflow: hidden;
-  color: #777f8a;
-  font-size: 10px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-rig-drawer[data-cab-mode="embedded"] .premium-rig-copy strong,
-.nam-rack-design-port .premium-rig-drawer[data-cab-mode="embedded"] .premium-rig-copy em {
-  display: -webkit-box;
-  line-height: 1.18;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.nam-rack-design-port .premium-rig-card > i {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #353c46;
-}
-.nam-rack-design-port .premium-rig-card[data-active="true"] > i {
-  background: var(--premium-accent-hot);
-  box-shadow: 0 0 8px rgba(255,195,108,.68);
-}
-.nam-rack-design-port .premium-library-cta {
-  height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: 1px solid rgba(224,161,73,.55);
-  border-radius: 5px;
-  color: #24170b;
-  background: linear-gradient(180deg, #edb25b, #c98231);
-  box-shadow: inset 0 1px rgba(255,255,255,.22), 0 8px 18px rgba(0,0,0,.2);
-  font-size: 10px;
-  font-weight: 790;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-library-cta:hover { filter: brightness(1.07); }
-.nam-rack-design-port .premium-library-cta svg { width: 14px; height: 14px; }
-.nam-rack-design-port .premium-rig-drawer > p {
-  margin: 0;
-  color: #5f6671;
-  font-size: 9px;
-  line-height: 1.45;
-}
-.nam-rack-design-port .premium-tuner-drawer {
-  grid-template-rows: auto minmax(230px, 1fr) auto auto;
-}
-.nam-rack-design-port .premium-tuner-display {
-  min-height: 184px;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 4px;
-  border: 1px solid var(--premium-line);
-  border-radius: 8px;
-  color: #505762;
-  background:
-    radial-gradient(circle, rgba(224,161,73,.1), transparent 60%),
-    #090b0f;
-}
-.nam-rack-design-port .premium-tuner-drawer[data-signal="true"] .premium-tuner-display {
-  color: var(--premium-accent-hot);
-}
-.nam-rack-design-port .premium-tuner-display svg { width: 22px; height: 22px; }
-.nam-rack-design-port .premium-tuner-display strong {
-  color: currentColor;
-  font-size: clamp(58px, 5.2vw, 86px);
-  font-weight: 700;
-  letter-spacing: -.06em;
-  line-height: 1;
-  text-shadow: 0 0 28px rgba(224,161,73,.2);
-}
-.nam-rack-design-port .premium-tuner-display span {
-  color: #737b86;
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-tuner-display em {
-  margin-top: 4px;
-  color: #d6d9dd;
-  font-size: 15px;
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-  font-weight: 760;
-}
-.nam-rack-design-port .premium-tuner-cents {
-  position: relative;
-  height: 36px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  align-items: end;
-  border-top: 1px solid var(--premium-line);
-}
-.nam-rack-design-port .premium-tuner-cents::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 8px;
-  height: 2px;
-  background: #252a32;
-}
-.nam-rack-design-port .premium-tuner-cents > i {
-  position: absolute;
-  left: var(--premium-tuner-pct);
-  top: 3px;
-  width: 2px;
-  height: 13px;
-  transform: translateX(-1px);
-  background: var(--premium-accent-hot);
-  box-shadow: 0 0 8px rgba(255,195,108,.7);
-}
-.nam-rack-design-port .premium-tuner-cents > span {
-  color: #5d6570;
-  font-size: 9px;
-  text-align: center;
-}
-.nam-rack-design-port .premium-tuner-readouts {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-}
-.nam-rack-design-port .premium-tuner-readouts article {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-  padding: 9px 6px;
-  border: 1px solid var(--premium-line);
-  border-radius: 4px;
-  background: rgba(255,255,255,.015);
-  text-align: center;
-}
-.nam-rack-design-port .premium-tuner-readouts span { color: #6e7682; font-size: 9px; }
-.nam-rack-design-port .premium-tuner-readouts strong { overflow: hidden; color: #d9dce0; font-size: 11px; text-overflow: ellipsis; }
-.nam-rack-design-port .footer {
-  position: relative !important;
-  inset: auto !important;
-  grid-row: 4;
-  z-index: 40;
-  width: auto;
-  height: auto !important;
-  display: grid;
-  grid-template-columns: auto auto auto 1px auto 1px auto auto 1px minmax(0,1fr) auto;
-  align-items: center;
-  gap: clamp(8px, .8vw, 16px);
-  padding: 0 clamp(15px, 1.45vw, 28px);
-  border-top: 1px solid rgba(255,255,255,.08);
-  color: #858c96;
-  background: #07090c;
-  font-size: 10px;
-  font-weight: 680;
-}
-.nam-rack-design-port .footer > b {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #d9dce0;
-  font-size: 10px;
-  font-weight: 780;
-}
-.nam-rack-design-port .footer > b svg { width: 12px; height: 12px; color: var(--premium-accent); }
-.nam-rack-design-port .footer > i {
-  width: 1px;
-  height: 15px;
-  background: rgba(255,255,255,.1);
-}
-.nam-rack-design-port .footer button {
-  min-height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 0 7px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: #8d949e;
-  background: transparent;
-  font-size: 9px;
-  font-weight: 720;
-  cursor: pointer;
-}
-.nam-rack-design-port .footer button:hover,
-.nam-rack-design-port .footer button[data-active="true"] {
-  color: #f1d1a0;
-  border-color: rgba(224,161,73,.22);
-  background: rgba(224,161,73,.07);
-}
-.nam-rack-design-port .footer button:disabled { cursor: default; opacity: .45; }
-.nam-rack-design-port .footer button svg { width: 12px; height: 12px; }
-.nam-rack-design-port .footer-control-spacer { min-width: 1px; }
-.nam-rack-design-port .footer-midi {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.nam-rack-design-port .footer-midi > i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #3e4650;
-}
-.nam-rack-design-port .footer strong { color: #d6d9dd; font-size: inherit; }
-.nam-rack-design-port .footer-runtime {
-  min-width: 0;
-  display: flex;
-  gap: 13px;
-}
-.nam-rack-design-port .footer-runtime strong[data-alert="true"] { color: #ef8d7f; }
-.nam-rack-design-port .footer > em {
-  margin: 0;
-  display: flex;
-  justify-content: flex-end;
-  gap: 3px;
-  font-style: normal;
-}
-.nam-rack-source-flow-design-port .source-flow-workspace {
-  position: relative !important;
-  inset: auto !important;
-  grid-row: 3;
-  z-index: 14;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  container-type: inline-size;
-  pointer-events: auto;
-  background:
-    radial-gradient(circle at 50% 0, rgba(224,161,73,.075), transparent 38%),
-    repeating-linear-gradient(135deg, rgba(255,255,255,.01) 0 1px, transparent 1px 6px),
-    #090b0f;
-}
-.nam-rack-source-flow-design-port .source-flow-workspace .tone-source-flow {
-  position: absolute;
-  inset: clamp(14px, 2.2vh, 24px) clamp(15px, 1.6vw, 28px) clamp(12px, 1.8vh, 20px);
-  grid-template-columns: minmax(220px, .88fr) minmax(390px, 1.5fr) minmax(280px, 1.05fr);
-  grid-template-rows: clamp(66px, 10vh, 88px) minmax(0,1fr) clamp(46px, 6.6vh, 62px);
-  gap: clamp(8px, .72cqw, 13px);
-  padding: clamp(8px, .72cqw, 13px);
-  border: 1px solid rgba(255,255,255,.09);
-  border-radius: 9px;
-  color: var(--premium-text);
-  background: rgba(13,16,21,.94);
-  box-shadow: 0 26px 70px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.025);
-}
-.nam-rack-source-flow-design-port .tone-source-header,
-.nam-rack-source-flow-design-port .tone-target-rail,
-.nam-rack-source-flow-design-port .tone-browser-feed,
-.nam-rack-source-flow-design-port .tone-detail-panel,
-.nam-rack-source-flow-design-port .tone-audition-status {
-  border-color: rgba(255,255,255,.085) !important;
-  border-radius: 6px !important;
-  background: #11151b !important;
-}
-.nam-rack-source-flow-design-port .tone-source-header {
-  padding: 9px 11px;
-  background: linear-gradient(180deg, #181c23, #12151a) !important;
-}
-.nam-rack-source-flow-design-port .tone-return-button,
-.nam-rack-source-flow-design-port .tone-source-flow button {
-  border-color: rgba(255,255,255,.12);
-  color: #b9bec6;
-  background: #191d24;
-  font-weight: 720;
-}
-.nam-rack-source-flow-design-port .tone-return-button {
-  border-color: rgba(224,161,73,.45);
-  color: #f3c684;
-  background: rgba(224,161,73,.08);
-}
-.nam-rack-source-flow-design-port .tone-source-flow button:hover {
-  color: #fff;
-  border-color: rgba(224,161,73,.48);
-  background: rgba(224,161,73,.1);
-}
-.nam-rack-source-flow-design-port .tone-breadcrumb span,
-.nam-rack-source-flow-design-port .tone-breadcrumb em,
-.nam-rack-source-flow-design-port .tone-rail-heading span,
-.nam-rack-source-flow-design-port .tone-feed-head span,
-.nam-rack-source-flow-design-port .tone-detail-heading span,
-.nam-rack-source-flow-design-port .tone-feed-head em,
-.nam-rack-source-flow-design-port .tone-detail-heading em { color: #737b87; }
-.nam-rack-source-flow-design-port .tone-breadcrumb b,
-.nam-rack-source-flow-design-port .tone-rail-heading b,
-.nam-rack-source-flow-design-port .tone-feed-head b,
-.nam-rack-source-flow-design-port .tone-detail-heading b { color: #f1f2f4; }
-.nam-rack-source-flow-design-port .tone-connection-state { color: #a1a7b0; }
-.nam-rack-source-flow-design-port .tone-target-card,
-.nam-rack-source-flow-design-port .tone-chain-node,
-.nam-rack-source-flow-design-port .tone-local-path,
-.nam-rack-source-flow-design-port .tone-feed-row,
-.nam-rack-source-flow-design-port .tone-search-panel label {
-  border-color: rgba(255,255,255,.075);
-  color: #c9cdd3;
-  background: #0c0f13;
-}
-.nam-rack-source-flow-design-port .tone-target-card[data-active="true"],
-.nam-rack-source-flow-design-port .tone-chain-node[data-target="true"],
-.nam-rack-source-flow-design-port .tone-feed-row[data-active="true"] {
-  border-color: rgba(224,161,73,.56);
-  background: linear-gradient(90deg, rgba(224,161,73,.11), rgba(255,255,255,.02));
-  box-shadow: inset 2px 0 var(--premium-accent);
-}
-.nam-rack-source-flow-design-port .tone-target-card b,
-.nam-rack-source-flow-design-port .tone-chain-node b,
-.nam-rack-source-flow-design-port .tone-search-panel label b,
-.nam-rack-source-flow-design-port .tone-row-main strong,
-.nam-rack-source-flow-design-port .tone-audition-status b { color: #eceef0; }
-.nam-rack-source-flow-design-port .tone-target-card span,
-.nam-rack-source-flow-design-port .tone-target-card em,
-.nam-rack-source-flow-design-port .tone-chain-node span,
-.nam-rack-source-flow-design-port .tone-local-path span,
-.nam-rack-source-flow-design-port .tone-search-panel label span,
-.nam-rack-source-flow-design-port .tone-row-main span,
-.nam-rack-source-flow-design-port .tone-row-stats span,
-.nam-rack-source-flow-design-port .tone-feed-row em,
-.nam-rack-source-flow-design-port .tone-detail-meta span,
-.nam-rack-source-flow-design-port .tone-audition-status span,
-.nam-rack-source-flow-design-port .tone-audition-status em { color: #767e89; }
-.nam-rack-source-flow-design-port .tone-row-tags i {
-  color: #a9afb8;
-  background: rgba(255,255,255,.06);
-}
-.nam-rack-source-flow-design-port .tone-tab-row button[data-active="true"],
-.nam-rack-source-flow-design-port .tone-filter-row button[data-active="true"],
-.nam-rack-source-flow-design-port .tone-action-grid button[data-primary="true"] {
-  border-color: #d7963e;
-  color: #211408;
-  background: linear-gradient(180deg, #efb45e, #c77f30);
-}
-.nam-rack-source-flow-design-port .tone-feed-row[data-source="openstudio"] { border-color: rgba(90,138,202,.32); }
-.nam-rack-source-flow-design-port .tone-feed-row[data-category="space-ir"],
-.nam-rack-source-flow-design-port .tone-feed-row[data-category="external-space-ir"] { background: rgba(42,55,73,.46); }
-.nam-rack-source-flow-design-port .tone-hardware-preview {
-  border-color: rgba(255,255,255,.08);
-  background: radial-gradient(circle at 50% 45%, rgba(224,161,73,.1), transparent 48%), #090b0f;
-}
-.nam-rack-source-flow-design-port .tone-hardware-preview > img:first-child {
-  filter: brightness(.82) saturate(.88) drop-shadow(0 16px 13px rgba(0,0,0,.48));
-}
-.nam-rack-source-flow-design-port .tone-hardware-preview .mic-panel {
-  filter: brightness(.88) saturate(.82) contrast(1.06);
-}
-.nam-rack-source-flow-design-port .tone-hardware-badge { display: none; }
-.nam-rack-source-flow-design-port .tone-feed-list {
-  grid-auto-rows: minmax(56px, 72px);
-  align-content: start;
-}
-.nam-rack-source-flow-design-port .tone-audition-status {
-  background: linear-gradient(90deg, rgba(224,161,73,.07), #101319 45%) !important;
-}
-.nam-rack-source-flow-design-port .tone-breadcrumb span,
-.nam-rack-source-flow-design-port .tone-breadcrumb em,
-.nam-rack-source-flow-design-port .tone-connection-state b,
-.nam-rack-source-flow-design-port .tone-connection-state span,
-.nam-rack-source-flow-design-port .tone-rail-heading span,
-.nam-rack-source-flow-design-port .tone-feed-head span,
-.nam-rack-source-flow-design-port .tone-detail-heading span {
-  font-size: 9px !important;
-  letter-spacing: .055em;
-}
-.nam-rack-source-flow-design-port .tone-breadcrumb b { font-size: 16px !important; }
-.nam-rack-source-flow-design-port .tone-rail-heading b,
-.nam-rack-source-flow-design-port .tone-feed-head b { font-size: 14px !important; }
-.nam-rack-source-flow-design-port .tone-detail-heading b { font-size: 18px !important; }
-.nam-rack-source-flow-design-port .tone-feed-head em,
-.nam-rack-source-flow-design-port .tone-detail-heading em,
-.nam-rack-source-flow-design-port .tone-target-card span,
-.nam-rack-source-flow-design-port .tone-target-card em,
-.nam-rack-source-flow-design-port .tone-chain-node span,
-.nam-rack-source-flow-design-port .tone-local-path span,
-.nam-rack-source-flow-design-port .tone-search-panel label span,
-.nam-rack-source-flow-design-port .tone-row-main span,
-.nam-rack-source-flow-design-port .tone-row-stats span,
-.nam-rack-source-flow-design-port .tone-feed-row em,
-.nam-rack-source-flow-design-port .tone-detail-meta span,
-.nam-rack-source-flow-design-port .tone-audition-status span,
-.nam-rack-source-flow-design-port .tone-audition-status em { font-size: 9px !important; }
-.nam-rack-source-flow-design-port .tone-target-card b,
-.nam-rack-source-flow-design-port .tone-chain-node b,
-.nam-rack-source-flow-design-port .tone-local-path b { font-size: 10px !important; }
-.nam-rack-source-flow-design-port .tone-search-panel label b { font-size: 11px !important; }
-.nam-rack-source-flow-design-port .tone-row-main strong { font-size: 13px !important; }
-.nam-rack-source-flow-design-port .tone-row-tags i { font-size: 8px !important; }
-.nam-rack-source-flow-design-port .tone-audition-status b { font-size: 10px !important; }
-.nam-rack-source-flow-design-port .preset-actions > button:disabled {
-  visibility: hidden;
-}
-.nam-rack-source-flow-design-port .preset-actions button:disabled,
-.nam-rack-source-flow-design-port .premium-compare button:disabled,
-.nam-rack-source-flow-design-port .nav-item:disabled {
-  cursor: default;
-  opacity: .4;
-}
-.nam-rack-source-flow-design-port .tone-library-mark:disabled { cursor: default; opacity: .8; }
-@media (max-width: 1240px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 106px 50px minmax(0,1fr) 42px; }
-  .nam-rack-design-port .global-strip {
-    grid-template-columns: 142px minmax(256px,.82fr) minmax(325px,1.35fr) minmax(116px,.35fr);
-    gap: 8px;
-    padding: 10px 16px;
-  }
-  .nam-rack-design-port .premium-brand > em { display: none; }
-  .nam-rack-design-port .mini-param { width: 57px; height: 82px; }
-  .nam-rack-design-port .mini-param > .asset-control { width: 45px !important; height: 45px !important; }
-  .nam-rack-design-port .mini-param > .knob-position-indicator { width: 45px !important; }
-  .nam-rack-design-port .premium-level-meter { height: 66px; }
-  .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr) 270px; }
-  .nam-rack-design-port .premium-rig-drawer { padding: 17px 14px 13px; gap: 9px; }
-  .nam-rack-design-port .premium-rig-card { min-height: 62px; }
-  .nam-rack-source-flow-design-port .source-flow-workspace .tone-source-flow {
-    grid-template-columns: minmax(190px,.82fr) minmax(330px,1.42fr) minmax(240px,1fr);
-  }
-}
-@media (max-width: 1030px) {
-  .nam-rack-design-port .global-strip { grid-template-columns: 126px minmax(224px,.88fr) minmax(300px,1.35fr) 88px; }
-  .nam-rack-design-port .global-block.left .mini-param { width: 48px; }
-  .nam-rack-design-port .global-block.right .mini-param { width: 54px; }
-  .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-design-port .premium-rig-drawer:not(.premium-tuner-drawer) { display: none; }
-  .nam-rack-design-port .hardware-stage:has(.premium-tuner-drawer) { grid-template-columns: minmax(0,1fr) 270px; }
-  .nam-rack-design-port .premium-tuner-drawer { display: grid; }
-  .nam-rack-design-port .footer-runtime strong:nth-child(2),
-  .nam-rack-design-port .footer-runtime strong:nth-child(3) { display: none; }
-  .nam-rack-source-flow-design-port .source-flow-workspace .tone-source-flow {
-    inset: 12px;
-    grid-template-columns: minmax(0,1.45fr) minmax(260px,.9fr);
-  }
-  .nam-rack-source-flow-design-port .tone-target-rail { display: none !important; }
-  .nam-rack-source-flow-design-port .tone-browser-feed { grid-column: 1; }
-  .nam-rack-source-flow-design-port .tone-detail-panel { grid-column: 2; display: grid !important; }
-}
-@media (max-width: 780px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 94px 46px minmax(0,1fr) 40px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: 102px minmax(150px,.72fr) minmax(235px,1.3fr); padding: 8px 10px; }
-  .nam-rack-design-port .global-block.right { display: none; }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.left .mini-param:nth-of-type(n+2) { display: none; }
-  .nam-rack-design-port .premium-brand > span { font-size: 8px; }
-  .nam-rack-design-port .premium-brand > strong { font-size: 17px; }
-  .nam-rack-design-port .preset-actions { grid-template-columns: 24px 24px minmax(0,1fr) 24px auto; }
-  .nam-rack-design-port .preset-actions > button { width: 24px; height: 23px; }
-  .nam-rack-design-port .premium-compare button { width: 21px; height: 23px; }
-  .nam-rack-design-port .tone-library-mark { min-width: 82px; padding: 0 7px; font-size: 8px !important; }
-  .nam-rack-design-port .top-nav { grid-template-columns: repeat(5,minmax(52px,84px)); gap: 3px; }
-  .nam-rack-design-port .nav-item { gap: 4px; padding: 0 4px; font-size: 8px !important; }
-  .nam-rack-design-port .premium-nav-icon,
-  .nam-rack-design-port .premium-nav-icon svg { width: 12px; height: 12px; }
-  .nam-rack-design-port .footer { grid-template-columns: auto auto auto 1px auto auto minmax(0,1fr) auto; gap: 6px; padding: 0 9px; }
-  .nam-rack-design-port .footer > i:nth-of-type(n+2),
-  .nam-rack-design-port .footer-midi,
-  .nam-rack-design-port .footer-runtime { display: none; }
-  .nam-rack-source-flow-design-port .source-flow-workspace .tone-source-flow { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-source-flow-design-port .tone-target-rail { display: none !important; }
-  .nam-rack-source-flow-design-port .tone-browser-feed { grid-column: 1; }
-  .nam-rack-source-flow-design-port .tone-detail-panel { display: none !important; }
-}
-
-/* Premium composition v3: the concept-aligned runtime surface. */
-.nam-rack-design-port .premium-nam-shell {
-  inset: 4px;
-  grid-template: clamp(186px, 21.5vh, 208px) clamp(66px, 7.8vh, 76px) minmax(0, 1fr) clamp(58px, 6.4vh, 62px) / minmax(0, 1fr);
-  border: 1px solid rgba(187, 197, 210, .23);
-  border-radius: 12px;
-  background:
-    radial-gradient(circle at 49% -28%, rgba(226, 155, 67, .1), transparent 40%),
-    linear-gradient(180deg, #0b0e12, #06080b);
-  box-shadow: inset 0 1px rgba(255,255,255,.055), inset 0 0 0 2px rgba(0,0,0,.5), 0 18px 70px rgba(0,0,0,.72);
-  font-family: Inter, "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
-}
-.nam-rack-design-port .global-strip {
-  grid-template-columns: minmax(328px, 350px) minmax(0, 1fr) minmax(150px, 174px);
-  justify-content: space-between;
-  gap: 20px;
-  padding: 18px clamp(24px, 1.8vw, 30px) 16px;
-  border-bottom-color: rgba(255,255,255,.12);
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.032), transparent 46%),
-    linear-gradient(90deg, rgba(255,255,255,.012), transparent 14% 86%, rgba(255,255,255,.012)),
-    #090c10;
-  box-shadow: inset 0 -1px rgba(0,0,0,.8), 0 18px 46px rgba(0,0,0,.34);
-}
-.nam-rack-design-port .premium-brand {
-  position: absolute;
-  left: clamp(26px, 1.9vw, 32px);
-  top: 20px;
-  z-index: 2;
-  display: grid;
-  align-content: start;
-  padding: 0;
-  border: 0;
-}
-.nam-rack-design-port .premium-brand > span {
-  color: #858b94;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: .13em;
-}
-.nam-rack-design-port .premium-brand > strong {
-  margin-top: 2px;
-  color: #d9dce0;
-  font-size: clamp(20px, 1.55vw, 24px);
-  font-weight: 720;
-  letter-spacing: -.02em;
-}
-.nam-rack-design-port .premium-brand > em {
-  display: none;
-}
-.nam-rack-design-port .premium-calibration-launch {
-  position: absolute;
-  left: 168px;
-  top: 1px;
-  min-width: 0;
-  height: 22px;
-  display: grid;
-  grid-template-columns: 12px auto 1fr;
-  align-items: center;
-  gap: 5px;
-  margin-top: 0;
-  padding: 0;
-  border: 0;
-  color: #6f7680;
-  background: transparent;
-  font-size: 8px;
-  font-weight: 650;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-calibration-launch:hover,
-.nam-rack-design-port .premium-calibration-launch[data-active="true"] {
-  color: #ffe1b1;
-  background: transparent;
-}
-.nam-rack-design-port .premium-calibration-launch svg { width: 11px; height: 11px; color: #b47b34; }
-.nam-rack-design-port .premium-calibration-launch > span { letter-spacing: .1em; }
-.nam-rack-design-port .premium-calibration-launch > strong { overflow: hidden; color: #9ca2aa; font-size: 8px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-design-port .global-block {
-  align-self: end;
-  justify-content: flex-start;
-  gap: clamp(15px, 1.35vw, 23px);
-  padding-top: 54px;
-}
-.nam-rack-design-port .global-block.left { grid-column: 1; }
-.nam-rack-design-port .global-block.right { grid-column: 3; justify-content: flex-end; }
-.nam-rack-design-port .mini-param {
-  width: clamp(70px, 5vw, 80px);
-  height: 112px;
-  grid-template-rows: 17px 68px 22px;
-}
-.nam-rack-design-port .mini-param > .asset-control {
-  top: 53px !important;
-  width: 64px !important;
-  height: 64px !important;
-  filter: drop-shadow(0 9px 10px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .mini-param > .knob-position-indicator {
-  top: 53px !important;
-  width: 64px !important;
-}
-.nam-rack-design-port .mini-param[data-param-id="inputTrimDb"] > .asset-control,
-.nam-rack-design-port .mini-param[data-param-id="outputTrimDb"] > .asset-control {
-  filter: sepia(.17) saturate(1.16) drop-shadow(0 9px 10px rgba(0,0,0,.55)) drop-shadow(0 0 7px rgba(224,161,73,.12));
-}
-.nam-rack-design-port .mini-param[data-param-id="inputTrimDb"] > .knob-position-indicator::after,
-.nam-rack-design-port .mini-param[data-param-id="outputTrimDb"] > .knob-position-indicator::after { background: #efbd73; }
-.nam-rack-design-port .mini-param .global-label {
-  color: #b6bac0 !important;
-  font-size: 10px !important;
-  font-weight: 650;
-  letter-spacing: .07em !important;
-}
-.nam-rack-design-port .mini-param strong {
-  grid-row: 3;
-  color: #d4d7db;
-  font-size: 11px;
-  font-weight: 620;
-}
-.nam-rack-design-port .mini-param[data-read-only="true"] {
-  opacity: .5;
-  cursor: not-allowed;
-}
-.nam-rack-design-port .mini-param[data-read-only="true"] > .asset-control {
-  filter: grayscale(.72) saturate(.45) drop-shadow(0 5px 7px rgba(0,0,0,.42));
-}
-.nam-rack-design-port [data-module="tape-echo"] .control-label {
-  font-size: 7px !important;
-  letter-spacing: 0 !important;
-}
-.nam-rack-design-port .premium-level-meter {
-  width: 31px;
-  height: 108px;
-  flex-basis: 31px;
-  border-radius: 4px;
-}
-.nam-rack-design-port .premium-level-meter > span { inset: 5px; }
-.nam-rack-design-port .premium-level-meter > i {
-  top: 5px;
-  right: 5px;
-  bottom: 5px;
-  left: 5px;
-  height: auto;
-  clip-path: inset(var(--premium-meter-inset, 100%) 0 0 0);
-}
-.nam-rack-design-port .premium-level-meter > strong { min-width: 28px; font-size: 9px; line-height: 15px; }
-.nam-rack-design-port .preset-area {
-  position: absolute !important;
-  left: 50% !important;
-  width: clamp(900px, 54vw, 1040px) !important;
-  transform: translateX(-50%) !important;
-  top: auto !important;
-  right: auto !important;
-  bottom: 0 !important;
-  grid-column: auto;
-  grid-template-columns: minmax(0,1fr);
-  grid-template-rows: minmax(0, 1fr);
-  align-self: end;
-  align-content: end;
-  gap: 0;
-  padding: 0 0 21px;
-}
-.nam-rack-design-port .premium-routing-utility {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 10px);
-  min-width: 0;
-  height: 70px;
-  display: grid;
-  grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
-  align-items: stretch;
-  gap: 14px;
-  color: #aeb4bd;
-  font-style: normal;
-}
-.nam-rack-design-port .premium-instrument-choice,
-.nam-rack-design-port .premium-doubler-utility {
-  min-width: 0;
-  display: grid;
-  align-items: center;
-  gap: 5px 10px;
-  padding: 8px 12px;
-  overflow: hidden;
-  border: 1px solid rgba(158,174,194,.13);
-  border-radius: 4px;
-  background:
-    linear-gradient(180deg, rgba(24,29,35,.98), rgba(8,11,15,.99)),
-    #090c10;
-  box-shadow:
-    inset 0 1px rgba(255,255,255,.035),
-    inset 0 -1px rgba(0,0,0,.7),
-    0 7px 18px rgba(0,0,0,.3);
-}
-.nam-rack-design-port .premium-instrument-choice {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 14px 27px 12px;
-  gap: 3px;
-  padding-inline: 12px;
-}
-.nam-rack-design-port .premium-instrument-choice > div {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(62px, 1fr));
-  gap: 6px;
-}
-.nam-rack-design-port .premium-instrument-choice > div > button {
-  min-width: 0;
-  height: 27px;
-  padding: 0 10px;
-  border: 1px solid rgba(141,154,169,.16);
-  border-radius: 4px;
-  color: #737b85;
-  background: linear-gradient(180deg, #11151a, #080b0f);
-  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 2px 5px rgba(0,0,0,.32);
-  font: inherit;
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: .045em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-instrument-choice > div > button[data-active="true"] {
-  border-color: rgba(222,154,63,.65);
-  color: #f4d09c;
-  background: linear-gradient(180deg, rgba(116,74,27,.68), rgba(57,35,14,.76));
-  box-shadow: inset 0 0 0 1px rgba(255,209,145,.06), 0 0 10px rgba(224,155,63,.07);
-}
-.nam-rack-design-port .premium-instrument-choice > div > button:disabled { cursor: not-allowed; opacity: .64; }
-.nam-rack-design-port .instrument-heading-short,
-.nam-rack-design-port .instrument-label-short { display: none; }
-.nam-rack-design-port .premium-instrument-choice > small {
-  overflow: hidden;
-  color: #7f8791;
-  font-size: 8px;
-  font-weight: 560;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-utility-heading {
-  color: #a2a9b3;
-  font-size: 9px;
-  font-weight: 720;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-doubler-utility {
-  grid-template-columns: auto 50px minmax(48px, 1fr) minmax(48px, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: 8px;
-  padding-inline: 17px;
-}
-.nam-rack-design-port .premium-doubler-power {
-  height: 30px;
-  min-width: 50px;
-  display: inline-grid;
-  grid-template-columns: 15px auto;
-  place-items: center;
-  gap: 4px;
-  padding: 0 5px;
-  border: 1px solid rgba(141,154,169,.16);
-  border-radius: 4px;
-  color: #7f8791;
-  background: linear-gradient(180deg, #11151a, #080b0f);
-  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 2px 5px rgba(0,0,0,.32);
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-doubler-power svg { width: 14px; height: 14px; }
-.nam-rack-design-port .premium-doubler-power strong { font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
-.nam-rack-design-port .premium-doubler-power[data-active="true"] {
-  border-color: rgba(222,160,79,.58);
-  color: #ffd69d;
-  background: rgba(143,88,30,.24);
-}
-.nam-rack-design-port .premium-doubler-utility[data-paused="true"] .premium-doubler-power {
-  border-color: rgba(146,113,72,.5);
-  color: #c7a87e;
-  background: rgba(88,67,42,.22);
-}
-.nam-rack-design-port .premium-utility-rotary {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 42px;
-  grid-template-rows: 10px 36px 8px;
-  align-items: center;
-  justify-content: center;
-  color: #9ba2ac;
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-utility-rotary > span { grid-column: 1; grid-row: 1; justify-self: center; letter-spacing: .05em; }
-.nam-rack-design-port .premium-utility-rotary > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
-.nam-rack-design-port .premium-utility-rotary > strong {
-  grid-column: 1;
-  grid-row: 3;
-  color: #c8ccd1;
-  font-size: 8px;
-  font-weight: 650;
-  line-height: 1;
-  text-align: center;
-  text-transform: none;
-}
-.nam-rack-design-port .premium-utility-rotary-spread { grid-template-columns: 42px; }
-.nam-rack-design-port .premium-utility-rotary-spread > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
-.nam-rack-design-port .premium-utility-rotary-spread > strong { grid-column: 1; grid-row: 3; }
-.nam-rack-design-port .premium-utility-rotary-spread > span { grid-column: 1; grid-row: 1; justify-self: center; }
-.nam-rack-design-port .premium-utility-knob-well {
-  position: relative;
-  width: 36px;
-  height: 36px;
-  justify-self: center;
-}
-.nam-rack-design-port .premium-utility-knob-well > .asset-control {
-  filter: brightness(.82) contrast(1.14) drop-shadow(0 4px 4px rgba(0,0,0,.65));
-}
-.nam-rack-design-port .premium-utility-knob-well > .knob-position-indicator::after { background: #e6aa55; }
-.nam-rack-design-port .premium-doubler-utility[data-paused="true"] .premium-utility-knob-well {
-  opacity: .55;
-  filter: grayscale(.55);
-}
-.nam-rack-design-port .preset-context {
-  display: none;
-}
-.nam-rack-design-port .preset-console {
-  --preset-previous-width: 48px;
-  --preset-next-width: 48px;
-  --preset-save-width: 60px;
-  --preset-compare-width: 76px;
-  --preset-action-rail-width: calc(var(--preset-next-width) + var(--preset-save-width) + var(--preset-compare-width));
-  position: relative;
-  grid-column: 1 / -1;
-  min-width: 0;
-  height: 63px;
-  display: block;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 4px;
-  background: linear-gradient(180deg, #15181d, #0a0d10);
-  box-shadow: inset 0 1px rgba(255,255,255,.035), inset 0 -1px rgba(0,0,0,.8), 0 12px 32px rgba(0,0,0,.34);
-}
-.nam-rack-design-port .preset-console > button,
-.nam-rack-design-port .preset-console .premium-compare {
-  border: 0;
-  border-left: 1px solid rgba(255,255,255,.09);
-  border-radius: 0;
-  color: #aeb4bd;
-  background: transparent;
-}
-.nam-rack-design-port .preset-console > button:first-child { border-left: 0; border-right: 1px solid rgba(255,255,255,.09); }
-.nam-rack-design-port .preset-console > button:hover { color: #fff; background: rgba(255,255,255,.045); }
-.nam-rack-design-port .preset-console > button svg { width: 20px; height: 20px; }
-.nam-rack-design-port .preset-console > button.preset-arrow {
-  display: grid;
-  place-items: center;
-  padding: 0;
-  line-height: 0;
-}
-.nam-rack-design-port .preset-console > button.preset-arrow svg {
-  display: block;
-  margin: auto;
-}
-.nam-rack-design-port .preset-title {
-  min-width: 0;
-  display: grid;
-  place-content: center;
-  gap: 5px;
-  padding: 0 18px;
-  text-align: center;
-}
-.nam-rack-design-port .preset-console > button.preset-title {
-  width: 100%;
-  border: 0;
-  color: inherit;
-  background: transparent;
-  font: inherit;
-  cursor: pointer;
-}
-.nam-rack-design-port .preset-console > button.preset-title:hover {
-  background: linear-gradient(180deg, rgba(224,161,73,.045), rgba(255,255,255,.018));
-}
-.nam-rack-design-port .preset-console > button.preset-title:focus-visible {
-  outline: 1px solid rgba(224,161,73,.72);
-  outline-offset: -3px;
-}
-.nam-rack-design-port .preset-title small {
-  display: block;
-  overflow: hidden;
-  color: #777f89;
-  font-size: 8px;
-  font-weight: 620;
-  letter-spacing: .09em;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.nam-rack-design-port .preset-title b {
-  overflow: hidden;
-  color: #e4e6e8;
-  font-size: clamp(20px, 1.55vw, 24px);
-  font-weight: 600;
-  letter-spacing: -.015em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .preset-console .preset-save {
-  display: grid;
-  place-content: center;
-  gap: 3px;
-  color: #9ea4ad;
-  font-size: 8px;
-  font-weight: 650;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .preset-console .preset-save svg { margin: auto; }
-.nam-rack-design-port .preset-console .premium-compare {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr;
-  gap: 4px;
-  align-items: center;
-  padding: 10px 7px;
-}
-.nam-rack-design-port .preset-console .premium-compare button {
-  width: 100%;
-  height: 34px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 3px;
-  background: #12151a;
-  font-size: 11px;
-  font-weight: 680;
-}
-.nam-rack-design-port .preset-console .premium-compare button + button { border-top: 1px solid rgba(255,255,255,.1); }
-.nam-rack-design-port .preset-console .premium-compare button[data-active="true"] {
-  color: #f3c47d;
-  border-color: rgba(224,161,73,.65);
-  background: rgba(224,161,73,.1);
-  box-shadow: inset 0 0 0 1px rgba(224,161,73,.06), 0 0 10px rgba(224,161,73,.08);
-}
-.nam-rack-design-port .tone-library-mark {
-  grid-column: 2;
-  grid-row: 2;
-  align-self: end;
-  min-width: 126px;
-  height: 28px;
-  margin: 0 8px 8px 0;
-  border-color: rgba(224,161,73,.3);
-  font-size: 9px !important;
-  z-index: 2;
-  display: none !important;
-}
-.nam-rack-design-port .top-nav {
-  grid-template-columns: repeat(5, minmax(122px, 164px));
-  gap: clamp(12px, 1.45vw, 26px);
-  padding: 0 30px;
-  background: linear-gradient(180deg, #101318, #090c0f);
-  box-shadow: inset 0 1px rgba(255,255,255,.018), 0 10px 28px rgba(0,0,0,.28);
-}
-.nam-rack-design-port .nav-flow-step {
-  position: relative;
-  min-width: 0;
-  display: grid;
-}
-.nam-rack-design-port .nav-flow-chevron {
-  position: absolute;
-  right: calc(-1 * clamp(9px, .95vw, 18px));
-  top: 50%;
-  width: 17px;
-  height: 17px;
-  transform: translate(50%, -50%);
-  color: #3c424a;
-}
-.nam-rack-design-port .nav-item {
-  grid-template-columns: 30px auto;
-  gap: 12px;
-  padding: 0 13px;
-  color: #8a919b;
-  font-size: 13px !important;
-  font-weight: 650;
-  letter-spacing: .035em !important;
-}
-.nam-rack-design-port .premium-nav-icon,
-.nam-rack-design-port .premium-nav-icon svg { width: 27px; height: 27px; }
-.nam-rack-design-port .nav-item > i { display: none; }
-.nam-rack-design-port .nav-item::after { left: 10%; right: 10%; height: 2px; }
-.nam-rack-design-port .nav-item[data-active="true"] { color: #e5aa54; }
-.nam-rack-design-port .nav-item[data-active="true"] .premium-nav-icon { color: #e5aa54; filter: drop-shadow(0 0 8px rgba(224,161,73,.2)); }
-.nam-rack-design-port .premium-nam-shell[data-tuner-open="true"] .nav-item[data-active="true"] {
-  color: #8a919a;
-}
-.nam-rack-design-port .premium-nam-shell[data-tuner-open="true"] .nav-item[data-active="true"]::after {
-  opacity: .32;
-  transform: scaleX(.34);
-}
-.nam-rack-design-port .premium-nam-shell[data-tuner-open="true"] .nav-item[data-active="true"] > i {
-  opacity: .45;
-  box-shadow: none;
-}
-.nam-rack-design-port .hardware-stage {
-  grid-template-columns: minmax(0, 1fr) clamp(278px, 19.6vw, 310px);
-  background: #07090b;
-}
-.nam-rack-design-port .hardware-stage[data-tuner-open="true"] { grid-template-columns: minmax(0,1fr); }
-.nam-rack-design-port .premium-stage-canvas {
-  background:
-    radial-gradient(ellipse at 50% 47%, rgba(240,174,91,.12), transparent 41%),
-    linear-gradient(90deg, rgba(0,0,0,.5), transparent 17% 83%, rgba(0,0,0,.52)),
-    var(--nam-studio-backdrop) center / cover no-repeat;
-}
-.nam-rack-design-port .premium-stage-canvas::before {
-  inset: 0;
-  border: 0;
-  border-radius: 0;
-  background:
-    radial-gradient(ellipse at 50% 38%, transparent 28%, rgba(0,0,0,.19) 73%, rgba(0,0,0,.52) 100%),
-    linear-gradient(180deg, rgba(2,3,4,.12), transparent 22% 70%, rgba(2,2,3,.24));
-  box-shadow: inset 0 22px 62px rgba(0,0,0,.26), inset 0 -24px 48px rgba(0,0,0,.22);
-}
-.nam-rack-design-port .premium-stage-canvas::after {
-  left: 8%;
-  right: 8%;
-  bottom: 3.5%;
-  height: 18%;
-  background: radial-gradient(ellipse, rgba(0,0,0,.78), transparent 68%);
-  filter: blur(15px);
-}
-.nam-rack-design-port .nam-rack-artboard { height: 341px; }
-.nam-rack-design-port .module { filter: drop-shadow(0 25px 22px rgba(0,0,0,.67)); }
-.nam-rack-design-port .module-skin { filter: saturate(.98) contrast(1.025) brightness(1.025); }
-.nam-rack-design-port .control-label,
-.nam-rack-design-port .value-label,
-.nam-rack-design-port .module-title,
-.nam-rack-design-port .label { text-shadow: 0 1px 1px rgba(0,0,0,.34); }
-.nam-rack-design-port .stompbox .control-label,
-.nam-rack-design-port .stompbox .value-label {
-  font-size: 9.25px !important;
-  color: rgba(237,235,229,.84) !important;
-  font-weight: 620 !important;
-  letter-spacing: .018em !important;
-}
-.nam-rack-design-port .wide-pedal .control-label,
-.nam-rack-design-port .wide-pedal .value-label {
-  font-size: 9.5px !important;
-  color: rgba(237,235,229,.82) !important;
-  font-weight: 610 !important;
-  letter-spacing: .012em !important;
-}
-.nam-rack-design-port .stompbox .module-title {
-  font-size: 10.5px !important;
-  color: rgba(244,242,235,.9) !important;
-  font-weight: 680 !important;
-  letter-spacing: .025em !important;
-}
-.nam-rack-design-port .wide-pedal .module-title {
-  font-size: 11.5px !important;
-  color: rgba(244,242,235,.88) !important;
-  font-weight: 680 !important;
-  letter-spacing: .025em !important;
-}
-.nam-rack-design-port .module[data-module="precision-drive"] .module-title {
-  font-size: 9.5px !important;
-}
-.nam-rack-design-port .stompbox .kicker {
-  font-size: 7.5px !important;
-}
-.nam-rack-design-port .asset-button span,
-.nam-rack-design-port .foot-action-label,
-.nam-rack-design-port .delay-rack .foot-action-label {
-  font-size: 8.5px !important;
-  color: rgba(226,224,218,.84) !important;
-  font-weight: 590 !important;
-}
-.nam-rack-design-port .asset-button.hot span { color: #e6ad5b !important; }
-.nam-rack-design-port .module[data-module="compressor"] .control-label {
-  width: 27%;
-  max-width: 27%;
-  overflow: visible;
-  font-size: 7.6px !important;
-  text-align: center;
-  white-space: nowrap;
-}
-.nam-rack-design-port .preset-console > .preset-title {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 1;
-  width: auto !important;
-  /* Reserve the larger action bank on both sides. The title element, its
-     content box and the displayed preset text now share the rack centreline. */
-  padding: 0 calc(var(--preset-action-rail-width) + 18px);
-}
-.nam-rack-design-port .preset-console > [data-qa="nam-preset-previous"] {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--preset-previous-width);
-  z-index: 2;
-}
-.nam-rack-design-port .preset-console > [data-qa="nam-preset-next"] {
-  position: absolute;
-  top: 0;
-  right: calc(var(--preset-save-width) + var(--preset-compare-width));
-  bottom: 0;
-  width: var(--preset-next-width);
-  z-index: 2;
-}
-.nam-rack-design-port .preset-console > .preset-save {
-  position: absolute;
-  top: 0;
-  right: var(--preset-compare-width);
-  bottom: 0;
-  width: var(--preset-save-width);
-  z-index: 2;
-}
-.nam-rack-design-port .preset-console > .premium-compare {
-  position: absolute;
-  inset: 0 0 0 auto;
-  width: var(--preset-compare-width);
-  z-index: 2;
-}
-.nam-rack-design-port .three-position-selector-detents,
-.nam-rack-design-port .four-position-selector-detents {
-  position: absolute;
-  z-index: 6;
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.nam-rack-design-port .three-position-selector-detents i,
-.nam-rack-design-port .four-position-selector-detents i {
-  position: absolute;
-  width: 2px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(216,226,234,.42);
-}
-.nam-rack-design-port .three-position-selector-detents i[data-active="true"],
-.nam-rack-design-port .four-position-selector-detents i[data-active="true"] {
-  width: 2.5px;
-  height: 4px;
-  background: #dff5ff;
-}
-.nam-rack-design-port .asset-control.enum-position-rotary {
-  z-index: 8;
-  filter: saturate(1.08) brightness(1.04) contrast(1.08) drop-shadow(0 1px 1px rgba(0,0,0,.72));
-  transition: transform 170ms cubic-bezier(.2, .92, .28, 1.12), filter 150ms ease;
-}
-.nam-rack-design-port .reverb-voice-display {
-  box-sizing: border-box;
-  overflow: hidden;
-  border-color: rgba(255,255,255,.14);
-  border-radius: 2px;
-  color: #e6ad5b;
-  background: linear-gradient(180deg, rgba(1,2,2,.99), rgba(5,7,7,.98));
-  box-shadow: none;
-  filter: none;
-  font-size: 7.5px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: .05em;
-  line-height: 1;
-  text-shadow: none;
-}
-.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout {
-  position: absolute;
-  z-index: 8;
-  display: grid;
-  grid-template-rows: 1fr 1fr;
-  align-items: center;
-  box-sizing: border-box;
-  color: rgba(237,235,229,.78);
-  font-size: 7px;
-  font-weight: 720;
-  letter-spacing: .025em;
-  line-height: 1;
-  text-align: center;
-  text-shadow: none;
-  pointer-events: none;
-}
-.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout strong {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  justify-self: stretch;
-  min-width: 0;
-  min-height: 9px;
-  padding: 1px;
-  box-sizing: border-box;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 1px;
-  color: #efbd72;
-  background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));
-  box-shadow: none;
-  filter: none;
-  font-size: 7px;
-  font-weight: 780;
-  letter-spacing: 0;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-.nam-rack-design-port .compressor-gr-meter {
-  position: absolute;
-  z-index: 7;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 3px;
-  box-sizing: border-box;
-  padding: 2px 3px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.13);
-  border-radius: 2px;
-  color: rgba(229,236,244,.78);
-  background: linear-gradient(180deg, rgba(3,6,8,.98), rgba(9,13,16,.98));
-  box-shadow: none;
-  filter: none;
-  font-size: 8px;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.nam-rack-design-port .compressor-gr-label {
-  color: rgba(229,236,244,.68);
-  font-weight: 760;
-  letter-spacing: .03em;
-}
-.nam-rack-design-port .compressor-gr-segments {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(2px, 1fr));
-  gap: 1px;
-  min-width: 0;
-}
-.nam-rack-design-port .compressor-gr-segments i {
-  display: block;
-  height: 4px;
-  border-radius: 1px;
-  background: rgba(103,126,145,.24);
-  box-shadow: none;
-}
-.nam-rack-design-port .compressor-gr-segments i[data-active="true"] {
-  background: #69d8e6;
-  box-shadow: none;
-}
-.nam-rack-design-port .compressor-gr-segments i:nth-last-child(-n+2)[data-active="true"] {
-  background: #e6ad5b;
-  box-shadow: none;
-}
-.nam-rack-design-port .compressor-gr-meter strong {
-  min-width: 16px;
-  color: rgba(239,243,246,.86);
-  font-size: 8px;
-  font-weight: 700;
-  text-align: right;
-}
-.nam-rack-design-port .module[data-module="distortion"] .control-label {
-  width: 27%;
-  max-width: 27%;
-  overflow: visible;
-  text-align: center;
-}
-.nam-rack-design-port .module[data-module="distortion"] .distortion-mode-display {
-  box-sizing: border-box;
-  overflow: hidden;
-  border-color: rgba(255,255,255,.14);
-  color: #e6ad5b !important;
-  background:
-    linear-gradient(180deg, rgba(1,2,2,.99), rgba(5,7,7,.98));
-  box-shadow: none;
-  filter: none;
-  font-size: 8.35px !important;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: .055em;
-  line-height: 1;
-  text-align: center;
-  text-shadow: none;
-  white-space: nowrap;
-}
-.nam-rack-design-port .module-display {
-  color: #e6ad5b;
-  font-weight: 650;
-}
-.nam-rack-design-port .stompbox .module-display,
-.nam-rack-design-port .wide-pedal .module-display {
-  box-shadow: none;
-  filter: none;
-}
-.nam-rack-design-port .mic-panel .panel-title,
-.nam-rack-design-port .mic-panel .control-label,
-.nam-rack-design-port .mic-panel .rack-small,
-.nam-rack-design-port .eq-rack .eq-scale,
-.nam-rack-design-port .eq-rack .eq-band-value,
-.nam-rack-design-port .eq-rack .eq-frequency,
-.nam-rack-design-port .eq-rack .rack-big,
-.nam-rack-design-port .eq-rack .rack-small {
-  font-size: max(9px, .61cqw) !important;
-  font-weight: 580 !important;
-  letter-spacing: .015em !important;
-  text-shadow: 0 1px 1px rgba(0,0,0,.45) !important;
-}
-.nam-rack-design-port .eq-rack .fader { width: 3.05%; }
-.nam-rack-design-port .eq-rack .fader-cap { width: 170%; }
-.nam-rack-design-port .eq-rack-title { font-size: max(10px, .75cqw) !important; font-weight: 680 !important; }
-.nam-rack-design-port .mic-panel .module-skin {
-  filter: brightness(.3) contrast(1.22) saturate(.45) sepia(.22) drop-shadow(0 20px 16px rgba(0,0,0,.5));
-}
-.nam-rack-design-port .mic-panel .module-frame::before {
-  content: "";
-  position: absolute;
-  inset: 2.4% 1.7%;
-  z-index: 2;
-  pointer-events: none;
-  border: 1px solid rgba(248,218,171,.14);
-  border-radius: 4.5%;
-  background:
-    linear-gradient(128deg, rgba(255,255,255,.065), transparent 22%, rgba(0,0,0,.11) 58%, rgba(224,161,73,.045)),
-    repeating-linear-gradient(90deg, rgba(255,255,255,.012) 0 1px, transparent 1px 4px);
-  box-shadow:
-    inset 0 1px rgba(255,255,255,.08),
-    inset 0 -20px 34px rgba(0,0,0,.2),
-    0 7px 14px rgba(0,0,0,.32);
-}
-.nam-rack-design-port .mic-panel .label,
-.nam-rack-design-port .mic-panel .panel-title,
-.nam-rack-design-port .mic-panel .control-label,
-.nam-rack-design-port .mic-panel .rack-small { color: rgba(241,235,222,.88) !important; text-shadow: 0 1px 2px #000; }
-.nam-rack-design-port .ir-shaper-panel .module-skin {
-  filter: brightness(.9) contrast(1.08) saturate(.72) drop-shadow(0 18px 15px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .ir-shaper-panel.cab-mode-empty.cab-controls-locked .module-skin {
-  filter: brightness(.68) contrast(1.08) saturate(.42) drop-shadow(0 18px 15px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .ir-shaper-panel.cab-mode-required.cab-controls-locked .module-skin {
-  filter: brightness(.75) contrast(1.08) saturate(.48) drop-shadow(0 18px 15px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .ir-shaper-panel.cab-mode-embedded.cab-controls-locked .module-skin {
-  filter: brightness(.81) contrast(1.08) saturate(.55) drop-shadow(0 18px 15px rgba(0,0,0,.55));
-}
-.nam-rack-design-port .ir-shaper-panel .cab-control-deck {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-}
-.nam-rack-design-port .ir-shaper-panel .cab-ir-primary-controls {
-  position: absolute;
-  inset: 0;
-}
-.nam-rack-design-port .ir-shaper-panel .control-label,
-.nam-rack-design-port .ir-shaper-panel .ir-utility-label {
-  color: rgba(237,232,222,.86) !important;
-  font-size: max(8px, .55cqw) !important;
-  font-weight: 620 !important;
-  letter-spacing: .055em !important;
-  text-shadow: 0 1px 2px rgba(0,0,0,.9) !important;
-}
-.nam-rack-design-port .ir-shaper-panel .ir-utility-label {
-  color: rgba(218,183,126,.84) !important;
-  font-size: max(7px, .48cqw) !important;
-  letter-spacing: .09em !important;
-}
-.nam-rack-design-port .ir-shaper-panel .cab-control-deck[data-locked="true"] .ir-utility-label {
-  filter: grayscale(.75);
-  opacity: .36;
-}
-.nam-rack-design-port .cab-room-console .module-frame {
-  overflow: hidden;
-  border-radius: 2.4%;
-}
-.nam-rack-design-port .cab-room-console .cab-source-selector {
-  left: 2.5%;
-  top: 4.6%;
-  width: 95%;
-  height: 13%;
-  padding: 4px 7px 4px 15px;
-  border-color: rgba(228,188,126,.22);
-  background: linear-gradient(180deg, rgba(17,18,18,.98), rgba(6,7,8,.99));
-}
-.nam-rack-design-port .cab-room-console .cab-source-copy > small {
-  color: rgba(228,179,103,.82);
-  font-size: 9px;
-  letter-spacing: .1em;
-}
-.nam-rack-design-port .cab-room-console .cab-source-copy > strong {
-  font-size: 12.5px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions {
-  gap: 7px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions > button {
-  padding-inline: 14px;
-  border-radius: 4px;
-  font-size: 9px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions > button svg {
-  width: 14px;
-  height: 14px;
-}
-.nam-rack-design-port .cab-room-console .ir-primary-label {
-  color: rgba(242,238,230,.9) !important;
-  font-size: 11px !important;
-  font-weight: 650 !important;
-  letter-spacing: .045em !important;
-}
-.nam-rack-design-port .cab-room-console .ir-filter-value {
-  min-width: 10%;
-  padding: 4px 0 3px;
-  color: rgba(222,216,204,.75) !important;
-  border-bottom: 1px solid rgba(255,255,255,.09);
-  font-size: 9px !important;
-  font-weight: 560 !important;
-  letter-spacing: .015em !important;
-  text-transform: none;
-}
-.nam-rack-design-port .cab-room-console .cab-room-bay {
-  position: absolute;
-  left: 2.2%;
-  right: 2.2%;
-  top: 62.2%;
-  bottom: 2%;
-  z-index: 18;
-  display: grid;
-  grid-template-columns: .96fr 1fr 1fr 1fr;
-  align-items: stretch;
-  overflow: hidden;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  pointer-events: none;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-zone,
-.nam-rack-design-port .cab-room-console .cab-room-control,
-.nam-rack-design-port .cab-room-console .cab-room-purpose {
-  position: relative;
-  min-width: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-zone::after,
-.nam-rack-design-port .cab-room-console .cab-room-control::after {
-  content: "";
-  position: absolute;
-  top: 15%;
-  right: 0;
-  bottom: 15%;
-  width: 1px;
-  background: rgba(157,178,194,.18);
-  box-shadow: 1px 0 rgba(0,0,0,.72);
-}
-.nam-rack-design-port .cab-room-console .cab-room-amount::after { display: none; }
-.nam-rack-design-port .cab-room-console .cab-room-power-zone {
-  display: block;
-  padding: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-title {
-  position: absolute;
-  left: 22%;
-  top: 22%;
-  color: #659ddd;
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: .08em;
-}
-.nam-rack-design-port .cab-room-console .cab-room-switch-row {
-  position: absolute;
-  inset: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch {
-  position: absolute;
-  left: 22%;
-  top: 52%;
-  width: 35%;
-  height: 11%;
-  min-height: 0;
-  padding: 0;
-  overflow: visible;
-  border: 1px solid rgba(154,169,184,.58);
-  border-radius: 999px;
-  background: linear-gradient(180deg, #141a20, #080b0e 72%);
-  box-shadow: inset 0 2px 4px rgba(0,0,0,.9), 0 1px rgba(255,255,255,.08);
-  pointer-events: auto;
-  transform: translateY(-50%);
-  cursor: pointer;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch > i {
-  position: absolute;
-  top: 50%;
-  left: calc(100% - 3px);
-  width: 31%;
-  aspect-ratio: 1;
-  border: 1px solid rgba(235,237,238,.64);
-  border-radius: 50%;
-  background: radial-gradient(circle at 38% 32%, #d7dadd 0 10%, #8c9195 28%, #3e4245 62%, #16191b 100%);
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.45), 0 2px 4px rgba(0,0,0,.82);
-  transform: translate(-100%, -50%);
-  transition: left 140ms cubic-bezier(.2,.75,.25,1), transform 140ms cubic-bezier(.2,.75,.25,1);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] {
-  border-color: rgba(108,163,220,.72);
-  background: linear-gradient(180deg, #16283a, #0a121a 72%);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] > i {
-  left: 3px;
-  transform: translate(0, -50%);
-}
-.nam-rack-design-port .cab-room-console .cab-room-status-led {
-  position: absolute;
-  left: 145%;
-  top: 50%;
-  width: 18%;
-  aspect-ratio: 1;
-  border: 1px solid rgba(158,190,226,.72);
-  border-radius: 50%;
-  background: radial-gradient(circle at 42% 36%, #dbeaff 0 12%, #79aaf0 28%, #315a8b 60%, #111b27 100%);
-  box-shadow: inset 0 1px rgba(255,255,255,.52), 0 0 8px rgba(92,154,231,.82), 0 2px 3px rgba(0,0,0,.8);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.nam-rack-design-port .cab-room-console .cab-room-status-led[data-active="false"] {
-  filter: grayscale(.72) brightness(.46);
-  box-shadow: inset 0 1px rgba(255,255,255,.24), 0 2px 3px rgba(0,0,0,.8);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch:focus-visible {
-  outline: 1px solid #73aee8;
-  outline-offset: 2px;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch:disabled {
-  cursor: default;
-  opacity: .46;
-}
-.nam-rack-design-port .cab-room-console .cab-room-state-labels {
-  position: absolute;
-  left: 22%;
-  top: 72%;
-  display: flex;
-  width: 35%;
-  justify-content: space-between;
-  color: rgba(230,232,234,.8);
-  font-size: 8px;
-  font-weight: 610;
-}
-.nam-rack-design-port .cab-room-console .cab-room-state-labels i {
-  font-style: normal;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control {
-  display: block;
-  padding: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control > strong {
-  position: absolute;
-  left: 50%;
-  top: 11%;
-  transform: translateX(-50%);
-  color: rgba(235,233,227,.88);
-  font-size: 10px;
-  font-weight: 630;
-  letter-spacing: .045em;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control > .cab-room-value {
-  position: absolute;
-  left: 50%;
-  bottom: 13%;
-  min-width: 42%;
-  padding: 2px 5px 1px;
-  transform: translateX(-50%);
-  color: rgba(223,225,227,.77);
-  font-size: 9px;
-  font-weight: 570;
-  line-height: 1.15;
-  text-align: center;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob {
-  filter: drop-shadow(0 5px 5px rgba(0,0,0,.65)) drop-shadow(0 0 1px rgba(106,167,219,.55));
-}
-.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob.blue-steel {
-  filter: brightness(.7) saturate(.72) contrast(1.04) drop-shadow(0 5px 5px rgba(0,0,0,.7));
-}
-.nam-rack-design-port .cab-room-console .cab-room-control .control-hit {
-  pointer-events: auto;
-}
-.nam-rack-design-port .cab-room-console .cab-room-purpose {
-  display: grid;
-  place-items: center;
-  padding: 10%;
-  color: #6198d7;
-  font-size: 10px;
-  font-weight: 720;
-  letter-spacing: .045em;
-  text-align: center;
-}
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-bay {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-control,
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-power-zone {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .amp-brand {
-  top: 25.5%;
-  color: rgba(220,222,224,.74) !important;
-  font-size: max(10px, .88cqw) !important;
-  font-weight: 650 !important;
-  letter-spacing: .09em !important;
-  text-shadow: 0 1px 2px rgba(0,0,0,.7) !important;
-}
-.nam-rack-design-port .amp-capture-nameplate {
-  position: absolute;
-  left: 50%;
-  top: 37.5%;
-  z-index: 76;
-  width: 34%;
-  height: 16.5%;
-  min-height: 52px;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 1px;
-  padding: 5px 20px 4px;
-  transform: translate(-50%, -50%);
-  border: 1px solid rgba(209,199,181,.56);
-  border-radius: 3px;
-  color: #ddd9d1;
-  background:
-    radial-gradient(circle at 8px 8px, #a9a49a 0 1px, #242424 1.4px 2.4px, transparent 2.8px),
-    radial-gradient(circle at calc(100% - 8px) 8px, #a9a49a 0 1px, #242424 1.4px 2.4px, transparent 2.8px),
-    radial-gradient(circle at 8px calc(100% - 8px), #8f8a82 0 1px, #202020 1.4px 2.4px, transparent 2.8px),
-    radial-gradient(circle at calc(100% - 8px) calc(100% - 8px), #8f8a82 0 1px, #202020 1.4px 2.4px, transparent 2.8px),
-    repeating-linear-gradient(90deg, rgba(255,255,255,.018) 0 1px, transparent 1px 4px),
-    linear-gradient(180deg, #202326, #0b0d0f 54%, #17191b);
-  box-shadow:
-    0 3px 8px rgba(0,0,0,.72),
-    inset 0 1px rgba(255,255,255,.18),
-    inset 0 -1px rgba(0,0,0,.9),
-    0 0 0 2px rgba(0,0,0,.38);
-  pointer-events: auto;
-}
-.nam-rack-design-port .amp-capture-nameplate:focus-within {
-  border-color: rgba(228,169,83,.82);
-  box-shadow:
-    0 3px 8px rgba(0,0,0,.72),
-    inset 0 0 0 1px rgba(232,173,90,.48),
-    0 0 0 2px rgba(0,0,0,.45);
-}
-.nam-rack-design-port .amp-capture-state {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  color: #8e918f;
-  font-size: 8px;
-  font-weight: 760;
-  letter-spacing: .12em;
-  line-height: 1;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .amp-capture-state i {
-  width: 4px;
-  height: 4px;
-  flex: 0 0 4px;
-  border-radius: 50%;
-  background: #5fd698;
-  box-shadow: 0 0 5px rgba(95,214,152,.58);
-}
-.nam-rack-design-port .amp-capture-nameplate[data-state="empty"] .amp-capture-state i {
-  background: #d29a4c;
-  box-shadow: 0 0 5px rgba(210,154,76,.48);
-}
-.nam-rack-design-port .amp-capture-nameplate[data-state="missing"] .amp-capture-state {
-  color: #dc9a8d;
-}
-.nam-rack-design-port .amp-capture-nameplate[data-state="missing"] .amp-capture-state i {
-  background: #e7604e;
-  box-shadow: 0 0 6px rgba(231,96,78,.62);
-}
-.nam-rack-design-port .amp-capture-model {
-  min-width: 0;
-  overflow: hidden;
-  color: #e8e4dc;
-  font-size: 12px;
-  font-weight: 680;
-  letter-spacing: .015em;
-  line-height: 1.05;
-  text-align: center;
-  text-overflow: ellipsis;
-  text-shadow: 0 1px 1px #000;
-  white-space: nowrap;
-}
-.nam-rack-design-port .amp-capture-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-.nam-rack-design-port .amp-capture-actions button {
-  min-width: 54px;
-  height: 19px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 7px;
-  border: 1px solid rgba(210,203,190,.2);
-  border-radius: 2px;
-  color: #aaa69d;
-  background: linear-gradient(180deg, #24272a, #111315);
-  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 1px 2px rgba(0,0,0,.7);
-  font-size: 8px;
-  font-weight: 760;
-  letter-spacing: .08em;
-  line-height: 1;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .amp-capture-actions button svg {
-  width: 9px;
-  height: 9px;
-}
-.nam-rack-design-port .amp-capture-actions button:hover:not(:disabled) {
-  color: #f0c27b;
-  border-color: rgba(224,161,73,.52);
-  background: linear-gradient(180deg, #2c2923, #15130f);
-}
-.nam-rack-design-port .amp-capture-actions button:focus-visible {
-  outline: 1px solid rgba(236,178,93,.9);
-  outline-offset: -2px;
-}
-.nam-rack-design-port .amp-capture-actions button:disabled {
-  cursor: default;
-  opacity: .42;
-}
-.nam-rack-design-port .amp-rail-label {
-  color: rgba(220,217,209,.86) !important;
-  font-size: max(9px, .62cqw) !important;
-  font-weight: 580 !important;
-  letter-spacing: .025em !important;
-  text-shadow: 0 1px 1px rgba(0,0,0,.72) !important;
-}
-.nam-rack-design-port .premium-rig-drawer {
-  grid-template-rows: auto auto auto minmax(0,1fr) auto auto;
-  gap: 10px;
-  padding: 18px 14px 13px;
-  border-left-color: rgba(255,255,255,.11);
-  background:
-    linear-gradient(180deg, rgba(224,161,73,.025), transparent 24%),
-    linear-gradient(90deg, #101317, #090c0f);
-  box-shadow: -18px 0 48px rgba(0,0,0,.32), inset 1px 0 rgba(255,255,255,.02);
-}
-.nam-rack-design-port .premium-drawer-heading span { color: #777e87; font-size: 8px; font-weight: 650; letter-spacing: .1em; }
-.nam-rack-design-port .premium-drawer-heading strong { color: #dca04c; font-size: 15px; font-weight: 680; letter-spacing: .02em; }
-.nam-rack-design-port .premium-library-search { height: 36px; border-radius: 3px; font-size: 10px; }
-.nam-rack-design-port .premium-library-search svg { width: 15px; height: 15px; }
-.nam-rack-design-port .premium-library-filter {
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 10px;
-  border: 1px solid rgba(255,255,255,.09);
-  border-radius: 3px;
-  color: #9298a1;
-  background: rgba(255,255,255,.018);
-  font-size: 9px;
-  font-weight: 620;
-}
-.nam-rack-design-port .premium-library-filter strong {
-  min-width: 23px;
-  padding: 3px 6px;
-  border-radius: 999px;
-  color: #d6d9dd;
-  background: rgba(255,255,255,.06);
-  text-align: center;
-}
-.nam-rack-design-port .premium-rig-list {
-  gap: 0;
-  border-top: 1px solid rgba(255,255,255,.075);
-  border-bottom: 1px solid rgba(255,255,255,.075);
-}
-.nam-rack-design-port .premium-rig-card {
-  min-height: 74px;
-  grid-template-columns: 72px minmax(0,1fr) 5px;
-  gap: 10px;
-  padding: 9px 7px;
-  border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.07);
-  border-radius: 0;
-  background: transparent;
-}
-.nam-rack-design-port .premium-rig-card:last-child { border-bottom: 0; }
-.nam-rack-design-port .premium-rig-card:hover { background: rgba(255,255,255,.025); }
-.nam-rack-design-port .premium-rig-card[data-active="true"] {
-  border-color: rgba(224,161,73,.38);
-  background: linear-gradient(90deg, rgba(224,161,73,.09), rgba(255,255,255,.012));
-  box-shadow: inset 3px 0 #d99a45, inset 0 0 0 1px rgba(224,161,73,.28);
-}
-.nam-rack-design-port .premium-rig-thumb { width: 72px; height: 48px; border: 0; background: #07090b; }
-.nam-rack-design-port .premium-rig-thumb img { width: 96%; height: 96%; filter: brightness(1.04) saturate(.96); }
-.nam-rack-design-port .premium-rig-copy small { color: #747b84; font-size: 8px; font-weight: 650; }
-.nam-rack-design-port .premium-rig-copy strong { color: #dfe1e4; font-size: 12px; font-weight: 650; }
-.nam-rack-design-port .premium-rig-copy em {
-  display: -webkit-box;
-  overflow: hidden;
-  color: #747b84;
-  font-size: 9px;
-  font-weight: 450;
-  line-height: 1.25;
-  text-overflow: clip;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.nam-rack-design-port .premium-library-cta {
-  height: 38px;
-  border-color: rgba(224,161,73,.48);
-  color: #efb55f;
-  background: linear-gradient(180deg, rgba(224,161,73,.11), rgba(224,161,73,.055));
-  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 8px 20px rgba(0,0,0,.13);
-  font-size: 10px;
-  font-weight: 650;
-}
-.nam-rack-design-port .premium-rig-drawer > p { display: none; }
-.nam-rack-design-port .footer {
-  display: flex;
-  gap: clamp(8px, .85vw, 14px);
-  padding: 0 clamp(18px, 1.7vw, 28px);
-  background: linear-gradient(180deg, #0a0c0f, #05070a);
-  font-size: 10px;
-  font-weight: 560;
-}
-.nam-rack-design-port .footer > b { display: none; }
-.nam-rack-design-port .footer button { min-height: 29px; padding: 0 8px; font-size: 9px; font-weight: 600; }
-.nam-rack-design-port .footer button svg { width: 14px; height: 14px; }
-.nam-rack-design-port .footer-runtime { margin-left: auto; gap: 15px; color: #858b94; }
-.nam-rack-design-port .footer-runtime strong { color: #aeb3ba; font-weight: 600; }
-.nam-rack-design-port .footer-runtime strong:nth-child(n+3) { display: none; }
-.nam-rack-design-port .footer > em { flex: none; margin-left: 4px; }
-
-.nam-rack-design-port .premium-tuner-stage {
-  position: absolute;
-  inset: clamp(28px, 4vh, 52px) clamp(42px, 5vw, 84px);
-  z-index: 13;
-  display: grid;
-  grid-template-rows: minmax(0,1fr) 96px auto;
-  align-items: center;
-  gap: clamp(15px, 2.2vh, 25px);
-  padding: clamp(24px, 3.2vh, 42px) clamp(34px, 4vw, 66px);
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 12px;
-  background: radial-gradient(circle at 50% 43%, rgba(224,161,73,.14), transparent 42%), rgba(8,10,13,.9);
-  box-shadow: 0 30px 80px rgba(0,0,0,.5), inset 0 1px rgba(255,255,255,.035);
-}
-.nam-rack-design-port .premium-tuner-stage-close {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  z-index: 3;
-  min-height: 40px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 13px;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 5px;
-  color: #aeb4bd;
-  background: rgba(20,24,29,.92);
-  font-size: 10px;
-  font-weight: 700;
-}
-.nam-rack-design-port .premium-tuner-stage-close svg { width: 16px; height: 16px; }
-.nam-rack-design-port .premium-tuner-stage-close:hover { color: #fff; border-color: rgba(224,161,73,.45); }
-.nam-rack-design-port .premium-tuner-stage-copy { display: grid; place-items: center; align-content: center; }
-.nam-rack-design-port .premium-tuner-stage-copy > span { color: #777f8a; font-size: 11px; font-weight: 760; letter-spacing: .14em; text-transform: uppercase; }
-.nam-rack-design-port .premium-tuner-stage-copy > strong { color: #4e5660; font-size: clamp(88px, 11vw, 154px); font-weight: 690; letter-spacing: -.07em; line-height: .92; text-shadow: 0 0 42px rgba(224,161,73,.12); }
-.nam-rack-design-port .premium-tuner-stage[data-signal="true"] .premium-tuner-stage-copy > strong { color: #ffc36c; text-shadow: 0 0 48px rgba(224,161,73,.26); }
-.nam-rack-design-port .premium-tuner-stage-copy > b { margin-top: 8px; color: #a5abb3; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
-.nam-rack-design-port .premium-tuner-stage-copy > em { margin-top: 7px; color: #f0f1f2; font-size: 19px; font-style: normal; font-weight: 740; }
-.nam-rack-design-port .premium-tuner-scale { position: relative; height: 96px; }
-.nam-rack-design-port .premium-tuner-scale::before { content: ""; position: absolute; left: 0; right: 0; top: 43px; height: 2px; background: #303640; }
-.nam-rack-design-port .premium-tuner-scale-ticks { position: absolute; inset: 18px 0 30px; display: grid; grid-template-columns: repeat(21, 1fr); align-items: end; }
-.nam-rack-design-port .premium-tuner-scale-ticks i { width: 1px; height: 16px; justify-self: center; background: #414852; }
-.nam-rack-design-port .premium-tuner-scale-ticks i[data-major="true"] { height: 27px; background: #69717c; }
-.nam-rack-design-port .premium-tuner-needle { position: absolute; left: var(--premium-tuner-pct); top: 8px; width: 3px; height: 55px; transform: translateX(-50%); border-radius: 2px; background: #ffc36c; box-shadow: 0 0 16px rgba(255,195,108,.8); transition: left 90ms linear; }
-.nam-rack-design-port .premium-tuner-scale-labels { position: absolute; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(3,1fr); color: #747c87; font-size: 10px; }
-.nam-rack-design-port .premium-tuner-scale-labels span:nth-child(2) { text-align: center; }
-.nam-rack-design-port .premium-tuner-scale-labels span:last-child { text-align: right; }
-.nam-rack-design-port .premium-tuner-stage-readouts { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
-.nam-rack-design-port .premium-tuner-stage-readouts article { display: grid; gap: 5px; padding: 11px; border: 1px solid rgba(255,255,255,.08); border-radius: 5px; background: rgba(255,255,255,.018); text-align: center; }
-.nam-rack-design-port .premium-tuner-stage-readouts span { color: #717985; font-size: 10px; }
-.nam-rack-design-port .premium-tuner-stage-readouts strong { color: #e9ebee; font-size: 13px; }
-.nam-rack-design-port .premium-tuner-drawer { grid-template-rows: auto minmax(0,1fr) auto auto; }
-.nam-rack-design-port .premium-tuner-side-status { display: grid; place-items: center; align-content: center; gap: 9px; min-height: 0; padding: 22px 16px; border: 1px solid rgba(255,255,255,.08); border-radius: 7px; background: rgba(0,0,0,.23); text-align: center; }
-.nam-rack-design-port .premium-tuner-side-status svg { width: 27px; height: 27px; color: var(--premium-accent); }
-.nam-rack-design-port .premium-tuner-side-status span { color: #858d98; font-size: 11px; }
-.nam-rack-design-port .premium-tuner-side-status strong { color: #eef0f2; font-size: 17px; }
-.nam-rack-design-port .premium-tuner-side-status p { max-width: 210px; margin: 8px 0 0; color: #676f7a; font-size: 11px; line-height: 1.55; }
-.nam-rack-design-port .premium-tuner-reference { height: 38px; display: flex; align-items: center; justify-content: space-between; padding: 0 11px; border-top: 1px solid rgba(255,255,255,.08); color: #737b86; font-size: 10px; }
-.nam-rack-design-port .premium-tuner-reference strong { color: #d9dce0; font-size: 11px; }
-
-@media (max-width: 1400px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 174px 60px minmax(0,1fr) 48px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: minmax(286px,310px) minmax(430px,720px) minmax(112px,132px); gap: 13px; padding: 14px 20px 13px; }
-  .nam-rack-design-port .premium-brand { left: 22px; top: 14px; }
-  .nam-rack-design-port .premium-brand > strong { font-size: 21px; }
-  .nam-rack-design-port .premium-calibration-launch { left: 153px; }
-  .nam-rack-design-port .global-block { gap: 12px; padding-top: 47px; }
-  .nam-rack-design-port .mini-param { width: 63px; height: 102px; grid-template-rows: 15px 62px 20px; }
-  .nam-rack-design-port .mini-param > .asset-control { top: 48px !important; width: 53px !important; height: 53px !important; }
-  .nam-rack-design-port .mini-param > .knob-position-indicator { top: 48px !important; width: 53px !important; }
-  .nam-rack-design-port .premium-level-meter { width: 27px; height: 96px; flex-basis: 27px; }
-  .nam-rack-design-port .preset-area { padding-bottom: 14px; }
-  .nam-rack-design-port .preset-console { height: 70px; grid-template-columns: 42px minmax(180px,1fr) 42px 50px 68px; }
-  .nam-rack-design-port .preset-title b { font-size: 19px; }
-  .nam-rack-design-port .top-nav { grid-template-columns: repeat(5,minmax(100px,150px)); gap: 10px; padding-inline: 20px; }
-  .nam-rack-design-port .nav-item { grid-template-columns: 25px auto; gap: 9px; font-size: 12px !important; }
-  .nam-rack-design-port .premium-nav-icon,
-  .nam-rack-design-port .premium-nav-icon svg { width: 23px; height: 23px; }
-  .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr) 276px; }
-  .nam-rack-design-port .premium-rig-drawer { padding: 14px 12px 11px; gap: 7px; }
-  .nam-rack-design-port .premium-rig-card { min-height: 66px; grid-template-columns: 58px minmax(0,1fr) 4px; padding-block: 7px; }
-  .nam-rack-design-port .premium-rig-thumb { width: 58px; height: 43px; }
-  .nam-rack-design-port .footer { padding-inline: 18px; }
-}
-@media (max-width: 1240px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 156px 54px minmax(0,1fr) 46px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: minmax(244px,268px) minmax(370px,1fr) 80px; gap: 9px; padding: 12px 15px 10px; }
-  .nam-rack-design-port .premium-brand { left: 17px; top: 11px; }
-  .nam-rack-design-port .premium-brand > strong { font-size: 20px; }
-  .nam-rack-design-port .premium-calibration-launch { left: 145px; }
-  .nam-rack-design-port .global-block { gap: 7px; padding-top: 42px; }
-  .nam-rack-design-port .mini-param { width: 56px; height: 92px; grid-template-rows: 14px 55px 19px; }
-  .nam-rack-design-port .mini-param > .asset-control { top: 43px !important; width: 47px !important; height: 47px !important; }
-  .nam-rack-design-port .mini-param > .knob-position-indicator { top: 43px !important; width: 47px !important; }
-  .nam-rack-design-port .premium-level-meter { width: 24px; height: 86px; flex-basis: 24px; }
-  .nam-rack-design-port .preset-area { padding-bottom: 10px; }
-  .nam-rack-design-port .preset-console { height: 66px; grid-template-columns: 36px minmax(160px,1fr) 36px 44px 58px; }
-  .nam-rack-design-port .preset-title b { font-size: 17px; }
-  .nam-rack-design-port .premium-compare { padding-inline: 5px !important; }
-  .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr) 252px; }
-}
-@media (max-width: 1030px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 144px 52px minmax(0,1fr) 46px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: 220px minmax(310px,1fr) 84px; gap: 7px; padding: 10px 12px 9px; }
-  .nam-rack-design-port .premium-brand > span { font-size: 9px; }
-  .nam-rack-design-port .premium-brand > strong { font-size: 18px; }
-  .nam-rack-design-port .premium-calibration-launch { left: 132px; top: 0; }
-  .nam-rack-design-port .global-block { padding-top: 37px; }
-  .nam-rack-design-port .global-block.left { gap: 5px; }
-  .nam-rack-design-port .global-block.left .premium-level-meter { display: block; }
-  .nam-rack-design-port .global-block.left .mini-param { width: 55px; }
-  .nam-rack-design-port .global-block.right .mini-param { width: 50px; }
-  .nam-rack-design-port .global-block.right .premium-level-meter { display: block; }
-  .nam-rack-design-port .mini-param { height: 86px; grid-template-rows: 13px 51px 18px; }
-  .nam-rack-design-port .mini-param > .asset-control { top: 39px !important; width: 44px !important; height: 44px !important; }
-  .nam-rack-design-port .mini-param > .knob-position-indicator { top: 39px !important; width: 44px !important; }
-  .nam-rack-design-port .mini-param .global-label { font-size: 9px !important; }
-  .nam-rack-design-port .mini-param strong { font-size: 10px; }
-  .nam-rack-design-port .preset-area {
-    grid-template-columns: minmax(0,1fr);
-    gap: 0;
-    padding-bottom: 8px;
-  }
-  .nam-rack-design-port .preset-console {
-    grid-column: 1;
-    grid-row: 1;
-    height: 57px;
-    grid-template-columns: 32px minmax(135px,1fr) 32px 42px 50px;
-  }
-  .nam-rack-design-port .preset-title { padding: 0 8px; }
-  .nam-rack-design-port .preset-title b { font-size: 16px; }
-  .nam-rack-design-port .tone-library-mark { display: none !important; }
-  .nam-rack-design-port .top-nav { grid-template-columns: repeat(5,minmax(78px,120px)); gap: 6px; padding: 0 14px; }
-  .nam-rack-design-port .nav-item { grid-template-columns: 20px auto 5px; gap: 7px; font-size: 11px !important; }
-  .nam-rack-design-port .premium-nav-icon,
-  .nam-rack-design-port .premium-nav-icon svg { width: 18px; height: 18px; }
-  .nam-rack-design-port .hardware-stage,
-  .nam-rack-design-port .hardware-stage:has(.premium-tuner-drawer) { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-design-port .premium-rig-drawer,
-  .nam-rack-design-port .premium-tuner-drawer { display: none !important; }
-  .nam-rack-design-port .premium-tuner-stage { inset: 24px 42px; }
-}
-@media (max-width: 780px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 126px 48px minmax(0,1fr) 48px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: 96px minmax(150px,.8fr) minmax(235px,1.45fr) 58px; padding: 9px; }
-  .nam-rack-design-port .premium-calibration-launch { display: none; }
-  .nam-rack-design-port .global-block.left .premium-level-meter { display: block; }
-  .nam-rack-design-port .global-block.left .mini-param:nth-of-type(n+3) { display: none; }
-  .nam-rack-design-port .global-block.right { display: flex; }
-  .nam-rack-design-port .global-block.right .premium-level-meter { display: none; }
-  .nam-rack-design-port .preset-context { display: none; }
-  .nam-rack-design-port .preset-area { grid-template-rows: 1fr; }
-  .nam-rack-design-port .preset-console { grid-row: 1; }
-  .nam-rack-design-port .tone-library-mark { display: none !important; }
-  .nam-rack-design-port .preset-console { grid-template-columns: 30px minmax(110px,1fr) 30px 38px 40px; }
-  .nam-rack-design-port .preset-console .preset-save span { display: none; }
-  .nam-rack-design-port .top-nav { grid-template-columns: repeat(5,minmax(52px,1fr)); }
-  .nam-rack-design-port .nav-item { grid-template-columns: 16px auto; gap: 4px; font-size: 9px !important; }
-  .nam-rack-design-port .nav-item > i,
-  .nam-rack-design-port .nav-flow-chevron { display: none; }
-  .nam-rack-design-port .premium-nav-icon,
-  .nam-rack-design-port .premium-nav-icon svg { width: 15px; height: 15px; }
-  .nam-rack-design-port .premium-tuner-stage { inset: 18px; padding: 22px; grid-template-rows: minmax(0,1fr) 72px auto; }
-  .nam-rack-design-port .premium-tuner-stage-readouts { grid-template-columns: repeat(2,1fr); }
-}
-
-/* Tone Library v2: selected hardware is the focal point; browsing is a real,
-   compact tool rail. Every visible control below is wired to NAMExplorer. */
-.nam-rack-source-flow-design-port .source-flow-workspace {
-  background:
-    radial-gradient(ellipse at 38% 26%, rgba(225,153,66,.13), transparent 34%),
-    linear-gradient(90deg, rgba(0,0,0,.42), transparent 16% 84%, rgba(0,0,0,.48)),
-    var(--nam-studio-backdrop) center / cover no-repeat !important;
-}
-.nam-rack-source-flow-design-port .preset-console > button:disabled {
-  visibility: visible;
-}
-.nam-rack-source-flow-design-port .source-flow-workspace .tone-source-v2 {
-  inset: clamp(11px, 1.5vh, 18px) clamp(12px, 1.2vw, 20px) clamp(10px, 1.4vh, 16px);
-  display: grid;
-  grid-template: 58px minmax(0,1fr) / minmax(0,1fr);
-  gap: 0;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 10px;
-  color: #e8eaed;
-  background: rgba(9,11,14,.9);
-  box-shadow: 0 26px 70px rgba(0,0,0,.48), inset 0 1px rgba(255,255,255,.03);
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-source-header {
-  grid-column: 1;
-  grid-row: 1;
-  display: grid;
-  grid-template-columns: auto minmax(0,1fr) auto;
-  gap: 15px;
-  padding: 0 16px;
-  border: 0 !important;
-  border-bottom: 1px solid rgba(255,255,255,.08) !important;
-  border-radius: 0 !important;
-  background: linear-gradient(180deg, rgba(26,30,36,.98), rgba(15,18,23,.98)) !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-return-button {
-  min-height: 36px !important;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  border-radius: 5px;
-  font-size: 11px !important;
-  letter-spacing: .02em;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-return-button svg { width: 15px; height: 15px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb { display: flex; align-items: baseline; gap: 10px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb span {
-  flex: 0 1 auto;
-  color: #747c87;
-  font-size: 10px !important;
-  letter-spacing: .09em;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb b {
-  overflow: hidden;
-  color: #f2f3f4;
-  font-size: 17px !important;
-  font-weight: 730;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #a3a9b1;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #6d737c;
-  box-shadow: 0 0 0 3px rgba(109,115,124,.12);
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state[data-auth="connected"] i { background: #75c58a; box-shadow: 0 0 0 3px rgba(117,197,138,.13); }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state[data-auth="offline"] i { background: #c46f65; box-shadow: 0 0 0 3px rgba(196,111,101,.13); }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state[data-auth="warning"] { color: #dca45a; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state[data-auth="warning"] i { background: #dca45a; box-shadow: 0 0 0 3px rgba(220,164,90,.14); }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state span { color: inherit; font-size: 11px !important; font-weight: 680; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-connection-state button {
-  min-height: 27px !important;
-  padding: 0 9px;
-  border-color: currentColor;
-  border-radius: 4px;
-  color: inherit;
-  background: rgba(255,255,255,.035);
-  font-size: 9px !important;
-  font-weight: 760;
-}
-.nam-rack-source-flow-design-port .tone-source-v2-workspace {
-  grid-column: 1;
-  grid-row: 2;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0,1fr) clamp(330px, 25vw, 382px);
-  overflow: hidden;
-}
-.nam-rack-source-flow-design-port .tone-selected-stage {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(210px,1fr) auto auto auto;
-  gap: 10px;
-  padding: clamp(17px, 2vw, 28px);
-  overflow: hidden;
-  background:
-    radial-gradient(ellipse at 50% 38%, rgba(229,156,71,.14), transparent 40%),
-    linear-gradient(180deg, rgba(8,10,13,.18), rgba(7,8,10,.86));
-}
-.nam-rack-source-flow-design-port .tone-selected-stage::after {
-  content: "";
-  position: absolute;
-  left: 8%;
-  right: 8%;
-  top: 50%;
-  height: 24%;
-  z-index: 0;
-  border-radius: 50%;
-  background: rgba(0,0,0,.68);
-  filter: blur(28px);
-  pointer-events: none;
-}
-.nam-rack-source-flow-design-port .tone-selected-visual {
-  position: relative;
-  z-index: 1;
-  min-height: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 8px;
-  background: radial-gradient(circle at 50% 45%, rgba(225,157,74,.13), transparent 48%), #090b0e;
-  box-shadow: 0 22px 50px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.025);
-}
-.nam-rack-source-flow-design-port .tone-selected-visual > img {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-  filter: brightness(.9) saturate(.92) contrast(1.04);
-  transform: scale(1.015);
-}
-.nam-rack-source-flow-design-port .tone-selected-visual-shade {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, rgba(5,7,9,.87) 0, rgba(5,7,9,.5) 38%, rgba(5,7,9,.05) 72%), linear-gradient(0deg, rgba(5,7,9,.82), transparent 58%);
-}
-.nam-rack-source-flow-design-port .tone-selected-identity {
-  position: absolute;
-  left: clamp(20px, 2.5vw, 38px);
-  right: clamp(20px, 3vw, 48px);
-  bottom: clamp(18px, 2.4vh, 30px);
-  z-index: 2;
-  display: grid;
-  gap: 6px;
-}
-.nam-rack-source-flow-design-port .tone-selected-identity > span {
-  color: #d89a48;
-  font-size: 10px !important;
-  font-weight: 780;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-.nam-rack-source-flow-design-port .tone-selected-identity h1 {
-  max-width: 820px;
-  margin: 0;
-  overflow: hidden;
-  color: #fafafa;
-  font-size: clamp(24px, 2.35vw, 38px);
-  font-weight: 740;
-  letter-spacing: -.035em;
-  line-height: 1.05;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 3px 14px rgba(0,0,0,.62);
-}
-.nam-rack-source-flow-design-port .tone-selected-identity p {
-  max-width: 780px;
-  margin: 0;
-  overflow: hidden;
-  color: #b9bec5;
-  font-size: 13px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-source-flow-design-port .tone-selected-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.nam-rack-source-flow-design-port .tone-selected-chips i {
-  padding: 4px 8px;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 999px;
-  color: #d8dadd;
-  background: rgba(9,11,14,.66);
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 660;
-}
-.nam-rack-source-flow-design-port .tone-selected-info {
-  position: relative;
-  z-index: 2;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  min-height: 28px;
-}
-.nam-rack-source-flow-design-port .tone-selected-meta,
-.nam-rack-source-flow-design-port .tone-selected-stats { min-width: 0; display: flex; flex-wrap: wrap; gap: 7px 14px; }
-.nam-rack-source-flow-design-port .tone-selected-meta span,
-.nam-rack-source-flow-design-port .tone-selected-stats span { color: #858c96; font-size: 10px; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-selected-stats { flex: none; }
-.nam-rack-source-flow-design-port .tone-action-grid {
-  position: relative;
-  z-index: 2;
-  width: 100%;
-  display: grid;
-  gap: 8px !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button {
-  min-width: 118px;
-  min-height: 40px !important;
-  padding: 0 16px;
-  border-radius: 5px;
-  color: #c7cbd1;
-  background: linear-gradient(180deg, #1b1f26, #111419);
-  font-size: 11px !important;
-  font-weight: 730;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button[data-primary="true"] {
-  border-color: #dea04d;
-  color: #211407;
-  background: linear-gradient(180deg, #f2b960, #c98231);
-  box-shadow: 0 7px 18px rgba(205,132,48,.18), inset 0 1px rgba(255,255,255,.24);
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button:disabled {
-  cursor: default;
-  opacity: .38;
-  box-shadow: none;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-audition-status {
-  position: relative;
-  z-index: 2;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0,1fr);
-  gap: 2px 10px;
-  padding: 8px 11px;
-  border: 1px solid rgba(255,255,255,.075) !important;
-  border-radius: 5px !important;
-  background: rgba(14,17,21,.82) !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-audition-status span { color: #d79a49; font-size: 9px !important; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-audition-status b { overflow: hidden; color: #d9dce0; font-size: 10px !important; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-audition-status em { grid-column: 2; overflow: hidden; color: #747c86; font-size: 9px !important; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel {
-  position: relative;
-  grid-column: 2;
-  grid-row: 1;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto 40px 35px 34px minmax(0,1fr) auto;
-  gap: 9px;
-  padding: 17px 14px 14px;
-  overflow: hidden;
-  border: 0 !important;
-  border-left: 1px solid rgba(255,255,255,.08) !important;
-  border-radius: 0 !important;
-  background: linear-gradient(90deg, #11151a, #0c0f13) !important;
-  box-shadow: -20px 0 54px rgba(0,0,0,.28);
-}
-.nam-rack-source-flow-design-port .tone-compact-selection { display: none; }
-.nam-rack-source-flow-design-port .tone-library-heading { min-width: 0; display: flex; justify-content: space-between; gap: 12px; }
-.nam-rack-source-flow-design-port .tone-library-heading > div { min-width: 0; display: grid; gap: 3px; }
-.nam-rack-source-flow-design-port .tone-library-heading span { color: #d99b49; font-size: 9px; font-weight: 780; letter-spacing: .13em; text-transform: uppercase; }
-.nam-rack-source-flow-design-port .tone-library-heading strong { overflow: hidden; color: #f0f1f2; font-size: 16px; font-weight: 710; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-library-heading em { flex: none; padding-top: 3px; color: #707883; font-size: 10px; font-style: normal; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-search-panel {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 17px minmax(0,1fr) 33px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 4px 0 11px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 5px;
-  background: #090c10;
-}
-.nam-rack-source-flow-design-port .tone-search-panel > svg { width: 15px; height: 15px; color: #656d77; }
-.nam-rack-source-flow-design-port .tone-search-panel input {
-  min-width: 0;
-  height: 36px;
-  border: 0;
-  outline: 0;
-  color: #e4e6e9;
-  background: transparent;
-  font: inherit;
-  font-size: 11px;
-}
-.nam-rack-source-flow-design-port .tone-search-panel input::placeholder { color: #646c76; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-search-panel button {
-  min-width: 31px;
-  min-height: 31px !important;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.nam-rack-source-flow-design-port .tone-search-panel button svg { width: 15px; height: 15px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button {
-  min-width: 0;
-  min-height: 33px !important;
-  padding: 0 5px;
-  border-color: transparent;
-  border-radius: 4px;
-  color: #767e89;
-  background: transparent;
-  font-size: 10px !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button[data-active="true"] {
-  border-color: rgba(224,161,73,.26);
-  color: #edb564;
-  background: rgba(224,161,73,.075);
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-filter-row {
-  min-width: 0;
-  display: flex;
-  gap: 6px;
-}
-.nam-rack-source-flow-design-port .tone-filter-row select {
-  min-width: 0;
-  height: 32px;
-  flex: 1 1 0;
-  padding: 0 24px 0 8px;
-  border: 1px solid rgba(255,255,255,.09);
-  border-radius: 4px;
-  outline: 0;
-  color: #aeb4bc;
-  background: #11151a;
-  font-size: 9px;
-}
-.nam-rack-source-flow-design-port .tone-arch-filter { flex: none; display: flex; gap: 3px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-arch-filter button {
-  min-width: 31px;
-  min-height: 32px !important;
-  padding: 0 5px;
-  font-size: 9px !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list {
-  min-height: 0;
-  display: grid;
-  grid-auto-rows: minmax(76px, auto);
-  align-content: start;
-  gap: 7px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding-right: 3px;
-  padding-bottom: 18px;
-  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 14px), transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 14px), transparent 100%);
-  scrollbar-color: #343a43 transparent;
-  scrollbar-width: thin;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar { width: 5px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #343a43; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list::-webkit-scrollbar-track { background: transparent; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-append-sentinel { width: 100%; height: 1px; }
-.nam-rack-source-flow-design-port .tone-library-pager {
-  position: relative;
-  z-index: 6;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(72px,1fr) auto;
-  align-items: center;
-  gap: 5px;
-  padding-top: 7px;
-  border-top: 1px solid rgba(255,255,255,.075);
-}
-.nam-rack-source-flow-design-port .tone-library-pager span {
-  overflow: hidden;
-  color: #858d97;
-  font-size: 9px;
-  font-weight: 650;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-pager button {
-  min-width: 30px;
-  min-height: 28px !important;
-  display: grid;
-  place-items: center;
-  padding: 0 7px;
-  border: 1px solid rgba(255,255,255,.09);
-  border-radius: 4px;
-  color: #aeb4bc;
-  background: #11151a;
-  font-size: 9px !important;
-}
-.nam-rack-source-flow-design-port .tone-library-pager button:disabled { opacity: .35; cursor: default; }
-.nam-rack-source-flow-design-port .tone-library-pager button:not(:disabled):hover {
-  border-color: rgba(224,161,73,.45);
-  color: #efb766;
-  background: #171b21;
-}
-.nam-rack-source-flow-design-port .tone-library-pager button svg { width: 13px; height: 13px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-pager .tone-library-load-more {
-  min-width: 70px;
-  color: #e4b063;
-  border-color: rgba(224,161,73,.28);
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 24px;
-  z-index: 4;
-  pointer-events: none;
-  background: linear-gradient(to bottom, transparent, rgba(10,13,17,.96));
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row {
-  min-width: 0;
-  min-height: 76px;
-  display: grid;
-  grid-template-columns: 82px minmax(0,1fr) 70px;
-  gap: 10px;
-  align-items: center;
-  padding: 7px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.075);
-  border-radius: 5px;
-  color: #d7dade;
-  background: rgba(9,12,16,.92);
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row:hover { border-color: rgba(224,161,73,.32); background: #12161b; transform: translateY(-1px); }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row[data-active="true"] { border-color: rgba(224,161,73,.68); background: linear-gradient(90deg, rgba(224,161,73,.12), rgba(255,255,255,.018)); box-shadow: inset 3px 0 #dfa04d; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-select-target,
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-select-target:hover {
-  border: 0 !important;
-  background: transparent !important;
-}
-.nam-rack-source-flow-design-port .tone-row-art {
-  width: 82px;
-  height: 55px;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  background: #06080a;
-}
-.nam-rack-source-flow-design-port .tone-row-art img { width: 100%; height: 100%; display: block; object-fit: cover; filter: brightness(.83) saturate(.86); }
-.nam-rack-source-flow-design-port .tone-row-art > span { color: #9e722f; font-size: 18px; font-weight: 800; }
-.nam-rack-source-flow-design-port .tone-row-main { min-width: 0; display: grid; gap: 4px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-main strong { overflow: hidden; color: #eef0f2; font-size: 12px !important; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-main > span { overflow: hidden; color: #747c87; font-size: 9px !important; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-row-tags { min-width: 0; display: flex; gap: 4px; overflow: hidden; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-tags i { overflow: hidden; padding: 2px 5px; border-radius: 999px; color: #949ba5; background: rgba(255,255,255,.05); font-size: 8px !important; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-stats {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  overflow: visible;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-stats span {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: #858d98;
-  font-size: 8px !important;
-  font-variant-numeric: tabular-nums;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-stats svg {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 10px;
-  color: #c68b3e;
-}
-.nam-rack-source-flow-design-port .tone-row-side { min-width: 0; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-favorite,
-.nam-rack-source-flow-design-port .tone-row-favorite-spacer {
-  width: 24px;
-  min-width: 24px;
-  min-height: 24px !important;
-  display: grid;
-  place-items: center;
-  justify-self: end;
-  padding: 0;
-  border: 0;
-  color: #747c87;
-  background: transparent;
-  font-size: 17px !important;
-}
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-favorite[data-active="true"] { color: #edb058; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-side > em { overflow: hidden; color: #717984; font-size: 8px !important; font-style: normal; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-row-action {
-  grid-column: 1 / -1;
-  min-width: 0;
-  min-height: 27px !important;
-  padding: 0 6px;
-  border-radius: 4px;
-  color: #d5d8dc;
-  background: #191e24;
-  font-size: 8px !important;
-}
-.nam-rack-source-flow-design-port .tone-feed-empty { min-height: 210px; display: grid; place-items: center; align-content: center; gap: 9px; padding: 24px; border: 1px dashed rgba(255,255,255,.09); border-radius: 6px; text-align: center; }
-.nam-rack-source-flow-design-port .tone-feed-empty strong { color: #e6e8ea; font-size: 14px; }
-.nam-rack-source-flow-design-port .tone-feed-empty p { max-width: 270px; margin: 0; color: #747c86; font-size: 11px; line-height: 1.5; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-empty button { min-height: 34px !important; padding: 0 12px; font-size: 10px !important; }
-.nam-rack-source-flow-design-port .tone-feed-skeleton { height: 76px; border-radius: 5px; background: linear-gradient(100deg, #11151a 10%, #1b2027 30%, #11151a 50%); background-size: 220% 100%; animation: tone-library-shimmer 1.3s linear infinite; }
-@keyframes tone-library-shimmer { to { background-position-x: -220%; } }
-
-@media (max-width: 1120px) {
-  .nam-rack-source-flow-design-port .nav-item:disabled { color: #737c87; opacity: .68; }
-  .nam-rack-source-flow-design-port .tone-source-v2-workspace { grid-template-columns: minmax(0,1fr) 305px; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel { padding-left: 11px; padding-right: 11px; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row { grid-template-columns: 66px minmax(0,1fr) 62px; gap: 8px; }
-  .nam-rack-source-flow-design-port .tone-row-art { width: 66px; height: 49px; }
-  .nam-rack-source-flow-design-port .tone-selected-stats { display: none; }
-  .nam-rack-source-flow-design-port .tone-row-side > em { display: none; }
-  .nam-rack-source-flow-design-port .tone-action-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button { min-width: 0; padding-inline: 8px; }
-  .nam-rack-source-flow-design-port .tone-feed-empty {
-    min-height: 146px;
-    gap: 6px;
-    padding: 13px 11px;
-  }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-empty button { min-height: 30px !important; }
-  .nam-rack-source-flow-design-port .tone-feed-list:has(.tone-feed-empty) {
-    padding-bottom: 0;
-    -webkit-mask-image: none;
-    mask-image: none;
-  }
-  .nam-rack-source-flow-design-port .tone-library-panel:has(.tone-feed-empty)::after { display: none; }
-}
-@media (max-width: 960px) {
-  .nam-rack-source-flow-design-port .tone-source-v2-workspace { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-source-flow-design-port .tone-selected-stage { display: none; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel {
-    grid-column: 1;
-    grid-template-rows: auto 40px 35px 34px auto minmax(0,1fr) auto;
-    border-left: 0 !important;
-  }
-  .nam-rack-source-flow-design-port .tone-compact-selection {
-    min-width: 0;
-    min-height: 44px;
-    display: grid;
-    grid-template-columns: minmax(116px,1fr) minmax(0,70vw);
-    align-items: center;
-    gap: 9px;
-    padding: 5px 7px;
-    border: 1px solid rgba(224,161,73,.2);
-    border-radius: 5px;
-    background: linear-gradient(90deg, rgba(224,161,73,.075), rgba(255,255,255,.018));
-  }
-  .nam-rack-source-flow-design-port .tone-compact-selection-copy { min-width: 0; display: grid; gap: 2px; }
-  .nam-rack-source-flow-design-port .tone-compact-selection-copy span { color: #b47c37; font-size: 7px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-  .nam-rack-source-flow-design-port .tone-compact-selection-copy strong { overflow: hidden; color: #e8e9eb; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-  .nam-rack-source-flow-design-port .tone-compact-selection .tone-action-grid { width: min(620px,70vw); max-width: none !important; gap: 5px !important; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-compact-selection .tone-action-grid button { min-width: 0; min-height: 32px !important; padding: 0 6px; font-size: 8px !important; white-space: nowrap; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb span { display: none; }
-}
-
-.nam-rack-design-port .premium-asset-recovery {
-  position: absolute;
-  left: clamp(14px, 2vw, 28px);
-  right: clamp(14px, 2vw, 28px);
-  top: clamp(12px, 1.8vh, 20px);
-  z-index: 92;
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 11px;
-  padding: 10px 10px 10px 12px;
-  overflow: hidden;
-  border: 1px solid rgba(239,101,86,.38);
-  border-radius: 7px;
-  color: #eadfdb;
-  background:
-    linear-gradient(90deg, rgba(107,35,29,.23), transparent 38%),
-    rgba(9,11,14,.94);
-  box-shadow: 0 16px 38px rgba(0,0,0,.44), inset 3px 0 #d96858;
-  backdrop-filter: blur(12px);
-}
-.nam-rack-design-port .premium-asset-recovery[data-bypassed="true"] {
-  border-color: rgba(224,161,73,.32);
-  background:
-    linear-gradient(90deg, rgba(118,75,28,.2), transparent 38%),
-    rgba(9,11,14,.94);
-  box-shadow: 0 16px 38px rgba(0,0,0,.44), inset 3px 0 #dca04f;
-}
-.nam-rack-design-port .premium-asset-recovery-icon {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(239,101,86,.26);
-  border-radius: 50%;
-  color: #ef8a7d;
-  background: rgba(239,101,86,.09);
-}
-.nam-rack-design-port .premium-asset-recovery-icon svg { width: 15px; height: 15px; }
-.nam-rack-design-port .premium-asset-recovery-copy {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px 10px;
-}
-.nam-rack-design-port .premium-asset-recovery-copy small {
-  grid-column: 1 / -1;
-  color: #df8378;
-  font-size: 10px;
-  font-weight: 780;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .premium-asset-recovery-copy strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #f0e9e6;
-  font-size: 13px;
-  font-weight: 690;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-asset-recovery-copy em {
-  overflow: hidden;
-  color: #888f99;
-  font-size: 10.5px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nam-rack-design-port .premium-asset-recovery-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-.nam-rack-design-port .premium-asset-recovery-actions button {
-  min-width: 74px;
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 0 9px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 4px;
-  color: #cbd0d6;
-  background: #171b20;
-  font-size: 10.5px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.nam-rack-design-port .premium-asset-recovery-actions button:first-child {
-  border-color: rgba(224,161,73,.44);
-  color: #f3c17a;
-  background: rgba(224,161,73,.1);
-}
-.nam-rack-design-port .premium-asset-recovery-actions button:hover:not(:disabled),
-.nam-rack-design-port .premium-asset-recovery-actions button:focus-visible {
-  border-color: rgba(255,208,126,.7);
-  outline: 1px solid rgba(255,208,126,.45);
-  outline-offset: 1px;
-  color: #fff2d9;
-}
-.nam-rack-design-port .premium-asset-recovery-actions button:disabled { cursor: default; opacity: .46; }
-.nam-rack-design-port .premium-asset-recovery-actions svg { width: 12px; height: 12px; }
-
-/* Hardware interaction feedback and faceplate hierarchy. These rules live last
-   in the design sheet so the physical states are not washed out by older skin
-   filters higher in the cascade. */
-.nam-rack-design-port .control-hit {
-  border-radius: 999px;
-  outline: none;
-}
-.nam-rack-design-port .control-hit.interactive:focus-visible {
-  outline: 2px solid rgba(244, 183, 91, .96);
-  outline-offset: -2px;
-  box-shadow:
-    0 0 0 2px rgba(6, 8, 10, .82),
-    0 0 0 5px rgba(224, 161, 73, .22),
-    0 0 14px rgba(224, 161, 73, .24);
-}
-.nam-rack-design-port .module .control-hit.interactive:is(
-  [data-param-id="chaosMode"],
-  [data-param-id="compressorSidechainHPF"]
-):focus-visible {
-  outline: 1px solid rgba(239, 186, 104, .76);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 1px rgba(6, 8, 10, .72);
-}
-.nam-rack-design-port .module .control-hit.interactive.pointer-focused:is(
-  [data-param-id="chaosMode"],
-  [data-param-id="compressorSidechainHPF"]
-):focus-visible {
-  outline: none;
-  box-shadow: none;
-}
-.nam-rack-design-port .control-hit.disabled-feedback {
-  cursor: help;
-}
-.nam-rack-design-port .control-hit.disabled-feedback:focus-visible {
-  outline: 1px solid rgba(210, 169, 105, .8);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 3px rgba(224, 161, 73, .14);
-}
-.nam-rack-design-port .asset-control.led {
-  opacity: 1;
-  transition: opacity 130ms ease, filter 130ms ease;
-}
-.nam-rack-design-port .asset-control.led.off {
-  opacity: .62;
-  filter:
-    grayscale(.72)
-    saturate(.3)
-    brightness(.5)
-    contrast(1.12)
-    drop-shadow(0 2px 2px rgba(0,0,0,.5));
-}
-.nam-rack-design-port .asset-control.led.on {
-  opacity: 1;
-  filter:
-    saturate(1.12)
-    brightness(1.14)
-    contrast(1.05)
-    drop-shadow(0 0 3px rgba(255,181,72,.88))
-    drop-shadow(0 0 8px rgba(232,151,43,.48));
-}
-.nam-rack-design-port .primary-foot-state {
-  min-width: 32px;
-  padding: 0 3px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 999px;
-  color: #777d84 !important;
-  background: rgba(4,6,7,.54);
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  text-shadow: 0 1px 1px #000 !important;
-}
-.nam-rack-design-port .foot-action-label,
-.nam-rack-design-port .delay-rack .foot-action-label {
-  font-size: 7px !important;
-  font-weight: 620 !important;
-  letter-spacing: .045em;
-}
-.nam-rack-design-port .primary-foot-state {
-  font-size: 7px !important;
-  letter-spacing: .035em;
-}
-.nam-rack-design-port .module[data-module="modulator"] .mod-switch-label {
-  color: rgba(226, 224, 218, .78);
-  font-size: 7px !important;
-  font-weight: 620 !important;
-  letter-spacing: .035em;
-  text-shadow: 0 1px 1px rgba(0, 0, 0, .45);
-}
-.nam-rack-design-port .module[data-module="modulator"] .mod-switch-state {
-  color: #e6ad5b;
-}
-.nam-rack-design-port .wide-pedal .post-label {
-  /* Preserve full-size physical hardware by taking the required breathing
-     room from typography, not from the LED or footswitch photographs. */
-  font-size: 7px !important;
-  font-weight: 720 !important;
-  letter-spacing: .025em !important;
-  line-height: 1;
-}
-.nam-rack-design-port .nam-rack-artboard[data-effects-disabled="true"] .module {
-  filter: grayscale(.82) saturate(.24) brightness(.64);
-  opacity: .52;
-  transition: filter 150ms ease, opacity 150ms ease;
-}
-.nam-rack-design-port .nam-rack-artboard[data-effects-disabled="true"] .module .control-hit {
-  pointer-events: none;
-}
-.nam-rack-design-port .nam-amp-required-callout {
-  position: absolute;
-  left: 50%;
-  top: clamp(18px, 5.2vh, 44px);
-  z-index: 26;
-  min-width: min(340px, calc(100% - 48px));
-  min-height: 56px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  padding: 9px 18px;
-  border: 1px solid rgba(224, 161, 73, .72);
-  border-radius: 10px;
-  color: #ecd7b6;
-  background:
-    linear-gradient(180deg, rgba(24, 25, 25, .97), rgba(10, 12, 14, .97));
-  box-shadow:
-    0 15px 42px rgba(0, 0, 0, .58),
-    inset 0 1px rgba(255, 255, 255, .055);
-  backdrop-filter: blur(10px);
-  transform: translateX(-50%);
-  cursor: pointer;
-}
-.nam-rack-design-port .nam-amp-required-callout:hover {
-  border-color: rgba(244, 184, 92, .94);
-  color: #f4dfbe;
-  background:
-    linear-gradient(180deg, rgba(35, 31, 24, .98), rgba(13, 14, 15, .98));
-}
-.nam-rack-design-port .nam-amp-required-callout:focus-visible {
-  outline: 2px solid rgba(245, 185, 92, .94);
-  outline-offset: 3px;
-}
-.nam-rack-design-port .nam-amp-required-callout:disabled {
-  cursor: default;
-}
-.nam-rack-design-port .nam-amp-required-callout > svg {
-  width: 25px;
-  height: 25px;
-  color: #e0a149;
-  filter: drop-shadow(0 0 8px rgba(224, 161, 73, .18));
-}
-.nam-rack-design-port .nam-amp-required-callout > span {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  text-align: left;
-}
-.nam-rack-design-port .nam-amp-required-callout strong {
-  font-size: 15px;
-  font-weight: 720;
-  letter-spacing: .012em;
-  line-height: 1.1;
-}
-.nam-rack-design-port .nam-amp-required-callout small {
-  color: rgba(217, 202, 179, .66);
-  font-size: 10px;
-  font-weight: 610;
-  letter-spacing: .045em;
-  line-height: 1.2;
-  text-transform: uppercase;
-}
-.nam-rack-design-port .pedal-nam-control-group[data-disabled="true"] .control-disabled {
-  opacity: .34;
-}
-.nam-rack-design-port .primary-foot-state[data-state="on"] {
-  border-color: rgba(224,161,73,.38);
-  color: #efbd72 !important;
-  background: rgba(94,58,14,.34);
-}
-.nam-rack-design-port .amp-brand small {
-  display: inline-block;
-  margin-left: 8px;
-  color: rgba(205, 170, 118, .78);
-  font-size: .72em;
-  font-weight: 620;
-  letter-spacing: .12em;
-}
-.nam-rack-design-port .amp-capture-nameplate[data-includes-cab="true"] .amp-capture-state {
-  color: #c7b287;
-  letter-spacing: .08em;
-}
-.nam-rack-design-port .amp-capture-nameplate[data-includes-cab="true"] .amp-capture-state i {
-  background: #e3a955;
-  box-shadow: 0 0 7px rgba(227,169,85,.66);
-}
-
-@media (max-width: 1120px) {
-  .nam-rack-design-port .premium-asset-recovery { grid-template-columns: 30px minmax(0, 1fr) auto; gap: 8px; }
-  .nam-rack-design-port .premium-asset-recovery-copy em { display: none; }
-  .nam-rack-design-port .premium-asset-recovery-actions button { min-width: 62px; padding-inline: 7px; }
-}
-@media (max-width: 960px) {
-  .nam-rack-design-port .premium-asset-recovery { right: 14px; }
-}
-
-/* Header utility compression preserves both rack-owned cards. Labels and
-   values remain visible; only physical spacing and dial size reduce. */
-@media (max-width: 1400px) {
-  .nam-rack-design-port .preset-area { width: clamp(720px, 62vw, 900px) !important; }
-  .nam-rack-design-port .premium-routing-utility {
-    bottom: calc(100% + 8px);
-    height: 65px;
-    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
-    gap: 12px;
-  }
-  .nam-rack-design-port .premium-instrument-choice,
-  .nam-rack-design-port .premium-doubler-utility { gap: 4px 9px; padding: 6px 12px; }
-  .nam-rack-design-port .premium-instrument-choice { grid-template-rows: 12px 25px 10px; gap: 2px; padding-inline: 9px; }
-  .nam-rack-design-port .premium-instrument-choice > div { gap: 4px; }
-  .nam-rack-design-port .premium-instrument-choice > div > button { height: 25px; padding-inline: 6px; font-size: 9px; }
-  .nam-rack-design-port .premium-instrument-choice > small { font-size: 7px; }
-  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 48px minmax(42px, 1fr) minmax(42px, 1fr); gap: 5px; padding-inline: 9px; }
-  .nam-rack-design-port .premium-doubler-power { min-width: 48px; height: 29px; padding-inline: 5px; }
-  .nam-rack-design-port .premium-utility-rotary,
-  .nam-rack-design-port .premium-utility-rotary-spread { grid-template-columns: 39px; grid-template-rows: 9px 34px 9px; font-size: 8px; }
-  .nam-rack-design-port .premium-utility-knob-well { width: 34px; height: 34px; }
-  .nam-rack-design-port .preset-console {
-    --preset-previous-width: 42px;
-    --preset-next-width: 42px;
-    --preset-save-width: 52px;
-    --preset-compare-width: 70px;
-    height: 63px;
-  }
-}
-@media (max-width: 1030px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 196px 52px minmax(0,1fr) 46px; }
-  .nam-rack-design-port .global-strip { padding-top: 61px; }
-  .nam-rack-design-port .preset-area { width: calc(100% - 24px) !important; }
-  .nam-rack-design-port .premium-routing-utility { height: 60px; grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr); gap: 7px; }
-  .nam-rack-design-port .premium-instrument-choice,
-  .nam-rack-design-port .premium-doubler-utility { padding-inline: 7px; }
-  .nam-rack-design-port .premium-instrument-choice > small { display: none; }
-  .nam-rack-design-port .premium-instrument-choice { grid-template-rows: 12px 28px; align-content: center; }
-  .nam-rack-design-port .premium-utility-heading { font-size: 8px; }
-  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 44px minmax(42px,1fr) minmax(46px,1fr); gap: 3px; padding-inline: 6px; }
-  .nam-rack-design-port .premium-doubler-power { min-width: 44px; grid-template-columns: 12px auto; gap: 2px; padding-inline: 3px; }
-  .nam-rack-design-port .premium-doubler-power svg { width: 13px; height: 13px; }
-  .nam-rack-design-port .premium-utility-rotary { grid-template-columns: 36px; grid-template-rows: 11px 30px 10px; row-gap: 0; }
-  .nam-rack-design-port .premium-utility-rotary > span,
-  .nam-rack-design-port .premium-utility-rotary-spread > span { grid-column: 1; grid-row: 1; justify-self: center; }
-  .nam-rack-design-port .premium-utility-rotary > .premium-utility-knob-well,
-  .nam-rack-design-port .premium-utility-rotary-spread > .premium-utility-knob-well { grid-column: 1; grid-row: 2; }
-  .nam-rack-design-port .premium-utility-rotary > strong,
-  .nam-rack-design-port .premium-utility-rotary-spread > strong { grid-column: 1; grid-row: 3; }
-  .nam-rack-design-port .premium-utility-knob-well { width: 30px; height: 30px; }
-  .nam-rack-design-port .preset-console {
-    --preset-previous-width: 36px;
-    --preset-next-width: 36px;
-    --preset-save-width: 46px;
-    --preset-compare-width: 62px;
-    height: 57px;
-  }
-}
-@media (max-width: 780px) {
-  .nam-rack-design-port .premium-nam-shell { grid-template-rows: 196px 48px minmax(0,1fr) 48px; }
-  .nam-rack-design-port .global-strip { grid-template-columns: 92px minmax(0,1fr) 54px; gap: 7px; padding: 61px 9px 9px; }
-  .nam-rack-design-port .preset-area { grid-column: auto; width: calc(100% - 18px) !important; }
-  .nam-rack-design-port .premium-routing-utility { height: 57px; grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr); gap: 7px; }
-  .nam-rack-design-port .premium-doubler-utility { grid-template-columns: auto 41px minmax(36px,1fr) minmax(38px,1fr); }
-  .nam-rack-design-port .premium-doubler-power { min-width: 41px; height: 29px; }
-  .nam-rack-design-port .premium-doubler-power strong { font-size: 7px; }
-  .nam-rack-design-port .premium-utility-rotary { grid-template-columns: 29px; grid-template-rows: 10px 27px 9px; font-size: 7px; }
-  .nam-rack-design-port .premium-utility-knob-well { width: 27px; height: 27px; }
-  .nam-rack-design-port .preset-console {
-    --preset-previous-width: 30px;
-    --preset-next-width: 30px;
-    --preset-save-width: 38px;
-    --preset-compare-width: 40px;
-  }
-  .nam-rack-design-port .preset-console > .preset-title {
-    padding-inline: calc(var(--preset-action-rail-width) + 8px);
-  }
-}
-
-/* Responsive header contract. Complete hardware bays remain edge controls at
-   every supported width while both centre rails stay shell-centred. */
-
-@media (min-width: 1031px) and (max-width: 1919px) {
-  .nam-rack-design-port .premium-nam-shell {
-    grid-template-rows: 213px clamp(52px, 4.4vw, 60px) minmax(0,1fr) clamp(46px, 3.5vw, 48px);
-  }
-  .nam-rack-design-port .preset-area {
-    top: 63px !important;
-    bottom: auto !important;
-    width: min(1040px, calc(100% - 24px)) !important;
-    padding: 80px 0 0;
-  }
-  .nam-rack-design-port .premium-routing-utility {
-    top: 0;
-    bottom: auto;
-  }
-  .nam-rack-design-port .premium-brand {
-    left: 50% !important;
-    right: auto !important;
-    top: 4px !important;
-    width: 132px;
-    height: 52px;
-    transform: translateX(-50%);
-    align-content: center;
-    justify-items: center;
-    text-align: center;
-  }
-  .nam-rack-design-port .premium-brand > span { font-size: 8px; }
-  .nam-rack-design-port .premium-brand > strong { margin-top: 1px; font-size: 18px; }
-  .nam-rack-design-port .premium-calibration-launch {
-    position: absolute;
-    left: auto !important;
-    right: 100px !important;
-    top: 14px !important;
-    z-index: 4;
-    width: auto;
-    height: 22px;
-    display: grid;
-    grid-template-columns: 12px auto;
-    gap: 4px;
-    margin: 0;
-  }
-  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    position: absolute !important;
-    top: 4px !important;
-    bottom: auto !important;
-    z-index: 3;
-    height: 52px;
-    align-items: center;
-    gap: 5px;
-    padding-top: 0;
-  }
-  .nam-rack-design-port .global-block.left {
-    left: 10px !important;
-    right: auto !important;
-  }
-  .nam-rack-design-port .global-block.right {
-    right: 10px !important;
-    left: auto !important;
-    display: flex;
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.right .premium-level-meter {
-    display: block;
-    width: 21px;
-    height: 50px;
-    flex-basis: 21px;
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter > strong,
-  .nam-rack-design-port .global-block.right .premium-level-meter > strong {
-    min-width: 20px;
-    font-size: 7.5px;
-    line-height: 9px;
-  }
-  .nam-rack-design-port .global-block.left .mini-param,
-  .nam-rack-design-port .global-block.right .mini-param {
-    width: 42px;
-    height: 52px;
-    display: grid !important;
-    grid-template-rows: 9px 34px 9px;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
-  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
-    top: 27px !important;
-    width: 32px !important;
-    height: 32px !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
-  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
-    top: 27px !important;
-    width: 32px !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param .global-label,
-  .nam-rack-design-port .global-block.right .mini-param .global-label,
-  .nam-rack-design-port .global-block.left .mini-param strong,
-  .nam-rack-design-port .global-block.right .mini-param strong { font-size: 7px !important; }
-}
-
-@media (max-width: 1030px) {
-  .nam-rack-design-port .premium-brand {
-    left: 50% !important;
-    right: auto !important;
-    top: 4px !important;
-    width: 132px;
-    height: 52px;
-    transform: translateX(-50%);
-    align-content: center;
-    justify-items: center;
-    text-align: center;
-  }
-  .nam-rack-design-port .premium-brand > span { font-size: 8px; }
-  .nam-rack-design-port .premium-brand > strong { margin-top: 1px; font-size: 18px; }
-  .nam-rack-design-port .premium-calibration-launch {
-    position: absolute;
-    left: auto !important;
-    right: 110px !important;
-    top: 18px !important;
-    z-index: 4;
-    width: auto;
-    height: 18px;
-    display: grid;
-    grid-template-columns: 10px auto;
-    gap: 3px;
-    margin: 0;
-  }
-  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    position: absolute !important;
-    top: 4px !important;
-    bottom: auto !important;
-    z-index: 3;
-    height: 52px;
-    align-items: center;
-    gap: 5px;
-    padding-top: 0;
-  }
-  .nam-rack-design-port .global-block.left {
-    left: 10px !important;
-    right: auto !important;
-    display: flex !important;
-  }
-  .nam-rack-design-port .global-block.right {
-    right: 10px !important;
-    left: auto !important;
-    display: flex !important;
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.right .premium-level-meter {
-    display: block !important;
-    width: 21px;
-    height: 50px;
-    flex-basis: 21px;
-  }
-  .nam-rack-design-port .global-block .premium-level-meter > span,
-  .nam-rack-design-port .global-block .premium-level-meter > i { inset: 3px; }
-  .nam-rack-design-port .global-block .premium-level-meter > strong {
-    min-width: 20px;
-    font-size: 7.5px;
-    line-height: 9px;
-  }
-  .nam-rack-design-port .global-block.left .mini-param,
-  .nam-rack-design-port .global-block.right .mini-param {
-    width: 42px;
-    height: 52px;
-    display: grid !important;
-    grid-template-rows: 9px 34px 9px;
-  }
-  .nam-rack-design-port .global-block .mini-param > .asset-control {
-    top: 27px !important;
-    width: 32px !important;
-    height: 32px !important;
-  }
-  .nam-rack-design-port .global-block .mini-param > .knob-position-indicator {
-    top: 27px !important;
-    width: 32px !important;
-  }
-  .nam-rack-design-port .global-block .mini-param .global-label,
-  .nam-rack-design-port .global-block .mini-param strong {
-    font-size: 7px !important;
-    line-height: 1;
-  }
-}
-
-/* Medium hosts have enough real side gutter for full-height hardware bays.
-   At 1264px the left bay is exactly 96px wide and is pulled through the
-   global-strip padding so it remains at least 8px clear of the 1040px rail. */
-@media (min-width: 1264px) and (max-width: 1919px) {
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    top: 58px !important;
-    bottom: auto !important;
-    height: 149px;
-    align-items: center;
-  }
-  .nam-rack-design-port .global-block.left {
-    left: -17px !important;
-  }
-  .nam-rack-design-port .global-block.right {
-    right: 10px !important;
-  }
-}
-
-@media (min-width: 1264px) and (max-width: 1399px) {
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    gap: clamp(3px, calc(2.5vw - 29px), 6px);
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.right .premium-level-meter {
-    width: clamp(18px, calc(5vw - 46px), 24px);
-    height: clamp(136px, calc(6.667vw + 50.67px), 144px);
-    flex-basis: clamp(18px, calc(5vw - 46px), 24px);
-  }
-  .nam-rack-design-port .global-block.left .mini-param,
-  .nam-rack-design-port .global-block.right .mini-param {
-    width: clamp(36px, calc(6.667vw - 49.33px), 44px);
-    height: clamp(118px, calc(10vw - 10px), 130px);
-    grid-template-rows: 13px minmax(0,1fr) 18px;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
-  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
-    top: clamp(58px, calc(5vw - 6px), 64px) !important;
-    width: clamp(34px, calc(5vw - 30px), 40px) !important;
-    height: clamp(34px, calc(5vw - 30px), 40px) !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
-  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
-    top: clamp(58px, calc(5vw - 6px), 64px) !important;
-    width: clamp(34px, calc(5vw - 30px), 40px) !important;
-  }
-}
-
-@media (min-width: 1400px) and (max-width: 1919px) {
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    gap: clamp(6px, calc(.7143vw - 4px), 8px);
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.right .premium-level-meter {
-    width: clamp(24px, calc(2.5vw - 11px), 31px);
-    height: clamp(144px, calc(2.143vw + 114px), 150px);
-    flex-basis: clamp(24px, calc(2.5vw - 11px), 31px);
-  }
-  .nam-rack-design-port .global-block.left .mini-param,
-  .nam-rack-design-port .global-block.right .mini-param {
-    width: clamp(44px, calc(4.286vw - 16px), 56px);
-    height: clamp(130px, calc(2.5vw + 95px), 137px);
-    grid-template-rows: 14px minmax(0,1fr) 20px;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .asset-control,
-  .nam-rack-design-port .global-block.right .mini-param > .asset-control {
-    top: clamp(64px, calc(1.429vw + 44px), 68px) !important;
-    width: clamp(40px, 2.857vw, 48px) !important;
-    height: clamp(40px, 2.857vw, 48px) !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param > .knob-position-indicator,
-  .nam-rack-design-port .global-block.right .mini-param > .knob-position-indicator {
-    top: clamp(64px, calc(1.429vw + 44px), 68px) !important;
-    width: clamp(40px, 2.857vw, 48px) !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param .global-label,
-  .nam-rack-design-port .global-block.right .mini-param .global-label,
-  .nam-rack-design-port .global-block.left .mini-param strong,
-  .nam-rack-design-port .global-block.right .mini-param strong {
-    font-size: 8px !important;
-  }
-}
-
-@media (max-width: 780px) {
-  .nam-rack-design-port .premium-calibration-launch {
-    right: 92px !important;
-    display: grid;
-  }
-  .nam-rack-design-port .global-block.left {
-    left: 9px !important;
-    display: flex !important;
-  }
-  .nam-rack-design-port .global-block.left .mini-param,
-  .nam-rack-design-port .global-block.right .mini-param { width: 38px; }
-  .nam-rack-design-port .global-block .mini-param > .asset-control {
-    width: 29px !important;
-    height: 29px !important;
-  }
-  .nam-rack-design-port .global-block .mini-param > .knob-position-indicator { width: 29px !important; }
-}
-
-@media (min-width: 1680px) and (max-width: 1919px) {
-  .nam-rack-design-port .preset-area {
-    width: clamp(1040px, 62vw, 1200px) !important;
-  }
-}
-
-@media (min-width: 1920px) {
-  .nam-rack-design-port .premium-nam-shell {
-    grid-template-rows: 213px clamp(66px, 7.8vh, 76px) minmax(0, 1fr) clamp(58px, 6.4vh, 62px);
-  }
-  .nam-rack-design-port .premium-brand { top: 13px; }
-  .nam-rack-design-port .preset-area {
-    top: 63px !important;
-    bottom: auto !important;
-    width: clamp(1040px, 62vw, 1200px) !important;
-    padding: 80px 0 0;
-  }
-  .nam-rack-design-port .premium-routing-utility {
-    top: 0;
-    bottom: auto;
-  }
-  .nam-rack-design-port .premium-calibration-launch {
-    position: absolute;
-    left: auto !important;
-    right: clamp(174px, 10vw, 212px) !important;
-    top: 14px !important;
-    z-index: 4;
-    width: 120px;
-    height: 22px;
-    display: grid;
-    grid-template-columns: 12px auto minmax(0, 1fr);
-    gap: 5px;
-    margin: 0;
-  }
-  .nam-rack-design-port .premium-calibration-launch > strong { display: block; }
-  .nam-rack-design-port .global-block.left,
-  .nam-rack-design-port .global-block.right {
-    position: absolute !important;
-    top: 58px !important;
-    bottom: auto !important;
-    z-index: 3;
-    height: 150px;
-    align-items: center;
-    gap: 12px;
-    padding-top: 0;
-  }
-  .nam-rack-design-port .global-block.left {
-    left: clamp(24px, 1.55vw, 32px) !important;
-    right: auto !important;
-  }
-  .nam-rack-design-port .global-block.right {
-    right: clamp(24px, 1.55vw, 32px) !important;
-    left: auto !important;
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter,
-  .nam-rack-design-port .global-block.right .premium-level-meter {
-    width: 42px;
-    height: 150px;
-    flex-basis: 42px;
-  }
-  .nam-rack-design-port .global-block.left .premium-level-meter > span,
-  .nam-rack-design-port .global-block.left .premium-level-meter > i,
-  .nam-rack-design-port .global-block.right .premium-level-meter > span,
-  .nam-rack-design-port .global-block.right .premium-level-meter > i { inset: 6px; }
-  .nam-rack-design-port .global-block.left .premium-level-meter > strong,
-  .nam-rack-design-port .global-block.right .premium-level-meter > strong {
-    min-width: 40px;
-    font-size: 9px;
-    line-height: 16px;
-  }
-}
-
-/* Final header composition. Routing and channel selection belong to the DAW,
-   so the rack header owns only its two real global utilities. Keep those
-   cards content-weighted, bounded, and centred independently of the wider
-   preset rail. */
-.nam-rack-design-port .premium-brand {
-  left: 50% !important;
-  right: auto !important;
-  justify-items: center;
-  text-align: center;
-  transform: translateX(-50%);
-}
-.nam-rack-design-port .premium-routing-utility {
-  left: 50%;
-  right: auto;
-  width: min(780px, calc(100% - 16px));
-  box-sizing: border-box;
-  grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
-  gap: clamp(8px, 1vw, 14px);
-  overflow: visible;
-  transform: translateX(-50%);
-}
-.nam-rack-design-port .premium-instrument-choice {
-  position: relative;
-  inset: auto;
-  width: auto;
-  height: auto;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 14px 27px 12px;
-  align-content: center;
-  gap: 3px;
-  padding: 8px 12px;
-}
-.nam-rack-design-port .premium-instrument-choice > .premium-utility-heading {
-  overflow: visible;
-  font-size: 9px;
-  letter-spacing: .1em;
-  line-height: normal;
-  text-align: left;
-}
-.nam-rack-design-port .instrument-heading-long,
-.nam-rack-design-port .instrument-label-long { display: inline; }
-.nam-rack-design-port .instrument-heading-short,
-.nam-rack-design-port .instrument-label-short { display: none; }
-.nam-rack-design-port .premium-instrument-choice > div {
-  grid-template-columns: repeat(2, minmax(62px, 1fr));
-  grid-template-rows: none;
-  gap: 6px;
-}
-.nam-rack-design-port .premium-instrument-choice > div > button {
-  width: auto;
-  height: 27px;
-  min-height: 0;
-  padding: 0 10px;
-  border-radius: 4px;
-  font-size: 10px;
-  letter-spacing: .045em;
-}
-.nam-rack-design-port .premium-instrument-choice > small { display: block; }
-
-@media (max-width: 1400px) {
-  .nam-rack-design-port .premium-routing-utility {
-    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
-    gap: clamp(8px, 1vw, 12px);
-  }
-  .nam-rack-design-port .premium-instrument-choice {
-    grid-template-rows: 12px 25px 10px;
-    gap: 2px;
-    padding: 6px 9px;
-  }
-  .nam-rack-design-port .premium-instrument-choice > div { gap: 4px; }
-  .nam-rack-design-port .premium-instrument-choice > div > button {
-    height: 25px;
-    padding-inline: 6px;
-    font-size: 9px;
-  }
-  .nam-rack-design-port .premium-instrument-choice > small { display: block; font-size: 7px; }
-}
-
-@media (max-width: 1030px) {
-  .nam-rack-design-port .premium-routing-utility {
-    width: min(780px, calc(100% - 16px));
-    grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr);
-    gap: 7px;
-  }
-  .nam-rack-design-port .premium-instrument-choice {
-    grid-template-rows: 12px 28px;
-    align-content: center;
-    padding-inline: 7px;
-  }
-  .nam-rack-design-port .premium-instrument-choice > small { display: none; }
-}
-
-@media (min-width: 1264px) {
-  /* With the obsolete setup column gone, both hardware bays fit wholly inside
-     the shell and CAL can align directly over the Output bay. The input bay is
-     pulled through the strip's 25px content inset so its painted edge lands at
-     8px and remains clear of the 1040px preset console at 1264/1280px. */
-  .nam-rack-design-port .global-block.left { left: -17px !important; }
-  .nam-rack-design-port .premium-calibration-launch {
-    left: auto !important;
-    right: 10px !important;
-    top: 14px !important;
-    height: 22px;
-    grid-template-columns: 12px auto;
-    justify-content: center;
-    justify-items: center;
-    gap: 4px;
-  }
-  .nam-rack-design-port .premium-calibration-launch svg { display: block; }
-  .nam-rack-design-port .premium-calibration-launch > strong { display: none; }
-  .nam-rack-design-port .premium-calibration-launch > span {
-    overflow: visible;
-    font-size: 8px;
-    letter-spacing: .1em;
-  }
-}
-
-@media (min-width: 1264px) and (max-width: 1399px) {
-  .nam-rack-design-port .premium-calibration-launch {
-    width: calc(
-      clamp(18px, calc(5vw - 46px), 24px)
-      + clamp(3px, calc(2.5vw - 29px), 6px)
-      + clamp(36px, calc(6.667vw - 49.33px), 44px)
-    );
-  }
-}
-
-@media (min-width: 1400px) and (max-width: 1919px) {
-  .nam-rack-design-port .premium-calibration-launch {
-    width: calc(
-      clamp(24px, calc(2.5vw - 11px), 31px)
-      + clamp(6px, calc(.7143vw - 4px), 8px)
-      + clamp(44px, calc(4.286vw - 16px), 56px)
-    );
-  }
-}
-
-@media (min-width: 1920px) {
-  .nam-rack-design-port .premium-calibration-launch {
-    right: clamp(24px, 1.55vw, 32px) !important;
-    top: 14px !important;
-    width: 134px;
-  }
-}
-
-/* The hardware surface is designed down to a 700px host height. Below that,
-   preserve readable controls and make the complete rack reachable instead of
-   continuously shrinking the gear, source results, or tuner into unusability. */
-@media (max-height: 699px) {
-  .nam-rack-design-port {
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    overflow-x: hidden;
-    overflow-y: auto;
-    overscroll-behavior-x: none;
-    overscroll-behavior-y: contain;
-    scrollbar-gutter: stable;
-    scrollbar-color: #343a43 #080a0d;
-    scrollbar-width: thin;
-    touch-action: pan-y;
-    -webkit-overflow-scrolling: touch;
-  }
-  .nam-rack-design-port::-webkit-scrollbar { width: 7px; }
-  .nam-rack-design-port::-webkit-scrollbar-thumb { border-radius: 999px; background: #343a43; }
-  .nam-rack-design-port::-webkit-scrollbar-track { background: #080a0d; }
-  .nam-rack-design-port .premium-nam-shell {
-    position: relative;
-    inset: auto;
-    width: calc(100% - 8px);
-    height: 692px;
-    min-height: 692px;
-    margin: 4px;
-  }
-  .nam-rack-design-port .hardware-stage,
-  .nam-rack-design-port .premium-stage-canvas {
-    min-height: 0;
-  }
-}
-`;
