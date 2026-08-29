@@ -4,20 +4,26 @@ import renderModalSource from "../components/RenderModal.tsx?raw";
 import nativeBridgeSource from "../services/NativeBridge.ts?raw";
 import mainComponentSource from "../../../Source/MainComponent.cpp?raw";
 
+function normalizeSourceText(source: string): string {
+  return source.replace(/\r\n?/g, "\n");
+}
+
 describe("live recording waveform regression guards", () => {
   it("requests only the missing recording peak tail", () => {
-    expect(timelineSource).toContain(
+    const normalizedTimelineSource = normalizeSourceText(timelineSource);
+    const normalizedNativeBridgeSource = normalizeSourceText(nativeBridgeSource);
+    expect(normalizedTimelineSource).toContain(
       "const startSample = previousPeaks.length * samplesPerPixel",
     );
-    expect(timelineSource).toContain(
+    expect(normalizedTimelineSource).toContain(
       "Math.ceil(Math.max(0, recordedSamples - startSample) / samplesPerPixel)",
     );
-    expect(timelineSource).toContain(
+    expect(normalizedTimelineSource).toContain(
       "samplesPerPixel,\n            missingPixels,\n            startSample",
     );
-    expect(timelineSource).toContain("if (inFlight) return;");
-    expect(nativeBridgeSource).toContain("startSample = 0");
-    expect(nativeBridgeSource).toContain(
+    expect(normalizedTimelineSource).toContain("if (inFlight) return;");
+    expect(normalizedNativeBridgeSource).toContain("startSample = 0");
+    expect(normalizedNativeBridgeSource).toContain(
       "numPixels,\n        startSample",
     );
   });

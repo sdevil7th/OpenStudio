@@ -309,6 +309,7 @@ juce_add_gui_app(OpenStudio
     VERSION ${PROJECT_VERSION}
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256x256.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
+    NEEDS_WEB_BROWSER TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )

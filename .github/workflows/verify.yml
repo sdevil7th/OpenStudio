@@ -168,7 +168,13 @@ jobs:
           $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
           $none = [System.Security.AccessControl.PropagationFlags]::None
           $allow = [System.Security.AccessControl.AccessControlType]::Allow
+          $deny = [System.Security.AccessControl.AccessControlType]::Deny
           $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          # GitHub-hosted Windows runners execute as an administrator. An explicit
+          # user deny keeps the probe non-writable while the Administrators group
+          # retains the delete and ACL rights needed for runner cleanup.
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentUser, 'Write', $inheritance, $none, $deny)))
           $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
             $currentUser, 'ReadAndExecute, Synchronize', $inheritance, $none, $allow)))
           $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(

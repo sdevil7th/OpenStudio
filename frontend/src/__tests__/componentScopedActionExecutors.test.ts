@@ -26,6 +26,10 @@ import {
 
 const cleanups: Array<() => void> = [];
 
+function normalizeSourceText(source: string): string {
+  return source.replace(/\r\n?/g, "\n");
+}
+
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   activateShortcutContext({ kind: "application" });
@@ -37,7 +41,7 @@ describe("component-owned scoped action wiring", () => {
     expect(timelineSource).toContain("const menu = clipContextMenu");
     expect(timelineSource).toContain("state.splitMIDIClipAtPosition(menu.clipId, menu.time)");
     expect(timelineSource).toContain("state.splitClipAtPosition(menu.clipId, menu.time)");
-    expect(timelineSource).toContain('registerScopedActionExecutor(\n      context,');
+    expect(normalizeSourceText(timelineSource)).toContain('registerScopedActionExecutor(\n      context,');
     expect(timelineSource).toContain('matchesActionShortcut(event, "clip.splitAtPointer")');
   });
 
@@ -78,11 +82,11 @@ describe("component-owned scoped action wiring", () => {
     expect(pitchEditorSource).toContain("toggleABCompare()");
     expect(pitchEditorSource).toContain('actionId === "pitch.openCorrectionMacro"');
     expect(pitchEditorSource).toContain("toggleCorrectPitchModal()");
-    expect(pitchEditorSource).toContain('registerScopedActionExecutor(\n      context,');
+    expect(normalizeSourceText(pitchEditorSource)).toContain('registerScopedActionExecutor(\n      context,');
   });
 
   it("opens only the primary selected standard or AI TrackHeader and supports the main mixer context", () => {
-    for (const source of [trackHeaderSource, aiTrackHeaderSource]) {
+    for (const source of [trackHeaderSource, aiTrackHeaderSource].map(normalizeSourceText)) {
       expect(source).toContain("if (!isSelected || selectedTrackId !== track.id) return");
       expect(source).toContain("if (selectedId !== track.id) return \"claimed_noop\"");
       expect(source).toContain('registerScopedActionExecutor(\n      { kind: "track_control_panel" }');
@@ -144,7 +148,7 @@ describe("component-owned scoped action wiring", () => {
 
     expect(mixerPanelSource).toContain('actionId === "mixer.addMonitorFx"');
     expect(mixerPanelSource).toContain('actionId === "mixer.close"');
-    expect(mixerPanelSource).toContain('registerShortcutSurface(\n      context,');
+    expect(normalizeSourceText(mixerPanelSource)).toContain('registerShortcutSurface(\n      context,');
     expect(mixerPanelSource).toContain('activateShortcutContext({ kind: "mixer" })');
     expect(masterTrackHeaderSource).toContain('actionId !== "mixer.openMasterFxChain"');
     expect(channelStripSource).toContain('actionId === "mixer.openMasterFxChain"');

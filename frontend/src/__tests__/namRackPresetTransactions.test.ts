@@ -1,5 +1,5 @@
 // @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
-import { readFileSync } from "node:fs";
+import { readFileSync as readRawFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -26,6 +26,10 @@ import {
   shouldClearNAMPresetIdentityForUnsavedAmpTransition,
   verifyNAMRackCompareReadback,
 } from "../utils/namRackPresetTransactions";
+
+function readFileSync(path: URL, encoding: "utf8"): string {
+  return readRawFileSync(path, encoding).replace(/\r\n?/g, "\n");
+}
 
 describe("NAM Rack preset transactions", () => {
   it("does not dirty a loaded preset with native capture-type sentinels for empty slots", () => {

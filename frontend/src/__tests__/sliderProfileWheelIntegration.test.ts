@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getSliderWheelSubtarget } from "../components/ui/Slider/Slider";
 import { useDAWStore } from "../store/useDAWStore";
 import { resolveProfiledParameterWheel } from "../utils/parameterWheel";
+import { getShortcutPlatform } from "../utils/platform";
 import sliderSource from "../components/ui/Slider/Slider.tsx?raw";
 import knobSource from "../components/ui/Knob/Knob.tsx?raw";
 import {
@@ -11,6 +12,10 @@ import {
 } from "../components/ui/editTransactionLifecycle";
 
 const originalMouseProfile = useDAWStore.getState().mouseBehaviorProfileId;
+
+function hostPrimaryModifier(): { ctrlKey: true } | { metaKey: true } {
+  return getShortcutPlatform() === "macos" ? { metaKey: true } : { ctrlKey: true };
+}
 
 afterEach(() => {
   useDAWStore.setState({ mouseBehaviorProfileId: originalMouseProfile });
@@ -75,7 +80,7 @@ describe("profiled Slider wheel routing", () => {
   it("makes Cakewalk plain/fine fader adjustment reachable and suppresses unsafe group edits", () => {
     useDAWStore.setState({ mouseBehaviorProfileId: "cakewalk_sonar" });
     const subtarget = getSliderWheelSubtarget("vertical", "fader");
-    const resolve = (modifiers: { ctrlKey?: boolean; shiftKey?: boolean }) => (
+    const resolve = (modifiers: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean }) => (
       resolveProfiledParameterWheel({ ...modifiers, deltaY: -120 }, subtarget)
     );
 
@@ -89,11 +94,11 @@ describe("profiled Slider wheel routing", () => {
       operation: "adjust",
       precision: "fine",
     });
-    expect(resolve({ ctrlKey: true })).toMatchObject({
+    expect(resolve(hostPrimaryModifier())).toMatchObject({
       ruleId: "cakewalk-sonar.console-all-faders",
       operation: "suppress",
     });
-    expect(resolve({ ctrlKey: true, shiftKey: true })).toMatchObject({
+    expect(resolve({ ...hostPrimaryModifier(), shiftKey: true })).toMatchObject({
       ruleId: "cakewalk-sonar.console-selected-faders",
       operation: "suppress",
     });

@@ -8,6 +8,10 @@ import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
 
 const initialState = useDAWStore.getState();
 
+function normalizeSourceText(source: string): string {
+  return source.replace(/\r\n?/g, "\n");
+}
+
 afterEach(() => {
   useDAWStore.setState(initialState, true);
 });
@@ -69,8 +73,9 @@ describe("raw MIDI input metering", () => {
   });
 
   it("captures filtered armed input before monitoring and emits it in the batched meter event", () => {
-    const inputRouting = audioEngineSource.slice(
-      audioEngineSource.indexOf("// Route MIDI to appropriate tracks"),
+    const normalizedAudioEngineSource = normalizeSourceText(audioEngineSource);
+    const inputRouting = normalizedAudioEngineSource.slice(
+      normalizedAudioEngineSource.indexOf("// Route MIDI to appropriate tracks"),
     );
     expect(inputRouting).toContain("if (track->getRecordArmed())\n            track->registerMIDIInputActivity(message);");
     expect(inputRouting.indexOf("track->registerMIDIInputActivity(message)")).toBeLessThan(

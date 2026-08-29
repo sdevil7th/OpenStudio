@@ -16,6 +16,7 @@
 #include "NAM/model_config.h"
 #include "NAM/wavenet/model.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -434,7 +435,7 @@ int runHeadlessNAMModelProbe(const juce::File& modelFile,
         while (totalRead < boundedLength)
         {
             const int requested = static_cast<int>(
-                juce::jmin<juce::int64>(
+                std::min<juce::int64>(
                     boundedLength - totalRead,
                     1024 * 1024));
             const int count = boundedInput.read(

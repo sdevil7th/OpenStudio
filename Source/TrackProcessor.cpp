@@ -6253,7 +6253,7 @@ int TrackProcessor::getChainLatency() const
         if (plugin)
             addProcessorLatency(plugin.get());
     }
-    return static_cast<int>(juce::jmin<juce::int64>(totalLatency,
+    return static_cast<int>(std::min<juce::int64>(totalLatency,
                                                     std::numeric_limits<int>::max()));
 }
 

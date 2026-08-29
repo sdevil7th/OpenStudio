@@ -14,6 +14,7 @@ import {
   registerShortcutSurface,
   resetShortcutContextForTests,
 } from "../utils/shortcutContext";
+import { getShortcutPlatform } from "../utils/platform";
 
 const originalStoreState = {
   customShortcuts: useDAWStore.getState().customShortcuts,
@@ -35,6 +36,10 @@ const originalStoreState = {
 };
 
 const cleanups: Array<() => void> = [];
+
+function hostPrimaryModifier(): { ctrlKey: true } | { metaKey: true } {
+  return getShortcutPlatform() === "macos" ? { metaKey: true } : { ctrlKey: true };
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -219,7 +224,7 @@ describe("editor shortcut registry", () => {
 
     expect(dispatchGlobalShortcut({
       key: "m",
-      ctrlKey: true,
+      ...hostPrimaryModifier(),
       source: "browser",
     })).toBe(true);
     expect(pianoAction).toHaveBeenCalledTimes(1);

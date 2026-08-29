@@ -22,12 +22,17 @@ import {
   getActiveShortcutContext,
   resetShortcutContextForTests,
 } from "../utils/shortcutContext";
+import { getShortcutPlatform } from "../utils/platform";
 
 const cleanup: Array<() => void> = [];
 const originalInputState = {
   keyboardShortcutProfileId: useDAWStore.getState().keyboardShortcutProfileId,
   customShortcuts: useDAWStore.getState().customShortcuts,
 };
+
+function hostPrimaryModifier(): { ctrlKey: true } | { metaKey: true } {
+  return getShortcutPlatform() === "macos" ? { metaKey: true } : { ctrlKey: true };
+}
 
 class ShortcutTestTarget extends EventTarget {
   constructor(private readonly editable = false) {
@@ -169,7 +174,7 @@ describe("visible component command reachability", () => {
     editableTarget.dispatchEvent(createShortcutEvent("Escape"));
     expect(close).not.toHaveBeenCalled();
 
-    const rebound = createShortcutEvent("F9", { ctrlKey: true });
+    const rebound = createShortcutEvent("F9", hostPrimaryModifier());
     editableTarget.dispatchEvent(rebound);
     expect(close).toHaveBeenCalledTimes(1);
     expect(rebound.defaultPrevented).toBe(true);
@@ -186,7 +191,7 @@ describe("visible component command reachability", () => {
     });
     cleanup.push(registerTransientOverlayShortcutScope(close, { eventTarget: editableTarget }));
 
-    const copy = createShortcutEvent("c", { ctrlKey: true });
+    const copy = createShortcutEvent("c", hostPrimaryModifier());
     editableTarget.dispatchEvent(copy);
     expect(close).not.toHaveBeenCalled();
     expect(copy.defaultPrevented).toBe(false);

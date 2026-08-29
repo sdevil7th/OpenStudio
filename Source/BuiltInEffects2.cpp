@@ -11,6 +11,7 @@
 #include "NAM/slimmable.h"
 #include "NAM/wavenet/model.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <limits>
 #include <mutex>
@@ -14330,7 +14331,7 @@ static bool readNAMModelFileTextBounded(const juce::File& modelFile,
         juce::int64 totalRead = 0;
         while (totalRead < length)
         {
-            const int requested = static_cast<int>(juce::jmin<juce::int64>(
+            const int requested = static_cast<int>(std::min<juce::int64>(
                 length - totalRead, 1024 * 1024));
             const int count = input.read(
                 static_cast<char*>(bytes.getData())
@@ -14459,7 +14460,7 @@ static bool createNAMModelValidationCopy(
         while (totalRead < length && ioSucceeded)
         {
             const size_t requested = static_cast<size_t>(
-                juce::jmin<juce::int64>(
+                std::min<juce::int64>(
                     length - totalRead,
                     static_cast<juce::int64>(buffer.getSize())));
             ssize_t count = -1;
@@ -14549,7 +14550,7 @@ static bool createNAMModelValidationCopy(
         juce::int64 totalRead = 0;
         while (totalRead < length)
         {
-            const int requested = static_cast<int>(juce::jmin<juce::int64>(
+            const int requested = static_cast<int>(std::min<juce::int64>(
                 length - totalRead,
                 static_cast<juce::int64>(buffer.getSize())));
             const int count = input.read(buffer.getData(), requested);

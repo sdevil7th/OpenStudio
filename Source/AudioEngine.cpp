@@ -3146,7 +3146,7 @@ static OfflineRenderPlan makeOfflineRenderPlan(juce::int64 sourceSamples,
                                                 int latencySamples)
 {
     OfflineRenderPlan plan;
-    plan.sourceSamples = juce::jmax<juce::int64>(1, sourceSamples);
+    plan.sourceSamples = std::max<juce::int64>(1, sourceSamples);
     plan.latencySamples = juce::jmax(0, latencySamples);
 
     const double safeRequestedTail = std::isfinite(requestedTailSeconds)
@@ -10079,8 +10079,8 @@ public:
 
     ~ScopedBuiltInPresetTestDirectories()
     {
-        builtInPresetPersistentRootOverride = {};
-        builtInPresetLegacyRootOverride = {};
+        builtInPresetPersistentRootOverride = juce::File();
+        builtInPresetLegacyRootOverride = juce::File();
         if (root.isDirectory())
             (void) root.deleteRecursively();
     }
@@ -35737,7 +35737,7 @@ juce::var AudioEngine::runNAMRackRegression()
     int renderBlockPatternIndex = 0;
     while (processingCursor < noTailRenderPlan.processingSamples)
     {
-        const int samplesThisBlock = static_cast<int>(juce::jmin<juce::int64>(
+        const int samplesThisBlock = static_cast<int>(std::min<juce::int64>(
             renderBlockPattern[static_cast<size_t>(renderBlockPatternIndex % renderBlockPattern.size())],
             noTailRenderPlan.processingSamples - processingCursor));
         const auto window = getOfflineRenderBlockWindow(noTailRenderPlan,
@@ -45848,12 +45848,12 @@ juce::var AudioEngine::runNAMRackRegression()
                 && phaseMatches;
 
             direction->setProperty(
-                "inputRate", inputRate);
+                "inputRate", static_cast<juce::int64>(inputRate));
             direction->setProperty(
-                "outputRate", outputRate);
+                "outputRate", static_cast<juce::int64>(outputRate));
             direction->setProperty(
                 "virtualDurationSeconds",
-                virtualDurationSeconds);
+                static_cast<juce::int64>(virtualDurationSeconds));
             direction->setProperty(
                 "virtualInputSamples",
                 static_cast<juce::int64>(
@@ -45874,7 +45874,7 @@ juce::var AudioEngine::runNAMRackRegression()
         runDirection(48000, 44100);
         result->setProperty(
             "virtualDurationSeconds",
-            virtualDurationSeconds);
+            static_cast<juce::int64>(virtualDurationSeconds));
         result->setProperty("blockSize", probeBlockSize);
         result->setProperty(
             "directions", juce::var(directions));
@@ -66733,11 +66733,11 @@ double AudioEngine::getAudioPeakAmplitude(const juce::String& filePath,
     const int numChannels = static_cast<int>(reader->numChannels);
     juce::AudioBuffer<float> buffer(
         numChannels,
-        static_cast<int>(juce::jmin<juce::int64>(analysisBlockSize, endSample - startSample)));
+        static_cast<int>(std::min<juce::int64>(analysisBlockSize, endSample - startSample)));
     double peak = 0.0;
     for (juce::int64 blockStart = startSample; blockStart < endSample;)
     {
-        const int samplesThisBlock = static_cast<int>(juce::jmin<juce::int64>(
+        const int samplesThisBlock = static_cast<int>(std::min<juce::int64>(
             analysisBlockSize,
             endSample - blockStart));
         if (! reader->read(&buffer, 0, samplesThisBlock, blockStart, true, true))
@@ -69317,7 +69317,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
     // ========== 6. Establish the requested source range ==========
     const double sourceDuration = endTime - startTime;
-    const juce::int64 sourceSamples = juce::jmax<juce::int64>(
+    const juce::int64 sourceSamples = std::max<juce::int64>(
         1,
         nonNegativeSecondsToSamples(sourceDuration, actualSampleRate));
     double tailSeconds = addTail ? juce::jmax(0.0, tailLengthMs * 0.001) : 0.0;

@@ -1,5 +1,7 @@
 #include "AudioRecorder.h"
 
+#include <algorithm>
+
 namespace
 {
 #ifndef OPENSTUDIO_AUDIO_RECORD_DEBUG
@@ -452,7 +454,7 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId,
     // getRecordingPeaks() and stopAllRecordings() both run on the message thread
     // so they are never concurrent — no use-after-free risk.
 
-    startSample = juce::jmax<juce::int64>(0, startSample);
+    startSample = std::max<juce::int64>(0, startSample);
     if (numChannels == 0 || chunkEntries == 0 || tableSize == 0
         || samplesPerPixel <= 0 || numPixels <= 0)
         return peakData;

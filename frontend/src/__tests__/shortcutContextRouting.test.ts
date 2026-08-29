@@ -17,7 +17,15 @@ import {
   shouldPreserveNonTextControlShortcut,
   toPressedShortcut,
 } from "../utils/shortcutContext";
-import { canonicalizeShortcutEvent } from "../utils/platform";
+import { canonicalizeShortcutEvent, getShortcutPlatform } from "../utils/platform";
+
+function hostPrimaryModifier(): { ctrlKey: true } | { metaKey: true } {
+  return getShortcutPlatform() === "macos" ? { metaKey: true } : { ctrlKey: true };
+}
+
+function hostLegacySecondaryModifier(): { ctrlKey: true } | { altKey: true } {
+  return getShortcutPlatform() === "macos" ? { ctrlKey: true } : { altKey: true };
+}
 
 const originalStoreActions = {
   undo: useDAWStore.getState().undo,
@@ -149,14 +157,14 @@ describe("shortcut edit-context routing", () => {
   });
 
   it("requires exact modifiers and preserves native editing chords", () => {
-    expect(shortcutExactlyMatches({ key: "z", ctrlKey: true }, "Ctrl+Z")).toBe(true);
+    expect(shortcutExactlyMatches({ key: "z", ...hostPrimaryModifier() }, "Ctrl+Z")).toBe(true);
     expect(shortcutExactlyMatches(
-      { key: "z", ctrlKey: true, altKey: true },
+      { key: "z", ...hostPrimaryModifier(), altKey: true },
       "Ctrl+Z",
     )).toBe(false);
     expect(toPressedShortcut({ key: "ArrowLeft", shiftKey: true })).toBe("Shift+Left");
-    expect(shouldPreserveEditableShortcut({ key: "a", ctrlKey: true })).toBe(true);
-    expect(shouldPreserveEditableShortcut({ key: "s", ctrlKey: true })).toBe(false);
+    expect(shouldPreserveEditableShortcut({ key: "a", ...hostPrimaryModifier() })).toBe(true);
+    expect(shouldPreserveEditableShortcut({ key: "s", ...hostPrimaryModifier() })).toBe(false);
     expect(shouldPreserveEditableShortcut({ key: " " })).toBe(true);
     expect(shouldPreserveEditableShortcut({ key: "Enter", altKey: true })).toBe(true);
     expect(shouldPreserveEditableShortcut({ key: "Enter", altKey: true }, true)).toBe(false);
@@ -239,7 +247,7 @@ describe("shortcut edit-context routing", () => {
     );
     activateShortcutContext({ kind: "pitch_editor" });
 
-    expect(dispatchGlobalShortcut({ key: "z", ctrlKey: true, source: "browser" })).toBe(true);
+    expect(dispatchGlobalShortcut({ key: "z", ...hostPrimaryModifier(), source: "browser" })).toBe(true);
     expect(projectUndo).not.toHaveBeenCalled();
   });
 
@@ -248,7 +256,7 @@ describe("shortcut edit-context routing", () => {
     useDAWStore.setState({ undo: projectUndo });
     activateShortcutContext({ kind: "application" });
 
-    expect(dispatchGlobalShortcut({ key: "z", ctrlKey: true, source: "browser" })).toBe(false);
+    expect(dispatchGlobalShortcut({ key: "z", ...hostPrimaryModifier(), source: "browser" })).toBe(false);
     expect(projectUndo).not.toHaveBeenCalled();
   });
 
@@ -259,10 +267,10 @@ describe("shortcut edit-context routing", () => {
       customShortcuts: { "view.toggleMixer": "Ctrl+Shift+M" },
     });
 
-    expect(dispatchGlobalShortcut({ key: "m", ctrlKey: true, source: "browser" })).toBe(false);
+    expect(dispatchGlobalShortcut({ key: "m", ...hostPrimaryModifier(), source: "browser" })).toBe(false);
     expect(dispatchGlobalShortcut({
       key: "m",
-      ctrlKey: true,
+      ...hostPrimaryModifier(),
       shiftKey: true,
       source: "browser",
     })).toBe(true);
@@ -281,14 +289,14 @@ describe("shortcut edit-context routing", () => {
       code: "KeyZ",
       ctrlKey: true,
       source: "browser",
-    })).toBe(true);
+    }, "windows")).toBe(true);
     expect(toggleMixer).toHaveBeenCalledTimes(1);
     expect(dispatchGlobalShortcut({
       key: "z",
       code: "KeyY",
       ctrlKey: true,
       source: "browser",
-    })).toBe(false);
+    }, "windows")).toBe(false);
 
     useDAWStore.setState({
       customShortcuts: { "view.toggleMixer": "Meta+Code:KeyM" },
@@ -298,14 +306,14 @@ describe("shortcut edit-context routing", () => {
       code: "KeyM",
       metaKey: true,
       source: "browser",
-    })).toBe(true);
+    }, "windows")).toBe(true);
     expect(toggleMixer).toHaveBeenCalledTimes(2);
     expect(dispatchGlobalShortcut({
       key: "m",
       code: "KeyM",
       ctrlKey: true,
       source: "browser",
-    })).toBe(false);
+    }, "windows")).toBe(false);
   });
 
   it("accepts multiple custom bindings at runtime without conflating numpad keys", () => {
@@ -322,13 +330,13 @@ describe("shortcut edit-context routing", () => {
       code: "KeyM",
       ctrlKey: true,
       source: "browser",
-    })).toBe(true);
+    }, "windows")).toBe(true);
     expect(dispatchGlobalShortcut({
       key: "y",
       code: "KeyZ",
       ctrlKey: true,
       source: "browser",
-    })).toBe(true);
+    }, "windows")).toBe(true);
     expect(toggleMixer).toHaveBeenCalledTimes(2);
 
     useDAWStore.setState({
@@ -337,10 +345,12 @@ describe("shortcut edit-context routing", () => {
     expect(matchesActionShortcut(
       { key: "1", code: "Numpad1", ctrlKey: true, location: 3 },
       "view.toggleMixer",
+      "windows",
     )).toBe(false);
     expect(matchesActionShortcut(
       { key: "1", code: "Digit1", ctrlKey: true },
       "view.toggleMixer",
+      "windows",
     )).toBe(true);
   });
 
@@ -372,7 +382,7 @@ describe("shortcut edit-context routing", () => {
 
     expect(dispatchGlobalShortcut({
       key: "m",
-      ctrlKey: true,
+      ...hostPrimaryModifier(),
       repeat: true,
       source: "browser",
     })).toBe(true);
@@ -404,7 +414,7 @@ describe("shortcut edit-context routing", () => {
     expect(dispatchGlobalShortcut({ key: "l", source: "browser" })).toBe(true);
     expect(toggleLoop).not.toHaveBeenCalled();
 
-    expect(dispatchGlobalShortcut({ key: "m", ctrlKey: true, source: "browser" })).toBe(true);
+    expect(dispatchGlobalShortcut({ key: "m", ...hostPrimaryModifier(), source: "browser" })).toBe(true);
     expect(toggleMixer).toHaveBeenCalledTimes(1);
   });
 
@@ -419,7 +429,7 @@ describe("shortcut edit-context routing", () => {
     registerShortcutSurface({ kind: "timeline" }, () => "unmatched");
     activateShortcutContext({ kind: "timeline" });
 
-    expect(dispatchGlobalShortcut({ key: "a", ctrlKey: true, source: "browser" })).toBe(true);
+    expect(dispatchGlobalShortcut({ key: "a", ...hostPrimaryModifier(), source: "browser" })).toBe(true);
     expect(selectAllTracks).toHaveBeenCalledTimes(1);
   });
 
@@ -437,7 +447,7 @@ describe("shortcut edit-context routing", () => {
     );
     activateShortcutContext({ kind: "piano_roll", sessionId: "selection-owner" });
 
-    expect(dispatchGlobalShortcut({ key: "c", ctrlKey: true, source: "browser" })).toBe(true);
+    expect(dispatchGlobalShortcut({ key: "c", ...hostPrimaryModifier(), source: "browser" })).toBe(true);
     expect(copySelectedClips).not.toHaveBeenCalled();
   });
 
@@ -450,7 +460,7 @@ describe("shortcut edit-context routing", () => {
 
     expect(dispatchGlobalShortcut({
       key: "a",
-      ctrlKey: true,
+      ...hostPrimaryModifier(),
       source: "browser",
       targetIsEditable: true,
     })).toBe(false);
@@ -458,7 +468,7 @@ describe("shortcut edit-context routing", () => {
 
     expect(dispatchGlobalShortcut({
       key: "s",
-      ctrlKey: true,
+      ...hostPrimaryModifier(),
       source: "browser",
       targetIsEditable: true,
     })).toBe(true);
@@ -471,7 +481,7 @@ describe("shortcut edit-context routing", () => {
 
     expect(dispatchGlobalShortcut({
       key: "Enter",
-      altKey: true,
+      ...hostLegacySecondaryModifier(),
       source: "browser",
       targetIsEditable: true,
     })).toBe(true);

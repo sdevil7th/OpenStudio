@@ -1032,7 +1032,7 @@ bool PlaybackEngine::evictFullyDecodedSourcesToFitLocked(
         }
 
         fullyDecodedBytesInUse =
-            juce::jmax<juce::int64>(
+            std::max<juce::int64>(
                 0,
                 fullyDecodedBytesInUse
                     - source->second->decodedBytes);

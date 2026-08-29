@@ -10,6 +10,11 @@ import {
   registerShortcutSurface,
   resetShortcutContextForTests,
 } from "../utils/shortcutContext";
+import { getShortcutPlatform } from "../utils/platform";
+
+function hostPrimaryModifier(): { ctrlKey: true } | { metaKey: true } {
+  return getShortcutPlatform() === "macos" ? { metaKey: true } : { ctrlKey: true };
+}
 
 describe("runtime shortcut profile dispatch", () => {
   const original = {
@@ -39,7 +44,7 @@ describe("runtime shortcut profile dispatch", () => {
 
   it("switches matching immediately without rewriting factory shortcuts", () => {
     useDAWStore.setState({ keyboardShortcutProfileId: "pro_tools" });
-    expect(matchesActionShortcut({ key: "e", code: "KeyE", ctrlKey: true }, "edit.splitAtCursor")).toBe(true);
+    expect(matchesActionShortcut({ key: "e", code: "KeyE", ...hostPrimaryModifier() }, "edit.splitAtCursor")).toBe(true);
     expect(matchesActionShortcut({ key: "s", code: "KeyS" }, "edit.splitAtCursor")).toBe(false);
   });
 
@@ -49,7 +54,7 @@ describe("runtime shortcut profile dispatch", () => {
       customShortcuts: { "edit.splitAtCursor": "Code:KeyK" },
     });
     expect(matchesActionShortcut({ key: "k", code: "KeyK" }, "edit.splitAtCursor")).toBe(true);
-    expect(matchesActionShortcut({ key: "e", code: "KeyE", ctrlKey: true }, "edit.splitAtCursor")).toBe(false);
+    expect(matchesActionShortcut({ key: "e", code: "KeyE", ...hostPrimaryModifier() }, "edit.splitAtCursor")).toBe(false);
   });
 
   it("keeps physical key profiles stable when the produced layout label changes", () => {
@@ -62,7 +67,7 @@ describe("runtime shortcut profile dispatch", () => {
       keyboardShortcutProfileId: "pro_tools",
       customShortcuts: { "edit.splitAtCursor": "" },
     });
-    expect(matchesActionShortcut({ key: "e", code: "KeyE", ctrlKey: true }, "edit.splitAtCursor")).toBe(false);
+    expect(matchesActionShortcut({ key: "e", code: "KeyE", ...hostPrimaryModifier() }, "edit.splitAtCursor")).toBe(false);
     expect(getDisplayEffectiveShortcut("edit.splitAtCursor")).toBe("");
   });
 

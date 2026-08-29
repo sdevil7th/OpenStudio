@@ -1,3 +1,10 @@
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <Security/Security.h>
+#endif
+#endif
+
 #include "MainComponent.h"
 #include "ApplicationLaunchState.h"
 #include "FFmpegLocator.h"
@@ -23,7 +30,6 @@
 
 #if JUCE_MAC
 #include <dlfcn.h>
-#include <Security/Security.h>
 #endif
 
 #if JUCE_LINUX
@@ -2461,7 +2467,7 @@ juce::var storeTone3000TokenPayloadUnlocked(
 
     const auto expiresIn = static_cast<juce::int64>(static_cast<double>(tokenObject->getProperty("expires_in")));
     const auto expiresAtMs = juce::Time::getCurrentTime().toMilliseconds()
-        + juce::jmax<juce::int64>(0, expiresIn) * 1000;
+        + std::max<juce::int64>(0, expiresIn) * 1000;
 
     juce::DynamicObject::Ptr stored = new juce::DynamicObject();
     stored->setProperty("schemaVersion", 1);
