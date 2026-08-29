@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})
@@ -19,11 +22,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -45,12 +48,14 @@ jobs:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-windows
       ASIO_SDK_DIR: thirdparty/asio
+      ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -59,11 +64,17 @@ jobs:
         run: |
           cd frontend
           npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install ASIO SDK
         shell: pwsh
         run: ./tools/setup-asio-sdk.ps1 -Destination $env:ASIO_SDK_DIR
+
+      - name: Install ONNX Runtime
+        shell: pwsh
+        run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
       - name: Install Windows prerequisite installers
         shell: pwsh
@@ -227,11 +238,11 @@ jobs:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-macos
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -303,7 +314,7 @@ jobs:
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install system dependencies
         shell: bash
@@ -311,9 +322,9 @@ jobs:
           bash ./tools/setup-linux-prereqs.sh
           sudo apt-get install -y xvfb
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -375,3 +386,21 @@ jobs:
       - name: Verify Linux AppImage output
         shell: bash
         run: test -f "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Validate packaged Linux AppImage contents
+        shell: bash
+        run: |
+          APPIMAGE="$GITHUB_WORKSPACE/dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+          EXTRACT_ROOT="$(mktemp -d)"
+          cleanup() { rm -rf -- "$EXTRACT_ROOT"; }
+          trap cleanup EXIT
+          chmod +x "$APPIMAGE"
+          (
+            cd "$EXTRACT_ROOT"
+            "$APPIMAGE" --appimage-extract >/dev/null
+          )
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/tools/validate-runtime-bundle.ps1" \
+            -Platform linux \
+            -BundlePath "$EXTRACT_ROOT/squashfs-root/usr/bin" \
+            -ExpectedVersion "$VERSION" \
+            -EnforceLeanBundle

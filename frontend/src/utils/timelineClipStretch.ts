@@ -11,7 +11,6 @@ export interface TimelineStretchGeometryInput {
   minDuration?: number;
   snapTime?: (time: number) => number;
 }
-
 export interface TimelineStretchGeometry {
   startTime: number;
   duration: number;
@@ -113,4 +112,3 @@ export function createStretchedMIDIClip(
       : undefined,
   };
 }
-

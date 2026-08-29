@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import designPortSource from "../components/NAMRackDesignPort.tsx?raw";
 import rackKnobSource from "../components/NAMRackKnob.tsx?raw";
 import rackPanelSource from "../components/NAMRackPanel.tsx?raw";
-import sceneGraphSource from "../components/NAMRackSceneGraph.tsx?raw";
 
 interface WheelSourceContract {
   name: string;
@@ -18,7 +17,6 @@ const wheelSources: readonly WheelSourceContract[] = [
   { name: "design port", source: designPortSource, handlerCount: 4, parameterHandlerCount: 3, subtarget: "control" },
   { name: "rack knob", source: rackKnobSource, handlerCount: 1, parameterHandlerCount: 1, subtarget: "control" },
   { name: "rack panel", source: rackPanelSource, handlerCount: 1, parameterHandlerCount: 1, subtarget: "control" },
-  { name: "scene graph", source: sceneGraphSource, handlerCount: 1, parameterHandlerCount: 1, subtarget: "graph" },
 ];
 
 function occurrenceCount(source: string, pattern: RegExp): number {
@@ -86,10 +84,4 @@ describe("NAM parameter wheel integration", () => {
     expect(designPortSource).toContain("event.currentTarget.scrollLeft += delta");
   });
 
-  it("keeps the scene graph's smaller normal rate while making fine precision finer", () => {
-    expect(sceneGraphSource).toContain(
-      "getParameterWheelStepCount(gesture, { normal: 2, fine: 1 })",
-    );
-    expect(sceneGraphSource).not.toContain("const multiplier = event.shiftKey ? 8 : 2");
-  });
 });

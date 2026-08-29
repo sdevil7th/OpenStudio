@@ -62,14 +62,12 @@ describe("NAM Rack Reverb V5 voice contract", () => {
     expect(NAM_REVERB_VOICE_SELECTOR_ROTATIONS.map(namReverbVoiceSelectorDetentPlacement)).toHaveLength(4);
   });
 
-  it("wires the voice across schema, state, advanced controls, fallback skins, and the live pedal", () => {
+  it("wires the voice across schema, state, advanced controls, and the live pedal", () => {
     const sources = {
       bridge: readFileSync(new URL("../services/NativeBridge.ts", import.meta.url), "utf8"),
       panel: readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8"),
       mixer: readFileSync(new URL("../components/NAMRackMixer.tsx", import.meta.url), "utf8"),
       design: readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8"),
-      registry: readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8"),
-      scene: readFileSync(new URL("../components/namScenes/post-reverb.scene.json", import.meta.url), "utf8"),
     };
     for (const source of Object.values(sources)) expect(source).toContain("reverbVoice");
     expect(sources.design).toContain("<ReverbVoiceDisplay paramId=\"reverbVoice\"");

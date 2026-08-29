@@ -495,7 +495,6 @@ export interface NAMCatalogRefreshResult {
   durationMs?: number;
   output?: string;
   rootPath?: string;
-  catalogPath?: string;
   catalogJsonPath?: string;
   toneRows?: number;
   generatedAt?: string;
@@ -512,7 +511,6 @@ export interface NAMLibraryPayload {
 export interface NAMLibraryInfo {
   rootPath: string;
   libraryPath: string;
-  catalogPath: string;
   catalogJsonPath: string;
   manifestPath: string;
 }
@@ -4007,17 +4005,16 @@ class NativeBridge {
     trackId: string,
     enabled: boolean,
   ): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.setTrackInputMonitoring) {
-      return await window.__JUCE__.backend.setTrackInputMonitoring(
-        trackId,
-        enabled,
-      );
-    } else {
-      console.log(
-        `[NativeBridge] Mock setTrackInputMonitoring: track ${trackId}, enabled: ${enabled}`,
-      );
-      return true;
+    if (this.isNative) {
+      const setInputMonitoring = window.__JUCE__?.backend.setTrackInputMonitoring;
+      if (!setInputMonitoring) return false;
+      return await setInputMonitoring.call(window.__JUCE__?.backend, trackId, enabled);
     }
+
+    console.log(
+      `[NativeBridge] Mock setTrackInputMonitoring: track ${trackId}, enabled: ${enabled}`,
+    );
+    return true;
   }
 
   async setTrackInputChannels(
@@ -4407,10 +4404,10 @@ class NativeBridge {
   }
 
   async getNAMRackOversamplingFactor(): Promise<2 | 4 | 8> {
-    if (this.isNative && window.__JUCE__?.backend.getNAMRackOversamplingFactor) {
-      const factor = Number(
-        await window.__JUCE__.backend.getNAMRackOversamplingFactor(),
-      );
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.getNAMRackOversamplingFactor) throw new Error("The native host does not support NAM Rack oversampling controls.");
+      const factor = Number(await backend.getNAMRackOversamplingFactor());
       return factor === 2 || factor === 8 ? factor : 4;
     }
     return this.mockNAMRackOversamplingFactor;
@@ -4420,8 +4417,10 @@ class NativeBridge {
     factor: 2 | 4 | 8,
   ): Promise<boolean> {
     if (factor !== 2 && factor !== 4 && factor !== 8) return false;
-    if (this.isNative && window.__JUCE__?.backend.setNAMRackOversamplingFactor) {
-      return await window.__JUCE__.backend.setNAMRackOversamplingFactor(factor);
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.setNAMRackOversamplingFactor) return false;
+      return await backend.setNAMRackOversamplingFactor(factor);
     }
     this.mockNAMRackOversamplingFactor = factor;
     return true;
@@ -4445,8 +4444,10 @@ class NativeBridge {
     const normalizedTrackId = trackId.trim();
     const normalizedSubscriberId = subscriberId.trim();
     if (!normalizedSubscriberId) return false;
-    if (this.isNative && window.__JUCE__?.backend.setNAMTunerActive) {
-      return await window.__JUCE__.backend.setNAMTunerActive(
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.setNAMTunerActive) return false;
+      return await backend.setNAMTunerActive(
         normalizedTrackId,
         active,
         normalizedSubscriberId,
@@ -7323,7 +7324,6 @@ class NativeBridge {
       return {
         rootPath: "OpenStudio/NAM",
         libraryPath: "OpenStudio/NAM/library",
-        catalogPath: "OpenStudio/NAM/catalog.sqlite",
         catalogJsonPath: "OpenStudio/NAM/catalog.json",
         manifestPath: "OpenStudio/NAM/library/manifest.json",
       };
@@ -7331,7 +7331,6 @@ class NativeBridge {
     return {
       rootPath: "",
       libraryPath: "",
-      catalogPath: "",
       catalogJsonPath: "",
       manifestPath: "",
     };

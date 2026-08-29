@@ -11,7 +11,7 @@ lives in [Testing](testing.md) and the
 - Complete release qualification for the NAM Rack and optional TONE3000
   workflow, including multi-capture selection, Guitar/Bass profiles, project and
   preset recovery, accessibility, and real-interface listening tests.
-- Keep Windows and macOS installation, startup, updates, and optional AI Tools
+- Keep Windows, macOS, and Linux installation, startup, updates, and optional AI Tools
   setup reliable on clean systems.
 - Preserve old projects and presets while strengthening audio-thread safety,
   deterministic state migration, and failure recovery.

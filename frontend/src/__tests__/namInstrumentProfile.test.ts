@@ -302,7 +302,6 @@ describe("NAM Rack instrument profile", () => {
     const engine = readFileSync(new URL("../../../Source/AudioEngine.cpp", import.meta.url), "utf8");
     const panel = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
     const design = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
-    const scene = readFileSync(new URL("../components/NAMRackSceneGraph.tsx", import.meta.url), "utf8");
 
     expect(dsp).toContain("kNAMRackPreEqFrequenciesByProfile");
     expect(dsp).toMatch(/50\.0f, 120\.0f, 250\.0f, 500\.0f,[\s\S]*800\.0f, 1600\.0f, 4500\.0f, 10000\.0f/);
@@ -312,7 +311,5 @@ describe("NAM Rack instrument profile", () => {
     expect(panel.match(/namPreEqBandLabelsForProfile\(instrumentProfile\)/g)?.length).toBe(1);
     expect(design).toContain("namPreEqBandsForProfile(instrumentProfile?.value)");
     expect(design).toContain("semanticLabel={`${band.accessibleLabel} EQ Boost`}");
-    expect(scene).toContain('scene.skinId === "pre-eq-boost-design-a"');
-    expect(scene).toContain("param.label.match");
   });
 });

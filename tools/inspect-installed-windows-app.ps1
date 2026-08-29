@@ -61,9 +61,14 @@ function Get-VCRedistStatus {
 
     try {
         $properties = Get-ItemProperty -Path $registryPath
+        $version = ""
+        if ($null -ne $properties.Version) {
+            $version = [string]$properties.Version
+        }
+
         return @{
             Installed = ($properties.Installed -eq 1)
-            Version = [string]($properties.Version ?? "")
+            Version = $version
         }
     } catch {
         return @{

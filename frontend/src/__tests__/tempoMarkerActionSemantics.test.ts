@@ -17,7 +17,6 @@ beforeEach(() => {
     canRedo: false,
   });
 });
-
 afterEach(() => {
   vi.restoreAllMocks();
   commandManager.clear();
@@ -91,4 +90,3 @@ describe("tempo marker transactions", () => {
     expect(commandManager.getUndoStack()).toHaveLength(0);
   });
 });
-

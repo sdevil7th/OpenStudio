@@ -1555,7 +1555,7 @@ public:
     }
     juce::var getDiagnosticState() const;
     bool loadCabIR(const juce::String& path);
-    void clearCabIR();
+    void clearCabIR(bool deferActivePublication = false);
     juce::String getCabIRPath() const;
     bool hasCabIR() const;
     bool restoreModelResourceState(bool pedalPathSpecified,
@@ -1773,9 +1773,14 @@ private:
         fadeIn
     };
 
+    struct LoadedCabIR;
+
     struct AmpModelHandoffState
     {
         std::atomic<LoadedNAMModel*> requestedModel { nullptr };
+        std::atomic<LoadedNAMModel*> requestedPedalModel { nullptr };
+        std::atomic<LoadedCabIR*> requestedCabIR { nullptr };
+        std::atomic<bool> publishesResourceTransaction { false };
         std::atomic<std::uint64_t> requestGeneration { 0 };
         std::uint64_t consumedRequestGeneration = 0;
         AmpModelHandoffPhase phase = AmpModelHandoffPhase::steady;
@@ -1861,6 +1866,13 @@ private:
     ActiveNAMModelPointer activePedalModel { nullptr };
     ActiveNAMModelPointer activeAmpModel { nullptr };
     std::atomic<bool> activeAmpModelIncludesCab { false };
+    std::atomic<std::uint64_t> modelResourcePublicationGeneration { 0 };
+    ActiveNAMModelPointer fallbackPedalModel { nullptr };
+    ActiveNAMModelPointer fallbackAmpModel { nullptr };
+    ActiveCabIRPointer fallbackCabIR { nullptr };
+    ActiveNAMModelPointer diagnosticLastBlockPedalModel { nullptr };
+    ActiveNAMModelPointer diagnosticLastBlockAmpModel { nullptr };
+    ActiveCabIRPointer diagnosticLastBlockCabIR { nullptr };
     AmpModelHandoffState ampModelHandoff;
     InputRoutingHandoffState inputRoutingHandoff;
     NAMModelReaderCounter modelReaders { 0 };
@@ -1876,6 +1888,12 @@ private:
     std::atomic<int> modelHostBlockSize { 512 };
     std::atomic<int> modelHostBufferCapacity { 512 };
     std::atomic<std::uint64_t> modelHostConfigurationGeneration { 0 };
+    // Serialises the short final host-generation check/publication hand-off
+    // with prepareToPlay(). It is never acquired by processBlock(): realtime
+    // readers continue to use the lock-free raw publications and grace period.
+    mutable juce::CriticalSection modelHostPublicationLock;
+    std::atomic<std::uint64_t> cabPublicationAttemptCount { 0 };
+    std::atomic<std::uint64_t> cabPublicationStaleGenerationRejectCount { 0 };
     mutable juce::CriticalSection cabIRLock;
     std::shared_ptr<LoadedCabIR> cabIR;
     ActiveCabIRPointer activeCabIR { nullptr };
@@ -2429,7 +2447,8 @@ private:
         int processedBlockSamples) noexcept;
     LoadedNAMModel* beginAmpModelHandoffBlock(
         float* handoffGainEnvelope,
-        int numSamples) noexcept;
+        int numSamples,
+        LoadedNAMModel* coherentActiveModel) noexcept;
     void finishAmpModelHandoffBlock(int processedBlockSamples) noexcept;
     static void resetModelStreamingState(LoadedNAMModel& model,
                                          double hostSampleRate,
@@ -2458,12 +2477,14 @@ private:
                                              double hostSampleRate,
                                              int hostBlockSize,
                                              juce::String& error);
-    bool publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared);
+    bool publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared,
+                              bool deferActivePublication = false);
     bool commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
                              bool pedalSlot,
                              bool applyDirectLoadPolicy,
                              bool reclaimEarlierPublication = true,
-                             juce::String* error = nullptr);
+                             juce::String* error = nullptr,
+                             bool deferActivePublication = false);
     bool loadModelIntoSlot(const juce::String& path, bool pedalSlot);
     bool restoreStateInformationInternal(const void* data,
                                          int sizeInBytes,

@@ -118,39 +118,19 @@ describe("NAM Rack current graphic EQ frontend contract", () => {
       panel: readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8"),
       mixer: readFileSync(new URL("../components/NAMRackMixer.tsx", import.meta.url), "utf8"),
       design: readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8"),
-      registry: readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8"),
       bridge: readFileSync(new URL("../services/NativeBridge.ts", import.meta.url), "utf8"),
     };
-    const scene = JSON.parse(readFileSync(
-      new URL("../components/namScenes/eq-rack.scene.json", import.meta.url),
-      "utf8",
-    )) as { controls: Array<{ id: string; paramId?: string; kind: string; label?: string; valuePlacement?: string }> };
 
     for (const id of [...filterIds, ...bandIds, "eqLevelDb"]) {
       expect(sources.panel).toContain(id);
+      expect(sources.mixer).toContain(id);
       expect(sources.design).toContain(id);
-      expect(sources.registry).toContain(id);
       expect(sources.bridge).toContain(id);
-      expect(scene.controls.some((control) => control.paramId === id)).toBe(true);
     }
-    // The compatibility manifest mirrors the approved V4 production deck:
-    // nine upper-tier bands and three lower-tier rotary utilities.
-    expect(scene.controls.filter((control) => control.kind === "fader")).toHaveLength(9);
-    expect(scene.controls.filter((control) => control.kind === "knob")).toHaveLength(3);
-    expect(scene.controls.filter((control) => control.kind === "display" && filterIds.includes(control.paramId as typeof filterIds[number]))).toHaveLength(0);
-    expect(scene.controls.find((control) => control.paramId === "eq65Db")?.label).toBe("65");
-    expect(scene.controls.find((control) => control.paramId === "eqLevelDb"))
-      .toMatchObject({ kind: "knob", label: "LEVEL", valuePlacement: "hidden" });
-    expect(scene.controls.find((control) => control.paramId === "eqHPFHz"))
-      .toMatchObject({ kind: "knob", valuePlacement: "hidden" });
-    expect(scene.controls.find((control) => control.paramId === "eqLPFHz"))
-      .toMatchObject({ kind: "knob", valuePlacement: "hidden" });
-    expect(scene.controls.some((control) => control.id === "eq-out-led")).toBe(false);
     expect(sources.design).toContain("<Fader");
     expect(sources.design).toContain("paramId={lane.paramId}");
     expect(sources.design).toContain('paramId="eqLevelDb"');
     expect(sources.design).toContain('semanticLabel="Output level"');
-    expect(scene.controls.some((control) => control.id === "eq-31" || control.id === "eq-62")).toBe(false);
     expect(sources.design).toContain('{ label: "65", paramId: "eq65Db"');
     expect(sources.design).toContain('semanticLabel="High-pass filter"');
     expect(sources.design).toContain('semanticLabel="Low-pass filter"');
@@ -440,7 +420,7 @@ describe("NAM Rack current graphic EQ frontend contract", () => {
     expect(namGraphicEqActiveRecallUpdate("eqLPFHz", 20001)).toBeNull();
     expect(namGraphicEqActiveRecallUpdate("eqLPFHz", Number.NaN)).toBeNull();
     expect(optimisticRecallSource).toContain("namGraphicEqActiveRecallUpdate(param.id, value)");
-    expect(optimisticRecallSource).toContain("setRackLiveDiagnostics((current)");
+    expect(optimisticRecallSource).toContain("setRackTelemetry((current)");
     expect(optimisticRecallSource).toContain("the next native poll remains authoritative");
   });
 

@@ -3,11 +3,13 @@
 #include "S13FXProcessor.h"
 #include "BuiltInEffects.h"
 #include "BuiltInEffects2.h"
+#include "NAMModelSafety.h"
 #include "NAMDelayRegression.h"
 #include "S13PitchCorrector.h"
 #include "PitchAnalyzer.h"
 #include "PitchResynthesizer.h"
 #include "CrashDiagnostics.h"
+#include "FFmpegLocator.h"
 #include "NAM/dsp.h"
 #include <algorithm>
 #include <chrono>
@@ -11755,6 +11757,8 @@ juce::var AudioEngine::runNAMRackRegression()
         tunerWorkerLifecycleProbe);
 
     const auto invalidNamFile = makeTempFile("openstudio_invalid_nam_fixture", ".nam");
+    const auto oversizedNamFile = makeTempFile(
+        "openstudio_oversized_nam_fixture", ".nam");
     const auto irFile = makeTempFile("openstudio_cab_ir_fixture", ".wav");
     const auto alternateIRFile = makeTempFile("openstudio_cab_ir_swap_fixture", ".wav");
 
@@ -35784,6 +35788,15 @@ juce::var AudioEngine::runNAMRackRegression()
              juce::var(offlineRenderPlanValue));
 
     invalidNamFile.replaceWithText("{\"not\":\"a nam model\"}");
+    bool oversizedNamWritten = false;
+    {
+        juce::FileOutputStream output(oversizedNamFile);
+        oversizedNamWritten = output.openedOk()
+            && output.setPosition(
+                OpenStudioNAMModelSafety::maximumFileBytes)
+            && output.writeByte('}');
+        output.flush();
+    }
     const bool irWritten = writeFixtureIR(irFile);
     const bool alternateIRWritten = writeFixtureIR(alternateIRFile, true);
 
@@ -35846,6 +35859,21 @@ juce::var AudioEngine::runNAMRackRegression()
              invalidLoadRejected ? "pass" : "fail",
              "Invalid .nam content should fail safely and leave the amp slot unloaded.",
              rack.getLastLoadError());
+
+    const bool oversizedLoadRejected = oversizedNamWritten
+        && oversizedNamFile.getSize()
+            == OpenStudioNAMModelSafety::maximumFileBytes + 1
+        && ! rack.loadAmpModel(
+            oversizedNamFile.getFullPathName())
+        && ! rack.hasAmpModel()
+        && rack.getLastLoadError().contains(
+            OpenStudioNAMModelSafety::maximumFileDescription);
+    addCheck(
+        checks,
+        "oversized_nam_rejected_before_allocation",
+        oversizedLoadRejected ? "pass" : "fail",
+        "A NAM file one byte above the shared 64 MiB live/child ceiling must be rejected before JSON allocation or child-process parsing.",
+        rack.getLastLoadError());
 
     auto runNAMFixture = [&] (const juce::File& modelFile, const juce::String& architectureLabel)
     {
@@ -45076,18 +45104,20 @@ juce::var AudioEngine::runNAMRackRegression()
                 embeddedBaseline.getData(),
                 static_cast<int>(embeddedBaseline.getSize()));
             if (baselineRecalled)
-                settleAmpHandoff(recallRack);
+                recallRack.reset();
             const bool recalledEmbeddedCorrect = baselineRecalled
                 && recallRack.ampModelIncludesCab()
+                && recallRack.hasCabIR()
                 && recallRack.isCabRequestedEnabled() == requestedEnabled
                 && recallRack.cabEnabled.load() < 0.5f;
             const bool secondAmpOnlyLoaded =
                 recallRack.loadAmpModel(
                     a2ModelFile.getFullPathName());
             if (secondAmpOnlyLoaded)
-                settleAmpHandoff(recallRack);
+                recallRack.reset();
             const bool secondAmpOnlySwitch = secondAmpOnlyLoaded
                 && ! recallRack.ampModelIncludesCab()
+                && recallRack.hasCabIR()
                 && recallRack.isCabRequestedEnabled() == requestedEnabled
                 && (recallRack.cabEnabled.load() >= 0.5f) == requestedEnabled;
 
@@ -49440,7 +49470,7 @@ juce::var AudioEngine::runNAMRackRegression()
              embeddedCabAvailable
                  ? (static_cast<bool>(embeddedCabRoutingProbe.getProperty("pass", false)) ? "pass" : "fail")
                  : "not_asserted",
-             "amp_cab captures should bypass a separate Cab/IR, keep it bypassed when an IR is selected, and restore the exact prior Cab state when switching away or clearing the capture.",
+             "amp_cab captures should bypass a separate Cab/IR, keep it bypassed when an IR is selected, and restore the exact prior Cab state through live handoffs and immediate offline/reset publication when switching away or clearing the capture.",
              embeddedCabRoutingProbe);
     const bool declaredCaptureFallbackPass =
         static_cast<bool>(embeddedCabRoutingProbe.getProperty(
@@ -54032,6 +54062,367 @@ juce::var AudioEngine::runNAMRackRegression()
     const int temporaryMasterRackIndex = masterFXBeforeArray != nullptr
         ? masterFXBeforeArray->size()
         : 0;
+    // Deterministically hold the publication gate while a Cab worker reaches
+    // its final hand-off, then reconfigure the host on the owning thread. The
+    // stale prepared engine must be rejected and retried for the new format;
+    // strict multi-resource failure must leave the already-audible Cab intact.
+    auto runNAMHostPublicationRaceProbe = [&] () -> juce::var
+    {
+        auto* value = new juce::DynamicObject();
+        S13NAMRack rack;
+        rack.prepareToPlay(44100.0, 128);
+        const auto fixture = juce::File::getSpecialLocation(
+            juce::File::tempDirectory).getChildFile(
+                "OpenStudio_NAM_Publication_" + juce::Uuid().toString() + ".wav");
+        juce::AudioBuffer<float> impulse(2, 512);
+        impulse.clear();
+        impulse.setSample(0, 0, 1.0f);
+        impulse.setSample(1, 0, 1.0f);
+        const bool fixtureWritten = writeBufferToWavFile(
+            impulse, impulse.getNumSamples(), 48000.0, fixture);
+
+        bool loadResult = false;
+        bool reachedPublicationGate = false;
+        if (fixtureWritten)
+        {
+            rack.modelHostPublicationLock.enter();
+            const auto attemptsBefore =
+                rack.cabPublicationAttemptCount.load(
+                    std::memory_order_relaxed);
+            std::thread loader([&]
+            {
+                loadResult = rack.loadCabIR(fixture.getFullPathName());
+            });
+            const auto deadline = juce::Time::getMillisecondCounter() + 5000U;
+            while (juce::Time::getMillisecondCounter() < deadline)
+            {
+                if (rack.cabPublicationAttemptCount.load(
+                        std::memory_order_relaxed) > attemptsBefore)
+                {
+                    reachedPublicationGate = true;
+                    break;
+                }
+                juce::Thread::sleep(1);
+            }
+            rack.prepareToPlay(48000.0, 256);
+            rack.modelHostPublicationLock.exit();
+            loader.join();
+        }
+
+        S13NAMRack::ModelHostConfigurationSnapshot hostSnapshot;
+        const bool hostSnapshotRead =
+            rack.readStableModelHostConfiguration(hostSnapshot);
+        bool publishedForCurrentHost = false;
+        S13NAMRack::LoadedCabIR* cabBeforeFailedRestore = nullptr;
+        {
+            const juce::ScopedLock lock(rack.cabIRLock);
+            cabBeforeFailedRestore = rack.cabIR.get();
+            publishedForCurrentHost = rack.cabIR != nullptr
+                && std::abs(rack.cabIR->preparedHostSampleRate
+                            - hostSnapshot.sampleRate) <= 0.5
+                && rack.cabIR->preparedHostBlockSize
+                    == hostSnapshot.blockSize
+                && rack.activeCabIR.load(std::memory_order_seq_cst)
+                    == rack.cabIR.get();
+        }
+
+        const auto missingModel = fixture.getSiblingFile(
+            "missing-" + juce::Uuid().toString() + ".nam");
+        const bool failedRestoreRejected = ! rack.restoreModelResourceState(
+            true, missingModel.getFullPathName(),
+            false, {},
+            true, {},
+            false, false);
+        bool failedRestoreLeftCabUntouched = false;
+        {
+            const juce::ScopedLock lock(rack.cabIRLock);
+            failedRestoreLeftCabUntouched = rack.cabIR.get()
+                    == cabBeforeFailedRestore
+                && rack.activeCabIR.load(std::memory_order_seq_cst)
+                    == cabBeforeFailedRestore
+                && rack.cabIRPath == fixture.getFullPathName();
+        }
+        const auto staleRejects =
+            rack.cabPublicationStaleGenerationRejectCount.load(
+                std::memory_order_relaxed);
+        S13NAMRack snapshotRack;
+        snapshotRack.prepareToPlay(48000.0, 64);
+        auto oldPedal = std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto oldAmp = std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto oldCab = std::make_shared<S13NAMRack::LoadedCabIR>();
+        auto newPedal = std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto newAmp = std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto newCab = std::make_shared<S13NAMRack::LoadedCabIR>();
+        snapshotRack.fallbackPedalModel.store(
+            oldPedal.get(), std::memory_order_relaxed);
+        snapshotRack.fallbackAmpModel.store(
+            oldAmp.get(), std::memory_order_relaxed);
+        snapshotRack.fallbackCabIR.store(
+            oldCab.get(), std::memory_order_relaxed);
+        snapshotRack.activePedalModel.store(
+            oldPedal.get(), std::memory_order_relaxed);
+        snapshotRack.activeAmpModel.store(
+            oldAmp.get(), std::memory_order_relaxed);
+        snapshotRack.activeCabIR.store(
+            oldCab.get(), std::memory_order_relaxed);
+        snapshotRack.ampModelHandoff.requestedModel.store(
+            oldAmp.get(), std::memory_order_relaxed);
+        snapshotRack.modelResourcePublicationGeneration.store(
+            2, std::memory_order_release);
+        std::atomic<int> publicationStage { 0 };
+        std::thread partialPublisher([&]
+        {
+            snapshotRack.fallbackPedalModel.store(
+                oldPedal.get(), std::memory_order_relaxed);
+            snapshotRack.fallbackAmpModel.store(
+                oldAmp.get(), std::memory_order_relaxed);
+            snapshotRack.fallbackCabIR.store(
+                oldCab.get(), std::memory_order_relaxed);
+            snapshotRack.modelResourcePublicationGeneration.store(
+                3, std::memory_order_release);
+            // Deliberately expose one partially-written active pointer while
+            // generation 3 is odd. The callback must use the complete fallback
+            // tuple and must not reload Amp independently later in its block.
+            snapshotRack.activeAmpModel.store(
+                newAmp.get(), std::memory_order_seq_cst);
+            publicationStage.store(1, std::memory_order_release);
+            const auto deadline =
+                juce::Time::getMillisecondCounter() + 5000U;
+            while (publicationStage.load(std::memory_order_acquire) < 2
+                   && juce::Time::getMillisecondCounter() < deadline)
+            {
+                juce::Thread::sleep(1);
+            }
+            snapshotRack.activePedalModel.store(
+                newPedal.get(), std::memory_order_seq_cst);
+            snapshotRack.activeCabIR.store(
+                newCab.get(), std::memory_order_seq_cst);
+            snapshotRack.modelResourcePublicationGeneration.store(
+                4, std::memory_order_release);
+            publicationStage.store(3, std::memory_order_release);
+        });
+        const auto partialPublicationDeadline =
+            juce::Time::getMillisecondCounter() + 5000U;
+        while (publicationStage.load(std::memory_order_acquire) < 1
+               && juce::Time::getMillisecondCounter()
+                      < partialPublicationDeadline)
+        {
+            juce::Thread::sleep(1);
+        }
+        const bool publisherReachedPartialState =
+            publicationStage.load(std::memory_order_acquire) >= 1;
+        juce::AudioBuffer<float> snapshotBlock(2, 64);
+        snapshotBlock.clear();
+        juce::MidiBuffer snapshotMidi;
+        snapshotRack.processBlock(snapshotBlock, snapshotMidi);
+        const bool inFlightCallbackSawOldSet =
+            publisherReachedPartialState
+            && snapshotRack.diagnosticLastBlockPedalModel.load(
+                std::memory_order_relaxed) == oldPedal.get()
+            && snapshotRack.diagnosticLastBlockAmpModel.load(
+                std::memory_order_relaxed) == oldAmp.get()
+            && snapshotRack.diagnosticLastBlockCabIR.load(
+                std::memory_order_relaxed) == oldCab.get();
+
+        publicationStage.store(2, std::memory_order_release);
+        partialPublisher.join();
+        snapshotBlock.clear();
+        snapshotRack.processBlock(snapshotBlock, snapshotMidi);
+        const bool completedCallbackSawNewSet =
+            publicationStage.load(std::memory_order_acquire) == 3
+            && snapshotRack.diagnosticLastBlockPedalModel.load(
+                std::memory_order_relaxed) == newPedal.get()
+            && snapshotRack.diagnosticLastBlockAmpModel.load(
+                std::memory_order_relaxed) == newAmp.get()
+            && snapshotRack.diagnosticLastBlockCabIR.load(
+                std::memory_order_relaxed) == newCab.get();
+        const bool callbackResourceSnapshotCoherent =
+            inFlightCallbackSawOldSet
+            && completedCallbackSawNewSet;
+
+        // Exercise the real audio-thread finisher while a second restore owns
+        // the requested-tuple publication lock and has written only one member
+        // of its new tuple. The callback must never wait, must remain on the
+        // complete fallback tuple at zero gain, and must publish the complete
+        // second tuple only after that writer releases the lock.
+        S13NAMRack overlappingRestoreRack;
+        overlappingRestoreRack.prepareToPlay(48000.0, 64);
+        auto overlapOldPedal =
+            std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto overlapOldAmp =
+            std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto overlapOldCab =
+            std::make_shared<S13NAMRack::LoadedCabIR>();
+        auto overlapNewPedal =
+            std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto overlapNewAmp =
+            std::make_shared<S13NAMRack::LoadedNAMModel>();
+        auto overlapNewCab =
+            std::make_shared<S13NAMRack::LoadedCabIR>();
+        overlappingRestoreRack.fallbackPedalModel.store(
+            overlapOldPedal.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.fallbackAmpModel.store(
+            overlapOldAmp.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.fallbackCabIR.store(
+            overlapOldCab.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.activePedalModel.store(
+            overlapOldPedal.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.activeAmpModel.store(
+            overlapOldAmp.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.activeCabIR.store(
+            overlapOldCab.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.requestedPedalModel.store(
+            overlapOldPedal.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.requestedModel.store(
+            overlapOldAmp.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.requestedCabIR.store(
+            overlapOldCab.get(), std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.publishesResourceTransaction.store(
+            true, std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.requestGeneration.store(
+            1, std::memory_order_relaxed);
+        overlappingRestoreRack.ampModelHandoff.consumedRequestGeneration = 1;
+        overlappingRestoreRack.ampModelHandoff.phase =
+            S13NAMRack::AmpModelHandoffPhase::fadeOut;
+        overlappingRestoreRack.ampModelHandoff.currentGain = 0.0f;
+        overlappingRestoreRack.ampModelHandoff.phaseStartGain = 0.0f;
+        overlappingRestoreRack.ampModelHandoff.phaseSamplePosition = 1;
+        overlappingRestoreRack.ampModelHandoff.phaseSampleCount = 1;
+        overlappingRestoreRack.modelResourcePublicationGeneration.store(
+            3, std::memory_order_release);
+
+        overlappingRestoreRack.modelHostPublicationLock.enter();
+        overlappingRestoreRack.ampModelHandoff.requestedCabIR.store(
+            overlapNewCab.get(), std::memory_order_release);
+        juce::AudioBuffer<float> overlappingBlock(2, 64);
+        overlappingBlock.clear();
+        juce::MidiBuffer overlappingMidi;
+        std::thread overlappingCallback([&]
+        {
+            overlappingRestoreRack.processBlock(
+                overlappingBlock, overlappingMidi);
+        });
+        overlappingCallback.join();
+        const bool overlappingFinisherDeferredWithoutBlocking =
+            (overlappingRestoreRack.modelResourcePublicationGeneration.load(
+                 std::memory_order_acquire) & 1U) != 0U
+            && overlappingRestoreRack.ampModelHandoff
+                   .publishesResourceTransaction.load(
+                       std::memory_order_acquire)
+            && overlappingRestoreRack.modelSnapshotLockMissCount.load(
+                   std::memory_order_relaxed) >= 1
+            && overlappingRestoreRack.diagnosticLastBlockPedalModel.load(
+                   std::memory_order_relaxed) == overlapOldPedal.get()
+            && overlappingRestoreRack.diagnosticLastBlockAmpModel.load(
+                   std::memory_order_relaxed) == overlapOldAmp.get()
+            && overlappingRestoreRack.diagnosticLastBlockCabIR.load(
+                   std::memory_order_relaxed) == overlapOldCab.get();
+
+        overlappingRestoreRack.ampModelHandoff.requestedPedalModel.store(
+            overlapNewPedal.get(), std::memory_order_release);
+        overlappingRestoreRack.ampModelHandoff.requestedModel.store(
+            overlapNewAmp.get(), std::memory_order_release);
+        overlappingRestoreRack.ampModelHandoff.requestGeneration.fetch_add(
+            1, std::memory_order_release);
+        overlappingRestoreRack.modelHostPublicationLock.exit();
+
+        bool overlappingCallbacksStayedCoherent = true;
+        bool overlappingSecondTuplePublished = false;
+        for (int block = 0; block < 32; ++block)
+        {
+            overlappingBlock.clear();
+            overlappingRestoreRack.processBlock(
+                overlappingBlock, overlappingMidi);
+            const auto* observedPedal =
+                overlappingRestoreRack.diagnosticLastBlockPedalModel.load(
+                    std::memory_order_relaxed);
+            const auto* observedAmp =
+                overlappingRestoreRack.diagnosticLastBlockAmpModel.load(
+                    std::memory_order_relaxed);
+            const auto* observedCab =
+                overlappingRestoreRack.diagnosticLastBlockCabIR.load(
+                    std::memory_order_relaxed);
+            const bool observedOldTuple =
+                observedPedal == overlapOldPedal.get()
+                && observedAmp == overlapOldAmp.get()
+                && observedCab == overlapOldCab.get();
+            const bool observedNewTuple =
+                observedPedal == overlapNewPedal.get()
+                && observedAmp == overlapNewAmp.get()
+                && observedCab == overlapNewCab.get();
+            overlappingCallbacksStayedCoherent =
+                overlappingCallbacksStayedCoherent
+                && (observedOldTuple || observedNewTuple);
+            overlappingSecondTuplePublished =
+                overlappingSecondTuplePublished
+                || observedNewTuple;
+            if (! overlappingCallbacksStayedCoherent
+                || overlappingSecondTuplePublished)
+            {
+                break;
+            }
+        }
+        const bool overlappingRestorePublicationCoherent =
+            overlappingFinisherDeferredWithoutBlocking
+            && overlappingCallbacksStayedCoherent
+            && overlappingSecondTuplePublished
+            && (overlappingRestoreRack.modelResourcePublicationGeneration.load(
+                    std::memory_order_acquire) & 1U) == 0U
+            && overlappingRestoreRack.activePedalModel.load(
+                   std::memory_order_relaxed) == overlapNewPedal.get()
+            && overlappingRestoreRack.activeAmpModel.load(
+                   std::memory_order_relaxed) == overlapNewAmp.get()
+            && overlappingRestoreRack.activeCabIR.load(
+                   std::memory_order_relaxed) == overlapNewCab.get();
+        const bool pass = fixtureWritten
+            && reachedPublicationGate
+            && loadResult
+            && hostSnapshotRead
+            && publishedForCurrentHost
+            && staleRejects >= 1
+            && failedRestoreRejected
+            && failedRestoreLeftCabUntouched
+            && callbackResourceSnapshotCoherent
+            && overlappingRestorePublicationCoherent;
+        value->setProperty("fixtureWritten", fixtureWritten);
+        value->setProperty("reachedPublicationGate", reachedPublicationGate);
+        value->setProperty("loadResult", loadResult);
+        value->setProperty("hostSnapshotRead", hostSnapshotRead);
+        value->setProperty("publishedForCurrentHost", publishedForCurrentHost);
+        value->setProperty("staleGenerationRejects",
+                           static_cast<double>(staleRejects));
+        value->setProperty("failedRestoreRejected", failedRestoreRejected);
+        value->setProperty("failedRestoreLeftCabUntouched",
+                           failedRestoreLeftCabUntouched);
+        value->setProperty("publisherReachedPartialState",
+                           publisherReachedPartialState);
+        value->setProperty("inFlightCallbackSawOldSet",
+                           inFlightCallbackSawOldSet);
+        value->setProperty("completedCallbackSawNewSet",
+                           completedCallbackSawNewSet);
+        value->setProperty("callbackResourceSnapshotCoherent",
+                           callbackResourceSnapshotCoherent);
+        value->setProperty("overlappingFinisherDeferredWithoutBlocking",
+                           overlappingFinisherDeferredWithoutBlocking);
+        value->setProperty("overlappingCallbacksStayedCoherent",
+                           overlappingCallbacksStayedCoherent);
+        value->setProperty("overlappingSecondTuplePublished",
+                           overlappingSecondTuplePublished);
+        value->setProperty("overlappingRestorePublicationCoherent",
+                           overlappingRestorePublicationCoherent);
+        value->setProperty("pass", pass);
+        fixture.deleteFile();
+        return juce::var(value);
+    };
+    const auto namHostPublicationRaceProbe =
+        runNAMHostPublicationRaceProbe();
+    addCheck(checks,
+             "nam_host_generation_and_multi_resource_publication_atomic",
+             namHostPublicationRaceProbe.getProperty("pass", false)
+                 ? "pass" : "fail",
+             "Cab publication must reject a graph prepared for a superseded host generation, strict preflight failure must leave live resources untouched, and every callback must observe either the complete old or complete new Pedal/Amp/Cab set.",
+             namHostPublicationRaceProbe);
+
     const bool temporaryMasterRackAdded = addMasterBuiltInFX("OpenStudio NAM Rack");
     int masterPublicationLeaseRequestCount = 0;
     bool masterRestoreCommittedAtomically = false;
@@ -55422,6 +55813,7 @@ juce::var AudioEngine::runNAMRackRegression()
     root->setProperty("checks", juce::var(checks));
 
     invalidNamFile.deleteFile();
+    oversizedNamFile.deleteFile();
     irFile.deleteFile();
     alternateIRFile.deleteFile();
     return juce::var(root);
@@ -56241,6 +56633,15 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
                 result.renderedValue);
         }
 
+        // A strict preset restore publishes its Pedal/Amp/Cab tuple at the
+        // Amp handoff's zero-gain boundary. Offline artifact renders do not
+        // have a live callback running between restore and verification, so
+        // reset the rack first to establish the already-prepared tuple as the
+        // current owner. This is the same setup used by the stage-capture
+        // render below and prevents a prepared Cab from being misreported as
+        // absent merely because its live handoff has not consumed a block.
+        auditionRack.reset();
+
         result.ampModelPathReadback = auditionRack.getAmpModelPath();
         result.cabIRPathReadback = auditionRack.getCabIRPath();
         result.cabRequested = auditionRack.isCabRequestedEnabled();
@@ -56282,10 +56683,6 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         auto expectedTree = selectedPreset.canonicalTree.createCopy();
         expectedTree.removeProperty("calibrationReferenceDbu", nullptr);
         expectedTree.removeProperty("auditionSource", nullptr);
-        expectedTree.setProperty(
-            "cabEnabled",
-            static_cast<double>(result.cabActive ? 1.0 : 0.0),
-            nullptr);
         if (renderedTree.hasProperty("tonePresetStateVersion"))
         {
             expectedTree.setProperty(
@@ -56345,9 +56742,9 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             && auditionRack.getNAMEffectsDspVersion()
                 == currentEffectsDspVersion;
 
-        // Establish the restored/one-toggle state at the beginning of each
-        // independent offline artifact instead of auditioning recall ramps.
-        auditionRack.reset();
+        // The reset above also establishes the restored/one-toggle state at
+        // the beginning of each independent artifact instead of auditioning
+        // live recall ramps.
         for (int start = 0;
              start < selectedPresetArtifactSamples;
              start += fixtureBlockSize)
@@ -60380,8 +60777,68 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         setTrackMIDIClips(renderFreezeTrackId,
             R"json([{"id":"render-freeze-midi-clip","startTime":0.0,"duration":1.0,"events":[{"type":"noteOn","timestamp":0.0,"note":67,"velocity":118,"channel":1},{"type":"cc","timestamp":0.02,"controller":11,"value":100,"channel":1},{"type":"pitchBend","timestamp":0.04,"value":12288,"channel":1},{"type":"channelPressure","timestamp":0.06,"value":48,"channel":1},{"type":"noteOff","timestamp":0.5,"note":67,"velocity":0,"channel":1}]}])json");
 
+        const bool namRackAdded = addTrackBuiltInFX(
+            renderFreezeTrackId, "OpenStudio NAM Rack", false);
+        S13NAMRack* renderFreezeRack = nullptr;
+        if (namRackAdded)
+        {
+            auto trackIt = trackMap.find(renderFreezeTrackId);
+            if (trackIt != trackMap.end() && trackIt->second != nullptr)
+            {
+                renderFreezeRack = dynamic_cast<S13NAMRack*>(
+                    trackIt->second->getTrackFXProcessor(0));
+            }
+        }
         const juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
+        const juce::File renderBaselineFile = tempDir.getChildFile("studio13_midi_render_no_audition_fixture_" + juce::Uuid().toString() + ".wav");
         const juce::File renderFile = tempDir.getChildFile("studio13_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
+        constexpr std::uint64_t auditionDisabledSampleSentinel =
+            static_cast<std::uint64_t>(1) << 39U;
+        constexpr std::uint64_t auditionEnabledSampleSentinel =
+            static_cast<std::uint64_t>(1) << 40U;
+        const std::uint64_t maximumRealtimeCursorAdvance =
+            static_cast<std::uint64_t>(std::ceil(
+                juce::jmax(44100.0, currentSampleRate) * 10.0));
+        const auto auditionCursorWasRestored = [maximumRealtimeCursorAdvance] (
+            std::uint64_t actual,
+            std::uint64_t expected)
+        {
+            return actual >= expected
+                && actual - expected <= maximumRealtimeCursorAdvance;
+        };
+        if (renderFreezeRack != nullptr)
+        {
+            renderFreezeRack->auditionSource.store(
+                0.0f, std::memory_order_relaxed);
+            renderFreezeRack->auditionSourceSample =
+                auditionDisabledSampleSentinel;
+        }
+        const bool renderBaselineOk = renderProject(
+            "master", 0.0, 1.0, renderBaselineFile.getFullPathName(),
+            "wav", currentSampleRate, 24, 2,
+            false, false, 0.0, false);
+        juce::AudioBuffer<float> renderBaselineBuffer;
+        double renderBaselineSampleRate = 0.0;
+        const bool renderBaselineReadable = renderBaselineOk
+            && readAudioFileForParity(
+                renderBaselineFile,
+                renderBaselineBuffer,
+                renderBaselineSampleRate);
+        const bool renderBaselineRestoredNAMTransient =
+            renderFreezeRack != nullptr
+            && renderFreezeRack->auditionSource.load(
+                std::memory_order_relaxed) < 0.5f
+            && auditionCursorWasRestored(
+                renderFreezeRack->auditionSourceSample,
+                auditionDisabledSampleSentinel);
+
+        if (renderFreezeRack != nullptr)
+        {
+            renderFreezeRack->auditionSource.store(
+                1.0f, std::memory_order_relaxed);
+            renderFreezeRack->auditionSourceSample =
+                auditionEnabledSampleSentinel;
+        }
         const bool renderOk = renderProject("master", 0.0, 1.0, renderFile.getFullPathName(),
                                             "wav", currentSampleRate, 24, 2,
                                             false, false, 0.0, false);
@@ -60391,6 +60848,86 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const float renderPeak = renderReadable
             ? peakFromFloatBuffer(renderBuffer, renderBuffer.getNumSamples())
             : 0.0f;
+        const bool renderRestoredNAMTransient = renderFreezeRack != nullptr
+            && renderFreezeRack->auditionSource.load(
+                std::memory_order_relaxed) >= 0.5f
+            && auditionCursorWasRestored(
+                renderFreezeRack->auditionSourceSample,
+                auditionEnabledSampleSentinel);
+
+        const auto maximumBufferDifference = [] (
+            const juce::AudioBuffer<float>& left,
+            const juce::AudioBuffer<float>& right)
+        {
+            if (left.getNumChannels() != right.getNumChannels()
+                || left.getNumSamples() != right.getNumSamples())
+            {
+                return std::numeric_limits<float>::infinity();
+            }
+            float maximumDifference = 0.0f;
+            for (int channel = 0; channel < left.getNumChannels(); ++channel)
+            {
+                const auto* leftSamples = left.getReadPointer(channel);
+                const auto* rightSamples = right.getReadPointer(channel);
+                for (int sample = 0; sample < left.getNumSamples(); ++sample)
+                {
+                    maximumDifference = juce::jmax(
+                        maximumDifference,
+                        std::abs(leftSamples[sample] - rightSamples[sample]));
+                }
+            }
+            return maximumDifference;
+        };
+        const float renderAuditionExclusionError =
+            renderBaselineReadable && renderReadable
+                && std::abs(
+                    renderBaselineSampleRate - renderSampleRate) < 0.01
+            ? maximumBufferDifference(renderBaselineBuffer, renderBuffer)
+            : std::numeric_limits<float>::infinity();
+
+        if (renderFreezeRack != nullptr)
+        {
+            renderFreezeRack->auditionSource.store(
+                0.0f, std::memory_order_relaxed);
+            renderFreezeRack->auditionSourceSample =
+                auditionDisabledSampleSentinel;
+        }
+        const juce::var freezeBaselineResult =
+            freezeTrack(renderFreezeTrackId);
+        bool freezeBaselineOk = false;
+        juce::File freezeBaselineFile;
+        if (auto* freezeBaselineObj =
+                freezeBaselineResult.getDynamicObject())
+        {
+            freezeBaselineOk = static_cast<bool>(
+                freezeBaselineObj->getProperty("success"));
+            freezeBaselineFile = juce::File(
+                freezeBaselineObj->getProperty("filePath").toString());
+        }
+        juce::AudioBuffer<float> freezeBaselineBuffer;
+        double freezeBaselineSampleRate = 0.0;
+        const bool freezeBaselineReadable = freezeBaselineOk
+            && readAudioFileForParity(
+                freezeBaselineFile,
+                freezeBaselineBuffer,
+                freezeBaselineSampleRate);
+        const bool freezeBaselineRestoredNAMTransient =
+            renderFreezeRack != nullptr
+            && renderFreezeRack->auditionSource.load(
+                std::memory_order_relaxed) < 0.5f
+            && auditionCursorWasRestored(
+                renderFreezeRack->auditionSourceSample,
+                auditionDisabledSampleSentinel);
+        if (freezeBaselineFile.existsAsFile())
+            freezeBaselineFile.deleteFile();
+
+        if (renderFreezeRack != nullptr)
+        {
+            renderFreezeRack->auditionSource.store(
+                1.0f, std::memory_order_relaxed);
+            renderFreezeRack->auditionSourceSample =
+                auditionEnabledSampleSentinel;
+        }
 
         const juce::var freezeResult = freezeTrack(renderFreezeTrackId);
         bool freezeOk = false;
@@ -60407,26 +60944,61 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const float freezePeak = freezeReadable
             ? peakFromFloatBuffer(freezeBuffer, freezeBuffer.getNumSamples())
             : 0.0f;
+        const bool freezeRestoredNAMTransient = renderFreezeRack != nullptr
+            && renderFreezeRack->auditionSource.load(
+                std::memory_order_relaxed) >= 0.5f
+            && auditionCursorWasRestored(
+                renderFreezeRack->auditionSourceSample,
+                auditionEnabledSampleSentinel);
+        const float freezeAuditionExclusionError =
+            freezeBaselineReadable && freezeReadable
+                && std::abs(
+                    freezeBaselineSampleRate - freezeSampleRate) < 0.01
+            ? maximumBufferDifference(freezeBaselineBuffer, freezeBuffer)
+            : std::numeric_limits<float>::infinity();
 
-        renderFreezePass = renderOk
+        renderFreezePass = namRackAdded
+            && renderFreezeRack != nullptr
+            && renderBaselineOk
+            && renderBaselineReadable
+            && renderOk
             && renderReadable
             && renderPeak > 1.0e-5f
             && renderPeak < 0.75f
+            && renderAuditionExclusionError <= 1.0e-6f
+            && renderBaselineRestoredNAMTransient
+            && freezeBaselineOk
+            && freezeBaselineReadable
             && freezeOk
             && freezeReadable
             && freezePeak > 1.0e-5f
-            && freezePeak < 0.75f;
-        renderFreezeDetail = "renderOk=" + juce::String(renderOk ? "true" : "false")
+            && freezePeak < 0.75f
+            && freezeAuditionExclusionError <= 1.0e-6f
+            && renderRestoredNAMTransient
+            && freezeBaselineRestoredNAMTransient
+            && freezeRestoredNAMTransient;
+        renderFreezeDetail = "renderBaselineOk=" + juce::String(renderBaselineOk ? "true" : "false")
+            + ", renderOk=" + juce::String(renderOk ? "true" : "false")
             + ", renderReadable=" + juce::String(renderReadable ? "true" : "false")
             + ", renderPeak=" + juce::String(renderPeak, 8)
+            + ", renderAuditionExclusionError=" + juce::String(renderAuditionExclusionError, 9)
+            + ", freezeBaselineOk=" + juce::String(freezeBaselineOk ? "true" : "false")
             + ", freezeOk=" + juce::String(freezeOk ? "true" : "false")
             + ", freezeReadable=" + juce::String(freezeReadable ? "true" : "false")
             + ", freezePeak=" + juce::String(freezePeak, 8)
+            + ", freezeAuditionExclusionError=" + juce::String(freezeAuditionExclusionError, 9)
+            + ", renderBaselineRestoredNAMTransient=" + juce::String(renderBaselineRestoredNAMTransient ? "true" : "false")
+            + ", renderRestoredNAMTransient=" + juce::String(renderRestoredNAMTransient ? "true" : "false")
+            + ", freezeBaselineRestoredNAMTransient=" + juce::String(freezeBaselineRestoredNAMTransient ? "true" : "false")
+            + ", freezeRestoredNAMTransient=" + juce::String(freezeRestoredNAMTransient ? "true" : "false")
             + ", pitchBendValue=12288"
             + ", renderSampleRate=" + juce::String(renderSampleRate, 2)
             + ", freezeSampleRate=" + juce::String(freezeSampleRate, 2);
 
+        renderBaselineFile.deleteFile();
         renderFile.deleteFile();
+        if (freezeBaselineFile.existsAsFile())
+            freezeBaselineFile.deleteFile();
         if (freezeFile.existsAsFile())
             freezeFile.deleteFile();
         removeTrack(renderFreezeTrackId);
@@ -68228,30 +68800,7 @@ bool AudioEngine::setMasterPluginState(
 
 juce::File AudioEngine::findFFmpegExe() const
 {
-    // Search for ffmpeg.exe in common locations relative to the executable
-    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-
-    // 1. Same directory as executable
-    auto ffmpeg = exeDir.getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile()) return ffmpeg;
-
-    // 2. tools/ subdirectory
-    ffmpeg = exeDir.getChildFile("tools").getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile()) return ffmpeg;
-
-    // 3. ../tools/ (one level up)
-    ffmpeg = exeDir.getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile()) return ffmpeg;
-
-    // 4. ../../tools/ (two levels up, for build/Studio13_artefacts/Release/)
-    ffmpeg = exeDir.getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile()) return ffmpeg;
-
-    // 5. ../../../tools/ (three levels up, for deeper build paths)
-    ffmpeg = exeDir.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile()) return ffmpeg;
-
-    return juce::File(); // Not found
+    return OpenStudioFFmpeg::findExecutable();
 }
 
 bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
@@ -68261,7 +68810,7 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     auto ffmpeg = findFFmpegExe();
     if (!ffmpeg.existsAsFile())
     {
-        logToDisk("convertWithFFmpeg: FAIL - ffmpeg.exe not found");
+        logToDisk("convertWithFFmpeg: FAIL - FFmpeg was not found in the app bundle or PATH");
         return false;
     }
 
@@ -68811,6 +69360,9 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         juce::AudioProcessor* processor;
         juce::MemoryBlock savedState;
         bool preparedByTrack = false;
+        bool hasNAMTransientState = false;
+        float namAuditionSource = 0.0f;
+        std::uint64_t namAuditionSourceSample = 0;
     };
     std::vector<PluginStateBackup> pluginBackups;
     std::vector<TrackProcessor*> renderPreparedTracks;
@@ -68829,6 +69381,16 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         PluginStateBackup backup;
         backup.processor = proc;
         backup.preparedByTrack = preparedByTrack;
+        if (auto* rack = dynamic_cast<S13NAMRack*>(proc))
+        {
+            // auditionSource is deliberately excluded from durable project and
+            // preset state. Offline work still has to restore the live monitor
+            // session exactly, including its deterministic source position.
+            backup.hasNAMTransientState = true;
+            backup.namAuditionSource = rack->auditionSource.load(
+                std::memory_order_relaxed);
+            backup.namAuditionSourceSample = rack->auditionSourceSample;
+        }
         proc->getStateInformation(backup.savedState);
         pluginBackups.push_back(std::move(backup));
     };
@@ -68887,6 +69449,15 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                                                            (int)backup.savedState.getSize());
                 }
                 backup.processor->reset();
+                if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor);
+                    rack != nullptr && backup.hasNAMTransientState)
+                {
+                    rack->auditionSource.store(
+                        backup.namAuditionSource,
+                        std::memory_order_relaxed);
+                    rack->auditionSourceSample =
+                        backup.namAuditionSourceSample;
+                }
             }
         }
 
@@ -70814,6 +71385,9 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     {
         juce::AudioProcessor* processor = nullptr;
         juce::MemoryBlock state;
+        bool hasNAMTransientState = false;
+        float namAuditionSource = 0.0f;
+        std::uint64_t namAuditionSourceSample = 0;
     };
     std::vector<FreezeProcessorBackup> processorBackups;
     const auto backupProcessor = [&processorBackups] (juce::AudioProcessor* processor)
@@ -70822,6 +71396,13 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
             return;
         FreezeProcessorBackup backup;
         backup.processor = processor;
+        if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+        {
+            backup.hasNAMTransientState = true;
+            backup.namAuditionSource = rack->auditionSource.load(
+                std::memory_order_relaxed);
+            backup.namAuditionSourceSample = rack->auditionSourceSample;
+        }
         processor->getStateInformation(backup.state);
         processorBackups.push_back(std::move(backup));
     };
@@ -70854,12 +71435,23 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
             if (backup.processor == nullptr)
                 continue;
             if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+            {
                 rack->restoreRenderPassStateInformation(backup.state.getData(),
                                                         static_cast<int>(backup.state.getSize()));
+            }
             else
                 backup.processor->setStateInformation(backup.state.getData(),
                                                       static_cast<int>(backup.state.getSize()));
             backup.processor->reset();
+            if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor);
+                rack != nullptr && backup.hasNAMTransientState)
+            {
+                rack->auditionSource.store(
+                    backup.namAuditionSource,
+                    std::memory_order_relaxed);
+                rack->auditionSourceSample =
+                    backup.namAuditionSourceSample;
+            }
         }
         recalculatePDC();
     };
@@ -70871,8 +71463,8 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     track->prepareToPlay(renderRate, renderBlockSize);
     for (auto& backup : processorBackups)
     {
-        if (dynamic_cast<S13NAMRack*>(backup.processor) != nullptr)
-            setOpenStudioBuiltInParameterValue(backup.processor, "auditionSource", 0.0f);
+        if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+            rack->auditionSource.store(0.0f, std::memory_order_relaxed);
         if (backup.processor != nullptr)
             backup.processor->reset();
     }

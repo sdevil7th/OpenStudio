@@ -61,6 +61,20 @@ public:
         return dynamic_cast<MainComponent*>(getContentComponent());
     }
 
+    void requestHostedBrowserFocus()
+    {
+        if (auto* component = getHostedComponent())
+            component->requestEmbeddedBrowserFocus();
+    }
+
+    void activeWindowStatusChanged() override
+    {
+        juce::DocumentWindow::activeWindowStatusChanged();
+
+        if (isActiveWindow())
+            requestHostedBrowserFocus();
+    }
+
 private:
     MixerWindowManager& owner;
 };
@@ -134,6 +148,7 @@ bool MixerWindowManager::open(const juce::Rectangle<int>& bounds)
         mixerWindow->setBounds(targetBounds);
         mixerWindow->setVisible(true);
         mixerWindow->toFront(true);
+        mixerWindow->requestHostedBrowserFocus();
         setState(WindowState::visible, "open existing bounds=" + describeBounds(targetBounds));
         scheduleStartupNudge();
         return true;
@@ -255,6 +270,7 @@ bool MixerWindowManager::focus()
 
     mixerWindow->setVisible(true);
     mixerWindow->toFront(true);
+    mixerWindow->requestHostedBrowserFocus();
     setState(WindowState::visible, "focus");
     scheduleStartupNudge();
     return true;
@@ -435,7 +451,10 @@ bool MixerWindowManager::createWindow(const juce::Rectangle<int>& targetBounds, 
     mixerWindow->setVisible(visible);
 
     if (visible)
+    {
         mixerWindow->toFront(true);
+        mixerWindow->requestHostedBrowserFocus();
+    }
 
     setState(visible ? WindowState::visible : WindowState::readyHidden,
              juce::String(visible ? "created visible bounds=" : "created hidden bounds=") + describeBounds(targetBounds));

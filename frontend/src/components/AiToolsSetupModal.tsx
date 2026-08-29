@@ -23,7 +23,7 @@ const IS_WINDOWS = navigator.platform.startsWith("Win") || navigator.userAgent.i
 
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 const STABLE_AUDIO_MODEL_URL = "https://huggingface.co/stabilityai/stable-audio-3-medium";
-const STABLE_AUDIO_INITIAL_PATH = "C:\\Users\\srvds\\Downloads\\stable_audio_3";
+const STABLE_AUDIO_FOLDER_EXAMPLE = `Downloads${IS_WINDOWS ? "\\" : "/"}stable_audio_3`;
 const STABLE_AUDIO_REQUIRED_FILES = [
   "model.safetensors",
   "model_config.json",
@@ -422,7 +422,7 @@ export default function AiToolsSetupModal() {
     }
 
     if (!folder) {
-      setStableAudioSetupError(`No folder was selected. Choose the Stable Audio snapshot folder, for example ${STABLE_AUDIO_INITIAL_PATH}.`);
+      setStableAudioSetupError(`No folder was selected. Choose the Stable Audio snapshot folder, for example ${STABLE_AUDIO_FOLDER_EXAMPLE}.`);
       return;
     }
 
@@ -463,10 +463,6 @@ export default function AiToolsSetupModal() {
       return;
     }
     await runStableAudioSetup(folder);
-  };
-
-  const handleUseKnownStableAudioFolder = async () => {
-    await runStableAudioSetup(STABLE_AUDIO_INITIAL_PATH);
   };
 
   const handleInstallSelected = async () => {
@@ -579,14 +575,6 @@ export default function AiToolsSetupModal() {
             icon={<FolderOpen size={14} />}
           >
             Proceed with Setup
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void handleUseKnownStableAudioFolder()}
-            disabled={aiToolsStatus.installInProgress || stableAudioSetupBusy}
-          >
-            Use Downloads Folder
           </Button>
         </div>
       </div>

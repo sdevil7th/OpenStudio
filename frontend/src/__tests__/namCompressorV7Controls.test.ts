@@ -200,8 +200,6 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
       panel: readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8"),
       mixer: readFileSync(new URL("../components/NAMRackMixer.tsx", import.meta.url), "utf8"),
       design: readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8"),
-      registry: readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8"),
-      scene: readFileSync(new URL("../components/namScenes/pre-compressor.scene.json", import.meta.url), "utf8"),
       bridge: readFileSync(new URL("../services/NativeBridge.ts", import.meta.url), "utf8"),
       project: readFileSync(new URL("../store/actions/project.ts", import.meta.url), "utf8"),
     };
@@ -211,8 +209,6 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
       expect(sources.mixer).toContain(id);
       expect(sources.bridge).toContain(id);
       expect(id === "compressorEnabled" || sources.design.includes(id)).toBe(true);
-      expect(id === "compressorEnabled" || sources.registry.includes(id)).toBe(true);
-      expect(id === "compressorEnabled" || sources.scene.includes(id)).toBe(true);
     }
     expect(sources.design).toContain("NAM_COMPRESSOR_FACEPLATE_LAYOUT");
     expect(sources.design).toContain('body={BODIES.blueWide}');
@@ -234,6 +230,6 @@ describe("NAM Rack Compressor V7 frontend contract", () => {
     expect(sources.project).toContain("return isRetiredNAMRackAutomationParamId(lane?.param)");
     expect(sources.project).toContain("if (isRetiredNAMRackAutomationLane(lane)) return false");
     expect(Object.values(sources).join("\n")).not.toContain('paramId="compressorDetail"');
-    expect(`${sources.panel}\n${sources.design}\n${sources.registry}\n${sources.scene}`).not.toMatch(/\b(?:FET|OTA)\b/i);
+    expect(`${sources.panel}\n${sources.design}`).not.toMatch(/\b(?:FET|OTA)\b/i);
   });
 });

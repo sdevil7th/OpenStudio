@@ -1,5 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { createNAMBootSchema } from "../components/BuiltInPluginPanel";
@@ -8,9 +6,6 @@ import {
   NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT,
   NAM_PRE_SIGNAL_LAYOUT,
 } from "../components/NAMRackDesignPort";
-import { getNAMDesignBodyAsset } from "../components/NAMDesignAssets";
-import { NAM_RACK_DEVICE_SKINS } from "../components/NAMRackNeuralSkinRegistry";
-import { NAM_RACK_SCENE_BODY_ASSETS } from "../components/NAMRackSceneGraph";
 import { NAM_RACK_ADVANCED_CONTROL_IDS } from "../components/NAMRackMixer";
 import {
   CURRENT_NAM_EFFECTS_DSP_VERSION,
@@ -76,26 +71,6 @@ const POST_EQ_PARAM_IDS = [
   "eqLPFHz",
 ] as const;
 
-type SceneControl = {
-  paramId?: string;
-  kind: string;
-  label?: string;
-};
-
-type RackScene = {
-  controls: SceneControl[];
-};
-
-const readScene = (relativePath: string): RackScene => JSON.parse(
-  readFileSync(new URL(relativePath, import.meta.url), "utf8"),
-) as RackScene;
-
-const sorted = (values: readonly string[]) => [...values].sort();
-
-const interactiveSceneControls = (scene: RackScene) => scene.controls.filter(
-  (control) => control.paramId && ["knob", "switch", "footswitch", "fader"].includes(control.kind),
-);
-
 describe("NAM Rack approved-surface implementation contract", () => {
   it("exposes every approved Amp, post-EQ, Drive, and PRE-EQ parameter in the boot schema", () => {
     const schema = createNAMBootSchema(
@@ -153,99 +128,6 @@ describe("NAM Rack approved-surface implementation contract", () => {
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]).toEqual(DRIVE_PARAM_IDS);
     expect(new Set(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]).size).toBe(6);
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]).not.toContain("preEqLevelDb");
-  });
-
-  it("freezes the approved scene roles and exact public parameter identities", () => {
-    const amp = interactiveSceneControls(
-      readScene("../components/namScenes/amp-head.scene.json"),
-    );
-    expect(amp.map(({ paramId }) => paramId).sort()).toEqual(sorted(AMP_PARAM_IDS));
-    expect(amp.filter(({ kind }) => kind === "knob")).toHaveLength(7);
-    expect(amp.filter(({ kind }) => kind === "switch")).toHaveLength(3);
-    expect(amp.some(({ label }) => /(?:post|master)/i.test(label ?? ""))).toBe(false);
-
-    const postEq = interactiveSceneControls(
-      readScene("../components/namScenes/eq-rack.scene.json"),
-    );
-    expect(postEq.map(({ paramId }) => paramId).sort()).toEqual(sorted(POST_EQ_PARAM_IDS));
-    expect(postEq.filter(({ kind }) => kind === "fader")).toHaveLength(9);
-    expect(postEq.filter(({ kind }) => kind === "knob")).toHaveLength(3);
-    expect(postEq).toContainEqual(expect.objectContaining({
-      paramId: "eqEnabled",
-      kind: "switch",
-    }));
-    expect(postEq).toContainEqual(expect.objectContaining({
-      paramId: "eqLevelDb",
-      kind: "knob",
-    }));
-
-    const preEq = interactiveSceneControls(
-      readScene("../components/namScenes/pre-eq-boost.scene.json"),
-    );
-    expect(preEq.map(({ paramId }) => paramId).sort()).toEqual(sorted(PRE_EQ_PARAM_IDS));
-    expect(preEq).toHaveLength(11);
-    expect(preEq.filter(({ kind }) => kind === "fader")).toHaveLength(8);
-    expect(preEq).toContainEqual(expect.objectContaining({
-      paramId: "preEqEnabled",
-      kind: "footswitch",
-    }));
-
-    const drive = interactiveSceneControls(
-      readScene("../components/namScenes/pre-precision-drive.scene.json"),
-    );
-    expect(drive.map(({ paramId }) => paramId).sort()).toEqual(sorted(DRIVE_PARAM_IDS));
-    expect(drive).toHaveLength(6);
-    expect(drive.filter(({ kind }) => kind === "fader")).toHaveLength(0);
-    expect(drive).toContainEqual(expect.objectContaining({
-      paramId: "precisionDriveEnabled",
-      kind: "footswitch",
-    }));
-  });
-
-  it("maps every approved compatibility renderer to the current body and anchor contract", () => {
-    const expectedAssets = {
-      "amp-head-design-a": "amp-head-body-v5",
-      "eq-rack-design-a": "graphic-eq-body-v6",
-      "pre-eq-boost-design-a": "stompbox-body-white-wide",
-      "pre-precision-drive-design-a": "stompbox-body-stone",
-    } as const;
-    for (const [skinId, assetId] of Object.entries(expectedAssets)) {
-      expect(NAM_RACK_SCENE_BODY_ASSETS[skinId]).toEqual([assetId]);
-      const skin = NAM_RACK_DEVICE_SKINS.find(({ id }) => id === skinId);
-      expect(skin?.assetUrl).toBe(getNAMDesignBodyAsset(assetId).href);
-    }
-
-    const approvedRegistryParams = (skinId: keyof typeof expectedAssets) => {
-      const skin = NAM_RACK_DEVICE_SKINS.find(({ id }) => id === skinId);
-      return (skin?.controls ?? [])
-        .filter(({ kind, paramId }) => paramId && ["knob", "switch", "footswitch", "fader"].includes(kind))
-        .map(({ paramId }) => paramId as string)
-        .sort();
-    };
-    expect(approvedRegistryParams("amp-head-design-a")).toEqual(sorted(AMP_PARAM_IDS));
-    expect(approvedRegistryParams("eq-rack-design-a")).toEqual(sorted(POST_EQ_PARAM_IDS));
-    expect(approvedRegistryParams("pre-eq-boost-design-a")).toEqual(sorted(PRE_EQ_PARAM_IDS));
-    expect(approvedRegistryParams("pre-precision-drive-design-a")).toEqual(sorted(DRIVE_PARAM_IDS));
-
-    const graphicEq = NAM_RACK_DEVICE_SKINS.find(({ id }) => id === "eq-rack-design-a");
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-65"))
-      .toMatchObject({ y: 0.383333, height: 0.455556 });
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-hpf"))
-      .toMatchObject({ x: 0.134259, y: 0.380556 });
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-lpf"))
-      .toMatchObject({ x: 0.865741, y: 0.380556 });
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-output-level"))
-      .toMatchObject({ x: 0.865741, y: 0.729167 });
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-power"))
-      .toMatchObject({ x: 0.134259, y: 0.729167 });
-    expect(graphicEq?.controls.find(({ id }) => id === "eq-led"))
-      .toMatchObject({ x: 0.185185, y: 0.729167 });
-
-    const eqBoost = NAM_RACK_DEVICE_SKINS.find(({ id }) => id === "pre-eq-boost-design-a");
-    expect(eqBoost?.controls.filter(({ kind }) => kind === "fader")).toHaveLength(8);
-    expect(eqBoost?.controls.filter(({ kind }) => kind === "fader").every(
-      ({ orientation }) => orientation === "horizontal",
-    )).toBe(true);
   });
 
   it("preserves every remaining pedal size while centring the five-device PRE row", () => {

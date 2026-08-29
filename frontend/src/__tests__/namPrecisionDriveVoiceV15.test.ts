@@ -109,11 +109,9 @@ describe("NAM Rack retired Maxon selector V18 compatibility contract", () => {
   it("removes Maxon from active UI and keeps EQ Boost before the standalone Drive", () => {
     const panel = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
     const design = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
-    const driveScene = readFileSync(new URL("../components/namScenes/pre-precision-drive.scene.json", import.meta.url), "utf8");
 
     expect(panel).not.toContain('paramById(params, "precisionDriveVoice")');
     expect(design).not.toContain("Maxon OD808");
-    expect(driveScene).not.toContain("precisionDriveVoice");
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["pre-eq"]).toContain("preEqEnabled");
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]).not.toContain("preEqEnabled");
     expect(NAM_RACK_ADVANCED_CONTROL_IDS["precision-drive"]).not.toContain("precisionDriveVoice");

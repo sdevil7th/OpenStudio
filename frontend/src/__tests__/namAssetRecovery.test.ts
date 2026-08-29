@@ -67,4 +67,3 @@ describe("NAM current-rack asset recovery", () => {
     expect(result).toEqual([]);
   });
 });
-

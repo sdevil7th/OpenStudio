@@ -767,7 +767,7 @@ describe("atomic selected-track shortcuts", () => {
     }
   });
 
-  it("toggles linked and unlinked track booleans in one undo step", () => {
+  it("toggles linked and unlinked track booleans in one undo step", async () => {
     const first = createDefaultTrack("first", "First", "#111", "audio", []);
     const linked = createDefaultTrack("linked", "Linked", "#222", "audio", [first]);
     const third = createDefaultTrack("third", "Third", "#333", "audio", [first, linked]);
@@ -806,11 +806,19 @@ describe("atomic selected-track shortcuts", () => {
       commandManager.clear();
       useDAWStore.setState({ canUndo: false, canRedo: false });
       getRegisteredAction(actionId)!.execute();
-      expect(useDAWStore.getState().tracks.map((track) => Boolean(track[field])), actionId)
-        .toEqual(expected);
+      await vi.waitFor(() => {
+        expect(useDAWStore.getState().tracks.map((track) => Boolean(track[field])), actionId)
+          .toEqual(expected);
+      });
       expect(commandManager.getUndoStack(), actionId).toHaveLength(1);
       useDAWStore.getState().undo();
       expect(commandManager.getUndoStack(), actionId).toHaveLength(0);
+      if (actionId === "track.toggleSelectedMonitor") {
+        await vi.waitFor(() => {
+          expect(useDAWStore.getState().tracks.map((track) => track.monitorEnabled))
+            .toEqual([false, false, true]);
+        });
+      }
     }
   });
 

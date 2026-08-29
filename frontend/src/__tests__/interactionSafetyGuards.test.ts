@@ -29,7 +29,7 @@ describe("interaction safety guards", () => {
 
     expect(editableBranchIndex).toBeGreaterThan(-1);
     expect(shortcutSource).toContain(
-      "isPlainSpacebar(payload) && (state.transport.isRecording || state.transport.isPlaying)",
+      "matchesTransportPlay && (state.transport.isRecording || state.transport.isPlaying)",
     );
     expect(shortcutSource).toContain("shouldPreserveEditableShortcut(");
     expect(shortcutSource).toContain('publishDetachedCommand("transport.stop")');

@@ -15,6 +15,9 @@ const auditionPublishSource = explorerSource.slice(auditionPublishStart, auditio
 const sourceFlowTargetsStart = explorerSource.indexOf("const sourceFlowTargetCards =");
 const sourceFlowTargetsEnd = explorerSource.indexOf("const sourceCategoryLabel =", sourceFlowTargetsStart);
 const sourceFlowTargetsSource = explorerSource.slice(sourceFlowTargetsStart, sourceFlowTargetsEnd);
+const sourceFlowHeaderStart = explorerSource.indexOf('<div className="tone-source-flow-head">');
+const sourceFlowHeaderEnd = explorerSource.indexOf('<aside className="nam-explorer-sidebar">', sourceFlowHeaderStart);
+const sourceFlowHeaderSource = explorerSource.slice(sourceFlowHeaderStart, sourceFlowHeaderEnd);
 
 describe("NAM remote capture Use flow", () => {
   it("has no demo-riff preview action or behavior", () => {
@@ -110,6 +113,11 @@ describe("NAM remote capture Use flow", () => {
     expect(updateIndex).toBeGreaterThan(-1);
     expect(refreshIndex).toBeGreaterThan(updateIndex);
     expect(successIndex).toBeGreaterThan(refreshIndex);
+  });
+
+  it("routes the visible Return button through transactional audition cleanup", () => {
+    expect(sourceFlowHeaderSource).toContain("void handleSourceFlowReturn()");
+    expect(sourceFlowHeaderSource).not.toContain("onClick={onReturn}");
   });
 
   it("keeps the newly selected capture visible throughout Use activation", () => {

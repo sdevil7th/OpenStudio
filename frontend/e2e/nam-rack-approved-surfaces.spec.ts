@@ -405,7 +405,7 @@ test("approved Amp uses one control deck and retains all ten wrapper parameters"
   await expect(module.locator('.asset-control.led[data-param-id="ampBoost"]'))
     .toHaveAttribute("data-rack-design-asset-id", "led-amber-off-panel-v4");
   await tight.focus();
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect(tight).toHaveAttribute("aria-checked", "true");
   await expect(module.locator('.asset-control.led[data-param-id="ampBoost"]'))
     .toHaveAttribute("data-rack-design-asset-id", "led-amber-on-panel-v4");
@@ -659,11 +659,11 @@ test("EQ Boost and Drive expose separate controls without collisions", async ({ 
   await expect(preEqPower).toHaveAttribute("aria-pressed", "false");
   await expect(drivePower).toHaveAttribute("aria-pressed", "false");
   await preEqPower.focus();
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect(preEqPower).toHaveAttribute("aria-pressed", "true");
   await expect(drivePower).toHaveAttribute("aria-pressed", "false");
   await drivePower.focus();
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect(preEqPower).toHaveAttribute("aria-pressed", "true");
   await expect(drivePower).toHaveAttribute("aria-pressed", "true");
 

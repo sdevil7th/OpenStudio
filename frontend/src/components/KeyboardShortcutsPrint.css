@@ -3,7 +3,6 @@
   margin: 0;
   padding: 0;
 }
-
 body {
   max-width: 900px;
   margin: 0 auto;
@@ -103,4 +102,3 @@ kbd {
     display: none;
   }
 }
-

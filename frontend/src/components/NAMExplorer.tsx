@@ -60,6 +60,7 @@ import {
   updateNAMExplorerSessionScroll,
 } from "../services/namExplorerSession";
 import { useDAWStore } from "../store/useDAWStore";
+import { createNAMPreviewMonitorLease } from "../utils/trackMonitorOwnership";
 import { useShallow } from "zustand/shallow";
 import { Button, Input, Modal } from "./ui";
 import {
@@ -2702,16 +2703,21 @@ export function NAMExplorer({
     openSettings,
     tempo,
     timeSignature,
-    toggleTrackMonitor,
   } = useDAWStore(
     useShallow((state) => ({
       hostTrack: state.tracks.find((track) => track.id === address.trackId) ?? null,
       openSettings: state.openSettings,
       tempo: state.transport.tempo,
       timeSignature: state.timeSignature,
-      toggleTrackMonitor: state.toggleTrackMonitor,
     })),
   );
+  const previewMonitorLeaseRef = useRef<ReturnType<typeof createNAMPreviewMonitorLease> | null>(null);
+  if (!previewMonitorLeaseRef.current) {
+    previewMonitorLeaseRef.current = createNAMPreviewMonitorLease({
+      read: (trackId) => useDAWStore.getState().tracks.find((track) => track.id === trackId)?.monitorEnabled,
+      setTransient: (trackId, enabled) => useDAWStore.getState().setTrackMonitorTransient(trackId, enabled),
+    });
+  }
 
   const sourceFlowTempo = Number.isFinite(runtimeTempo) ? Number(runtimeTempo) : tempo;
   const sourceFlowTimeSignature = runtimeTimeSignature ?? timeSignature;
@@ -2838,6 +2844,12 @@ export function NAMExplorer({
       liveSearchEpochRef.current.invalidate();
       queryDebouncerRef.current?.cancel();
       unsubscribe();
+      // Closing or replacing the explorer is also an audition stop boundary.
+      // Restore only the monitor state owned by this preview lease; explicit
+      // user monitor changes are protected by the lease revision check.
+      void previewMonitorLeaseRef.current?.release().catch((error) => {
+        console.warn("[NAMExplorer] Could not restore track monitoring while closing the explorer", error);
+      });
     };
   }, [rackTransactionKey]);
 
@@ -3801,12 +3813,35 @@ export function NAMExplorer({
     isCurrent: () => boolean = () => true,
     canUpdateUI: () => boolean = isCurrent,
   ) => {
-    if (!isCurrent() || !hostTrack || hostTrack.monitorEnabled) return;
+    if (!isCurrent() || !hostTrack) return false;
     try {
-      await toggleTrackMonitor(hostTrack.id);
+      const enabled = await previewMonitorLeaseRef.current!.ensureEnabled(hostTrack.id);
+      if (!enabled && canUpdateUI()) {
+        setStatus("The capture loaded, but track monitoring could not be enabled automatically.");
+      }
+      return enabled;
     } catch (error) {
       console.warn("[NAMExplorer] Could not enable host track monitoring for live preview", error);
-      if (canUpdateUI()) setStatus("Tone loaded for live input, but track monitoring could not be enabled automatically.");
+      if (canUpdateUI()) setStatus("The capture loaded, but track monitoring could not be enabled automatically.");
+      return false;
+    }
+  };
+
+  const releaseLiveTrackMonitoring = async (
+    canUpdateUI: () => boolean = () => true,
+  ) => {
+    try {
+      const restored = await previewMonitorLeaseRef.current!.release();
+      if (!restored && canUpdateUI()) {
+        setStatus("The NAM audition ended, but its temporary track-monitoring change could not be restored.");
+      }
+      return restored;
+    } catch (error) {
+      console.warn("[NAMExplorer] Could not restore host track monitoring after preview", error);
+      if (canUpdateUI()) {
+        setStatus("The NAM audition ended, but its temporary track-monitoring change could not be restored.");
+      }
+      return false;
     }
   };
 
@@ -4049,7 +4084,7 @@ export function NAMExplorer({
         }
         return false;
       }
-      await enableLiveTrackMonitoring(isCurrent, canUpdateUI);
+      const monitorReady = await enableLiveTrackMonitoring(isCurrent, canUpdateUI);
       if (!isCurrent()) return false;
 
       const verifiedState = await nativeBridge.getBuiltInPluginState(address);
@@ -4168,11 +4203,13 @@ export function NAMExplorer({
         ? " Pedal captures need an amp/full-rig tone after them for a complete instrument sound."
         : "";
       if (canUpdateUI()) setStatus(
-        !previewStateSaved
-          ? "The audition is audible, but its session recovery metadata could not be saved. Use it or choose Stop Audition before closing this rack."
-          : sourceFlow === "amp" || sourceFlow === "pedal"
-            ? `Auditioning the ${targetSlot} capture with live input. This is temporary; choose Use Capture to keep it or Stop Audition to restore the previous capture.` + ampMissingNotice
-            : `${previewDownload ? "Loaded unsaved" : "Loaded"} ${targetSlot} Capture for live input. Track monitoring is ${hostTrack?.monitorEnabled ? "on" : "requested"}; Save Preset stores the complete rack.` + ampMissingNotice,
+        !monitorReady
+          ? "The capture is loaded for live input, but track monitoring could not be enabled automatically. Enable monitoring on the track to audition it."
+          : !previewStateSaved
+            ? "The audition is audible, but its session recovery metadata could not be saved. Use it or choose Stop Audition before closing this rack."
+            : sourceFlow === "amp" || sourceFlow === "pedal"
+              ? `Auditioning the ${targetSlot} capture with live input. This is temporary; choose Use Capture to keep it or Stop Audition to restore the previous capture.` + ampMissingNotice
+              : `${previewDownload ? "Loaded unsaved" : "Loaded"} ${targetSlot} Capture for live input. Track monitoring is on; Save Preset stores the complete rack.` + ampMissingNotice,
       );
       window.setTimeout(() => {
         if (!mountedRef.current || !isNAMRackTransactionLatest(rackTransactionKey, generation)
@@ -4941,6 +4978,14 @@ export function NAMExplorer({
             return false;
           }
         }
+        const monitoringRestored = await releaseLiveTrackMonitoring(canUpdateUI);
+        if (!isCurrent()) return false;
+        if (!monitoringRestored) {
+          if (canUpdateUI()) {
+            setStatus("No active audition was found, but its temporary track-monitoring change could not be restored.");
+          }
+          return false;
+        }
         if (canUpdateUI()) {
           if (localAudition && !localAudition.saved) updateAudition(null);
           setStatus(stalePreview
@@ -4964,11 +5009,15 @@ export function NAMExplorer({
       }
       const cleanedPreview = await cleanupPreviewAudition(activeAudition, true, isCurrent, canUpdateUI);
       if (!isCurrent()) return false;
+      const monitoringRestored = await releaseLiveTrackMonitoring(canUpdateUI);
+      if (!isCurrent()) return false;
       if (canUpdateUI()) {
         updateAudition(null);
-        setStatus(activeAudition.previewDownload && !cleanedPreview
-          ? "Audition stopped, but its download could not be removed."
-          : "Audition stopped.");
+        setStatus(!monitoringRestored
+          ? "Audition stopped, but its temporary track-monitoring change could not be restored."
+          : activeAudition.previewDownload && !cleanedPreview
+            ? "Audition stopped, but its download could not be removed."
+            : "Audition stopped.");
         onRefreshRack();
       }
       return true;
@@ -7434,7 +7483,7 @@ export function NAMExplorer({
         return;
       }
 
-      await enableLiveTrackMonitoring(isCurrent, canUpdateUI);
+      const monitoringRestored = await releaseLiveTrackMonitoring(canUpdateUI);
       if (!isCurrent()) return;
       await cleanupPreviewAudition(previewToCleanup, false, isCurrent, canUpdateUI);
       if (!isCurrent()) return;
@@ -7477,9 +7526,10 @@ export function NAMExplorer({
         );
         return;
       }
-      const successMessage = targetSlot === "cab"
+      const successMessage = (targetSlot === "cab"
         ? `${displayName} is installed and active in Cab/IR.`
-        : `${displayName} is installed and active in ${targetLabelForSlot(targetSlot)}.`;
+        : `${displayName} is installed and active in ${targetLabelForSlot(targetSlot)}.`)
+        + (monitoringRestored ? "" : " Its temporary track-monitoring change could not be restored; set monitoring manually.");
       if (canUpdateUI()) {
         setCaptureUseProgress({ phase: "success", rowId: progressRowId, message: successMessage });
         setStatus(successMessage);
@@ -7930,7 +7980,7 @@ export function NAMExplorer({
             type="button"
             className="tone-return-button"
             data-return-target={sourceFlowConfig.returnTarget}
-            onClick={onReturn}
+            onClick={() => { void handleSourceFlowReturn(); }}
           >
             <ChevronLeft size={14} />
             {sourceReturnLabel ?? sourceFlowConfig.returnLabel}

@@ -233,8 +233,6 @@ describe("NAM Rack current Distortion controls", () => {
     const panelSource = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
     const bridgeSource = readFileSync(new URL("../services/NativeBridge.ts", import.meta.url), "utf8");
     const designSource = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
-    const registrySource = readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8");
-    const sceneSource = readFileSync(new URL("../components/namScenes/pre-chaos.scene.json", import.meta.url), "utf8");
 
     expect(panelSource).toContain("chaosMode: 0");
     expect(panelSource).toContain("chaosWeight: 0.5");
@@ -244,10 +242,8 @@ describe("NAM Rack current Distortion controls", () => {
     expect(bridgeSource).toContain('chaosMode: [{ value: 0, label: "Heavy" }, { value: 1, label: "Extreme" }, { value: 2, label: "Crunch" }]');
     expect(bridgeSource).toContain('param("chaosWeight", "Weight (Tight to Thick)", 0.5, 0, 1');
     expect(bridgeSource).toContain('param("chaosGate", "Dist Gate", 0.22, 0, 1, "", "distortion")');
-    for (const source of [designSource, registrySource, sceneSource]) {
-      expect(source).toContain("chaosMode");
-      expect(source).toContain("chaosWeight");
-      expect(source).toContain("chaosGate");
-    }
+    expect(designSource).toContain('paramId="chaosMode"');
+    expect(designSource).toContain('paramId="chaosWeight"');
+    expect(designSource).toContain('paramId="chaosGate"');
   });
 });

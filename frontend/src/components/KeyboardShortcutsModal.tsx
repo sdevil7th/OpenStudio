@@ -5,6 +5,8 @@ import {
   getActionShortcutScopeLabel,
   getActionShortcutScopes,
   getRegisteredActions,
+  type ActionDef,
+  type ActionShortcutWhen,
 } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, NativeSelect } from "./ui";
@@ -12,6 +14,9 @@ import { InputProfileSelectors } from "./InputProfileSelectors";
 import { CustomKeyboardProfileManager } from "./CustomKeyboardProfileManager";
 import { Modal } from "./ui/Modal/Modal";
 import { formatShortcut, getShortcutPlatform } from "../utils/platform";
+import {
+  actionShortcutConditionIsActive,
+} from "../utils/globalShortcutDispatcher";
 import {
   getKeyboardShortcutProfilePresentation,
   getProfileActionBindings,
@@ -48,6 +53,120 @@ export function escapePrintHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+export interface ShortcutActionAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+function shortcutConditionRequirement(condition: ActionShortcutWhen): string {
+  switch (condition) {
+    case "transport_running":
+      return "Available while transport is running";
+    case "transport_stopped":
+      return "Available while transport is stopped";
+    case "step_input_enabled":
+      return "Available while MIDI step input is enabled";
+    case "step_input_disabled":
+      return "Available while MIDI step input is disabled";
+    case "always":
+      return "Available now";
+  }
+}
+
+/** Keep modal invocation semantics identical to shortcut dispatch. */
+export function getShortcutActionAvailability(action: ActionDef): ShortcutActionAvailability {
+  if (!actionShortcutConditionIsActive(action)) {
+    return {
+      available: false,
+      reason: shortcutConditionRequirement(action.shortcutWhen!),
+    };
+  }
+  if (action.canHandleShortcut && !action.canHandleShortcut()) {
+    return {
+      available: false,
+      reason: "Unavailable in the current context",
+    };
+  }
+  return { available: true };
+}
+
+export function executeShortcutActionFromModal(
+  action: ActionDef,
+  onClose: () => void,
+): ShortcutActionAvailability {
+  const availability = getShortcutActionAvailability(action);
+  if (!availability.available) return availability;
+  action.execute();
+  onClose();
+  return availability;
+}
+
+type DAWStoreSnapshot = ReturnType<typeof useDAWStore.getState>;
+
+/**
+ * Inputs read by actionRegistry shortcutWhen/canHandleShortcut guards.
+ *
+ * Keep this projection explicit: subscribing to the whole store would make the
+ * modal rerender for meters and other high-frequency state, while omitting one
+ * of these values leaves an action's displayed availability stale.
+ */
+export function selectShortcutAvailabilityInputs(state: DAWStoreSnapshot) {
+  return {
+    tracks: state.tracks,
+    trackGroups: state.trackGroups,
+    selectedTrackId: state.selectedTrackId,
+    selectedTrackIds: state.selectedTrackIds,
+    selectedClipId: state.selectedClipId,
+    selectedClipIds: state.selectedClipIds,
+    selectedNoteIds: state.selectedNoteIds,
+    selectedRegionIds: state.selectedRegionIds,
+    selectedAutomationTarget: state.selectedAutomationTarget,
+    razorEdits: state.razorEdits,
+    midiEditRange: state.midiEditRange,
+    pianoRollEditCursorTime: state.pianoRollEditCursorTime,
+    midiEditorSessions: state.midiEditorSessions,
+    timeSelection: state.timeSelection,
+    clipboard: state.clipboard,
+    markers: state.markers,
+    regions: state.regions,
+    transportCurrentTime: state.transport.currentTime,
+    transportTempo: state.transport.tempo,
+    transportIsPlaying: state.transport.isPlaying,
+    transportIsRecording: state.transport.isRecording,
+    recordSession: state.recordSession,
+    recordingClips: state.recordingClips,
+    stepInputEnabled: state.stepInputEnabled,
+    canUndo: state.canUndo,
+    canRedo: state.canRedo,
+    globalLocked: state.globalLocked,
+    lockSettings: state.lockSettings,
+    timeSignature: state.timeSignature,
+    gridSize: state.gridSize,
+    pixelsPerSecond: state.pixelsPerSecond,
+    quantizePresets: state.quantizePresets,
+    quantizePresetId: state.quantizePresetId,
+    masterAutomationLanes: state.masterAutomationLanes,
+    masterAutomationReadEnabled: state.masterAutomationReadEnabled,
+    masterAutomationWriteEnabled: state.masterAutomationWriteEnabled,
+    suspendedMasterAutomationState: state.suspendedMasterAutomationState,
+    mixerSnapshots: state.mixerSnapshots,
+    detachedPanels: state.detachedPanels,
+    recentProjects: state.recentProjects,
+    projectTemplates: state.projectTemplates,
+    customToolbars: state.customToolbars,
+    trackTemplates: state.trackTemplates,
+    activeMidiEditorSessionId: state.activeMidiEditorSessionId,
+    pianoRollTrackId: state.pianoRollTrackId,
+    pianoRollClipId: state.pianoRollClipId,
+    showPianoRoll: state.showPianoRoll,
+    showPitchEditor: state.showPitchEditor,
+    pitchEditorTrackId: state.pitchEditorTrackId,
+    pitchEditorClipId: state.pitchEditorClipId,
+    trackHeight: state.trackHeight,
+    tcpWidth: state.tcpWidth,
+  };
+}
+
 /**
  * KeyboardShortcutsModal - Searchable, categorized keyboard shortcuts reference
  * with rebinding support.
@@ -62,6 +181,7 @@ export function KeyboardShortcutsModal({
   );
   const [capturedShortcut, setCapturedShortcut] = useState<string>("");
   const [bindingTarget, setBindingTarget] = useState<CustomShortcutTarget>("common");
+  const [actionRunStatus, setActionRunStatus] = useState("");
 
   const {
     customShortcuts,
@@ -87,6 +207,13 @@ export function KeyboardShortcutsModal({
         resetCustomShortcuts: s.resetCustomShortcuts,
       }))
     );
+
+  // Action availability is contextual. Subscribe only while the modal is open
+  // and only to the explicit guard projection (never the entire DAW store).
+  const actionAvailabilityInputs = useDAWStore(useShallow((state) => (
+    isOpen ? selectShortcutAvailabilityInputs(state) : null
+  )));
+  void actionAvailabilityInputs;
 
   const actions = useMemo(() => getRegisteredActions(), []);
   const implicitProfileCreationBlocked = activeCustomKeyboardProfileId === null
@@ -174,6 +301,7 @@ export function KeyboardShortcutsModal({
       },
       previousContext,
     );
+
     activateShortcutContext({ kind: "application" });
     return unregister;
   }, [addCustomShortcutBinding, bindingTarget, listeningActionId]);
@@ -183,6 +311,7 @@ export function KeyboardShortcutsModal({
     if (!isOpen) {
       setListeningActionId(null);
       setCapturedShortcut("");
+      setActionRunStatus("");
     }
   }, [isOpen]);
 
@@ -357,6 +486,16 @@ export function KeyboardShortcutsModal({
         <div className="text-xs text-neutral-500 px-1">
           Select an action name to run it, or add one or more keys for the selected platform target. Scoped bindings apply only in their named editors; a custom list overrides the selected base profile.
         </div>
+        {actionRunStatus && (
+          <div
+            className="rounded border border-orange-500/40 bg-orange-500/10 px-2 py-1 text-xs text-orange-200"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {actionRunStatus}
+          </div>
+        )}
 
         {/* Shortcuts List */}
         <div className="min-w-0 flex-none">
@@ -399,6 +538,8 @@ export function KeyboardShortcutsModal({
                   const shortcutScopeLabel = shortcutScopeLabels.join(", ");
                   const canRebind = true;
                   const isListening = listeningActionId === action.id;
+                  const availability = getShortcutActionAvailability(action);
+                  const unavailableReasonId = `shortcut-action-unavailable-${action.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 
                   return (
                     <div
@@ -411,18 +552,32 @@ export function KeyboardShortcutsModal({
                     >
                       <button
                         type="button"
-                        className="min-w-0 flex-1 truncate rounded text-left text-daw-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent disabled:cursor-default"
+                        className="min-w-0 flex-1 rounded text-left text-daw-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent disabled:cursor-default aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
                         onClick={() => {
                           if (!listeningActionId) {
-                            action.execute();
-                            onClose();
+                            const result = executeShortcutActionFromModal(action, onClose);
+                            setActionRunStatus(result.available
+                              ? ""
+                              : `${action.name}: ${result.reason ?? "Unavailable"}`);
                           }
                         }}
                         disabled={Boolean(listeningActionId)}
-                        title={action.name}
+                        aria-disabled={!availability.available || undefined}
+                        aria-describedby={!availability.available ? unavailableReasonId : undefined}
+                        title={!availability.available
+                          ? `${action.name} — ${availability.reason}`
+                          : action.name}
                       >
-                        {action.name}
+                        <span className="block truncate">{action.name}</span>
                       </button>
+                      {!availability.available && (
+                        <span
+                          id={unavailableReasonId}
+                          className="sr-only"
+                        >
+                          {availability.reason}
+                        </span>
+                      )}
 
                       <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:ml-2 sm:shrink-0 sm:justify-end">
                         {/* Shortcut badge */}

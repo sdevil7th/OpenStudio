@@ -50,6 +50,11 @@ import {
 } from "../services/NativeBridge";
 import { useTONE3000Session } from "../services/tone3000Session";
 import { useDAWStore } from "../store/useDAWStore";
+import {
+  namRackTelemetryIntervalMs,
+  shouldRefreshNAMRackDiagnostics,
+} from "../utils/namRackTelemetryCadence";
+import { applyVerifiedNAMRackMutation } from "../utils/namRackMutationReadback";
 import { useShallow } from "zustand/shallow";
 import {
   NAMExplorer,
@@ -2124,7 +2129,11 @@ export function NAMRackPanel({
       timeSignature: state.timeSignature,
     })),
   );
-  const [audioDebugSnapshot, setAudioDebugSnapshot] = useState<AudioDebugSnapshot | null>(null);
+  const [rackTelemetry, setRackTelemetry] = useState<{
+    audio: AudioDebugSnapshot | null;
+    diagnostics: Record<string, unknown> | null;
+  }>({ audio: null, diagnostics: null });
+  const audioDebugSnapshot = rackTelemetry.audio;
   const [rackOversamplingFactor, setRackOversamplingFactor] = useState<NAMRackOversamplingFactor>(4);
   const [rackOversamplingBusy, setRackOversamplingBusy] = useState(false);
   const rackOversamplingRequestRef = useRef(false);
@@ -2132,7 +2141,7 @@ export function NAMRackPanel({
   if (!tunerSubscriberIdRef.current) {
     tunerSubscriberIdRef.current = createNAMTunerSubscriberId();
   }
-  const [rackLiveDiagnostics, setRackLiveDiagnostics] = useState<Record<string, unknown> | null>(null);
+  const rackLiveDiagnostics = rackTelemetry.diagnostics;
   const meterFreshnessRef = useRef<{
     processedBlockCount: number | null;
     lastAdvanceAtMs: number;
@@ -2916,68 +2925,59 @@ export function NAMRackPanel({
     };
   }, [address.trackId, rackRailTab]);
   useEffect(() => {
-    let cancelled = false;
-    let refreshInFlight = false;
-
-    const refreshRealtimeAudioTelemetry = async () => {
-      if (refreshInFlight) return;
-      refreshInFlight = true;
-      try {
-        const snapshot = await nativeBridge.getRealtimeAudioTelemetry();
-        if (!cancelled) setAudioDebugSnapshot(snapshot);
-      } catch (error) {
-        if (!cancelled) {
-          console.warn("[NAMRackPanel] Could not refresh realtime audio telemetry", error);
-        }
-      } finally {
-        refreshInFlight = false;
-      }
-    };
-
-    void refreshRealtimeAudioTelemetry();
-    const refreshMs = rackRailTab === "tuner" ? 100 : 500;
-    const timer = window.setInterval(() => {
-      void refreshRealtimeAudioTelemetry();
-    }, refreshMs);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [rackRailTab]);
+    setRackTelemetry((current) => ({ ...current, diagnostics: null }));
+  }, [address.chain, address.fxIndex, address.trackId]);
   useEffect(() => {
     let cancelled = false;
     let refreshInFlight = false;
+    let tick = 0;
+    const tunerOpen = rackRailTab === "tuner";
 
-    const refreshRackDiagnostics = async () => {
+    const refreshTelemetry = async () => {
       if (refreshInFlight) return;
       refreshInFlight = true;
+      const refreshDiagnostics = shouldRefreshNAMRackDiagnostics(tunerOpen, tick);
+      tick += 1;
       try {
-        const diagnostics = await nativeBridge.getNAMRackDiagnostics(address);
-        if (!cancelled && diagnostics) setRackLiveDiagnostics(diagnostics);
-      } catch (error) {
-        if (!cancelled) {
-          console.warn("[NAMRackPanel] Could not refresh NAM diagnostics", error);
+        const [audioResult, diagnosticsResult] = await Promise.allSettled([
+          nativeBridge.getRealtimeAudioTelemetry(),
+          refreshDiagnostics ? nativeBridge.getNAMRackDiagnostics(address) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        if (audioResult.status === "rejected") {
+          console.warn("[NAMRackPanel] Could not refresh realtime audio telemetry", audioResult.reason);
+        }
+        if (diagnosticsResult.status === "rejected") {
+          console.warn("[NAMRackPanel] Could not refresh NAM diagnostics", diagnosticsResult.reason);
+        }
+        const nextAudio = audioResult.status === "fulfilled" ? audioResult.value : undefined;
+        const nextDiagnostics = diagnosticsResult.status === "fulfilled"
+          ? diagnosticsResult.value
+          : undefined;
+        if (nextAudio !== undefined || nextDiagnostics) {
+          // Publish one combined snapshot per timer tick. This avoids two
+          // independent parent rerenders while keeping 10 Hz tuner updates and
+          // 5 Hz meters/diagnostics.
+          setRackTelemetry((current) => ({
+            audio: nextAudio ?? current.audio,
+            diagnostics: nextDiagnostics ?? current.diagnostics,
+          }));
         }
       } finally {
         refreshInFlight = false;
       }
     };
 
-    setRackLiveDiagnostics(null);
-    void refreshRackDiagnostics();
-    // Full rack diagnostics builds and transfers a large native object. Five
-    // updates per second keeps meters responsive without forcing this large
-    // panel and WebView heap to churn at the audio timer's 10 Hz rate.
+    void refreshTelemetry();
     const timer = window.setInterval(() => {
-      void refreshRackDiagnostics();
-    }, 200);
+      void refreshTelemetry();
+    }, namRackTelemetryIntervalMs(tunerOpen));
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [address.chain, address.fxIndex, address.trackId]);
+  }, [address.chain, address.fxIndex, address.trackId, rackRailTab]);
   const postCabOrder = useMemo(
     () => slotOrder.filter((moduleId) => moduleId === "eq" || moduleId === "mod" || moduleId === "delay" || moduleId === "reverb"),
     [slotOrder],
@@ -4026,6 +4026,10 @@ export function NAMRackPanel({
     }
   };
 
+  const applyVerifiedRackMutation = async (
+    patch: { values?: Record<string, number>; modelState?: Record<string, unknown> },
+  ) => applyVerifiedNAMRackMutation(nativeBridge, address, patch);
+
   const resetSlotModule = async (moduleId: RackModuleId) => {
     const values: Record<string, number> = {};
     for (const id of moduleParamIds(moduleId)) {
@@ -4040,10 +4044,21 @@ export function NAMRackPanel({
         if (belongsToModule) values[id] = value;
       }
     }
-    const ok = await nativeBridge.setBuiltInPluginState(address, { values });
-    if (ok) {
+    try {
+      const result = await applyVerifiedRackMutation({ values });
+      if (result !== "verified") {
+        setSlotActionStatus(result === "rejected"
+          ? `${moduleTitle(moduleId)} reset was rejected; the current settings were kept.`
+          : `${moduleTitle(moduleId)} reset could not be verified. Refresh the rack before retrying.`);
+        return false;
+      }
       setSlotActionStatus(`${moduleTitle(moduleId)} reset`);
-      onRefreshRack();
+      await Promise.resolve(onRefreshRack());
+      return true;
+    } catch (error) {
+      console.warn(`[NAMRackPanel] Could not reset ${moduleTitle(moduleId)}`, error);
+      setSlotActionStatus(`${moduleTitle(moduleId)} reset failed; the rack could not confirm the change.`);
+      return false;
     }
   };
 
@@ -4063,8 +4078,8 @@ export function NAMRackPanel({
       nextModelState.clearPedalModel = true;
     } else if (moduleId === "amp") {
       values.ampMix = 1;
-      await resetSlotModule("amp");
-      setSlotActionStatus("Amp Capture is the required rack spine, so it was reset instead of removed");
+      const reset = await resetSlotModule("amp");
+      if (reset) setSlotActionStatus("Amp Capture is the required rack spine, so it was reset instead of removed");
       return;
     } else if (moduleId === "cab") {
       values.cabEnabled = 0;
@@ -4083,27 +4098,40 @@ export function NAMRackPanel({
       values.reverbEnabled = 0;
     }
 
-    const ok = await nativeBridge.setBuiltInPluginState(address, {
-      values,
-      modelState: nextModelState,
-    });
-    if (ok) {
+    try {
+      const result = await applyVerifiedRackMutation({ values, modelState: nextModelState });
+      if (result !== "verified") {
+        setSlotActionStatus(result === "rejected"
+          ? `${moduleTitle(moduleId)} could not be removed; the active rig was kept.`
+          : `${moduleTitle(moduleId)} removal could not be verified. Refresh the rack before retrying.`);
+        return;
+      }
       setSlotActionStatus(`${moduleTitle(moduleId)} removed from the active rig`);
-      onRefreshRack();
+      await Promise.resolve(onRefreshRack());
+    } catch (error) {
+      console.warn(`[NAMRackPanel] Could not remove ${moduleTitle(moduleId)}`, error);
+      setSlotActionStatus(`${moduleTitle(moduleId)} removal failed; the rack could not confirm the change.`);
     }
   };
 
   const clearAmpCapture = async () => {
     if (blockResourceChangeWhilePreviewing("Unload Amp Capture")) return;
-    const ok = await nativeBridge.setBuiltInPluginState(address, {
-      values: { ampEnabled: 1, ampMix: 1 },
-      modelState: { clearAmpModel: true },
-    });
-    if (ok) {
+    try {
+      const result = await applyVerifiedRackMutation({
+        values: { ampEnabled: 1, ampMix: 1 },
+        modelState: { clearAmpModel: true },
+      });
+      if (result !== "verified") {
+        setSlotActionStatus(result === "rejected"
+          ? "Could not unload the Amp Capture. The current capture was kept."
+          : "Amp Capture unload could not be verified. Refresh the rack before retrying.");
+        return;
+      }
       setSlotActionStatus("Amp Capture unloaded");
-      onRefreshRack();
-    } else {
-      setSlotActionStatus("Could not unload the Amp Capture. The current capture was kept.");
+      await Promise.resolve(onRefreshRack());
+    } catch (error) {
+      console.warn("[NAMRackPanel] Could not unload the Amp Capture", error);
+      setSlotActionStatus("Amp Capture unload failed; the rack could not confirm the change.");
     }
   };
 
@@ -5138,14 +5166,22 @@ export function NAMRackPanel({
     }
     setCabBusy(true);
     try {
-      const ok = await nativeBridge.setBuiltInPluginState(address, {
+      const result = await applyVerifiedRackMutation({
         modelState: { cabIRPath: cleanPath },
         values: { cabEnabled: 1 },
       });
-      if (ok) {
-        rememberIRPath(cleanPath);
-        onRefreshRack();
+      if (result !== "verified") {
+        setSlotActionStatus(result === "rejected"
+          ? "The Cab/IR could not be loaded. The current cabinet was kept."
+          : "The Cab/IR load could not be verified. Refresh the rack before retrying.");
+        return;
       }
+      rememberIRPath(cleanPath);
+      setSlotActionStatus(`${fileName(cleanPath) || "Cab/IR"} loaded and verified`);
+      await Promise.resolve(onRefreshRack());
+    } catch (error) {
+      console.warn("[NAMRackPanel] Could not load Cab/IR", error);
+      setSlotActionStatus("The Cab/IR load failed; the rack could not confirm the change.");
     } finally {
       setCabBusy(false);
     }
@@ -5228,11 +5264,21 @@ export function NAMRackPanel({
     if (blockResourceChangeWhilePreviewing("Remove Cab/IR")) return;
     setCabBusy(true);
     try {
-      const ok = await nativeBridge.setBuiltInPluginState(address, {
+      const result = await applyVerifiedRackMutation({
         modelState: { clearCabIR: true },
         values: { cabEnabled: 0 },
       });
-      if (ok) onRefreshRack();
+      if (result !== "verified") {
+        setSlotActionStatus(result === "rejected"
+          ? "The Cab/IR could not be removed. The current cabinet was kept."
+          : "Cab/IR removal could not be verified. Refresh the rack before retrying.");
+        return;
+      }
+      setSlotActionStatus("Cab/IR removed from the active rig");
+      await Promise.resolve(onRefreshRack());
+    } catch (error) {
+      console.warn("[NAMRackPanel] Could not remove Cab/IR", error);
+      setSlotActionStatus("Cab/IR removal failed; the rack could not confirm the change.");
     } finally {
       setCabBusy(false);
     }
@@ -6293,10 +6339,13 @@ export function NAMRackPanel({
       // Mirror the native last-active memory immediately so active -> OFF
       // cannot flash clean while waiting for the 200 ms diagnostic poll. This
       // is local UI state only; the next native poll remains authoritative.
-      setRackLiveDiagnostics((current) => ({
-        ...(schemaRackDiagnostics ?? {}),
-        ...(current ?? {}),
-        [id]: activeValue,
+      setRackTelemetry((current) => ({
+        ...current,
+        diagnostics: {
+          ...(schemaRackDiagnostics ?? {}),
+          ...(current.diagnostics ?? {}),
+          [id]: activeValue,
+        },
       }));
     }
     const nextInstrumentProfile = normalizeNAMInstrumentProfile(value);

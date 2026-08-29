@@ -75,7 +75,6 @@ export function InputProfileSelectors({
       return;
     }
     if (isKeyboardShortcutProfileId(value)) {
-      activateCustomKeyboardProfile(null);
       setKeyboardShortcutProfile(value);
     }
   };

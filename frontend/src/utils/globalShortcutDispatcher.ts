@@ -158,7 +158,7 @@ function findMatchingAction(
   ));
 }
 
-function actionShortcutConditionIsActive(action: ActionDef): boolean {
+export function actionShortcutConditionIsActive(action: ActionDef): boolean {
   const state = useDAWStore.getState();
   switch (action.shortcutWhen) {
     case "transport_running":
@@ -344,6 +344,7 @@ export function dispatchGlobalShortcut(
 ): boolean {
   const state = useDAWStore.getState();
   const role = options.role ?? windowRole;
+  const matchesTransportPlay = matchesActionShortcut(payload, "transport.play", platform);
   const registeredApplicationAction = findMatchingAction(
     payload,
     "global",
@@ -352,17 +353,26 @@ export function dispatchGlobalShortcut(
     role,
   );
 
-  if (payload.targetIsNonTextControl && shouldPreserveNonTextControlShortcut(payload)) {
-    return false;
+  if (payload.targetIsNonTextControl) {
+    // A focused button/slider normally owns Space, Enter, and navigation keys.
+    // Transport Play is the one reserved exception: only its current effective
+    // profile/custom binding may take the gesture. Consequently, unbinding or
+    // remapping Play immediately gives plain Space back to the control.
+    if (matchesTransportPlay) {
+      return dispatchApplicationShortcut(payload, platform, options);
+    }
+    if (shouldPreserveNonTextControlShortcut(payload)) return false;
   }
 
   if (payload.targetIsEditable) {
-    if (isPlainSpacebar(payload) && (state.transport.isRecording || state.transport.isPlaying)) {
+    if (matchesTransportPlay && (state.transport.isRecording || state.transport.isPlaying)) {
       markHandled(payload);
       if (payload.repeat) return true;
-      const now = Date.now();
-      if (now - _lastSpacebarMs < 150) return true;
-      _lastSpacebarMs = now;
+      if (isPlainSpacebar(payload)) {
+        const now = Date.now();
+        if (now - _lastSpacebarMs < 150) return true;
+        _lastSpacebarMs = now;
+      }
       if (role !== "main") publishDetachedCommand("transport.stop");
       else state.stop();
       return true;
@@ -380,7 +390,7 @@ export function dispatchGlobalShortcut(
   // active. Resolve it before scoped/profile actions so an active Timeline,
   // Piano Roll, or automation lane cannot route it through the generic
   // Play/Pause action and leave an in-progress recording unfinalized.
-  if (isPlainSpacebar(payload) && matchesActionShortcut(payload, "transport.play", platform)) {
+  if (isPlainSpacebar(payload) && matchesTransportPlay) {
     return dispatchApplicationShortcut(payload, platform, options);
   }
 

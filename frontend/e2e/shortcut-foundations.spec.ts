@@ -75,12 +75,13 @@ test("text inputs retain editing shortcuts and ordinary typing", async ({ page }
   );
 });
 
-test("buttons and sliders keep native Space and arrow behavior", async ({ page }) => {
+test("transport Space is reserved while sliders keep native arrow behavior", async ({ page }) => {
   const button = page.getByRole("button", { name: "Native button" });
   await button.focus();
   await page.keyboard.press("Space");
-  await expect(page.locator("#button-click-count")).toHaveText("1");
-  await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"native"');
+  await expect(page.locator("#button-click-count")).toHaveText("0");
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"registry"');
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"actionId":"transport.play"');
 
   const slider = page.getByRole("slider", { name: "Native range" });
   await slider.focus();

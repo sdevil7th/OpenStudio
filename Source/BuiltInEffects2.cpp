@@ -1,4 +1,5 @@
 #include "BuiltInEffects2.h"
+#include "NAMModelSafety.h"
 #include "S13PluginEditors.h"
 
 #include "NAM/container.h"
@@ -14,6 +15,14 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+
+#if JUCE_MAC || JUCE_LINUX
+ #include <cerrno>
+ #include <ctime>
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+#endif
 
 #if JUCE_WINDOWS
  #include <excpt.h>
@@ -14078,11 +14087,101 @@ int S13NAMRack::NAMResamplerState::process(const float* input,
     return outputSamples;
 }
 
+static juce::File getNAMModelProbeDirectory()
+{
+    return juce::File::getSpecialLocation(
+               juce::File::userApplicationDataDirectory)
+        .getChildFile("OpenStudio")
+        .getChildFile(".nam-model-probes");
+}
+
+static bool prepareNAMModelProbeDirectory(const juce::File& directory,
+                                          juce::String& error)
+{
+    if (directory.exists() && directory.isSymbolicLink())
+    {
+        error = "NAM safety probe directory must not be a symbolic link";
+        return false;
+    }
+    if (! directory.createDirectory())
+    {
+        error = "Could not create private NAM safety probe directory";
+        return false;
+    }
+
+#if JUCE_MAC || JUCE_LINUX
+    const auto directoryFullPath = directory.getFullPathName();
+    const auto path = directoryFullPath.toRawUTF8();
+    struct stat directoryStatus {};
+    if (::lstat(path, &directoryStatus) != 0
+        || ! S_ISDIR(directoryStatus.st_mode)
+        || S_ISLNK(directoryStatus.st_mode)
+        || directoryStatus.st_uid != ::geteuid())
+    {
+        error = "NAM safety probe directory is not a private user directory";
+        return false;
+    }
+    if (::chmod(path, S_IRWXU) != 0
+        || ::lstat(path, &directoryStatus) != 0
+        || (directoryStatus.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+    {
+        error = "Could not restrict NAM safety probe directory permissions";
+        return false;
+    }
+#endif
+
+    // A crash may leave an otherwise private read-only copy behind. Only
+    // direct children with the exact generated prefix, regular-file type,
+    // current-user ownership, and a conservative age are eligible.
+    static juce::CriticalSection cleanupLock;
+    const juce::ScopedLock cleanupGuard(cleanupLock);
+    constexpr juce::int64 staleAgeMs = 24LL * 60 * 60 * 1000;
+    const auto oldestAllowed =
+        juce::Time::getCurrentTime().toMilliseconds() - staleAgeMs;
+    for (const auto& entry : juce::RangedDirectoryIterator(
+             directory,
+             false,
+             "validated_*.nam",
+             juce::File::findFiles))
+    {
+        const auto candidate = entry.getFile();
+#if JUCE_MAC || JUCE_LINUX
+        const auto candidateFullPath = candidate.getFullPathName();
+        const auto candidatePath = candidateFullPath.toRawUTF8();
+        struct stat candidateStatus {};
+        if (::lstat(candidatePath, &candidateStatus) != 0)
+            continue;
+        if (candidateStatus.st_uid != ::geteuid())
+            continue;
+        if (S_ISLNK(candidateStatus.st_mode))
+        {
+            (void) ::unlink(candidatePath);
+            continue;
+        }
+        if (! S_ISREG(candidateStatus.st_mode)
+            || candidate.getLastModificationTime().toMilliseconds()
+                >= oldestAllowed)
+            continue;
+        (void) ::unlink(candidatePath);
+#else
+        if (candidate.isSymbolicLink())
+        {
+            error = "NAM safety probe directory contains an unexpected symbolic link";
+            return false;
+        }
+        if (candidate.getLastModificationTime().toMilliseconds()
+            >= oldestAllowed)
+            continue;
+        candidate.setReadOnly(false);
+        candidate.deleteFile();
+#endif
+    }
+    error.clear();
+    return true;
+}
+
 static bool probeNAMModelInChildProcess(const juce::File& modelFile, juce::String& error)
 {
-    if (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_DISABLE_NAM_MODEL_PROBE", "0") == "1")
-        return true;
-
     const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     if (! executable.existsAsFile())
     {
@@ -14090,12 +14189,9 @@ static bool probeNAMModelInChildProcess(const juce::File& modelFile, juce::Strin
         return false;
     }
 
-    auto probeDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
-        .getChildFile("OpenStudio")
-        .getChildFile("NAMModelProbes");
-    if (! probeDir.createDirectory())
+    auto probeDir = getNAMModelProbeDirectory();
+    if (! prepareNAMModelProbeDirectory(probeDir, error))
     {
-        error = "Could not create temporary NAM safety probe directory.";
         return false;
     }
 
@@ -14140,6 +14236,371 @@ static bool probeNAMModelInChildProcess(const juce::File& modelFile, juce::Strin
 
     reportFile.deleteFile();
     return success;
+}
+
+static bool inspectNAMModelFileEnvelope(const juce::File& modelFile,
+                                        juce::String& error)
+{
+    // Bound untrusted input before either this process or the isolated probe
+    // allocates a string for it. Current NAM captures are comfortably below
+    // this ceiling; it primarily prevents accidental/synthetic multi-gigabyte
+    // JSON files from exhausting the application.
+    const auto size = modelFile.getSize();
+    if (size <= 0)
+    {
+        error = "NAM model file is empty";
+        return false;
+    }
+    if (size > OpenStudioNAMModelSafety::maximumFileBytes)
+    {
+        error = "NAM model file exceeds the "
+            + juce::String(
+                OpenStudioNAMModelSafety::maximumFileDescription)
+            + " safety limit";
+        return false;
+    }
+
+    juce::FileInputStream input(modelFile);
+    if (! input.openedOk())
+    {
+        error = "Could not read NAM model file";
+        return false;
+    }
+
+    std::array<char, 4096> prefix {};
+    const auto bytesRead = input.read(
+        prefix.data(), static_cast<int>(prefix.size()));
+    if (bytesRead <= 0)
+    {
+        error = "NAM model file is empty";
+        return false;
+    }
+
+    int offset = 0;
+    if (bytesRead >= 3
+        && static_cast<unsigned char>(prefix[0]) == 0xef
+        && static_cast<unsigned char>(prefix[1]) == 0xbb
+        && static_cast<unsigned char>(prefix[2]) == 0xbf)
+    {
+        offset = 3;
+    }
+    while (offset < bytesRead
+           && juce::CharacterFunctions::isWhitespace(
+               static_cast<juce::juce_wchar>(
+                   static_cast<unsigned char>(prefix[static_cast<size_t>(offset)]))))
+    {
+        ++offset;
+    }
+    if (offset >= bytesRead || prefix[static_cast<size_t>(offset)] != '{')
+    {
+        error = "Invalid NAM model file: expected a JSON object";
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+
+static bool readNAMModelFileTextBounded(const juce::File& modelFile,
+                                        juce::String& text,
+                                        juce::String& error)
+{
+    juce::FileInputStream input(modelFile);
+    if (! input.openedOk())
+    {
+        error = "Could not read NAM model file";
+        return false;
+    }
+
+    const auto length = input.getTotalLength();
+    if (length <= 0
+        || length > OpenStudioNAMModelSafety::maximumFileBytes)
+    {
+        error = length <= 0
+            ? juce::String("NAM model file is empty")
+            : juce::String("NAM model file exceeds the ")
+                + OpenStudioNAMModelSafety::maximumFileDescription
+                + " safety limit";
+        return false;
+    }
+
+    try
+    {
+        juce::MemoryBlock bytes(static_cast<size_t>(length));
+        juce::int64 totalRead = 0;
+        while (totalRead < length)
+        {
+            const int requested = static_cast<int>(juce::jmin<juce::int64>(
+                length - totalRead, 1024 * 1024));
+            const int count = input.read(
+                static_cast<char*>(bytes.getData())
+                    + static_cast<size_t>(totalRead),
+                requested);
+            if (count <= 0)
+                break;
+            totalRead += count;
+        }
+
+        char unexpectedByte = 0;
+        if (totalRead != length || input.read(&unexpectedByte, 1) > 0)
+        {
+            error = "NAM model file changed while it was being validated";
+            return false;
+        }
+
+        text = juce::String::fromUTF8(
+            static_cast<const char*>(bytes.getData()),
+            static_cast<int>(bytes.getSize()));
+    }
+    catch (const std::exception& ex)
+    {
+        error = "Could not allocate bounded NAM model input: "
+            + juce::String(ex.what());
+        return false;
+    }
+    catch (...)
+    {
+        error = "Could not allocate bounded NAM model input";
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+
+struct ScopedNAMModelValidationCopy
+{
+    juce::File file;
+
+    ~ScopedNAMModelValidationCopy()
+    {
+        if (file.existsAsFile())
+        {
+            file.setReadOnly(false);
+            file.deleteFile();
+        }
+    }
+};
+
+static bool createNAMModelValidationCopy(
+    const juce::File& source,
+    ScopedNAMModelValidationCopy& destination,
+    juce::String& error)
+{
+    if (source.isSymbolicLink())
+    {
+        error = "NAM model symbolic links are not accepted by the safety probe";
+        return false;
+    }
+
+    auto directory = getNAMModelProbeDirectory();
+    if (! prepareNAMModelProbeDirectory(directory, error))
+        return false;
+
+    destination.file = directory.getChildFile(
+        "validated_" + juce::Uuid().toString() + ".nam");
+
+    try
+    {
+#if JUCE_MAC || JUCE_LINUX
+        struct ScopedDescriptor
+        {
+            int value = -1;
+            ~ScopedDescriptor()
+            {
+                if (value >= 0)
+                    ::close(value);
+            }
+        };
+
+        const auto sourceFullPath = source.getFullPathName();
+        const auto sourcePath = sourceFullPath.toRawUTF8();
+        ScopedDescriptor input {
+            ::open(sourcePath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        };
+        struct stat sourceStatus {};
+        if (input.value < 0
+            || ::fstat(input.value, &sourceStatus) != 0
+            || ! S_ISREG(sourceStatus.st_mode))
+        {
+            error = "Could not securely open the NAM model file";
+            return false;
+        }
+        const auto length =
+            static_cast<juce::int64>(sourceStatus.st_size);
+        if (length <= 0
+            || length > OpenStudioNAMModelSafety::maximumFileBytes)
+        {
+            error = length <= 0
+                ? juce::String("NAM model file is empty")
+                : juce::String("NAM model file exceeds the ")
+                    + OpenStudioNAMModelSafety::maximumFileDescription
+                    + " safety limit";
+            return false;
+        }
+
+        const auto destinationFullPath =
+            destination.file.getFullPathName();
+        const auto destinationPath = destinationFullPath.toRawUTF8();
+        ScopedDescriptor output {
+            ::open(destinationPath,
+                   O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                   S_IRUSR | S_IWUSR)
+        };
+        if (output.value < 0)
+        {
+            error = "Could not securely create the NAM validation copy";
+            return false;
+        }
+
+        juce::MemoryBlock buffer(1024 * 1024);
+        juce::int64 totalRead = 0;
+        bool ioSucceeded = true;
+        while (totalRead < length && ioSucceeded)
+        {
+            const size_t requested = static_cast<size_t>(
+                juce::jmin<juce::int64>(
+                    length - totalRead,
+                    static_cast<juce::int64>(buffer.getSize())));
+            ssize_t count = -1;
+            do
+            {
+                count = ::read(input.value, buffer.getData(), requested);
+            }
+            while (count < 0 && errno == EINTR);
+            if (count <= 0)
+            {
+                ioSucceeded = false;
+                break;
+            }
+
+            size_t written = 0;
+            while (written < static_cast<size_t>(count))
+            {
+                ssize_t writeCount = -1;
+                do
+                {
+                    writeCount = ::write(
+                        output.value,
+                        static_cast<const char*>(buffer.getData()) + written,
+                        static_cast<size_t>(count) - written);
+                }
+                while (writeCount < 0 && errno == EINTR);
+                if (writeCount <= 0)
+                {
+                    ioSucceeded = false;
+                    break;
+                }
+                written += static_cast<size_t>(writeCount);
+            }
+            if (ioSucceeded)
+                totalRead += count;
+        }
+
+        char unexpectedByte = 0;
+        ssize_t extraRead = -1;
+        do
+        {
+            extraRead = ::read(input.value, &unexpectedByte, 1);
+        }
+        while (extraRead < 0 && errno == EINTR);
+        struct stat copyStatus {};
+        if (! ioSucceeded
+            || totalRead != length
+            || extraRead != 0
+            || ::fsync(output.value) != 0
+            || ::fchmod(output.value, S_IRUSR) != 0
+            || ::fstat(output.value, &copyStatus) != 0
+            || ! S_ISREG(copyStatus.st_mode)
+            || copyStatus.st_uid != ::geteuid()
+            || (copyStatus.st_mode & (S_IRWXG | S_IRWXO)) != 0
+            || static_cast<juce::int64>(copyStatus.st_size) != length)
+        {
+            error = "NAM model changed or could not be protected while its validation copy was created";
+            return false;
+        }
+#else
+        juce::FileInputStream input(source);
+        if (! input.openedOk())
+        {
+            error = "Could not read NAM model file";
+            return false;
+        }
+        const auto length = input.getTotalLength();
+        if (length <= 0
+            || length > OpenStudioNAMModelSafety::maximumFileBytes)
+        {
+            error = length <= 0
+                ? juce::String("NAM model file is empty")
+                : juce::String("NAM model file exceeds the ")
+                    + OpenStudioNAMModelSafety::maximumFileDescription
+                    + " safety limit";
+            return false;
+        }
+
+        juce::FileOutputStream output(destination.file);
+        if (output.failedToOpen())
+        {
+            error = "Could not create immutable NAM validation copy";
+            return false;
+        }
+
+        juce::MemoryBlock buffer(1024 * 1024);
+        juce::int64 totalRead = 0;
+        while (totalRead < length)
+        {
+            const int requested = static_cast<int>(juce::jmin<juce::int64>(
+                length - totalRead,
+                static_cast<juce::int64>(buffer.getSize())));
+            const int count = input.read(buffer.getData(), requested);
+            if (count <= 0
+                || ! output.write(buffer.getData(),
+                                  static_cast<size_t>(count)))
+            {
+                break;
+            }
+            totalRead += count;
+        }
+        char unexpectedByte = 0;
+        const bool sourceGrew = input.read(&unexpectedByte, 1) > 0;
+        output.flush();
+        if (totalRead != length
+            || sourceGrew
+            || output.getStatus().failed()
+            || destination.file.getSize() != length)
+        {
+            error = "NAM model file changed while its validation copy was created";
+            destination.file.deleteFile();
+            return false;
+        }
+#endif
+    }
+    catch (const std::exception& ex)
+    {
+        destination.file.deleteFile();
+        error = "Could not create bounded NAM validation copy: "
+            + juce::String(ex.what());
+        return false;
+    }
+    catch (...)
+    {
+        destination.file.deleteFile();
+        error = "Could not create bounded NAM validation copy";
+        return false;
+    }
+
+#if JUCE_WINDOWS
+    if (! destination.file.setReadOnly(true))
+    {
+        error = "Could not protect the immutable NAM validation copy";
+        destination.file.setReadOnly(false);
+        destination.file.deleteFile();
+        return false;
+    }
+#endif
+
+    error.clear();
+    return true;
 }
 
 static void updateNAMMeterLevel(std::atomic<float>& meterDb,
@@ -16093,6 +16554,7 @@ double S13NAMRack::getMaximumAutomatedTailLengthSeconds() const
 void S13NAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const juce::ScopedLock processorConfigurationLock(getCallbackLock());
+    const juce::ScopedLock hostPublicationLock(modelHostPublicationLock);
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
     publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
     namEffectsDspVersion.store(
@@ -18342,13 +18804,20 @@ void S13NAMRack::reclaimRetiredCabIRsFromEarlierPublication()
                 && cabIR->transitionSamplesRemaining.load(std::memory_order_acquire) > 0
                 ? cabIR->transitionFrom
                 : nullptr;
+            const auto* const active =
+                activeCabIR.load(std::memory_order_seq_cst);
+            const auto* const requested =
+                ampModelHandoff.requestedCabIR.load(
+                    std::memory_order_acquire);
 
             std::vector<std::shared_ptr<LoadedCabIR>> stillReferenced;
             stillReferenced.reserve(retiredCabIRs.size());
             irsToDestroy.reserve(retiredCabIRs.size());
             for (auto& retired : retiredCabIRs)
             {
-                if (retired.get() == transitionSource)
+                if (retired.get() == transitionSource
+                    || retired.get() == active
+                    || retired.get() == requested)
                     stillReferenced.push_back(std::move(retired));
                 else
                     irsToDestroy.push_back(std::move(retired));
@@ -18401,10 +18870,36 @@ void S13NAMRack::resetModelStreamingState(LoadedNAMModel& model,
 void S13NAMRack::resetAmpModelHandoffForCurrentOwner() noexcept
 {
     auto* const currentModel = ampModel.get();
+    auto* const currentPedalModel = pedalModel.get();
+    auto* const requestedCab =
+        ampModelHandoff.publishesResourceTransaction.load(
+            std::memory_order_acquire)
+        ? ampModelHandoff.requestedCabIR.load(
+            std::memory_order_acquire)
+        : activeCabIR.load(std::memory_order_acquire);
+    activePedalModel.store(
+        currentPedalModel, std::memory_order_seq_cst);
     activeAmpModel.store(
         currentModel, std::memory_order_seq_cst);
+    activeCabIR.store(
+        requestedCab, std::memory_order_seq_cst);
     ampModelHandoff.requestedModel.store(
         currentModel, std::memory_order_release);
+    ampModelHandoff.requestedPedalModel.store(
+        currentPedalModel, std::memory_order_release);
+    ampModelHandoff.requestedCabIR.store(
+        requestedCab, std::memory_order_release);
+    ampModelHandoff.publishesResourceTransaction.store(
+        false, std::memory_order_release);
+    const auto resourceGeneration =
+        modelResourcePublicationGeneration.load(
+            std::memory_order_acquire);
+    if ((resourceGeneration & 1U) != 0U)
+    {
+        modelResourcePublicationGeneration.store(
+            resourceGeneration + 1U,
+            std::memory_order_release);
+    }
     const auto generation =
         ampModelHandoff.requestGeneration.fetch_add(
             1, std::memory_order_acq_rel)
@@ -18426,6 +18921,14 @@ void S13NAMRack::resetAmpModelHandoffForCurrentOwner() noexcept
             std::memory_order_acquire);
     activeAmpModelIncludesCab.store(
         includesCab, std::memory_order_release);
+    const bool cabWasRequested =
+        cabRequestedEnabled.load(
+            std::memory_order_relaxed);
+    cabEnabled.store(
+        cabWasRequested && ! includesCab
+            ? 1.0f
+            : 0.0f,
+        std::memory_order_relaxed);
 }
 
 void S13NAMRack::resetInputRoutingHandoff() noexcept
@@ -18769,7 +19272,8 @@ void S13NAMRack::finishInputRoutingHandoffBlock(
 S13NAMRack::LoadedNAMModel*
 S13NAMRack::beginAmpModelHandoffBlock(
     float* const handoffGainEnvelope,
-    int numSamples) noexcept
+    int numSamples,
+    LoadedNAMModel* const coherentActiveModel) noexcept
 {
     const int safeNumSamples =
         juce::jmax(0, numSamples);
@@ -18802,8 +19306,7 @@ S13NAMRack::beginAmpModelHandoffBlock(
     if (handoffGainEnvelope == nullptr
         || safeNumSamples <= 0)
     {
-        return activeAmpModel.load(
-            std::memory_order_seq_cst);
+        return coherentActiveModel;
     }
 
     if (ampModelHandoff.phase
@@ -18876,8 +19379,7 @@ S13NAMRack::beginAmpModelHandoffBlock(
                    .phaseSampleCount;
     }
 
-    return activeAmpModel.load(
-        std::memory_order_seq_cst);
+    return coherentActiveModel;
 }
 
 void S13NAMRack::finishAmpModelHandoffBlock(
@@ -18894,6 +19396,24 @@ void S13NAMRack::finishAmpModelHandoffBlock(
     if (ampModelHandoff.phase
         == AmpModelHandoffPhase::fadeOut)
     {
+        // Resource writers hold this lock only for their bounded final
+        // publication transaction. Never wait for it on the audio thread: if
+        // a second preset restore is rewriting the requested Pedal/Amp/Cab
+        // tuple, remain at the already-reached zero-gain boundary and retry on
+        // the next callback. This prevents the finisher from observing or
+        // publishing a half-old/half-new requested tuple.
+        const juce::ScopedTryLock resourcePublicationLock(
+            modelHostPublicationLock);
+        if (! resourcePublicationLock.isLocked())
+        {
+            ampModelHandoff.consumedRequestGeneration =
+                ampModelHandoff.requestGeneration.load(
+                    std::memory_order_acquire);
+            modelSnapshotLockMissCount.fetch_add(
+                1, std::memory_order_relaxed);
+            return;
+        }
+
         const auto latestGeneration =
             ampModelHandoff.requestGeneration.load(
                 std::memory_order_acquire);
@@ -18903,9 +19423,36 @@ void S13NAMRack::finishAmpModelHandoffBlock(
         ampModelHandoff
             .consumedRequestGeneration =
             latestGeneration;
+        const bool publishesResourceTransaction =
+            ampModelHandoff.publishesResourceTransaction.exchange(
+                false, std::memory_order_acq_rel);
+        if (publishesResourceTransaction)
+        {
+            activePedalModel.store(
+                ampModelHandoff.requestedPedalModel.load(
+                    std::memory_order_acquire),
+                std::memory_order_seq_cst);
+            activeCabIR.store(
+                ampModelHandoff.requestedCabIR.load(
+                    std::memory_order_acquire),
+                std::memory_order_seq_cst);
+        }
         activeAmpModel.store(
             requestedModel,
             std::memory_order_seq_cst);
+
+        if (publishesResourceTransaction)
+        {
+            const auto resourceGeneration =
+                modelResourcePublicationGeneration.load(
+                    std::memory_order_acquire);
+            if ((resourceGeneration & 1U) != 0U)
+            {
+                modelResourcePublicationGeneration.store(
+                    resourceGeneration + 1U,
+                    std::memory_order_release);
+            }
+        }
 
         const bool includesCab =
             requestedModel != nullptr
@@ -19217,7 +19764,43 @@ std::shared_ptr<S13NAMRack::LoadedNAMModel> S13NAMRack::prepareModel(
         return {};
     }
 
-    const auto modelJson = juce::JSON::parse(modelFile.loadFileAsString());
+    // Before crash isolation, the live process performs only bounded envelope
+    // validation and a byte-for-byte stream copy. JSON shape parsing and NAM
+    // Core construction happen in the low-priority child first.
+    if (! inspectNAMModelFileEnvelope(modelFile, error))
+    {
+        return {};
+    }
+
+    // Snapshot the bounded bytes once, then make both the isolated child and
+    // the production NAM Core loader consume that exact private copy. The
+    // selected library path remains the durable identity, but replacing it
+    // during validation can no longer substitute unprobed bytes into this
+    // process.
+    ScopedNAMModelValidationCopy validationCopy;
+    if (! createNAMModelValidationCopy(
+            modelFile, validationCopy, error))
+    {
+        return {};
+    }
+
+    juce::String probeError;
+    if (! probeNAMModelInChildProcess(
+            validationCopy.file, probeError))
+    {
+        error = "Failed NAM model safety probe: " + probeError;
+        return {};
+    }
+
+    // The isolated child has parsed and exercised this immutable copy
+    // successfully. It is now safe to read metadata needed by the live rack;
+    // NAM Core consumes that same copy while constructing the production graph.
+    juce::String modelText;
+    if (! readNAMModelFileTextBounded(
+            validationCopy.file, modelText, error))
+        return {};
+    const auto modelJson = juce::JSON::parse(modelText);
+    modelText.clear();
     const bool hasRequiredNAMShape = modelJson.isObject()
         && modelJson.hasProperty("version")
         && modelJson.hasProperty("architecture")
@@ -19226,13 +19809,6 @@ std::shared_ptr<S13NAMRack::LoadedNAMModel> S13NAMRack::prepareModel(
     if (!hasRequiredNAMShape)
     {
         error = "Invalid NAM model file: missing required version, architecture, config, or weights fields";
-        return {};
-    }
-
-    juce::String probeError;
-    if (! probeNAMModelInChildProcess(modelFile, probeError))
-    {
-        error = "Failed NAM model safety probe: " + probeError;
         return {};
     }
 
@@ -19289,7 +19865,7 @@ std::shared_ptr<S13NAMRack::LoadedNAMModel> S13NAMRack::prepareModel(
                 std::memory_order_relaxed);
             lane->dsp = nam::get_dsp(
                 std::filesystem::path(
-                    modelFile.getFullPathName().toStdString()));
+                    validationCopy.file.getFullPathName().toStdString()));
             if (lane->dsp == nullptr)
             {
                 throw std::runtime_error(
@@ -19438,7 +20014,8 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
                                      bool pedalSlot,
                                      bool applyDirectLoadPolicy,
                                      bool reclaimEarlierPublication,
-                                     juce::String* error)
+                                     juce::String* error,
+                                     bool deferActivePublication)
 {
     // Reclaiming can run the destructor of a retired NAM graph. Keep that
     // potentially expensive work outside the publication critical section.
@@ -19486,6 +20063,8 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
         }
 
         {
+            const juce::ScopedLock hostPublicationLock(
+                modelHostPublicationLock);
             const juce::ScopedLock lock(modelSwapLock);
             if (modelHostConfigurationGeneration.load(
                     std::memory_order_acquire)
@@ -19549,7 +20128,38 @@ bool S13NAMRack::commitPreparedModel(std::shared_ptr<LoadedNAMModel> loaded,
             auto* const published = owner.get();
             if (pedalSlot)
             {
-                activePedalModel.store(published, std::memory_order_seq_cst);
+                const bool joinsPendingResourceTransaction =
+                    ! deferActivePublication
+                    && (((modelResourcePublicationGeneration.load(
+                              std::memory_order_acquire)
+                          & 1U) != 0U)
+                        || ampModelHandoff.publishesResourceTransaction.load(
+                            std::memory_order_acquire));
+                if (deferActivePublication
+                    || joinsPendingResourceTransaction)
+                {
+                    ampModelHandoff.requestedPedalModel.store(
+                        published, std::memory_order_release);
+                    if (joinsPendingResourceTransaction)
+                    {
+                        // A direct internal load that arrives during a preset
+                        // handoff joins that handoff instead of being briefly
+                        // published and then overwritten by its older tuple.
+                        // Bump the Amp handoff generation as well: if the
+                        // callback has already claimed the earlier request,
+                        // this newer Pedal pointer gets another zero-gain
+                        // publication boundary.
+                        ampModelHandoff.publishesResourceTransaction.store(
+                            true, std::memory_order_release);
+                        ampModelHandoff.requestGeneration.fetch_add(
+                            1, std::memory_order_release);
+                    }
+                }
+                else
+                {
+                    activePedalModel.store(
+                        published, std::memory_order_seq_cst);
+                }
                 pedalModelPath = owner != nullptr ? owner->path : juce::String();
                 pedalDeclaredCaptureType = owner != nullptr
                     ? owner->declaredCaptureType
@@ -20469,6 +21079,10 @@ juce::var S13NAMRack::getDiagnosticState() const
         "reverbMix",
         reverbMix.load(std::memory_order_relaxed));
     obj->setProperty("modelSnapshotLockMissCount", static_cast<double>(modelSnapshotLockMissCount.load(std::memory_order_relaxed)));
+    obj->setProperty("cabPublicationAttemptCount", static_cast<double>(
+        cabPublicationAttemptCount.load(std::memory_order_relaxed)));
+    obj->setProperty("cabPublicationStaleGenerationRejectCount", static_cast<double>(
+        cabPublicationStaleGenerationRejectCount.load(std::memory_order_relaxed)));
     return juce::var(obj);
 }
 
@@ -20517,6 +21131,11 @@ bool S13NAMRack::loadCabIR(const juce::String& path)
     }
 
     reclaimRetiredCabIRsFromEarlierPublication();
+    {
+        const juce::ScopedLock lock(cabIRLock);
+        if (cabIR != nullptr)
+            retiredCabIRs.reserve(retiredCabIRs.size() + 1);
+    }
 
     // A Convolution load submitted to an already-running instance is
     // asynchronous and has no public completion callback. Build a fresh
@@ -20553,6 +21172,22 @@ bool S13NAMRack::loadCabIR(const juce::String& path)
                 std::memory_order_acquire)
             != hostConfiguration.generation)
         {
+            continue;
+        }
+
+        // Keep the final generation validation and publication indivisible
+        // from prepareToPlay(). This lock is message/worker-thread-only; the
+        // audio callback continues to read activeCabIR lock-free.
+        cabPublicationAttemptCount.fetch_add(
+            1, std::memory_order_relaxed);
+        const juce::ScopedLock hostPublicationLock(
+            modelHostPublicationLock);
+        if (modelHostConfigurationGeneration.load(
+                std::memory_order_acquire)
+            != hostConfiguration.generation)
+        {
+            cabPublicationStaleGenerationRejectCount.fetch_add(
+                1, std::memory_order_relaxed);
             continue;
         }
 
@@ -20612,7 +21247,9 @@ std::shared_ptr<S13NAMRack::LoadedCabIR> S13NAMRack::prepareCabIR(
     return {};
 }
 
-bool S13NAMRack::publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared)
+bool S13NAMRack::publishPreparedCabIR(
+    std::shared_ptr<LoadedCabIR> prepared,
+    bool deferActivePublication)
 {
     if (prepared == nullptr)
         return false;
@@ -20637,7 +21274,31 @@ bool S13NAMRack::publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared)
         cabIRPath = cabIR->path;
         cabIRDurationSeconds.store(cabIR->durationSeconds, std::memory_order_relaxed);
         cabIRLoaded.store(true, std::memory_order_release);
-        activeCabIR.store(cabIR.get(), std::memory_order_seq_cst);
+        const bool joinsPendingResourceTransaction =
+            ! deferActivePublication
+            && (((modelResourcePublicationGeneration.load(
+                      std::memory_order_acquire)
+                  & 1U) != 0U)
+                || ampModelHandoff.publishesResourceTransaction.load(
+                    std::memory_order_acquire));
+        if (deferActivePublication
+            || joinsPendingResourceTransaction)
+        {
+            ampModelHandoff.requestedCabIR.store(
+                cabIR.get(), std::memory_order_release);
+            if (joinsPendingResourceTransaction)
+            {
+                ampModelHandoff.publishesResourceTransaction.store(
+                    true, std::memory_order_release);
+                ampModelHandoff.requestGeneration.fetch_add(
+                    1, std::memory_order_release);
+            }
+        }
+        else
+        {
+            activeCabIR.store(
+                cabIR.get(), std::memory_order_seq_cst);
+        }
     }
 
     cabRequestedEnabled.store(true, std::memory_order_relaxed);
@@ -20649,13 +21310,40 @@ bool S13NAMRack::publishPreparedCabIR(std::shared_ptr<LoadedCabIR> prepared)
     return true;
 }
 
-void S13NAMRack::clearCabIR()
+void S13NAMRack::clearCabIR(bool deferActivePublication)
 {
+    const juce::ScopedLock hostPublicationLock(
+        modelHostPublicationLock);
+    const bool joinsPendingResourceTransaction =
+        ! deferActivePublication
+        && (((modelResourcePublicationGeneration.load(
+                  std::memory_order_acquire)
+              & 1U) != 0U)
+            || ampModelHandoff.publishesResourceTransaction.load(
+                std::memory_order_acquire));
     {
         const juce::ScopedLock lock(cabIRLock);
         cabIRLoaded.store(false, std::memory_order_release);
         cabIRDurationSeconds.store(0.0, std::memory_order_relaxed);
         cabIRPath.clear();
+        if (deferActivePublication
+            || joinsPendingResourceTransaction)
+        {
+            ampModelHandoff.requestedCabIR.store(
+                nullptr, std::memory_order_release);
+        }
+        else
+        {
+            activeCabIR.store(
+                nullptr, std::memory_order_seq_cst);
+        }
+    }
+    if (joinsPendingResourceTransaction)
+    {
+        ampModelHandoff.publishesResourceTransaction.store(
+            true, std::memory_order_release);
+        ampModelHandoff.requestGeneration.fetch_add(
+            1, std::memory_order_release);
     }
     cabRequestedEnabled.store(false, std::memory_order_relaxed);
     cabEnabled.store(0.0f, std::memory_order_relaxed);
@@ -20910,6 +21598,11 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
             + static_cast<size_t>(ampResourceNeedsChange);
         retiredModels.reserve(retiredModels.size() + possibleRetirements);
     }
+    {
+        const juce::ScopedLock lock(cabIRLock);
+        if (cabResourceNeedsChange && cabIR != nullptr)
+            retiredCabIRs.reserve(retiredCabIRs.size() + 1);
+    }
 
     // The host can change while files are probed. Re-prewarm both graphs for a
     // single stable configuration, then publish through the lock-free realtime
@@ -20994,6 +21687,14 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                 return false;
         }
 
+        // No resource is published until every graph is ready. Hold the
+        // message-thread host-publication lock through the whole commit so a
+        // device reconfiguration cannot invalidate the prepared generation
+        // between Cab, Pedal and Amp publication. All operations below have
+        // pre-reserved retirement storage and cannot fail after the first
+        // resource is made visible.
+        const juce::ScopedLock hostPublicationLock(
+            modelHostPublicationLock);
         if (modelHostConfigurationGeneration.load(
                 std::memory_order_acquire)
             != hostConfiguration.generation)
@@ -21001,11 +21702,49 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
             continue;
         }
 
+        auto resourceGeneration =
+            modelResourcePublicationGeneration.load(
+                std::memory_order_acquire);
+        if ((resourceGeneration & 1U) == 0U)
+        {
+            auto* const currentPedal =
+                activePedalModel.load(std::memory_order_seq_cst);
+            auto* const currentAmp =
+                activeAmpModel.load(std::memory_order_seq_cst);
+            auto* const currentCab =
+                activeCabIR.load(std::memory_order_seq_cst);
+            fallbackPedalModel.store(
+                currentPedal, std::memory_order_relaxed);
+            fallbackAmpModel.store(
+                currentAmp, std::memory_order_relaxed);
+            fallbackCabIR.store(
+                currentCab, std::memory_order_relaxed);
+            ampModelHandoff.requestedPedalModel.store(
+                currentPedal, std::memory_order_relaxed);
+            ampModelHandoff.requestedCabIR.store(
+                currentCab, std::memory_order_relaxed);
+            modelResourcePublicationGeneration.store(
+                resourceGeneration + 1U,
+                std::memory_order_release);
+        }
+        if (ampResourceNeedsChange)
+        {
+            ampModelHandoff.publishesResourceTransaction.store(
+                true, std::memory_order_release);
+        }
+        const bool deferActiveResourcePublication = true;
+
     if (cabResourceNeedsChange)
     {
         if (cabPath.trim().isEmpty())
-            clearCabIR();
-        else if (cabAvailable && ! publishPreparedCabIR(std::move(preparedCab)))
+        {
+            clearCabIR(true);
+            ampModelHandoff.requestedCabIR.store(
+                nullptr, std::memory_order_release);
+        }
+        else if (cabAvailable && ! publishPreparedCabIR(
+                     std::move(preparedCab),
+                     deferActiveResourcePublication))
         {
             cabAvailable = false;
             rememberError("Failed to publish prepared cab IR: " + cabPath);
@@ -21015,7 +21754,9 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
 
         if (! cabAvailable && allowMissingResources)
         {
-            clearCabIR();
+            clearCabIR(true);
+            ampModelHandoff.requestedCabIR.store(
+                nullptr, std::memory_order_release);
             const juce::ScopedLock lock(cabIRLock);
             cabIRPath = cabPath;
         }
@@ -21028,7 +21769,8 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
                                   true,
                                   applySessionCabAutoBypass,
                                   false,
-                                  &commitError))
+                                  &commitError,
+                                  deferActiveResourcePublication))
         {
             rememberError(commitError);
             const juce::ScopedLock lock(modelSwapLock);
@@ -21132,6 +21874,28 @@ bool S13NAMRack::restoreModelResourceState(bool pedalPathSpecified,
 
     if (publishAdditionalState)
         publishAdditionalState();
+
+    if (! ampModelHandoff.publishesResourceTransaction.load(
+            std::memory_order_acquire))
+    {
+        activePedalModel.store(
+            ampModelHandoff.requestedPedalModel.load(
+                std::memory_order_acquire),
+            std::memory_order_seq_cst);
+        activeCabIR.store(
+            ampModelHandoff.requestedCabIR.load(
+                std::memory_order_acquire),
+            std::memory_order_seq_cst);
+        const auto completingGeneration =
+            modelResourcePublicationGeneration.load(
+                std::memory_order_acquire);
+        if ((completingGeneration & 1U) != 0U)
+        {
+            modelResourcePublicationGeneration.store(
+                completingGeneration + 1U,
+                std::memory_order_release);
+        }
+    }
 
     {
         const juce::ScopedLock lock(modelSwapLock);
@@ -26122,11 +26886,61 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         static_cast<float>(currentReverbEngineVersion),
         std::memory_order_relaxed);
     ScopedNAMModelReader modelReadGuard(modelReaders);
-    auto* const pedalModelForBlock =
-        activePedalModel.load(std::memory_order_seq_cst);
-    auto* ampModelForBlock =
-        activeAmpModel.load(std::memory_order_seq_cst);
-    auto* const cabIRForBlock = activeCabIR.load(std::memory_order_seq_cst);
+    LoadedNAMModel* pedalModelForBlock = nullptr;
+    LoadedNAMModel* ampModelForBlock = nullptr;
+    LoadedCabIR* cabIRForBlock = nullptr;
+    bool resourceSnapshotRead = false;
+    constexpr int maximumResourceSnapshotAttempts = 16;
+    for (int attempt = 0;
+         attempt < maximumResourceSnapshotAttempts;
+         ++attempt)
+    {
+        const auto generationBefore =
+            modelResourcePublicationGeneration.load(
+                std::memory_order_acquire);
+        if ((generationBefore & 1U) != 0U)
+        {
+            pedalModelForBlock = fallbackPedalModel.load(
+                std::memory_order_acquire);
+            ampModelForBlock = fallbackAmpModel.load(
+                std::memory_order_acquire);
+            cabIRForBlock = fallbackCabIR.load(
+                std::memory_order_acquire);
+            resourceSnapshotRead = true;
+            break;
+        }
+
+        pedalModelForBlock = activePedalModel.load(
+            std::memory_order_seq_cst);
+        ampModelForBlock = activeAmpModel.load(
+            std::memory_order_seq_cst);
+        cabIRForBlock = activeCabIR.load(
+            std::memory_order_seq_cst);
+        const auto generationAfter =
+            modelResourcePublicationGeneration.load(
+                std::memory_order_acquire);
+        if (generationBefore == generationAfter
+            && (generationAfter & 1U) == 0U)
+        {
+            resourceSnapshotRead = true;
+            break;
+        }
+    }
+    if (! resourceSnapshotRead)
+    {
+        pedalModelForBlock = fallbackPedalModel.load(
+            std::memory_order_acquire);
+        ampModelForBlock = fallbackAmpModel.load(
+            std::memory_order_acquire);
+        cabIRForBlock = fallbackCabIR.load(
+            std::memory_order_acquire);
+        modelSnapshotLockMissCount.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    diagnosticLastBlockPedalModel.store(
+        pedalModelForBlock, std::memory_order_relaxed);
+    diagnosticLastBlockCabIR.store(
+        cabIRForBlock, std::memory_order_relaxed);
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
@@ -26203,7 +27017,8 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         ampModelForBlock =
             beginAmpModelHandoffBlock(
                 ampHandoffGainEnvelope,
-                numSamples);
+                numSamples,
+                ampModelForBlock);
         ampHandoffActive =
             ampModelHandoff.phase
                     != AmpModelHandoffPhase::steady
@@ -26235,6 +27050,8 @@ void S13NAMRack::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         // diagnostic records that this callback could not be dezippered.
         resetInputRoutingHandoff();
     }
+    diagnosticLastBlockAmpModel.store(
+        ampModelForBlock, std::memory_order_relaxed);
 
     diagnosticProcessedBlockCount.fetch_add(1, std::memory_order_relaxed);
     diagnosticLastBlockSize.store(numSamples, std::memory_order_relaxed);

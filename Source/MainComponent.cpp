@@ -1,18 +1,39 @@
 #include "MainComponent.h"
 #include "ApplicationLaunchState.h"
+#include "FFmpegLocator.h"
+#include "NAMModelSafety.h"
 #include <array>
 #include <atomic>
 #include <set>
 #include <thread>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <vector>
 
 #if ! JUCE_WINDOWS
 #include <sys/stat.h>
+#endif
+
+#if JUCE_MAC
+#include <dlfcn.h>
+#include <Security/Security.h>
+#endif
+
+#if JUCE_LINUX
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 #if JUCE_WINDOWS
@@ -596,16 +617,12 @@ juce::Array<RuntimeAssetCheck> getBundledFeatureAssetChecks()
     const auto runtimeRoot = getRuntimeAssetRoot();
     juce::Array<RuntimeAssetCheck> checks;
 
-   #if JUCE_WINDOWS
-    const auto ffmpegName = "ffmpeg.exe";
-   #else
-    const auto ffmpegName = "ffmpeg";
-   #endif
-
     checks.add({ "bundled effects directory", runtimeRoot.getChildFile("effects") });
     checks.add({ "bundled scripts directory", runtimeRoot.getChildFile("scripts") });
     checks.add({ "core pitch model", runtimeRoot.getChildFile("models").getChildFile("basic_pitch_nmp.onnx") });
-    checks.add({ "bundled ffmpeg binary", runtimeRoot.getChildFile(ffmpegName) });
+#if JUCE_WINDOWS
+    checks.add({ "bundled ffmpeg binary", runtimeRoot.getChildFile("ffmpeg.exe") });
+#endif
 
     return checks;
 }
@@ -1038,7 +1055,8 @@ juce::File getOpenStudioNAMRoot()
 
 #if JUCE_MAC || JUCE_LINUX
     // Preserve pre-release data written before NAM adopted the platform data
-    // directory. The Python catalog updater uses the same fallback.
+    // directory. Native catalog refresh and library discovery share this
+    // compatibility fallback.
     if (! root.exists() && legacyRoot.isDirectory())
         root = legacyRoot;
 #endif
@@ -1054,11 +1072,6 @@ juce::File getOpenStudioNAMCatalogJson()
     return getOpenStudioNAMRoot().getChildFile("catalog.json");
 }
 
-juce::File getOpenStudioNAMCatalogSqlite()
-{
-    return getOpenStudioNAMRoot().getChildFile("catalog.sqlite");
-}
-
 juce::File getOpenStudioNAMManifestJson()
 {
     return getOpenStudioNAMRoot().getChildFile("library_manifest.json");
@@ -1072,6 +1085,64 @@ std::map<std::string, juce::uint64> namModelMutationGenerations;
 juce::uint64 nextNAMModelMutationGeneration = 0;
 juce::uint64 namRackTopologyGeneration = 1;
 juce::CriticalSection namLibraryMutationLock;
+juce::InterProcessLock namLibraryMutationProcessLock(
+    "OpenStudio.NAMLibraryManifest.v1");
+
+bool isTone3000TaskCancelled() noexcept;
+juce::var parseJsonFileOrDefault(const juce::File& file,
+                                 const juce::String& arrayProperty);
+juce::var makeEmptyNAMLibraryManifest();
+juce::var runNAMLibraryReliabilityRegressionImpl();
+
+struct ScopedNAMLibraryMutationLock
+{
+    explicit ScopedNAMLibraryMutationLock(int timeoutMs = 5000)
+    {
+        const auto deadline = juce::Time::getMillisecondCounterHiRes()
+            + static_cast<double>(juce::jmax(0, timeoutMs));
+
+        while (! localLocked)
+        {
+            localLocked = namLibraryMutationLock.tryEnter();
+            if (localLocked)
+                break;
+            if (isTone3000TaskCancelled()
+                || juce::Time::getMillisecondCounterHiRes() >= deadline)
+            {
+                return;
+            }
+            juce::Thread::sleep(10);
+        }
+
+        while (! processLocked)
+        {
+            if (isTone3000TaskCancelled())
+                return;
+            const auto remainingMs = static_cast<int>(std::ceil(
+                deadline - juce::Time::getMillisecondCounterHiRes()));
+            if (remainingMs <= 0)
+                return;
+            processLocked = namLibraryMutationProcessLock.enter(
+                juce::jmin(100, remainingMs));
+        }
+    }
+
+    ~ScopedNAMLibraryMutationLock()
+    {
+        if (processLocked)
+            namLibraryMutationProcessLock.exit();
+        if (localLocked)
+            namLibraryMutationLock.exit();
+    }
+
+    bool locked() const noexcept
+    {
+        return localLocked && processLocked;
+    }
+
+    bool localLocked = false;
+    bool processLocked = false;
+};
 
 void invalidateNAMRackTopology()
 {
@@ -1085,15 +1156,43 @@ bool isNAMRackTopologyCurrent(juce::uint64 generation)
     return generation == namRackTopologyGeneration;
 }
 
-bool persistNAMLibraryManifest(const juce::var& manifest)
+bool persistJsonFileAtomically(const juce::File& targetFile,
+                               const juce::var& value)
 {
-    const juce::ScopedLock manifestLock(namLibraryMutationLock);
-    const auto manifestFile = getOpenStudioNAMManifestJson();
-    juce::TemporaryFile temporaryManifest(manifestFile, juce::TemporaryFile::useHiddenFile);
-    if (! temporaryManifest.getFile().replaceWithText(juce::JSON::toString(manifest, true)))
+    juce::TemporaryFile temporaryFile(
+        targetFile, juce::TemporaryFile::useHiddenFile);
+    if (! temporaryFile.getFile().replaceWithText(
+            juce::JSON::toString(value, true)))
         return false;
 
-    return temporaryManifest.overwriteTargetFileWithTemporary();
+    return temporaryFile.overwriteTargetFileWithTemporary();
+}
+
+bool persistNAMLibraryManifestLocked(const juce::File& manifestFile,
+                                     const juce::var& manifest)
+{
+    return persistJsonFileAtomically(manifestFile, manifest);
+}
+
+juce::var makeNAMLibraryLockFailure(const juce::File& manifestFile)
+{
+    auto manifest = parseJsonFileOrDefault(manifestFile, "installed");
+    auto* object = manifest.getDynamicObject();
+    if (object == nullptr)
+    {
+        juce::DynamicObject::Ptr fallback = new juce::DynamicObject();
+        fallback->setProperty("schemaVersion", 1);
+        fallback->setProperty("installed", juce::Array<juce::var>());
+        manifest = juce::var(fallback.get());
+        object = fallback.get();
+    }
+    object->setProperty("success", false);
+    object->setProperty(
+        "error",
+        isTone3000TaskCancelled()
+            ? juce::String("The NAM library operation was canceled.")
+            : juce::String("Timed out waiting for another OpenStudio instance to finish updating the NAM library."));
+    return manifest;
 }
 
 juce::File getTone3000TokenFile()
@@ -1122,6 +1221,249 @@ constexpr const char* kTone3000DefaultRedirectUri = "http://127.0.0.1:18762/tone
 
 std::atomic<int> tone3000AuthFlowGeneration { 0 };
 std::atomic<bool> tone3000AuthFlowActive { false };
+std::atomic<juce::uint64> tone3000CredentialEpoch { 1 };
+std::mutex tone3000TokenStorageMutex;
+std::mutex tone3000PendingAuthStorageMutex;
+std::mutex tone3000RefreshMutex;
+std::mutex tone3000CatalogRefreshMutex;
+const juce::String tone3000CredentialSessionId =
+    juce::Uuid().toString();
+juce::InterProcessLock tone3000CredentialProcessLock(
+    "OpenStudio.TONE3000.Credentials.v1");
+juce::InterProcessLock tone3000CatalogRefreshProcessLock(
+    "OpenStudio.TONE3000.CatalogRefresh.v1");
+juce::InterProcessLock tone3000TokenRefreshProcessLock(
+    "OpenStudio.TONE3000.TokenRefresh.v1");
+juce::InterProcessLock tone3000AuthFlowProcessLock(
+    "OpenStudio.TONE3000.AuthFlow.v1");
+thread_local const std::atomic<bool>* activeTone3000TaskCancellation = nullptr;
+
+bool isTone3000TaskCancelled() noexcept
+{
+    return activeTone3000TaskCancellation != nullptr
+        && activeTone3000TaskCancellation->load(
+            std::memory_order_acquire);
+}
+
+bool sleepForTone3000Task(int milliseconds)
+{
+    int remaining = juce::jmax(0, milliseconds);
+    while (remaining > 0)
+    {
+        if (isTone3000TaskCancelled())
+            return false;
+        const int slice = juce::jmin(remaining, 100);
+        juce::Thread::sleep(slice);
+        remaining -= slice;
+    }
+    return ! isTone3000TaskCancelled();
+}
+
+struct ScopedTone3000CredentialProcessLock
+{
+    ScopedTone3000CredentialProcessLock()
+        : locked(tone3000CredentialProcessLock.enter(30000))
+    {
+    }
+
+    ~ScopedTone3000CredentialProcessLock()
+    {
+        if (locked)
+            tone3000CredentialProcessLock.exit();
+    }
+
+    bool locked = false;
+};
+
+struct ScopedTone3000CatalogRefreshLock
+{
+    explicit ScopedTone3000CatalogRefreshLock(
+        int maximumWaitMs = 180000)
+        : localLock(tone3000CatalogRefreshMutex, std::defer_lock)
+    {
+        const auto deadline =
+            juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! localLock.try_lock())
+        {
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(100))
+                return;
+        }
+
+        while (! isTone3000TaskCancelled())
+        {
+            if (tone3000CatalogRefreshProcessLock.enter(100))
+            {
+                processLocked = true;
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline)
+                return;
+        }
+    }
+
+    ~ScopedTone3000CatalogRefreshLock()
+    {
+        if (processLocked)
+            tone3000CatalogRefreshProcessLock.exit();
+    }
+
+    std::unique_lock<std::mutex> localLock;
+    bool processLocked = false;
+    bool locked = false;
+};
+
+struct ScopedTone3000TokenRefreshLock
+{
+    explicit ScopedTone3000TokenRefreshLock(
+        int maximumWaitMs = 60000)
+        : localLock(tone3000RefreshMutex, std::defer_lock)
+    {
+        const auto deadline =
+            juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! localLock.try_lock())
+        {
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(100))
+                return;
+        }
+
+        while (! isTone3000TaskCancelled())
+        {
+            if (tone3000TokenRefreshProcessLock.enter(100))
+            {
+                processLocked = true;
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline)
+                return;
+        }
+    }
+
+    ~ScopedTone3000TokenRefreshLock()
+    {
+        if (processLocked)
+            tone3000TokenRefreshProcessLock.exit();
+    }
+
+    std::unique_lock<std::mutex> localLock;
+    bool processLocked = false;
+    bool locked = false;
+};
+
+struct ScopedTone3000AuthFlowProcessLock
+{
+    ScopedTone3000AuthFlowProcessLock()
+        : locked(tone3000AuthFlowProcessLock.enter(0))
+    {
+    }
+
+    ~ScopedTone3000AuthFlowProcessLock()
+    {
+        if (locked)
+            tone3000AuthFlowProcessLock.exit();
+    }
+
+    bool locked = false;
+};
+
+juce::uint64 beginTone3000CredentialEpoch() noexcept
+{
+    return tone3000CredentialEpoch.fetch_add(
+               1, std::memory_order_acq_rel) + 1;
+}
+
+juce::uint64 getTone3000RecordEpoch(
+    const juce::DynamicObject* object) noexcept
+{
+    if (object == nullptr)
+        return 0;
+    const auto value = static_cast<juce::int64>(
+        object->getProperty("credentialEpoch"));
+    return value > 0 ? static_cast<juce::uint64>(value) : 0;
+}
+
+juce::String getTone3000RecordSession(
+    const juce::DynamicObject* object)
+{
+    return object != nullptr
+        ? object->getProperty("credentialSession").toString()
+        : juce::String();
+}
+
+juce::String makeTone3000TokenIdentity(
+    const juce::DynamicObject* object)
+{
+    if (object == nullptr)
+        return {};
+    const auto revision =
+        object->getProperty("credentialRevision").toString();
+    return revision.isNotEmpty()
+        ? revision
+        : object->getProperty("accessToken").toString()
+        + "\x1f"
+        + object->getProperty("refreshToken").toString();
+}
+
+bool tone3000CredentialSnapshotStillCurrent(
+    juce::uint64 snapshotEpoch,
+    const juce::String& expectedIdentity,
+    juce::uint64 currentEpoch,
+    const juce::String& currentIdentity) noexcept
+{
+    return snapshotEpoch == currentEpoch
+        && expectedIdentity.isNotEmpty()
+        && expectedIdentity == currentIdentity;
+}
+
+bool tone3000RecordCanBeInvalidated(
+    const juce::String& recordSession,
+    juce::uint64 recordEpoch,
+    juce::uint64 invalidationEpoch) noexcept
+{
+    return recordSession != tone3000CredentialSessionId
+        || recordEpoch == 0
+        || recordEpoch <= invalidationEpoch;
+}
+
+bool tone3000PendingRecordCanBeInvalidated(
+    const juce::String& recordSession,
+    juce::uint64 recordEpoch,
+    juce::uint64 invalidationEpoch) noexcept
+{
+    // A pending PKCE verifier belongs to the process whose loopback listener
+    // created it. Another OpenStudio instance must not delete that verifier
+    // and leave the owning listener waiting for a callback it can no longer
+    // exchange. A later request in this process may supersede its own record.
+    return recordSession.isEmpty()
+        || (recordSession == tone3000CredentialSessionId
+            && (recordEpoch == 0
+                || recordEpoch <= invalidationEpoch));
+}
+
+bool tone3000PendingRecordOwnedByLiveOtherSession(
+    const juce::DynamicObject* pending,
+    juce::int64 nowMs) noexcept
+{
+    if (pending == nullptr)
+        return false;
+    const auto session = getTone3000RecordSession(pending);
+    if (session.isEmpty()
+        || session == tone3000CredentialSessionId)
+    {
+        return false;
+    }
+    const auto createdAtMs = static_cast<juce::int64>(
+        static_cast<double>(pending->getProperty("createdAtMs")));
+    const auto ageMs = nowMs - createdAtMs;
+    return createdAtMs > 0
+        && ageMs >= 0
+        && ageMs <= kTone3000LoopbackTimeoutMs;
+}
 
 juce::String getConfiguredTone3000ClientId()
 {
@@ -1278,53 +1620,6 @@ juce::String readTone3000HttpRequest(juce::StreamingSocket& socket, int timeoutM
     return juce::String::fromUTF8(static_cast<const char*> (stream.getData()), static_cast<int> (stream.getDataSize()));
 }
 
-juce::File findOpenStudioNAMCatalogUpdaterScript()
-{
-    const auto appDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-    const auto cwd = juce::File::getCurrentWorkingDirectory();
-
-    juce::Array<juce::File> candidates;
-    candidates.add(cwd.getChildFile("tools").getChildFile("update_nam_catalog.py"));
-    candidates.add(appDir.getChildFile("scripts").getChildFile("update_nam_catalog.py"));
-    candidates.add(appDir.getParentDirectory().getChildFile("scripts").getChildFile("update_nam_catalog.py"));
-    candidates.add(appDir.getParentDirectory().getParentDirectory().getChildFile("scripts").getChildFile("update_nam_catalog.py"));
-    candidates.add(appDir.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("update_nam_catalog.py"));
-
-    for (const auto& candidate : candidates)
-        if (candidate.existsAsFile())
-            return candidate;
-
-    return {};
-}
-
-juce::String findOpenStudioPythonForNAMCatalog()
-{
-    const auto appDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-    const auto cwd = juce::File::getCurrentWorkingDirectory();
-
-    juce::Array<juce::File> candidates;
-#if JUCE_WINDOWS
-    candidates.add(cwd.getChildFile("tools").getChildFile("python").getChildFile("python.exe"));
-    candidates.add(appDir.getChildFile("python").getChildFile("python.exe"));
-    candidates.add(appDir.getParentDirectory().getChildFile("tools").getChildFile("python").getChildFile("python.exe"));
-    candidates.add(appDir.getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("python").getChildFile("python.exe"));
-    candidates.add(appDir.getParentDirectory().getParentDirectory().getParentDirectory().getChildFile("tools").getChildFile("python").getChildFile("python.exe"));
-#else
-    candidates.add(cwd.getChildFile("tools").getChildFile("python").getChildFile("bin").getChildFile("python3"));
-    candidates.add(appDir.getChildFile("python").getChildFile("bin").getChildFile("python3"));
-#endif
-
-    for (const auto& candidate : candidates)
-        if (candidate.existsAsFile())
-            return candidate.getFullPathName();
-
-#if JUCE_WINDOWS
-    return "python";
-#else
-    return "python3";
-#endif
-}
-
 juce::String base64UrlEncode(const void* data, size_t size)
 {
     auto text = juce::Base64::toBase64(data, size);
@@ -1364,6 +1659,490 @@ juce::String makeTone3000CodeChallenge(const juce::String& verifier)
     return base64UrlEncode(hash.getData(), hash.getSize());
 }
 
+#if ! JUCE_WINDOWS
+juce::String tone3000SecureItemName(const juce::File& legacyFile)
+{
+    return legacyFile.getFileName().containsIgnoreCase("pending")
+        ? juce::String("pending-auth")
+        : juce::String("oauth-token");
+}
+#endif
+
+#if JUCE_MAC
+struct Tone3000MacKeychainApi
+{
+    using Find = OSStatus (*) (CFTypeRef, UInt32, const char*, UInt32,
+                               const char*, UInt32*, void**,
+                               SecKeychainItemRef*);
+    using Add = OSStatus (*) (SecKeychainRef, UInt32, const char*, UInt32,
+                              const char*, UInt32, const void*,
+                              SecKeychainItemRef*);
+    using Modify = OSStatus (*) (SecKeychainItemRef,
+                                 const SecKeychainAttributeList*,
+                                 UInt32, const void*);
+    using Delete = OSStatus (*) (SecKeychainItemRef);
+    using FreeContent = OSStatus (*) (SecKeychainAttributeList*, void*);
+
+    void* library = nullptr;
+    Find find = nullptr;
+    Add add = nullptr;
+    Modify modify = nullptr;
+    Delete remove = nullptr;
+    FreeContent freeContent = nullptr;
+
+    Tone3000MacKeychainApi()
+    {
+        library = ::dlopen(
+            "/System/Library/Frameworks/Security.framework/Security",
+            RTLD_NOW | RTLD_LOCAL);
+        if (library == nullptr)
+            return;
+        find = reinterpret_cast<Find>(::dlsym(
+            library, "SecKeychainFindGenericPassword"));
+        add = reinterpret_cast<Add>(::dlsym(
+            library, "SecKeychainAddGenericPassword"));
+        modify = reinterpret_cast<Modify>(::dlsym(
+            library, "SecKeychainItemModifyAttributesAndData"));
+        remove = reinterpret_cast<Delete>(::dlsym(
+            library, "SecKeychainItemDelete"));
+        freeContent = reinterpret_cast<FreeContent>(::dlsym(
+            library, "SecKeychainItemFreeContent"));
+    }
+
+    ~Tone3000MacKeychainApi()
+    {
+        if (library != nullptr)
+            ::dlclose(library);
+    }
+
+    bool available() const noexcept
+    {
+        return find != nullptr && add != nullptr && modify != nullptr
+            && remove != nullptr && freeContent != nullptr;
+    }
+};
+
+Tone3000MacKeychainApi& getTone3000MacKeychainApi()
+{
+    static Tone3000MacKeychainApi api;
+    return api;
+}
+
+constexpr const char* kTone3000KeychainService =
+    "com.openstudio.OpenStudio.TONE3000";
+
+bool loadTone3000MacKeychainText(const juce::String& item,
+                                 juce::String& text,
+                                 bool& found,
+                                 juce::String& error)
+{
+    text.clear();
+    found = false;
+    error.clear();
+    auto& api = getTone3000MacKeychainApi();
+    if (! api.available())
+    {
+        error = "macOS Keychain services are unavailable";
+        return false;
+    }
+
+    UInt32 dataLength = 0;
+    void* data = nullptr;
+    SecKeychainItemRef keychainItem = nullptr;
+    const auto account = item.toRawUTF8();
+    const auto status = api.find(
+        nullptr,
+        static_cast<UInt32>(std::strlen(kTone3000KeychainService)),
+        kTone3000KeychainService,
+        static_cast<UInt32>(item.getNumBytesAsUTF8()),
+        account,
+        &dataLength,
+        &data,
+        &keychainItem);
+    if (status == errSecItemNotFound)
+        return true;
+    if (status != errSecSuccess)
+    {
+        error = "Could not read the TONE3000 session from macOS Keychain ("
+            + juce::String(static_cast<int>(status)) + ")";
+        return false;
+    }
+
+    found = true;
+    text = juce::String::fromUTF8(
+        static_cast<const char*>(data), static_cast<int>(dataLength));
+    if (data != nullptr)
+        api.freeContent(nullptr, data);
+    if (keychainItem != nullptr)
+        CFRelease(keychainItem);
+    return true;
+}
+
+bool saveTone3000MacKeychainText(const juce::String& item,
+                                 const juce::String& text,
+                                 juce::String& error)
+{
+    error.clear();
+    auto& api = getTone3000MacKeychainApi();
+    if (! api.available())
+    {
+        error = "macOS Keychain services are unavailable";
+        return false;
+    }
+
+    UInt32 existingLength = 0;
+    void* existingData = nullptr;
+    SecKeychainItemRef keychainItem = nullptr;
+    const auto account = item.toRawUTF8();
+    const auto findStatus = api.find(
+        nullptr,
+        static_cast<UInt32>(std::strlen(kTone3000KeychainService)),
+        kTone3000KeychainService,
+        static_cast<UInt32>(item.getNumBytesAsUTF8()),
+        account,
+        &existingLength,
+        &existingData,
+        &keychainItem);
+    if (findStatus == errSecSuccess && existingData != nullptr)
+        api.freeContent(nullptr, existingData);
+
+    const auto* bytes = text.toRawUTF8();
+    const auto byteCount = static_cast<UInt32>(text.getNumBytesAsUTF8());
+    OSStatus status = errSecSuccess;
+    if (findStatus == errSecSuccess && keychainItem != nullptr)
+    {
+        status = api.modify(keychainItem, nullptr, byteCount, bytes);
+        CFRelease(keychainItem);
+    }
+    else if (findStatus == errSecItemNotFound)
+    {
+        status = api.add(
+            nullptr,
+            static_cast<UInt32>(std::strlen(kTone3000KeychainService)),
+            kTone3000KeychainService,
+            static_cast<UInt32>(item.getNumBytesAsUTF8()),
+            account,
+            byteCount,
+            bytes,
+            nullptr);
+    }
+    else
+    {
+        status = findStatus == errSecSuccess
+            ? errSecInvalidItemRef
+            : findStatus;
+        if (keychainItem != nullptr)
+            CFRelease(keychainItem);
+    }
+
+    if (status != errSecSuccess)
+    {
+        error = "Could not store the TONE3000 session in macOS Keychain ("
+            + juce::String(static_cast<int>(status)) + ")";
+        return false;
+    }
+    return true;
+}
+
+bool deleteTone3000MacKeychainText(const juce::String& item)
+{
+    auto& api = getTone3000MacKeychainApi();
+    if (! api.available())
+        return false;
+
+    UInt32 dataLength = 0;
+    void* data = nullptr;
+    SecKeychainItemRef keychainItem = nullptr;
+    const auto account = item.toRawUTF8();
+    const auto findStatus = api.find(
+        nullptr,
+        static_cast<UInt32>(std::strlen(kTone3000KeychainService)),
+        kTone3000KeychainService,
+        static_cast<UInt32>(item.getNumBytesAsUTF8()),
+        account,
+        &dataLength,
+        &data,
+        &keychainItem);
+    if (findStatus == errSecItemNotFound)
+        return true;
+    if (findStatus != errSecSuccess)
+        return false;
+    if (data != nullptr)
+        api.freeContent(nullptr, data);
+    if (keychainItem == nullptr)
+        return false;
+    const auto deleteStatus = api.remove(keychainItem);
+    CFRelease(keychainItem);
+    return deleteStatus == errSecSuccess;
+}
+#elif JUCE_LINUX
+juce::File findTone3000SecretTool()
+{
+    for (const auto& candidate : {
+             juce::File("/usr/bin/secret-tool"),
+             juce::File("/bin/secret-tool") })
+    {
+        if (candidate.existsAsFile())
+            return candidate;
+    }
+    return {};
+}
+
+bool runTone3000SecretTool(const juce::StringArray& arguments,
+                           juce::String& output,
+                           int& exitCode)
+{
+    const auto tool = findTone3000SecretTool();
+    if (! tool.existsAsFile())
+        return false;
+    juce::StringArray command;
+    command.add(tool.getFullPathName());
+    for (const auto& argument : arguments)
+        command.add(argument);
+    juce::ChildProcess process;
+    if (! process.start(command))
+        return false;
+    const auto deadline =
+        juce::Time::getMillisecondCounterHiRes() + 30000.0;
+    while (process.isRunning()
+           && juce::Time::getMillisecondCounterHiRes() < deadline
+           && ! isTone3000TaskCancelled())
+    {
+        juce::Thread::sleep(25);
+    }
+    if (process.isRunning())
+    {
+        process.kill();
+        exitCode = -1;
+        return true;
+    }
+    exitCode = process.getExitCode();
+    output = process.readAllProcessOutput();
+    return true;
+}
+
+bool runTone3000SecretToolWithInput(const juce::StringArray& arguments,
+                                    const juce::String& input,
+                                    int& exitCode)
+{
+    exitCode = -1;
+    const auto tool = findTone3000SecretTool();
+    if (! tool.existsAsFile())
+        return false;
+
+    int inputPipe[2] { -1, -1 };
+    if (::pipe(inputPipe) != 0)
+        return false;
+
+    posix_spawn_file_actions_t actions;
+    if (::posix_spawn_file_actions_init(&actions) != 0)
+    {
+        ::close(inputPipe[0]);
+        ::close(inputPipe[1]);
+        return false;
+    }
+    const bool actionsReady =
+        ::posix_spawn_file_actions_adddup2(
+            &actions, inputPipe[0], STDIN_FILENO) == 0
+        && ::posix_spawn_file_actions_addclose(
+            &actions, inputPipe[1]) == 0
+        && ::posix_spawn_file_actions_addopen(
+            &actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0
+        && ::posix_spawn_file_actions_addopen(
+            &actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0;
+    if (! actionsReady)
+    {
+        ::posix_spawn_file_actions_destroy(&actions);
+        ::close(inputPipe[0]);
+        ::close(inputPipe[1]);
+        return false;
+    }
+
+    std::vector<std::string> ownedArguments;
+    ownedArguments.reserve(static_cast<size_t>(arguments.size()) + 1);
+    ownedArguments.push_back(tool.getFullPathName().toStdString());
+    for (const auto& argument : arguments)
+        ownedArguments.push_back(argument.toStdString());
+    std::vector<char*> argv;
+    argv.reserve(ownedArguments.size() + 1);
+    for (auto& argument : ownedArguments)
+        argv.push_back(argument.data());
+    argv.push_back(nullptr);
+
+    pid_t child = 0;
+    const int spawnStatus = ::posix_spawn(
+        &child,
+        ownedArguments.front().c_str(),
+        &actions,
+        nullptr,
+        argv.data(),
+        environ);
+    ::posix_spawn_file_actions_destroy(&actions);
+    ::close(inputPipe[0]);
+    if (spawnStatus != 0)
+    {
+        ::close(inputPipe[1]);
+        return false;
+    }
+
+    sigset_t blockedSignals;
+    sigset_t previousSignals;
+    ::sigemptyset(&blockedSignals);
+    ::sigaddset(&blockedSignals, SIGPIPE);
+    if (::pthread_sigmask(
+            SIG_BLOCK, &blockedSignals, &previousSignals) != 0)
+    {
+        ::close(inputPipe[1]);
+        ::kill(child, SIGKILL);
+        (void) ::waitpid(child, nullptr, 0);
+        return false;
+    }
+    sigset_t pendingBefore;
+    ::sigpending(&pendingBefore);
+    const bool sigpipeWasPending = ::sigismember(&pendingBefore, SIGPIPE) == 1;
+
+    const auto utf8 = input.toUTF8();
+    size_t written = 0;
+    while (written < utf8.sizeInBytes() - 1)
+    {
+        if (isTone3000TaskCancelled())
+            break;
+        const auto count = ::write(
+            inputPipe[1],
+            utf8.getAddress() + written,
+            utf8.sizeInBytes() - 1 - written);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0)
+            break;
+        written += static_cast<size_t>(count);
+    }
+    ::close(inputPipe[1]);
+    if (! sigpipeWasPending)
+    {
+        timespec noWait { 0, 0 };
+        (void) ::sigtimedwait(&blockedSignals, nullptr, &noWait);
+    }
+    (void) ::pthread_sigmask(SIG_SETMASK, &previousSignals, nullptr);
+
+    if (isTone3000TaskCancelled())
+    {
+        ::kill(child, SIGKILL);
+        (void) ::waitpid(child, nullptr, 0);
+        exitCode = -1;
+        return true;
+    }
+
+    int childStatus = 0;
+    bool childReaped = false;
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + 30000.0;
+    for (;;)
+    {
+        const auto waitResult = ::waitpid(child, &childStatus, WNOHANG);
+        if (waitResult == child)
+        {
+            childReaped = true;
+            break;
+        }
+        if (waitResult < 0 && errno != EINTR)
+            break;
+        if (isTone3000TaskCancelled()
+            || juce::Time::getMillisecondCounterHiRes() >= deadline)
+        {
+            ::kill(child, SIGKILL);
+            (void) ::waitpid(child, &childStatus, 0);
+            exitCode = -1;
+            return true;
+        }
+        juce::Thread::sleep(10);
+    }
+    if (! childReaped)
+    {
+        ::kill(child, SIGKILL);
+        (void) ::waitpid(child, &childStatus, 0);
+    }
+    exitCode = childReaped && WIFEXITED(childStatus)
+        ? WEXITSTATUS(childStatus)
+        : -1;
+    return written == utf8.sizeInBytes() - 1;
+}
+
+bool saveTone3000LinuxSecret(const juce::String& item,
+                             const juce::String& text,
+                             juce::String& error)
+{
+    error.clear();
+    const auto tool = findTone3000SecretTool();
+    if (! tool.existsAsFile())
+    {
+        error = "Secret Service is unavailable (secret-tool was not found)";
+        return false;
+    }
+
+    juce::StringArray arguments;
+    arguments.add("store");
+    arguments.add("--label=OpenStudio TONE3000");
+    arguments.add("service");
+    arguments.add("com.openstudio.OpenStudio.TONE3000");
+    arguments.add("item");
+    arguments.add(item);
+    int status = -1;
+    if (! runTone3000SecretToolWithInput(arguments, text, status)
+        || status != 0)
+    {
+        error = "Could not store the TONE3000 session in Secret Service";
+        return false;
+    }
+    return true;
+}
+
+bool loadTone3000LinuxSecret(const juce::String& item,
+                             juce::String& text,
+                             bool& found,
+                             juce::String& error)
+{
+    text.clear();
+    found = false;
+    error.clear();
+    juce::StringArray arguments;
+    arguments.add("lookup");
+    arguments.add("service");
+    arguments.add("com.openstudio.OpenStudio.TONE3000");
+    arguments.add("item");
+    arguments.add(item);
+    int status = -1;
+    juce::String output;
+    if (! runTone3000SecretTool(arguments, output, status))
+    {
+        error = "Secret Service is unavailable (secret-tool was not found)";
+        return false;
+    }
+    found = status == 0 && output.isNotEmpty();
+    if (status != 0 && status != 1)
+    {
+        error = "Could not read the TONE3000 session from Secret Service";
+        return false;
+    }
+    if (found)
+        text = output.trimCharactersAtEnd("\r\n");
+    return true;
+}
+
+bool deleteTone3000LinuxSecret(const juce::String& item)
+{
+    juce::StringArray arguments;
+    arguments.add("clear");
+    arguments.add("service");
+    arguments.add("com.openstudio.OpenStudio.TONE3000");
+    arguments.add("item");
+    arguments.add(item);
+    int status = -1;
+    juce::String output;
+    return runTone3000SecretTool(arguments, output, status)
+        && (status == 0 || status == 1);
+}
+#endif
+
 bool saveProtectedText(const juce::File& file, const juce::String& text, juce::String& error)
 {
     const auto directoryResult = file.getParentDirectory().createDirectory();
@@ -1396,44 +2175,44 @@ bool saveProtectedText(const juce::File& file, const juce::String& text, juce::S
         return false;
     }
     return true;
-#else
-    juce::TemporaryFile temporaryFile(file, juce::TemporaryFile::useHiddenFile);
-    if (! temporaryFile.getFile().replaceWithText(text))
-    {
-        error = "Could not write the private TONE3000 session file";
+#elif JUCE_MAC
+    if (! saveTone3000MacKeychainText(
+            tone3000SecureItemName(file), text, error))
         return false;
-    }
-
-    const auto temporaryPath = temporaryFile.getFile().getFullPathName();
-    if (::chmod(temporaryPath.toRawUTF8(), S_IRUSR | S_IWUSR) != 0)
+    // Successful secure publication completes migration from pre-release
+    // plaintext storage.
+    if (file.existsAsFile() && ! file.deleteFile())
     {
-        error = "Could not restrict permissions on the private TONE3000 session file";
-        return false;
-    }
-
-    if (! temporaryFile.overwriteTargetFileWithTemporary())
-    {
-        error = "Could not publish the private TONE3000 session file";
-        return false;
-    }
-
-    const auto targetPath = file.getFullPathName();
-    if (::chmod(targetPath.toRawUTF8(), S_IRUSR | S_IWUSR) != 0)
-    {
-        file.deleteFile();
-        error = "Could not restrict permissions on the private TONE3000 session file";
+        (void) deleteTone3000MacKeychainText(
+            tone3000SecureItemName(file));
+        error = "Could not remove the legacy plaintext TONE3000 session file";
         return false;
     }
     return true;
+#elif JUCE_LINUX
+    if (! saveTone3000LinuxSecret(
+            tone3000SecureItemName(file), text, error))
+        return false;
+    if (file.existsAsFile() && ! file.deleteFile())
+    {
+        (void) deleteTone3000LinuxSecret(
+            tone3000SecureItemName(file));
+        error = "Could not remove the legacy plaintext TONE3000 session file";
+        return false;
+    }
+    return true;
+#else
+    juce::ignoreUnused(text);
+    error = "Secure TONE3000 token storage is unavailable on this platform";
+    return false;
 #endif
 }
 
 juce::String loadProtectedText(const juce::File& file, juce::String& error)
 {
+#if JUCE_WINDOWS
     if (!file.existsAsFile())
         return {};
-
-#if JUCE_WINDOWS
     juce::MemoryBlock encrypted;
     if (!file.loadFileAsData(encrypted) || encrypted.getSize() == 0)
     {
@@ -1457,11 +2236,82 @@ juce::String loadProtectedText(const juce::File& file, juce::String& error)
                                                     static_cast<int>(output.cbData));
     ::LocalFree(output.pbData);
     return text;
+#elif JUCE_MAC || JUCE_LINUX
+    juce::String secureText;
+    bool found = false;
+   #if JUCE_MAC
+    const bool secureRead = loadTone3000MacKeychainText(
+        tone3000SecureItemName(file), secureText, found, error);
+   #else
+    const bool secureRead = loadTone3000LinuxSecret(
+        tone3000SecureItemName(file), secureText, found, error);
+   #endif
+    if (! secureRead)
+        return {};
+    if (found)
+    {
+        if (file.existsAsFile() && ! file.deleteFile())
+        {
+            error = "Could not remove the legacy plaintext TONE3000 session file";
+            return {};
+        }
+        return secureText;
+    }
+
+    // One-time migration for builds which stored mode-0600 JSON. Do not use
+    // the legacy value unless it was successfully committed to OS storage;
+    // this prevents silently retaining refresh tokens on disk.
+    if (! file.existsAsFile())
+        return {};
+    const auto legacyText = file.loadFileAsString();
+    if (legacyText.isEmpty())
+    {
+        error = "Legacy TONE3000 session file is empty";
+        return {};
+    }
+    juce::String migrationError;
+    if (! saveProtectedText(file, legacyText, migrationError))
+    {
+        error = "Could not migrate the TONE3000 session to secure storage: "
+            + migrationError;
+        return {};
+    }
+    return legacyText;
 #else
-    const auto text = file.loadFileAsString();
-    if (text.isEmpty())
-        error = "Private TONE3000 session file is empty";
-    return text;
+    error = "Secure TONE3000 token storage is unavailable on this platform";
+    return {};
+#endif
+}
+
+bool deleteProtectedText(const juce::File& file)
+{
+#if JUCE_WINDOWS
+    return ! file.existsAsFile() || file.deleteFile();
+#elif JUCE_MAC
+    const bool deleted = deleteTone3000MacKeychainText(
+        tone3000SecureItemName(file));
+    const bool legacyDeleted = ! file.existsAsFile() || file.deleteFile();
+    return deleted && legacyDeleted;
+#elif JUCE_LINUX
+    const bool deleted = deleteTone3000LinuxSecret(
+        tone3000SecureItemName(file));
+    const bool legacyDeleted = ! file.existsAsFile() || file.deleteFile();
+    return deleted && legacyDeleted;
+#else
+    return ! file.existsAsFile() || file.deleteFile();
+#endif
+}
+
+bool isTone3000SecureStorageAvailable()
+{
+#if JUCE_WINDOWS
+    return true;
+#elif JUCE_MAC
+    return getTone3000MacKeychainApi().available();
+#elif JUCE_LINUX
+    return findTone3000SecretTool().existsAsFile();
+#else
+    return false;
 #endif
 }
 
@@ -1492,8 +2342,51 @@ juce::var makeTone3000Error(const juce::String& message, int statusCode = 0)
     return juce::var(result.get());
 }
 
+bool readTone3000ResponseText(
+    juce::InputStream& input,
+    juce::String& text,
+    juce::String& error,
+    size_t maximumBytes)
+{
+    juce::MemoryOutputStream output;
+    std::array<char, 64 * 1024> buffer {};
+    while (! input.isExhausted())
+    {
+        if (isTone3000TaskCancelled())
+        {
+            error = "The NAM/TONE3000 request was canceled.";
+            return false;
+        }
+        const int bytesRead = input.read(
+            buffer.data(), static_cast<int>(buffer.size()));
+        if (bytesRead <= 0)
+            break;
+        if (output.getDataSize()
+                + static_cast<size_t>(bytesRead)
+            > maximumBytes)
+        {
+            error = "The TONE3000 response exceeded its safety limit.";
+            return false;
+        }
+        if (! output.write(
+                buffer.data(), static_cast<size_t>(bytesRead)))
+        {
+            error = "Could not buffer the TONE3000 response.";
+            return false;
+        }
+    }
+
+    text = juce::String::fromUTF8(
+        static_cast<const char*>(output.getData()),
+        static_cast<int>(output.getDataSize()));
+    error.clear();
+    return true;
+}
+
 juce::var postTone3000OAuthToken(const juce::StringPairArray& fields)
 {
+    if (isTone3000TaskCancelled())
+        return makeTone3000Error("The TONE3000 token request was canceled.");
     int statusCode = 0;
     auto tokenUrl = juce::URL("https://www.tone3000.com/api/v1/oauth/token")
         .withPOSTData(makeTone3000FormBody(fields));
@@ -1508,7 +2401,16 @@ juce::var postTone3000OAuthToken(const juce::StringPairArray& fields)
     if (input == nullptr)
         return makeTone3000Error("TONE3000 token request failed", statusCode);
 
-    const auto responseText = input->readEntireStreamAsString();
+    juce::String responseText;
+    juce::String responseError;
+    if (! readTone3000ResponseText(
+            *input,
+            responseText,
+            responseError,
+            1024 * 1024))
+    {
+        return makeTone3000Error(responseError, statusCode);
+    }
     auto parsed = juce::JSON::parse(responseText);
     if (parsed.isVoid())
         return makeTone3000Error("TONE3000 token response was not valid JSON", statusCode);
@@ -1543,7 +2445,10 @@ juce::var postTone3000OAuthToken(const juce::StringPairArray& fields)
     return parsed;
 }
 
-juce::var storeTone3000TokenPayload(juce::var tokenPayload, const juce::String& clientId)
+juce::var storeTone3000TokenPayloadUnlocked(
+    juce::var tokenPayload,
+    const juce::String& clientId,
+    juce::uint64 credentialEpoch)
 {
     auto* tokenObject = tokenPayload.getDynamicObject();
     if (tokenObject == nullptr)
@@ -1561,6 +2466,13 @@ juce::var storeTone3000TokenPayload(juce::var tokenPayload, const juce::String& 
     juce::DynamicObject::Ptr stored = new juce::DynamicObject();
     stored->setProperty("schemaVersion", 1);
     stored->setProperty("provider", "tone3000");
+    stored->setProperty(
+        "credentialEpoch",
+        static_cast<juce::int64>(credentialEpoch));
+    stored->setProperty(
+        "credentialSession", tone3000CredentialSessionId);
+    stored->setProperty(
+        "credentialRevision", juce::Uuid().toString());
     stored->setProperty("clientId", clientId);
     stored->setProperty("accessToken", accessToken);
     stored->setProperty("refreshToken", refreshToken);
@@ -1590,7 +2502,16 @@ juce::var storeTone3000TokenPayload(juce::var tokenPayload, const juce::String& 
 juce::var makeTone3000AuthStatus()
 {
     juce::String error;
-    auto stored = loadProtectedJson(getTone3000TokenFile(), error);
+    juce::var stored;
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000TokenStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+            stored = loadProtectedJson(getTone3000TokenFile(), error);
+        else
+            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+    }
     juce::DynamicObject::Ptr status = new juce::DynamicObject();
     status->setProperty("success", true);
     status->setProperty("authenticated", false);
@@ -1630,9 +2551,21 @@ juce::var makeTone3000AuthStatus()
     status->setProperty("oauthProvider", "tone3000.com");
 #if JUCE_WINDOWS
     status->setProperty("secureTokenStorage", "windows-dpapi");
+#elif JUCE_MAC
+    status->setProperty("secureTokenStorage",
+        isTone3000SecureStorageAvailable()
+            ? "macos-keychain"
+            : "unavailable");
+#elif JUCE_LINUX
+    status->setProperty("secureTokenStorage",
+        isTone3000SecureStorageAvailable()
+            ? "freedesktop-secret-service"
+            : "unavailable");
 #else
-    status->setProperty("secureTokenStorage", "user-private-file");
+    status->setProperty("secureTokenStorage", "unavailable");
 #endif
+    status->setProperty("secureTokenStorageAvailable",
+                        isTone3000SecureStorageAvailable());
 
     return juce::var(status.get());
 }
@@ -1640,7 +2573,16 @@ juce::var makeTone3000AuthStatus()
 juce::String getStoredTone3000AccessToken()
 {
     juce::String error;
-    auto stored = loadProtectedJson(getTone3000TokenFile(), error);
+    juce::var stored;
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000TokenStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+            stored = loadProtectedJson(getTone3000TokenFile(), error);
+        else
+            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+    }
     if (auto* object = stored.getDynamicObject())
     {
         const auto expiresAtMs = static_cast<juce::int64>(static_cast<double>(object->getProperty("expiresAtMs")));
@@ -1673,14 +2615,27 @@ juce::var makeTone3000Success()
     return juce::var(result.get());
 }
 
+double parseTone3000RetryAfterSeconds(const juce::String& headerValue)
+{
+    double seconds = headerValue.trim().isNotEmpty()
+        ? headerValue.getDoubleValue()
+        : 15.0;
+    if (! std::isfinite(seconds) || seconds <= 0.0)
+        seconds = 15.0;
+    return juce::jlimit(1.0, 60.0, seconds);
+}
+
 juce::var getTone3000Json(juce::URL url, const juce::String& accessToken, const juce::String& label)
 {
+    if (isTone3000TaskCancelled())
+        return makeTone3000Error(label + " was canceled");
     if (accessToken.isEmpty())
         return makeTone3000Error("Missing TONE3000 access token");
     if (accessToken.containsAnyOf("\r\n"))
         return makeTone3000Error("The TONE3000 access token contains invalid header characters");
 
     int statusCode = 0;
+    juce::StringPairArray responseHeaders;
     juce::String headers;
     headers << "Authorization: Bearer " << accessToken << "\r\n"
             << "Content-Type: application/json\r\n";
@@ -1690,15 +2645,54 @@ juce::var getTone3000Json(juce::URL url, const juce::String& accessToken, const 
             .withExtraHeaders(headers)
             .withConnectionTimeoutMs(30000)
             .withNumRedirectsToFollow(2)
-            .withStatusCode(&statusCode));
+            .withStatusCode(&statusCode)
+            .withResponseHeaders(&responseHeaders));
+
+    const auto attachRateLimitMetadata = [&responseHeaders, &statusCode]
+        (juce::var result)
+    {
+        if (statusCode != 429)
+            return result;
+        juce::String retryAfter;
+        for (int index = 0; index < responseHeaders.size(); ++index)
+        {
+            if (responseHeaders.getAllKeys()[index]
+                    .equalsIgnoreCase("Retry-After"))
+            {
+                retryAfter = responseHeaders.getAllValues()[index].trim();
+                break;
+            }
+        }
+        const double retryAfterSeconds =
+            parseTone3000RetryAfterSeconds(retryAfter);
+        if (auto* object = result.getDynamicObject())
+        {
+            object->setProperty("retryAfterSeconds", retryAfterSeconds);
+            if (retryAfter.isNotEmpty())
+                object->setProperty("retryAfter", retryAfter);
+        }
+        return result;
+    };
 
     if (input == nullptr)
-        return makeTone3000Error(label + " failed", statusCode);
+        return attachRateLimitMetadata(
+            makeTone3000Error(label + " failed", statusCode));
 
-    const auto responseText = input->readEntireStreamAsString();
+    juce::String responseText;
+    juce::String responseError;
+    if (! readTone3000ResponseText(
+            *input,
+            responseText,
+            responseError,
+            32 * 1024 * 1024))
+    {
+        return attachRateLimitMetadata(
+            makeTone3000Error(responseError, statusCode));
+    }
     auto parsed = juce::JSON::parse(responseText);
     if (parsed.isVoid())
-        return makeTone3000Error(label + " response was not valid JSON", statusCode);
+        return attachRateLimitMetadata(makeTone3000Error(
+            label + " response was not valid JSON", statusCode));
 
     if (statusCode >= 400)
     {
@@ -1722,7 +2716,7 @@ juce::var getTone3000Json(juce::URL url, const juce::String& accessToken, const 
         auto result = makeTone3000Error(message, statusCode);
         if (auto* resultObject = result.getDynamicObject())
             resultObject->setProperty("response", parsed);
-        return result;
+        return attachRateLimitMetadata(result);
     }
 
     return parsed;
@@ -1773,6 +2767,330 @@ juce::String normaliseTone3000Gears(juce::String gears)
     return gears.replace(",", "_");
 }
 
+constexpr int kTone3000CatalogModelPageSize = 100;
+constexpr int kTone3000MaximumModelPages = 20;
+
+struct Tone3000ModelPaginationResult
+{
+    juce::Array<juce::var> models;
+    juce::var error;
+    int pagesFetched = 0;
+};
+
+struct Tone3000PaginationInteger
+{
+    bool present = false;
+    bool valid = true;
+    int value = 0;
+};
+
+Tone3000PaginationInteger readTone3000PaginationInteger(
+    juce::DynamicObject* object,
+    const juce::String& primary,
+    const juce::String& fallback = {})
+{
+    Tone3000PaginationInteger result;
+    if (object == nullptr)
+        return result;
+
+    juce::var value;
+    if (object->hasProperty(primary))
+    {
+        result.present = true;
+        value = object->getProperty(primary);
+    }
+    else if (fallback.isNotEmpty() && object->hasProperty(fallback))
+    {
+        result.present = true;
+        value = object->getProperty(fallback);
+    }
+    else
+    {
+        return result;
+    }
+
+    if (value.isVoid())
+        return result;
+
+    double numericValue = 0.0;
+    if (value.isInt() || value.isInt64() || value.isDouble())
+    {
+        numericValue = static_cast<double>(value);
+    }
+    else if (value.isString())
+    {
+        const auto text = value.toString().trim();
+        if (text.isEmpty() || ! text.containsOnly("0123456789"))
+        {
+            result.valid = false;
+            return result;
+        }
+        numericValue = text.getDoubleValue();
+    }
+    else
+    {
+        result.valid = false;
+        return result;
+    }
+
+    if (! std::isfinite(numericValue)
+        || numericValue < 0.0
+        || numericValue > static_cast<double>(
+            std::numeric_limits<int>::max())
+        || std::floor(numericValue) != numericValue)
+    {
+        result.valid = false;
+        return result;
+    }
+
+    result.value = static_cast<int>(numericValue);
+    return result;
+}
+
+struct Tone3000PaginationBoolean
+{
+    bool present = false;
+    bool valid = true;
+    bool value = false;
+};
+
+Tone3000PaginationBoolean readTone3000PaginationBoolean(
+    juce::DynamicObject* object,
+    const juce::String& primary,
+    const juce::String& fallback = {})
+{
+    Tone3000PaginationBoolean result;
+    if (object == nullptr)
+        return result;
+
+    juce::var value;
+    if (object->hasProperty(primary))
+    {
+        result.present = true;
+        value = object->getProperty(primary);
+    }
+    else if (fallback.isNotEmpty() && object->hasProperty(fallback))
+    {
+        result.present = true;
+        value = object->getProperty(fallback);
+    }
+    else
+    {
+        return result;
+    }
+
+    if (value.isBool())
+    {
+        result.value = static_cast<bool>(value);
+        return result;
+    }
+    if (value.isInt())
+    {
+        const int numericValue = static_cast<int>(value);
+        result.valid = numericValue == 0 || numericValue == 1;
+        result.value = numericValue == 1;
+        return result;
+    }
+    if (value.isString())
+    {
+        const auto text = value.toString().trim().toLowerCase();
+        result.valid = text == "true" || text == "false";
+        result.value = text == "true";
+        return result;
+    }
+
+    result.valid = false;
+    return result;
+}
+
+Tone3000ModelPaginationResult fetchTone3000ModelPages(
+    int toneId,
+    const juce::String& architecture,
+    int requestedPageSize,
+    const std::function<juce::var(int, int)>& requestPage)
+{
+    Tone3000ModelPaginationResult result;
+    juce::Array<int> seenModelIds;
+    const int pageSize = juce::jlimit(
+        1, kTone3000CatalogModelPageSize, requestedPageSize);
+    const auto expectedArchitecture =
+        normaliseTone3000Architecture(architecture);
+
+    for (int page = 1; page <= kTone3000MaximumModelPages; ++page)
+    {
+        if (isTone3000TaskCancelled())
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination was canceled");
+            return result;
+        }
+
+        auto payload = requestPage(page, pageSize);
+        if (isTone3000ErrorPayload(payload))
+        {
+            result.error = payload;
+            return result;
+        }
+
+        auto* payloadObject = payload.getDynamicObject();
+        if (payloadObject == nullptr)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model list returned an invalid response");
+            return result;
+        }
+
+        auto data = payloadObject->getProperty("data");
+        if (! data.isArray())
+            data = payloadObject->getProperty("models");
+        auto* models = data.getArray();
+        if (models == nullptr)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model list did not include a model array");
+            return result;
+        }
+
+        ++result.pagesFetched;
+        for (auto modelValue : *models)
+        {
+            auto* model = modelValue.getDynamicObject();
+            if (model == nullptr)
+                continue;
+
+            const int modelId = getModelObjectInt(
+                model, "id", "model_id");
+            const int modelToneId = getModelObjectInt(
+                model, "tone_id", "toneId");
+            const auto modelArchitecture =
+                normaliseTone3000Architecture(getModelObjectString(
+                    model,
+                    "architecture_version",
+                    "architecture"));
+            if (modelId <= 0
+                || (modelToneId > 0 && modelToneId != toneId)
+                || (expectedArchitecture.isNotEmpty()
+                    && modelArchitecture.isNotEmpty()
+                    && modelArchitecture != expectedArchitecture)
+                || seenModelIds.contains(modelId))
+            {
+                continue;
+            }
+
+            seenModelIds.add(modelId);
+            auto architectureValue =
+                model->getProperty("architecture_version");
+            if (architectureValue.isVoid())
+                architectureValue = model->getProperty("architecture");
+            model->setProperty("architecture", architectureValue);
+            result.models.add(modelValue);
+        }
+
+        const auto reportedPage = readTone3000PaginationInteger(
+            payloadObject, "page", "current_page");
+        const auto reportedTotalPages =
+            readTone3000PaginationInteger(
+                payloadObject, "total_pages", "totalPages");
+        const auto reportedTotalModels =
+            readTone3000PaginationInteger(
+                payloadObject, "total", "total_count");
+        const auto reportedNextPage =
+            readTone3000PaginationInteger(
+                payloadObject, "next_page", "nextPage");
+        const auto reportedHasMore =
+            readTone3000PaginationBoolean(
+                payloadObject, "has_more", "hasMore");
+        if (! reportedPage.valid
+            || ! reportedTotalPages.valid
+            || ! reportedTotalModels.valid
+            || ! reportedNextPage.valid
+            || ! reportedHasMore.valid)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination returned invalid metadata");
+            return result;
+        }
+        if (reportedPage.value > 0 && reportedPage.value != page)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination returned page "
+                + juce::String(reportedPage.value)
+                + " while page " + juce::String(page)
+                + " was requested");
+            return result;
+        }
+
+        int totalPages = reportedTotalPages.value;
+        if (totalPages <= 0)
+        {
+            if (reportedTotalModels.value > 0)
+            {
+                totalPages = static_cast<int>((
+                    static_cast<juce::int64>(reportedTotalModels.value)
+                    + pageSize - 1) / pageSize);
+            }
+        }
+        if (totalPages > kTone3000MaximumModelPages)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 returned " + juce::String(totalPages)
+                + " model pages for one tone; OpenStudio's safety limit is "
+                + juce::String(kTone3000MaximumModelPages)
+                + ". No partial capture list was published.");
+            return result;
+        }
+        if (totalPages > 0 && page > totalPages)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination metadata moved backwards");
+            return result;
+        }
+
+        const bool hasExplicitMore = reportedHasMore.present;
+        const bool explicitMore = reportedHasMore.value;
+        const int nextPage = reportedNextPage.value;
+
+        bool shouldContinue = false;
+        if (totalPages > 0)
+            shouldContinue = page < totalPages;
+        else if (hasExplicitMore)
+            shouldContinue = explicitMore;
+        else if (nextPage > 0)
+            shouldContinue = nextPage > page;
+        else
+            shouldContinue = models->size() >= pageSize;
+
+        if (hasExplicitMore
+            && totalPages > 0
+            && explicitMore != (page < totalPages))
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination returned contradictory metadata");
+            return result;
+        }
+        if (nextPage > 0
+            && shouldContinue
+            && nextPage != page + 1)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination returned an invalid next page");
+            return result;
+        }
+        if (! shouldContinue)
+            return result;
+        if (page == kTone3000MaximumModelPages)
+        {
+            result.error = makeTone3000Error(
+                "TONE3000 model pagination exceeded OpenStudio's bounded safety limit. No partial capture list was published.");
+            return result;
+        }
+    }
+
+    result.error = makeTone3000Error(
+        "TONE3000 model pagination did not terminate");
+    return result;
+}
+
 juce::var fetchTone3000ModelsForTone(int toneId,
                                      const juce::StringArray& architectures,
                                      const juce::String& accessToken,
@@ -1784,41 +3102,38 @@ juce::var fetchTone3000ModelsForTone(int toneId,
 
     for (const auto& architecture : architectures)
     {
-        auto url = juce::URL("https://www.tone3000.com/api/v1/models")
-            .withParameter("tone_id", juce::String(toneId))
-            .withParameter("page", "1")
-            .withParameter("page_size", juce::String(juce::jlimit(1, 100, modelPageSize)));
-        if (architecture.isNotEmpty())
-            url = url.withParameter("architecture", architecture);
-
-        auto payload = getTone3000Json(url, accessToken, "TONE3000 model list");
-        if (isTone3000ErrorPayload(payload))
+        const auto pageResult = fetchTone3000ModelPages(
+            toneId,
+            architecture,
+            modelPageSize,
+            [&] (int page, int pageSize)
+            {
+                auto url = juce::URL(
+                    "https://www.tone3000.com/api/v1/models")
+                    .withParameter("tone_id", juce::String(toneId))
+                    .withParameter("page", juce::String(page))
+                    .withParameter("page_size", juce::String(pageSize));
+                if (architecture.isNotEmpty())
+                    url = url.withParameter(
+                        "architecture", architecture);
+                return getTone3000Json(
+                    url, accessToken, "TONE3000 model list");
+            });
+        if (! pageResult.error.isVoid())
         {
-            errors.add(payload);
+            errors.add(pageResult.error);
             continue;
         }
 
-        if (auto* payloadObject = payload.getDynamicObject())
+        for (const auto& modelValue : pageResult.models)
         {
-            const auto data = payloadObject->getProperty("data");
-            if (auto* array = data.getArray())
-            {
-                for (auto modelVar : *array)
-                {
-                    if (auto* model = modelVar.getDynamicObject())
-                    {
-                        const int modelId = getModelObjectInt(model, "id", "model_id");
-                        if (modelId > 0 && seenModelIds.contains(modelId))
-                            continue;
-
-                        if (modelId > 0)
-                            seenModelIds.add(modelId);
-
-                        model->setProperty("architecture", model->getProperty("architecture_version"));
-                        models.add(modelVar);
-                    }
-                }
-            }
+            const int modelId = static_cast<int>(
+                modelValue.getProperty("id", 0));
+            if (modelId > 0 && seenModelIds.contains(modelId))
+                continue;
+            if (modelId > 0)
+                seenModelIds.add(modelId);
+            models.add(modelValue);
         }
     }
 
@@ -2016,11 +3331,24 @@ juce::var getTone3000ToneDetail(int toneId, const juce::String& architecture)
         return tone;
 
     juce::Array<juce::var> errors;
+    const auto models = fetchTone3000ModelsForTone(
+        toneId, architectures, accessToken, 100, errors);
+    if (! errors.isEmpty())
+    {
+        auto failure = errors.getFirst();
+        if (auto* failureObject = failure.getDynamicObject())
+        {
+            failureObject->setProperty("tone", tone);
+            failureObject->setProperty("errors", errors);
+        }
+        return failure;
+    }
+
     auto result = makeTone3000Success();
     if (auto* object = result.getDynamicObject())
     {
         object->setProperty("tone", tone);
-        object->setProperty("models", fetchTone3000ModelsForTone(toneId, architectures, accessToken, 100, errors));
+        object->setProperty("models", models);
         object->setProperty("errors", errors);
     }
     return result;
@@ -2037,6 +3365,7 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
     if (redirectUri.trim().isEmpty())
         return makeTone3000Error("Missing OAuth redirect_uri");
 
+    const auto credentialEpoch = beginTone3000CredentialEpoch();
     const auto verifier = makeTone3000CodeVerifier();
     const auto challenge = makeTone3000CodeChallenge(verifier);
     const auto state = juce::Uuid().toString();
@@ -2061,6 +3390,13 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
 
     juce::DynamicObject::Ptr pending = new juce::DynamicObject();
     pending->setProperty("schemaVersion", 1);
+    pending->setProperty(
+        "credentialEpoch",
+        static_cast<juce::int64>(credentialEpoch));
+    pending->setProperty(
+        "credentialSession", tone3000CredentialSessionId);
+    pending->setProperty(
+        "credentialRevision", juce::Uuid().toString());
     pending->setProperty("clientId", clientId.trim());
     pending->setProperty("redirectUri", redirectUri.trim());
     pending->setProperty("codeVerifier", verifier);
@@ -2069,8 +3405,46 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
     pending->setProperty("createdAt", juce::Time::getCurrentTime().toISO8601(true));
 
     juce::String error;
-    if (!saveProtectedJson(getTone3000PendingAuthFile(), juce::var(pending.get()), error))
-        return makeTone3000Error(error);
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000PendingAuthStorageMutex);
+        if (isTone3000TaskCancelled())
+        {
+            return makeTone3000Error(
+                "The TONE3000 sign-in request was canceled.");
+        }
+        if (tone3000CredentialEpoch.load(
+                std::memory_order_acquire) != credentialEpoch)
+        {
+            return makeTone3000Error(
+                "This TONE3000 sign-in request was superseded by a newer credential action.");
+        }
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (! processGuard.locked)
+        {
+            return makeTone3000Error(
+                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+        }
+        juce::String existingError;
+        const auto existingPending = loadProtectedJson(
+            getTone3000PendingAuthFile(), existingError);
+        if (tone3000PendingRecordOwnedByLiveOtherSession(
+                existingPending.getDynamicObject(),
+                juce::Time::getCurrentTime().toMilliseconds()))
+        {
+            return makeTone3000Error(
+                "Another OpenStudio instance already has a TONE3000 sign-in in progress.");
+        }
+        if (existingPending.isVoid() && existingError.isNotEmpty())
+            return makeTone3000Error(existingError);
+        if (! saveProtectedJson(
+                getTone3000PendingAuthFile(),
+                juce::var(pending.get()),
+                error))
+        {
+            return makeTone3000Error(error);
+        }
+    }
 
     juce::DynamicObject::Ptr result = new juce::DynamicObject();
     result->setProperty("success", true);
@@ -2078,7 +3452,75 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
     result->setProperty("state", state);
     result->setProperty("redirectUri", redirectUri.trim());
     result->setProperty("clientId", clientId.trim());
+    result->setProperty(
+        "credentialEpoch",
+        static_cast<juce::int64>(credentialEpoch));
     return juce::var(result.get());
+}
+
+bool deleteTone3000PendingAuthIfCurrent(
+    const juce::String& expectedState,
+    juce::uint64 expectedEpoch)
+{
+    const std::lock_guard<std::mutex> storageGuard(
+        tone3000PendingAuthStorageMutex);
+    const ScopedTone3000CredentialProcessLock processGuard;
+    if (! processGuard.locked)
+        return false;
+    juce::String error;
+    const auto currentPending = loadProtectedJson(
+        getTone3000PendingAuthFile(), error);
+    const auto* currentObject = currentPending.getDynamicObject();
+    if (currentObject == nullptr)
+        return error.isEmpty();
+
+    const auto currentRecordEpoch =
+        getTone3000RecordEpoch(currentObject);
+    const auto currentRecordSession =
+        getTone3000RecordSession(currentObject);
+    const auto currentState =
+        currentObject->getProperty("state").toString();
+    if (! tone3000CredentialSnapshotStillCurrent(
+            expectedEpoch,
+            expectedState,
+            tone3000CredentialEpoch.load(
+                std::memory_order_acquire),
+            currentState)
+        || (currentRecordSession == tone3000CredentialSessionId
+            && currentRecordEpoch > 0
+            && currentRecordEpoch != expectedEpoch))
+    {
+        // A newer request owns the pending record. Preserving it is a
+        // successful cleanup outcome for this older flow.
+        return true;
+    }
+    return deleteProtectedText(getTone3000PendingAuthFile());
+}
+
+bool tone3000PendingAuthStillCurrent(
+    const juce::String& expectedState,
+    juce::uint64 expectedEpoch)
+{
+    const std::lock_guard<std::mutex> storageGuard(
+        tone3000PendingAuthStorageMutex);
+    const ScopedTone3000CredentialProcessLock processGuard;
+    if (! processGuard.locked)
+        return false;
+
+    juce::String error;
+    const auto pending = loadProtectedJson(
+        getTone3000PendingAuthFile(), error);
+    const auto* pendingObject = pending.getDynamicObject();
+    if (pendingObject == nullptr || error.isNotEmpty())
+        return false;
+
+    return getTone3000RecordSession(pendingObject)
+               == tone3000CredentialSessionId
+        && getTone3000RecordEpoch(pendingObject) == expectedEpoch
+        && pendingObject->getProperty("state").toString()
+               == expectedState
+        && tone3000CredentialEpoch.load(std::memory_order_acquire)
+               == expectedEpoch;
 }
 
 juce::var exchangeTone3000OAuthCode(const juce::String& code,
@@ -2090,21 +3532,84 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
         return makeTone3000Error("Missing OAuth code");
 
     juce::String error;
-    auto pending = loadProtectedJson(getTone3000PendingAuthFile(), error);
+    juce::var pending;
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000PendingAuthStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+        {
+            pending = loadProtectedJson(
+                getTone3000PendingAuthFile(), error);
+        }
+        else
+        {
+            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+        }
+    }
     auto* pendingObject = pending.getDynamicObject();
     if (pendingObject == nullptr)
         return makeTone3000Error(error.isNotEmpty() ? error : "No pending TONE3000 OAuth request");
+
+    const auto currentEpoch = tone3000CredentialEpoch.load(
+        std::memory_order_acquire);
+    const auto storedEpoch = getTone3000RecordEpoch(pendingObject);
+    const auto storedSession =
+        getTone3000RecordSession(pendingObject);
+    const auto expectedEpoch =
+        storedSession == tone3000CredentialSessionId
+            && storedEpoch > 0
+        ? storedEpoch
+        : currentEpoch;
+    const auto expectedState =
+        pendingObject->getProperty("state").toString();
+    if (expectedEpoch != currentEpoch)
+    {
+        return makeTone3000Error(
+            "This TONE3000 sign-in request was superseded by a newer credential action.");
+    }
 
     const auto createdAtMs = static_cast<juce::int64>(
         static_cast<double>(pendingObject->getProperty("createdAtMs")));
     const auto requestAgeMs = juce::Time::getCurrentTime().toMilliseconds() - createdAtMs;
     if (createdAtMs <= 0 || requestAgeMs < 0 || requestAgeMs > kTone3000LoopbackTimeoutMs)
     {
-        getTone3000PendingAuthFile().deleteFile();
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000PendingAuthStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (! processGuard.locked)
+        {
+            return makeTone3000Error(
+                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+        }
+        juce::String currentError;
+        const auto currentPending = loadProtectedJson(
+            getTone3000PendingAuthFile(), currentError);
+        const auto* currentPendingObject =
+            currentPending.getDynamicObject();
+        const auto currentPendingEpoch =
+            getTone3000RecordEpoch(currentPendingObject);
+        const auto currentPendingSession =
+            getTone3000RecordSession(currentPendingObject);
+        if (tone3000CredentialSnapshotStillCurrent(
+                expectedEpoch,
+                expectedState,
+                tone3000CredentialEpoch.load(
+                    std::memory_order_acquire),
+                currentPendingObject != nullptr
+                    ? currentPendingObject->getProperty(
+                        "state").toString()
+                    : juce::String())
+            && (currentPendingSession != tone3000CredentialSessionId
+                || currentPendingEpoch == 0
+                || currentPendingEpoch == expectedEpoch))
+        {
+            (void) deleteProtectedText(
+                getTone3000PendingAuthFile());
+        }
         return makeTone3000Error("The pending TONE3000 sign-in expired. Start the connection again.");
     }
 
-    const auto expectedState = pendingObject->getProperty("state").toString();
     if (stateFromCallback.isEmpty())
         return makeTone3000Error("OAuth callback did not include the required state");
     if (expectedState != stateFromCallback)
@@ -2126,32 +3631,90 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
     fields.set("client_id", clientId);
 
     auto tokenPayload = postTone3000OAuthToken(fields);
+    if (isTone3000TaskCancelled())
+    {
+        return makeTone3000Error(
+            "The TONE3000 token exchange was canceled before credentials were stored.");
+    }
     if (auto* tokenObject = tokenPayload.getDynamicObject())
     {
         if (static_cast<bool>(tokenObject->getProperty("success")) == false && tokenObject->hasProperty("error"))
             return tokenPayload;
     }
 
-    auto result = storeTone3000TokenPayload(tokenPayload, clientId);
-    if (auto* resultObject = result.getDynamicObject())
+    std::scoped_lock storageGuards(
+        tone3000TokenStorageMutex,
+        tone3000PendingAuthStorageMutex);
+    const ScopedTone3000CredentialProcessLock processGuard;
+    if (! processGuard.locked)
     {
-        if (static_cast<bool>(resultObject->getProperty("success")))
-            getTone3000PendingAuthFile().deleteFile();
+        return makeTone3000Error(
+            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+    }
+    juce::String currentPendingError;
+    const auto currentPending = loadProtectedJson(
+        getTone3000PendingAuthFile(), currentPendingError);
+    const auto* currentPendingObject =
+        currentPending.getDynamicObject();
+    const auto currentPendingEpoch =
+        getTone3000RecordEpoch(currentPendingObject);
+    const auto currentPendingSession =
+        getTone3000RecordSession(currentPendingObject);
+    if (! tone3000CredentialSnapshotStillCurrent(
+            expectedEpoch,
+            expectedState,
+            tone3000CredentialEpoch.load(
+                std::memory_order_acquire),
+            currentPendingObject != nullptr
+                ? currentPendingObject->getProperty("state").toString()
+                : juce::String())
+        || (currentPendingSession == tone3000CredentialSessionId
+            && currentPendingEpoch > 0
+            && currentPendingEpoch != expectedEpoch))
+    {
+        return makeTone3000Error(
+            "This TONE3000 token exchange was superseded before credentials could be stored.");
+    }
+
+    auto result = storeTone3000TokenPayloadUnlocked(
+        tokenPayload, clientId, expectedEpoch);
+    if (auto* resultObject = result.getDynamicObject();
+        resultObject != nullptr
+        && static_cast<bool>(resultObject->getProperty("success")))
+    {
+        const bool pendingDeleted =
+            deleteProtectedText(getTone3000PendingAuthFile());
+        resultObject->setProperty(
+            "pendingAuthDeleted", pendingDeleted);
+        if (! pendingDeleted)
+        {
+            resultObject->setProperty(
+                "warning",
+                "TONE3000 connected, but OpenStudio could not clear the completed pending secure session.");
+        }
     }
     return result;
 }
 
 juce::var waitForTone3000LoopbackCallback(juce::StreamingSocket& listener,
                                           int generation,
-                                          int timeoutMs)
+                                          int timeoutMs,
+                                          const juce::String& expectedState,
+                                          juce::uint64 expectedCredentialEpoch)
 {
     const auto deadline = juce::Time::currentTimeMillis() + timeoutMs;
 
     while (juce::Time::currentTimeMillis() < deadline)
     {
+        if (isTone3000TaskCancelled())
+        {
+            return makeTone3000AuthFlowResult(
+                "canceled",
+                false,
+                "The OpenStudio window that started TONE3000 sign-in was closed.");
+        }
         if (generation != tone3000AuthFlowGeneration.load())
         {
-            getTone3000PendingAuthFile().deleteFile();
             return makeTone3000AuthFlowResult("canceled", false, "TONE3000 sign-in was canceled.");
         }
 
@@ -2166,6 +3729,19 @@ juce::var waitForTone3000LoopbackCallback(juce::StreamingSocket& listener,
             continue;
 
         const auto request = readTone3000HttpRequest(*client, 3000);
+        if (! tone3000PendingAuthStillCurrent(
+                expectedState, expectedCredentialEpoch))
+        {
+            writeTone3000CallbackPage(
+                *client,
+                "TONE3000 sign-in canceled",
+                "The secure TONE3000 sign-in session was cleared in OpenStudio.",
+                false);
+            return makeTone3000AuthFlowResult(
+                "canceled",
+                false,
+                "TONE3000 sign-in was canceled because its secure session was cleared.");
+        }
         const auto firstLine = request.upToFirstOccurrenceOf("\n", false, false).trim();
         if (! firstLine.startsWith("GET "))
         {
@@ -2194,26 +3770,31 @@ juce::var waitForTone3000LoopbackCallback(juce::StreamingSocket& listener,
         if (error.equalsIgnoreCase("access_denied")
             || (canceled.equalsIgnoreCase("true") && code.isEmpty()))
         {
-            getTone3000PendingAuthFile().deleteFile();
+            (void) deleteTone3000PendingAuthIfCurrent(
+                expectedState, expectedCredentialEpoch);
             writeTone3000CallbackPage(*client, "TONE3000 sign-in canceled", "You can return to OpenStudio and connect again when you are ready.", false);
             return makeTone3000AuthFlowResult("canceled", false, error.isNotEmpty() ? error : juce::String("TONE3000 sign-in was canceled."), {}, toneId);
         }
 
         if (error.isNotEmpty())
         {
-            getTone3000PendingAuthFile().deleteFile();
+            (void) deleteTone3000PendingAuthIfCurrent(
+                expectedState, expectedCredentialEpoch);
             writeTone3000CallbackPage(*client, "TONE3000 sign-in failed", "OpenStudio received an authorization error. Return to the app and try again.", false);
             return makeTone3000AuthFlowResult("failed", false, error, {}, toneId);
         }
 
         if (code.isEmpty())
         {
+            (void) deleteTone3000PendingAuthIfCurrent(
+                expectedState, expectedCredentialEpoch);
             writeTone3000CallbackPage(*client, "TONE3000 sign-in failed", "OpenStudio did not receive an OAuth code from TONE3000.", false);
             return makeTone3000AuthFlowResult("failed", false, "OAuth callback did not include a code.", {}, toneId);
         }
         if (state.isEmpty())
         {
-            getTone3000PendingAuthFile().deleteFile();
+            (void) deleteTone3000PendingAuthIfCurrent(
+                expectedState, expectedCredentialEpoch);
             writeTone3000CallbackPage(*client, "TONE3000 sign-in failed", "OpenStudio did not receive the OAuth security state from TONE3000.", false);
             return makeTone3000AuthFlowResult("failed", false, "OAuth callback did not include the required state.", {}, toneId);
         }
@@ -2239,7 +3820,8 @@ juce::var waitForTone3000LoopbackCallback(juce::StreamingSocket& listener,
         return makeTone3000AuthFlowResult("failed", false, "Token exchange returned an invalid result.", {}, toneId);
     }
 
-    getTone3000PendingAuthFile().deleteFile();
+    (void) deleteTone3000PendingAuthIfCurrent(
+        expectedState, expectedCredentialEpoch);
     return makeTone3000AuthFlowResult("failed", false, "Timed out waiting for TONE3000 to return to OpenStudio.", {}, {}, true);
 }
 
@@ -2264,6 +3846,15 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
                                           {},
                                           {},
                                           true);
+    }
+
+    const ScopedTone3000AuthFlowProcessLock processFlowGuard;
+    if (! processFlowGuard.locked)
+    {
+        return makeTone3000AuthFlowResult(
+            "failed",
+            false,
+            "Another OpenStudio instance already has a TONE3000 sign-in in progress.");
     }
 
     if (tone3000AuthFlowActive.exchange(true))
@@ -2301,13 +3892,23 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
     }
 
     const auto authUrl = requestObject->getProperty("authUrl").toString();
+    const auto expectedState =
+        requestObject->getProperty("state").toString();
+    const auto expectedCredentialEpoch =
+        static_cast<juce::uint64>(static_cast<juce::int64>(
+            requestObject->getProperty("credentialEpoch")));
     if (authUrl.isEmpty())
         return makeTone3000AuthFlowResult("failed", false, "TONE3000 did not produce an authorization URL.", {}, {}, true);
 
     if (! juce::URL(authUrl).launchInDefaultBrowser())
         return makeTone3000AuthFlowResult("failed", false, "Could not open the TONE3000 sign-in page in the default browser.", authUrl, {}, true);
 
-    auto result = waitForTone3000LoopbackCallback(listener, generation, timeoutMs);
+    auto result = waitForTone3000LoopbackCallback(
+        listener,
+        generation,
+        timeoutMs,
+        expectedState,
+        expectedCredentialEpoch);
     if (auto* resultObject = result.getDynamicObject())
     {
         if (! resultObject->hasProperty("authUrl"))
@@ -2321,18 +3922,200 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
 juce::var cancelTone3000AuthFlow()
 {
     tone3000AuthFlowGeneration.fetch_add(1);
-    getTone3000PendingAuthFile().deleteFile();
+    const auto cancelEpoch = beginTone3000CredentialEpoch();
 
+    // Wake the loopback listener before secure-storage cleanup, which may ask
+    // Secret Service to unlock and therefore take time on Linux.
     juce::StreamingSocket wakeSocket;
     wakeSocket.connect(kTone3000LoopbackHost, kTone3000LoopbackPort, 500);
 
-    return makeTone3000AuthFlowResult("canceled", true);
+    bool newerPendingAuthPreserved = false;
+    bool pendingAuthDeleted = false;
+    bool pendingAuthCleanupComplete = false;
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000PendingAuthStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+        {
+            juce::String loadError;
+            const auto pending = loadProtectedJson(
+                getTone3000PendingAuthFile(), loadError);
+            const auto* pendingObject = pending.getDynamicObject();
+            newerPendingAuthPreserved = pendingObject != nullptr
+                && ! tone3000PendingRecordCanBeInvalidated(
+                    getTone3000RecordSession(pendingObject),
+                    getTone3000RecordEpoch(pendingObject),
+                    cancelEpoch);
+            pendingAuthDeleted = ! newerPendingAuthPreserved
+                && deleteProtectedText(
+                    getTone3000PendingAuthFile());
+            pendingAuthCleanupComplete =
+                newerPendingAuthPreserved || pendingAuthDeleted;
+        }
+    }
+    auto result = makeTone3000AuthFlowResult(
+        "canceled",
+        pendingAuthCleanupComplete,
+        pendingAuthCleanupComplete
+            ? juce::String()
+            : juce::String(
+                "TONE3000 sign-in was canceled, but OpenStudio could not clear its pending secure session."));
+    if (auto* object = result.getDynamicObject())
+    {
+        object->setProperty("canceled", true);
+        object->setProperty("pendingAuthDeleted", pendingAuthDeleted);
+        object->setProperty(
+            "pendingAuthCleanupComplete",
+            pendingAuthCleanupComplete);
+        object->setProperty(
+            "newerPendingAuthPreserved",
+            newerPendingAuthPreserved);
+    }
+    return result;
+}
+
+juce::var clearTone3000Auth()
+{
+    tone3000AuthFlowGeneration.fetch_add(1);
+    const auto clearEpoch = beginTone3000CredentialEpoch();
+    bool newerTokenPreserved = false;
+    bool newerPendingAuthPreserved = false;
+    bool tokenDeleted = false;
+    bool pendingAuthDeleted = false;
+    bool tokenClearComplete = false;
+    bool pendingAuthClearComplete = false;
+    bool tokenWasPresent = false;
+    {
+        std::scoped_lock storageGuards(
+            tone3000TokenStorageMutex,
+            tone3000PendingAuthStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+        {
+            juce::String tokenLoadError;
+            const auto token = loadProtectedJson(
+                getTone3000TokenFile(), tokenLoadError);
+            const auto* tokenObject = token.getDynamicObject();
+            tokenWasPresent = tokenObject != nullptr
+                && makeTone3000TokenIdentity(
+                    tokenObject).isNotEmpty();
+            newerTokenPreserved = tokenObject != nullptr
+                && ! tone3000RecordCanBeInvalidated(
+                    getTone3000RecordSession(tokenObject),
+                    getTone3000RecordEpoch(tokenObject),
+                    clearEpoch);
+            tokenDeleted = ! newerTokenPreserved
+                && deleteProtectedText(getTone3000TokenFile());
+            tokenClearComplete =
+                newerTokenPreserved || tokenDeleted;
+
+            juce::String pendingLoadError;
+            const auto pending = loadProtectedJson(
+                getTone3000PendingAuthFile(), pendingLoadError);
+            const auto* pendingObject = pending.getDynamicObject();
+            newerPendingAuthPreserved = pendingObject != nullptr
+                && ! tone3000RecordCanBeInvalidated(
+                    getTone3000RecordSession(pendingObject),
+                    getTone3000RecordEpoch(pendingObject),
+                    clearEpoch);
+            pendingAuthDeleted = ! newerPendingAuthPreserved
+                && deleteProtectedText(
+                    getTone3000PendingAuthFile());
+            pendingAuthClearComplete =
+                newerPendingAuthPreserved || pendingAuthDeleted;
+        }
+    }
+    if (pendingAuthDeleted)
+    {
+        // A sign-in listener may belong to another OpenStudio instance. Wake
+        // it after the global clear transaction so it can observe the missing
+        // secure pending record instead of waiting for the ten-minute timeout.
+        juce::StreamingSocket wakeSocket;
+        if (wakeSocket.connect(
+                kTone3000LoopbackHost,
+                kTone3000LoopbackPort,
+                500))
+        {
+            constexpr auto request =
+                "GET /tone3000/credential-cleared HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Connection: close\r\n\r\n";
+            (void) wakeSocket.write(
+                request, static_cast<int>(std::strlen(request)));
+        }
+    }
+    if (! tokenClearComplete || ! pendingAuthClearComplete)
+    {
+        auto failure = makeTone3000Error(
+            "OpenStudio could not completely clear the secure TONE3000 session.");
+        if (auto* object = failure.getDynamicObject())
+        {
+            object->setProperty(
+                "authenticated",
+                tokenWasPresent && ! tokenDeleted);
+            object->setProperty("tokenDeleted", tokenDeleted);
+            object->setProperty("pendingAuthDeleted", pendingAuthDeleted);
+            object->setProperty(
+                "newerTokenPreserved", newerTokenPreserved);
+            object->setProperty(
+                "newerPendingAuthPreserved",
+                newerPendingAuthPreserved);
+        }
+        return failure;
+    }
+
+    juce::DynamicObject::Ptr result = new juce::DynamicObject();
+    result->setProperty("success", true);
+    result->setProperty(
+        "authenticated", newerTokenPreserved);
+    result->setProperty("tokenDeleted", tokenDeleted);
+    result->setProperty(
+        "pendingAuthDeleted", pendingAuthDeleted);
+    result->setProperty(
+        "tokenClearComplete", tokenClearComplete);
+    result->setProperty(
+        "pendingAuthClearComplete", pendingAuthClearComplete);
+    result->setProperty(
+        "newerTokenPreserved", newerTokenPreserved);
+    result->setProperty(
+        "newerPendingAuthPreserved",
+        newerPendingAuthPreserved);
+    return juce::var(result.get());
 }
 
 juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
 {
+    // OAuth providers may rotate refresh tokens. Only one refresh request may
+    // consume/publish a token at a time across every OpenStudio instance.
+    // The dedicated lock spans the network request but is separate from the
+    // short storage transaction lock, so Clear and status remain responsive.
+    const ScopedTone3000TokenRefreshLock refreshGuard;
+    if (! refreshGuard.locked)
+    {
+        return makeTone3000Error(
+            "TONE3000 refresh was canceled or timed out while waiting for another refresh to finish.");
+    }
+
     juce::String error;
-    auto stored = loadProtectedJson(getTone3000TokenFile(), error);
+    juce::var stored;
+    juce::uint64 snapshotEpoch = 0;
+    {
+        const std::lock_guard<std::mutex> storageGuard(
+            tone3000TokenStorageMutex);
+        const ScopedTone3000CredentialProcessLock processGuard;
+        if (processGuard.locked)
+        {
+            stored = loadProtectedJson(
+                getTone3000TokenFile(), error);
+            snapshotEpoch = tone3000CredentialEpoch.load(
+                std::memory_order_acquire);
+        }
+        else
+        {
+            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+        }
+    }
     auto* object = stored.getDynamicObject();
     if (object == nullptr)
         return makeTone3000Error(error.isNotEmpty() ? error : "No stored TONE3000 token");
@@ -2345,6 +4128,8 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
         return makeTone3000Error("No stored TONE3000 refresh token");
     if (clientId.isEmpty())
         return makeTone3000Error("Missing TONE3000 client_id");
+    const auto expectedTokenIdentity =
+        makeTone3000TokenIdentity(object);
 
     juce::StringPairArray fields;
     fields.set("grant_type", "refresh_token");
@@ -2352,19 +4137,65 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
     fields.set("client_id", clientId);
 
     auto tokenPayload = postTone3000OAuthToken(fields);
+    if (isTone3000TaskCancelled())
+    {
+        return makeTone3000Error(
+            "The TONE3000 refresh was canceled before credentials were updated.");
+    }
     if (auto* tokenObject = tokenPayload.getDynamicObject())
     {
         if (static_cast<bool>(tokenObject->getProperty("success")) == false && tokenObject->hasProperty("error"))
         {
             if (tokenObject->getProperty("oauthError").toString() == "invalid_grant")
             {
-                getTone3000TokenFile().deleteFile();
-                getTone3000PendingAuthFile().deleteFile();
+                bool invalidatedCurrentToken = false;
+                bool currentTokenPresent = false;
+                bool snapshotStillCurrent = false;
+                {
+                    const std::lock_guard<std::mutex> storageGuard(
+                        tone3000TokenStorageMutex);
+                    const ScopedTone3000CredentialProcessLock processGuard;
+                    if (processGuard.locked)
+                    {
+                        juce::String currentError;
+                        const auto currentStored = loadProtectedJson(
+                            getTone3000TokenFile(), currentError);
+                        const auto* currentObject =
+                            currentStored.getDynamicObject();
+                        currentTokenPresent =
+                            makeTone3000TokenIdentity(
+                                currentObject).isNotEmpty();
+                        snapshotStillCurrent =
+                            tone3000CredentialSnapshotStillCurrent(
+                                snapshotEpoch,
+                                expectedTokenIdentity,
+                                tone3000CredentialEpoch.load(
+                                    std::memory_order_acquire),
+                                makeTone3000TokenIdentity(
+                                    currentObject));
+                        if (snapshotStillCurrent)
+                        {
+                            invalidatedCurrentToken =
+                                deleteProtectedText(
+                                    getTone3000TokenFile());
+                        }
+                    }
+                }
                 auto expired = makeTone3000Error("TONE3000 session expired. Connect again.", static_cast<int> (tokenObject->getProperty("statusCode")));
                 if (auto* expiredObject = expired.getDynamicObject())
                 {
                     expiredObject->setProperty("oauthError", "invalid_grant");
-                    expiredObject->setProperty("authenticated", false);
+                    expiredObject->setProperty(
+                        "authenticated",
+                        currentTokenPresent
+                            && ! invalidatedCurrentToken);
+                    expiredObject->setProperty(
+                        "tokenInvalidated", invalidatedCurrentToken);
+                    if (! snapshotStillCurrent)
+                    {
+                        expiredObject->setProperty(
+                            "superseded", true);
+                    }
                 }
                 return expired;
             }
@@ -2374,7 +4205,30 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
             tokenObject->setProperty("refresh_token", refreshToken);
     }
 
-    return storeTone3000TokenPayload(tokenPayload, clientId);
+    const std::lock_guard<std::mutex> storageGuard(
+        tone3000TokenStorageMutex);
+    const ScopedTone3000CredentialProcessLock processGuard;
+    if (! processGuard.locked)
+    {
+        return makeTone3000Error(
+            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+    }
+    juce::String currentError;
+    const auto currentStored = loadProtectedJson(
+        getTone3000TokenFile(), currentError);
+    const auto* currentObject = currentStored.getDynamicObject();
+    if (! tone3000CredentialSnapshotStillCurrent(
+            snapshotEpoch,
+            expectedTokenIdentity,
+            tone3000CredentialEpoch.load(
+                std::memory_order_acquire),
+            makeTone3000TokenIdentity(currentObject)))
+    {
+        return makeTone3000Error(
+            "This TONE3000 refresh was superseded before credentials could be stored.");
+    }
+    return storeTone3000TokenPayloadUnlocked(
+        tokenPayload, clientId, snapshotEpoch);
 }
 
 juce::String sanitizeNAMFileName(juce::String name)
@@ -2435,21 +4289,678 @@ juce::String normaliseNAMCatalogUpdaterArchitecture(juce::String architecture)
     return {};
 }
 
+std::string makeNAMCatalogModelCacheKey(int toneId,
+                                        const juce::String& architecture)
+{
+    return (juce::String(toneId) + ":"
+            + normaliseNAMCatalogUpdaterArchitecture(architecture))
+        .toStdString();
+}
+
+juce::var sanitizeNAMCatalogModels(const juce::var& modelsValue,
+                                   int expectedToneId,
+                                   const juce::String& expectedArchitecture)
+{
+    juce::Array<juce::var> accepted;
+    const auto expected =
+        normaliseNAMCatalogUpdaterArchitecture(expectedArchitecture);
+    if (auto* models = modelsValue.getArray())
+    {
+        for (const auto& modelValue : *models)
+        {
+            auto* model = modelValue.getDynamicObject();
+            if (model == nullptr
+                || getModelObjectInt(model, "id", "model_id") <= 0)
+            {
+                continue;
+            }
+            const int modelToneId =
+                getModelObjectInt(model, "tone_id", "toneId");
+            if (modelToneId > 0 && modelToneId != expectedToneId)
+                continue;
+            const auto modelArchitecture =
+                normaliseNAMCatalogUpdaterArchitecture(
+                    getModelObjectString(
+                        model, "architecture_version", "architecture"));
+            if (modelArchitecture.isNotEmpty()
+                && expected.isNotEmpty()
+                && modelArchitecture != expected)
+            {
+                continue;
+            }
+            accepted.add(modelValue);
+        }
+    }
+    return juce::var(accepted);
+}
+
+void seedNAMCatalogModelCache(
+    const juce::var& catalog,
+    std::map<std::string, juce::var>& cache)
+{
+    auto* root = catalog.getDynamicObject();
+    auto* tones = root != nullptr
+        ? root->getProperty("tones").getArray()
+        : nullptr;
+    if (tones == nullptr)
+        return;
+
+    for (const auto& toneValue : *tones)
+    {
+        auto* tone = toneValue.getDynamicObject();
+        if (tone == nullptr)
+            continue;
+        const int toneId = getModelObjectInt(tone, "id", "toneId");
+        const auto architecture = normaliseNAMCatalogUpdaterArchitecture(
+            tone->getProperty("architecture").toString());
+        if (toneId <= 0 || architecture.isEmpty())
+            continue;
+        const auto sanitized = sanitizeNAMCatalogModels(
+            tone->getProperty("models"), toneId, architecture);
+        auto* models = sanitized.getArray();
+        if (models == nullptr || models->isEmpty())
+            continue;
+        const auto key = makeNAMCatalogModelCacheKey(toneId, architecture);
+        auto existing = cache.find(key);
+        if (existing == cache.end()
+            || existing->second.getArray() == nullptr
+            || existing->second.getArray()->size() < models->size())
+        {
+            cache[key] = sanitized;
+        }
+    }
+}
+
+struct NAMLibraryMultiProcessRegressionResult
+{
+    bool passed = false;
+    juce::String detail;
+};
+
+struct NAMLibraryChildWaitResult
+{
+    bool finishedNaturally = false;
+    bool killRequested = false;
+    bool stopped = false;
+    int exitCode = -1;
+};
+
+NAMLibraryChildWaitResult waitForNAMLibraryRegressionChild(
+    juce::ChildProcess& child,
+    bool started,
+    int naturalWaitMs,
+    int postKillWaitMs)
+{
+    NAMLibraryChildWaitResult result;
+    if (! started)
+        return result;
+
+    result.finishedNaturally = child.waitForProcessToFinish(
+        juce::jmax(0, naturalWaitMs));
+    if (! result.finishedNaturally)
+    {
+        result.killRequested = child.kill();
+        const bool reapedAfterKill = child.waitForProcessToFinish(
+            juce::jmax(0, postKillWaitMs));
+        result.stopped = reapedAfterKill || ! child.isRunning();
+    }
+    else
+    {
+        result.stopped = true;
+    }
+    if (result.stopped)
+        result.exitCode = child.getExitCode();
+    return result;
+}
+
+bool cleanupNAMLibraryRegressionDirectory(
+    const juce::File& directory)
+{
+    if (! directory.exists())
+        return true;
+    return directory.deleteRecursively() && ! directory.exists();
+}
+
+NAMLibraryMultiProcessRegressionResult
+runNAMLibraryMultiProcessRegression()
+{
+    NAMLibraryMultiProcessRegressionResult result;
+    const auto executable = juce::File::getSpecialLocation(
+        juce::File::currentExecutableFile);
+    const auto regressionDirectory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getChildFile(
+            "OpenStudio_NAM_Library_Multiprocess_"
+            + juce::Uuid().toString());
+    const auto manifestFile = regressionDirectory.getChildFile(
+        "library_manifest.json");
+    const auto startFile = regressionDirectory.getChildFile("start.flag");
+    const auto readyA = regressionDirectory.getChildFile("ready-writer-a.flag");
+    const auto readyB = regressionDirectory.getChildFile("ready-writer-b.flag");
+
+    juce::DynamicObject::Ptr manifest = new juce::DynamicObject();
+    manifest->setProperty("schemaVersion", 1);
+    manifest->setProperty("installed", juce::Array<juce::var>());
+    const bool fixtureReady = executable.existsAsFile()
+        && regressionDirectory.createDirectory().wasOk()
+        && manifestFile.replaceWithText(
+            juce::JSON::toString(juce::var(manifest.get()), true));
+    if (! fixtureReady)
+    {
+        result.detail = "Could not prepare the isolated multi-process manifest fixture.";
+        (void) regressionDirectory.deleteRecursively();
+        return result;
+    }
+
+    const auto makeCommand = [&] (const juce::String& writerId,
+                                  const juce::File& readyFile)
+    {
+        juce::StringArray command;
+        command.add(executable.getFullPathName());
+        command.add("--nam-library-manifest-writer-child");
+        command.add("--manifest");
+        command.add(manifestFile.getFullPathName());
+        command.add("--writer-id");
+        command.add(writerId);
+        command.add("--ready");
+        command.add(readyFile.getFullPathName());
+        command.add("--start");
+        command.add(startFile.getFullPathName());
+        return command;
+    };
+
+    juce::ChildProcess writerA;
+    juce::ChildProcess writerB;
+    const bool writerAStarted = writerA.start(
+        makeCommand("writer-a", readyA));
+    const bool writerBStarted = writerB.start(
+        makeCommand("writer-b", readyB));
+    const auto readyDeadline = juce::Time::getMillisecondCounterHiRes()
+        + 10000.0;
+    while (writerAStarted && writerBStarted
+           && (! readyA.existsAsFile() || ! readyB.existsAsFile())
+           && writerA.isRunning() && writerB.isRunning()
+           && juce::Time::getMillisecondCounterHiRes() < readyDeadline)
+    {
+        juce::Thread::sleep(5);
+    }
+    const bool bothReady = readyA.existsAsFile()
+        && readyB.existsAsFile();
+    const bool startReleased = bothReady
+        && startFile.replaceWithText("start");
+
+    const auto writerAWait = waitForNAMLibraryRegressionChild(
+        writerA, writerAStarted, 15000, 2000);
+    const auto writerBWait = waitForNAMLibraryRegressionChild(
+        writerB, writerBStarted, 15000, 2000);
+
+    const auto finalManifest = juce::JSON::parse(manifestFile);
+    const auto* finalObject = finalManifest.getDynamicObject();
+    const auto installedValue = finalObject != nullptr
+        ? finalObject->getProperty("installed")
+        : juce::var();
+    const auto* installed = installedValue.getArray();
+    int writerACount = 0;
+    int writerBCount = 0;
+    if (installed != nullptr)
+    {
+        for (const auto& record : *installed)
+        {
+            const auto writer = record.getProperty(
+                "writerId", {}).toString();
+            writerACount += writer == "writer-a" ? 1 : 0;
+            writerBCount += writer == "writer-b" ? 1 : 0;
+        }
+    }
+
+    const bool childrenStopped =
+        (! writerAStarted || writerAWait.stopped)
+        && (! writerBStarted || writerBWait.stopped);
+    const bool cleanupSucceeded = childrenStopped
+        && cleanupNAMLibraryRegressionDirectory(
+            regressionDirectory);
+    result.passed = writerAStarted
+        && writerBStarted
+        && bothReady
+        && startReleased
+        && writerAWait.finishedNaturally
+        && writerBWait.finishedNaturally
+        && writerAWait.exitCode == 0
+        && writerBWait.exitCode == 0
+        && installed != nullptr
+        && installed->size() == 2
+        && writerACount == 1
+        && writerBCount == 1
+        && cleanupSucceeded;
+    result.detail = "writerAStarted="
+        + juce::String(writerAStarted ? "true" : "false")
+        + ", writerBStarted="
+        + juce::String(writerBStarted ? "true" : "false")
+        + ", bothReady="
+        + juce::String(bothReady ? "true" : "false")
+        + ", startReleased="
+        + juce::String(startReleased ? "true" : "false")
+        + ", writerAExitCode=" + juce::String(writerAWait.exitCode)
+        + ", writerBExitCode=" + juce::String(writerBWait.exitCode)
+        + ", installedCount="
+        + juce::String(installed != nullptr ? installed->size() : -1)
+        + ", writerACount=" + juce::String(writerACount)
+        + ", writerBCount=" + juce::String(writerBCount)
+        + ", cleanupSucceeded="
+        + juce::String(cleanupSucceeded ? "true" : "false");
+    return result;
+}
+
+NAMLibraryMultiProcessRegressionResult
+runNAMLibraryProcessCleanupRegression()
+{
+    NAMLibraryMultiProcessRegressionResult result;
+    const auto executable = juce::File::getSpecialLocation(
+        juce::File::currentExecutableFile);
+    const auto regressionDirectory = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getChildFile(
+            "OpenStudio_NAM_Library_Multiprocess_"
+            + juce::Uuid().toString());
+    const auto manifestFile = regressionDirectory.getChildFile(
+        "library_manifest.json");
+    const auto readyFile = regressionDirectory.getChildFile(
+        "ready-cleanup-writer.flag");
+    const auto startFile = regressionDirectory.getChildFile(
+        "start.flag");
+    const auto manifest = makeEmptyNAMLibraryManifest();
+    const bool fixtureReady = executable.existsAsFile()
+        && regressionDirectory.createDirectory().wasOk()
+        && manifestFile.replaceWithText(
+            juce::JSON::toString(manifest, true));
+    if (! fixtureReady)
+    {
+        result.detail =
+            "Could not prepare the child-cleanup fixture.";
+        (void) cleanupNAMLibraryRegressionDirectory(
+            regressionDirectory);
+        return result;
+    }
+
+    juce::StringArray command;
+    command.add(executable.getFullPathName());
+    command.add("--nam-library-manifest-writer-child");
+    command.add("--manifest");
+    command.add(manifestFile.getFullPathName());
+    command.add("--writer-id");
+    command.add("cleanup-writer");
+    command.add("--ready");
+    command.add(readyFile.getFullPathName());
+    command.add("--start");
+    command.add(startFile.getFullPathName());
+    juce::ChildProcess child;
+    const bool started = child.start(command);
+    const auto readyDeadline =
+        juce::Time::getMillisecondCounterHiRes() + 5000.0;
+    while (started && ! readyFile.existsAsFile()
+           && child.isRunning()
+           && juce::Time::getMillisecondCounterHiRes()
+               < readyDeadline)
+    {
+        juce::Thread::sleep(5);
+    }
+    const bool becameReady = readyFile.existsAsFile();
+    const auto wait = waitForNAMLibraryRegressionChild(
+        child, started, 25, 2000);
+    const bool childStopped = ! started || wait.stopped;
+    const bool cleanupSucceeded = childStopped
+        && cleanupNAMLibraryRegressionDirectory(
+            regressionDirectory);
+    result.passed = started
+        && becameReady
+        && ! wait.finishedNaturally
+        && wait.killRequested
+        && wait.stopped
+        && cleanupSucceeded;
+    result.detail = "started="
+        + juce::String(started ? "true" : "false")
+        + ", becameReady="
+        + juce::String(becameReady ? "true" : "false")
+        + ", killRequested="
+        + juce::String(wait.killRequested ? "true" : "false")
+        + ", stoppedAfterKill="
+        + juce::String(wait.stopped ? "true" : "false")
+        + ", cleanupSucceeded="
+        + juce::String(cleanupSucceeded ? "true" : "false");
+    return result;
+}
+
+juce::var runNAMCatalogNativeRegressionImpl()
+{
+    juce::Array<juce::var> checks;
+    bool overallPass = true;
+    const auto addCheck = [&checks, &overallPass]
+        (const juce::String& id,
+         bool pass,
+         const juce::String& detail)
+    {
+        juce::DynamicObject::Ptr check = new juce::DynamicObject();
+        check->setProperty("id", id);
+        check->setProperty("pass", pass);
+        check->setProperty("detail", detail);
+        checks.add(juce::var(check.get()));
+        overallPass = overallPass && pass;
+    };
+    const auto makeModel = [] (int modelId,
+                               int toneId,
+                               const juce::String& architecture)
+    {
+        juce::DynamicObject::Ptr model = new juce::DynamicObject();
+        model->setProperty("id", modelId);
+        model->setProperty("tone_id", toneId);
+        model->setProperty("architecture_version", architecture);
+        return juce::var(model.get());
+    };
+    const auto makeTone = [&makeModel]
+        (int toneId,
+         const juce::String& architecture,
+         int modelId)
+    {
+        juce::DynamicObject::Ptr tone = new juce::DynamicObject();
+        tone->setProperty("id", toneId);
+        tone->setProperty("architecture", architecture);
+        juce::Array<juce::var> models;
+        models.add(makeModel(modelId, toneId, architecture));
+        tone->setProperty("models", juce::var(models));
+        return juce::var(tone.get());
+    };
+
+    juce::Array<juce::var> oldRows;
+    oldRows.add(makeTone(7, "1", 701));
+    oldRows.add(makeTone(7, "2", 702));
+    juce::DynamicObject::Ptr oldRoot = new juce::DynamicObject();
+    oldRoot->setProperty("tones", juce::var(oldRows));
+    std::map<std::string, juce::var> cache;
+    seedNAMCatalogModelCache(juce::var(oldRoot.get()), cache);
+    const auto a1Key = makeNAMCatalogModelCacheKey(7, "1");
+    const auto a2Key = makeNAMCatalogModelCacheKey(7, "2");
+    const bool priorArchitecturesHydrated =
+        cache.find(a1Key) != cache.end()
+        && cache.find(a2Key) != cache.end();
+    addCheck(
+        "existing_catalog_models_seed_both_architectures",
+        priorArchitecturesHydrated,
+        "Verified cached A1 and A2 model arrays must remain available when the native fetch budget is exhausted.");
+
+    juce::Array<juce::var> fetchedModels;
+    fetchedModels.add(makeModel(703, 7, "1"));
+    fetchedModels.add(makeModel(999, 99, "1"));
+    cache[a1Key] = sanitizeNAMCatalogModels(
+        juce::var(fetchedModels), 7, "1");
+    bool everyDuplicateHydrated = true;
+    for (int duplicate = 0; duplicate < 3; ++duplicate)
+    {
+        auto found = cache.find(a1Key);
+        auto* models = found != cache.end()
+            ? found->second.getArray()
+            : nullptr;
+        everyDuplicateHydrated = everyDuplicateHydrated
+            && models != nullptr
+            && models->size() == 1
+            && static_cast<int>(
+                   models->getReference(0).getProperty("id", 0))
+                == 703;
+    }
+    addCheck(
+        "duplicate_sort_rows_share_sanitized_models",
+        everyDuplicateHydrated,
+        "Every sort-bucket duplicate must receive the same freshly fetched tone/architecture models, with mismatched tone IDs rejected.");
+
+    auto a2 = cache.find(a2Key);
+    auto* a2Models = a2 != cache.end()
+        ? a2->second.getArray()
+        : nullptr;
+    const bool unfetchedA2Preserved = a2Models != nullptr
+        && a2Models->size() == 1
+        && static_cast<int>(
+               a2Models->getReference(0).getProperty("id", 0))
+            == 702;
+    addCheck(
+        "unfetched_architecture_uses_verified_cache",
+        unfetchedA2Preserved,
+        "Rows beyond maxModelFetches must retain verified prior model arrays instead of losing multi-capture choices.");
+
+    int largeCapturePageRequests = 0;
+    const auto largeCapturePack = fetchTone3000ModelPages(
+        8,
+        "2",
+        kTone3000CatalogModelPageSize,
+        [&] (int page, int pageSize)
+        {
+            ++largeCapturePageRequests;
+            juce::Array<juce::var> pageModels;
+            const int firstIndex = (page - 1) * pageSize;
+            const int endIndex = juce::jmin(
+                firstIndex + pageSize, 137);
+            for (int index = firstIndex; index < endIndex; ++index)
+                pageModels.add(makeModel(800 + index, 8, "2"));
+
+            juce::DynamicObject::Ptr payload = new juce::DynamicObject();
+            payload->setProperty("data", juce::var(pageModels));
+            payload->setProperty("page", page);
+            payload->setProperty("page_size", pageSize);
+            payload->setProperty("total", 137);
+            payload->setProperty("total_pages", 2);
+            payload->setProperty("has_more", page < 2);
+            payload->setProperty(
+                "next_page",
+                page < 2 ? juce::var(page + 1) : juce::var());
+            return juce::var(payload.get());
+        });
+    const bool largeCapturePackPass =
+        largeCapturePack.error.isVoid()
+        && largeCapturePageRequests == 2
+        && largeCapturePack.pagesFetched == 2
+        && largeCapturePack.models.size() == 137
+        && static_cast<int>(
+               largeCapturePack.models.getFirst().getProperty("id", 0))
+            == 800
+        && static_cast<int>(
+               largeCapturePack.models.getLast().getProperty("id", 0))
+            == 936;
+    addCheck(
+        "catalog_paginates_capture_packs_above_one_hundred_models",
+        largeCapturePackPass,
+        "The native catalog and live tone detail path must request every bounded model page and preserve all 137 captures without duplicates or truncation.");
+
+    const auto overLimitCapturePack = fetchTone3000ModelPages(
+        9,
+        "2",
+        kTone3000CatalogModelPageSize,
+        [&makeModel] (int page, int pageSize)
+        {
+            juce::Array<juce::var> pageModels;
+            pageModels.add(makeModel(900, 9, "2"));
+            juce::DynamicObject::Ptr payload = new juce::DynamicObject();
+            payload->setProperty("data", juce::var(pageModels));
+            payload->setProperty("page", page);
+            payload->setProperty("page_size", pageSize);
+            payload->setProperty(
+                "total_pages", kTone3000MaximumModelPages + 1);
+            return juce::var(payload.get());
+        });
+    addCheck(
+        "catalog_rejects_unbounded_capture_pagination",
+        ! overLimitCapturePack.error.isVoid(),
+        "A provider response beyond the bounded per-tone page limit must fail explicitly instead of publishing a silently truncated capture list.");
+
+    std::atomic<bool> firstRefreshEntered { false };
+    std::atomic<bool> releaseFirstRefresh { false };
+    std::atomic<bool> secondRefreshEntered { false };
+    std::thread firstRefresh([&]
+    {
+        const ScopedTone3000CatalogRefreshLock lock(2000);
+        firstRefreshEntered.store(lock.locked, std::memory_order_release);
+        while (lock.locked
+               && ! releaseFirstRefresh.load(
+                   std::memory_order_acquire))
+        {
+            juce::Thread::sleep(1);
+        }
+    });
+    for (int attempt = 0;
+         attempt < 400
+         && ! firstRefreshEntered.load(std::memory_order_acquire);
+         ++attempt)
+    {
+        juce::Thread::sleep(5);
+    }
+    std::thread secondRefresh([&]
+    {
+        const ScopedTone3000CatalogRefreshLock lock(2000);
+        secondRefreshEntered.store(lock.locked, std::memory_order_release);
+    });
+    juce::Thread::sleep(50);
+    const bool secondRefreshWasBlocked =
+        ! secondRefreshEntered.load(std::memory_order_acquire);
+    releaseFirstRefresh.store(true, std::memory_order_release);
+    firstRefresh.join();
+    secondRefresh.join();
+    const bool catalogRefreshSerializationPass =
+        firstRefreshEntered.load(std::memory_order_acquire)
+        && secondRefreshWasBlocked
+        && secondRefreshEntered.load(std::memory_order_acquire);
+    addCheck(
+        "catalog_refresh_threads_are_process_local_single_flight",
+        catalogRefreshSerializationPass,
+        "Concurrent refresh workers in one process must serialize before attempting the separately configured inter-process publication lock.");
+
+    const auto manifestMultiProcessRegression =
+        runNAMLibraryMultiProcessRegression();
+    addCheck(
+        "nam_library_manifest_multi_process_writers_preserved",
+        manifestMultiProcessRegression.passed,
+        "Two real OpenStudio child processes must preserve both concurrent manifest records under the shared OS lock. "
+            + manifestMultiProcessRegression.detail);
+
+    const auto processCleanupRegression =
+        runNAMLibraryProcessCleanupRegression();
+    addCheck(
+        "nam_library_child_timeout_is_reaped_before_cleanup",
+        processCleanupRegression.passed,
+        "A timed-out real child process must be killed, observed stopped with a bounded wait, and have its isolated fixture removed. "
+            + processCleanupRegression.detail);
+
+    std::atomic<bool> firstTokenRefreshEntered { false };
+    std::atomic<bool> releaseFirstTokenRefresh { false };
+    std::atomic<bool> secondTokenRefreshEntered { false };
+    std::thread firstTokenRefresh([&]
+    {
+        const ScopedTone3000TokenRefreshLock lock(2000);
+        firstTokenRefreshEntered.store(
+            lock.locked, std::memory_order_release);
+        while (lock.locked
+               && ! releaseFirstTokenRefresh.load(
+                   std::memory_order_acquire))
+        {
+            juce::Thread::sleep(1);
+        }
+    });
+    for (int attempt = 0;
+         attempt < 400
+         && ! firstTokenRefreshEntered.load(
+             std::memory_order_acquire);
+         ++attempt)
+    {
+        juce::Thread::sleep(5);
+    }
+    std::thread secondTokenRefresh([&]
+    {
+        const ScopedTone3000TokenRefreshLock lock(2000);
+        secondTokenRefreshEntered.store(
+            lock.locked, std::memory_order_release);
+    });
+    juce::Thread::sleep(50);
+    const bool secondTokenRefreshWasBlocked =
+        ! secondTokenRefreshEntered.load(
+            std::memory_order_acquire);
+    releaseFirstTokenRefresh.store(true, std::memory_order_release);
+    firstTokenRefresh.join();
+    secondTokenRefresh.join();
+    const bool tokenRefreshSerializationPass =
+        firstTokenRefreshEntered.load(
+            std::memory_order_acquire)
+        && secondTokenRefreshWasBlocked
+        && secondTokenRefreshEntered.load(
+            std::memory_order_acquire);
+    addCheck(
+        "token_refresh_threads_are_process_local_single_flight",
+        tokenRefreshSerializationPass,
+        "Concurrent refresh workers in one process must serialize before attempting the separately configured inter-process token-rotation lock.");
+
+    const bool retryAfterPass =
+        std::abs(parseTone3000RetryAfterSeconds({}) - 15.0) < 0.001
+        && std::abs(parseTone3000RetryAfterSeconds("0") - 15.0) < 0.001
+        && std::abs(parseTone3000RetryAfterSeconds("2.5") - 2.5) < 0.001
+        && std::abs(parseTone3000RetryAfterSeconds("120") - 60.0) < 0.001;
+    addCheck(
+        "retry_after_default_and_clamp",
+        retryAfterPass,
+        "HTTP 429 Retry-After must preserve numeric seconds, default conservatively to 15 seconds, and clamp to 1-60 seconds.");
+
+    const bool credentialGenerationPass =
+        tone3000CredentialSnapshotStillCurrent(
+            10, "token-a", 10, "token-a")
+        && ! tone3000CredentialSnapshotStillCurrent(
+            10, "token-a", 11, "token-a")
+        && ! tone3000CredentialSnapshotStillCurrent(
+            10, "token-a", 10, "token-b")
+        && tone3000RecordCanBeInvalidated(
+            tone3000CredentialSessionId, 0, 20)
+        && tone3000RecordCanBeInvalidated(
+            tone3000CredentialSessionId, 19, 20)
+        && tone3000RecordCanBeInvalidated(
+            tone3000CredentialSessionId, 20, 20)
+        && ! tone3000RecordCanBeInvalidated(
+            tone3000CredentialSessionId, 21, 20)
+        && tone3000RecordCanBeInvalidated(
+            "prior-or-other-process", 999, 20)
+        && tone3000PendingRecordCanBeInvalidated(
+            tone3000CredentialSessionId, 19, 20)
+        && ! tone3000PendingRecordCanBeInvalidated(
+            "other-live-process", 1, 20);
+    addCheck(
+        "credential_epoch_and_identity_reject_stale_publication",
+        credentialGenerationPass,
+        "A refresh/exchange snapshot must be rejected after clear, cancel, a newer sign-in, or token rotation; cleanup must preserve newer records and pending PKCE state owned by another live instance.");
+
+    const auto libraryReliability =
+        runNAMLibraryReliabilityRegressionImpl();
+    overallPass = overallPass
+        && static_cast<bool>(libraryReliability.getProperty(
+            "success", false));
+    const auto reliabilityChecksValue =
+        libraryReliability.getProperty("checks", {});
+    if (auto* reliabilityChecks = reliabilityChecksValue.getArray())
+    {
+        for (const auto& check : *reliabilityChecks)
+            checks.add(check);
+    }
+
+    juce::DynamicObject::Ptr result = new juce::DynamicObject();
+    result->setProperty("success", overallPass);
+    result->setProperty("objectiveGateStatus",
+                        overallPass ? "pass" : "fail");
+    result->setProperty("checks", juce::var(checks));
+    return juce::var(result.get());
+}
+
 juce::var refreshNAMCatalogFromUpdater(juce::var optionsVar)
 {
     juce::DynamicObject::Ptr result = new juce::DynamicObject();
     result->setProperty("success", false);
-
-    const auto script = findOpenStudioNAMCatalogUpdaterScript();
-    if (! script.existsAsFile())
+    const ScopedTone3000CatalogRefreshLock refreshLock;
+    if (! refreshLock.locked)
     {
-        result->setProperty("error", "NAM catalog updater script not found.");
+        result->setProperty("exitCode", 2);
+        result->setProperty(
+            "error", "NAM catalog refresh was canceled or timed out while waiting for another refresh to finish.");
         return juce::var(result.get());
     }
-
-    const auto python = findOpenStudioPythonForNAMCatalog();
     const auto namRoot = getOpenStudioNAMRoot();
-    const auto dbFile = getOpenStudioNAMCatalogSqlite();
     const auto jsonFile = getOpenStudioNAMCatalogJson();
 
     auto* options = optionsVar.getDynamicObject();
@@ -2475,96 +4986,290 @@ juce::var refreshNAMCatalogFromUpdater(juce::var optionsVar)
     const auto gears = optionProperty(options, "gears", {}, "amp_amp-cab").toString().trim();
     const auto query = optionProperty(options, "query", {}, "").toString();
     const auto architecture = normaliseNAMCatalogUpdaterArchitecture(optionProperty(options, "architecture", {}, "").toString());
-
-    juce::StringArray args;
-    args.add(python);
-    args.add(script.getFullPathName());
-    args.add("--nam-root");
-    args.add(namRoot.getFullPathName());
-    args.add("--db");
-    args.add(dbFile.getFullPathName());
-    args.add("--json");
-    args.add(jsonFile.getFullPathName());
-    args.add("--page-size");
-    args.add(juce::String(pageSize));
-    args.add("--pages");
-    args.add(juce::String(pages));
-    args.add("--max-model-fetches");
-    args.add(juce::String(maxModelFetches));
-    args.add("--min-interval");
-    args.add(juce::String(minInterval, 2));
-    args.add("--gears");
-    args.add(gears.isNotEmpty() ? gears : juce::String("amp_amp-cab"));
-
-    if (query.isNotEmpty())
-    {
-        args.add("--query");
-        args.add(query);
-    }
-
-    if (architecture.isNotEmpty())
-    {
-        args.add("--architecture");
-        args.add(architecture);
-    }
-
     const auto startMs = juce::Time::getMillisecondCounterHiRes();
-    juce::ChildProcess process;
-    const bool started = process.start(args);
-    if (! started)
-    {
-        result->setProperty("error", "Could not start Python for NAM catalog refresh.");
-        result->setProperty("pythonPath", python);
-        result->setProperty("scriptPath", script.getFullPathName());
-        return juce::var(result.get());
-    }
-
-    bool timedOut = false;
-    if (! process.waitForProcessToFinish(180000))
-    {
-        timedOut = true;
-        process.kill();
-    }
-
-    const int exitCode = timedOut ? -1 : process.getExitCode();
-    const auto output = process.readAllProcessOutput().trim();
-    const double durationMs = juce::Time::getMillisecondCounterHiRes() - startMs;
-    const bool success = ! timedOut && exitCode == 0 && jsonFile.existsAsFile();
-
-    result->setProperty("success", success);
-    result->setProperty("exitCode", exitCode);
-    result->setProperty("timedOut", timedOut);
-    result->setProperty("durationMs", durationMs);
-    result->setProperty("pythonPath", python);
-    result->setProperty("scriptPath", script.getFullPathName());
+    result->setProperty("exitCode", 0);
+    result->setProperty("timedOut", false);
+    result->setProperty("updater", "native-cpp");
     result->setProperty("rootPath", namRoot.getFullPathName());
-    result->setProperty("catalogPath", dbFile.getFullPathName());
     result->setProperty("catalogJsonPath", jsonFile.getFullPathName());
-    result->setProperty("output", output.substring(0, 4000));
     result->setProperty("pageSize", pageSize);
     result->setProperty("pages", pages);
     result->setProperty("maxModelFetches", maxModelFetches);
 
-    auto catalog = parseJsonFileOrDefault(jsonFile, "tones");
-    if (auto* catalogObject = catalog.getDynamicObject())
+    auto accessToken = getStoredTone3000AccessToken();
+    if (accessToken.isEmpty())
     {
-        const auto tonesVar = catalogObject->getProperty("tones");
-        const int rowCount = tonesVar.isArray() ? tonesVar.getArray()->size() : 0;
-        result->setProperty("toneRows", rowCount);
-        result->setProperty("generatedAt", catalogObject->getProperty("generatedAt"));
+        const auto refreshResult = refreshTone3000Auth({});
+        if (isTone3000ErrorPayload(refreshResult))
+        {
+            const auto* refreshObject = refreshResult.getDynamicObject();
+            result->setProperty("error", refreshObject != nullptr
+                ? refreshObject->getProperty("error")
+                : juce::var("Connect TONE3000 before refreshing the NAM catalog."));
+            result->setProperty("exitCode", 2);
+            return juce::var(result.get());
+        }
+        accessToken = getStoredTone3000AccessToken();
     }
+    if (accessToken.isEmpty())
+    {
+        result->setProperty("error", "Connect TONE3000 before refreshing the NAM catalog.");
+        result->setProperty("exitCode", 2);
+        return juce::var(result.get());
+    }
+
+    juce::StringArray architectures;
+    if (architecture.isNotEmpty())
+        architectures.add(architecture);
+    else
+    {
+        architectures.add("1");
+        architectures.add("2");
+    }
+    juce::StringArray sorts;
+    sorts.add("newest");
+    sorts.add("trending");
+    sorts.add("downloads-all-time");
+
+    const auto existingCatalog =
+        parseJsonFileOrDefault(jsonFile, "tones");
+    std::map<std::string, juce::var> modelCache;
+    seedNAMCatalogModelCache(existingCatalog, modelCache);
+    juce::Array<juce::var> rows;
+    std::set<std::string> fetchedModelKeys;
+    int modelFetchCount = 0;
+    double lastRequestMs = 0.0;
+    const auto waitForRequestSlot = [&]
+    {
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        const double waitMs = minInterval * 1000.0 - (now - lastRequestMs);
+        if (waitMs > 0.0)
+        {
+            if (! sleepForTone3000Task(
+                    juce::jlimit(
+                        1, 5000, juce::roundToInt(waitMs))))
+            {
+                return false;
+            }
+        }
+        lastRequestMs = juce::Time::getMillisecondCounterHiRes();
+        return ! isTone3000TaskCancelled();
+    };
+    const auto requestCatalogJson = [&] (const juce::URL& url,
+                                         const juce::String& label)
+    {
+        juce::var payload;
+        constexpr int maximumRateLimitRetries = 3;
+        for (int attempt = 0; attempt <= maximumRateLimitRetries; ++attempt)
+        {
+            if (juce::Time::getMillisecondCounterHiRes() - startMs
+                >= 180000.0)
+            {
+                result->setProperty("timedOut", true);
+                return makeTone3000Error(
+                    "NAM catalog refresh timed out.");
+            }
+            if (! waitForRequestSlot())
+            {
+                return makeTone3000Error(
+                    "NAM catalog refresh was canceled.");
+            }
+            payload = getTone3000Json(url, accessToken, label);
+            auto* object = payload.getDynamicObject();
+            const int statusCode = object != nullptr
+                ? static_cast<int>(object->getProperty("statusCode"))
+                : 0;
+            if (! isTone3000ErrorPayload(payload)
+                || statusCode != 429
+                || attempt == maximumRateLimitRetries)
+            {
+                return payload;
+            }
+            double retryAfterSeconds = static_cast<double>(
+                object->getProperty("retryAfterSeconds"));
+            if (! std::isfinite(retryAfterSeconds)
+                || retryAfterSeconds <= 0.0)
+            {
+                retryAfterSeconds = 15.0;
+            }
+            if (! sleepForTone3000Task(juce::roundToInt(
+                    juce::jlimit(1.0, 60.0, retryAfterSeconds)
+                        * 1000.0)))
+            {
+                return makeTone3000Error(
+                    "NAM catalog refresh was canceled.");
+            }
+        }
+        return payload;
+    };
+    const auto fail = [&] (const juce::var& payload,
+                           const juce::String& fallback) -> juce::var
+    {
+        auto* object = payload.getDynamicObject();
+        result->setProperty("error", object != nullptr
+            ? object->getProperty("error").toString()
+            : fallback);
+        result->setProperty("exitCode", 2);
+        result->setProperty("durationMs",
+            juce::Time::getMillisecondCounterHiRes() - startMs);
+        result->setProperty("catalog", existingCatalog);
+        return juce::var(result.get());
+    };
+
+    int rank = 0;
+    for (const auto& architectureValue : architectures)
+    {
+        for (const auto& sort : sorts)
+        {
+            for (int page = 1; page <= pages; ++page)
+            {
+                if (isTone3000TaskCancelled())
+                    return fail({}, "NAM catalog refresh was canceled.");
+                auto searchUrl = juce::URL("https://www.tone3000.com/api/v1/tones/search")
+                    .withParameter("query", query)
+                    .withParameter("page", juce::String(page))
+                    .withParameter("page_size", juce::String(pageSize))
+                    .withParameter("sort", sort)
+                    .withParameter("gears", gears.isNotEmpty() ? gears : juce::String("amp_amp-cab"))
+                    .withParameter("platform", "nam")
+                    .withParameter("architecture", architectureValue);
+                auto searchPayload = requestCatalogJson(
+                    searchUrl, "TONE3000 catalog search");
+                if (isTone3000ErrorPayload(searchPayload))
+                    return fail(searchPayload, "TONE3000 catalog search failed.");
+
+                auto* searchObject = searchPayload.getDynamicObject();
+                if (searchObject == nullptr)
+                    return fail({}, "TONE3000 catalog search returned invalid JSON.");
+                auto tonesValue = searchObject->getProperty("data");
+                if (! tonesValue.isArray())
+                    tonesValue = searchObject->getProperty("tones");
+                auto* tones = tonesValue.getArray();
+                if (tones == nullptr)
+                    continue;
+
+                for (auto toneValue : *tones)
+                {
+                    auto* tone = toneValue.getDynamicObject();
+                    if (tone == nullptr)
+                        continue;
+                    const int toneId = getModelObjectInt(tone, "id", "toneId");
+                    if (toneId <= 0)
+                        continue;
+                    ++rank;
+                    tone->setProperty("sortBucket", sort);
+                    tone->setProperty("architecture", architectureValue);
+                    tone->setProperty("catalogRank", rank);
+
+                    const auto modelKey = makeNAMCatalogModelCacheKey(
+                        toneId, architectureValue);
+                    if (fetchedModelKeys.find(modelKey)
+                            == fetchedModelKeys.end()
+                        && modelFetchCount < maxModelFetches)
+                    {
+                        fetchedModelKeys.insert(modelKey);
+                        ++modelFetchCount;
+                        const auto pageResult = fetchTone3000ModelPages(
+                            toneId,
+                            architectureValue,
+                            kTone3000CatalogModelPageSize,
+                            [&] (int modelPage, int modelPageSize)
+                            {
+                                const auto modelsUrl = juce::URL(
+                                    "https://www.tone3000.com/api/v1/models")
+                                    .withParameter(
+                                        "tone_id", juce::String(toneId))
+                                    .withParameter(
+                                        "page", juce::String(modelPage))
+                                    .withParameter(
+                                        "page_size",
+                                        juce::String(modelPageSize))
+                                    .withParameter(
+                                        "architecture",
+                                        architectureValue);
+                                return requestCatalogJson(
+                                    modelsUrl,
+                                    "TONE3000 catalog model list");
+                            });
+                        if (! pageResult.error.isVoid())
+                        {
+                            return fail(
+                                pageResult.error,
+                                "TONE3000 catalog model pagination failed.");
+                        }
+                        modelCache[modelKey] = sanitizeNAMCatalogModels(
+                            juce::var(pageResult.models),
+                            toneId,
+                            architectureValue);
+                    }
+                    const auto cachedModels = modelCache.find(modelKey);
+                    tone->setProperty(
+                        "models",
+                        cachedModels != modelCache.end()
+                            ? cachedModels->second
+                            : juce::var(juce::Array<juce::var>()));
+                    rows.add(toneValue);
+                }
+            }
+        }
+    }
+
+    juce::DynamicObject::Ptr catalogObject = new juce::DynamicObject();
+    catalogObject->setProperty("schemaVersion", 1);
+    const auto generatedAt = juce::Time::getCurrentTime().toISO8601(true);
+    catalogObject->setProperty("generatedAt", generatedAt);
+    catalogObject->setProperty("source", "tone3000");
+    juce::DynamicObject::Ptr queryObject = new juce::DynamicObject();
+    queryObject->setProperty("platform", "nam");
+    queryObject->setProperty("gears", gears.isNotEmpty() ? gears : juce::String("amp_amp-cab"));
+    juce::Array<juce::var> architectureValues;
+    for (const auto& value : architectures)
+        architectureValues.add(value);
+    juce::Array<juce::var> sortValues;
+    for (const auto& value : sorts)
+        sortValues.add(value);
+    queryObject->setProperty("architecture", juce::var(architectureValues));
+    queryObject->setProperty("sort", juce::var(sortValues));
+    queryObject->setProperty("pageSize", pageSize);
+    queryObject->setProperty("pages", pages);
+    catalogObject->setProperty("query", juce::var(queryObject.get()));
+    catalogObject->setProperty("tones", juce::var(rows));
+    const juce::var catalog(catalogObject.get());
+
+    if (isTone3000TaskCancelled())
+        return fail({}, "NAM catalog refresh was canceled before publication.");
+    if (namRoot.createDirectory().failed())
+        return fail({}, "Could not create the NAM catalog directory.");
+    juce::TemporaryFile temporaryCatalog(
+        jsonFile, juce::TemporaryFile::useHiddenFile);
+    if (! temporaryCatalog.getFile().replaceWithText(
+            juce::JSON::toString(catalog, true))
+        || ! temporaryCatalog.overwriteTargetFileWithTemporary())
+    {
+        return fail({}, "Could not publish catalog.json.");
+    }
+
+    bool legacyCatalogCleanupComplete = true;
+    for (const auto& legacyName : {
+             juce::String("catalog.sqlite"),
+             juce::String("catalog.sqlite-wal"),
+             juce::String("catalog.sqlite-shm") })
+    {
+        const auto legacyFile = namRoot.getChildFile(legacyName);
+        if (legacyFile.existsAsFile() && ! legacyFile.deleteFile())
+            legacyCatalogCleanupComplete = false;
+    }
+
+    result->setProperty("success", true);
+    result->setProperty("durationMs",
+        juce::Time::getMillisecondCounterHiRes() - startMs);
+    result->setProperty("output", "Native catalog refresh cached "
+        + juce::String(rows.size()) + " tone rows");
+    result->setProperty("toneRows", rows.size());
+    result->setProperty("generatedAt", generatedAt);
+    result->setProperty("legacyCatalogCleanupComplete",
+                        legacyCatalogCleanupComplete);
     result->setProperty("catalog", catalog);
-
-    if (! success)
-    {
-        if (timedOut)
-            result->setProperty("error", "NAM catalog refresh timed out.");
-        else if (exitCode != 0)
-            result->setProperty("error", "NAM catalog refresh failed with exit code " + juce::String(exitCode) + ".");
-        else
-            result->setProperty("error", "NAM catalog refresh did not create catalog.json.");
-    }
-
     return juce::var(result.get());
 }
 
@@ -2603,7 +5308,61 @@ bool calculateNAMAssetSha256(const juce::File& file,
         return false;
     }
 
-    actualSha256 = juce::SHA256(input).toHexString().toLowerCase();
+    class CancellableHashInput final : public juce::InputStream
+    {
+    public:
+        explicit CancellableHashInput(juce::InputStream& sourceIn)
+            : source(sourceIn)
+        {
+        }
+
+        juce::int64 getTotalLength() override
+        {
+            return source.getTotalLength();
+        }
+
+        bool isExhausted() override
+        {
+            return canceled || source.isExhausted();
+        }
+
+        juce::int64 getPosition() override
+        {
+            return source.getPosition();
+        }
+
+        bool setPosition(juce::int64 position) override
+        {
+            return source.setPosition(position);
+        }
+
+        int read(void* destination, int maximumBytes) override
+        {
+            if (isTone3000TaskCancelled())
+            {
+                canceled = true;
+                return 0;
+            }
+            constexpr int maximumChunkBytes = 64 * 1024;
+            return source.read(
+                destination,
+                juce::jmin(maximumBytes, maximumChunkBytes));
+        }
+
+        bool wasCanceled() const noexcept { return canceled; }
+
+    private:
+        juce::InputStream& source;
+        bool canceled = false;
+    } cancellableInput(input);
+
+    const auto hash = juce::SHA256(cancellableInput);
+    if (cancellableInput.wasCanceled())
+    {
+        error = "The NAM asset search was canceled while checking a file.";
+        return false;
+    }
+    actualSha256 = hash.toHexString().toLowerCase();
     return true;
 }
 
@@ -2725,9 +5484,21 @@ juce::var findNAMAssetInDirectory(const juce::String& directoryPath,
     for (const auto& entry : juce::RangedDirectoryIterator(
              directory, true, "*", juce::File::findFiles))
     {
+        if (isTone3000TaskCancelled())
+        {
+            result->setProperty("error", "The NAM asset search was canceled.");
+            result->setProperty("canceled", true);
+            return juce::var(result.get());
+        }
         const auto file = entry.getFile();
         if (! isAllowedNAMRelinkCandidate(file, slot))
             continue;
+        if (slot != "cab"
+            && file.getSize()
+                   > OpenStudioNAMModelSafety::maximumFileBytes)
+        {
+            continue;
+        }
         if (candidates.size() >= maxCandidateFiles)
         {
             truncated = true;
@@ -2743,15 +5514,22 @@ juce::var findNAMAssetInDirectory(const juce::String& directoryPath,
     {
         // Same-sized and same-named files are checked first, but the checksum is
         // authoritative and still permits users to rename or move the asset.
-        for (int pass = 0; pass < 3; ++pass)
+        for (int pass = 0; pass < 2; ++pass)
         {
             for (const auto& candidate : candidates)
             {
+                if (isTone3000TaskCancelled())
+                {
+                    result->setProperty(
+                        "error", "The NAM asset search was canceled.");
+                    result->setProperty("canceled", true);
+                    return juce::var(result.get());
+                }
                 const bool sameName = candidate.getFileName().equalsIgnoreCase(expectedFileName);
                 const bool sameSize = expectedSize <= 0 || candidate.getSize() == expectedSize;
-                if ((pass == 0 && (!sameName || !sameSize))
-                    || (pass == 1 && (sameName || !sameSize))
-                    || (pass == 2 && sameSize))
+                if (! sameSize
+                    || (pass == 0 && ! sameName)
+                    || (pass == 1 && sameName))
                 {
                     continue;
                 }
@@ -2896,6 +5674,11 @@ NAMDownloadStream openAuthenticatedNAMDownload(const juce::String& modelURL,
     constexpr int maxRedirects = 5;
     for (int redirectCount = 0; redirectCount <= maxRedirects; ++redirectCount)
     {
+        if (isTone3000TaskCancelled())
+        {
+            result.error = "The TONE3000 model download was canceled";
+            return result;
+        }
         const bool trustedDestination = isTrustedTone3000DownloadHost(currentURL.getDomain());
         juce::String headers;
         if (trustedDestination && accessToken.isNotEmpty())
@@ -2963,7 +5746,6 @@ juce::var makeNAMLibraryInfo()
     const auto namRoot = getOpenStudioNAMRoot();
     root->setProperty("rootPath", namRoot.getFullPathName());
     root->setProperty("libraryPath", namRoot.getChildFile("library").getFullPathName());
-    root->setProperty("catalogPath", namRoot.getChildFile("catalog.sqlite").getFullPathName());
     root->setProperty("catalogJsonPath", getOpenStudioNAMCatalogJson().getFullPathName());
     root->setProperty("manifestPath", getOpenStudioNAMManifestJson().getFullPathName());
     return juce::var(root.get());
@@ -3150,6 +5932,533 @@ bool areNAMPathsEquivalent(const juce::String& leftPath, const juce::String& rig
     return normalise(leftPath) == normalise(rightPath);
 }
 
+struct NAMLibraryManifestReadResult
+{
+    bool success = false;
+    juce::var manifest;
+    juce::String error;
+};
+
+juce::var makeEmptyNAMLibraryManifest()
+{
+    juce::DynamicObject::Ptr object = new juce::DynamicObject();
+    object->setProperty("schemaVersion", 1);
+    object->setProperty("installed", juce::Array<juce::var>());
+    return juce::var(object.get());
+}
+
+NAMLibraryManifestReadResult readNAMLibraryManifestStrictLocked(
+    const juce::File& manifestFile)
+{
+    NAMLibraryManifestReadResult result;
+    if (! manifestFile.existsAsFile())
+    {
+        result.success = true;
+        result.manifest = makeEmptyNAMLibraryManifest();
+        return result;
+    }
+
+    result.manifest = juce::JSON::parse(manifestFile);
+    auto* object = result.manifest.getDynamicObject();
+    if (object == nullptr
+        || object->getProperty("installed").getArray() == nullptr)
+    {
+        result.error =
+            "The existing NAM library manifest is invalid. OpenStudio left it unchanged instead of replacing installed-model records.";
+        return result;
+    }
+
+    result.success = true;
+    return result;
+}
+
+constexpr const char* kNAMLibraryTransactionMarkerName =
+    ".library_asset_transaction.json";
+constexpr const char* kNAMLibraryRollbackTag =
+    ".openstudio-nam-rollback-";
+
+struct NAMLibraryTransactionRecoveryResult
+{
+    bool success = true;
+    bool markerFound = false;
+    bool committed = false;
+    bool rolledBack = false;
+    juce::String error;
+};
+
+enum class NAMLibraryPublicationFailurePoint
+{
+    none,
+    manifestPublish,
+    afterAssetPublish,
+    afterManifestPublish
+};
+
+struct NAMLibraryPublicationTestHooks
+{
+    NAMLibraryPublicationFailurePoint failurePoint =
+        NAMLibraryPublicationFailurePoint::none;
+};
+
+struct NAMLibraryPublicationResult
+{
+    bool success = false;
+    bool recoveryAttempted = false;
+    bool recoverySucceeded = false;
+    bool recoveryPending = false;
+    bool committedDuringRecovery = false;
+    juce::String error;
+};
+
+bool calculateUncancelledFileSha256(const juce::File& file,
+                                    juce::String& sha256)
+{
+    sha256.clear();
+    juce::FileInputStream input(file);
+    if (! input.openedOk())
+        return false;
+    sha256 = juce::SHA256(input).toHexString().toLowerCase();
+    return sha256.length() == 64;
+}
+
+bool removeFileAndVerify(const juce::File& file)
+{
+    return ! file.existsAsFile()
+        || (file.deleteFile() && ! file.existsAsFile());
+}
+
+bool NAMFileMatchesSnapshot(const juce::File& file,
+                            juce::int64 expectedSize,
+                            juce::int64 expectedModificationTimeMs,
+                            bool requireModificationTime)
+{
+    if (! file.existsAsFile() || file.getSize() != expectedSize)
+        return false;
+    return ! requireModificationTime
+        || file.getLastModificationTime().toMilliseconds()
+            == expectedModificationTimeMs;
+}
+
+bool isSafeNAMTransactionRelativePath(const juce::String& path)
+{
+    const auto portable = path.trim().replaceCharacter('\\', '/');
+    return portable.isNotEmpty()
+        && ! juce::File::isAbsolutePath(portable)
+        && portable != ".."
+        && ! portable.startsWith("../")
+        && ! portable.contains("/../")
+        && ! portable.endsWith("/..");
+}
+
+NAMLibraryTransactionRecoveryResult
+recoverPendingNAMLibraryTransactionLocked(
+    const juce::File& namRoot,
+    const juce::File& manifestFile)
+{
+    NAMLibraryTransactionRecoveryResult result;
+    const auto markerFile = namRoot.getChildFile(
+        kNAMLibraryTransactionMarkerName);
+    if (! markerFile.existsAsFile())
+        return result;
+
+    result.markerFound = true;
+    const auto markerValue = juce::JSON::parse(markerFile);
+    auto* marker = markerValue.getDynamicObject();
+    if (marker == nullptr
+        || static_cast<int>(marker->getProperty("schemaVersion")) != 1)
+    {
+        result.success = false;
+        result.error =
+            "The pending NAM library transaction marker is invalid; it was retained for manual recovery.";
+        return result;
+    }
+
+    const auto transactionId =
+        marker->getProperty("transactionId").toString().trim();
+    const auto targetRelativePath =
+        marker->getProperty("targetRelativePath").toString();
+    const auto rollbackRelativePath =
+        marker->getProperty("rollbackRelativePath").toString();
+    const auto expectedManifestSha256 = normaliseNAMSha256(
+        marker->getProperty("expectedManifestSha256").toString());
+    const bool hadOriginal =
+        static_cast<bool>(marker->getProperty("hadOriginal"));
+    const auto oldSize = static_cast<juce::int64>(
+        static_cast<double>(marker->getProperty("oldSizeBytes")));
+    const auto oldModificationTimeMs = static_cast<juce::int64>(
+        static_cast<double>(marker->getProperty(
+            "oldModificationTimeMs")));
+    const auto newSize = static_cast<juce::int64>(
+        static_cast<double>(marker->getProperty("newSizeBytes")));
+    const auto newModificationTimeMs = static_cast<juce::int64>(
+        static_cast<double>(marker->getProperty(
+            "newModificationTimeMs")));
+    const auto expectedAssetSha256 = normaliseNAMSha256(
+        marker->getProperty("expectedAssetSha256").toString());
+    const auto libraryRoot = namRoot.getChildFile("library");
+    const auto targetFile = libraryRoot.getChildFile(targetRelativePath);
+    const auto rollbackFile = libraryRoot.getChildFile(
+        rollbackRelativePath);
+    const auto expectedRollbackName = "." + targetFile.getFileName()
+        + kNAMLibraryRollbackTag + transactionId;
+    const bool safeMarker = markerFile.getParentDirectory() == namRoot
+        && markerFile.getFileName()
+            == kNAMLibraryTransactionMarkerName
+        && transactionId.isNotEmpty()
+        && transactionId.length() <= 64
+        && transactionId.containsOnly(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+        && isSafeNAMTransactionRelativePath(targetRelativePath)
+        && isSafeNAMTransactionRelativePath(rollbackRelativePath)
+        && targetFile.isAChildOf(libraryRoot)
+        && rollbackFile.isAChildOf(libraryRoot)
+        && rollbackFile.getParentDirectory()
+            == targetFile.getParentDirectory()
+        && rollbackFile.getFileName() == expectedRollbackName
+        && expectedManifestSha256.length() == 64
+        && expectedManifestSha256.containsOnly(
+            "0123456789abcdef")
+        && expectedAssetSha256.length() == 64
+        && expectedAssetSha256.containsOnly(
+            "0123456789abcdef")
+        && newSize > 0
+        && (! hadOriginal || oldSize >= 0);
+    if (! safeMarker)
+    {
+        result.success = false;
+        result.error =
+            "The pending NAM library transaction marker contains unsafe paths or invalid metadata; it was retained without touching any asset.";
+        return result;
+    }
+
+    juce::String currentManifestSha256;
+    const bool manifestDigestAvailable =
+        manifestFile.existsAsFile()
+        && calculateUncancelledFileSha256(
+            manifestFile, currentManifestSha256);
+    result.committed = manifestDigestAvailable
+        && currentManifestSha256 == expectedManifestSha256;
+
+    if (result.committed)
+    {
+        if (! NAMFileMatchesSnapshot(
+                targetFile, newSize, newModificationTimeMs, false))
+        {
+            result.success = false;
+            result.error =
+                "The NAM manifest was committed, but the published asset no longer matches the transaction marker. The rollback and marker were retained.";
+            return result;
+        }
+        if (! removeFileAndVerify(rollbackFile)
+            || ! removeFileAndVerify(markerFile))
+        {
+            result.success = false;
+            result.error =
+                "The NAM asset and manifest were committed, but transaction cleanup is still pending.";
+            return result;
+        }
+        return result;
+    }
+
+    if (hadOriginal)
+    {
+        if (rollbackFile.existsAsFile())
+        {
+            if (rollbackFile.getSize() != oldSize)
+            {
+                result.success = false;
+                result.error =
+                    "The NAM rollback file does not match the original asset size; recovery stopped without deleting it.";
+                return result;
+            }
+
+            juce::TemporaryFile restoredTarget(
+                targetFile, juce::TemporaryFile::useHiddenFile);
+            if (! rollbackFile.copyFileTo(restoredTarget.getFile())
+                || restoredTarget.getFile().getSize() != oldSize
+                || ! restoredTarget.overwriteTargetFileWithTemporary()
+                || ! NAMFileMatchesSnapshot(
+                    targetFile, oldSize, oldModificationTimeMs, false))
+            {
+                result.success = false;
+                result.error =
+                    "OpenStudio could not restore the prior NAM asset. The rollback file and transaction marker were retained.";
+                return result;
+            }
+        }
+        else if (! NAMFileMatchesSnapshot(
+                     targetFile,
+                     oldSize,
+                     oldModificationTimeMs,
+                     true))
+        {
+            result.success = false;
+            result.error =
+                "The prior NAM asset and its rollback file are both unavailable. The transaction marker was retained.";
+            return result;
+        }
+
+        result.rolledBack = true;
+    }
+    else
+    {
+        if (targetFile.existsAsFile()
+            && ! NAMFileMatchesSnapshot(
+                targetFile,
+                newSize,
+                newModificationTimeMs,
+                true))
+        {
+            result.success = false;
+            result.error =
+                "The uncommitted NAM target has changed since publication. It was retained with the transaction marker instead of being deleted.";
+            return result;
+        }
+        if (! removeFileAndVerify(targetFile))
+        {
+            result.success = false;
+            result.error =
+                "OpenStudio could not remove the uncommitted NAM asset. The transaction marker was retained.";
+            return result;
+        }
+        result.rolledBack = true;
+    }
+
+    if (! removeFileAndVerify(rollbackFile)
+        || ! removeFileAndVerify(markerFile))
+    {
+        result.success = false;
+        result.error =
+            "The NAM file state was recovered, but transaction cleanup is still pending.";
+    }
+    return result;
+}
+
+NAMLibraryPublicationResult publishNAMLibraryAssetAndManifestLocked(
+    const juce::File& stagedAsset,
+    const juce::File& targetFile,
+    const juce::File& namRoot,
+    const juce::File& manifestFile,
+    const juce::var& manifest,
+    const juce::String& expectedAssetSha256,
+    const NAMLibraryPublicationTestHooks* testHooks = nullptr)
+{
+    NAMLibraryPublicationResult result;
+    const auto libraryRoot = namRoot.getChildFile("library");
+    const auto markerFile = namRoot.getChildFile(
+        kNAMLibraryTransactionMarkerName);
+    if (! stagedAsset.existsAsFile()
+        || stagedAsset.getSize() <= 0
+        || ! targetFile.isAChildOf(libraryRoot)
+        || targetFile.getParentDirectory()
+            != stagedAsset.getParentDirectory())
+    {
+        result.error =
+            "The prepared NAM publication paths are invalid.";
+        return result;
+    }
+
+    const auto priorRecovery =
+        recoverPendingNAMLibraryTransactionLocked(
+            namRoot, manifestFile);
+    if (! priorRecovery.success)
+    {
+        result.recoveryAttempted = priorRecovery.markerFound;
+        result.recoveryPending = priorRecovery.markerFound;
+        result.error = priorRecovery.error;
+        return result;
+    }
+
+    juce::TemporaryFile stagedManifest(
+        manifestFile, juce::TemporaryFile::useHiddenFile);
+    if (! stagedManifest.getFile().replaceWithText(
+            juce::JSON::toString(manifest, true)))
+    {
+        result.error =
+            "Could not prepare the updated NAM library manifest.";
+        return result;
+    }
+    juce::String expectedManifestSha256;
+    if (! calculateUncancelledFileSha256(
+            stagedManifest.getFile(), expectedManifestSha256))
+    {
+        result.error =
+            "Could not verify the prepared NAM library manifest.";
+        return result;
+    }
+
+    const auto transactionId = juce::Uuid().toString();
+    const auto rollbackFile = targetFile.getSiblingFile(
+        "." + targetFile.getFileName() + kNAMLibraryRollbackTag
+            + transactionId);
+    const bool hadOriginal = targetFile.existsAsFile();
+    const auto oldSize = hadOriginal ? targetFile.getSize() : 0;
+    const auto oldModificationTimeMs = hadOriginal
+        ? targetFile.getLastModificationTime().toMilliseconds()
+        : 0;
+    const auto newSize = stagedAsset.getSize();
+    const auto newModificationTimeMs =
+        stagedAsset.getLastModificationTime().toMilliseconds();
+
+    juce::DynamicObject::Ptr marker = new juce::DynamicObject();
+    marker->setProperty("schemaVersion", 1);
+    marker->setProperty("transactionId", transactionId);
+    marker->setProperty(
+        "targetRelativePath",
+        targetFile.getRelativePathFrom(libraryRoot));
+    marker->setProperty(
+        "rollbackRelativePath",
+        rollbackFile.getRelativePathFrom(libraryRoot));
+    marker->setProperty("hadOriginal", hadOriginal);
+    marker->setProperty("oldSizeBytes", static_cast<double>(oldSize));
+    marker->setProperty(
+        "oldModificationTimeMs",
+        static_cast<double>(oldModificationTimeMs));
+    marker->setProperty("newSizeBytes", static_cast<double>(newSize));
+    marker->setProperty(
+        "newModificationTimeMs",
+        static_cast<double>(newModificationTimeMs));
+    marker->setProperty(
+        "expectedAssetSha256",
+        normaliseNAMSha256(expectedAssetSha256));
+    marker->setProperty(
+        "expectedManifestSha256", expectedManifestSha256);
+    marker->setProperty(
+        "createdAt", juce::Time::getCurrentTime().toISO8601(true));
+    if (! persistJsonFileAtomically(
+            markerFile, juce::var(marker.get())))
+    {
+        result.error =
+            "Could not persist the NAM library transaction marker.";
+        return result;
+    }
+
+    const auto recoverAfterFailure = [&]
+        (const juce::String& failureMessage)
+    {
+        result.recoveryAttempted = true;
+        const auto recovery =
+            recoverPendingNAMLibraryTransactionLocked(
+                namRoot, manifestFile);
+        result.recoverySucceeded = recovery.success;
+        result.recoveryPending = ! recovery.success;
+        result.committedDuringRecovery = recovery.committed;
+        if (recovery.committed && recovery.success)
+        {
+            result.success = true;
+            return;
+        }
+        result.error = failureMessage;
+        if (recovery.success && recovery.rolledBack)
+            result.error += " The previous NAM file state was restored.";
+        else if (! recovery.error.isEmpty())
+            result.error += " " + recovery.error;
+    };
+
+    if (hadOriginal
+        && (! targetFile.moveFileTo(rollbackFile)
+            || targetFile.existsAsFile()
+            || ! rollbackFile.existsAsFile()
+            || rollbackFile.getSize() != oldSize))
+    {
+        recoverAfterFailure(
+            "Could not create a verified rollback copy of the existing NAM asset.");
+        return result;
+    }
+
+    if (! stagedAsset.moveFileTo(targetFile)
+        || ! NAMFileMatchesSnapshot(
+            targetFile, newSize, newModificationTimeMs, false))
+    {
+        recoverAfterFailure(
+            "Could not publish the verified NAM asset into the library.");
+        return result;
+    }
+
+    if (testHooks != nullptr
+        && testHooks->failurePoint
+            == NAMLibraryPublicationFailurePoint::afterAssetPublish)
+    {
+        result.recoveryPending = true;
+        result.error =
+            "Injected interruption after NAM asset publication.";
+        return result;
+    }
+
+    const bool injectManifestFailure = testHooks != nullptr
+        && testHooks->failurePoint
+            == NAMLibraryPublicationFailurePoint::manifestPublish;
+    if (injectManifestFailure
+        || ! stagedManifest.overwriteTargetFileWithTemporary())
+    {
+        recoverAfterFailure(
+            "Could not persist the NAM library manifest after publishing the asset.");
+        return result;
+    }
+
+    if (testHooks != nullptr
+        && testHooks->failurePoint
+            == NAMLibraryPublicationFailurePoint::afterManifestPublish)
+    {
+        result.recoveryPending = true;
+        result.error =
+            "Injected interruption after NAM manifest publication.";
+        return result;
+    }
+
+    const auto cleanup = recoverPendingNAMLibraryTransactionLocked(
+        namRoot, manifestFile);
+    result.success = cleanup.committed;
+    result.recoveryAttempted = true;
+    result.recoverySucceeded = cleanup.success;
+    result.recoveryPending = ! cleanup.success;
+    result.committedDuringRecovery = cleanup.committed;
+    if (! result.success)
+        result.error = cleanup.error.isNotEmpty()
+            ? cleanup.error
+            : juce::String(
+                "The NAM asset publication could not be verified.");
+    else if (! cleanup.success)
+        result.error = cleanup.error;
+    return result;
+}
+
+void applyNAMLibraryRecoveryStatus(
+    juce::DynamicObject& object,
+    const NAMLibraryTransactionRecoveryResult& recovery)
+{
+    if (! recovery.markerFound)
+        return;
+    object.setProperty(
+        "transactionRecoveryStatus",
+        recovery.success
+            ? (recovery.committed ? "finalized" : "rolledBack")
+            : "pending");
+    object.setProperty("transactionRecoveryPending", ! recovery.success);
+    if (! recovery.error.isEmpty())
+        object.setProperty("transactionRecoveryError", recovery.error);
+}
+
+void applyNAMLibraryPublicationStatus(
+    juce::DynamicObject& object,
+    const NAMLibraryPublicationResult& publication)
+{
+    object.setProperty(
+        "transactionRecoveryAttempted",
+        publication.recoveryAttempted);
+    object.setProperty(
+        "transactionRecoverySucceeded",
+        publication.recoverySucceeded);
+    object.setProperty(
+        "transactionRecoveryPending",
+        publication.recoveryPending);
+    object.setProperty(
+        "transactionCommittedDuringRecovery",
+        publication.committedDuringRecovery);
+    if (! publication.error.isEmpty())
+        object.setProperty("transactionRecoveryDetail", publication.error);
+}
+
 juce::var makeNAMPreviewRetentionResult(const juce::String& warning,
                                         const juce::String& loadedSlot = {})
 {
@@ -3167,16 +6476,109 @@ juce::var makeNAMPreviewRetentionResult(const juce::String& warning,
     return juce::var(result.get());
 }
 
-juce::var refreshNAMLibraryManifest(bool persistIfChanged)
+struct NAMLibraryHashCandidate
 {
-    const juce::ScopedLock manifestLock(namLibraryMutationLock);
-    auto manifest = parseJsonFileOrDefault(getOpenStudioNAMManifestJson(), "installed");
+    juce::String localPath;
+    juce::int64 fileSize = 0;
+    juce::int64 modificationTimeMs = 0;
+};
+
+struct NAMLibraryHashObservation : NAMLibraryHashCandidate
+{
+    bool success = false;
+    juce::String sha256;
+};
+
+using NAMLibraryHashFunction = std::function<bool(
+    const juce::File&, juce::String&, juce::String&)>;
+
+juce::var makeNAMLibraryManifestFailure(const juce::String& error)
+{
+    auto manifest = makeEmptyNAMLibraryManifest();
+    if (auto* object = manifest.getDynamicObject())
+    {
+        object->setProperty("success", false);
+        object->setProperty("error", error);
+    }
+    return manifest;
+}
+
+std::vector<NAMLibraryHashCandidate>
+collectNAMLibraryHashCandidates(const juce::var& manifest)
+{
+    std::vector<NAMLibraryHashCandidate> candidates;
+    auto* object = manifest.getDynamicObject();
+    auto* installed = object != nullptr
+        ? object->getProperty("installed").getArray()
+        : nullptr;
+    if (installed == nullptr)
+        return candidates;
+
+    for (const auto& recordValue : *installed)
+    {
+        auto* record = recordValue.getDynamicObject();
+        if (record == nullptr)
+            continue;
+        const auto existingSha256 = normaliseNAMSha256(
+            record->getProperty("fileSha256").toString());
+        if (existingSha256.length() == 64
+            && existingSha256.containsOnly("0123456789abcdef"))
+        {
+            continue;
+        }
+
+        const auto path = record->getProperty("localPath").toString();
+        const juce::File file(path);
+        if (path.isEmpty() || ! file.existsAsFile())
+            continue;
+        const NAMLibraryHashCandidate candidate {
+            file.getFullPathName(),
+            file.getSize(),
+            file.getLastModificationTime().toMilliseconds()
+        };
+        const auto duplicate = std::find_if(
+            candidates.begin(), candidates.end(),
+            [&candidate] (const NAMLibraryHashCandidate& existing)
+            {
+                return areNAMPathsEquivalent(
+                           existing.localPath, candidate.localPath)
+                    && existing.fileSize == candidate.fileSize
+                    && existing.modificationTimeMs
+                        == candidate.modificationTimeMs;
+            });
+        if (duplicate == candidates.end())
+            candidates.push_back(candidate);
+    }
+    return candidates;
+}
+
+juce::var refreshNAMLibraryManifestLockedAtPaths(
+    const juce::File& namRoot,
+    const juce::File& manifestFile,
+    const juce::File& catalogFile,
+    bool persistIfChanged,
+    const std::vector<NAMLibraryHashObservation>& hashObservations,
+    NAMLibraryTransactionRecoveryResult* recoveryOutput = nullptr)
+{
+    const auto recovery = recoverPendingNAMLibraryTransactionLocked(
+        namRoot, manifestFile);
+    if (recoveryOutput != nullptr)
+        *recoveryOutput = recovery;
+    if (! recovery.success)
+        return makeNAMLibraryManifestFailure(recovery.error);
+
+    const auto readResult = readNAMLibraryManifestStrictLocked(
+        manifestFile);
+    if (! readResult.success)
+        return makeNAMLibraryManifestFailure(readResult.error);
+
+    auto manifest = readResult.manifest;
     auto* manifestObject = manifest.getDynamicObject();
     if (manifestObject == nullptr)
         return manifest;
 
     const auto nowIso = juce::Time::getCurrentTime().toISO8601(true);
-    const auto catalog = parseJsonFileOrDefault(getOpenStudioNAMCatalogJson(), "tones");
+    const auto catalog = parseJsonFileOrDefault(catalogFile, "tones");
     const auto catalogGeneratedAt = catalog.getDynamicObject() != nullptr
         ? catalog.getDynamicObject()->getProperty("generatedAt").toString()
         : juce::String();
@@ -3203,9 +6605,29 @@ juce::var refreshNAMLibraryManifest(bool persistIfChanged)
                     && fileSha256.containsOnly("0123456789abcdef");
                 if (! missing && ! validFileSha256)
                 {
-                    juce::String hashError;
-                    if (calculateNAMAssetSha256(localFile, fileSha256, hashError))
-                        recordChanged = setNAMRecordPropertyIfChanged(*record, "fileSha256", fileSha256) || recordChanged;
+                    const auto currentSize = localFile.getSize();
+                    const auto currentModificationTimeMs =
+                        localFile.getLastModificationTime().toMilliseconds();
+                    const auto observation = std::find_if(
+                        hashObservations.begin(),
+                        hashObservations.end(),
+                        [&] (const NAMLibraryHashObservation& candidate)
+                        {
+                            return candidate.success
+                                && areNAMPathsEquivalent(
+                                    candidate.localPath, localPath)
+                                && candidate.fileSize == currentSize
+                                && candidate.modificationTimeMs
+                                    == currentModificationTimeMs;
+                        });
+                    if (observation != hashObservations.end())
+                    {
+                        fileSha256 = observation->sha256;
+                        recordChanged = setNAMRecordPropertyIfChanged(
+                            *record,
+                            "fileSha256",
+                            fileSha256) || recordChanged;
+                    }
                 }
 
                 juce::String assetId;
@@ -3278,19 +6700,137 @@ juce::var refreshNAMLibraryManifest(bool persistIfChanged)
         }
     }
 
-    if (changed && persistIfChanged && ! persistNAMLibraryManifest(manifest))
-        juce::Logger::writeToLog("NAM library: could not atomically persist the refreshed manifest");
+    if (changed && persistIfChanged
+        && ! persistNAMLibraryManifestLocked(manifestFile, manifest))
+    {
+        juce::Logger::writeToLog(
+            "NAM library: could not atomically persist the refreshed manifest");
+        manifestObject->setProperty("success", false);
+        manifestObject->setProperty(
+            "error",
+            "Could not persist the refreshed NAM library manifest.");
+    }
 
     return manifest;
 }
 
+juce::var refreshNAMLibraryManifestLocked(bool persistIfChanged)
+{
+    static const std::vector<NAMLibraryHashObservation> noHashes;
+    return refreshNAMLibraryManifestLockedAtPaths(
+        getOpenStudioNAMRoot(),
+        getOpenStudioNAMManifestJson(),
+        getOpenStudioNAMCatalogJson(),
+        persistIfChanged,
+        noHashes);
+}
+
+juce::var refreshNAMLibraryManifestAtPaths(
+    const juce::File& namRoot,
+    const juce::File& manifestFile,
+    const juce::File& catalogFile,
+    bool persistIfChanged,
+    const NAMLibraryHashFunction& hashFunction)
+{
+    std::vector<NAMLibraryHashCandidate> candidates;
+    NAMLibraryTransactionRecoveryResult initialRecovery;
+    {
+        const ScopedNAMLibraryMutationLock manifestLock;
+        if (! manifestLock.locked())
+            return makeNAMLibraryLockFailure(manifestFile);
+
+        initialRecovery = recoverPendingNAMLibraryTransactionLocked(
+            namRoot, manifestFile);
+        if (! initialRecovery.success)
+            return makeNAMLibraryManifestFailure(
+                initialRecovery.error);
+        const auto readResult = readNAMLibraryManifestStrictLocked(
+            manifestFile);
+        if (! readResult.success)
+            return makeNAMLibraryManifestFailure(readResult.error);
+        candidates = collectNAMLibraryHashCandidates(
+            readResult.manifest);
+    }
+
+    std::vector<NAMLibraryHashObservation> observations;
+    observations.reserve(candidates.size());
+    for (const auto& candidate : candidates)
+    {
+        if (isTone3000TaskCancelled())
+            return makeNAMLibraryManifestFailure(
+                "The NAM library refresh was canceled while checking installed assets.");
+        NAMLibraryHashObservation observation;
+        observation.localPath = candidate.localPath;
+        observation.fileSize = candidate.fileSize;
+        observation.modificationTimeMs =
+            candidate.modificationTimeMs;
+        juce::String error;
+        observation.success = hashFunction(
+            juce::File(candidate.localPath),
+            observation.sha256,
+            error);
+        observation.sha256 = normaliseNAMSha256(
+            observation.sha256);
+        observation.success = observation.success
+            && observation.sha256.length() == 64
+            && observation.sha256.containsOnly(
+                "0123456789abcdef");
+        observations.push_back(observation);
+    }
+
+    const ScopedNAMLibraryMutationLock manifestLock;
+    if (! manifestLock.locked())
+        return makeNAMLibraryLockFailure(manifestFile);
+    NAMLibraryTransactionRecoveryResult finalRecovery;
+    auto manifest = refreshNAMLibraryManifestLockedAtPaths(
+        namRoot,
+        manifestFile,
+        catalogFile,
+        persistIfChanged,
+        observations,
+        &finalRecovery);
+    if (auto* object = manifest.getDynamicObject())
+    {
+        applyNAMLibraryRecoveryStatus(
+            *object,
+            finalRecovery.markerFound
+                ? finalRecovery
+                : initialRecovery);
+    }
+    return manifest;
+}
+
+juce::var refreshNAMLibraryManifest(bool persistIfChanged)
+{
+    return refreshNAMLibraryManifestAtPaths(
+        getOpenStudioNAMRoot(),
+        getOpenStudioNAMManifestJson(),
+        getOpenStudioNAMCatalogJson(),
+        persistIfChanged,
+        [] (const juce::File& file,
+            juce::String& sha256,
+            juce::String& error)
+        {
+            return calculateNAMAssetSha256(file, sha256, error);
+        });
+}
+
 juce::var setNAMLibraryFavorite(int modelId, const juce::String& localPath, bool favorite)
 {
-    const juce::ScopedLock manifestLock(namLibraryMutationLock);
+    const ScopedNAMLibraryMutationLock manifestLock;
+    if (! manifestLock.locked())
+        return makeNAMLibraryLockFailure(getOpenStudioNAMManifestJson());
     juce::DynamicObject::Ptr result = new juce::DynamicObject();
     result->setProperty("success", false);
 
-    auto manifest = refreshNAMLibraryManifest(false);
+    auto manifest = refreshNAMLibraryManifestLocked(false);
+    const auto manifestError = manifest.getProperty(
+        "error", {}).toString();
+    if (manifestError.isNotEmpty())
+    {
+        result->setProperty("error", manifestError);
+        return juce::var(result.get());
+    }
     auto* manifestObject = manifest.getDynamicObject();
     const auto installedVar = manifestObject != nullptr ? manifestObject->getProperty("installed") : juce::var();
     auto* installed = installedVar.getArray();
@@ -3310,7 +6850,8 @@ juce::var setNAMLibraryFavorite(int modelId, const juce::String& localPath, bool
                 record->setProperty("favorite", favorite);
                 record->setProperty("updatedAt", nowIso);
                 record->setProperty("manifestUpdatedAt", nowIso);
-                if (! persistNAMLibraryManifest(manifest))
+                if (! persistNAMLibraryManifestLocked(
+                        getOpenStudioNAMManifestJson(), manifest))
                 {
                     result->setProperty("error", "Could not persist the NAM library manifest");
                     return juce::var(result.get());
@@ -3332,11 +6873,20 @@ juce::var removeNAMModelFromLibrary(int modelId, const juce::String& localPath, 
     // Physical deletion remains disabled until the engine can prove that no rack,
     // preset, or project references the path.
     const juce::ScopedLock stateLock(namModelMutationStateLock);
-    const juce::ScopedLock manifestLock(namLibraryMutationLock);
+    const ScopedNAMLibraryMutationLock manifestLock;
+    if (! manifestLock.locked())
+        return makeNAMLibraryLockFailure(getOpenStudioNAMManifestJson());
     juce::DynamicObject::Ptr result = new juce::DynamicObject();
     result->setProperty("success", false);
 
-    auto manifest = refreshNAMLibraryManifest(false);
+    auto manifest = refreshNAMLibraryManifestLocked(false);
+    const auto manifestError = manifest.getProperty(
+        "error", {}).toString();
+    if (manifestError.isNotEmpty())
+    {
+        result->setProperty("error", manifestError);
+        return juce::var(result.get());
+    }
     auto* manifestObject = manifest.getDynamicObject();
     const auto installedVar = manifestObject != nullptr ? manifestObject->getProperty("installed") : juce::var();
     auto* installedArray = installedVar.getArray();
@@ -3380,7 +6930,8 @@ juce::var removeNAMModelFromLibrary(int modelId, const juce::String& localPath, 
     }
 
     manifestObject->setProperty("installed", kept);
-    if (! persistNAMLibraryManifest(manifest))
+    if (! persistNAMLibraryManifestLocked(
+            getOpenStudioNAMManifestJson(), manifest))
     {
         result->setProperty("error", "Could not persist the NAM library manifest");
         return juce::var(result.get());
@@ -3492,11 +7043,19 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
             return juce::var(result.get());
         }
 
-        constexpr juce::int64 maxDownloadBytes = 1024LL * 1024LL * 1024LL;
+        const juce::int64 maxDownloadBytes = looksLikeCabIR
+            ? 1024LL * 1024LL * 1024LL
+            : OpenStudioNAMModelSafety::maximumFileBytes;
+        const auto maximumDownloadDescription = looksLikeCabIR
+            ? juce::String("1 GiB")
+            : juce::String(OpenStudioNAMModelSafety::maximumFileDescription);
         const auto declaredLength = download.input->getTotalLength();
         if (declaredLength > maxDownloadBytes)
         {
-            result->setProperty("error", "The NAM model download exceeds the 1 GB safety limit");
+            result->setProperty(
+                "error",
+                "The download exceeds the " + maximumDownloadDescription
+                    + " safety limit");
             return juce::var(result.get());
         }
 
@@ -3504,12 +7063,21 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
         juce::int64 bytesWritten = 0;
         while (! download.input->isExhausted())
         {
+            if (isTone3000TaskCancelled())
+            {
+                result->setProperty(
+                    "error", "The NAM model download was canceled");
+                return juce::var(result.get());
+            }
             const auto bytesRead = download.input->read(buffer.data(), static_cast<int>(buffer.size()));
             if (bytesRead <= 0)
                 break;
             if (bytesWritten + bytesRead > maxDownloadBytes)
             {
-                result->setProperty("error", "The NAM model download exceeds the 1 GB safety limit");
+                result->setProperty(
+                    "error",
+                    "The download exceeds the " + maximumDownloadDescription
+                        + " safety limit");
                 return juce::var(result.get());
             }
             if (! output.write(buffer.data(), static_cast<size_t>(bytesRead)))
@@ -3537,27 +7105,68 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
 
     juce::String actualSha256;
     juce::String checksumError;
+    if (isTone3000TaskCancelled())
+    {
+        result->setProperty(
+            "error", "The NAM model download was canceled");
+        return juce::var(result.get());
+    }
     if (! verifyNAMFileSha256(downloadedFile, checksum, actualSha256, checksumError))
     {
         result->setProperty("error", checksumError + " The temporary download was discarded and was not installed.");
         return juce::var(result.get());
     }
+    if (isTone3000TaskCancelled())
+    {
+        result->setProperty(
+            "error", "The NAM model installation was canceled before publication");
+        return juce::var(result.get());
+    }
 
-    // The download uses a unique temporary file and needs no shared lock. Hold
-    // the process-wide lock from publication through manifest persistence so
-    // concurrent windows cannot lose one another's installed records.
-    std::unique_ptr<juce::ScopedLock> manifestLock;
+    // The download and checksum verification use a unique temporary file and
+    // need no shared lock. Serialize only the final target publication and the
+    // manifest read/modify/write transaction across windows and processes.
+    const auto verifiedFileSize = downloadedFile.getSize();
+    std::unique_ptr<ScopedNAMLibraryMutationLock> manifestLock;
+    NAMLibraryTransactionRecoveryResult prePublicationRecovery;
+    const auto namRoot = getOpenStudioNAMRoot();
+    const auto manifestFile = getOpenStudioNAMManifestJson();
+    juce::var manifest;
     if (! previewMode)
-        manifestLock = std::make_unique<juce::ScopedLock>(namLibraryMutationLock);
+    {
+        manifestLock = std::make_unique<ScopedNAMLibraryMutationLock>();
+        if (! manifestLock->locked())
+            return makeNAMLibraryLockFailure(getOpenStudioNAMManifestJson());
 
-    if (! temporaryDownload.overwriteTargetFileWithTemporary())
+        prePublicationRecovery =
+            recoverPendingNAMLibraryTransactionLocked(
+                namRoot, manifestFile);
+        if (! prePublicationRecovery.success)
+        {
+            result->setProperty("error", prePublicationRecovery.error);
+            applyNAMLibraryRecoveryStatus(
+                *result, prePublicationRecovery);
+            return juce::var(result.get());
+        }
+
+        const auto readResult = readNAMLibraryManifestStrictLocked(
+            manifestFile);
+        if (! readResult.success)
+        {
+            result->setProperty("error", readResult.error);
+            return juce::var(result.get());
+        }
+        manifest = readResult.manifest;
+        applyNAMLibraryRecoveryStatus(
+            *result, prePublicationRecovery);
+    }
+    else if (! temporaryDownload.overwriteTargetFileWithTemporary())
     {
         result->setProperty("error", "Could not publish the verified NAM download into the library");
         return juce::var(result.get());
     }
 
-    auto manifest = parseJsonFileOrDefault(getOpenStudioNAMManifestJson(), "installed");
-    auto* manifestObject = manifest.getDynamicObject();
+    auto* manifestObject = previewMode ? nullptr : manifest.getDynamicObject();
     juce::Array<juce::var> installed;
     bool preservedFavorite = false;
     bool replacedExistingRecord = false;
@@ -3592,7 +7201,7 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
     record->setProperty("preview", previewMode);
     record->setProperty("missing", false);
     record->setProperty("missingSince", juce::var());
-    record->setProperty("fileSizeBytes", static_cast<double>(targetFile.getSize()));
+    record->setProperty("fileSizeBytes", static_cast<double>(verifiedFileSize));
     record->setProperty("lastSeenMetadata", modelPayload);
     record->setProperty("lastSeenAt", nowIso);
     record->setProperty("catalogSeenAt", nowIso);
@@ -3609,7 +7218,9 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
             if (auto* existing = installed.getReference(i).getDynamicObject())
             {
                 const bool sameModel = static_cast<int>(existing->getProperty("modelId")) == modelId && modelId > 0;
-                const bool samePath = existing->getProperty("localPath").toString() == targetFile.getFullPathName();
+                const bool samePath = areNAMPathsEquivalent(
+                    existing->getProperty("localPath").toString(),
+                    targetFile.getFullPathName());
                 if (sameModel || samePath)
                 {
                     replacedExistingRecord = true;
@@ -3622,14 +7233,35 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
         }
         record->setProperty("reinstalled", replacedExistingRecord);
         record->setProperty("favorite", preservedFavorite);
+        if (preservedInstalledAt.isNotEmpty())
+            record->setProperty("installedAt", preservedInstalledAt);
         installed.add(juce::var(record.get()));
         manifestObject->setProperty("installed", installed);
     }
 
-    if (! previewMode && ! persistNAMLibraryManifest(manifest))
+    if (! previewMode)
     {
-        result->setProperty("error", "Could not persist the NAM library manifest after download");
-        return juce::var(result.get());
+        const auto publication =
+            publishNAMLibraryAssetAndManifestLocked(
+                downloadedFile,
+                targetFile,
+                namRoot,
+                manifestFile,
+                manifest,
+                actualSha256);
+        applyNAMLibraryPublicationStatus(*result, publication);
+        if (! publication.success)
+        {
+            result->setProperty("error", publication.error);
+            return juce::var(result.get());
+        }
+        if (publication.recoveryPending)
+        {
+            result->setProperty(
+                "warning",
+                "The NAM model was installed, but transaction cleanup will be retried during the next library refresh. "
+                    + publication.error);
+        }
     }
     result->setProperty("success", true);
     result->setProperty("record", juce::var(record.get()));
@@ -3638,7 +7270,6 @@ juce::var installNAMModelFromMetadata(juce::var modelPayload, bool previewMode =
 
 juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metadataPayload, juce::var rackStatePayload)
 {
-    const juce::ScopedLock manifestLock(namLibraryMutationLock);
     if (recordPayload.isString())
         recordPayload = juce::JSON::parse(recordPayload.toString());
     if (metadataPayload.isString())
@@ -3686,6 +7317,7 @@ juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metad
     const int modelId = static_cast<int>(record->getProperty("modelId"));
     const int toneId = static_cast<int>(record->getProperty("toneId"));
     auto finalFile = sourceFile;
+    std::unique_ptr<juce::TemporaryFile> promotedFile;
     if (isFileInsideNAMPreviews(sourceFile))
     {
         const auto targetDir = getOpenStudioNAMRoot()
@@ -3708,19 +7340,60 @@ juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metad
             return juce::var(result.get());
         }
 
-        auto targetFile = targetDir.getChildFile(libraryFileName);
-        juce::TemporaryFile promotedFile(targetFile, juce::TemporaryFile::useHiddenFile);
-        if (! sourceFile.copyFileTo(promotedFile.getFile())
-            || ! promotedFile.overwriteTargetFileWithTemporary()
-            || ! targetFile.existsAsFile())
+        finalFile = targetDir.getChildFile(libraryFileName);
+        promotedFile = std::make_unique<juce::TemporaryFile>(
+            finalFile, juce::TemporaryFile::useHiddenFile);
+        if (! sourceFile.copyFileTo(promotedFile->getFile()))
         {
-            result->setProperty("error", "Could not copy the verified preview into the NAM library");
+            result->setProperty(
+                "error",
+                "Could not prepare the verified preview for the NAM library");
             return juce::var(result.get());
         }
-        finalFile = targetFile;
+
+        juce::String copiedSha256;
+        juce::String copiedChecksumError;
+        if (! verifyNAMFileSha256(
+                promotedFile->getFile(),
+                actualPreviewSha256,
+                copiedSha256,
+                copiedChecksumError))
+        {
+            result->setProperty(
+                "error",
+                copiedChecksumError
+                    + " The preview was not promoted; its source file was retained.");
+            return juce::var(result.get());
+        }
     }
 
-    auto manifest = parseJsonFileOrDefault(getOpenStudioNAMManifestJson(), "installed");
+    const ScopedNAMLibraryMutationLock manifestLock;
+    if (! manifestLock.locked())
+        return makeNAMLibraryLockFailure(getOpenStudioNAMManifestJson());
+
+    const auto namRoot = getOpenStudioNAMRoot();
+    const auto manifestFile = getOpenStudioNAMManifestJson();
+    const auto prePublicationRecovery =
+        recoverPendingNAMLibraryTransactionLocked(
+            namRoot, manifestFile);
+    if (! prePublicationRecovery.success)
+    {
+        result->setProperty("error", prePublicationRecovery.error);
+        applyNAMLibraryRecoveryStatus(
+            *result, prePublicationRecovery);
+        return juce::var(result.get());
+    }
+
+    const auto readResult = readNAMLibraryManifestStrictLocked(
+        manifestFile);
+    if (! readResult.success)
+    {
+        result->setProperty("error", readResult.error);
+        return juce::var(result.get());
+    }
+    auto manifest = readResult.manifest;
+    applyNAMLibraryRecoveryStatus(
+        *result, prePublicationRecovery);
     auto* manifestObject = manifest.getDynamicObject();
     const auto installedVar = manifestObject != nullptr ? manifestObject->getProperty("installed") : juce::var();
     auto* installedArray = installedVar.getArray();
@@ -3740,7 +7413,9 @@ juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metad
         if (auto* existing = installed.getReference(i).getDynamicObject())
         {
             const bool sameModel = modelId > 0 && static_cast<int>(existing->getProperty("modelId")) == modelId;
-            const bool samePath = existing->getProperty("localPath").toString() == finalFile.getFullPathName();
+            const bool samePath = areNAMPathsEquivalent(
+                existing->getProperty("localPath").toString(),
+                finalFile.getFullPathName());
             if (sameModel || samePath)
             {
                 preservedFavorite = preservedFavorite || static_cast<bool>(existing->getProperty("favorite"));
@@ -3758,7 +7433,11 @@ juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metad
     record->setProperty("preview", false);
     record->setProperty("missing", false);
     record->setProperty("missingSince", juce::var());
-    record->setProperty("fileSizeBytes", static_cast<double>(finalFile.getSize()));
+    const auto publishedFileSize = promotedFile != nullptr
+        ? promotedFile->getFile().getSize()
+        : finalFile.getSize();
+    record->setProperty(
+        "fileSizeBytes", static_cast<double>(publishedFileSize));
     record->setProperty("fileSha256", actualPreviewSha256);
     record->setProperty("assetId", "sha256:" + actualPreviewSha256);
     record->setProperty("installedAt", preservedInstalledAt.isNotEmpty() ? preservedInstalledAt : nowIso);
@@ -3770,9 +7449,36 @@ juce::var commitNAMPreviewToneToLibrary(juce::var recordPayload, juce::var metad
 
     installed.add(recordPayload);
     manifestObject->setProperty("installed", installed);
-    if (! persistNAMLibraryManifest(manifest))
+    if (promotedFile != nullptr)
     {
-        result->setProperty("error", "Could not persist the NAM library manifest after preview promotion");
+        const auto publication =
+            publishNAMLibraryAssetAndManifestLocked(
+                promotedFile->getFile(),
+                finalFile,
+                namRoot,
+                manifestFile,
+                manifest,
+                actualPreviewSha256);
+        applyNAMLibraryPublicationStatus(*result, publication);
+        if (! publication.success)
+        {
+            result->setProperty("error", publication.error);
+            return juce::var(result.get());
+        }
+        if (publication.recoveryPending)
+        {
+            result->setProperty(
+                "warning",
+                "The preview was saved, but transaction cleanup will be retried during the next library refresh. "
+                    + publication.error);
+        }
+    }
+    else if (! persistNAMLibraryManifestLocked(
+                 manifestFile, manifest))
+    {
+        result->setProperty(
+            "error",
+            "Could not persist the NAM library manifest after preview promotion");
         return juce::var(result.get());
     }
 
@@ -3828,6 +7534,519 @@ juce::var cleanupNAMPreviewFiles(double maxAgeHours)
     result->setProperty("deleteSkipped", true);
     result->setProperty("error",
         "Bulk NAM preview cleanup is disabled because the host cannot yet prove that every rack has released each file");
+    return juce::var(result.get());
+}
+
+juce::var runNAMLibraryReliabilityRegressionImpl()
+{
+    juce::Array<juce::var> checks;
+    bool overallPass = true;
+    const auto addCheck = [&] (const juce::String& id,
+                               bool pass,
+                               const juce::String& detail)
+    {
+        juce::DynamicObject::Ptr check = new juce::DynamicObject();
+        check->setProperty("id", id);
+        check->setProperty("pass", pass);
+        check->setProperty("detail", detail);
+        checks.add(juce::var(check.get()));
+        overallPass = overallPass && pass;
+    };
+    const auto makeRecord = [] (const juce::File& file,
+                                const juce::String& sha256,
+                                int modelId,
+                                bool favorite)
+    {
+        juce::DynamicObject::Ptr record = new juce::DynamicObject();
+        record->setProperty("modelId", modelId);
+        record->setProperty("toneId", 1);
+        record->setProperty("localPath", file.getFullPathName());
+        record->setProperty("fileSha256", sha256);
+        record->setProperty("fileSizeBytes",
+                            static_cast<double>(file.getSize()));
+        record->setProperty("favorite", favorite);
+        return juce::var(record.get());
+    };
+    const auto makeManifest = [] (const juce::Array<juce::var>& installed)
+    {
+        juce::DynamicObject::Ptr manifest = new juce::DynamicObject();
+        manifest->setProperty("schemaVersion", 1);
+        manifest->setProperty("installed", juce::var(installed));
+        return juce::var(manifest.get());
+    };
+    const auto makeFixtureRoot = [] (const juce::String& label)
+    {
+        const auto root = juce::File::getSpecialLocation(
+            juce::File::tempDirectory).getChildFile(
+                "OpenStudio_NAM_Library_Reliability_" + label + "_"
+                + juce::Uuid().toString());
+        (void) root.getChildFile("library")
+            .getChildFile("tone-1").createDirectory();
+        return root;
+    };
+    const auto countRollbackFiles = [] (const juce::File& root)
+    {
+        juce::Array<juce::File> files;
+        root.getChildFile("library").findChildFiles(
+            files,
+            juce::File::findFiles,
+            true,
+            "*" + juce::String(kNAMLibraryRollbackTag) + "*");
+        return files.size();
+    };
+
+    {
+        const auto root = makeFixtureRoot("new-install-failure");
+        const auto manifestFile = root.getChildFile(
+            "library_manifest.json");
+        const auto target = root.getChildFile("library")
+            .getChildFile("tone-1").getChildFile("new-model.nam");
+        const auto initialManifest = makeEmptyNAMLibraryManifest();
+        const bool fixtureReady = persistJsonFileAtomically(
+            manifestFile, initialManifest);
+        juce::TemporaryFile staged(
+            target, juce::TemporaryFile::useHiddenFile);
+        const bool stagedReady = staged.getFile().replaceWithText(
+            "new-install-bytes");
+        juce::String newSha256;
+        const bool hashReady = stagedReady
+            && calculateUncancelledFileSha256(
+                staged.getFile(), newSha256);
+        juce::Array<juce::var> installed;
+        installed.add(makeRecord(target, newSha256, 101, false));
+        const auto desiredManifest = makeManifest(installed);
+        NAMLibraryPublicationResult publication;
+        if (fixtureReady && hashReady)
+        {
+            const ScopedNAMLibraryMutationLock lock;
+            const NAMLibraryPublicationTestHooks hooks {
+                NAMLibraryPublicationFailurePoint::manifestPublish
+            };
+            if (lock.locked())
+            {
+                publication = publishNAMLibraryAssetAndManifestLocked(
+                    staged.getFile(),
+                    target,
+                    root,
+                    manifestFile,
+                    desiredManifest,
+                    newSha256,
+                    &hooks);
+            }
+        }
+        const auto diskManifest = readNAMLibraryManifestStrictLocked(
+            manifestFile);
+        const auto diskInstalledValue = diskManifest.success
+            ? diskManifest.manifest.getProperty("installed", {})
+            : juce::var();
+        const auto* diskInstalled = diskInstalledValue.getArray();
+        const bool targetRemoved = ! target.existsAsFile();
+        const bool noMarker = ! root.getChildFile(
+            kNAMLibraryTransactionMarkerName).existsAsFile();
+        const bool noRollback = countRollbackFiles(root) == 0;
+        const bool cleaned = cleanupNAMLibraryRegressionDirectory(root);
+        const bool pass = fixtureReady
+            && hashReady
+            && ! publication.success
+            && publication.recoveryAttempted
+            && publication.recoverySucceeded
+            && ! publication.recoveryPending
+            && targetRemoved
+            && diskInstalled != nullptr
+            && diskInstalled->isEmpty()
+            && noMarker
+            && noRollback
+            && cleaned;
+        addCheck(
+            "nam_library_new_install_manifest_failure_removes_uncommitted_asset",
+            pass,
+            "An injected manifest publication failure must remove a newly published target, preserve the prior empty manifest, verify recovery, and leave no rollback artifact.");
+    }
+
+    {
+        const auto root = makeFixtureRoot("overwrite-rollback");
+        const auto manifestFile = root.getChildFile(
+            "library_manifest.json");
+        const auto target = root.getChildFile("library")
+            .getChildFile("tone-1").getChildFile("model.nam");
+        const bool oldReady = target.replaceWithText("old-model-bytes");
+        juce::String oldSha256;
+        const bool oldHashReady = oldReady
+            && calculateUncancelledFileSha256(target, oldSha256);
+        juce::Array<juce::var> oldInstalled;
+        oldInstalled.add(makeRecord(target, oldSha256, 102, true));
+        const bool manifestReady = persistJsonFileAtomically(
+            manifestFile, makeManifest(oldInstalled));
+        juce::TemporaryFile staged(
+            target, juce::TemporaryFile::useHiddenFile);
+        const bool stagedReady = staged.getFile().replaceWithText(
+            "replacement-model-bytes");
+        juce::String newSha256;
+        const bool newHashReady = stagedReady
+            && calculateUncancelledFileSha256(
+                staged.getFile(), newSha256);
+        juce::Array<juce::var> newInstalled;
+        newInstalled.add(makeRecord(target, newSha256, 102, true));
+        NAMLibraryPublicationResult publication;
+        if (oldHashReady && manifestReady && newHashReady)
+        {
+            const ScopedNAMLibraryMutationLock lock;
+            const NAMLibraryPublicationTestHooks hooks {
+                NAMLibraryPublicationFailurePoint::manifestPublish
+            };
+            if (lock.locked())
+            {
+                publication = publishNAMLibraryAssetAndManifestLocked(
+                    staged.getFile(),
+                    target,
+                    root,
+                    manifestFile,
+                    makeManifest(newInstalled),
+                    newSha256,
+                    &hooks);
+            }
+        }
+        juce::String restoredSha256;
+        const bool restoredHashReady = calculateUncancelledFileSha256(
+            target, restoredSha256);
+        const auto diskManifest = readNAMLibraryManifestStrictLocked(
+            manifestFile);
+        const auto diskInstalledValue = diskManifest.success
+            ? diskManifest.manifest.getProperty("installed", {})
+            : juce::var();
+        const auto* diskInstalled = diskInstalledValue.getArray();
+        const bool manifestPreserved = diskInstalled != nullptr
+            && diskInstalled->size() == 1
+            && normaliseNAMSha256(
+                diskInstalled->getReference(0).getProperty(
+                    "fileSha256", {}).toString()) == oldSha256;
+        const bool noMarker = ! root.getChildFile(
+            kNAMLibraryTransactionMarkerName).existsAsFile();
+        const bool noRollback = countRollbackFiles(root) == 0;
+        const bool cleaned = cleanupNAMLibraryRegressionDirectory(root);
+        addCheck(
+            "nam_library_overwrite_manifest_failure_restores_prior_bytes",
+            oldHashReady && manifestReady && newHashReady
+                && ! publication.success
+                && publication.recoverySucceeded
+                && restoredHashReady
+                && restoredSha256 == oldSha256
+                && manifestPreserved
+                && noMarker
+                && noRollback
+                && cleaned,
+            "An injected overwrite failure must restore the exact prior target bytes and manifest record before reporting failure.");
+    }
+
+    {
+        const auto root = makeFixtureRoot("crash-recovery");
+        const auto manifestFile = root.getChildFile(
+            "library_manifest.json");
+        const auto target = root.getChildFile("library")
+            .getChildFile("tone-1").getChildFile("model.nam");
+        const bool oldReady = target.replaceWithText("crash-old-bytes");
+        juce::String oldSha256;
+        const bool oldHashReady = oldReady
+            && calculateUncancelledFileSha256(target, oldSha256);
+        juce::Array<juce::var> oldInstalled;
+        oldInstalled.add(makeRecord(target, oldSha256, 103, false));
+        const bool manifestReady = persistJsonFileAtomically(
+            manifestFile, makeManifest(oldInstalled));
+        juce::TemporaryFile staged(
+            target, juce::TemporaryFile::useHiddenFile);
+        const bool stagedReady = staged.getFile().replaceWithText(
+            "crash-new-bytes");
+        juce::String newSha256;
+        const bool newHashReady = stagedReady
+            && calculateUncancelledFileSha256(
+                staged.getFile(), newSha256);
+        juce::Array<juce::var> newInstalled;
+        newInstalled.add(makeRecord(target, newSha256, 103, false));
+        NAMLibraryPublicationResult interrupted;
+        NAMLibraryTransactionRecoveryResult recovery;
+        if (oldHashReady && manifestReady && newHashReady)
+        {
+            const ScopedNAMLibraryMutationLock lock;
+            const NAMLibraryPublicationTestHooks hooks {
+                NAMLibraryPublicationFailurePoint::afterAssetPublish
+            };
+            if (lock.locked())
+            {
+                interrupted = publishNAMLibraryAssetAndManifestLocked(
+                    staged.getFile(),
+                    target,
+                    root,
+                    manifestFile,
+                    makeManifest(newInstalled),
+                    newSha256,
+                    &hooks);
+                recovery = recoverPendingNAMLibraryTransactionLocked(
+                    root, manifestFile);
+            }
+        }
+        juce::String recoveredSha256;
+        const bool recoveredHashReady =
+            calculateUncancelledFileSha256(target, recoveredSha256);
+        const bool artifactsCleared = ! root.getChildFile(
+                kNAMLibraryTransactionMarkerName).existsAsFile()
+            && countRollbackFiles(root) == 0;
+        const bool cleaned = cleanupNAMLibraryRegressionDirectory(root);
+        addCheck(
+            "nam_library_crash_marker_rolls_back_pre_manifest_publication",
+            oldHashReady && manifestReady && newHashReady
+                && ! interrupted.success
+                && interrupted.recoveryPending
+                && recovery.success
+                && recovery.markerFound
+                && recovery.rolledBack
+                && recoveredHashReady
+                && recoveredSha256 == oldSha256
+                && artifactsCleared
+                && cleaned,
+            "A retained intent marker after asset publication must restore the prior bytes when the expected manifest digest was never committed.");
+    }
+
+    {
+        const auto root = makeFixtureRoot("committed-crash-recovery");
+        const auto manifestFile = root.getChildFile(
+            "library_manifest.json");
+        const auto target = root.getChildFile("library")
+            .getChildFile("tone-1").getChildFile("model.nam");
+        const bool oldReady = target.replaceWithText("committed-old");
+        juce::String oldSha256;
+        const bool oldHashReady = oldReady
+            && calculateUncancelledFileSha256(target, oldSha256);
+        juce::Array<juce::var> oldInstalled;
+        oldInstalled.add(makeRecord(target, oldSha256, 104, false));
+        const bool manifestReady = persistJsonFileAtomically(
+            manifestFile, makeManifest(oldInstalled));
+        juce::TemporaryFile staged(
+            target, juce::TemporaryFile::useHiddenFile);
+        const bool stagedReady = staged.getFile().replaceWithText(
+            "committed-new");
+        juce::String newSha256;
+        const bool newHashReady = stagedReady
+            && calculateUncancelledFileSha256(
+                staged.getFile(), newSha256);
+        juce::Array<juce::var> newInstalled;
+        newInstalled.add(makeRecord(target, newSha256, 104, false));
+        NAMLibraryPublicationResult interrupted;
+        NAMLibraryTransactionRecoveryResult recovery;
+        if (oldHashReady && manifestReady && newHashReady)
+        {
+            const ScopedNAMLibraryMutationLock lock;
+            const NAMLibraryPublicationTestHooks hooks {
+                NAMLibraryPublicationFailurePoint::afterManifestPublish
+            };
+            if (lock.locked())
+            {
+                interrupted = publishNAMLibraryAssetAndManifestLocked(
+                    staged.getFile(),
+                    target,
+                    root,
+                    manifestFile,
+                    makeManifest(newInstalled),
+                    newSha256,
+                    &hooks);
+                recovery = recoverPendingNAMLibraryTransactionLocked(
+                    root, manifestFile);
+            }
+        }
+        juce::String recoveredSha256;
+        const bool recoveredHashReady =
+            calculateUncancelledFileSha256(target, recoveredSha256);
+        const bool artifactsCleared = ! root.getChildFile(
+                kNAMLibraryTransactionMarkerName).existsAsFile()
+            && countRollbackFiles(root) == 0;
+        const bool cleaned = cleanupNAMLibraryRegressionDirectory(root);
+        addCheck(
+            "nam_library_crash_marker_finalizes_committed_manifest",
+            oldHashReady && manifestReady && newHashReady
+                && ! interrupted.success
+                && interrupted.recoveryPending
+                && recovery.success
+                && recovery.markerFound
+                && recovery.committed
+                && recoveredHashReady
+                && recoveredSha256 == newSha256
+                && artifactsCleared
+                && cleaned,
+            "A retained marker after manifest publication must keep the committed new bytes and discard only the rollback artifact.");
+    }
+
+    {
+        const auto root = makeFixtureRoot("concurrent-hash");
+        const auto manifestFile = root.getChildFile(
+            "library_manifest.json");
+        const auto catalogFile = root.getChildFile("catalog.json");
+        const auto toneDirectory = root.getChildFile("library")
+            .getChildFile("tone-1");
+        const auto stableFile = toneDirectory.getChildFile("stable.nam");
+        const auto staleFile = toneDirectory.getChildFile("stale.nam");
+        const auto replacementFile = toneDirectory.getChildFile(
+            "replacement.nam");
+        const bool assetsReady = stableFile.replaceWithText(
+                "stable-hash-source")
+            && staleFile.replaceWithText("stale-hash-source")
+            && replacementFile.replaceWithText(
+                "replacement-with-different-size");
+        juce::Array<juce::var> installed;
+        installed.add(makeRecord(stableFile, {}, 201, false));
+        installed.add(makeRecord(staleFile, {}, 202, false));
+        const bool manifestReady = persistJsonFileAtomically(
+            manifestFile, makeManifest(installed));
+        std::atomic<bool> hashEntered { false };
+        std::atomic<bool> releaseHash { false };
+        juce::var refreshResult;
+        std::thread refreshThread([&]
+        {
+            refreshResult = refreshNAMLibraryManifestAtPaths(
+                root,
+                manifestFile,
+                catalogFile,
+                true,
+                [&] (const juce::File& file,
+                     juce::String& sha256,
+                     juce::String& error)
+                {
+                    if (areNAMPathsEquivalent(
+                            file.getFullPathName(),
+                            stableFile.getFullPathName()))
+                    {
+                        hashEntered.store(true, std::memory_order_release);
+                        while (! releaseHash.load(
+                            std::memory_order_acquire))
+                        {
+                            juce::Thread::sleep(1);
+                        }
+                    }
+                    if (! calculateUncancelledFileSha256(file, sha256))
+                    {
+                        error = "fixture hash failed";
+                        return false;
+                    }
+                    return true;
+                });
+        });
+        for (int attempt = 0;
+             attempt < 2000
+                && ! hashEntered.load(std::memory_order_acquire);
+             ++attempt)
+        {
+            juce::Thread::sleep(1);
+        }
+        bool concurrentUpdatePersisted = false;
+        if (hashEntered.load(std::memory_order_acquire))
+        {
+            const ScopedNAMLibraryMutationLock lock;
+            if (lock.locked())
+            {
+                const auto latest = readNAMLibraryManifestStrictLocked(
+                    manifestFile);
+                auto latestManifest = latest.manifest;
+                auto latestInstalledValue = latest.success
+                    ? latestManifest.getProperty("installed", {})
+                    : juce::var();
+                auto* latestInstalled = latestInstalledValue.getArray();
+                if (latestInstalled != nullptr
+                    && latestInstalled->size() == 2)
+                {
+                    if (auto* stable = latestInstalled->getReference(0)
+                            .getDynamicObject())
+                    {
+                        stable->setProperty("favorite", true);
+                    }
+                    if (auto* stale = latestInstalled->getReference(1)
+                            .getDynamicObject())
+                    {
+                        stale->setProperty(
+                            "localPath",
+                            replacementFile.getFullPathName());
+                        stale->setProperty(
+                            "fileSizeBytes",
+                            static_cast<double>(
+                                replacementFile.getSize()));
+                    }
+                    latestInstalled->add(makeRecord(
+                        replacementFile, {}, 203, true));
+                    concurrentUpdatePersisted =
+                        persistNAMLibraryManifestLocked(
+                            manifestFile, latestManifest);
+                }
+            }
+        }
+        releaseHash.store(true, std::memory_order_release);
+        refreshThread.join();
+
+        const auto finalRead = readNAMLibraryManifestStrictLocked(
+            manifestFile);
+        const auto finalInstalledValue = finalRead.success
+            ? finalRead.manifest.getProperty("installed", {})
+            : juce::var();
+        auto* finalInstalled = finalInstalledValue.getArray();
+        bool stableFavoritePreserved = false;
+        bool stableHashMerged = false;
+        bool staleReplacementPreserved = false;
+        bool staleHashRejected = false;
+        bool addedRecordPreserved = false;
+        if (finalInstalled != nullptr)
+        {
+            for (const auto& value : *finalInstalled)
+            {
+                auto* record = value.getDynamicObject();
+                if (record == nullptr)
+                    continue;
+                const int modelId = static_cast<int>(
+                    record->getProperty("modelId"));
+                if (modelId == 201)
+                {
+                    stableFavoritePreserved = static_cast<bool>(
+                        record->getProperty("favorite"));
+                    const auto sha = normaliseNAMSha256(
+                        record->getProperty("fileSha256").toString());
+                    stableHashMerged = sha.length() == 64;
+                }
+                else if (modelId == 202)
+                {
+                    staleReplacementPreserved = areNAMPathsEquivalent(
+                        record->getProperty("localPath").toString(),
+                        replacementFile.getFullPathName());
+                    staleHashRejected = normaliseNAMSha256(
+                        record->getProperty("fileSha256").toString())
+                            .isEmpty();
+                }
+                else if (modelId == 203)
+                {
+                    addedRecordPreserved = true;
+                }
+            }
+        }
+        const auto refreshSuccessValue = refreshResult.getProperty(
+            "success", true);
+        const bool refreshSucceeded = refreshResult.isObject()
+            && (! refreshSuccessValue.isBool()
+                || static_cast<bool>(refreshSuccessValue));
+        const bool cleaned = cleanupNAMLibraryRegressionDirectory(root);
+        addCheck(
+            "nam_library_refresh_hash_merge_preserves_concurrent_manifest_update",
+            assetsReady && manifestReady
+                && hashEntered.load(std::memory_order_acquire)
+                && concurrentUpdatePersisted
+                && refreshSucceeded
+                && finalInstalled != nullptr
+                && finalInstalled->size() == 3
+                && stableFavoritePreserved
+                && stableHashMerged
+                && staleReplacementPreserved
+                && staleHashRejected
+                && addedRecordPreserved
+                && cleaned,
+            "Hashing must run outside the OS lock; the final merge must preserve a concurrent favorite, added record, and replacement path while rejecting the stale hash observation.");
+    }
+
+    juce::DynamicObject::Ptr result = new juce::DynamicObject();
+    result->setProperty("success", overallPass);
+    result->setProperty("checks", juce::var(checks));
     return juce::var(result.get());
 }
 
@@ -4054,6 +8273,196 @@ juce::StringArray getNAMModelMutationSlots(const juce::String& stateJson)
 
 juce::CriticalSection MainComponent::instanceListLock;
 juce::Array<MainComponent*> MainComponent::activeInstances;
+
+int MainComponent::runNAMLibraryManifestWriterRegressionChild(
+    const juce::File& manifestFile,
+    const juce::String& writerId,
+    const juce::File& readyFile,
+    const juce::File& startFile)
+{
+    const auto temporaryRoot = juce::File::getSpecialLocation(
+        juce::File::tempDirectory);
+    const auto regressionDirectory = manifestFile.getParentDirectory();
+    const auto safeWriterId = writerId.trim();
+    const bool safePaths = juce::File::isAbsolutePath(
+            manifestFile.getFullPathName())
+        && juce::File::isAbsolutePath(readyFile.getFullPathName())
+        && juce::File::isAbsolutePath(startFile.getFullPathName())
+        && regressionDirectory.isDirectory()
+        && regressionDirectory.isAChildOf(temporaryRoot)
+        && regressionDirectory.getFileName().startsWith(
+            "OpenStudio_NAM_Library_Multiprocess_")
+        && readyFile.getParentDirectory() == regressionDirectory
+        && startFile.getParentDirectory() == regressionDirectory
+        && manifestFile.getFileName() == "library_manifest.json"
+        && startFile.getFileName() == "start.flag"
+        && readyFile.getFileName()
+            == "ready-" + safeWriterId + ".flag"
+        && safeWriterId.isNotEmpty()
+        && safeWriterId.length() <= 32
+        && safeWriterId.containsOnly(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_");
+    if (! safePaths)
+        return 2;
+
+    if (! readyFile.replaceWithText(safeWriterId))
+        return 3;
+
+    const auto startDeadline = juce::Time::getMillisecondCounterHiRes()
+        + 10000.0;
+    while (! startFile.existsAsFile()
+           && juce::Time::getMillisecondCounterHiRes() < startDeadline)
+    {
+        juce::Thread::sleep(5);
+    }
+    if (! startFile.existsAsFile())
+        return 4;
+
+    const ScopedNAMLibraryMutationLock manifestLock(10000);
+    if (! manifestLock.locked())
+        return 5;
+
+    auto manifest = parseJsonFileOrDefault(manifestFile, "installed");
+    auto* manifestObject = manifest.getDynamicObject();
+    auto installedValue = manifestObject != nullptr
+        ? manifestObject->getProperty("installed")
+        : juce::var();
+    auto* installedArray = installedValue.getArray();
+    if (manifestObject == nullptr || installedArray == nullptr)
+        return 6;
+
+    // Both child processes cross the start barrier together. Keeping the read
+    // snapshot open briefly makes a missing OS-wide lock deterministically lose
+    // one writer, while the production lock serializes the complete RMW.
+    juce::Thread::sleep(250);
+    bool alreadyPresent = false;
+    for (const auto& recordValue : *installedArray)
+    {
+        if (recordValue.getProperty("writerId", {}).toString()
+                == safeWriterId)
+        {
+            alreadyPresent = true;
+            break;
+        }
+    }
+    if (! alreadyPresent)
+    {
+        juce::DynamicObject::Ptr record = new juce::DynamicObject();
+        record->setProperty("writerId", safeWriterId);
+        record->setProperty(
+            "modelId", safeWriterId.hashCode());
+        installedArray->add(juce::var(record.get()));
+        manifestObject->setProperty("installed", installedValue);
+    }
+
+    return persistNAMLibraryManifestLocked(manifestFile, manifest) ? 0 : 7;
+}
+
+juce::var MainComponent::runNAMCatalogNativeRegression()
+{
+    return runNAMCatalogNativeRegressionImpl();
+}
+
+void MainComponent::runTone3000NativeTask(
+    std::function<juce::var()> task,
+    juce::WebBrowserComponent::NativeFunctionCompletion completion)
+{
+    if (! tone3000NativeCompletionsEnabled.load(
+            std::memory_order_acquire))
+    {
+        return;
+    }
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    auto cancellation = tone3000TaskCancellation;
+    auto completionState = std::make_shared<
+        juce::WebBrowserComponent::NativeFunctionCompletion>(
+            std::move(completion));
+    const auto reportSchedulingFailure = [this, &completionState]
+        (const juce::String& message)
+    {
+        if (tone3000NativeCompletionsEnabled.load(
+                std::memory_order_acquire)
+            && completionState != nullptr
+            && static_cast<bool>(*completionState))
+        {
+            (*completionState)(makeTone3000Error(message));
+        }
+    };
+
+    try
+    {
+        tone3000BridgePool.addJob(std::function<void()>([
+            safeThis,
+            cancellation = std::move(cancellation),
+            task = std::move(task),
+            completionState]() mutable
+        {
+            if (cancellation == nullptr
+                || cancellation->load(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            struct ScopedTaskCancellation
+            {
+                explicit ScopedTaskCancellation(
+                    const std::atomic<bool>* cancellationIn)
+                    : previous(activeTone3000TaskCancellation)
+                {
+                    activeTone3000TaskCancellation = cancellationIn;
+                }
+                ~ScopedTaskCancellation()
+                {
+                    activeTone3000TaskCancellation = previous;
+                }
+                const std::atomic<bool>* previous = nullptr;
+            } scopedCancellation(cancellation.get());
+
+            juce::var result;
+            try
+            {
+                result = task();
+            }
+            catch (const std::exception& exception)
+            {
+                result = makeTone3000Error(
+                    "Native NAM/TONE3000 task failed: "
+                    + juce::String(exception.what()));
+            }
+            catch (...)
+            {
+                result = makeTone3000Error(
+                    "Native NAM/TONE3000 task failed unexpectedly.");
+            }
+
+            juce::MessageManager::callAsync([
+                safeThis,
+                result = std::move(result),
+                completionState]() mutable
+            {
+                if (safeThis != nullptr
+                    && safeThis->tone3000NativeCompletionsEnabled.load(
+                        std::memory_order_acquire)
+                    && completionState != nullptr
+                    && static_cast<bool>(*completionState))
+                {
+                    (*completionState)(result);
+                }
+            });
+        }));
+    }
+    catch (const std::exception& exception)
+    {
+        reportSchedulingFailure(
+            "Could not schedule the native NAM/TONE3000 task: "
+            + juce::String(exception.what()));
+    }
+    catch (...)
+    {
+        reportSchedulingFailure(
+            "Could not schedule the native NAM/TONE3000 task.");
+    }
+}
 
 std::string MainComponent::makeNAMModelMutationKey(const juce::String& trackId,
                                                    const juce::String& chainType,
@@ -6053,154 +10462,171 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         localPath.revealToUser();
                         completion(true);
                     })
-                    .withNativeFunction ("createTONE3000AuthRequest", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("createTONE3000AuthRequest", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto clientId = args.size() > 0 ? args[0].toString() : juce::String();
                         const auto redirectUri = args.size() > 1 ? args[1].toString() : juce::String();
                         const auto prompt = args.size() > 2 ? args[2].toString() : juce::String();
                         const auto toneId = args.size() > 3 ? args[3].toString() : juce::String();
                         const auto loginHint = args.size() > 4 ? args[4].toString() : juce::String();
-                        completion(createTone3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint));
+                        runTone3000NativeTask(
+                            [clientId, redirectUri, prompt, toneId, loginHint]
+                            {
+                                return createTone3000AuthRequest(
+                                    clientId,
+                                    redirectUri,
+                                    prompt,
+                                    toneId,
+                                    loginHint);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("startTONE3000AuthFlow", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("startTONE3000AuthFlow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto options = args.size() > 0 ? args[0] : juce::var();
-                        std::thread([options, completion]() mutable {
-                            auto result = startTone3000AuthFlow(options);
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                        runTone3000NativeTask(
+                            [options]
+                            {
+                                return startTone3000AuthFlow(options);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("cancelTONE3000AuthFlow", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("cancelTONE3000AuthFlow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        completion(cancelTone3000AuthFlow());
+                        runTone3000NativeTask(
+                            [] { return cancelTone3000AuthFlow(); },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("exchangeTONE3000OAuthCode", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("exchangeTONE3000OAuthCode", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto code = args.size() > 0 ? args[0].toString() : juce::String();
                         const auto state = args.size() > 1 ? args[1].toString() : juce::String();
                         const auto clientId = args.size() > 2 ? args[2].toString() : juce::String();
                         const auto redirectUri = args.size() > 3 ? args[3].toString() : juce::String();
-                        std::thread([code, state, clientId, redirectUri, completion]() mutable {
+                        runTone3000NativeTask(
+                            [code, state, clientId, redirectUri]
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: exchangeOAuthCode started");
                             auto result = exchangeTone3000OAuthCode(code, state, clientId, redirectUri);
                             juce::Logger::writeToLog("TONE3000 bridge: exchangeOAuthCode finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("refreshTONE3000Auth", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("refreshTONE3000Auth", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto clientId = args.size() > 0 ? args[0].toString() : juce::String();
-                        std::thread([clientId, completion]() mutable {
+                        runTone3000NativeTask(
+                            [clientId]
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: refreshAuth started");
                             auto result = refreshTone3000Auth(clientId);
                             juce::Logger::writeToLog("TONE3000 bridge: refreshAuth finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("getTONE3000AuthStatus", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getTONE3000AuthStatus", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        completion(makeTone3000AuthStatus());
+                        runTone3000NativeTask(
+                            [] { return makeTone3000AuthStatus(); },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("clearTONE3000Auth", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("clearTONE3000Auth", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        tone3000AuthFlowGeneration.fetch_add(1);
-                        getTone3000TokenFile().deleteFile();
-                        getTone3000PendingAuthFile().deleteFile();
-                        juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                        result->setProperty("success", true);
-                        result->setProperty("authenticated", false);
-                        completion(juce::var(result.get()));
+                        runTone3000NativeTask(
+                            [] { return clearTone3000Auth(); },
+                            std::move(completion));
                     })
                     .withNativeFunction ("getNAMLibraryInfo", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(makeNAMLibraryInfo());
                     })
-                    .withNativeFunction ("inspectNAMAsset", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("inspectNAMAsset", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto filePath = args.size() > 0 ? args[0].toString() : juce::String();
-                        std::thread([filePath, completion]() mutable {
+                        runTone3000NativeTask(
+                            [filePath]
+                            {
                            #if JUCE_WINDOWS
                             ::SetThreadPriority(
                                 ::GetCurrentThread(),
                                 THREAD_PRIORITY_BELOW_NORMAL);
                            #endif
-                            const auto result = inspectNAMAssetFile(filePath);
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return inspectNAMAssetFile(filePath);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("findNAMAssetInDirectory", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("findNAMAssetInDirectory", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto directoryPath = args.size() > 0 ? args[0].toString() : juce::String();
                         const auto expectedFileName = args.size() > 1 ? args[1].toString() : juce::String();
                         const auto checksum = args.size() > 2 ? args[2].toString() : juce::String();
                         const auto fileSizeBytes = args.size() > 3 ? static_cast<juce::int64>(static_cast<double>(args[3])) : 0;
                         const auto slot = args.size() > 4 ? args[4].toString().trim().toLowerCase() : juce::String("amp");
-                        std::thread([directoryPath, expectedFileName, checksum, fileSizeBytes, slot, completion]() mutable {
-                            const auto result = findNAMAssetInDirectory(directoryPath, expectedFileName, checksum, fileSizeBytes, slot);
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                        runTone3000NativeTask(
+                            [directoryPath, expectedFileName, checksum, fileSizeBytes, slot]
+                            {
+                                return findNAMAssetInDirectory(
+                                    directoryPath,
+                                    expectedFileName,
+                                    checksum,
+                                    fileSizeBytes,
+                                    slot);
+                            },
+                            std::move(completion));
                     })
                     .withNativeFunction ("getNAMCatalog", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(parseJsonFileOrDefault(getOpenStudioNAMCatalogJson(), "tones"));
                     })
-                    .withNativeFunction ("refreshNAMCatalog", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("refreshNAMCatalog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto options = args.size() > 0 ? args[0] : juce::var();
-                        std::thread([options, completion]() mutable {
-                            auto result = refreshNAMCatalogFromUpdater(options);
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                        runTone3000NativeTask(
+                            [options]
+                            {
+                                return refreshNAMCatalogFromUpdater(options);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("searchTONE3000NAM", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("searchTONE3000NAM", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto options = args.size() > 0 ? args[0] : juce::var();
-                        std::thread([options, completion]() mutable {
+                        runTone3000NativeTask(
+                            [options]
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: searchNAM started");
                             auto result = searchTone3000NAM(options);
                             juce::Logger::writeToLog("TONE3000 bridge: searchNAM finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("runTONE3000AuthenticatedQA", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("runTONE3000AuthenticatedQA", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        std::thread([completion]() mutable {
-                            const auto result = runTone3000AuthenticatedQA();
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                        runTone3000NativeTask(
+                            [] { return runTone3000AuthenticatedQA(); },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("getTONE3000ToneDetail", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getTONE3000ToneDetail", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const int toneId = args.size() > 0 ? static_cast<int>(args[0]) : 0;
                         const auto architecture = args.size() > 1 ? args[1].toString() : juce::String();
-                        std::thread([toneId, architecture, completion]() mutable {
+                        runTone3000NativeTask(
+                            [toneId, architecture]
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: toneDetail started toneId=" + juce::String(toneId));
                             auto result = getTone3000ToneDetail(toneId, architecture);
                             juce::Logger::writeToLog("TONE3000 bridge: toneDetail finished toneId=" + juce::String(toneId));
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("getNAMLibrary", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("getNAMLibrary", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
-                        std::thread([completion]() mutable {
+                        runTone3000NativeTask(
+                            []
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: getNAMLibrary started");
                             auto result = refreshNAMLibraryManifest(true);
                             juce::Logger::writeToLog("TONE3000 bridge: getNAMLibrary finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("installNAMModel", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("installNAMModel", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() < 1)
                         {
                             juce::DynamicObject::Ptr result = new juce::DynamicObject();
@@ -6211,7 +10637,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                         const auto modelPayload = args[0];
                         const auto optionsPayload = args.size() > 1 ? args[1] : juce::var();
-                        std::thread([modelPayload, optionsPayload, completion]() mutable {
+                        runTone3000NativeTask(
+                            [modelPayload, optionsPayload]
+                            {
                             bool previewMode = false;
                             if (optionsPayload.isString())
                             {
@@ -6227,23 +10655,23 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::Logger::writeToLog("TONE3000 bridge: installNAMModel started mode=" + juce::String(previewMode ? "preview" : "library"));
                             auto result = installNAMModelFromMetadata(modelPayload, previewMode);
                             juce::Logger::writeToLog("TONE3000 bridge: installNAMModel finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("commitNAMPreviewTone", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("commitNAMPreviewTone", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto recordPayload = args.size() > 0 ? args[0] : juce::var();
                         const auto metadataPayload = args.size() > 1 ? args[1] : juce::var();
                         const auto rackStatePayload = args.size() > 2 ? args[2] : juce::var();
-                        std::thread([recordPayload, metadataPayload, rackStatePayload, completion]() mutable {
+                        runTone3000NativeTask(
+                            [recordPayload, metadataPayload, rackStatePayload]
+                            {
                             juce::Logger::writeToLog("TONE3000 bridge: commitNAMPreviewTone started");
                             auto result = commitNAMPreviewToneToLibrary(recordPayload, metadataPayload, rackStatePayload);
                             juce::Logger::writeToLog("TONE3000 bridge: commitNAMPreviewTone finished");
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                            return result;
+                            },
+                            std::move(completion));
                     })
                     .withNativeFunction ("discardNAMPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto recordPayload = args.size() > 0 ? args[0] : juce::var();
@@ -6260,26 +10688,40 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             });
                         });
                     })
-                    .withNativeFunction ("cleanupNAMPreviews", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("cleanupNAMPreviews", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const double maxAgeHours = args.size() > 0 ? static_cast<double>(args[0]) : 24.0;
-                        std::thread([maxAgeHours, completion]() mutable {
-                            auto result = cleanupNAMPreviewFiles(maxAgeHours);
-                            juce::MessageManager::callAsync([completion, result]() {
-                                completion(result);
-                            });
-                        }).detach();
+                        runTone3000NativeTask(
+                            [maxAgeHours]
+                            {
+                                return cleanupNAMPreviewFiles(maxAgeHours);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("setNAMModelFavorite", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("setNAMModelFavorite", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const int modelId = args.size() > 0 ? static_cast<int>(args[0]) : 0;
                         const auto localPath = args.size() > 1 ? args[1].toString() : juce::String();
                         const bool favorite = args.size() > 2 && static_cast<bool>(args[2]);
-                        completion(setNAMLibraryFavorite(modelId, localPath, favorite));
+                        runTone3000NativeTask(
+                            [modelId, localPath, favorite]
+                            {
+                                return setNAMLibraryFavorite(
+                                    modelId, localPath, favorite);
+                            },
+                            std::move(completion));
                     })
-                    .withNativeFunction ("removeNAMModel", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("removeNAMModel", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const int modelId = args.size() > 0 ? static_cast<int>(args[0]) : 0;
                         const auto localPath = args.size() > 1 ? args[1].toString() : juce::String();
                         const bool deleteLocalFile = args.size() > 2 && static_cast<bool>(args[2]);
-                        completion(removeNAMModelFromLibrary(modelId, localPath, deleteLocalFile));
+                        runTone3000NativeTask(
+                            [modelId, localPath, deleteLocalFile]
+                            {
+                                return removeNAMModelFromLibrary(
+                                    modelId,
+                                    localPath,
+                                    deleteLocalFile);
+                            },
+                            std::move(completion));
                     })
                     .withNativeFunction ("loadNAMModelIntoRack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() < 5)
@@ -6856,21 +11298,38 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     tempDir.createDirectory();
                                     extractedFile = tempDir.getChildFile(audioFile.getFileNameWithoutExtension() + "_audio.wav");
 
-                                    // Find FFmpeg: check next to executable first, then fall back to PATH
-                                    juce::File appDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-                                    juce::File bundledFFmpeg = appDir.getChildFile("ffmpeg.exe");
-                                    juce::String ffmpegPath = bundledFFmpeg.existsAsFile() ? bundledFFmpeg.getFullPathName() : "ffmpeg";
-
-                                    // Run FFmpeg to extract audio as WAV
-                                    juce::String cmd = "\"" + ffmpegPath + "\" -y -i \"" + filePath + "\" -vn -acodec pcm_s16le -ar 44100 -ac 2 \"" + extractedFile.getFullPathName() + "\"";
+                                    const auto ffmpegExecutable =
+                                        OpenStudioFFmpeg::findExecutable();
+                                    juce::StringArray processArgs;
+                                    processArgs.add(
+                                        ffmpegExecutable.getFullPathName());
+                                    processArgs.add("-y");
+                                    processArgs.add("-i");
+                                    processArgs.add(filePath);
+                                    processArgs.add("-vn");
+                                    processArgs.add("-acodec");
+                                    processArgs.add("pcm_s16le");
+                                    processArgs.add("-ar");
+                                    processArgs.add("44100");
+                                    processArgs.add("-ac");
+                                    processArgs.add("2");
+                                    processArgs.add(
+                                        extractedFile.getFullPathName());
 
                                     juce::ChildProcess ffmpeg;
-                                    bool started = ffmpeg.start(cmd);
+                                    const bool started =
+                                        ffmpegExecutable.existsAsFile()
+                                        && ffmpeg.start(processArgs);
 
                                     if (started) {
                                         // Wait up to 60 seconds for extraction
-                                        bool finished = ffmpeg.waitForProcessToFinish(60000);
-                                        auto exitCode = ffmpeg.getExitCode();
+                                        const bool finished =
+                                            ffmpeg.waitForProcessToFinish(60000);
+                                        if (! finished)
+                                            ffmpeg.kill();
+                                        const auto exitCode = finished
+                                            ? ffmpeg.getExitCode()
+                                            : -1;
 
                                         if (finished && exitCode == 0 && extractedFile.existsAsFile()) {
                                             juce::Logger::writeToLog("importMediaFile: FFmpeg extracted audio to: " + extractedFile.getFullPathName());
@@ -7712,11 +12171,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 inputFile.getFileNameWithoutExtension() + "_ts_" + timestamp + inputFile.getFileExtension()
                             );
 
-                            // Find FFmpeg
-                            auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-                            juce::File ffmpeg = exeDir.getChildFile("ffmpeg.exe");
-                            if (!ffmpeg.existsAsFile()) ffmpeg = exeDir.getChildFile("tools").getChildFile("ffmpeg.exe");
-                            if (!ffmpeg.existsAsFile()) ffmpeg = exeDir.getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
+                            const auto ffmpeg =
+                                OpenStudioFFmpeg::findExecutable();
                             if (!ffmpeg.existsAsFile()) {
                                 completion(juce::String());
                                 return;
@@ -7816,11 +12272,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             // Convert semitones to frequency ratio: ratio = 2^(semitones/12)
                             double ratio = std::pow(2.0, semitones / 12.0);
 
-                            // Find FFmpeg
-                            auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-                            juce::File ffmpeg = exeDir.getChildFile("ffmpeg.exe");
-                            if (!ffmpeg.existsAsFile()) ffmpeg = exeDir.getChildFile("tools").getChildFile("ffmpeg.exe");
-                            if (!ffmpeg.existsAsFile()) ffmpeg = exeDir.getParentDirectory().getChildFile("tools").getChildFile("ffmpeg.exe");
+                            const auto ffmpeg =
+                                OpenStudioFFmpeg::findExecutable();
                             if (!ffmpeg.existsAsFile()) {
                                 completion(juce::String());
                                 return;
@@ -11007,6 +15460,17 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
 
 MainComponent::~MainComponent()
 {
+    tone3000NativeCompletionsEnabled.store(
+        false, std::memory_order_release);
+    if (tone3000TaskCancellation != nullptr)
+        tone3000TaskCancellation->store(
+            true, std::memory_order_release);
+    // These jobs own every long-running NAM/TONE3000 completion. Drain them
+    // while the WebView provider, lifetime flag, and macOS Keychain loader are
+    // still alive; queued message-thread completions are additionally gated by
+    // SafePointer and the flag above.
+    tone3000BridgePool.removeAllJobs(true, -1);
+
     if (! isMainWindow())
         prepareForSecondaryWindowClose();
 
@@ -11037,6 +15501,11 @@ void MainComponent::prepareForSecondaryWindowClose()
         return;
 
     secondaryWindowClosing = true;
+    tone3000NativeCompletionsEnabled.store(
+        false, std::memory_order_release);
+    if (tone3000TaskCancellation != nullptr)
+        tone3000TaskCancellation->store(
+            true, std::memory_order_release);
     startupWatchdogActive = false;
     frontendStartupDetail = "Secondary window is closing.";
     stopTimer();
@@ -11058,6 +15527,51 @@ void MainComponent::prepareForSecondaryWindowClose()
     juce::Logger::writeToLog("Secondary MainComponent shutdown prepared: role="
                              + getWindowRoleQueryValue(windowRole)
                              + (windowInstanceId.isNotEmpty() ? " sessionId=" + windowInstanceId : juce::String()));
+}
+
+void MainComponent::requestEmbeddedBrowserFocus()
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    if (secondaryWindowClosing
+        || frontendStartupState != FrontendStartupState::ready
+        || embeddedBrowserFocusRequestPending)
+    {
+        return;
+    }
+
+    embeddedBrowserFocusRequestPending = true;
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::MessageManager::callAsync([safeThis]()
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->embeddedBrowserFocusRequestPending = false;
+
+        if (safeThis->secondaryWindowClosing
+            || safeThis->frontendStartupState != FrontendStartupState::ready
+            || ! safeThis->webView.isShowing()
+            || safeThis->isCurrentlyBlockedByAnotherModalComponent()
+            || safeThis->webView.isCurrentlyBlockedByAnotherModalComponent())
+        {
+            return;
+        }
+
+        if (auto* modalComponent = juce::Component::getCurrentlyModalComponent();
+            modalComponent != nullptr && modalComponent->isVisible())
+        {
+            return;
+        }
+
+        auto* topLevelWindow = dynamic_cast<juce::TopLevelWindow*>(
+            safeThis->getTopLevelComponent());
+        if (topLevelWindow == nullptr || ! topLevelWindow->isActiveWindow())
+            return;
+
+        safeThis->webView.setWantsKeyboardFocus(true);
+        safeThis->webView.grabKeyboardFocus();
+    });
 }
 
 bool MainComponent::hasFrontendStartupReachedTerminalState() const
@@ -11339,6 +15853,7 @@ void MainComponent::markFrontendStartupReady(const juce::String& detail)
     hideStartupOverlay();
     webView.setVisible(true);
     juce::Logger::writeToLog("Frontend startup state: boot-ready" + (detail.isNotEmpty() ? " - " + detail : ""));
+    requestEmbeddedBrowserFocus();
 
     if (! isMainWindow())
     {

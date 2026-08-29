@@ -1,4 +1,5 @@
 #include "VideoReader.h"
+#include "FFmpegLocator.h"
 
 VideoReader::VideoReader()
 {
@@ -12,14 +13,7 @@ VideoReader::~VideoReader()
 
 juce::File VideoReader::findFFmpeg() const
 {
-    // Look next to the executable first
-    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-    auto ffmpeg = exeDir.getChildFile("ffmpeg.exe");
-    if (ffmpeg.existsAsFile())
-        return ffmpeg;
-
-    // Try PATH
-    return juce::File("ffmpeg");
+    return OpenStudioFFmpeg::findExecutable();
 }
 
 bool VideoReader::openFile(const juce::String& filePath, const juce::File& audioOutputDir)
@@ -58,18 +52,26 @@ void VideoReader::closeFile()
 
 bool VideoReader::parseMetadata(const juce::String& filePath)
 {
-    if (!ffmpegExe.existsAsFile() && ffmpegExe.getFullPathName() != "ffmpeg")
+    if (! ffmpegExe.existsAsFile())
         return false;
 
     // Use ffmpeg -i to get metadata (writes to stderr)
     juce::ChildProcess proc;
-    juce::String cmd = "\"" + ffmpegExe.getFullPathName() + "\" -i \"" + filePath + "\" -hide_banner";
+    juce::StringArray args;
+    args.add(ffmpegExe.getFullPathName());
+    args.add("-i");
+    args.add(filePath);
+    args.add("-hide_banner");
 
-    if (!proc.start(cmd))
+    if (! proc.start(args))
         return false;
 
     // ffmpeg -i exits with error code 1 but writes metadata to stderr
-    proc.waitForProcessToFinish(10000);
+    if (! proc.waitForProcessToFinish(10000))
+    {
+        proc.kill();
+        return false;
+    }
     juce::String output = proc.readAllProcessOutput();
 
     // Parse duration: "Duration: HH:MM:SS.ms"
@@ -136,20 +138,33 @@ bool VideoReader::parseMetadata(const juce::String& filePath)
 
 bool VideoReader::extractAudio(const juce::String& videoPath, const juce::File& outputWav)
 {
-    if (!ffmpegExe.existsAsFile() && ffmpegExe.getFullPathName() != "ffmpeg")
+    if (! ffmpegExe.existsAsFile())
         return false;
 
     if (outputWav.existsAsFile())
         outputWav.deleteFile();
 
-    juce::String cmd = "\"" + ffmpegExe.getFullPathName() + "\" -i \"" + videoPath +
-                       "\" -vn -acodec pcm_s24le -ar 48000 -y \"" + outputWav.getFullPathName() + "\"";
+    juce::StringArray args;
+    args.add(ffmpegExe.getFullPathName());
+    args.add("-i");
+    args.add(videoPath);
+    args.add("-vn");
+    args.add("-acodec");
+    args.add("pcm_s24le");
+    args.add("-ar");
+    args.add("48000");
+    args.add("-y");
+    args.add(outputWav.getFullPathName());
 
     juce::ChildProcess proc;
-    if (!proc.start(cmd))
+    if (! proc.start(args))
         return false;
 
-    proc.waitForProcessToFinish(60000); // Up to 60 seconds
+    if (! proc.waitForProcessToFinish(60000))
+    {
+        proc.kill();
+        return false;
+    }
     return outputWav.existsAsFile();
 }
 
@@ -158,7 +173,7 @@ juce::String VideoReader::getFrameAtTime(double timeSeconds, int outputWidth, in
     if (!fileOpen || info.filePath.isEmpty())
         return {};
 
-    if (!ffmpegExe.existsAsFile() && ffmpegExe.getFullPathName() != "ffmpeg")
+    if (! ffmpegExe.existsAsFile())
         return {};
 
     // Extract a single frame as JPEG to a temp file
@@ -168,15 +183,30 @@ juce::String VideoReader::getFrameAtTime(double timeSeconds, int outputWidth, in
     juce::String timeStr = juce::String(timeSeconds, 3);
     juce::String scaleFilter = "scale=" + juce::String(outputWidth) + ":" + juce::String(outputHeight);
 
-    juce::String cmd = "\"" + ffmpegExe.getFullPathName() + "\" -ss " + timeStr +
-                       " -i \"" + info.filePath + "\" -vf \"" + scaleFilter +
-                       "\" -frames:v 1 -q:v 2 -y \"" + tempFile.getFullPathName() + "\"";
+    juce::StringArray args;
+    args.add(ffmpegExe.getFullPathName());
+    args.add("-ss");
+    args.add(timeStr);
+    args.add("-i");
+    args.add(info.filePath);
+    args.add("-vf");
+    args.add(scaleFilter);
+    args.add("-frames:v");
+    args.add("1");
+    args.add("-q:v");
+    args.add("2");
+    args.add("-y");
+    args.add(tempFile.getFullPathName());
 
     juce::ChildProcess proc;
-    if (!proc.start(cmd))
+    if (! proc.start(args))
         return {};
 
-    proc.waitForProcessToFinish(5000);
+    if (! proc.waitForProcessToFinish(5000))
+    {
+        proc.kill();
+        return {};
+    }
 
     if (!tempFile.existsAsFile())
         return {};

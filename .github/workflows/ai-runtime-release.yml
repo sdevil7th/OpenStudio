@@ -10,6 +10,9 @@ on:
         description: "AI runtime version, for example 0.0.30"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   build-windows-runtime-base:
     runs-on: windows-latest
@@ -19,7 +22,7 @@ jobs:
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Normalize runtime version
         shell: pwsh
@@ -28,7 +31,7 @@ jobs:
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache standalone Python and wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .cache/ai-runtime
@@ -59,7 +62,7 @@ jobs:
             -ExpectedRuntimeVersion $env:VERSION `
             -MaxArtifactSizeBytes 2100000000
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-base-ai-runtime
           path: |
@@ -75,14 +78,14 @@ jobs:
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Normalize runtime version
         shell: bash
         run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
       - name: Cache standalone Python and wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .cache/ai-runtime
@@ -91,7 +94,7 @@ jobs:
 
       - name: Cache packaged macOS runtime
         id: cache-macos-runtime-package
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
@@ -123,7 +126,7 @@ jobs:
             -ExpectedRuntimeVersion $env:VERSION `
             -MaxArtifactSizeBytes 2100000000
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-arm64-ai-runtime
           path: |
@@ -139,14 +142,14 @@ jobs:
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Normalize runtime version
         shell: bash
         run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
       - name: Cache standalone Python and wheels
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .cache/ai-runtime
@@ -177,7 +180,7 @@ jobs:
             -ExpectedRuntimeVersion $env:VERSION `
             -MaxArtifactSizeBytes 2100000000
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-cpu-x64-ai-runtime
           path: |
@@ -196,23 +199,23 @@ jobs:
     env:
       VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Normalize runtime version
         shell: bash
         run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-base-ai-runtime
           path: dist/ai-runtime
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: macos-arm64-ai-runtime
           path: dist/ai-runtime
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: linux-cpu-x64-ai-runtime
           path: dist/ai-runtime
@@ -228,14 +231,13 @@ jobs:
           test -f "dist/ai-runtime/reports/linux-cpu-x64-size-report.json"
 
       - name: Publish AI runtime release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('ai-runtime-v{0}', github.event.inputs.runtime_version) }}
           name: OpenStudio AI Runtime ${{ env.VERSION }}
           body: |
             OpenStudio AI base runtimes. Windows accelerator backends are installed on-device from the pinned install plans in the published runtime manifest.
           fail_on_unmatched_files: true
-          overwrite_files: true
           files: |
             dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip
             dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip

@@ -32,7 +32,6 @@ const componentOwners = [
   "NAMRackDiagnostics",
   "NAMRackKnob",
   "NAMRackMixer",
-  "NAMRackSceneGraph",
 ] as const;
 
 const featureStyles = [

@@ -72,29 +72,17 @@ describe("NAM Rack Precision Drive Gate control", () => {
     expect(driveStage).not.toContain("precisionDriveVoice");
   });
 
-  it("retains the same parameter across defaults, schema, and compatibility surfaces", () => {
+  it("retains the same parameter across defaults, schema, and the active control surface", () => {
     const panelSource = readSource("../components/NAMRackPanel.tsx");
     const bridgeSource = readSource("../services/NativeBridge.ts");
-    const registrySource = readSource(
-      "../components/NAMRackNeuralSkinRegistry.ts",
-    );
-    const scene = JSON.parse(
-      readSource("../components/namScenes/pre-precision-drive.scene.json"),
-    ) as {
-      controls: Array<{ paramId?: string; kind: string }>;
-    };
+    const designSource = readSource("../components/NAMRackDesignPort.tsx");
 
     expect(panelSource).toContain("precisionDriveGate: 0");
     expect(panelSource).toContain('"precisionDriveGate", "precisionDriveDrive"');
     expect(bridgeSource).toContain(
       'param("precisionDriveGate", "PD Gate", 0, 0, 1, "", "drive")',
     );
-    expect(registrySource).toContain('paramId: "precisionDriveGate"');
-    expect(scene.controls).toContainEqual(
-      expect.objectContaining({
-        paramId: "precisionDriveGate",
-        kind: "knob",
-      }),
-    );
+    expect(designSource).toContain('paramId="precisionDriveGate"');
+    expect(designSource).toContain('semanticLabel="Drive Gate"');
   });
 });

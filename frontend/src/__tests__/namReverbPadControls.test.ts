@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { createNAMBootSchema } from "../components/BuiltInPluginPanel";
 import { NAM_POST_FX_FACEPLATE_LAYOUT } from "../components/NAMRackDesignPort";
 import { NAM_RACK_REVERB_ADVANCED_CONTROL_GROUPS } from "../components/NAMRackMixer";
-import { deviceSkinForModule } from "../components/NAMRackNeuralSkinRegistry";
 import {
   isCurrentNAMRackPresetState,
   migrateLegacyNAMRackPresetDspState,
@@ -117,28 +116,8 @@ describe("NAM Rack dedicated Reverb PAD frontend", () => {
     expect(reverb).not.toContain("Pad intensity");
   });
 
-  it("keeps scene, skin, module-copy/reset, and factory preset surfaces synchronized", () => {
+  it("keeps module-copy/reset and factory preset surfaces synchronized", () => {
     const panel = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
-    const registry = readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8");
-    const sceneGraph = readFileSync(new URL("../components/NAMRackSceneGraph.tsx", import.meta.url), "utf8");
-    const scene = JSON.parse(readFileSync(
-      new URL("../components/namScenes/post-reverb.scene.json", import.meta.url),
-      "utf8",
-    )) as { controls: Array<Record<string, unknown>>; composition: { requiredModules: string[] } };
-
-    const pad = scene.controls.find(({ paramId }) => paramId === "reverbPad");
-    const engage = scene.controls.find(({ paramId }) => paramId === "reverbEnabled");
-    expect(pad).toMatchObject({ id: "reverb-pad", kind: "switch", x: 245, y: 920, width: 72, height: 72, label: "Pad" });
-    expect(engage).toMatchObject({ id: "reverb-engage", kind: "footswitch", x: 475, y: 920, label: "Engage" });
-    expect(scene.controls.filter(({ kind }) => kind === "footswitch")).toHaveLength(1);
-    expect(scene.composition.requiredModules).toContain("Pad");
-    expect(registry).toContain('{ id: "reverb-pad", paramId: "reverbPad", kind: "switch"');
-    expect(sceneGraph).toContain('if (control.kind === "switch") return <SceneSwitch');
-    expect(sceneGraph).toContain("control.label?.toUpperCase()");
-
-    const skin = deviceSkinForModule("reverb");
-    expect(skin?.controls.find(({ paramId }) => paramId === "reverbPad")).toMatchObject({ kind: "switch", label: "Pad" });
-    expect(skin?.controls.filter(({ kind }) => kind === "footswitch")).toHaveLength(1);
 
     const moduleMapStart = panel.indexOf("function moduleParamIds");
     const moduleMapEnd = panel.indexOf("function normalizeRackModuleCopy", moduleMapStart);

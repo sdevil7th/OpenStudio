@@ -5,6 +5,7 @@
 #include "CLAPPluginFormat.h"
 #include "MainComponent.h"
 #include "MixerWindowManager.h"
+#include "NAMModelSafety.h"
 #include "PluginManager.h"
 
 #include "NAM/container.h"
@@ -367,7 +368,108 @@ int runHeadlessNAMModelProbe(const juce::File& modelFile,
     }
     addHarnessCheck(checks, "model_file_exists", "pass", "NAM model file exists.", modelFile.getFullPathName());
 
-    const auto parsed = juce::JSON::parse(modelFile.loadFileAsString());
+    const auto modelFileSize = modelFile.getSize();
+    const bool boundedModelSize = modelFileSize > 0
+        && modelFileSize
+            <= OpenStudioNAMModelSafety::maximumFileBytes;
+    addHarnessCheck(checks,
+                    "model_file_size_bounded",
+                    boundedModelSize ? "pass" : "fail",
+                    "The isolated probe rejects empty or oversized NAM JSON before allocating it.",
+                    juce::String(modelFileSize));
+    if (! boundedModelSize)
+        return finish(false, modelFileSize <= 0
+            ? juce::String("NAM model file is empty.")
+            : juce::String("NAM model file exceeds the ")
+                + OpenStudioNAMModelSafety::maximumFileDescription
+                + " safety limit.");
+
+    juce::FileInputStream modelInput(modelFile);
+    std::array<char, 4096> modelPrefix {};
+    const auto prefixBytes = modelInput.openedOk()
+        ? modelInput.read(modelPrefix.data(), static_cast<int>(modelPrefix.size()))
+        : 0;
+    int prefixOffset = 0;
+    if (prefixBytes >= 3
+        && static_cast<unsigned char>(modelPrefix[0]) == 0xef
+        && static_cast<unsigned char>(modelPrefix[1]) == 0xbb
+        && static_cast<unsigned char>(modelPrefix[2]) == 0xbf)
+    {
+        prefixOffset = 3;
+    }
+    while (prefixOffset < prefixBytes
+           && juce::CharacterFunctions::isWhitespace(
+               static_cast<juce::juce_wchar>(
+                   static_cast<unsigned char>(modelPrefix[static_cast<size_t>(prefixOffset)]))))
+    {
+        ++prefixOffset;
+    }
+    const bool jsonObjectEnvelope = prefixOffset < prefixBytes
+        && modelPrefix[static_cast<size_t>(prefixOffset)] == '{';
+    addHarnessCheck(checks,
+                    "model_json_object_envelope",
+                    jsonObjectEnvelope ? "pass" : "fail",
+                    "The isolated probe requires a JSON object envelope before full parsing.");
+    if (! jsonObjectEnvelope)
+        return finish(false, "Invalid NAM model file envelope.");
+
+    juce::String modelText;
+    try
+    {
+        juce::FileInputStream boundedInput(modelFile);
+        const auto boundedLength = boundedInput.openedOk()
+            ? boundedInput.getTotalLength()
+            : 0;
+        if (boundedLength <= 0
+            || boundedLength
+                > OpenStudioNAMModelSafety::maximumFileBytes)
+        {
+            return finish(false,
+                "NAM model file changed before isolated parsing.");
+        }
+
+        juce::MemoryBlock modelBytes(
+            static_cast<size_t>(boundedLength));
+        juce::int64 totalRead = 0;
+        while (totalRead < boundedLength)
+        {
+            const int requested = static_cast<int>(
+                juce::jmin<juce::int64>(
+                    boundedLength - totalRead,
+                    1024 * 1024));
+            const int count = boundedInput.read(
+                static_cast<char*>(modelBytes.getData())
+                    + static_cast<size_t>(totalRead),
+                requested);
+            if (count <= 0)
+                break;
+            totalRead += count;
+        }
+        char unexpectedByte = 0;
+        if (totalRead != boundedLength
+            || boundedInput.read(&unexpectedByte, 1) > 0)
+        {
+            return finish(false,
+                "NAM model file changed during isolated parsing.");
+        }
+        modelText = juce::String::fromUTF8(
+            static_cast<const char*>(modelBytes.getData()),
+            static_cast<int>(modelBytes.getSize()));
+    }
+    catch (const std::exception& ex)
+    {
+        return finish(false,
+            "Could not allocate bounded NAM model input: "
+                + juce::String(ex.what()));
+    }
+    catch (...)
+    {
+        return finish(false,
+            "Could not allocate bounded NAM model input.");
+    }
+
+    const auto parsed = juce::JSON::parse(modelText);
+    modelText.clear();
     if (! parsed.isObject()
         || ! parsed.hasProperty("version")
         || ! parsed.hasProperty("architecture")
@@ -802,6 +904,37 @@ int runHeadlessPitchRegressionJob(AudioEngine& audioEngine, const juce::String& 
 int runHeadlessAutomatedRegressionSuite(AudioEngine& audioEngine, const juce::File& reportFile)
 {
     auto result = audioEngine.runAutomatedRegressionSuite();
+    const auto catalogRegression =
+        MainComponent::runNAMCatalogNativeRegression();
+    const bool catalogPass = catalogRegression.isObject()
+        && catalogRegression.getProperty(
+               "objectiveGateStatus", {}).toString() == "pass";
+    if (auto* resultObject = result.getDynamicObject())
+    {
+        auto suitesValue = resultObject->getProperty("suites");
+        if (auto* suites = suitesValue.getArray())
+        {
+            juce::DynamicObject::Ptr suite = new juce::DynamicObject();
+            suite->setProperty("id", "nam_catalog_native_fixture");
+            suite->setProperty("pass", catalogPass);
+            suite->setProperty(
+                "detail",
+                catalogPass
+                    ? juce::String(
+                        "Native catalog model-cache, duplicate-row, Retry-After, and credential-generation checks passed.")
+                    : juce::String(
+                        "One or more native NAM catalog or credential-generation checks failed."));
+            suite->setProperty("diagnostics", catalogRegression);
+            suites->add(juce::var(suite.get()));
+            resultObject->setProperty("suites", suitesValue);
+        }
+        const bool enginePass = static_cast<bool>(
+            resultObject->getProperty("overallPass"));
+        resultObject->setProperty(
+            "overallPass", enginePass && catalogPass);
+        resultObject->setProperty(
+            "namCatalogNativeRegression", catalogRegression);
+    }
     const bool wroteReport = writeHeadlessResult(reportFile, result);
     const bool overallPass = result.isObject()
         && static_cast<bool>(result.getProperty("overallPass", false));
@@ -830,6 +963,39 @@ int runHeadlessCleanGuitarRegression(AudioEngine& audioEngine, const juce::File&
 int runHeadlessNAMRackRegression(AudioEngine& audioEngine, const juce::File& reportFile)
 {
     auto result = audioEngine.runNAMRackRegression();
+    const auto catalogRegression =
+        MainComponent::runNAMCatalogNativeRegression();
+    const bool catalogPass = catalogRegression.isObject()
+        && catalogRegression.getProperty(
+               "objectiveGateStatus", {}).toString() == "pass";
+    if (auto* resultObject = result.getDynamicObject())
+    {
+        auto checksValue = resultObject->getProperty("checks");
+        if (auto* checks = checksValue.getArray())
+        {
+            juce::DynamicObject::Ptr check = new juce::DynamicObject();
+            check->setProperty(
+                "id", "nam_catalog_native_fixture");
+            check->setProperty(
+                "status", catalogPass ? "pass" : "fail");
+            check->setProperty(
+                "detail",
+                "The native packaged catalog must preserve multi-capture model hydration, honor Retry-After, and reject stale credential publication/cleanup decisions.");
+            check->setProperty("value", catalogRegression);
+            checks->add(juce::var(check.get()));
+            resultObject->setProperty("checks", checksValue);
+        }
+        const bool rackPass =
+            resultObject->getProperty(
+                "objectiveGateStatus").toString() == "pass";
+        const bool combinedPass = rackPass && catalogPass;
+        resultObject->setProperty(
+            "objectiveGateStatus", combinedPass ? "pass" : "fail");
+        resultObject->setProperty("success", combinedPass);
+        resultObject->setProperty("done", combinedPass);
+        resultObject->setProperty(
+            "namCatalogNativeRegression", catalogRegression);
+    }
     const bool wroteReport = writeHeadlessResult(reportFile, result);
     const bool pass = result.isObject()
         && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
@@ -875,6 +1041,30 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
+        if (commandLineHasFlag(
+                commandLine,
+                "--nam-library-manifest-writer-child"))
+        {
+           #if JUCE_WINDOWS
+            ::SetPriorityClass(
+                ::GetCurrentProcess(),
+                BELOW_NORMAL_PRIORITY_CLASS);
+           #endif
+            const auto exitCode =
+                MainComponent::runNAMLibraryManifestWriterRegressionChild(
+                    juce::File(getCommandLineOptionValue(
+                        commandLine, "--manifest")),
+                    getCommandLineOptionValue(
+                        commandLine, "--writer-id"),
+                    juce::File(getCommandLineOptionValue(
+                        commandLine, "--ready")),
+                    juce::File(getCommandLineOptionValue(
+                        commandLine, "--start")));
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
         const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
@@ -1132,7 +1322,9 @@ public:
 
         audioEngine->setPluginWindowShortcutForwardCallback([](const juce::var& payload)
         {
-            MainComponent::broadcastEventToAll("nativeGlobalShortcut", payload);
+            MainComponent::broadcastEventToRole(MainComponent::WindowRole::main,
+                                                "nativeGlobalShortcut",
+                                                payload);
         });
 
         juce::Logger::writeToLog("MainWindow Created.");
@@ -1252,6 +1444,15 @@ public:
                 component->requestFrontendAppClose();
             else
                 juce::JUCEApplication::getInstance()->systemRequestedQuit();
+        }
+
+        void activeWindowStatusChanged() override
+        {
+            juce::DocumentWindow::activeWindowStatusChanged();
+
+            if (isActiveWindow())
+                if (auto* component = getMainComponent())
+                    component->requestEmbeddedBrowserFocus();
         }
 
         MainComponent* getMainComponent() const

@@ -10,6 +10,8 @@ import {
   type CustomShortcutMap,
 } from "../utils/customShortcutProfiles";
 
+const INPUT_PROFILE_SETTINGS_KEY = "openstudio.inputProfiles.v1";
+
 describe("custom keyboard profile store", () => {
   let storage: Storage;
   let previousState: Pick<
@@ -102,6 +104,28 @@ describe("custom keyboard profile store", () => {
     expect(useDAWStore.getState().deleteCustomKeyboardProfile(firstId)).toBe(true);
     expect(useDAWStore.getState().activeCustomKeyboardProfileId).toBeNull();
     expect(useDAWStore.getState().customShortcuts).toEqual({});
+  });
+
+  it("switches from a custom overlay to a built-in keyboard profile as one transaction", () => {
+    const profileId = useDAWStore.getState().createCustomKeyboardProfile("Editing", "cubase");
+    expect(profileId).toBeTruthy();
+    useDAWStore.getState().addCustomShortcutBinding("edit.copy", "F8");
+
+    useDAWStore.getState().setKeyboardShortcutProfile("pro_tools");
+
+    expect(useDAWStore.getState()).toMatchObject({
+      keyboardShortcutProfileId: "pro_tools",
+      activeCustomKeyboardProfileId: null,
+      customShortcuts: {},
+    });
+    expect(JSON.parse(storage.getItem(INPUT_PROFILE_SETTINGS_KEY) ?? "{}")).toMatchObject({
+      schemaVersion: 1,
+      keyboardProfileId: "pro_tools",
+    });
+    expect(JSON.parse(storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY) ?? "{}")).toMatchObject({
+      schemaVersion: 2,
+      activeProfileId: null,
+    });
   });
 
   it("exports and imports a validated profile with a fresh ID and preserves independent mouse choice", () => {
@@ -252,6 +276,8 @@ describe("custom keyboard profile store", () => {
     const profilesBefore = before.customKeyboardProfiles;
     const shortcutsBefore = before.customShortcuts;
     const activeBefore = before.activeCustomKeyboardProfileId;
+    const keyboardBefore = before.keyboardShortcutProfileId;
+    const persistedInputBefore = storage.getItem(INPUT_PROFILE_SETTINGS_KEY);
     const persistedBefore = storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY);
     vi.spyOn(storage, "setItem").mockImplementation(() => {
       throw new Error("quota exceeded");
@@ -270,9 +296,94 @@ describe("custom keyboard profile store", () => {
       customKeyboardProfiles: profilesBefore,
       customShortcuts: shortcutsBefore,
       activeCustomKeyboardProfileId: activeBefore,
+      keyboardShortcutProfileId: keyboardBefore,
     });
     expect(useDAWStore.getState().customKeyboardProfiles).toBe(profilesBefore);
     expect(useDAWStore.getState().customShortcuts).toBe(shortcutsBefore);
+    expect(storage.getItem(INPUT_PROFILE_SETTINGS_KEY)).toBe(persistedInputBefore);
     expect(storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY)).toBe(persistedBefore);
+  });
+
+  it("rolls back both persistence records when the second profile write exceeds quota", () => {
+    const firstId = useDAWStore.getState().createCustomKeyboardProfile("First", "cubase");
+    const secondId = useDAWStore.getState().createCustomKeyboardProfile("Second", "reaper");
+    expect(firstId).toBeTruthy();
+    expect(secondId).toBeTruthy();
+    if (!firstId || !secondId) return;
+    expect(useDAWStore.getState().activateCustomKeyboardProfile(firstId)).toBe(true);
+    const serialized = useDAWStore.getState().exportActiveCustomKeyboardProfile();
+    expect(serialized).toBeTruthy();
+
+    const attempts: Array<{
+      name: string;
+      invoke: () => unknown;
+      assertRejected: (result: unknown) => void;
+    }> = [
+      {
+        name: "create",
+        invoke: () => useDAWStore.getState().createCustomKeyboardProfile("Rejected create"),
+        assertRejected: (result) => expect(result).toBeNull(),
+      },
+      {
+        name: "duplicate",
+        invoke: () => useDAWStore.getState().duplicateKeyboardProfile("Rejected duplicate"),
+        assertRejected: (result) => expect(result).toBeNull(),
+      },
+      {
+        name: "activate",
+        invoke: () => useDAWStore.getState().activateCustomKeyboardProfile(secondId),
+        assertRejected: (result) => expect(result).toBe(false),
+      },
+      {
+        name: "deactivate",
+        invoke: () => useDAWStore.getState().activateCustomKeyboardProfile(null),
+        assertRejected: (result) => expect(result).toBe(false),
+      },
+      {
+        name: "select built-in",
+        invoke: () => useDAWStore.getState().setKeyboardShortcutProfile("pro_tools"),
+        assertRejected: (result) => expect(result).toBeUndefined(),
+      },
+      {
+        name: "delete active",
+        invoke: () => useDAWStore.getState().deleteCustomKeyboardProfile(firstId),
+        assertRejected: (result) => expect(result).toBe(false),
+      },
+      {
+        name: "import",
+        invoke: () => useDAWStore.getState().importCustomKeyboardProfile(serialized ?? ""),
+        assertRejected: (result) => expect(result).toMatchObject({ success: false }),
+      },
+    ];
+
+    for (const attempt of attempts) {
+      const before = useDAWStore.getState();
+      const profilesBefore = before.customKeyboardProfiles;
+      const shortcutsBefore = before.customShortcuts;
+      const activeBefore = before.activeCustomKeyboardProfileId;
+      const keyboardBefore = before.keyboardShortcutProfileId;
+      const persistedInputBefore = storage.getItem(INPUT_PROFILE_SETTINGS_KEY);
+      const persistedProfilesBefore = storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY);
+      const realSetItem = storage.setItem.bind(storage);
+      const setItemSpy = vi.spyOn(storage, "setItem").mockImplementation((key, value) => {
+        if (key === CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY) {
+          throw new DOMException(`${attempt.name} quota exceeded`, "QuotaExceededError");
+        }
+        realSetItem(key, value);
+      });
+
+      const result = attempt.invoke();
+      attempt.assertRejected(result);
+      setItemSpy.mockRestore();
+
+      expect(useDAWStore.getState().customKeyboardProfiles).toBe(profilesBefore);
+      expect(useDAWStore.getState().customShortcuts).toBe(shortcutsBefore);
+      expect(useDAWStore.getState()).toMatchObject({
+        activeCustomKeyboardProfileId: activeBefore,
+        keyboardShortcutProfileId: keyboardBefore,
+      });
+      expect(storage.getItem(INPUT_PROFILE_SETTINGS_KEY)).toBe(persistedInputBefore);
+      expect(storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY)).toBe(persistedProfilesBefore);
+    }
   });
 });

@@ -8,6 +8,7 @@ import { buildTrackRenameChanges } from "../../utils/trackRename";
 import { buildTrackFolderGroupPlan } from "../../utils/trackFolderGrouping";
 import { notifyInstrumentChanged } from "../../utils/fxChain";
 import { isClipEditLocked } from "../../utils/clipEditLock";
+import { markTrackMonitorUserMutation } from "../../utils/trackMonitorOwnership";
 import {
   getLinkedTrackIds,
   _linkingInProgress,
@@ -32,6 +33,20 @@ interface TrackVolumeBatchEdit {
 
 let activeTrackVolumeBatchEdit: TrackVolumeBatchEdit | null = null;
 
+// Monitoring is shared by user commands and temporary NAM audition leases.
+// Serialize every native/UI monitor mutation so rapid clicks, shortcut repeats,
+// and preview start/stop cannot all compute from the same stale track state.
+let trackMonitorMutationTail: Promise<void> = Promise.resolve();
+
+function enqueueTrackMonitorMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const result = trackMonitorMutationTail.then(mutation, mutation);
+  trackMonitorMutationTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 const trackReorderEditSnapshots = new Map<string, string[]>();
 const clipVolumeEditModifiedSnapshots = new Map<string, boolean>();
 
@@ -40,7 +55,6 @@ type BatchTrackBooleanField =
   | "soloed"
   | "armed"
   | "fxBypassed"
-  | "monitorEnabled"
   | "phaseInverted";
 
 interface TrackBooleanBatchOptions {
@@ -117,6 +131,106 @@ function executeSelectedTrackBooleanBatch(
   options.afterExecute?.(newStates);
   set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
   return true;
+}
+
+async function executeSelectedTrackMonitorBatchNow(
+  set: SetFn,
+  get: GetFn,
+): Promise<boolean> {
+  const state = get();
+  const roots = selectedExistingTrackIds(state);
+  if (roots.length === 0) return false;
+
+  const oldStates = new Map<string, boolean>();
+  const newStates = new Map<string, boolean>();
+  const claimedIds = new Set<string>();
+  for (const rootId of roots) {
+    if (claimedIds.has(rootId)) continue;
+    const root = state.tracks.find((track: any) => track.id === rootId);
+    if (!root) continue;
+    const nextValue = !Boolean(root.monitorEnabled);
+    for (const trackId of [rootId]) {
+      if (claimedIds.has(trackId)) continue;
+      const track = state.tracks.find((candidate: any) => candidate.id === trackId);
+      if (!track) continue;
+      claimedIds.add(trackId);
+      oldStates.set(trackId, Boolean(track.monitorEnabled));
+      newStates.set(trackId, nextValue);
+    }
+  }
+  if (newStates.size === 0) return false;
+
+  const applyAcceptedStates = async (
+    values: ReadonlyMap<string, boolean>,
+    rollbackValues: ReadonlyMap<string, boolean>,
+  ): Promise<boolean> => {
+    const acceptedTrackIds: string[] = [];
+    try {
+      for (const [trackId, monitorEnabled] of values) {
+        const accepted = await nativeBridge.setTrackInputMonitoring(trackId, monitorEnabled);
+        if (!accepted) {
+          throw new Error(
+            `Native track monitoring rejected ${monitorEnabled ? "enable" : "disable"} for ${trackId}`,
+          );
+        }
+        acceptedTrackIds.push(trackId);
+      }
+    } catch (error) {
+      for (const trackId of acceptedTrackIds.reverse()) {
+        const rollbackValue = rollbackValues.get(trackId);
+        if (rollbackValue === undefined) continue;
+        try {
+          const rolledBack = await nativeBridge.setTrackInputMonitoring(trackId, rollbackValue);
+          if (!rolledBack) {
+            console.error(`[tracks] Native track monitoring rollback was rejected for ${trackId}`);
+          }
+        } catch (rollbackError) {
+          console.error(`[tracks] Native track monitoring rollback failed for ${trackId}`, rollbackError);
+        }
+      }
+      console.error("[tracks] Selected track monitoring transaction failed", error);
+      return false;
+    }
+
+    for (const trackId of values.keys()) markTrackMonitorUserMutation(trackId);
+    set((current: any) => ({
+      tracks: current.tracks.map((track: any) => values.has(track.id)
+        ? { ...track, monitorEnabled: values.get(track.id) }
+        : track),
+      isModified: true,
+    }));
+    return true;
+  };
+
+  if (!await applyAcceptedStates(newStates, oldStates)) {
+    get().showToast("Track monitoring was not changed because the audio engine rejected part of the selection.", "error");
+    return false;
+  }
+
+  commandManager.push({
+    type: "TOGGLE_SELECTED_TRACKS_MONITOR",
+    description: "Toggle selected track input monitoring",
+    timestamp: Date.now(),
+    execute: () => {
+      void enqueueTrackMonitorMutation(() => applyAcceptedStates(newStates, oldStates)).then((accepted) => {
+        if (!accepted) get().showToast("Could not redo the selected track monitoring change.", "error");
+      });
+    },
+    undo: () => {
+      void enqueueTrackMonitorMutation(() => applyAcceptedStates(oldStates, newStates)).then((accepted) => {
+        if (!accepted) get().showToast("Could not undo the selected track monitoring change.", "error");
+      });
+    },
+  });
+  set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+  return true;
+}
+
+function executeSelectedTrackMonitorBatch(
+  set: SetFn,
+  get: GetFn,
+): Promise<boolean> {
+  return enqueueTrackMonitorMutation(() => executeSelectedTrackMonitorBatchNow(set, get));
 }
 
 function applyClipVolumeValue(
@@ -2796,20 +2910,27 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
-    toggleTrackMonitor: async (id) => {
+    toggleTrackMonitor: (id) => enqueueTrackMonitorMutation(async () => {
       const state = get();
       const track = state.tracks.find((t) => t.id === id);
       if (!track) return;
 
       const newMonitor = !track.monitorEnabled;
       const applyMonitor = async (monitorEnabled: boolean) => {
+        const applied = await nativeBridge.setTrackInputMonitoring(id, monitorEnabled);
+        if (!applied) {
+          throw new Error(`Native track monitoring rejected ${monitorEnabled ? "enable" : "disable"}`);
+        }
+        // A failed user request must not steal ownership from an active NAM
+        // preview lease. Commit the user revision only after native accepted
+        // the requested state.
+        markTrackMonitorUserMutation(id);
         set((s) => ({
           tracks: s.tracks.map((candidate) =>
             candidate.id === id ? { ...candidate, monitorEnabled } : candidate,
           ),
           isModified: true,
         }));
-        await nativeBridge.setTrackInputMonitoring(id, monitorEnabled).catch(logBridgeError("track monitoring"));
       };
 
       await applyMonitor(newMonitor);
@@ -2818,14 +2939,31 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         description: newMonitor ? "Enable track monitoring" : "Disable track monitoring",
         timestamp: Date.now(),
         execute: () => {
-          void applyMonitor(newMonitor).catch(logBridgeError("redo track monitoring"));
+          void enqueueTrackMonitorMutation(() => applyMonitor(newMonitor))
+            .catch(logBridgeError("redo track monitoring"));
         },
         undo: () => {
-          void applyMonitor(track.monitorEnabled).catch(logBridgeError("undo track monitoring"));
+          void enqueueTrackMonitorMutation(() => applyMonitor(track.monitorEnabled))
+            .catch(logBridgeError("undo track monitoring"));
         },
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
-    },
+    }),
+
+    setTrackMonitorTransient: (id, monitorEnabled) => enqueueTrackMonitorMutation(async () => {
+      const track = get().tracks.find((candidate) => candidate.id === id);
+      if (!track) return false;
+      if (track.monitorEnabled === monitorEnabled) return true;
+
+      const applied = await nativeBridge.setTrackInputMonitoring(id, monitorEnabled);
+      if (!applied) return false;
+      set((state) => ({
+        tracks: state.tracks.map((candidate) =>
+          candidate.id === id ? { ...candidate, monitorEnabled } : candidate,
+        ),
+      }));
+      return true;
+    }),
 
     toggleSelectedTracksMute: () => executeSelectedTrackBooleanBatch(set, get, {
       field: "muted",
@@ -2892,15 +3030,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       },
     }),
 
-    toggleSelectedTracksMonitor: () => executeSelectedTrackBooleanBatch(set, get, {
-      field: "monitorEnabled",
-      type: "TOGGLE_SELECTED_TRACKS_MONITOR",
-      description: "Toggle selected track input monitoring",
-      sync: (track, monitorEnabled) => {
-        void nativeBridge.setTrackInputMonitoring(track.id, monitorEnabled)
-          .catch(logBridgeError("selected track monitoring"));
-      },
-    }),
+    toggleSelectedTracksMonitor: () => executeSelectedTrackMonitorBatch(set, get),
 
     toggleSelectedTracksPhaseInvert: () => executeSelectedTrackBooleanBatch(set, get, {
       field: "phaseInverted",

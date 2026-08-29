@@ -25,6 +25,7 @@ sudo apt-get install -y \
     libfreetype6-dev \
     libfontconfig1-dev \
     libcurl4-openssl-dev \
+    libsecret-tools \
     \
     libx11-dev \
     libxext-dev \

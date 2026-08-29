@@ -131,7 +131,7 @@ Ratings:
 | Real-time auto-tune style pitch corrector plugin | H | H |
 | Pitch editor undo/redo and A/B style comparison state | M | M |
 | Transient detection and silent-region detection | M | M |
-| Polyphonic pitch detection and MIDI extraction via Basic Pitch / ONNX | H | H |
+| Polyphonic pitch detection and MIDI extraction via Basic Pitch / ONNX (ONNX-enabled builds; current Windows/Linux release pipeline) | H | H |
 | Stem-aware / AI-adjacent audio analysis plumbing | M | H |
 
 ## Rendering / Export / Interchange
@@ -139,7 +139,7 @@ Ratings:
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Offline project render through the same playback/FX engine | H | H |
-| Render formats: WAV, AIFF, FLAC, MP3, OGG | H | H |
+| Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux) | H | H |
 | Render options: sample rate, bit depth/quality, mono/stereo, normalize, tail | H | M |
 | Dithered render path | M | H |
 | Master and per-track stem render paths, plus region/razor range orchestration | H | H |
@@ -242,7 +242,7 @@ These have real code surfaces, but should not be counted as fully delivered DAW 
 | Online render | The current render-dialog control is a disabled UI placeholder |
 | Specialist delivery workflows | Region matrix, DDP, batch conversion, immersive delivery, broadcast metadata, and CD-mastering behavior need focused release smoke/hardware validation before strong public claims |
 | External sync and control surfaces | MTC, MIDI clock, OSC, and MCU-style paths need release validation with real devices |
-| Video | FFmpeg-backed plumbing exists, but this is not a mature post-production video suite |
+| Video | FFmpeg-backed plumbing exists, but this is not a mature post-production video suite; FFmpeg is bundled on Windows and is an optional system dependency on macOS/Linux |
 | Surround/immersive delivery | Channel-layout and VBAP paths exist; dedicated workflow and hardware validation remain open |
 | AI generation availability and quality | Optional runtime, model licenses, local hardware, RAM/VRAM, and user audition determine availability and results; large generation models are not bundled with the core app |
 | Subjective audio quality | Pitch, formant, stem, generation, and NAM tone/artifact claims require audition; automated diagnostics alone are not acceptance evidence |

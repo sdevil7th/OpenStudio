@@ -35,14 +35,14 @@ Use this flow instead:
    - If runtime inputs did not change, keep `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and `OPENSTUDIO_AI_RUNTIME_VERSION` pinned to the latest known-good runtime release.
    - If runtime inputs changed, publish the runtime first with `.github/workflows/ai-runtime-release.yml`, then update those variables to the new runtime release tag/version.
 6. Push a version tag like `v0.0.2`.
-7. Let `.github/workflows/release.yml` build Windows and macOS, reuse the pinned AI runtime release, publish the GitHub Release, attach the fixed-name assets, and then trigger the website repo so it can publish the public metadata and redirects.
+7. Let `.github/workflows/release.yml` build Windows, macOS, and Linux, reuse the pinned AI runtime release, publish the GitHub Release, attach the release assets, and then trigger the website repo so it can publish the public metadata and redirects.
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Linux.AppImage`
+   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-linux-x86_64.AppImage`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
-   - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-AI-Runtime-macos-arm64.zip`
-   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-x64.tar.gz`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-macos-arm64.zip`
+   - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-cpu-x64.zip`
 9. Verify the website repo finishes its deploy and the public metadata/redirect URLs on `openstudio.org.in` return JSON/XML/302 responses instead of the SPA HTML shell.
 
 The stable installer/runtime filenames are part of the public download contract. The website repo is now the only publisher of public metadata and redirects.
@@ -59,11 +59,23 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - Official Windows CI and release builds also provision the pinned Windows prerequisite installers used by the installer recovery flow.
 - To install the pinned optional ONNX Runtime package locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
+  The installer records and verifies the requested version, platform, archive
+  digest, import library, runtime DLL, headers, and redistributed notices before
+  reusing an existing local installation.
 - To install the pinned ASIO SDK locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
 - To install the pinned Windows prerequisite installers locally, run:
   `powershell -ExecutionPolicy Bypass -File tools/setup-windows-prereqs.ps1`
-- To include ONNX Runtime in the Windows GitHub Actions build, set the repository variable `OPENSTUDIO_SETUP_ONNXRUNTIME=true`.
+- Official Windows and Linux CI/release jobs provision the pinned ONNX Runtime
+  and validate its redistributed license notices. The current macOS release job
+  does not provision ONNX Runtime.
+- Windows packages include one checksum-pinned, provenance-recorded FFmpeg
+  executable. macOS and Linux packages intentionally do not redistribute an
+  unpinned FFmpeg binary and use an optional system `ffmpeg` on `PATH`.
+- Windows configuration and runtime validation fail if the pinned FFmpeg
+  executable or its required legal/provenance files are absent or altered.
+- Linux release automation extracts the completed AppImage and reruns the
+  runtime-bundle contract against its packaged `usr/bin` payload.
 
 ## Dependency contract
 
@@ -77,6 +89,16 @@ OpenStudio now follows the policy documented in `docs/runtime-dependency-contrac
 
 ## Release decision rules
 
+- Do not publish a Windows artifact containing the bundled `ffmpeg.exe` until
+  complete corresponding source for that exact static build (including its
+  linked libraries) is made available through the release distribution. The
+  packaged GPL text and provenance manifest are necessary notices, but are not
+  a substitute for corresponding source.
+- Configure repository variables `OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_URL`
+  and `OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_SHA256` with an HTTPS archive and
+  digest for that exact complete source package. Release automation downloads,
+  verifies, checksums, and publishes it beside the Windows installer; missing
+  or mismatched configuration blocks the release.
 - A passing `--startup-self-test` proves dependency and asset preflight, not a
   rendered UI. The packaged main shell, detached Mixer, detached MIDI editor,
   and built-in effect editor must each report `boot-ready` through close/reopen
@@ -121,7 +143,7 @@ If you want one command for the full guarded Windows path, use:
 
 1. Build the frontend: `cd frontend && npm ci && npm run build`
 2. Install the ASIO SDK when you want parity with the official Windows release path: `powershell -ExecutionPolicy Bypass -File tools/setup-asio-sdk.ps1`
-3. Optional: install ONNX Runtime for polyphonic pitch detection: `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
+3. Install ONNX Runtime for parity with the official Windows release and polyphonic pitch detection: `powershell -ExecutionPolicy Bypass -File tools/setup-onnxruntime.ps1`
 4. Build the app in a clean release directory: `cmake -S . -B build-release-windows -A x64 "-DOPENSTUDIO_APP_VERSION=1.0.0" "-DJUCE_ASIOSDK_PATH=thirdparty/asio" "-DOPENSTUDIO_REQUIRE_ASIO=ON" "-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF" -DFETCHCONTENT_UPDATES_DISCONNECTED=ON`
 5. Build the release target: `cmake --build build-release-windows --config Release --target OpenStudio`
 6. Validate the runtime bundle: `./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath build-release-windows/OpenStudio_artefacts/Release -ExpectedVersion 1.0.0 -EnforceLeanBundle`
@@ -197,7 +219,12 @@ The default base app no longer bundles the optional stem-separation Python runti
 
 ## Secrets expected by GitHub Actions
 
-For the current release path, the only non-signing secret required for public metadata publishing is the cross-repo website dispatch token. If you want Doppler-backed secret loading, add `DOPPLER_TOKEN` as the single bootstrap secret in GitHub Actions. The signing/notarization secrets below stay optional unless you decide to enable trusted distribution later.
+For the current release path, `OPENSTUDIO_WEBSITE_DISPATCH_TOKEN` must be set
+directly as a GitHub Actions secret because the publish job intentionally does
+not receive Doppler credentials. `DOPPLER_TOKEN` is an optional bootstrap for
+the allowlisted build/signing values used inside their specific build steps; it
+does not replace the website dispatch secret. Signing/notarization secrets stay
+optional unless you decide to enable trusted distribution later.
 
 - `MACOS_CODESIGN_IDENTITY`
 - `MACOS_CERTIFICATE_BASE64`

@@ -6,17 +6,13 @@ export type NAMDesignBodyAssetId =
   | "amp-head-body-v5"
   | "cabinet-body"
   | "cab-room-integrated-body"
-  | "expression-body"
   | "graphic-eq-body-v6"
   | "ir-shaper-panel-body"
   | "mic-panel-body"
-  | "rack-unit-body"
-  | "rack-unit-body-deep"
   | "stompbox-body-blue"
   | "stompbox-body-blue-wide"
   | "stompbox-body-dark"
   | "stompbox-body-dark-wide"
-  | "stompbox-body-navy"
   | "stompbox-body-olive"
   | "stompbox-body-red"
   | "stompbox-body-red-wide"
@@ -129,17 +125,13 @@ export const NAM_DESIGN_BODY_ASSETS = {
   "amp-head-body-v5": body("amp-head-body-v5", "amp-head-body-v5.webp", 2160, 1035),
   "cabinet-body": body("cabinet-body", "cabinet-body.webp", 1328, 888),
   "cab-room-integrated-body": body("cab-room-integrated-body", "cab-room-integrated-body.webp", 1634, 962),
-  "expression-body": body("expression-body", "expression-body.webp", 582, 1485),
   "graphic-eq-body-v6": body("graphic-eq-body-v6", "graphic-eq-body-v6.webp", 2160, 720),
   "ir-shaper-panel-body": body("ir-shaper-panel-body", "ir-shaper-panel-body.webp", 1542, 710),
   "mic-panel-body": body("mic-panel-body", "mic-panel-body.webp", 1542, 710),
-  "rack-unit-body": body("rack-unit-body", "rack-unit-body.webp", 2101, 434),
-  "rack-unit-body-deep": body("rack-unit-body-deep", "rack-unit-body-deep.webp", 2101, 657),
   "stompbox-body-blue": body("stompbox-body-blue", "stompbox-body-blue.webp", 694, 1340),
   "stompbox-body-blue-wide": body("stompbox-body-blue-wide", "stompbox-body-blue-wide.webp", 900, 1340),
   "stompbox-body-dark": body("stompbox-body-dark", "stompbox-body-dark.webp", 694, 1340),
   "stompbox-body-dark-wide": body("stompbox-body-dark-wide", "stompbox-body-dark-wide.webp", 900, 1340),
-  "stompbox-body-navy": body("stompbox-body-navy", "stompbox-body-navy.webp", 694, 1340),
   "stompbox-body-olive": body("stompbox-body-olive", "stompbox-body-olive.webp", 694, 1340),
   "stompbox-body-red": body("stompbox-body-red", "stompbox-body-red.webp", 694, 1340),
   "stompbox-body-red-wide": body("stompbox-body-red-wide", "stompbox-body-red-wide.webp", 900, 1340),
@@ -180,9 +172,6 @@ export const NAM_DESIGN_CONTROL_ASSETS = {
   "toggle-chrome-panel-v4": control("toggle-chrome-panel-v4", "toggle-chrome-panel-v4.webp", 320, 320),
   "washer-chrome-top": control("washer-chrome-top", "washer-chrome-top.webp", 512, 512),
 } as const satisfies Record<NAMDesignControlAssetId, NAMDesignControlAsset>;
-
-export const NAM_REQUIRED_DESIGN_BODY_ASSET_IDS = Object.keys(NAM_DESIGN_BODY_ASSETS) as NAMDesignBodyAssetId[];
-export const NAM_REQUIRED_DESIGN_CONTROL_ASSET_IDS = Object.keys(NAM_DESIGN_CONTROL_ASSETS) as NAMDesignControlAssetId[];
 
 export function getNAMDesignBodyAsset(assetId: NAMDesignBodyAssetId): NAMDesignBodyAsset {
   const asset = NAM_DESIGN_BODY_ASSETS[assetId];

@@ -58,7 +58,6 @@ beforeEach(() => {
     canRedo: false,
   }));
 });
-
 afterEach(() => {
   vi.restoreAllMocks();
   commandManager.clear();
@@ -165,4 +164,3 @@ describe("timeline quantize truthfulness", () => {
     expect(commandManager.getUndoStack()).toHaveLength(0);
   });
 });
-

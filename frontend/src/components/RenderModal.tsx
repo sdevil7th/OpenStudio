@@ -11,6 +11,7 @@ import {
 import { useShallow } from "zustand/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { prepareForManualRender } from "../utils/renderPreparation";
+import { joinNativePath } from "../utils/nativePath";
 import {
   Button,
   Input,
@@ -257,7 +258,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   const getRenderPath = (trackName?: string, index?: number) => {
     const ext = options.format;
     const name = getResolvedFileName(trackName, index);
-    return `${options.directory}\\${name}.${ext}`;
+    return joinNativePath(options.directory, `${name}.${ext}`);
   };
 
   /** Calculate number of files that will be rendered */
@@ -422,7 +423,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           setRenderStatus(`Rendering master mix${range.name ? ` (${range.name})` : ""}...`);
           const masterPath = getRenderPath(undefined, 0);
           const resolvedMaster = range.name
-            ? `${options.directory}\\${resolveWildcards(options.fileName, { projectName, index: 0, ...regionCtx })}.${options.format}`
+            ? joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, index: 0, ...regionCtx })}.${options.format}`)
             : masterPath;
           await doRender({ source: "master", startTime: range.start, endTime: range.end, filePath: resolvedMaster });
           renderedFiles.push(resolvedMaster);
@@ -431,7 +432,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           for (let i = 0; i < tracks.length; i++) {
             const track = tracks[i];
             setRenderStatus(`Rendering stem ${i + 1} of ${tracks.length}: ${track.name}${range.name ? ` (${range.name})` : ""}...`);
-            const stemPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`;
+            const stemPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
             await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: stemPath });
             renderedFiles.push(stemPath);
             advanceProgress();
@@ -446,7 +447,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           for (let i = 0; i < tracksToRender.length; i++) {
             const track = tracksToRender[i];
             setRenderStatus(`Rendering track ${i + 1} of ${tracksToRender.length}: ${track.name}...`);
-            const trackPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`;
+            const trackPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
             await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: trackPath });
             renderedFiles.push(trackPath);
             advanceProgress();
@@ -461,7 +462,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           setRenderStatus(`Rendering ${selectedClipIds.length} selected item(s)${range.name ? ` (${range.name})` : ""}...`);
           // selected_items_master routes through master FX; selected_items renders direct
           const source = options.source === "selected_items_master" ? "master" : "selected_items";
-          const itemPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`;
+          const itemPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
           await doRender({ source, startTime: range.start, endTime: range.end, filePath: itemPath });
           renderedFiles.push(itemPath);
           advanceProgress();
@@ -476,7 +477,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             const razor = razorEdits[i];
             const track = tracks.find((t) => t.id === razor.trackId);
             setRenderStatus(`Rendering razor area ${i + 1} of ${razorEdits.length}...`);
-            const razorPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, trackName: track?.name, index: i + 1 })}.${options.format}`;
+            const razorPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track?.name, index: i + 1 })}.${options.format}`);
             await doRender({ source: `stem:${razor.trackId}`, startTime: razor.start, endTime: razor.end, filePath: razorPath });
             renderedFiles.push(razorPath);
             advanceProgress();
@@ -484,7 +485,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         } else {
           // Master mix render
           setRenderStatus(`Rendering master mix${range.name ? ` (${range.name})` : ""}...`);
-          const masterPath = `${options.directory}\\${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`;
+          const masterPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
           await doRender({ source: options.source, startTime: range.start, endTime: range.end, filePath: masterPath });
           renderedFiles.push(masterPath);
           advanceProgress();

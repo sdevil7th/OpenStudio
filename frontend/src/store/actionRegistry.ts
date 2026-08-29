@@ -1856,7 +1856,7 @@ export function getRegisteredActions(): ActionDef[] {
       if (trackId) void state.consolidateTrack(trackId);
     }},
     { id: "track.toggleSelectedFxBypass", name: "Bypass / Enable Selected Track FX", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer", "plugin"], canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => { s().toggleSelectedTracksFXBypass(); } },
-    { id: "track.toggleSelectedMonitor", name: "Toggle Selected Track Input Monitoring", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => { s().toggleSelectedTracksMonitor(); } },
+    { id: "track.toggleSelectedMonitor", name: "Toggle Selected Track Input Monitoring", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => { void s().toggleSelectedTracksMonitor(); } },
     { id: "track.toggleSelectedAutomationRead", name: "Toggle Selected Track Automation Read", category: "Automation", shortcutScope: "automation", shortcutScopes: ["automation", "track_control_panel", "mixer"], canHandleShortcut: () => canEditAutomationSettings() && selectedTrackIds().some((id) => {
       const track = s().tracks.find((candidate) => candidate.id === id);
       return Boolean(track && (track.automationLanes.length > 0 || track.automationWriteEnabled));

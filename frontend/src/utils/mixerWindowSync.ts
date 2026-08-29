@@ -6,7 +6,7 @@ import {
   type Track,
 } from "../store/useDAWStore";
 import { commandManager } from "../store/commands";
-import { getRegisteredActions } from "../store/actionRegistry";
+import { getRegisteredActions, type ActionDef } from "../store/actionRegistry";
 import {
   extractInputProfileWindowSnapshot,
   parseInputProfileWindowSnapshot,
@@ -67,6 +67,7 @@ let remoteApplyDepth = 0;
 let currentRevision = 0;
 let lastPublishedSignature = "";
 const REMOTE_MIXER_EDIT_IDLE_MS = 180;
+let detachedMainActions: ActionDef[] | null = null;
 
 interface MixerTrackControlState {
   volume: number;
@@ -360,6 +361,73 @@ function getSnapshotSignature(snapshot: MixerUISnapshot): string {
   return JSON.stringify(snapshot);
 }
 
+function getAvailableDetachedMainActionIds(): string[] {
+  // Action definitions are static and their handlers/availability predicates
+  // read current Zustand state when invoked. Cache only the small detached
+  // subset so the 60 fps transport updates do not rebuild the full registry.
+  detachedMainActions ??= getRegisteredActions().filter((action) => (
+    isDetachedMainActionId(action.id)
+  ));
+  return windowRole === "main"
+    ? detachedMainActions.filter((action) => (
+      !action.canHandleShortcut || action.canHandleShortcut()
+    )).map((action) => action.id)
+    : [...getDetachedMainActionAvailability()];
+}
+
+function actionAvailabilityEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length
+    && left.every((actionId, index) => actionId === right[index]);
+}
+
+type MixerStoreState = ReturnType<typeof useDAWStore.getState>;
+type MixerUISyncDependencies = readonly unknown[];
+
+/**
+ * Keep hot runtime state (playhead, meters, automation display values) out of
+ * the retained-window payload path. Detached action availability has its own
+ * lightweight selector below, so future canHandleShortcut dependencies do not
+ * need to be duplicated manually in this list.
+ */
+function selectMixerUISyncDependencies(state: MixerStoreState): MixerUISyncDependencies {
+  return [
+    // State carried by MixerUISnapshot.
+    state.keyboardShortcutProfileId,
+    state.mouseBehaviorProfileId,
+    state.customKeyboardProfiles,
+    state.activeCustomKeyboardProfileId,
+    state.customShortcuts,
+    state.mouseModifiers,
+    state.tracks,
+    state.selectedTrackIds,
+    state.lastSelectedTrackId,
+    state.trackGroups,
+    state.masterVolume,
+    state.masterPan,
+    state.masterFxCount,
+    state.isMasterMuted,
+    state.masterMono,
+    state.masterAutomationLanes,
+    state.showMasterAutomation,
+    state.masterAutomationReadEnabled,
+    state.masterAutomationWriteEnabled,
+    state.masterAutomationEnabled,
+    state.automationWriteBehavior,
+    state.mixerSnapshots,
+    state.showMixer,
+    state.detachedPanels,
+    state.panelPositions,
+  ];
+}
+
+function mixerUISyncDependenciesEqual(
+  left: MixerUISyncDependencies,
+  right: MixerUISyncDependencies,
+): boolean {
+  return left.length === right.length
+    && left.every((value, index) => Object.is(value, right[index]));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -487,12 +555,7 @@ export function extractMixerUISnapshot(state = useDAWStore.getState()): MixerUIS
   return {
     ...extractInputProfileWindowSnapshot(state),
     editBoundaryToken: `${windowId}:${commandManager.getRevision()}`,
-    availableDetachedMainActionIds: windowRole === "main"
-      ? getRegisteredActions().filter((action) => (
-        isDetachedMainActionId(action.id)
-        && (!action.canHandleShortcut || action.canHandleShortcut())
-      )).map((action) => action.id)
-      : [...getDetachedMainActionAvailability()],
+    availableDetachedMainActionIds: getAvailableDetachedMainActionIds(),
     tracks: state.tracks.map(serialiseTrack),
     selectedTrackIds: state.selectedTrackIds,
     lastSelectedTrackId: state.lastSelectedTrackId,
@@ -675,27 +738,38 @@ export async function hydrateMixerUISnapshotFromNative(): Promise<boolean> {
 export function startMixerUISync(): () => void {
   void publishCurrentMixerUISnapshot();
 
+  const publishIfChanged = () => {
+    if (remoteApplyDepth > 0) return;
+
+    const snapshot = extractMixerUISnapshot();
+    const signature = getSnapshotSignature(snapshot);
+    if (signature === lastPublishedSignature) return;
+
+    lastPublishedSignature = signature;
+    currentRevision += 1;
+    void nativeBridge.publishMixerUISnapshot({
+      originWindowId: windowId,
+      revision: currentRevision,
+      payload: snapshot,
+    });
+  };
+
   const unsubscribeStore = useDAWStore.subscribe(
-    (state) => extractMixerUISnapshot(state),
-    (snapshot) => {
-      if (remoteApplyDepth > 0) {
-        return;
-      }
-
-      const signature = getSnapshotSignature(snapshot);
-      if (signature === lastPublishedSignature) {
-        return;
-      }
-
-      lastPublishedSignature = signature;
-      currentRevision += 1;
-      void nativeBridge.publishMixerUISnapshot({
-        originWindowId: windowId,
-        revision: currentRevision,
-        payload: snapshot,
-      });
-    },
+    selectMixerUISyncDependencies,
+    publishIfChanged,
+    { equalityFn: mixerUISyncDependenciesEqual },
   );
+
+  // This selector may run for hot store updates, but it compares only the
+  // compact set of currently executable action IDs. Full mixer serialisation
+  // and native publication happen only when that set actually changes.
+  const unsubscribeActionAvailability = windowRole === "main"
+    ? useDAWStore.subscribe(
+      () => getAvailableDetachedMainActionIds(),
+      publishIfChanged,
+      { equalityFn: actionAvailabilityEqual },
+    )
+    : () => {};
 
   const unsubscribeRemote = nativeBridge.subscribe("mixerUISync", (value) => {
     const envelope = normaliseEnvelope(value);
@@ -718,6 +792,7 @@ export function startMixerUISync(): () => void {
 
   return () => {
     unsubscribeStore();
+    unsubscribeActionAvailability();
     unsubscribeRemote();
     if (windowRole === "main") flushPendingMixerRemoteEdit();
     else cancelPendingMixerRemoteEdit();

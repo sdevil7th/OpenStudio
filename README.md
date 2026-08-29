@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue" alt="Platform: Windows and macOS"/>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform: Windows, macOS, and Linux"/>
   <img src="https://img.shields.io/badge/engine-JUCE%209-informational" alt="JUCE 9"/>
   <img src="https://img.shields.io/badge/UI-React%20%2B%20TypeScript-61dafb?logo=react" alt="React and TypeScript"/>
   <img src="https://img.shields.io/badge/audio-ASIO%20%7C%20WASAPI%20%7C%20DirectSound-green" alt="Audio drivers"/>
@@ -36,8 +36,6 @@
   <a href="docs/API.md">Lua API</a>
 </p>
 
-> Screenshot/GIF slot: add a first-run timeline or mixer capture here once the current UI pass is ready.
-
 ---
 
 ## OpenStudio In One Sentence
@@ -51,15 +49,15 @@ It combines classic multitrack production with newer tools such as stem separati
 | Area | Current support |
 |---|---|
 | Recording | Multitrack audio recording, MIDI recording, input monitoring, punch range, record modes |
-| Editing | Clip move/trim/split, ripple edit, razor edit, fades, grouping, takes, slip edit, reverse, normalize, time stretch, pitch shift |
+| Editing | Clip move/trim/split, ripple edit, razor edit, fades, grouping, takes, slip edit, reverse, normalize, time stretch, pitch shift (FFmpeg-backed operations require system FFmpeg on macOS/Linux) |
 | MIDI | MIDI tracks, instrument tracks, piano roll, velocity/CC editing, transforms, virtual keyboard, MIDI import/export, audio-to-MIDI |
 | Mixing | Mixer, detached mixer, sends, buses, routing matrix, master strip, meter isolation, mixer snapshots |
 | Plugins | VST3, CLAP, LV2 code paths, native plugin editors, input/track/master/monitoring FX, plugin presets, A/B states, MIDI learn |
 | Built-in FX | EQ, compressor, gate, limiter, delay, reverb, chorus, saturator, pitch corrector, basic synth/piano/drums |
 | Guitar / Bass / NAM Rack | Free A1/A2 amp, full-rig, and pedal capture host; explicit capture choice inside multi-capture packs; Guitar/Bass voicing profiles; native pedalboard, cabinet IRs, Cabinet Space, Graphic EQ, modulation, delay, reverb/shimmer, presets, calibration, transactional audition, and project recall; optional TONE3000 connection |
-| Pitch | Graphical pitch editor, YIN analysis, note blobs, drift/vibrato tools, real-time auto-tune style FX, Basic Pitch polyphonic detection |
+| Pitch | Graphical pitch editor, YIN analysis, note blobs, drift/vibrato tools, real-time auto-tune style FX, and Basic Pitch polyphonic detection in ONNX-enabled builds (current Windows/Linux release pipeline) |
 | AI | Optional AI Tools runtime, stem separation, ACE-Step music generation, Stable Audio 3 text-to-audio, clip variation, inpaint, continuation |
-| Render | WAV, AIFF, FLAC, MP3, and OGG; target sample rate, mono/stereo, normalize, tail, dither, track stems, and secondary output |
+| Render | WAV, AIFF, FLAC, MP3, and OGG; target sample rate, mono/stereo, normalize, tail, dither, track stems, and secondary output (MP3/OGG and FFmpeg conversions require system FFmpeg on macOS/Linux) |
 | Delivery | Render queue, region render matrix, DDP export, batch converter, session archive, project compare, and clean-project tools |
 | Workflow | Command palette, searchable/printable shortcut reference, 19 built-in DAW keyboard profiles, independently selectable mouse/scroll profiles, scoped rebinding, custom keyboard-profile import/export, help overlay, getting started guide, screensets, themes, toolbar editor |
 | Extensibility | Lua scripting API, script editor, JSFX/S13FX script effects, project automation helpers |
@@ -83,7 +81,7 @@ licenses, accounts, hardware requirements, and usage terms.
 | Guitar and bass rig | **Included — free** | NAM A1/A2 capture hosting, pedal/amp/full-rig slots, local cabinet-IR loading, native pedalboard and post effects, Guitar/Bass voicing, presets, A/B, and project recall |
 | Plug-in and scripting host | **Included — free** | Primarily VST3 hosting with CLAP/LV2 code paths, built-in effects, JSFX/S13FX-style effects, and Lua scripting |
 | Hotkey and mouse profiles | **Included — free** | 19 built-in DAW-style keyboard maps, independent mouse/scroll maps, scoped multi-binding, conflict checks, and named custom keyboard profiles with JSON import/export |
-| AI-assisted creation | **Free / optional setup** | Local integration for supported generation, variation, inpaint, continuation, stems, and audio-to-MIDI workflows; Basic Pitch is bundled, while large generation/stem runtimes and models are optional downloads and hardware requirements vary |
+| AI-assisted creation | **Free / optional setup** | Local integration for generation, variation, inpaint, continuation, stems, and audio-to-MIDI; the small Basic Pitch model is included and its inference runtime is enabled in current Windows/Linux releases, while large generation/stem runtimes and models remain optional downloads |
 | Local and inspectable workflow | **Included — free** | Local project files and source-visible JUCE/React implementation under the GNU AGPLv3 |
 
 ### Free-access context
@@ -159,7 +157,7 @@ Cubase is a mature commercial composition DAW. OpenStudio is the open local-firs
 | Pricing / model | Commercial DAW; current Pro/Elements trials run 60 days | Open-source app with local project files and no paid track-count tier; current real-time engine cap is 64 tracks |
 | Full DAW timeline | ✅ Mature arrange, MIDI, scoring, MixConsole, VariAudio | ✅ Multitrack timeline, MIDI, mixer, routing, pitch editor, render tools |
 | Recording / editing / mixing | ✅ Decades of polished DAW workflows | ✅ Native JUCE engine, clip editing, takes, razor/ripple edits, sends, buses, mixer snapshots |
-| Pitch / stems / audio-to-MIDI | VariAudio 3 is in Artist/Pro; AI stem separation is Pro-only; Audio-to-MIDI chords are in Elements/Artist/Pro | Graphical pitch editor, real-time pitch corrector, stem separation integration, Basic Pitch audio-to-MIDI |
+| Pitch / stems / audio-to-MIDI | VariAudio 3 is in Artist/Pro; AI stem separation is Pro-only; Audio-to-MIDI chords are in Elements/Artist/Pro | Graphical pitch editor, real-time pitch corrector, stem separation integration, and Basic Pitch audio-to-MIDI in ONNX-enabled Windows/Linux builds |
 | AI generation | ⚠️ Assisted tools, but not a local AI music-generation DAW workflow | ✅ Optional local AI Tools runtime for ACE-Step, Stable Audio 3, variation, inpaint, continuation, stems |
 | Plugin ecosystem | VST3 hosting; ARA 2 in Artist/Pro. VST2 can be enabled in limited cases but is officially unsupported | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX/S13FX, Lua |
 | Local / private workflow | Local desktop DAW; proprietary software and licensing | ✅ Local project files, optional local AI runtime, source-visible implementation |
@@ -191,7 +189,7 @@ Suno provides a dedicated cloud prompt-to-song workflow. OpenStudio is for when 
 | Product shape | Core cloud AI song generator; Premier adds the browser-based Suno Studio 2.0 production environment | Full DAW with optional local AI-assisted generation |
 | Full DAW timeline | Studio 2.0 adds browser multitrack production to Premier; the free plan does not include it | Tracks, clips, timeline editing, MIDI, routing, mixer, render workflows |
 | Recording / editing / mixing | Studio 2.0 adds effects, automation, MIDI, stems, and exports, but Suno documents no direct DAW sync or third-party plug-in host | Record, import, arrange, edit, tune, mix, host plugins, render |
-| Pitch / stems / audio-to-MIDI | Free has no stem separation; Pro/Premier add stem tools. No note-based pitch or audio-to-MIDI editor is advertised | ✅ Stem separation, graphical pitch editor, real-time pitch correction, Basic Pitch audio-to-MIDI |
+| Pitch / stems / audio-to-MIDI | Free has no stem separation; Pro/Premier add stem tools. No note-based pitch or audio-to-MIDI editor is advertised | ✅ Stem separation, graphical pitch editor, real-time pitch correction, and Basic Pitch audio-to-MIDI in ONNX-enabled Windows/Linux builds |
 | AI generation | Fast cloud prompt-to-song workflow; free access is credit-limited | Local/optional ACE-Step and Stable Audio 3 workflows inside a DAW session |
 | Plugin ecosystem | Suno documents no plug-in-host integration or direct DAW sync | ✅ Input, track, master, monitoring FX plus built-in FX and script effects |
 | Local / private workflow | ❌ Cloud service; uploads and outputs depend on Suno terms | ✅ Local projects and optional local runtime; users choose what media enters the session |
@@ -234,7 +232,7 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 ### Edit
 
 - Konva-powered arrange view with waveforms, MIDI thumbnails, grid, rulers, time selection, razor areas, and zoom/scroll navigation.
-- Clip splitting, trimming, moving, copying, muting, grouping, locking, color, fades, auto-crossfade, reverse, normalize, time stretch, and pitch shift.
+- Clip splitting, trimming, moving, copying, muting, grouping, locking, color, fades, auto-crossfade, reverse, normalize, time stretch, and pitch shift. FFmpeg-backed operations use the bundled audited executable on Windows and require a system `ffmpeg` on macOS/Linux.
 - Piano roll for note editing, velocity, CC lanes, pitch bend controls, quantize, scale snap, transpose, reverse, invert, and humanize.
 
 ### Mix
@@ -251,7 +249,7 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 ### Deliver
 
 - Render master mixes and selected/all-track stems over project, custom, time-selection, and region ranges. A razor-area job renders that range from its owning track stem.
-- Export WAV, AIFF, FLAC, MP3, and OGG with mono/stereo output, target sample rate, bit depth/quality, normalize, render tail, dither, and an optional secondary format.
+- Export WAV, AIFF, FLAC, MP3, and OGG with mono/stereo output, target sample rate, bit depth/quality, normalize, render tail, dither, and an optional secondary format. MP3/OGG and other FFmpeg conversions use the bundled audited executable on Windows and require a system `ffmpeg` on macOS/Linux.
 - Use render queue, region render matrix, DDP export, batch converter, MIDI export, archive, project compare, and clean-project tools for handoff. Selected-item-only source filtering remains caveated in the [partial-feature inventory](docs/implemented_features.md#implemented-but-partial--caveated).
 
 ## Project And File Formats
@@ -290,10 +288,15 @@ The backend owns audio I/O, recording, playback, plugin processing, MIDI, meteri
 - macOS release packaging support for app/DMG builds
 - CMake 3.22 or newer
 - Visual Studio 2022 with C++ workload on Windows
-- Node.js 18 or newer
+- Node.js 22.12+ on the Node 22 LTS line, or Node.js 24+
+- npm 10.9.8 when updating the committed lockfile
 - Python 3.10 or newer
 - NASM in `PATH` for YSFX builds
 - ARA SDK and supported third-party SDK/runtime assets as documented in the repo
+
+On Linux, local NAM captures work without extra credential software. Optional
+TONE3000 sign-in requires `secret-tool` (usually the `libsecret-tools` package)
+and an available Secret Service/keyring.
 
 ### Development
 
@@ -370,4 +373,4 @@ OpenStudio is under active development. Many core DAW workflows are implemented,
 
 ## License
 
-OpenStudio is distributed in this repository under the GNU AGPLv3. See `LICENSE` and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for licensing and dependency notices.
+OpenStudio is distributed in this repository under the GNU AGPLv3. See `LICENSE`, [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), and the generated [frontend production notices](frontend/THIRD_PARTY_NOTICES.txt) for licensing and dependency notices. Release bundles include upstream notices for the native dependencies they contain. Build-time pinned checksums cover YSFX/WDL, dr_libs, stb, CLAP, Signalsmith, ARA, Basic Pitch, and the bundled Windows FFmpeg files; notices from the pinned NeuralAmpModelerCore/Eigen source and a provenance-verified ONNX Runtime installation are also packaged when applicable.

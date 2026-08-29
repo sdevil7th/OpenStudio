@@ -41,7 +41,8 @@ OpenStudio is a desktop DAW built with a JUCE C++ audio backend and a React/Type
 
 **Minimum requirements:**
 
-- Windows 10 or later (64-bit), or macOS for the desktop release
+- Windows 10 or later (64-bit), a supported macOS release, or an x86-64 Linux
+  desktop capable of running AppImage packages
 - WebView2 Runtime on Windows (typically pre-installed on Windows 10/11)
 - Audio interface with ASIO, WASAPI, or DirectSound drivers on Windows
 - 4 GB RAM (8 GB or more recommended)
@@ -59,13 +60,17 @@ OpenStudio is a desktop DAW built with a JUCE C++ audio backend and a React/Type
 
 OpenStudio production releases are distributed as platform-specific install packages.
 
-1. Download the latest Windows installer or macOS package from the official download page.
+1. Download the latest Windows installer, macOS package, or Linux AppImage from the official download page.
 2. Run the installer and complete the setup steps for your platform.
 3. Launch OpenStudio from the Start menu, Applications folder, or desktop shortcut.
 
 **Windows:** run the installer and follow the wizard. If you are using the unsigned zero-cost release path, Windows SmartScreen may warn before first launch.
 
 **macOS:** OpenStudio v1 ships as an unsigned DMG. Drag `OpenStudio.app` to `Applications`. If macOS blocks launch, right-click the app, choose **Open**, and if needed allow it under **System Settings > Privacy & Security**.
+
+**Linux:** mark the downloaded AppImage executable and launch it from your
+desktop or terminal. FFmpeg-backed operations use an optional system `ffmpeg`
+on `PATH`; the AppImage does not bundle an arbitrary host FFmpeg binary.
 
 OpenStudio also includes automatic update support. You can trigger a manual update check from **Help > Check for Updates...**.
 
@@ -1175,7 +1180,9 @@ binaries, so another machine may require Locate, Search, or supported
 Re-download recovery.
 
 Local `.nam` loading works without TONE3000. Public-build TONE3000 availability
-depends on the partner-approved integration and release configuration.
+depends on the partner-approved integration and release configuration. On
+Linux, sign-in also requires `secret-tool` (usually installed by the
+`libsecret-tools` package) and an available Secret Service/keyring.
 
 Audition and Use/Cancel are transactional, and prepared model swaps reject
 stale requests. Perceived click/noise behavior on a real interface is still a
@@ -1359,8 +1366,8 @@ Choose the time range to render:
 | **WAV** | Uncompressed output with the available bit-depth selection |
 | **AIFF** | Uncompressed output with the available bit-depth selection |
 | **FLAC** | Lossless compressed output with the available bit-depth selection |
-| **MP3** | FFmpeg-encoded output using the selected bitrate |
-| **OGG Vorbis** | FFmpeg-encoded output using the selected quality |
+| **MP3** | FFmpeg-encoded output using the selected bitrate; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
+| **OGG Vorbis** | FFmpeg-encoded output using the selected quality; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
 
 **Sample rate**: Select the target render rate. The offline engine renders at
 that rate while the playback path converts source files as required.
@@ -2150,7 +2157,7 @@ microphone permission for every application.
 
 ## 18. AI Music and Assisted Audio
 
-OpenStudio includes AI-assisted workflows that live inside the normal DAW session. Basic Pitch audio-to-MIDI support is bundled; generation and stem workflows use optional AI Tools runtimes and large model assets installed on demand.
+OpenStudio includes AI-assisted workflows that live inside the normal DAW session. The small Basic Pitch model is bundled, with audio-to-MIDI inference enabled in current ONNX-enabled Windows/Linux releases. Generation and stem workflows use optional AI Tools runtimes and large model assets installed on demand.
 
 ### 18.1 AI Tools Setup
 
@@ -2205,9 +2212,9 @@ OpenStudio project files (`.osproj`) are saved to the location you choose when s
 
 ## Appendix B: Audio Format Support
 
-**Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and video audio extraction where FFmpeg is available
+**Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and video audio extraction where FFmpeg is available. The audited executable is bundled on Windows; FFmpeg-backed operations require a system `ffmpeg` on `PATH` on macOS/Linux.
 
-**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export
+**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export. MP3/OGG and other FFmpeg conversions require the bundled Windows executable or a system `ffmpeg` on macOS/Linux.
 
 **Plugin formats**: VST3 is the stable primary path. CLAP and LV2 code paths are present where available. Experimental 32-bit bridging controls are not part of the stable plugin-hosting path.
 

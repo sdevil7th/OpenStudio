@@ -36,7 +36,7 @@ public:
     // Uses FFmpeg to seek and extract one frame
     juce::String getFrameAtTime(double timeSeconds, int outputWidth = 320, int outputHeight = 180);
 
-    // Set the FFmpeg executable path (defaults to adjacent ffmpeg.exe)
+    // Set the FFmpeg executable path (defaults to app candidates, then PATH)
     void setFFmpegPath(const juce::File& path) { ffmpegExe = path; }
 
 private:

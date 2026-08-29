@@ -35,6 +35,33 @@ async function readRackState(page: Page) {
   }, NAM_ADDRESS);
 }
 
+async function seedHostTrack(page: Page) {
+  await page.evaluate(async (trackId) => {
+    const moduleUrl = "/src/store/useDAWStore.ts";
+    const { createDefaultTrack, useDAWStore } = await import(/* @vite-ignore */ moduleUrl);
+    useDAWStore.setState({
+      tracks: [createDefaultTrack(trackId, "NAM audition", "#335577", "audio", [])],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+  }, NAM_ADDRESS.trackId);
+}
+
+async function readMonitorAndHistory(page: Page) {
+  return page.evaluate(async (trackId) => {
+    const moduleUrl = "/src/store/useDAWStore.ts";
+    const { useDAWStore } = await import(/* @vite-ignore */ moduleUrl);
+    const state = useDAWStore.getState();
+    return {
+      monitorEnabled: state.tracks.find((track: { id: string }) => track.id === trackId)?.monitorEnabled,
+      isModified: state.isModified,
+      canUndo: state.canUndo,
+      canRedo: state.canRedo,
+    };
+  }, NAM_ADDRESS.trackId);
+}
+
 async function readAmpPath(page: Page) {
   const state = await readRackState(page);
   return String(state.modelState?.ampModelPath ?? "").replace(/\\/g, "/");
@@ -52,6 +79,13 @@ async function expectAmpPath(page: Page, modelId: number | null) {
 
 test("multi-capture pack supports preview, use, replace, bypass, and unload", async ({ page }) => {
   await page.goto(sourceFlowUrl());
+  await seedHostTrack(page);
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: false,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 
   const packCard = page.locator(".tone-feed-row").filter({ hasText: PACK_TITLE });
   await expect(packCard).toHaveCount(1);
@@ -74,7 +108,7 @@ test("multi-capture pack supports preview, use, replace, bypass, and unload", as
   expect(baselineAmpPath).not.toBe("");
 
   await ir01Select.focus();
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect(ir01Select).toHaveAttribute("aria-pressed", "true");
   await expect(ir01).toHaveAttribute("data-selected", "true");
   await expect.poll(() => readAmpPath(page)).toBe(baselineAmpPath);
@@ -82,18 +116,42 @@ test("multi-capture pack supports preview, use, replace, bypass, and unload", as
   await ir01.getByRole("button", { name: "Audition Headbangers Ball 01 IR" }).click();
   await expect(ir01).toHaveAttribute("data-audition", "true");
   await expectAmpPath(page, 6713902);
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: true,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 
   await raw01.getByRole("button", { name: "Audition Headbangers Ball 01 RAW" }).click();
   await expect(raw01).toHaveAttribute("data-audition", "true");
   await expect(ir01).not.toHaveAttribute("data-audition", "true");
   await expectAmpPath(page, 6713901);
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: true,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 
   await raw01.getByRole("button", { name: "Stop auditioning Headbangers Ball 01 RAW" }).click();
   await expect.poll(() => readAmpPath(page)).toBe(baselineAmpPath);
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: false,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 
   await raw01.getByRole("button", { name: "Audition Headbangers Ball 01 RAW" }).click();
   await expectAmpPath(page, 6713901);
   await raw01.getByRole("button", { name: "Use Headbangers Ball 01 RAW" }).click();
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: false,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 
   const nameplate = page.locator('[data-qa="nam-amp-capture-nameplate"]');
   await expect(nameplate).toHaveAttribute("data-state", "loaded");
@@ -103,9 +161,9 @@ test("multi-capture pack supports preview, use, replace, bypass, and unload", as
 
   const ampPower = page.locator('[data-param-id="ampEnabled"][role]').first();
   await ampPower.focus();
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect.poll(async () => (await readRackState(page)).values?.ampEnabled).toBe(0);
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
   await expect.poll(async () => (await readRackState(page)).values?.ampEnabled).toBe(1);
 
   await page.locator('[data-qa="nam-amp-capture-selector"]').click();
@@ -123,4 +181,37 @@ test("multi-capture pack supports preview, use, replace, bypass, and unload", as
   await expect(nameplate).toHaveAttribute("data-state", "empty");
   await expect(nameplate).toContainText("No amp capture loaded");
   await expectAmpPath(page, null);
+});
+
+test("audition reports monitor bridge failures without dirtying history or pretending success", async ({ page }) => {
+  await page.goto(sourceFlowUrl());
+  await seedHostTrack(page);
+  await page.evaluate(async () => {
+    const moduleUrl = "/src/services/NativeBridge.ts";
+    const { nativeBridge } = await import(/* @vite-ignore */ moduleUrl);
+    nativeBridge.setTrackInputMonitoring = async () => false;
+  });
+
+  const packCard = page.locator(".tone-feed-row").filter({ hasText: PACK_TITLE });
+  await packCard.getByRole("button", { name: "View 4 Captures" }).click();
+  const picker = page.locator('[data-qa="nam-tone-capture-picker"]:not([data-compact])');
+  const ir01 = picker.locator(".nam-tone-capture-select").filter({ hasText: "Headbangers Ball 01 IR" }).locator("..");
+  await ir01.getByRole("button", { name: "Audition Headbangers Ball 01 IR" }).click();
+
+  await expectAmpPath(page, 6713902);
+  await expect(page.getByText(/track monitoring could not be enabled automatically/i).first()).toBeVisible();
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: false,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
+
+  await ir01.getByRole("button", { name: "Stop auditioning Headbangers Ball 01 IR" }).click();
+  await expect.poll(() => readMonitorAndHistory(page)).toEqual({
+    monitorEnabled: false,
+    isModified: false,
+    canUndo: false,
+    canRedo: false,
+  });
 });

@@ -180,14 +180,16 @@ describe("NAM Rack Cabinet Space controls", () => {
   });
 
   it("keeps legacy cabRoomSend named Bloom rather than misrepresenting it as the new room", () => {
-    const manifest = readFileSync(new URL("../components/namScenes/cab-room.scene.json", import.meta.url), "utf8");
-    const registry = readFileSync(new URL("../components/NAMRackNeuralSkinRegistry.ts", import.meta.url), "utf8");
-    const sceneGraph = readFileSync(new URL("../components/NAMRackSceneGraph.tsx", import.meta.url), "utf8");
+    const design = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
+    const paramIndex = design.indexOf('paramId="cabRoomSend"');
+    const controlStart = design.lastIndexOf("<Knob", paramIndex);
+    const controlEnd = design.indexOf("/>", paramIndex);
+    const control = design.slice(controlStart, controlEnd + 2);
 
-    expect(manifest).toContain('"paramId": "cabRoomSend"');
-    expect(manifest).toContain('"label": "Bloom"');
-    expect(registry).toContain('paramId: "cabRoomSend"');
-    expect(registry).toContain('label: "Bloom"');
-    expect(sceneGraph).toContain(">BLOOM</text>");
+    expect(paramIndex).toBeGreaterThan(-1);
+    expect(controlStart).toBeGreaterThan(-1);
+    expect(control).toContain('paramId="cabRoomSend"');
+    expect(control).toContain('labelText="LOW BLOOM"');
+    expect(control).not.toContain('labelText="ROOM"');
   });
 });

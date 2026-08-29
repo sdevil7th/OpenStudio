@@ -675,9 +675,15 @@ endif()
 
 function(openstudio_copy_runtime_file source destination_relative_path copy_comment)
     if(EXISTS "${source}")
+        get_filename_component(destination_directory "${destination_relative_path}" DIRECTORY)
+        set(runtime_destination_directory "${OPENSTUDIO_RUNTIME_ASSET_ROOT}")
+        if(NOT destination_directory STREQUAL "")
+            set(runtime_destination_directory
+                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_directory}")
+        endif()
         add_custom_command(TARGET OpenStudio POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}"
+                "${runtime_destination_directory}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${source}"
                 "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"
@@ -717,16 +723,219 @@ function(openstudio_remove_runtime_file destination_relative_path remove_comment
     )
 endfunction()
 
+# Verify text notices after normalizing line endings so the same pinned source
+# is accepted on Windows, macOS, and Linux checkouts. The original upstream
+# file is still copied byte-for-byte into the runtime bundle.
+function(openstudio_require_and_copy_notice source expected_normalized_sha256 destination_relative_path description)
+    if(NOT EXISTS "${source}")
+        message(FATAL_ERROR "Required ${description} is missing: ${source}")
+    endif()
+
+    file(READ "${source}" notice_contents)
+    string(REPLACE "\r\n" "\n" notice_contents "${notice_contents}")
+    string(REPLACE "\r" "\n" notice_contents "${notice_contents}")
+    string(SHA256 notice_actual_sha256 "${notice_contents}")
+    if(NOT "${notice_actual_sha256}" STREQUAL "${expected_normalized_sha256}")
+        message(FATAL_ERROR
+            "${description} checksum mismatch. Expected ${expected_normalized_sha256}, "
+            "received ${notice_actual_sha256}.")
+    endif()
+
+    openstudio_copy_runtime_file(
+        "${source}"
+        "${destination_relative_path}"
+        "Copying ${description} to output directory"
+    )
+endfunction()
+
+# Give bundle validation a display-server-independent version source. Launching
+# the JUCE GUI binary just to query its version can initialise a platform GUI
+# backend on headless Linux runners, so the release contract uses this manifest
+# generated from the exact CMake version compiled into the target.
+set(OPENSTUDIO_VERSION_MANIFEST
+    "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.version")
+file(WRITE "${OPENSTUDIO_VERSION_MANIFEST}" "${OPENSTUDIO_APP_VERSION}\n")
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_VERSION_MANIFEST}"
+    "OpenStudio.version"
+    "Copying OpenStudio version manifest to output directory"
+)
+
+# Ship the application license and third-party notices with every binary
+# bundle. On macOS these land in Contents/Resources; on Windows and Linux they
+# sit beside the executable and are consequently included by the packagers.
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+    "LICENSE"
+    "Copying OpenStudio license to output directory"
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_LICENSES.md"
+    "THIRD_PARTY_LICENSES.md"
+    "Copying third-party notices to output directory"
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/THIRD_PARTY_NOTICES.txt"
+    "licenses/Frontend-THIRD_PARTY_NOTICES.txt"
+    "Copying frontend dependency notices to output directory"
+)
+
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/LICENSE"
+    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    "licenses/YSFX-LICENSE.txt"
+    "YSFX Apache-2.0 license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/WDL/LICENSE.txt"
+    "aeb30b800c5b402a52e4a8960601bc56a74bed26ff6356f459f88d902998f4f4"
+    "licenses/WDL-LICENSE.txt"
+    "WDL zlib-style license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/dr_libs/LICENSE"
+    "dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15"
+    "licenses/dr_libs-LICENSE.txt"
+    "dr_libs dual license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/stb/LICENSE"
+    "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+    "licenses/stb-LICENSE.txt"
+    "stb dual license"
+)
+openstudio_require_and_copy_notice(
+    "${clap_SOURCE_DIR}/LICENSE"
+    "ced49f9ef950277afdb56199369ea6e8165ebfdbfbb37ebfe1827e0de892088d"
+    "licenses/CLAP-LICENSE.txt"
+    "CLAP SDK MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/signalsmith/LICENSE.txt"
+    "7154ecf162d91232235c9ba4619d95b30c7f1f904a39e0f22eaf914e208cb69b"
+    "licenses/Signalsmith-Stretch-LICENSE.txt"
+    "Signalsmith Stretch MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/signalsmith/signalsmith-linear/LICENSE.txt"
+    "072b5e9eb5b22880bdf6256324654cf3ce53dba828edb911921121e1be09d9c3"
+    "licenses/Signalsmith-Linear-LICENSE.txt"
+    "Signalsmith Linear MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/NOTICE.txt"
+    "c2cb0f6d2e7142c4eaa437c658e2fef1aa6d304b9eb75e5de8a9be09f317cdd3"
+    "licenses/ARA-NOTICE.txt"
+    "ARA SDK notice"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/ARA_API/LICENSE.txt"
+    "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    "licenses/ARA-API-LICENSE.txt"
+    "ARA API Apache-2.0 license"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/ARA_Library/LICENSE.txt"
+    "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    "licenses/ARA-Library-LICENSE.txt"
+    "ARA Library Apache-2.0 license"
+)
+
+# These files are pinned to Spotify Basic Pitch v0.4.0. Verify their contents
+# before packaging so an HTTP/API error page can never be shipped as a notice.
+set(OPENSTUDIO_BASIC_PITCH_LICENSE
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/basic-pitch/LICENSE")
+set(OPENSTUDIO_BASIC_PITCH_NOTICE
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/basic-pitch/NOTICE")
+set(OPENSTUDIO_BASIC_PITCH_LICENSE_SHA256
+    "929c910bae2152fa87199a5d0660e09263419b7eee6d4b301d05ee2aaf211c37")
+set(OPENSTUDIO_BASIC_PITCH_NOTICE_SHA256
+    "b810e55c0e3b520fabb45fc2ccc74880187bf84e309971968541cc812dcde905")
+foreach(basic_pitch_legal_file IN ITEMS LICENSE NOTICE)
+    set(basic_pitch_legal_path "${OPENSTUDIO_BASIC_PITCH_${basic_pitch_legal_file}}")
+    if(NOT EXISTS "${basic_pitch_legal_path}")
+        message(FATAL_ERROR "Required Basic Pitch ${basic_pitch_legal_file} is missing: ${basic_pitch_legal_path}")
+    endif()
+    file(SHA256 "${basic_pitch_legal_path}" basic_pitch_legal_actual_sha256)
+    if(NOT "${basic_pitch_legal_actual_sha256}" STREQUAL
+           "${OPENSTUDIO_BASIC_PITCH_${basic_pitch_legal_file}_SHA256}")
+        message(FATAL_ERROR
+            "Basic Pitch ${basic_pitch_legal_file} checksum mismatch. Refusing to package an unverified legal file.")
+    endif()
+endforeach()
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_BASIC_PITCH_LICENSE}"
+    "licenses/BasicPitch-LICENSE.txt"
+    "Copying Basic Pitch license to output directory"
+)
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_BASIC_PITCH_NOTICE}"
+    "licenses/BasicPitch-NOTICE.txt"
+    "Copying Basic Pitch notice to output directory"
+)
+openstudio_copy_runtime_file(
+    "${neural_amp_modeler_core_SOURCE_DIR}/LICENSE"
+    "licenses/NeuralAmpModelerCore-LICENSE.txt"
+    "Copying NeuralAmpModelerCore license to output directory"
+)
+foreach(eigen_notice IN ITEMS COPYING.MPL2 COPYING.BSD COPYING.APACHE COPYING.MINPACK COPYING.README)
+    openstudio_copy_runtime_file(
+        "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/eigen/${eigen_notice}"
+        "licenses/Eigen-${eigen_notice}.txt"
+        "Copying Eigen ${eigen_notice} notice to output directory"
+    )
+endforeach()
+
 if(WIN32)
     set(FFMPEG_EXE "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg.exe")
+    set(OPENSTUDIO_FFMPEG_WINDOWS_SHA256
+        "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d")
+    set(OPENSTUDIO_FFMPEG_GPLV3
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/COPYING.GPLv3")
+    set(OPENSTUDIO_FFMPEG_PROVENANCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/PROVENANCE.json")
+    set(OPENSTUDIO_FFMPEG_GPLV3_SHA256
+        "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903")
+    set(OPENSTUDIO_FFMPEG_PROVENANCE_SHA256
+        "30fc0edca9acc1d7a3253a81afe485a44f1de3c4b86542a18f644c1f71f312d4")
     if(EXISTS "${FFMPEG_EXE}")
+        file(SHA256 "${FFMPEG_EXE}" ffmpeg_actual_sha256)
+        if(NOT "${ffmpeg_actual_sha256}" STREQUAL "${OPENSTUDIO_FFMPEG_WINDOWS_SHA256}")
+            message(FATAL_ERROR
+                "Bundled tools/ffmpeg.exe checksum mismatch. Refusing to package an unverified FFmpeg build.")
+        endif()
+        foreach(ffmpeg_legal_file IN ITEMS GPLV3 PROVENANCE)
+            set(ffmpeg_legal_path "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}}")
+            if(NOT EXISTS "${ffmpeg_legal_path}")
+                message(FATAL_ERROR
+                    "Bundled FFmpeg requires ${ffmpeg_legal_path}, but that legal/provenance file is missing.")
+            endif()
+            file(SHA256 "${ffmpeg_legal_path}" ffmpeg_legal_actual_sha256)
+            if(NOT "${ffmpeg_legal_actual_sha256}" STREQUAL
+                   "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}_SHA256}")
+                message(FATAL_ERROR
+                    "Bundled FFmpeg ${ffmpeg_legal_file} checksum mismatch. Refusing to package an unverified legal/provenance file.")
+            endif()
+        endforeach()
         openstudio_copy_runtime_file(
             "${FFMPEG_EXE}"
             "ffmpeg.exe"
             "Copying bundled ffmpeg.exe to output directory"
         )
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_FFMPEG_GPLV3}"
+            "licenses/FFmpeg-COPYING.GPLv3.txt"
+            "Copying FFmpeg GPLv3 license to output directory"
+        )
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_FFMPEG_PROVENANCE}"
+            "licenses/FFmpeg-PROVENANCE.json"
+            "Copying FFmpeg provenance to output directory"
+        )
     else()
-        message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
+        message(FATAL_ERROR
+            "Required bundled tools/ffmpeg.exe is missing. Run: "
+            "powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
     endif()
 
     set(OPENSTUDIO_WINDOWS_PREREQS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/windows-prereqs")
@@ -738,16 +947,6 @@ if(WIN32)
         )
     else()
         message(WARNING "thirdparty/windows-prereqs not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-windows-prereqs.ps1")
-    endif()
-elseif(APPLE OR UNIX)
-    # On macOS/Linux, look for ffmpeg in the tools directory (no .exe extension)
-    set(FFMPEG_BIN "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
-    if(EXISTS "${FFMPEG_BIN}")
-        openstudio_copy_runtime_file(
-            "${FFMPEG_BIN}"
-            "ffmpeg"
-            "Copying bundled ffmpeg to output directory"
-        )
     endif()
 endif()
 
@@ -798,21 +997,52 @@ elseif(HAS_ONNXRUNTIME AND UNIX AND NOT APPLE)
     endif()
 endif()
 
+if(HAS_ONNXRUNTIME)
+    foreach(onnxruntime_notice IN ITEMS LICENSE ThirdPartyNotices.txt)
+        set(onnxruntime_notice_path "${ONNXRUNTIME_ROOT}/${onnxruntime_notice}")
+        if(NOT EXISTS "${onnxruntime_notice_path}")
+            message(FATAL_ERROR
+                "ONNX Runtime is enabled but ${onnxruntime_notice_path} is missing. "
+                "Reinstall the pinned runtime so its redistribution notices are complete.")
+        endif()
+        openstudio_copy_runtime_file(
+            "${onnxruntime_notice_path}"
+            "licenses/ONNXRuntime-${onnxruntime_notice}"
+            "Copying ONNX Runtime ${onnxruntime_notice} to output directory"
+        )
+    endforeach()
+endif()
+
 # Copy required core ML model(s) to output directory
 set(OPENSTUDIO_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/models")
+set(OPENSTUDIO_BASIC_PITCH_MODEL "${OPENSTUDIO_MODELS_DIR}/basic_pitch_nmp.onnx")
+set(OPENSTUDIO_BASIC_PITCH_SHA256
+    "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec")
+if(NOT EXISTS "${OPENSTUDIO_BASIC_PITCH_MODEL}")
+    message(FATAL_ERROR
+        "The required bundled Basic Pitch model is missing: ${OPENSTUDIO_BASIC_PITCH_MODEL}")
+endif()
+file(SHA256 "${OPENSTUDIO_BASIC_PITCH_MODEL}" OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256)
+if(NOT "${OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256}" STREQUAL "${OPENSTUDIO_BASIC_PITCH_SHA256}")
+    message(FATAL_ERROR
+        "Basic Pitch model checksum mismatch. Expected ${OPENSTUDIO_BASIC_PITCH_SHA256}, "
+        "received ${OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256}.")
+endif()
 set(OPENSTUDIO_CORE_MODEL_FILES
     "basic_pitch_nmp.onnx"
+    "basic_pitch_nmp.provenance.json"
 )
 
 foreach(OPENSTUDIO_CORE_MODEL_FILE IN LISTS OPENSTUDIO_CORE_MODEL_FILES)
     set(OPENSTUDIO_CORE_MODEL_PATH "${OPENSTUDIO_MODELS_DIR}/${OPENSTUDIO_CORE_MODEL_FILE}")
-    if(EXISTS "${OPENSTUDIO_CORE_MODEL_PATH}")
-        openstudio_copy_runtime_file(
-            "${OPENSTUDIO_CORE_MODEL_PATH}"
-            "models/${OPENSTUDIO_CORE_MODEL_FILE}"
-            "Copying core ML model ${OPENSTUDIO_CORE_MODEL_FILE} to output directory"
-        )
+    if(NOT EXISTS "${OPENSTUDIO_CORE_MODEL_PATH}")
+        message(FATAL_ERROR "Required core ML asset is missing: ${OPENSTUDIO_CORE_MODEL_PATH}")
     endif()
+    openstudio_copy_runtime_file(
+        "${OPENSTUDIO_CORE_MODEL_PATH}"
+        "models/${OPENSTUDIO_CORE_MODEL_FILE}"
+        "Copying core ML model ${OPENSTUDIO_CORE_MODEL_FILE} to output directory"
+    )
 endforeach()
 
 # Copy stem separator Python script to output directory
@@ -858,15 +1088,6 @@ if(EXISTS "${AI_STABLE_AUDIO_GENERATION_SCRIPT}")
         "${AI_STABLE_AUDIO_GENERATION_SCRIPT}"
         "scripts/stable_audio3_generate.py"
         "Copying Stable Audio 3 generation helper script to output directory"
-    )
-endif()
-
-set(NAM_CATALOG_UPDATER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/update_nam_catalog.py")
-if(EXISTS "${NAM_CATALOG_UPDATER_SCRIPT}")
-    openstudio_copy_runtime_file(
-        "${NAM_CATALOG_UPDATER_SCRIPT}"
-        "scripts/update_nam_catalog.py"
-        "Copying NAM catalog updater script to output directory"
     )
 endif()
 

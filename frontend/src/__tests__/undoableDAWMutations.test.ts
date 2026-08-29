@@ -8,6 +8,7 @@ import {
   type Track,
   useDAWStore,
 } from "../store/useDAWStore";
+import { createNAMPreviewMonitorLease } from "../utils/trackMonitorOwnership";
 
 const originalState = useDAWStore.getState();
 
@@ -267,9 +268,9 @@ describe("undo-aware track control mutations", () => {
     await useDAWStore.getState().toggleTrackMonitor("a");
     expect(currentTrack("a").monitorEnabled).toBe(true);
     useDAWStore.getState().undo();
-    expect(currentTrack("a").monitorEnabled).toBe(false);
+    await vi.waitFor(() => expect(currentTrack("a").monitorEnabled).toBe(false));
     useDAWStore.getState().redo();
-    expect(currentTrack("a").monitorEnabled).toBe(true);
+    await vi.waitFor(() => expect(currentTrack("a").monitorEnabled).toBe(true));
     expect(monitorSpy).toHaveBeenCalledWith("a", false);
 
     commandManager.clear();
@@ -280,6 +281,220 @@ describe("undo-aware track control mutations", () => {
     useDAWStore.getState().redo();
     expect(currentTrack("a").phaseInverted).toBe(true);
     expect(phaseSpy).toHaveBeenCalledWith("a", false);
+  });
+
+  it("keeps preview-only monitoring out of project dirty and undo state and surfaces native failure", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring").mockResolvedValue(true);
+    useDAWStore.setState({
+      tracks: [track("preview", { monitorEnabled: false })],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    await expect(useDAWStore.getState().setTrackMonitorTransient("preview", true)).resolves.toBe(true);
+    expect(currentTrack("preview").monitorEnabled).toBe(true);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+
+    monitorSpy.mockResolvedValueOnce(false);
+    await expect(useDAWStore.getState().setTrackMonitorTransient("preview", false)).resolves.toBe(false);
+    expect(currentTrack("preview").monitorEnabled).toBe(true);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+  });
+
+  it("leaves direct monitoring state, dirty state, and undo history unchanged on native failure", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring");
+    useDAWStore.setState({
+      tracks: [track("monitor-failure", { monitorEnabled: false })],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    monitorSpy.mockResolvedValueOnce(false);
+    await expect(useDAWStore.getState().toggleTrackMonitor("monitor-failure"))
+      .rejects.toThrow("Native track monitoring rejected enable");
+    expect(currentTrack("monitor-failure").monitorEnabled).toBe(false);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+    expect(commandManager.canUndo()).toBe(false);
+
+    monitorSpy.mockRejectedValueOnce(new Error("monitor bridge unavailable"));
+    await expect(useDAWStore.getState().toggleTrackMonitor("monitor-failure"))
+      .rejects.toThrow("monitor bridge unavailable");
+    expect(currentTrack("monitor-failure").monitorEnabled).toBe(false);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+    expect(commandManager.canUndo()).toBe(false);
+  });
+
+  it("retains preview monitor ownership when a user disable request fails", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring").mockResolvedValue(true);
+    useDAWStore.setState({
+      tracks: [track("preview-owner", { monitorEnabled: false })],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+    const lease = createNAMPreviewMonitorLease({
+      read: (trackId) => useDAWStore.getState().tracks.find((entry) => entry.id === trackId)?.monitorEnabled,
+      setTransient: (trackId, enabled) => useDAWStore.getState().setTrackMonitorTransient(trackId, enabled),
+    });
+
+    await expect(lease.ensureEnabled("preview-owner")).resolves.toBe(true);
+    expect(currentTrack("preview-owner").monitorEnabled).toBe(true);
+
+    monitorSpy.mockResolvedValueOnce(false);
+    await expect(useDAWStore.getState().toggleTrackMonitor("preview-owner"))
+      .rejects.toThrow("Native track monitoring rejected disable");
+    expect(currentTrack("preview-owner").monitorEnabled).toBe(true);
+    expect(lease.ownsTemporaryEnable()).toBe(true);
+
+    monitorSpy.mockResolvedValueOnce(true);
+    await expect(lease.release()).resolves.toBe(true);
+    expect(currentTrack("preview-owner").monitorEnabled).toBe(false);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+  });
+
+  it.each(["false", "reject"] as const)(
+    "rolls back a selected-track monitoring batch on native %s without stealing preview ownership",
+    async (failureMode) => {
+      const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring").mockResolvedValue(true);
+      useDAWStore.setState({
+        tracks: [
+          track("batch-preview", { monitorEnabled: false }),
+          track("batch-other", { monitorEnabled: false }),
+        ],
+        selectedTrackId: "batch-preview",
+        selectedTrackIds: ["batch-preview", "batch-other"],
+        lastSelectedTrackId: "batch-other",
+        isModified: false,
+        canUndo: false,
+        canRedo: false,
+      });
+      const lease = createNAMPreviewMonitorLease({
+        read: (trackId) => useDAWStore.getState().tracks.find((entry) => entry.id === trackId)?.monitorEnabled,
+        setTransient: (trackId, enabled) => useDAWStore.getState().setTrackMonitorTransient(trackId, enabled),
+      });
+
+      await expect(lease.ensureEnabled("batch-preview")).resolves.toBe(true);
+      monitorSpy.mockClear();
+      monitorSpy.mockImplementation(async (trackId, enabled) => {
+        if (trackId === "batch-other" && enabled) {
+          if (failureMode === "reject") throw new Error("monitor bridge unavailable");
+          return false;
+        }
+        return true;
+      });
+
+      await expect(useDAWStore.getState().toggleSelectedTracksMonitor()).resolves.toBe(false);
+      expect(monitorSpy.mock.calls).toEqual([
+        ["batch-preview", false],
+        ["batch-other", true],
+        ["batch-preview", true],
+      ]);
+      expect(currentTrack("batch-preview").monitorEnabled).toBe(true);
+      expect(currentTrack("batch-other").monitorEnabled).toBe(false);
+      expect(useDAWStore.getState()).toMatchObject({ isModified: false, canUndo: false, canRedo: false });
+      expect(commandManager.canUndo()).toBe(false);
+      expect(lease.ownsTemporaryEnable()).toBe(true);
+
+      await expect(lease.release()).resolves.toBe(true);
+      expect(currentTrack("batch-preview").monitorEnabled).toBe(false);
+    },
+  );
+
+  it("commits a selected-track monitoring batch only after every native update succeeds", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring").mockResolvedValue(true);
+    useDAWStore.setState({
+      tracks: [
+        track("batch-a", { monitorEnabled: false }),
+        track("batch-b", { monitorEnabled: true }),
+      ],
+      selectedTrackId: "batch-a",
+      selectedTrackIds: ["batch-a", "batch-b"],
+      lastSelectedTrackId: "batch-b",
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    await expect(useDAWStore.getState().toggleSelectedTracksMonitor()).resolves.toBe(true);
+    expect([currentTrack("batch-a").monitorEnabled, currentTrack("batch-b").monitorEnabled])
+      .toEqual([true, false]);
+    expect(useDAWStore.getState()).toMatchObject({ isModified: true, canUndo: true, canRedo: false });
+
+    useDAWStore.getState().undo();
+    await vi.waitFor(() => {
+      expect([currentTrack("batch-a").monitorEnabled, currentTrack("batch-b").monitorEnabled])
+        .toEqual([false, true]);
+    });
+    useDAWStore.getState().redo();
+    await vi.waitFor(() => {
+      expect([currentTrack("batch-a").monitorEnabled, currentTrack("batch-b").monitorEnabled])
+        .toEqual([true, false]);
+    });
+    expect(monitorSpy).toHaveBeenCalledTimes(6);
+  });
+
+  it("serializes rapid monitor toggles so each command reads the accepted state", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring");
+    let acceptFirst!: (accepted: boolean) => void;
+    monitorSpy
+      .mockReturnValueOnce(new Promise<boolean>((resolve) => { acceptFirst = resolve; }))
+      .mockResolvedValue(true);
+    useDAWStore.setState({
+      tracks: [track("rapid-monitor", { monitorEnabled: false })],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    const firstToggle = useDAWStore.getState().toggleTrackMonitor("rapid-monitor");
+    const secondToggle = useDAWStore.getState().toggleTrackMonitor("rapid-monitor");
+    await vi.waitFor(() => expect(monitorSpy).toHaveBeenCalledTimes(1));
+    expect(monitorSpy).toHaveBeenNthCalledWith(1, "rapid-monitor", true);
+
+    acceptFirst(true);
+    await Promise.all([firstToggle, secondToggle]);
+
+    expect(monitorSpy.mock.calls).toEqual([
+      ["rapid-monitor", true],
+      ["rapid-monitor", false],
+    ]);
+    expect(currentTrack("rapid-monitor").monitorEnabled).toBe(false);
+    expect(commandManager.getUndoStack()).toHaveLength(2);
+  });
+
+  it("serializes a user monitor command behind preview setup without stale-state inversion", async () => {
+    const monitorSpy = vi.spyOn(nativeBridge, "setTrackInputMonitoring");
+    let acceptPreview!: (accepted: boolean) => void;
+    monitorSpy
+      .mockReturnValueOnce(new Promise<boolean>((resolve) => { acceptPreview = resolve; }))
+      .mockResolvedValue(true);
+    useDAWStore.setState({
+      tracks: [track("preview-race", { monitorEnabled: false })],
+      isModified: false,
+      canUndo: false,
+      canRedo: false,
+    });
+    const lease = createNAMPreviewMonitorLease({
+      read: (trackId) => useDAWStore.getState().tracks.find((entry) => entry.id === trackId)?.monitorEnabled,
+      setTransient: (trackId, enabled) => useDAWStore.getState().setTrackMonitorTransient(trackId, enabled),
+    });
+
+    const previewStart = lease.ensureEnabled("preview-race");
+    const userToggle = useDAWStore.getState().toggleTrackMonitor("preview-race");
+    await vi.waitFor(() => expect(monitorSpy).toHaveBeenCalledTimes(1));
+    acceptPreview(true);
+    await Promise.all([previewStart, userToggle]);
+
+    expect(monitorSpy.mock.calls).toEqual([
+      ["preview-race", true],
+      ["preview-race", false],
+    ]);
+    expect(currentTrack("preview-race").monitorEnabled).toBe(false);
+    expect(lease.ownsTemporaryEnable()).toBe(false);
+    await expect(lease.release()).resolves.toBe(true);
+    expect(monitorSpy).toHaveBeenCalledTimes(2);
   });
 
   it("undoes and redoes automation read/write mode snapshots", () => {

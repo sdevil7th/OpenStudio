@@ -546,7 +546,8 @@ The native sign-in flow:
 2. Opens the normal TONE3000 authorize page in the default browser.
 3. Listens on `http://127.0.0.1:18762/tone3000/callback`.
 4. Verifies the returned state and exchanges the code with the verifier.
-5. Stores tokens in a private local session file; Windows uses DPAPI.
+5. Stores tokens in the operating-system credential store: Windows DPAPI,
+   macOS Keychain, or Linux Secret Service through `secret-tool`.
 6. Restores a returning session and refreshes it before an authenticated action
    when required.
 
@@ -580,88 +581,13 @@ sent only to trusted TONE3000 hosts. OpenStudio validates the response, installs
 to a durable local path, and preserves source attribution.
 OpenStudio does not bulk-download, proxy, or re-host the TONE3000 catalog.
 
-## Private TONE3000 review before public release
+## TONE3000 partner approval gate
 
-Public source or a public download is not required for partner review. Send the
-TONE3000 team a private release candidate containing:
-
-- a Windows installer or portable release archive and SHA-256 checksum;
-- the exact version/commit and supported OS;
-- a one-page integration note with OAuth redirect URI, endpoints used,
-  attribution, storage, download validation, and deletion behavior;
-- a two-minute screen recording of first-time sign-up/sign-in, A1/A2 search,
-  install, Use, restart/session restore, and re-download;
-- a short test script and a contact for a live walkthrough;
-- optional read-only access to a private repository or a source archive if they
-  request code inspection.
-
-They can test the binary with their own account and registered test client. A
-private GitHub pre-release, expiring cloud link, or invited private-repository
-reviewer is sufficient. Ask them to confirm in writing that the implemented
-search/detail/download scope, OAuth flow, attribution, and release wording are
-approved for OpenStudio.
-
-If the main repository is public, remember that pushing an ordinary branch
-publishes that branch immediately. For a review before public disclosure, use
-a private fork or private repository and invite the TONE3000 reviewer. Pin the
-review to one commit so their feedback maps to an exact build.
-
-Suggested email:
-
-> **Subject:** OpenStudio NAM Rack — private TONE3000 integration review
->
-> Hi TONE3000 team,
->
-> I am preparing the NAM Rack for OpenStudio, a free and open-source DAW with
-> no paid NAM Rack tier or related upsell. It gives musicians a built-in Neural
-> Amp Modeler A1/A2 guitar and bass rig with native pedals, explicit selection
-> inside multi-capture packs, cabinet IRs, studio effects, presets, project
-> recall, and optional TONE3000 discovery and delivery.
->
-> I would appreciate a private review before we announce or release the
-> integration. The review branch is:
->
-> **Branch:** `[PRIVATE_BRANCH_URL]`  
-> **Commit:** `[COMMIT_SHA]`  
-> **Windows build:** `[PRIVATE_BUILD_URL]`  
-> **SHA-256:** `[BUILD_SHA256]`
->
-> The current integration uses OAuth Authorization Code with PKCE and the
-> loopback redirect `http://127.0.0.1:18762/tone3000/callback`. Access tokens
-> are stored locally; on Windows the token file is protected with DPAPI. The
-> client requests `/api/v1/tones/search`, `/api/v1/tones/{id}`, and
-> `/api/v1/models`, then downloads only the model or IR explicitly selected by
-> the authenticated user. OpenStudio validates the initial official HTTPS
-> model URL, allows bounded HTTPS CDN redirects without forwarding bearer
-> credentials outside trusted TONE3000 hosts,
-> preserves creator/license/source metadata, and does not bulk-download,
-> mirror, proxy, or re-host the catalog.
->
-> I understand that the current free API tier documents OAuth prompt flows and
-> bounded list endpoints, while OpenStudio's proposed experience includes
-> richer search and detail browsing. Could you please confirm whether this
-> endpoint scope can be approved for OpenStudio, or tell me which flow you
-> would prefer us to ship?
->
-> I have included screenshots of the rack, A1/A2 amp slot, pre- and post-FX,
-> cabinet/IR workflow, calibration, presets, TONE3000 browser, audition, and
-> install path. The catalog examples in the screenshots are deterministic mock
-> review records, not production TONE3000 content. The supplied build and
-> branch contain the real integration for your live-account testing. I can also
-> provide a short first-time-account recording or join a live walkthrough
-> using a test account you supply.
->
-> Please also let me know whether the displayed “TONE3000” naming,
-> attribution, creator metadata, and release wording meet your design and
-> branding requirements.
->
-> Thanks for building such an important home for the NAM community. I would be
-> grateful for any product, API, security, or UX feedback.
->
-> Best,  
-> `[NAME]`  
-> OpenStudio  
-> `[CONTACT]`
+Before a public release enables the connected catalog, obtain written TONE3000
+approval for the exact release candidate's endpoint scope, OAuth flow,
+attribution, creator/license metadata, download behavior, and release wording.
+The public build must remain usable with local NAM captures when the connected
+service is unavailable or not configured.
 
 ## Release status
 

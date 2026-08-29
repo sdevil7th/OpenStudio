@@ -1015,14 +1015,18 @@ function getStoredInputProfileSettings(): PersistedInputProfileSettings {
   };
 }
 
-function persistInputProfileSettings(settings: Omit<PersistedInputProfileSettings, "schemaVersion">): void {
+function persistInputProfileSettings(settings: Omit<PersistedInputProfileSettings, "schemaVersion">): boolean {
   try {
-    getBrowserStorage()?.setItem(INPUT_PROFILE_SETTINGS_KEY, JSON.stringify({
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    storage.setItem(INPUT_PROFILE_SETTINGS_KEY, JSON.stringify({
       schemaVersion: 1,
       ...settings,
     } satisfies PersistedInputProfileSettings));
+    return true;
   } catch {
     // Storage can be unavailable in private/embedded browser contexts.
+    return false;
   }
 }
 
@@ -1044,6 +1048,63 @@ function persistCustomKeyboardProfiles(
     if (!storage) return false;
     storage.setItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, JSON.stringify(payload));
     return true;
+  } catch {
+    // Storage can be unavailable in private/embedded browser contexts.
+    return false;
+  }
+}
+
+function restoreStoredValue(storage: Storage, key: string, value: string | null): void {
+  if (value === null) storage.removeItem(key);
+  else storage.setItem(key, value);
+}
+
+/**
+ * Custom-profile activation spans two local-storage records: the profile
+ * collection owns the active overlay, while the input settings own its base
+ * keyboard profile. Snapshot both records and roll both back if either write
+ * fails so the next launch cannot observe a half-committed selection.
+ */
+function persistInputAndCustomKeyboardProfiles(
+  settings: Omit<PersistedInputProfileSettings, "schemaVersion">,
+  profiles: readonly CustomKeyboardShortcutProfile[],
+  activeProfileId: string | null,
+): boolean {
+  const inputPayload = JSON.stringify({
+    schemaVersion: 1,
+    ...settings,
+  } satisfies PersistedInputProfileSettings);
+  const customPayload = {
+    schemaVersion: CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION,
+    activeProfileId,
+    profiles,
+  } satisfies PersistedCustomKeyboardProfiles;
+  if (!parsePersistedCustomKeyboardProfiles(customPayload)) return false;
+
+  try {
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    const previousInput = storage.getItem(INPUT_PROFILE_SETTINGS_KEY);
+    const previousCustom = storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY);
+    try {
+      storage.setItem(INPUT_PROFILE_SETTINGS_KEY, inputPayload);
+      storage.setItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, JSON.stringify(customPayload));
+      return true;
+    } catch {
+      // localStorage has no multi-key transaction. Best-effort restoration is
+      // safe here because both snapshots were captured before either write.
+      try {
+        restoreStoredValue(storage, CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, previousCustom);
+      } catch {
+        // A hostile/unavailable Storage implementation may reject rollback too.
+      }
+      try {
+        restoreStoredValue(storage, INPUT_PROFILE_SETTINGS_KEY, previousInput);
+      } catch {
+        // See note above; frontend state still remains unchanged.
+      }
+      return false;
+    }
   } catch {
     // Storage can be unavailable in private/embedded browser contexts.
     return false;
@@ -1861,11 +1922,12 @@ interface DAWActions {
   toggleTrackArmed: (id: string) => Promise<void>;
   toggleTrackFXBypass: (id: string) => Promise<void>;
   toggleTrackMonitor: (id: string) => Promise<void>;
+  setTrackMonitorTransient: (id: string, enabled: boolean) => Promise<boolean>;
   toggleSelectedTracksMute: () => boolean;
   toggleSelectedTracksSolo: () => boolean;
   toggleSelectedTracksArmed: () => boolean;
   toggleSelectedTracksFXBypass: () => boolean;
-  toggleSelectedTracksMonitor: () => boolean;
+  toggleSelectedTracksMonitor: () => Promise<boolean>;
   toggleSelectedTracksPhaseInvert: () => boolean;
   setTrackInput: (
     id: string,
@@ -3909,13 +3971,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           updatedAt: timestamp,
         };
         const profiles = [...state.customKeyboardProfiles, profile];
-        if (!persistCustomKeyboardProfiles(profiles, candidateId)) return {};
-        id = candidateId;
-        persistInputProfileSettings({
+        if (!persistInputAndCustomKeyboardProfiles({
           keyboardProfileId: resolvedBase,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
+        }, profiles, candidateId)) return {};
+        id = candidateId;
         return {
           customKeyboardProfiles: profiles,
           activeCustomKeyboardProfileId: id,
@@ -3950,13 +4011,12 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           updatedAt: timestamp,
         };
         const profiles = [...state.customKeyboardProfiles, profile];
-        if (!persistCustomKeyboardProfiles(profiles, candidateId)) return {};
-        id = candidateId;
-        persistInputProfileSettings({
+        if (!persistInputAndCustomKeyboardProfiles({
           keyboardProfileId: profile.baseProfileId,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
+        }, profiles, candidateId)) return {};
+        id = candidateId;
         return {
           customKeyboardProfiles: profiles,
           activeCustomKeyboardProfileId: id,
@@ -3991,7 +4051,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         const profiles = state.customKeyboardProfiles.filter((profile) => profile.id !== profileId);
         const wasActive = state.activeCustomKeyboardProfileId === profileId;
         const activeProfileId = wasActive ? null : state.activeCustomKeyboardProfileId;
-        if (!persistCustomKeyboardProfiles(profiles, activeProfileId)) return {};
+        const persisted = wasActive
+          ? persistInputAndCustomKeyboardProfiles({
+            keyboardProfileId: removed.baseProfileId,
+            mouseProfileId: state.mouseBehaviorProfileId,
+            onboardingSeen: state.inputProfileOnboardingSeen,
+          }, profiles, activeProfileId)
+          : persistCustomKeyboardProfiles(profiles, activeProfileId);
+        if (!persisted) return {};
         deleted = true;
         return {
           customKeyboardProfiles: profiles,
@@ -4006,21 +4073,29 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       let activated = false;
       set((state) => {
         if (profileId === null) {
-          if (!persistCustomKeyboardProfiles(state.customKeyboardProfiles, null)) return {};
+          const activeProfile = state.customKeyboardProfiles.find(
+            (candidate) => candidate.id === state.activeCustomKeyboardProfileId,
+          );
+          const baseProfileId = activeProfile?.baseProfileId ?? state.keyboardShortcutProfileId;
+          if (!persistInputAndCustomKeyboardProfiles({
+            keyboardProfileId: baseProfileId,
+            mouseProfileId: state.mouseBehaviorProfileId,
+            onboardingSeen: state.inputProfileOnboardingSeen,
+          }, state.customKeyboardProfiles, null)) return {};
           activated = true;
           return {
             activeCustomKeyboardProfileId: null,
             customShortcuts: {},
+            keyboardShortcutProfileId: baseProfileId,
           };
         }
         const profile = state.customKeyboardProfiles.find((candidate) => candidate.id === profileId);
         if (!profile) return {};
-        if (!persistCustomKeyboardProfiles(state.customKeyboardProfiles, profile.id)) return {};
-        persistInputProfileSettings({
+        if (!persistInputAndCustomKeyboardProfiles({
           keyboardProfileId: profile.baseProfileId,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
+        }, state.customKeyboardProfiles, profile.id)) return {};
         activated = true;
         return {
           activeCustomKeyboardProfileId: profile.id,
@@ -4060,15 +4135,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           ),
         };
         const profiles = [...state.customKeyboardProfiles, importedProfile];
-        if (!persistCustomKeyboardProfiles(profiles, importedProfile.id)) {
-          persistenceFailed = true;
-          return {};
-        }
-        persistInputProfileSettings({
+        if (!persistInputAndCustomKeyboardProfiles({
           keyboardProfileId: importedProfile.baseProfileId,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
+        }, profiles, importedProfile.id)) {
+          persistenceFailed = true;
+          return {};
+        }
         return {
           customKeyboardProfiles: profiles,
           activeCustomKeyboardProfileId: importedProfile.id,
@@ -4086,35 +4160,64 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     setKeyboardShortcutProfile: (profileId) => {
       if (!isKeyboardShortcutProfileId(profileId)) return;
+      let persistenceFailed = false;
       set((state) => {
-        persistInputProfileSettings({
+        if (state.keyboardShortcutProfileId === profileId
+          && state.activeCustomKeyboardProfileId === null) return {};
+        if (!persistInputAndCustomKeyboardProfiles({
           keyboardProfileId: profileId,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
-        return { keyboardShortcutProfileId: profileId };
+        }, state.customKeyboardProfiles, null)) {
+          persistenceFailed = true;
+          return {};
+        }
+        return {
+          keyboardShortcutProfileId: profileId,
+          activeCustomKeyboardProfileId: null,
+          customShortcuts: {},
+        };
       });
+      if (persistenceFailed) {
+        get().showToast("The keyboard profile could not be saved to local storage.", "error");
+      }
     },
     setMouseBehaviorProfile: (profileId) => {
       if (!isKeyboardShortcutProfileId(profileId)) return;
+      let persistenceFailed = false;
       set((state) => {
-        persistInputProfileSettings({
+        if (state.mouseBehaviorProfileId === profileId) return {};
+        if (!persistInputProfileSettings({
           keyboardProfileId: state.keyboardShortcutProfileId,
           mouseProfileId: profileId,
           onboardingSeen: state.inputProfileOnboardingSeen,
-        });
+        })) {
+          persistenceFailed = true;
+          return {};
+        }
         return { mouseBehaviorProfileId: profileId };
       });
+      if (persistenceFailed) {
+        get().showToast("The mouse profile could not be saved to local storage.", "error");
+      }
     },
     markInputProfileOnboardingSeen: () => {
+      let persistenceFailed = false;
       set((state) => {
-        persistInputProfileSettings({
+        if (state.inputProfileOnboardingSeen) return {};
+        if (!persistInputProfileSettings({
           keyboardProfileId: state.keyboardShortcutProfileId,
           mouseProfileId: state.mouseBehaviorProfileId,
           onboardingSeen: true,
-        });
+        })) {
+          persistenceFailed = true;
+          return {};
+        }
         return { inputProfileOnboardingSeen: true };
       });
+      if (persistenceFailed) {
+        get().showToast("Input profile setup could not be saved to local storage.", "error");
+      }
     },
 
     // ========== Track Templates ==========

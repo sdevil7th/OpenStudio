@@ -478,8 +478,10 @@ describe("shortcut edit-context routing", () => {
     expect(openProjectSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("routes globals from non-text controls while preserving their native keys", () => {
+  it("reserves the effective transport Play binding while preserving other native control keys", () => {
     const toggleLoop = vi.fn();
+    const executeAction = vi.fn();
+    const preventDefault = vi.fn();
     useDAWStore.setState({ toggleLoop });
     activateShortcutContext({ kind: "application" });
 
@@ -495,6 +497,10 @@ describe("shortcut edit-context routing", () => {
       code: "Space",
       source: "browser",
       targetIsNonTextControl: true,
-    })).toBe(false);
+      preventDefault,
+    }, "windows", { executeAction })).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(executeAction).toHaveBeenCalledOnce();
+    expect(executeAction.mock.calls[0][0].id).toBe("transport.play");
   });
 });

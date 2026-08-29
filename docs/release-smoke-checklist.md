@@ -33,7 +33,15 @@ release-candidate platform.
 - Confirm the installer shows which step it is on while copying files, installing VC++, installing WebView2, and validating shell startup.
 - Confirm the installed app launches without a frontend dev server running.
 - Confirm the installed app does not show a full black window.
-- Confirm `webui`, `effects`, `scripts`, `models`, and `ffmpeg.exe` are present in the installed app directory.
+- Confirm `webui`, `effects`, `scripts`, `models`, and the checksum-pinned
+  `ffmpeg.exe` are present in the installed app directory.
+- Confirm `licenses/FFmpeg-COPYING.GPLv3.txt` and
+  `licenses/FFmpeg-PROVENANCE.json` are present, and confirm the matching
+  complete corresponding-source distribution is available before publication.
+- Confirm the checksum-validated YSFX/WDL, dr_libs, stb, CLAP, Signalsmith,
+  ARA, and Basic Pitch notices are present under `licenses/`. Also confirm the
+  notices copied from the pinned NAMCore/Eigen source and, when enabled, the
+  provenance-verified ONNX Runtime installation are present.
 - Confirm `prereqs/windows/MicrosoftEdgeWebView2RuntimeInstallerX64.exe` and `prereqs/windows/vc_redist.x64.exe` are present in the installed app directory.
 - Confirm `%APPDATA%\OpenStudio\logs\OpenStudio_Startup.log` is created on first launch.
 - Confirm the startup log reports `Embedded browser backend supported: Yes`.
@@ -91,6 +99,9 @@ release-candidate platform.
 - Scan, open, close, and reopen available VST3, CLAP, and AU editors while audio
   is active.
 - Import audio, edit, and export a short render.
+- Confirm WAV/AIFF/FLAC work without FFmpeg. Then install a system `ffmpeg` on
+  `PATH` and confirm an MP3/OGG conversion succeeds; the app bundle itself must
+  not contain an unpinned `ffmpeg` binary.
 - Save a new `.osproj` project and reopen it manually from Finder.
 - Open a legacy `.s13` project and confirm it loads.
 - Confirm the base app bundle does not include a bundled `python/` runtime folder.
@@ -98,6 +109,21 @@ release-candidate platform.
 - Click the toolbar AI Tools button and confirm the optional setup stays in the background with visible toolbar progress and no UI freeze.
 - Trigger `Check for Updates...` and confirm the stable manifest request succeeds.
 - Validate update behavior from the previous public version to the candidate build.
+
+## Linux
+
+- Validate both the raw Release output and the extracted AppImage payload with
+  `tools/validate-runtime-bundle.ps1 -Platform linux -ExpectedVersion <version>
+  -EnforceLeanBundle`.
+- Confirm `OpenStudio.version` exists and exactly matches the candidate version;
+  a missing, empty, or mismatched manifest is a release failure.
+- Run `--startup-self-test` under `xvfb-run`, then launch the AppImage visibly on
+  an x86-64 desktop and confirm the frontend reaches `boot-ready`.
+- Confirm no FFmpeg binary is bundled. Test one FFmpeg-backed operation both
+  without `ffmpeg` on `PATH` (actionable failure) and with the supported system
+  package installed (successful operation).
+- Test local NAM loading without a keyring. When TONE3000 sign-in is enabled,
+  also test token persistence with `secret-tool` and an active Secret Service.
 
 ## Updater And Release Metadata
 

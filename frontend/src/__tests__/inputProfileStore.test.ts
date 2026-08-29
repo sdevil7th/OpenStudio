@@ -16,6 +16,7 @@ describe("input profile persistence", () => {
     | "mouseBehaviorProfileId"
     | "inputProfileOnboardingSeen"
     | "mouseModifiers"
+    | "showToast"
   >;
 
   beforeEach(() => {
@@ -35,6 +36,7 @@ describe("input profile persistence", () => {
       mouseBehaviorProfileId: state.mouseBehaviorProfileId,
       inputProfileOnboardingSeen: state.inputProfileOnboardingSeen,
       mouseModifiers: state.mouseModifiers,
+      showToast: state.showToast,
     };
     storage.removeItem(SETTINGS_KEY);
     useDAWStore.setState({
@@ -69,6 +71,57 @@ describe("input profile persistence", () => {
     useDAWStore.getState().markInputProfileOnboardingSeen();
     expect(useDAWStore.getState().inputProfileOnboardingSeen).toBe(true);
     expect(JSON.parse(storage.getItem(SETTINGS_KEY) ?? "{}").onboardingSeen).toBe(true);
+  });
+
+  it("keeps keyboard, mouse, and onboarding state atomic when storage is unavailable", () => {
+    const showToast = vi.fn();
+    useDAWStore.setState({ showToast });
+    vi.stubGlobal("localStorage", undefined);
+
+    useDAWStore.getState().setKeyboardShortcutProfile("reaper");
+    useDAWStore.getState().setMouseBehaviorProfile("logic_pro");
+    useDAWStore.getState().markInputProfileOnboardingSeen();
+
+    expect(useDAWStore.getState()).toMatchObject({
+      keyboardShortcutProfileId: "openstudio",
+      mouseBehaviorProfileId: "openstudio",
+      inputProfileOnboardingSeen: false,
+    });
+    expect(showToast).toHaveBeenNthCalledWith(
+      1,
+      "The keyboard profile could not be saved to local storage.",
+      "error",
+    );
+    expect(showToast).toHaveBeenNthCalledWith(
+      2,
+      "The mouse profile could not be saved to local storage.",
+      "error",
+    );
+    expect(showToast).toHaveBeenNthCalledWith(
+      3,
+      "Input profile setup could not be saved to local storage.",
+      "error",
+    );
+  });
+
+  it("keeps keyboard, mouse, and onboarding state atomic when storage throws", () => {
+    const showToast = vi.fn();
+    useDAWStore.setState({ showToast });
+    vi.spyOn(storage, "setItem").mockImplementation(() => {
+      throw new Error("quota exceeded");
+    });
+
+    useDAWStore.getState().setKeyboardShortcutProfile("cubase");
+    useDAWStore.getState().setMouseBehaviorProfile("studio_one");
+    useDAWStore.getState().markInputProfileOnboardingSeen();
+
+    expect(useDAWStore.getState()).toMatchObject({
+      keyboardShortcutProfileId: "openstudio",
+      mouseBehaviorProfileId: "openstudio",
+      inputProfileOnboardingSeen: false,
+    });
+    expect(showToast).toHaveBeenCalledTimes(3);
+    expect(storage.getItem(SETTINGS_KEY)).toBeNull();
   });
 
   it("rejects invalid profile IDs received from untrusted persisted/UI data", () => {
