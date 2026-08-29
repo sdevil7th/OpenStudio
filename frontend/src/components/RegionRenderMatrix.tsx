@@ -3,6 +3,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { prepareForManualRender } from "../utils/renderPreparation";
+import { joinNativePath } from "../utils/nativePath";
 import {
   Button,
   Input,
@@ -23,14 +24,14 @@ interface RegionRenderMatrixProps {
  * Each checked cell produces one file.
  */
 export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps) {
-  const { tracks, regions, syncClipsWithBackend } = useDAWStore(
+  const { tracks, regions, syncClipsWithBackend, projectName } = useDAWStore(
     useShallow((s) => ({
       tracks: s.tracks,
       regions: s.regions,
       syncClipsWithBackend: s.syncClipsWithBackend,
+      projectName: s.projectName,
     }))
   );
-  const projectName = useDAWStore((s) => s.projectName);
 
   // Matrix: key = "trackId:regionId", value = checked
   const [checked, setChecked] = useState<Record<string, boolean>>({});
@@ -103,7 +104,7 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
         const fileName = resolveFilename(job.trackName, job.regionName, i + 1);
-        const filePath = `${directory}\\${fileName}.${format}`;
+        const filePath = joinNativePath(directory, `${fileName}.${format}`);
         setStatus(`Rendering ${i + 1}/${jobs.length}: ${job.trackName} × ${job.regionName}`);
 
         await nativeBridge.renderProject({

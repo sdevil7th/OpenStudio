@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight } from "lucide-react";
 import { guardModalContextMenu, shouldSuppressWorkspaceContextMenu } from "../utils/modalEventGuards";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 export interface MenuItem {
   label: string;
@@ -26,6 +28,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const submenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [submenuOpen, setSubmenuOpen] = useState<number | null>(null);
   const [adjustedPos, setAdjustedPos] = useState({ x, y });
+  useTransientOverlayShortcutScope(true, onClose);
 
   const clearSubmenuCloseTimer = () => {
     if (submenuCloseTimerRef.current) {
@@ -71,17 +74,9 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
       }
     };
 
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
-    };
-
     document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
     };
   }, [onClose]);
 
@@ -104,6 +99,8 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
         top: adjustedPos.y,
       }}
       onContextMenu={guardModalContextMenu}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
     >
       {items.map((item, index) => {
         if (item.divider) {
@@ -156,7 +153,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                   <div
                     key={subIndex}
                     className={`
-                      px-3 py-1.5 text-sm cursor-pointer flex items-center gap-2
+                      px-3 py-1.5 text-sm cursor-pointer flex items-center justify-between gap-4
                       ${subItem.disabled ? "text-neutral-500 cursor-not-allowed" : "text-neutral-200 hover:bg-neutral-700"}
                     `}
                     onClick={(e) => {
@@ -167,13 +164,21 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                       }
                     }}
                   >
-                    {subItem.swatchColor && (
-                      <span
-                        className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
-                        style={{ backgroundColor: subItem.swatchColor }}
-                      />
+                    <div className="flex items-center gap-2">
+                      {subItem.icon && <span className="w-4 h-4">{subItem.icon}</span>}
+                      {subItem.swatchColor && (
+                        <span
+                          className="w-3.5 h-3.5 rounded-sm border border-white/40 shadow-sm"
+                          style={{ backgroundColor: subItem.swatchColor }}
+                        />
+                      )}
+                      <span>{subItem.label}</span>
+                    </div>
+                    {subItem.shortcut && (
+                      <span className="text-xs text-neutral-500">
+                        {subItem.shortcut}
+                      </span>
                     )}
-                    <span>{subItem.label}</span>
                   </div>
                 ))}
               </div>

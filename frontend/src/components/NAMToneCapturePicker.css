@@ -1,0 +1,196 @@
+.nam-tone-capture-picker {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(245, 174, 39, 0.24);
+  background:
+    radial-gradient(ellipse at 18% 0%, rgba(245, 174, 39, 0.11), transparent 44%),
+    linear-gradient(180deg, rgba(23, 25, 22, 0.98), rgba(7, 8, 7, 0.99));
+  color: rgba(248, 250, 252, 0.92);
+  overflow: hidden;
+}
+
+.nam-tone-capture-picker > header {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.nam-tone-capture-picker > header > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.nam-tone-capture-picker > header span {
+  color: #8ef5c2;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nam-tone-capture-picker > header strong {
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-tone-capture-picker > header em {
+  flex: 0 0 auto;
+  color: rgba(226, 232, 240, 0.58);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.nam-tone-capture-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  overflow: auto;
+}
+
+.nam-tone-capture-list > article {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.nam-tone-capture-list > article[data-selected="true"] {
+  border-color: rgba(245, 174, 39, 0.7);
+  background: rgba(245, 174, 39, 0.09);
+}
+
+.nam-tone-capture-list > article[data-active="true"] {
+  box-shadow: inset 3px 0 0 #8ef5c2;
+}
+
+.nam-tone-capture-select {
+  min-width: 0;
+  min-height: 42px;
+  display: grid;
+  justify-items: start;
+  gap: 5px;
+  padding: 4px 5px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nam-tone-capture-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-tone-capture-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nam-tone-capture-badges i {
+  padding: 2px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: rgba(226, 232, 240, 0.67);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.nam-tone-capture-badges i[data-state="active"],
+.nam-tone-capture-badges i[data-state="installed"] {
+  border-color: rgba(142, 245, 194, 0.28);
+  color: #8ef5c2;
+}
+
+.nam-tone-capture-badges i[data-state="preview"] {
+  border-color: rgba(245, 174, 39, 0.4);
+  color: #f5c86a;
+}
+
+.nam-tone-capture-badges i[data-state="missing"],
+.nam-tone-capture-error {
+  color: #fca5a5;
+}
+
+.nam-tone-capture-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nam-tone-capture-actions button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(248, 250, 252, 0.85);
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.nam-tone-capture-select:focus-visible,
+.nam-tone-capture-actions button:focus-visible {
+  outline: 2px solid #f5ae27;
+  outline-offset: 2px;
+}
+
+.nam-tone-capture-actions button[data-primary="true"] {
+  border-color: rgba(142, 245, 194, 0.38);
+  color: #d1fae5;
+  background: rgba(69, 179, 107, 0.13);
+}
+
+.nam-tone-capture-actions button:disabled,
+.nam-tone-capture-select:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.nam-tone-capture-empty,
+.nam-tone-capture-error {
+  margin: 0;
+  padding: 9px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  color: rgba(226, 232, 240, 0.62);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.nam-tone-capture-picker[data-compact="true"] {
+  padding: 8px;
+}
+
+.nam-tone-capture-picker[data-compact="true"] .nam-tone-capture-list > article {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.nam-tone-capture-picker[data-compact="true"] .nam-tone-capture-actions {
+  justify-content: stretch;
+}
+
+.nam-tone-capture-picker[data-compact="true"] .nam-tone-capture-actions button {
+  flex: 1 1 0;
+}

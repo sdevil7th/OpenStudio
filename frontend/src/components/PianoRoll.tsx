@@ -9,6 +9,7 @@ import {
   MIDICCEvent,
   type PianoRollVisibleLane,
 } from "../store/useDAWStore";
+import { getEditableMidiClip } from "../store/actions/midi";
 import {
   DEFAULT_PITCH_BEND_RANGE_SEMITONES,
   MIDI_PITCH_BEND_CENTER,
@@ -64,6 +65,7 @@ import {
 } from "../utils/timelineGeometry";
 import {
   guardModalContextMenu,
+  isEditorWheelOwnedTarget,
   shouldSuppressWorkspaceContextMenu,
 } from "../utils/modalEventGuards";
 import {
@@ -81,6 +83,36 @@ import {
 } from "../utils/snapToGrid";
 import { windowRole, windowSessionId } from "../utils/windowEnvironment";
 import {
+  publishDetachedLoopRegion,
+  publishDetachedMidiQuantize,
+} from "../utils/detachedMainActionRouting";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import {
+  getDisplayEffectiveShortcut,
+  registerScopedActionExecutor,
+} from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+  type EditShortcutContext,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
+import { getShortcutPlatform } from "../utils/platform";
+import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
+import { resolveWheelGesture } from "../utils/wheelGestureResolver";
+import {
+  computeAnchoredVerticalWheelZoom,
+  createWheelEditBurstController,
+  getAccumulatedWheelNudgeDirection,
+  getAccumulatedWheelStepCount,
+  getMidiNoteHeightZoomPointerOffset,
+  type WheelEditBurstController,
+} from "../utils/contextWheelBehaviors";
+import {
+  createWheelDeltaAccumulator,
+  type WheelDeltaAccumulator,
+} from "../utils/wheelDeltaAccumulator";
+import {
   getNoteNameFromPitch,
   isNoteInScale,
   NOTE_NAMES,
@@ -91,7 +123,7 @@ import {
   velocityColor,
   velocityStrokeColor,
 } from "../utils/pianoRollVelocity";
-import { Button } from "./ui";
+import { Button, ProfiledRangeInput } from "./ui";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PianoRollControllerLaneSection } from "./PianoRollControllerLaneSection";
 import { PianoRollInspectorSummary } from "./PianoRollInspectorSummary";
@@ -132,6 +164,7 @@ interface NoteDragState {
   startPointerTime: number;
   startPointerNote: number;
   activeNoteId: string;
+  originalIsModified: boolean;
 }
 
 interface DrawingState {
@@ -146,12 +179,14 @@ interface VelocityEditState {
   timestamp: number;
   noteNumber: number;
   originalEvents: MIDIEvent[];
+  originalIsModified: boolean;
 }
 
 interface CCDrawState {
   lane: "cc" | "pitchBend" | "midiEvent" | "noteMetadata";
   originalCCEvents: MIDICCEvent[];
   originalEvents: MIDIEvent[];
+  originalIsModified: boolean;
 }
 
 interface MarqueeState {
@@ -223,6 +258,19 @@ type PianoRollContextMenuState = {
   time?: number;
 } | null;
 
+type PianoRollContextWheelEditTarget = {
+  kind: "note-nudge" | "note-property";
+  trackId: string;
+  clipId: string;
+  sessionKey: string;
+  initialNoteId: string;
+  currentNoteId: string;
+  propertyKey: string;
+  description: string;
+  originalEvents: MIDIEvent[] | null;
+  originalIsModified: boolean;
+};
+
 const MULTI_CLIP_TINTS = [
   null,
   "#ff6b9d",
@@ -241,18 +289,119 @@ const STEP_SIZE_OPTIONS = [
   { label: "1/32", beats: 0.125 },
 ];
 
-const KEY_TO_NOTE: Record<string, number> = {
-  c: 0,
-  d: 2,
-  e: 4,
-  f: 5,
-  g: 7,
-  a: 9,
-  b: 11,
+const PIANO_STEP_INPUT_ACTION_SEMITONES: Record<string, number> = {
+  "midi.stepInputC": 0,
+  "midi.stepInputD": 2,
+  "midi.stepInputE": 4,
+  "midi.stepInputF": 5,
+  "midi.stepInputG": 7,
+  "midi.stepInputA": 9,
+  "midi.stepInputB": 11,
+  "midi.stepInputCSharp": 1,
+  "midi.stepInputDSharp": 3,
+  "midi.stepInputESharp": 5,
+  "midi.stepInputFSharp": 6,
+  "midi.stepInputGSharp": 8,
+  "midi.stepInputASharp": 10,
+  "midi.stepInputBSharp": 12,
 };
 
+const PIANO_TOOL_ACTIONS = {
+  "midi.tool.draw": "draw",
+  "midi.tool.select": "select",
+  "midi.tool.erase": "erase",
+  "midi.tool.trim": "trim",
+  "midi.tool.split": "split",
+  "midi.tool.glue": "glue",
+  "midi.tool.mute": "mute",
+  "midi.tool.velocity": "velocity",
+  "midi.tool.line": "line",
+  "midi.tool.zoom": "zoom",
+  "midi.tool.pan": "pan",
+  "midi.tool.range": "range",
+} as const;
+
+const PIANO_MOVE_ACTION_IDS = [
+  "midi.moveLeft",
+  "midi.moveRight",
+  "midi.movePitchUp",
+  "midi.movePitchDown",
+  "midi.moveLeftFine",
+  "midi.moveRightFine",
+  "midi.movePitchOctaveUp",
+  "midi.movePitchOctaveDown",
+] as const;
+
+const PIANO_SHORTCUT_ACTION_IDS = [
+  ...Object.keys(PIANO_STEP_INPUT_ACTION_SEMITONES),
+  ...Object.keys(PIANO_TOOL_ACTIONS),
+  "midi.repeatSelection",
+  "midi.quantizeLast",
+  "midi.selectAll",
+  "midi.deselectAll",
+  "midi.selectNextNote",
+  "midi.selectPreviousNote",
+  "midi.glueSelectedNotes",
+  "view.togglePianoRoll",
+  "midi.loopFromSelectedNotes",
+  "midi.noteProperties",
+  "midi.toggleGhostReference",
+  "midi.configureControllerLanes",
+  "midi.openQuantizePanel",
+  "midi.quantizeLength",
+  "midi.controllerLine",
+  "midi.controllerSineLfo",
+  "midi.controllerTriangleLfo",
+  "midi.controllerSquareLfo",
+  "midi.controllerSawUpLfo",
+  "midi.controllerSawDownLfo",
+  "midi.controllerTransform",
+  "midi.controllerThin",
+  "midi.copyControllerLane",
+  "midi.pasteControllerLane",
+  "midi.clearControllerLane",
+  "midi.copySelection",
+  "midi.cutSelection",
+  "midi.pasteSelection",
+  "midi.duplicateSelection",
+  "midi.deleteSelection",
+  ...PIANO_MOVE_ACTION_IDS,
+  "midi.closeEditor",
+] as const;
+
+const PIANO_REPEATABLE_ACTION_IDS = new Set<string>([
+  ...Object.keys(PIANO_STEP_INPUT_ACTION_SEMITONES),
+  ...PIANO_MOVE_ACTION_IDS,
+]);
+
+const PIANO_LOCK_SAFE_ACTION_IDS = new Set<string>([
+  ...Object.keys(PIANO_TOOL_ACTIONS),
+  "view.togglePianoRoll",
+  "midi.closeEditor",
+  "midi.selectAll",
+  "midi.deselectAll",
+  "midi.selectNextNote",
+  "midi.selectPreviousNote",
+  "midi.noteProperties",
+  "midi.toggleGhostReference",
+  "midi.configureControllerLanes",
+  "midi.openQuantizePanel",
+  "midi.controllerLine",
+  "midi.controllerSineLfo",
+  "midi.controllerTriangleLfo",
+  "midi.controllerSquareLfo",
+  "midi.controllerSawUpLfo",
+  "midi.controllerSawDownLfo",
+  "midi.controllerTransform",
+  "midi.controllerThin",
+  "midi.copyControllerLane",
+  "midi.copySelection",
+]);
+
 const TOTAL_NOTES = 128;
-const NOTE_HEIGHT = 12;
+const DEFAULT_NOTE_HEIGHT = 12;
+const MIN_NOTE_HEIGHT = 6;
+const MAX_NOTE_HEIGHT = 36;
 const PIANO_WIDTH = 0;
 const PIANO_KEY_STRIP_MIN_WIDTH = 56;
 const PIANO_KEY_STRIP_MAX_WIDTH = 86;
@@ -382,9 +531,19 @@ function parseNotePairs(events?: MIDIEvent[]): NotePair[] {
   return parseMIDINotePairs(events || []);
 }
 
+function getPianoRollClipEventsSnapshot(
+  trackId: string,
+  clipId: string,
+): MIDIEvent[] | null {
+  const track = useDAWStore.getState().tracks.find((candidate) => candidate.id === trackId);
+  const clip = track?.midiClips.find((candidate) => candidate.id === clipId);
+  return clip ? clip.events.map((event) => ({ ...event })) : null;
+}
+
 export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], isDetached = false, onDetach }: PianoRollProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const controllerLaneSelectorRef = useRef<HTMLSelectElement>(null);
   const scrollbarRef = useRef<HTMLDivElement>(null);
   const verticalScrollbarRef = useRef<HTMLDivElement>(null);
   const auditionRef = useRef<{ note: number | null; timeoutId: number | null; lastAt: number }>({
@@ -399,10 +558,83 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const gestureSessionRef = useRef<PianoRollGestureSession | null>(null);
   const ccDrawStateRef = useRef<CCDrawState | null>(null);
   const panDragRef = useRef<PanDragState | null>(null);
+  const contextWheelEditControllerRef = useRef<
+    WheelEditBurstController<PianoRollContextWheelEditTarget> | null
+  >(null);
+  if (contextWheelEditControllerRef.current === null) {
+    contextWheelEditControllerRef.current = createWheelEditBurstController({
+      idleMs: 180,
+      getKey: (target) => [
+        target.kind,
+        target.sessionKey,
+        target.trackId,
+        target.clipId,
+        target.initialNoteId,
+        target.propertyKey,
+      ].join(":"),
+      onBegin: (target) => {
+        target.originalEvents = getPianoRollClipEventsSnapshot(
+          target.trackId,
+          target.clipId,
+        );
+        target.originalIsModified = useDAWStore.getState().isModified;
+      },
+      onCommit: (target) => {
+        const finalEvents = getPianoRollClipEventsSnapshot(
+          target.trackId,
+          target.clipId,
+        );
+        if (
+          !target.originalEvents
+          || !finalEvents
+          || JSON.stringify(target.originalEvents) === JSON.stringify(finalEvents)
+        ) {
+          return;
+        }
+        useDAWStore.getState().commitMIDIClipEvents(
+          target.trackId,
+          target.clipId,
+          target.originalEvents,
+          finalEvents,
+          target.description,
+        );
+      },
+    });
+  }
+
+  const createPianoRollContextWheelAccumulator = useCallback(() => (
+    createWheelDeltaAccumulator({
+      quantum: 100,
+      idleMs: 180,
+      onReset: ({ hadOutput }) => {
+        if (hadOutput) contextWheelEditControllerRef.current?.commit();
+      },
+    })
+  ), []);
+  const contextWheelAccumulatorRef = useRef<WheelDeltaAccumulator | null>(null);
+  if (contextWheelAccumulatorRef.current === null) {
+    contextWheelAccumulatorRef.current = createPianoRollContextWheelAccumulator();
+  }
+
+  useEffect(() => () => {
+    contextWheelAccumulatorRef.current?.reset();
+    contextWheelEditControllerRef.current?.commit();
+  }, [clipId, sessionId, trackId]);
+
+  useEffect(() => {
+    if (contextWheelAccumulatorRef.current?.getState().disposed) {
+      contextWheelAccumulatorRef.current = createPianoRollContextWheelAccumulator();
+    }
+    return () => {
+      contextWheelAccumulatorRef.current?.dispose();
+      contextWheelEditControllerRef.current?.dispose();
+    };
+  }, [createPianoRollContextWheelAccumulator]);
 
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [toolbarHeight, setToolbarHeight] = useState(TOOLBAR_HEIGHT);
-  const [scrollY, setScrollY] = useState(TOTAL_NOTES * NOTE_HEIGHT / 2 - 300);
+  const [noteHeight, setNoteHeight] = useState(DEFAULT_NOTE_HEIGHT);
+  const [scrollY, setScrollY] = useState(TOTAL_NOTES * DEFAULT_NOTE_HEIGHT / 2 - 300);
   const [sourceLengthDraft, setSourceLengthDraft] = useState("");
   const [stepInputOctave, setStepInputOctave] = useState(4);
   const [selectedCC, setSelectedCC] = useState(1);
@@ -461,6 +693,10 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     quantizePresets,
     isTransportPlaying,
     tcpWidth,
+    keyboardShortcutProfileId,
+    customShortcuts,
+    globalLocked,
+    itemsLocked,
   } = useDAWStore(
     useShallow((state) => ({
       track: state.tracks.find((candidate) => candidate.id === trackId),
@@ -491,7 +727,15 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       quantizePresets: state.quantizePresets,
       isTransportPlaying: state.transport.isPlaying,
       tcpWidth: state.tcpWidth,
+      keyboardShortcutProfileId: state.keyboardShortcutProfileId,
+      customShortcuts: state.customShortcuts,
+      globalLocked: state.globalLocked,
+      itemsLocked: state.lockSettings.items,
     })),
+  );
+  const shortcut = useCallback(
+    (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
+    [customShortcuts, keyboardShortcutProfileId],
   );
   const tool = activeMidiTool;
   const pitchBendRangeUp = clamp(track?.midiPitchBendRangeUp ?? DEFAULT_PITCH_BEND_RANGE_SEMITONES, 1, 24);
@@ -508,6 +752,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     commitMIDICCEvents,
     previewMIDIClipEvents,
     commitMIDIClipEvents,
+    glueSelectedMIDINotes,
     addMIDINote,
     removeMIDINotes,
     moveMIDINotes,
@@ -582,6 +827,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       commitMIDICCEvents: state.commitMIDICCEvents,
       previewMIDIClipEvents: state.previewMIDIClipEvents,
       commitMIDIClipEvents: state.commitMIDIClipEvents,
+      glueSelectedMIDINotes: state.glueSelectedMIDINotes,
       addMIDINote: state.addMIDINote,
       removeMIDINotes: state.removeMIDINotes,
       moveMIDINotes: state.moveMIDINotes,
@@ -657,6 +903,80 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const activeControllerLane = isVelocityLaneActive ? undefined : activeLane;
 
   const clip = track?.midiClips.find((candidate) => candidate.id === clipId);
+  const midiTargetEditable = Boolean(getEditableMidiClip(
+    {
+      tracks: track ? [track] : [],
+      globalLocked,
+      lockSettings: { items: itemsLocked },
+    },
+    trackId,
+    clipId,
+  ));
+
+  useEffect(() => {
+    const cancelLockedGesture = (state: ReturnType<typeof useDAWStore.getState>) => {
+      if (getEditableMidiClip(state, trackId, clipId)) return;
+      const wheelTarget = contextWheelEditControllerRef.current?.getActiveTarget();
+      const activeCCDrawState = ccDrawStateRef.current || ccDrawState;
+      const hasActiveGesture = Boolean(
+        dragState
+        || drawingState
+        || velocityEdit
+        || activeCCDrawState
+        || loopBoundaryDrag
+        || wheelTarget,
+      );
+      if (!hasActiveGesture) return;
+
+      const originalEvents = activeCCDrawState?.originalEvents
+        ?? velocityEdit?.originalEvents
+        ?? dragState?.originalEvents
+        ?? wheelTarget?.originalEvents
+        ?? null;
+      const originalCCEvents = activeCCDrawState?.originalCCEvents ?? null;
+      const originalIsModified = activeCCDrawState?.originalIsModified
+        ?? velocityEdit?.originalIsModified
+        ?? dragState?.originalIsModified
+        ?? wheelTarget?.originalIsModified
+        ?? state.isModified;
+      if (originalEvents || originalCCEvents) {
+        useDAWStore.setState((current) => ({
+          tracks: current.tracks.map((candidate) => candidate.id === trackId
+            ? {
+                ...candidate,
+                midiClips: candidate.midiClips.map((candidateClip) => candidateClip.id === clipId
+                  ? {
+                      ...candidateClip,
+                      ...(originalEvents ? { events: originalEvents.map((event) => ({ ...event })) } : {}),
+                      ...(originalCCEvents ? { ccEvents: originalCCEvents.map((event) => ({ ...event })) } : {}),
+                    }
+                  : candidateClip),
+              }
+            : candidate),
+          isModified: originalIsModified,
+        }));
+        void useDAWStore.getState().syncMIDITrackToBackend(trackId, { debounce: false });
+      }
+
+      const restoredSelection = dragState?.noteIds
+        ?? (velocityEdit ? [velocityEdit.noteId] : undefined)
+        ?? (wheelTarget ? [wheelTarget.initialNoteId] : undefined);
+      if (restoredSelection) useDAWStore.getState().setSelectedNoteIds(restoredSelection);
+      contextWheelEditControllerRef.current?.cancel();
+      contextWheelAccumulatorRef.current?.reset();
+      gestureSessionRef.current = null;
+      ccDrawStateRef.current = null;
+      latestDragAuditionRef.current = null;
+      setDragState(null);
+      setDrawingState(null);
+      setVelocityEdit(null);
+      setCCDrawState(null);
+      setLoopBoundaryDrag(null);
+    };
+
+    cancelLockedGesture(useDAWStore.getState());
+    return useDAWStore.subscribe(cancelLockedGesture);
+  }, [ccDrawState, clipId, dragState, drawingState, loopBoundaryDrag, trackId, velocityEdit]);
   const clipEvents = clip?.events;
   const clipCCEvents = clip?.ccEvents;
   const clipDuration = clip ? getMIDIClipSourceLoopLength(clip) : 0;
@@ -690,7 +1010,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     1,
     dimensions.height - toolbarHeight - INFO_LINE_HEIGHT - RULER_HEIGHT - HORIZONTAL_SCROLLBAR_HEIGHT - STATUS_STRIP_HEIGHT,
   );
-  const noteGridHeight = Math.max(NOTE_HEIGHT * 4, stageHeight - bottomLanesHeight);
+  const noteGridHeight = Math.max(noteHeight * 4, stageHeight - bottomLanesHeight);
   const velocityLaneY = noteGridHeight;
   const ccLaneY = noteGridHeight;
   const visibleGridWidth = Math.max(1, stageWidth - PIANO_WIDTH);
@@ -893,7 +1213,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const editorContentEnd = clipStartTime + contentDuration + editorPaddingSeconds;
   const contentWidth = Math.max(visibleGridWidth, editorContentEnd * pixelsPerSecond);
   const maxScrollX = Math.max(0, contentWidth - visibleGridWidth);
-  const maxScrollY = Math.max(0, TOTAL_NOTES * NOTE_HEIGHT - noteGridHeight);
+  const maxScrollY = Math.max(0, TOTAL_NOTES * noteHeight - noteGridHeight);
   const formatSeconds = useCallback((value: number) => value.toFixed(3), []);
   const applySourceLength = useCallback((nextLength: number, description: string) => {
     if (!clip) return;
@@ -975,9 +1295,9 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
   const noteFromPianoKeyPointer = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const row = Math.floor((event.clientY - rect.top + scrollY) / NOTE_HEIGHT);
+    const row = Math.floor((event.clientY - rect.top + scrollY) / noteHeight);
     return clamp(TOTAL_NOTES - 1 - row, 0, TOTAL_NOTES - 1);
-  }, [scrollY]);
+  }, [noteHeight, scrollY]);
 
   const beginPianoKeyPointerDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -1011,12 +1331,12 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, [endPianoKeyDrag]);
 
   const getNoteY = useCallback((noteNumber: number) => {
-    return (TOTAL_NOTES - 1 - noteNumber) * NOTE_HEIGHT - scrollY;
-  }, [scrollY]);
+    return (TOTAL_NOTES - 1 - noteNumber) * noteHeight - scrollY;
+  }, [noteHeight, scrollY]);
 
   const getNoteFromY = useCallback((y: number): number => {
-    return clamp(TOTAL_NOTES - 1 - Math.floor((y + scrollY) / NOTE_HEIGHT), 0, 127);
-  }, [scrollY]);
+    return clamp(TOTAL_NOTES - 1 - Math.floor((y + scrollY) / noteHeight), 0, 127);
+  }, [noteHeight, scrollY]);
 
   const midiSnapEventTimes = useMemo(() => {
     const times: number[] = [];
@@ -1084,8 +1404,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }),
     y: getNoteY(pair.noteNumber),
     width: Math.max(4, pair.duration * pixelsPerSecond),
-    height: NOTE_HEIGHT,
-  })), [clipId, clipStartTime, getNoteY, notePairs, pixelsPerSecond, timelineScrollX]);
+    height: noteHeight,
+  })), [clipId, clipStartTime, getNoteY, noteHeight, notePairs, pixelsPerSecond, timelineScrollX]);
 
   const pianoRollHitLanes = useMemo(() => {
     if (!activeLane) return [];
@@ -1219,16 +1539,16 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
   const revealPreviewNote = useCallback((note: number) => {
     const safeNote = clamp(Math.round(note), 0, 127);
-    const noteTop = (TOTAL_NOTES - 1 - safeNote) * NOTE_HEIGHT;
-    const noteBottom = noteTop + NOTE_HEIGHT;
-    const verticalPadding = NOTE_HEIGHT * 2;
+    const noteTop = (TOTAL_NOTES - 1 - safeNote) * noteHeight;
+    const noteBottom = noteTop + noteHeight;
+    const verticalPadding = noteHeight * 2;
     setScrollY((previous) => {
       const visibleTop = previous + verticalPadding;
       const visibleBottom = previous + noteGridHeight - verticalPadding;
       if (noteTop >= visibleTop && noteBottom <= visibleBottom) return previous;
       return clamp(noteTop - noteGridHeight * 0.45, 0, maxScrollY);
     });
-  }, [maxScrollY, noteGridHeight]);
+  }, [maxScrollY, noteGridHeight, noteHeight]);
 
   const showPreviewNote = useCallback((
     rawNote: number,
@@ -1319,15 +1639,258 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     if (!container) return;
 
     const handleWheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement | null)?.closest(".piano-roll-sidebar")) {
+      if (isEditorWheelOwnedTarget(event.target)) return;
+      const eventElement = event.target instanceof Element ? event.target : null;
+      const isSidebar = Boolean(eventElement?.closest(".piano-roll-sidebar"));
+      const keyboardViewport = eventElement?.closest<HTMLElement>(".piano-roll-key-viewport");
+      const isKeyboard = Boolean(keyboardViewport);
+      const stageElement = container.querySelector<HTMLElement>(".piano-roll-stage-wrap");
+      const stageRect = stageElement?.getBoundingClientRect();
+      const stageX = stageRect ? event.clientX - stageRect.left : -1;
+      const stageY = stageRect ? event.clientY - stageRect.top : -1;
+      const isInsideStage = Boolean(
+        stageRect
+        && stageX >= 0
+        && stageY >= 0
+        && stageX <= stageRect.width
+        && stageY <= stageRect.height,
+      );
+      const wheelHit = isInsideStage
+        ? hitTestPianoRoll(stageX, stageY, {
+          pianoWidth: PIANO_WIDTH,
+          noteGridHeight,
+          velocityLaneY,
+          velocityLaneHeight: isVelocityLaneActive ? velocityLaneHeight : 0,
+          controllerLaneY: ccLaneY,
+          controllerLaneHeight: activeControllerLane ? ccLaneHeight : 0,
+          noteEdgeHitWidth: NOTE_EDGE_HIT_WIDTH,
+          timeFromX: getTimeFromX,
+          noteFromY: getNoteFromY,
+          notes: pianoRollHitNotes,
+          lanes: pianoRollHitLanes,
+          controllerEvents: pianoRollControllerHitEvents,
+          loopStartX: loopBoundaryStartX,
+          loopEndX: loopBoundaryEndX,
+          loopBoundaryHitWidth: 6,
+        })
+        : { kind: "outside" as const };
+      const isControllerTarget = wheelHit.kind === "velocity-lane"
+        || wheelHit.kind === "controller-lane"
+        || wheelHit.kind === "controller-node"
+        || wheelHit.kind === "controller-segment"
+        || wheelHit.kind === "lane-header"
+        || wheelHit.kind === "lane-resize";
+      const wheelSubtarget = isSidebar
+        ? "sidebar" as const
+        : isKeyboard
+          ? "keyboard" as const
+          : wheelHit.kind === "note"
+            ? "note" as const
+            : isControllerTarget
+              ? "controller_lane" as const
+              : "grid" as const;
+      const shortcutPlatform = getShortcutPlatform();
+      const behaviorProfile = getMouseBehaviorProfile(
+        useDAWStore.getState().mouseBehaviorProfileId,
+        shortcutPlatform,
+      );
+      const gesture = resolveWheelGesture(event, {
+        surface: "piano_roll",
+        subtarget: wheelSubtarget,
+        platform: toMouseBehaviorPlatform(shortcutPlatform),
+        hoveredTargetId: wheelHit.kind === "note" ? wheelHit.noteId : undefined,
+      }, behaviorProfile.wheel);
+      if (gesture.preventDefault) event.preventDefault();
+      if (gesture.stopPropagation) event.stopPropagation();
+      const isAccumulatedNoteWheel = wheelHit.kind === "note" && (
+        (gesture.operation === "nudge" && gesture.target === "note-position")
+        || (gesture.operation === "adjust" && gesture.target === "note-property")
+      );
+      if (!isAccumulatedNoteWheel) contextWheelAccumulatorRef.current?.reset();
+      if (gesture.operation === "native-scroll") return;
+
+      if (gesture.operation === "zoom" && gesture.target === "midi-note-height") {
+        if (gesture.amount === 0) return;
+        const keyboardRect = keyboardViewport?.getBoundingClientRect();
+        const noteHeightZoomTarget = isKeyboard
+          ? "keyboard" as const
+          : wheelHit.kind === "note"
+            ? "note" as const
+            : "grid" as const;
+        const pointerY = getMidiNoteHeightZoomPointerOffset({
+          target: noteHeightZoomTarget,
+          stagePointerOffset: isInsideStage ? stageY : undefined,
+          keyboardPointerOffset: keyboardRect
+            ? event.clientY - keyboardRect.top
+            : undefined,
+          gridHeight: noteGridHeight,
+        });
+        const unclampedNextHeight = clamp(
+          noteHeight * Math.exp(-gesture.amount * 0.0015),
+          MIN_NOTE_HEIGHT,
+          MAX_NOTE_HEIGHT,
+        );
+        const nextMaxScrollY = Math.max(0, TOTAL_NOTES * unclampedNextHeight - noteGridHeight);
+        const next = computeAnchoredVerticalWheelZoom({
+          itemHeight: noteHeight,
+          scrollOffset: scrollY,
+          pointerOffset: pointerY,
+          amount: gesture.amount,
+          minItemHeight: MIN_NOTE_HEIGHT,
+          maxItemHeight: MAX_NOTE_HEIGHT,
+          maxScrollOffset: nextMaxScrollY,
+        });
+        setNoteHeight(next.itemHeight);
+        setScrollY(next.scrollOffset);
         return;
       }
-      event.preventDefault();
-      if (event.ctrlKey || event.metaKey) {
+
+      if (
+        gesture.operation === "nudge"
+        && gesture.target === "note-position"
+        && wheelHit.kind === "note"
+      ) {
+        const sessionKey = sessionId ?? (isDetached ? "detached" : "embedded");
+        const activeTarget = contextWheelEditControllerRef.current?.getActiveTarget();
+        const matchingTarget = activeTarget?.kind === "note-nudge"
+          && activeTarget.sessionKey === sessionKey
+          && activeTarget.trackId === trackId
+          && activeTarget.clipId === clipId
+          && (
+            wheelHit.noteId === activeTarget.initialNoteId
+            || wheelHit.noteId === activeTarget.currentNoteId
+          )
+          ? activeTarget
+          : null;
+        if (!contextWheelAccumulatorRef.current) return;
+        const initialNoteId = matchingTarget?.initialNoteId ?? wheelHit.noteId;
+        const direction = getAccumulatedWheelNudgeDirection(
+          contextWheelAccumulatorRef.current,
+          `note-nudge:${sessionKey}:${trackId}:${clipId}:${initialNoteId}`,
+          gesture.amount,
+        );
+        if (direction === 0) {
+          const pendingTarget = contextWheelEditControllerRef.current?.getActiveTarget();
+          if (pendingTarget === matchingTarget && pendingTarget) {
+            contextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        const currentEvents = getLatestClipEvents();
+        const currentNoteId = matchingTarget?.currentNoteId ?? wheelHit.noteId;
+        const pair = parseNotePairs(currentEvents).find((candidate) =>
+          noteIdFor(clipId, candidate.startTime, candidate.noteNumber) === currentNoteId,
+        );
+        if (!pair) return;
+        const nextStart = Math.max(0, pair.startTime + direction * stepDurationSeconds);
+        if (nextStart === pair.startTime) return;
+        const target = matchingTarget ?? {
+          kind: "note-nudge" as const,
+          trackId,
+          clipId,
+          sessionKey,
+          initialNoteId: wheelHit.noteId,
+          currentNoteId: wheelHit.noteId,
+          propertyKey: "position",
+          description: "Nudge MIDI note",
+          originalEvents: null,
+          originalIsModified: useDAWStore.getState().isModified,
+        };
+        contextWheelEditControllerRef.current?.touch(target);
+        const { events: nextEvents, nextIds } = rebuildMIDIEventsForNotes(
+          currentEvents,
+          clipId,
+          [currentNoteId],
+          (candidate) => ({ ...candidate, startTime: nextStart }),
+        );
+        if (JSON.stringify(nextEvents) === JSON.stringify(currentEvents)) return;
+        previewMIDIClipEvents(trackId, clipId, nextEvents);
+        if (nextIds[0]) target.currentNoteId = nextIds[0];
+        if (nextIds.length > 0) setSelectedNoteIds(nextIds);
+        return;
+      }
+
+      if (
+        gesture.operation === "adjust"
+        && gesture.target === "note-property"
+        && wheelHit.kind === "note"
+      ) {
+        const sessionKey = sessionId ?? (isDetached ? "detached" : "embedded");
+        const propertyKey = selectedNoteMetadataLaneType ?? "velocity";
+        const activeTarget = contextWheelEditControllerRef.current?.getActiveTarget();
+        const matchingTarget = activeTarget?.kind === "note-property"
+          && activeTarget.sessionKey === sessionKey
+          && activeTarget.trackId === trackId
+          && activeTarget.clipId === clipId
+          && activeTarget.propertyKey === propertyKey
+          && (
+            wheelHit.noteId === activeTarget.initialNoteId
+            || wheelHit.noteId === activeTarget.currentNoteId
+          )
+          ? activeTarget
+          : null;
+        if (!contextWheelAccumulatorRef.current) return;
+        const initialNoteId = matchingTarget?.initialNoteId ?? wheelHit.noteId;
+        const stepCount = getAccumulatedWheelStepCount(
+          contextWheelAccumulatorRef.current,
+          `note-property:${sessionKey}:${trackId}:${clipId}:${initialNoteId}:${propertyKey}`,
+          gesture.amount,
+        );
+        if (stepCount === 0) {
+          const pendingTarget = contextWheelEditControllerRef.current?.getActiveTarget();
+          if (pendingTarget === matchingTarget && pendingTarget) {
+            contextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        const oldEvents = getLatestClipEvents();
+        const currentNoteId = matchingTarget?.currentNoteId ?? wheelHit.noteId;
+        const pair = parseNotePairs(oldEvents).find((candidate) =>
+          noteIdFor(clipId, candidate.startTime, candidate.noteNumber) === currentNoteId,
+        );
+        if (!pair) return;
+        const integerStep = Math.trunc(stepCount);
+        if (integerStep === 0) return;
+        const nextEvents = selectedNoteMetadataLaneType
+          ? applyNoteMetadataValueToEvents(
+            oldEvents,
+            pair,
+            selectedNoteMetadataLaneType,
+            clamp(
+              noteMetadataValueForPair(pair, selectedNoteMetadataLaneType) + integerStep,
+              0,
+              noteMetadataLaneMax(selectedNoteMetadataLaneType),
+            ),
+          )
+          : oldEvents.map((midiEvent, index) => index === pair.onIndex
+            ? { ...midiEvent, velocity: clamp((midiEvent.velocity ?? pair.velocity) + integerStep, 1, 127) }
+            : midiEvent);
+        if (JSON.stringify(nextEvents) === JSON.stringify(oldEvents)) return;
+        const target = matchingTarget ?? {
+          kind: "note-property" as const,
+          trackId,
+          clipId,
+          sessionKey,
+          initialNoteId: wheelHit.noteId,
+          currentNoteId,
+          propertyKey,
+          description: selectedNoteMetadataLaneType
+            ? `Adjust MIDI ${noteMetadataLaneName(selectedNoteMetadataLaneType)}`
+            : "Adjust MIDI note velocity",
+          originalEvents: null,
+          originalIsModified: useDAWStore.getState().isModified,
+        };
+        contextWheelEditControllerRef.current?.touch(target);
+        previewMIDIClipEvents(trackId, clipId, sortEvents(nextEvents));
+        setSelectedNoteIds([currentNoteId]);
+        return;
+      }
+
+      if (gesture.operation === "zoom" && gesture.target === "timeline") {
         const rect = container.getBoundingClientRect();
         const cursorGridX = clamp(event.clientX - rect.left - sidebarWidth - TIMELINE_DIVIDER_WIDTH - PIANO_WIDTH, 0, visibleGridWidth);
         const projectTimeAtCursor = (timelineScrollX + cursorGridX) / pixelsPerSecond;
-        const factor = Math.exp(-event.deltaY * 0.0015);
+        const factor = Math.exp(-gesture.amount * 0.0015);
         const nextPixelsPerSecond = clamp(pixelsPerSecond * factor, 1, 1000);
         const nextEditorContentEnd = clipStartTime + contentDuration + getEditorPaddingSeconds(nextPixelsPerSecond);
         const nextContentWidth = Math.max(visibleGridWidth, nextEditorContentEnd * nextPixelsPerSecond);
@@ -1337,29 +1900,52 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         setTimelineScroll(nextScrollX, timelineScrollY);
         return;
       }
-      const horizontalIntent = Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey;
-      if (horizontalIntent) {
-        const delta = event.deltaX + (event.shiftKey ? event.deltaY : 0);
-        setTimelineScroll(clamp(timelineScrollX + delta, 0, maxScrollX), timelineScrollY);
-      } else {
-        setScrollY((previous) => clamp(previous + event.deltaY, 0, maxScrollY));
+      if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
+        setTimelineScroll(clamp(timelineScrollX + gesture.amount, 0, maxScrollX), timelineScrollY);
+      } else if (gesture.operation === "scroll") {
+        setScrollY((previous) => clamp(previous + gesture.amount, 0, maxScrollY));
       }
     };
 
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
   }, [
+    activeControllerLane,
+    ccLaneHeight,
+    ccLaneY,
     clipStartTime,
+    clipId,
     contentDuration,
     getEditorPaddingSeconds,
+    getLatestClipEvents,
+    getNoteFromY,
+    getTimeFromX,
+    isVelocityLaneActive,
+    isDetached,
+    loopBoundaryEndX,
+    loopBoundaryStartX,
     maxScrollX,
     maxScrollY,
+    noteGridHeight,
+    noteHeight,
+    pianoRollControllerHitEvents,
+    pianoRollHitLanes,
+    pianoRollHitNotes,
     pixelsPerSecond,
+    previewMIDIClipEvents,
+    scrollY,
+    sessionId,
+    selectedNoteMetadataLaneType,
+    setSelectedNoteIds,
     setTimelineScroll,
     setTimelineZoom,
     sidebarWidth,
+    stepDurationSeconds,
     timelineScrollX,
     timelineScrollY,
+    trackId,
+    velocityLaneHeight,
+    velocityLaneY,
     visibleGridWidth,
   ]);
 
@@ -1386,156 +1972,270 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     return () => window.removeEventListener("blur", handleBlur);
   }, [stopAudition]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement;
-      if (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+  // The root app owns the one capture-phase key listener. The most recently
+  // interacted editor session registers its local behavior with that router.
+  const shortcutSessionId = sessionId || windowSessionId || `docked:${trackId}:${clipId}`;
+  const pianoShortcutContext = useMemo<EditShortcutContext>(
+    () => ({ kind: "piano_roll", sessionId: shortcutSessionId }),
+    [shortcutSessionId],
+  );
+  const pianoActionExecutorRef = useRef<
+    (actionId: string) => ReturnType<ShortcutSurfaceHandler>
+  >(() => "unmatched");
+  pianoActionExecutorRef.current = (actionId) => {
+    if (actionId === "midi.closeEditor") {
+      stopAudition();
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.closeMidiEditorWindow(shortcutSessionId, "close");
+      } else {
+        useDAWStore.getState().closePianoRoll();
+      }
+      return "handled";
+    }
+    if (actionId === "view.togglePianoRoll") {
+      stopAudition();
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.closeMidiEditorWindow(shortcutSessionId, "close");
+      } else {
+        useDAWStore.getState().closePianoRoll();
+      }
+      return "handled";
+    }
 
-      const key = event.key.toLowerCase();
-      const isStepInputNoteKey =
-        stepInputEnabled
-        && selectedNoteIds.length === 0
-        && KEY_TO_NOTE[key] !== undefined;
-      if (isStepInputNoteKey) return;
+    if (!PIANO_LOCK_SAFE_ACTION_IDS.has(actionId)
+        && !getEditableMidiClip(useDAWStore.getState(), trackId, clipId)) {
+      return "claimed_noop";
+    }
 
-      const hasShortcutModifier = event.ctrlKey || event.metaKey || event.altKey;
+    const stepInputSemitone = PIANO_STEP_INPUT_ACTION_SEMITONES[actionId];
+    if (stepInputSemitone !== undefined) {
+      if (!stepInputEnabled || selectedNoteIds.length > 0) return "claimed_noop";
+      const noteNumber = (stepInputOctave + 2) * 12 + stepInputSemitone;
+      if (noteNumber < 0 || noteNumber > 127) return "claimed_noop";
+      const newId = addMIDINote(
+        trackId,
+        clipId,
+        stepInputPosition,
+        noteNumber,
+        stepDurationSeconds,
+        pianoRollInsertVelocity,
+      );
+      if (!newId) return "claimed_noop";
+      setSelectedNoteIds([newId]);
+      auditionNote(noteNumber, pianoRollInsertVelocity);
+      setStepInputPosition(stepInputPosition + stepDurationSeconds);
+      return "handled";
+    }
 
-      if (!hasShortcutModifier && key === "d") {
-        event.preventDefault();
-        setTool("draw");
-        return;
-      }
-      if (!hasShortcutModifier && key === "v") {
-        event.preventDefault();
-        setTool("select");
-        return;
-      }
-      if (!hasShortcutModifier && key === "e") {
-        event.preventDefault();
-        setTool("erase");
-        return;
-      }
-      if (!hasShortcutModifier && key === "t") {
-        event.preventDefault();
-        setTool("trim");
-        return;
-      }
-      if (!hasShortcutModifier && key === "b") {
-        event.preventDefault();
-        setTool("split");
-        return;
-      }
-      if (!hasShortcutModifier && key === "g") {
-        event.preventDefault();
-        setTool("glue");
-        return;
-      }
-      if (!hasShortcutModifier && key === "m") {
-        event.preventDefault();
-        setTool("mute");
-        return;
-      }
-      if (!hasShortcutModifier && key === "y") {
-        event.preventDefault();
-        setTool("velocity");
-        return;
-      }
-      if (!hasShortcutModifier && key === "l") {
-        event.preventDefault();
-        setTool("line");
-        return;
-      }
-      if (!hasShortcutModifier && key === "z") {
-        event.preventDefault();
-        setTool("zoom");
-        return;
-      }
-      if (!hasShortcutModifier && key === "h") {
-        event.preventDefault();
-        setTool("pan");
-        return;
-      }
-      if (!hasShortcutModifier && key === "r" && event.shiftKey) {
-        event.preventDefault();
-        const repeatingRange = !!midiEditRange;
-        const nextIds = repeatMIDISelection(trackId, clipId);
-        if (!repeatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-      if (!hasShortcutModifier && key === "r") {
-        event.preventDefault();
-        setTool("range");
-        return;
-      }
-      if (!hasShortcutModifier && key === "q") {
-        event.preventDefault();
-        const nextIds = quantizeSelectedMIDINotesUsingLast(trackId, clipId);
-        if (nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
+    const nextTool = PIANO_TOOL_ACTIONS[actionId as keyof typeof PIANO_TOOL_ACTIONS];
+    if (nextTool) {
+      setTool(nextTool);
+      return "handled";
+    }
 
-      if ((event.ctrlKey || event.metaKey) && key === "a") {
-        event.preventDefault();
-        selectAllMIDINotes();
-        return;
+    if (actionId === "midi.repeatSelection") {
+      const repeatingRange = Boolean(midiEditRange);
+      const nextIds = repeatMIDISelection(trackId, clipId);
+      if (!repeatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return repeatingRange || nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (actionId === "midi.quantizeLast") {
+      if (isDetached || windowRole !== "main") {
+        return publishDetachedMidiQuantize(
+          shortcutSessionId,
+          selectedNoteIds,
+          midiEditRange,
+        ) ? "handled" : "claimed_noop";
       }
-      if ((event.ctrlKey || event.metaKey) && key === "c") {
-        event.preventDefault();
-        if (midiEditRange) copyMIDIRange(trackId, clipId);
-        else copySelectedMIDINotes(trackId, clipId);
-        return;
+      const nextIds = quantizeSelectedMIDINotesUsingLast(trackId, clipId);
+      if (nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (actionId === "midi.selectAll") {
+      selectAllMIDINotes();
+      return "handled";
+    }
+    if (actionId === "midi.deselectAll") {
+      if (selectedNoteIds.length === 0 && !midiEditRange) return "claimed_noop";
+      setSelectedNoteIds([]);
+      setMIDIEditRange(null);
+      return "handled";
+    }
+    if (actionId === "midi.selectNextNote" || actionId === "midi.selectPreviousNote") {
+      const orderedPairs = parseNotePairs(getLatestClipEvents()).sort((left, right) => (
+        left.startTime - right.startTime
+        || left.noteNumber - right.noteNumber
+        || (left.channel ?? 1) - (right.channel ?? 1)
+        || left.duration - right.duration
+      ));
+      const anchorId = selectedNoteIds[selectedNoteIds.length - 1];
+      if (!anchorId) return "claimed_noop";
+      const currentIndex = orderedPairs.findIndex((pair) => (
+        noteIdFor(clipId, pair.startTime, pair.noteNumber) === anchorId
+      ));
+      const nextIndex = currentIndex + (actionId === "midi.selectNextNote" ? 1 : -1);
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= orderedPairs.length) {
+        return "claimed_noop";
       }
-      if ((event.ctrlKey || event.metaKey) && key === "x") {
-        event.preventDefault();
-        if (midiEditRange) cutMIDIRange(trackId, clipId);
-        else cutSelectedMIDINotes(trackId, clipId);
-        stopAudition();
-        return;
+      const next = orderedPairs[nextIndex];
+      setSelectedNoteIds([noteIdFor(clipId, next.startTime, next.noteNumber)]);
+      setMIDIEditRange(null);
+      return "handled";
+    }
+    if (actionId === "midi.glueSelectedNotes") {
+      const nextIds = glueSelectedMIDINotes(trackId, clipId, selectedNoteIds);
+      if (nextIds.length === 0) return "claimed_noop";
+      setSelectedNoteIds(nextIds);
+      return "handled";
+    }
+    if (actionId === "midi.loopFromSelectedNotes") {
+      const actionPairs = parseNotePairs(getLatestClipEvents()).filter((pair) =>
+        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+      );
+      if (actionPairs.length === 0) return "claimed_noop";
+      const start = Math.min(...actionPairs.map((pair) => pair.startTime));
+      const end = Math.max(...actionPairs.map((pair) => pair.startTime + pair.duration));
+      const loopStart = clipStartTime + start;
+      const loopEnd = clipStartTime + end;
+      if (isDetached || windowRole !== "main") {
+        if (!publishDetachedLoopRegion(loopStart, loopEnd, shortcutSessionId)) {
+          return "claimed_noop";
+        }
+      } else {
+        useDAWStore.getState().setLoopRegion(loopStart, loopEnd);
       }
-      if ((event.ctrlKey || event.metaKey) && key === "v") {
-        event.preventDefault();
-        const pastingRange = midiRangeClipboard.rangeLength > 0;
-        const nextIds = pastingRange
-          ? pasteMIDIRange(trackId, clipId)
-          : pasteMIDINotes(trackId, clipId);
-        if (!pastingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
+      return "handled";
+    }
+    if (actionId === "midi.noteProperties") {
+      const selectedPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
+        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+      );
+      if (!selectedPair) return "claimed_noop";
+      setTransformDialog({ type: "velocity", value: selectedPair.velocity });
+      setContextMenu(null);
+      return "handled";
+    }
+    if (actionId === "midi.toggleGhostReference") {
+      setShowGhostMIDIClips((visible) => !visible);
+      return "handled";
+    }
+    if (actionId === "midi.configureControllerLanes") {
+      const selector = controllerLaneSelectorRef.current as (
+        HTMLSelectElement & { showPicker?: () => void }
+      ) | null;
+      if (!selector) return "claimed_noop";
+      selector.focus();
+      try {
+        selector.showPicker?.();
+      } catch {
+        // Browsers can reject showPicker outside transient activation; focus is
+        // still a safe, keyboard-usable fallback for this exact editor instance.
       }
-      if ((event.ctrlKey || event.metaKey) && key === "d" && (selectedNoteIds.length > 0 || midiEditRange)) {
-        event.preventDefault();
-        const duplicatingRange = !!midiEditRange;
-        const nextIds = duplicatingRange
-          ? duplicateMIDIRange(trackId, clipId)
-          : duplicateSelectedMIDINotes(trackId, clipId);
-        if (!duplicatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
-        return;
-      }
-
-      if ((key === "delete" || key === "backspace") && midiEditRange) {
-        event.preventDefault();
+      return "handled";
+    }
+    if (actionId === "midi.openQuantizePanel") {
+      openQuantizePanel();
+      return "handled";
+    }
+    if (actionId === "midi.quantizeLength") {
+      if (selectedNoteIds.length === 0) return "claimed_noop";
+      applyCurrentQuantizePreset("length");
+      return "handled";
+    }
+    if (actionId === "midi.controllerLine") {
+      openControllerLineDialog();
+      return "handled";
+    }
+    const controllerLfoShape = {
+      "midi.controllerSineLfo": "sine",
+      "midi.controllerTriangleLfo": "triangle",
+      "midi.controllerSquareLfo": "square",
+      "midi.controllerSawUpLfo": "sawUp",
+      "midi.controllerSawDownLfo": "sawDown",
+    }[actionId] as ControllerLFOShape | undefined;
+    if (controllerLfoShape) {
+      if (selectedNoteMetadataLaneType) return "claimed_noop";
+      openControllerLFODialog(controllerLfoShape);
+      return "handled";
+    }
+    if (actionId === "midi.controllerTransform") {
+      if (selectedNoteMetadataLaneType) return "claimed_noop";
+      openControllerTransformDialog();
+      return "handled";
+    }
+    if (actionId === "midi.controllerThin") {
+      if (selectedNoteMetadataLaneType) return "claimed_noop";
+      openControllerThinDialog();
+      return "handled";
+    }
+    if (actionId === "midi.copyControllerLane") {
+      copyCurrentControllerLane();
+      return "handled";
+    }
+    if (actionId === "midi.pasteControllerLane") {
+      if (!controllerLaneClipboard) return "claimed_noop";
+      pasteControllerLaneClipboard();
+      return "handled";
+    }
+    if (actionId === "midi.clearControllerLane") {
+      clearCurrentControllerLane();
+      return "handled";
+    }
+    if (actionId === "midi.copySelection") {
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      if (midiEditRange) copyMIDIRange(trackId, clipId);
+      else copySelectedMIDINotes(trackId, clipId);
+      return "handled";
+    }
+    if (actionId === "midi.cutSelection") {
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      if (midiEditRange) cutMIDIRange(trackId, clipId);
+      else cutSelectedMIDINotes(trackId, clipId);
+      stopAudition();
+      return "handled";
+    }
+    if (actionId === "midi.pasteSelection") {
+      const pastingRange = midiRangeClipboard.rangeLength > 0;
+      const nextIds = pastingRange
+        ? pasteMIDIRange(trackId, clipId)
+        : pasteMIDINotes(trackId, clipId);
+      if (!pastingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return pastingRange || nextIds.length > 0 ? "handled" : "claimed_noop";
+    }
+    if (actionId === "midi.duplicateSelection") {
+      if (!midiEditRange && selectedNoteIds.length === 0) return "claimed_noop";
+      const duplicatingRange = Boolean(midiEditRange);
+      const nextIds = duplicatingRange
+        ? duplicateMIDIRange(trackId, clipId)
+        : duplicateSelectedMIDINotes(trackId, clipId);
+      if (!duplicatingRange && nextIds.length > 0) setSelectedNoteIds(nextIds);
+      return "handled";
+    }
+    if (actionId === "midi.deleteSelection") {
+      if (midiEditRange) {
         deleteMIDIRange(trackId, clipId);
-        stopAudition();
-        return;
-      }
-
-      if ((key === "delete" || key === "backspace") && selectedNoteIds.length > 0) {
-        event.preventDefault();
+      } else if (selectedNoteIds.length > 0) {
         removeMIDINotes(trackId, clipId, selectedNoteIds);
         setSelectedNoteIds([]);
-        stopAudition();
-        return;
+      } else {
+        return "claimed_noop";
       }
+      stopAudition();
+      return "handled";
+    }
 
-      if (selectedNoteIds.length > 0 && key.startsWith("arrow")) {
-        event.preventDefault();
-        const timeStep = event.shiftKey ? stepDurationSeconds : snapDuration;
+    if (PIANO_MOVE_ACTION_IDS.includes(actionId as typeof PIANO_MOVE_ACTION_IDS[number])) {
+      if (selectedNoteIds.length > 0) {
+        const usesStepSize = actionId === "midi.moveLeftFine" || actionId === "midi.moveRightFine";
+        const timeStep = usesStepSize ? stepDurationSeconds : snapDuration;
         let deltaTime = 0;
         let deltaNote = 0;
-        if (key === "arrowleft") deltaTime = -timeStep;
-        if (key === "arrowright") deltaTime = timeStep;
-        if (key === "arrowup") deltaNote = event.shiftKey ? 12 : 1;
-        if (key === "arrowdown") deltaNote = event.shiftKey ? -12 : -1;
+        if (actionId === "midi.moveLeft" || actionId === "midi.moveLeftFine") deltaTime = -timeStep;
+        if (actionId === "midi.moveRight" || actionId === "midi.moveRightFine") deltaTime = timeStep;
+        if (actionId === "midi.movePitchUp") deltaNote = 1;
+        if (actionId === "midi.movePitchDown") deltaNote = -1;
+        if (actionId === "midi.movePitchOctaveUp") deltaNote = 12;
+        if (actionId === "midi.movePitchOctaveDown") deltaNote = -12;
         const nextIds = moveMIDINotes(trackId, clipId, selectedNoteIds, deltaTime, deltaNote);
         if (nextIds.length > 0) {
           setSelectedNoteIds(nextIds);
@@ -1544,105 +2244,90 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           );
           if (nextPair) auditionNote(nextPair.noteNumber, nextPair.velocity);
         }
+        return "handled";
       }
-    };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    auditionNote,
-    clipId,
-    copyMIDIRange,
-    copySelectedMIDINotes,
-    cutMIDIRange,
-    cutSelectedMIDINotes,
-    deleteMIDIRange,
-    duplicateMIDIRange,
-    duplicateSelectedMIDINotes,
-    getLatestClipEvents,
-    midiEditRange,
-    midiRangeClipboard.rangeLength,
-    moveMIDINotes,
-    pasteMIDIRange,
-    pasteMIDINotes,
-    quantizeSelectedMIDINotesUsingLast,
-    removeMIDINotes,
-    repeatMIDISelection,
-    selectAllMIDINotes,
-    selectedNoteIds,
-    setSelectedNoteIds,
-    snapDuration,
-    stepDurationSeconds,
-    stepInputEnabled,
-    stopAudition,
-    trackId,
-  ]);
+      if (stepInputEnabled) {
+        if (actionId === "midi.movePitchUp" || actionId === "midi.movePitchOctaveUp") {
+          setStepInputOctave((previous) => Math.min(8, previous + 1));
+        }
+        if (actionId === "midi.movePitchDown" || actionId === "midi.movePitchOctaveDown") {
+          setStepInputOctave((previous) => Math.max(-2, previous - 1));
+        }
+        if (actionId === "midi.moveLeft" || actionId === "midi.moveLeftFine") {
+          setStepInputPosition(Math.max(0, stepInputPosition - stepDurationSeconds));
+          setTimelineScroll(
+            clamp(timelineScrollX - stepDurationSeconds * pixelsPerSecond, 0, maxScrollX),
+            timelineScrollY,
+          );
+        }
+        if (actionId === "midi.moveRight" || actionId === "midi.moveRightFine") {
+          setStepInputPosition(stepInputPosition + stepDurationSeconds);
+          setTimelineScroll(
+            clamp(timelineScrollX + stepDurationSeconds * pixelsPerSecond, 0, maxScrollX),
+            timelineScrollY,
+          );
+        }
+        return "handled";
+      }
+
+      return "claimed_noop";
+    }
+
+    return "unmatched";
+  };
+
+  const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
+  shortcutHandlerRef.current = (event) => {
+    if (matchesActionShortcut(event, "edit.undo")) {
+      if (event.repeat) return "claimed_noop";
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.publishAppCommand({ command: "edit.undo", sessionId: shortcutSessionId });
+      } else {
+        useDAWStore.getState().undo();
+      }
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.redo")) {
+      if (event.repeat) return "claimed_noop";
+      if (isDetached || windowRole !== "main") {
+        void nativeBridge.publishAppCommand({ command: "edit.redo", sessionId: shortcutSessionId });
+      } else {
+        useDAWStore.getState().redo();
+      }
+      return "handled";
+    }
+
+    const stepActionId = stepInputEnabled && selectedNoteIds.length === 0
+      ? Object.keys(PIANO_STEP_INPUT_ACTION_SEMITONES).find((actionId) =>
+          matchesActionShortcut(event, actionId),
+        )
+      : undefined;
+    const actionId = stepActionId ?? PIANO_SHORTCUT_ACTION_IDS.find((candidate) =>
+      matchesActionShortcut(event, candidate),
+    );
+    if (!actionId) return "unmatched";
+    if (event.repeat && !PIANO_REPEATABLE_ACTION_IDS.has(actionId)) return "claimed_noop";
+    return pianoActionExecutorRef.current(actionId);
+  };
 
   useEffect(() => {
-    if (!stepInputEnabled) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement;
-      if (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
-      if (selectedNoteIds.length > 0) return;
-
-      const key = event.key.toLowerCase();
-      if (key === "arrowup") {
-        event.preventDefault();
-        setStepInputOctave((previous) => Math.min(8, previous + 1));
-        return;
-      }
-      if (key === "arrowdown") {
-        event.preventDefault();
-        setStepInputOctave((previous) => Math.max(-2, previous - 1));
-        return;
-      }
-      if (key === "arrowleft") {
-        event.preventDefault();
-        setStepInputPosition(Math.max(0, stepInputPosition - stepDurationSeconds));
-        setTimelineScroll(clamp(timelineScrollX - stepDurationSeconds * pixelsPerSecond, 0, maxScrollX), timelineScrollY);
-        return;
-      }
-      if (key === "arrowright") {
-        event.preventDefault();
-        setStepInputPosition(stepInputPosition + stepDurationSeconds);
-        setTimelineScroll(clamp(timelineScrollX + stepDurationSeconds * pixelsPerSecond, 0, maxScrollX), timelineScrollY);
-        return;
-      }
-
-      const semitone = KEY_TO_NOTE[key];
-      if (semitone === undefined) return;
-      event.preventDefault();
-      const noteNumber = (stepInputOctave + 2) * 12 + semitone + (event.shiftKey ? 1 : 0);
-      if (noteNumber < 0 || noteNumber > 127) return;
-
-      const newId = addMIDINote(trackId, clipId, stepInputPosition, noteNumber, stepDurationSeconds, pianoRollInsertVelocity);
-      setSelectedNoteIds(newId ? [newId] : []);
-      auditionNote(noteNumber, pianoRollInsertVelocity);
-      setStepInputPosition(stepInputPosition + stepDurationSeconds);
+    const unregisterSurface = registerShortcutSurface(
+      pianoShortcutContext,
+      (event) => shortcutHandlerRef.current(event),
+      isDetached ? { kind: "application" } : { kind: "timeline" },
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      pianoShortcutContext,
+      (actionId) => pianoActionExecutorRef.current(actionId),
+      PIANO_SHORTCUT_ACTION_IDS,
+    );
+    if (isDetached || windowRole !== "main") activateShortcutContext(pianoShortcutContext);
+    return () => {
+      unregisterActions();
+      unregisterSurface();
     };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    addMIDINote,
-    auditionNote,
-    clipId,
-    maxScrollX,
-    pianoRollInsertVelocity,
-    pixelsPerSecond,
-    selectedNoteIds.length,
-    setTimelineScroll,
-    setStepInputPosition,
-    stepDurationSeconds,
-    stepInputEnabled,
-    stepInputOctave,
-    stepInputPosition,
-    timelineScrollX,
-    timelineScrollY,
-    trackId,
-  ]);
+  }, [isDetached, pianoShortcutContext]);
 
   const handleScrollbarScroll = useCallback(() => {
     const scrollbar = scrollbarRef.current;
@@ -2752,6 +3437,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   ]);
 
   const handleVelocityMouseDown = useCallback((event: KonvaEvent) => {
+    if (!midiTargetEditable) return;
     const pos = getPointer(event);
     if (!pos || pos.y < velocityLaneY || pos.y >= velocityLaneY + velocityLaneHeight) return;
 
@@ -2770,6 +3456,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       timestamp: pair.startTime,
       noteNumber: pair.noteNumber,
       originalEvents: getLatestClipEvents(),
+      originalIsModified: useDAWStore.getState().isModified,
     });
     updateMIDINoteVelocity(trackId, clipId, pair.startTime, pair.noteNumber, velocity, { transient: true });
     auditionNote(pair.noteNumber, velocity, { throttle: true });
@@ -2785,9 +3472,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     updateMIDINoteVelocity,
     velocityLaneHeight,
     velocityLaneY,
+    midiTargetEditable,
   ]);
 
   const handleCCMouseDown = useCallback((event: KonvaEvent) => {
+    if (!midiTargetEditable) return;
     const pos = getPointer(event);
     if (!pos || pos.y < ccLaneY || pos.y >= ccLaneY + ccLaneHeight) return;
     const originalEvents = getLatestClipEvents();
@@ -2795,7 +3484,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
     if (selectedNoteMetadataLaneType) {
       const newEvents = upsertNoteMetadataLaneValue(pos.x, pos.y, originalEvents);
-      const nextDrawState: CCDrawState = { lane: "noteMetadata", originalCCEvents, originalEvents };
+      const nextDrawState: CCDrawState = { lane: "noteMetadata", originalCCEvents, originalEvents, originalIsModified: useDAWStore.getState().isModified };
       ccDrawStateRef.current = nextDrawState;
       setCCDrawState(nextDrawState);
       previewMIDIClipEvents(trackId, clipId, newEvents);
@@ -2803,7 +3492,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
     if (selectedCC === PITCH_BEND_LANE) {
       const newEvents = upsertPitchBendEvent(pos.x, pos.y, originalEvents);
-      const nextDrawState: CCDrawState = { lane: "pitchBend", originalCCEvents, originalEvents };
+      const nextDrawState: CCDrawState = { lane: "pitchBend", originalCCEvents, originalEvents, originalIsModified: useDAWStore.getState().isModified };
       ccDrawStateRef.current = nextDrawState;
       setCCDrawState(nextDrawState);
       previewMIDIClipEvents(trackId, clipId, newEvents);
@@ -2811,7 +3500,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
     if (selectedScalarMIDIEventType) {
       const newEvents = upsertScalarMIDIEvent(pos.x, pos.y, originalEvents);
-      const nextDrawState: CCDrawState = { lane: "midiEvent", originalCCEvents, originalEvents };
+      const nextDrawState: CCDrawState = { lane: "midiEvent", originalCCEvents, originalEvents, originalIsModified: useDAWStore.getState().isModified };
       ccDrawStateRef.current = nextDrawState;
       setCCDrawState(nextDrawState);
       previewMIDIClipEvents(trackId, clipId, newEvents);
@@ -2819,7 +3508,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     const newEvents = upsertCCEvent(pos.x, pos.y, originalCCEvents);
-    const nextDrawState: CCDrawState = { lane: "cc", originalCCEvents, originalEvents };
+    const nextDrawState: CCDrawState = { lane: "cc", originalCCEvents, originalEvents, originalIsModified: useDAWStore.getState().isModified };
     ccDrawStateRef.current = nextDrawState;
     setCCDrawState(nextDrawState);
     updateMIDICCEvents(trackId, clipId, newEvents, { transient: true });
@@ -2839,10 +3528,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     upsertNoteMetadataLaneValue,
     upsertPitchBendEvent,
     upsertScalarMIDIEvent,
+    midiTargetEditable,
   ]);
 
   const updateDragPreview = useCallback((event: KonvaEvent) => {
-    if (!dragState) return;
+    if (!dragState || !midiTargetEditable) return;
     const pos = getPointer(event);
     if (!pos) return;
 
@@ -2907,6 +3597,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     snapDuration,
     snapTime,
     trackId,
+    midiTargetEditable,
   ]);
 
   const handleNoteMouseDown = useCallback((event: KonvaEvent, pair: NotePair) => {
@@ -2935,6 +3626,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       };
     }
 
+    if (!midiTargetEditable && ["erase", "mute", "glue", "split"].includes(tool)) return;
+
     if (tool === "erase") {
       removeMIDINotes(trackId, clipId, [id]);
       setSelectedNoteIds(selectedNoteIds.filter((noteId) => noteId !== id));
@@ -2952,54 +3645,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     if (tool === "glue") {
       const nextSelection = selectedNoteIds.includes(id) ? selectedNoteIds : [id];
       setSelectedNoteIds(nextSelection);
-      const oldEvents = getLatestClipEvents();
-      const selected = new Set(nextSelection);
-      const pairsToGlue = parseNotePairs(oldEvents).filter((candidate) =>
-        selected.has(noteIdFor(clipId, candidate.startTime, candidate.noteNumber)),
-      );
-      const groups = new Map<string, NotePair[]>();
-      pairsToGlue.forEach((candidate) => {
-        const key = `${candidate.noteNumber}:${candidate.channel ?? 1}`;
-        groups.set(key, [...(groups.get(key) || []), candidate]);
-      });
-      const consumed = new Set<MIDIEvent>();
-      const additions: MIDIEvent[] = [];
-      const nextIds: string[] = [];
-
-      groups.forEach((group) => {
-        if (group.length < 2) return;
-        const sortedGroup = [...group].sort((a, b) => a.startTime - b.startTime);
-        sortedGroup.forEach((candidate) => {
-          consumed.add(candidate.noteOn);
-          consumed.add(candidate.noteOff);
-        });
-        const first = sortedGroup[0];
-        const last = sortedGroup[sortedGroup.length - 1];
-        const startTime = first.startTime;
-        const endTime = Math.max(...sortedGroup.map((candidate) => candidate.startTime + candidate.duration));
-        const releaseVelocity = last.releaseVelocity ?? last.noteOff.releaseVelocity ?? last.noteOff.velocity ?? 0;
-        additions.push(
-          { ...first.noteOn, timestamp: startTime },
-          {
-            ...last.noteOff,
-            timestamp: endTime,
-            note: first.noteNumber,
-            channel: first.channel ?? 1,
-            velocity: releaseVelocity,
-            releaseVelocity,
-          },
-        );
-        nextIds.push(noteIdFor(clipId, startTime, first.noteNumber));
-      });
-
-      if (additions.length > 0) {
-        commitMIDIClipEvents(
-          trackId,
-          clipId,
-          oldEvents,
-          sortEvents([...oldEvents.filter((event) => !consumed.has(event)), ...additions]),
-          "Glue MIDI notes",
-        );
+      const nextIds = glueSelectedMIDINotes(trackId, clipId, nextSelection);
+      if (nextIds.length > 0) {
         setSelectedNoteIds(nextIds);
         return;
       }
@@ -3054,6 +3701,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     if (
       tool === "select"
       && nativeEvent.altKey
+      && midiTargetEditable
       && selectedNoteIds.includes(id)
       && selectedNoteIds.length > 0
     ) {
@@ -3071,6 +3719,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         }),
         startPointerNote: pair.noteNumber,
         activeNoteId: nextIds[0],
+        originalIsModified: useDAWStore.getState().isModified,
       });
       latestDragAuditionRef.current = {
         noteNumber: pair.noteNumber,
@@ -3092,6 +3741,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     auditionNote(pair.noteNumber, pair.velocity);
 
     if ((tool !== "select" && tool !== "trim") || !nextSelection.includes(id)) return;
+    if (!midiTargetEditable) return;
 
     if (!pos) return;
     const mode: DragMode =
@@ -3111,6 +3761,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       }),
       startPointerNote: pair.noteNumber,
       activeNoteId: id,
+      originalIsModified: useDAWStore.getState().isModified,
     });
     latestDragAuditionRef.current = {
       noteNumber: pair.noteNumber,
@@ -3135,6 +3786,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     tool,
     toggleSelectedMIDINoteMute,
     trackId,
+    midiTargetEditable,
   ]);
 
   const handleNoteContextMenu = useCallback((event: KonvaEvent, pair: NotePair) => {
@@ -3775,8 +4427,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const renderGrid = () => {
     const elements: React.ReactNode[] = [];
     const beatInterval = 1 / beatsPerSecond;
-    const firstRow = Math.max(0, Math.floor(scrollY / NOTE_HEIGHT) - 1);
-    const lastRow = Math.min(TOTAL_NOTES, Math.ceil((scrollY + noteGridHeight) / NOTE_HEIGHT) + 1);
+    const firstRow = Math.max(0, Math.floor(scrollY / noteHeight) - 1);
+    const lastRow = Math.min(TOTAL_NOTES, Math.ceil((scrollY + noteGridHeight) / noteHeight) + 1);
     const visibleProjectStart = Math.max(0, timelineScrollX / pixelsPerSecond - beatInterval);
     const visibleProjectEnd = (timelineScrollX + stageWidth) / pixelsPerSecond + beatInterval;
     const projectContentEnd = editorContentEnd;
@@ -3807,7 +4459,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     for (let row = firstRow; row <= lastRow; row += 1) {
-      const y = row * NOTE_HEIGHT - scrollY;
+      const y = row * noteHeight - scrollY;
       const noteNumber = TOTAL_NOTES - 1 - row;
       const noteName = NOTE_NAMES[noteNumber >= 0 ? noteNumber % NOTES_PER_OCTAVE : 0];
       const isC = noteName === "C";
@@ -3821,7 +4473,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             x={PIANO_WIDTH}
             y={y}
             width={contentWidth}
-            height={NOTE_HEIGHT}
+            height={noteHeight}
             fill="#4cc9f0"
             opacity={0.06}
             listening={false}
@@ -3835,7 +4487,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             x={PIANO_WIDTH}
             y={y}
             width={contentWidth}
-            height={NOTE_HEIGHT}
+            height={noteHeight}
             fill="#000000"
             opacity={0.08}
             listening={false}
@@ -3938,14 +4590,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           const x = PIANO_WIDTH + adjustedTime * pixelsPerSecond - scrollX;
           const y = getNoteY(pair.noteNumber);
           const width = pair.duration * pixelsPerSecond;
-          if (x + width < PIANO_WIDTH || x > stageWidth || y + NOTE_HEIGHT < 0 || y > noteGridHeight) return;
+          if (x + width < PIANO_WIDTH || x > stageWidth || y + noteHeight < 0 || y > noteGridHeight) return;
           ghostElements.push(
             <Rect
               key={`ghost-${otherClip.id}-${pair.startTime}-${pair.noteNumber}`}
               x={x}
               y={y}
               width={Math.max(3, width)}
-              height={NOTE_HEIGHT - 1}
+              height={noteHeight - 1}
               fill="#9ca3af"
               opacity={0.2}
               cornerRadius={2}
@@ -3963,7 +4615,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const x = PIANO_WIDTH + pair.startTime * pixelsPerSecond - scrollX;
       const y = getNoteY(pair.noteNumber);
       const width = Math.max(4, pair.duration * pixelsPerSecond);
-      if (x + width < PIANO_WIDTH || x > stageWidth || y + NOTE_HEIGHT < 0 || y > noteGridHeight) return null;
+      if (x + width < PIANO_WIDTH || x > stageWidth || y + noteHeight < 0 || y > noteGridHeight) return null;
 
       const selected = selectedNoteIds.includes(id);
       const fillColor = velocityColor(pair.velocity);
@@ -3981,7 +4633,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             x={x}
             y={y}
             width={width}
-            height={NOTE_HEIGHT - 1}
+            height={noteHeight - 1}
             fill={fillColor}
             opacity={muted ? 0.28 : selected ? 0.98 : 0.85}
             stroke={strokeColor}
@@ -3993,18 +4645,18 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           />
           {selected && width > 14 && (
             <>
-              <Rect x={x + 2} y={y + 2} width={2} height={NOTE_HEIGHT - 5} fill="#ffffff" opacity={0.9} listening={false} />
-              <Rect x={x + width - 4} y={y + 2} width={2} height={NOTE_HEIGHT - 5} fill="#ffffff" opacity={0.9} listening={false} />
+              <Rect x={x + 2} y={y + 2} width={2} height={Math.max(1, noteHeight - 5)} fill="#ffffff" opacity={0.9} listening={false} />
+              <Rect x={x + width - 4} y={y + 2} width={2} height={Math.max(1, noteHeight - 5)} fill="#ffffff" opacity={0.9} listening={false} />
             </>
           )}
           {pair.pressure !== undefined && pair.pressure > 0 && (
-            <Rect x={x} y={y} width={width} height={NOTE_HEIGHT - 1} fill="#ffffff" opacity={pair.pressure * 0.3} cornerRadius={2} listening={false} />
+            <Rect x={x} y={y} width={width} height={noteHeight - 1} fill="#ffffff" opacity={pair.pressure * 0.3} cornerRadius={2} listening={false} />
           )}
           {pair.pitchBend !== undefined && pair.pitchBend !== 0 && width > 8 && (
             <Line
               points={pair.pitchBend > 0
-                ? [x + width - 6, y + NOTE_HEIGHT - 4, x + width - 3, y + 2, x + width, y + NOTE_HEIGHT - 4]
-                : [x + width - 6, y + 2, x + width - 3, y + NOTE_HEIGHT - 4, x + width, y + 2]}
+                ? [x + width - 6, y + noteHeight - 4, x + width - 3, y + 2, x + width, y + noteHeight - 4]
+                : [x + width - 6, y + 2, x + width - 3, y + noteHeight - 4, x + width, y + 2]}
               fill="#ffffff"
               closed
               opacity={0.7}
@@ -4012,7 +4664,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             />
           )}
           {pair.slide !== undefined && pair.slide > 0 && width > 8 && (
-            <Line points={[x + width - 8, y + NOTE_HEIGHT - 3, x + width - 2, y + 2]} stroke="#ffffff" strokeWidth={1.5} opacity={0.6} listening={false} />
+            <Line points={[x + width - 8, y + noteHeight - 3, x + width - 2, y + 2]} stroke="#ffffff" strokeWidth={1.5} opacity={0.6} listening={false} />
           )}
           {showName && (
             <Text
@@ -4036,7 +4688,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const x = PIANO_WIDTH + pair.startTime * pixelsPerSecond - scrollX;
       const y = getNoteY(pair.noteNumber);
       const width = Math.max(4, pair.duration * pixelsPerSecond);
-      if (x + width < PIANO_WIDTH || x > stageWidth || y + NOTE_HEIGHT < 0 || y > noteGridHeight) return null;
+      if (x + width < PIANO_WIDTH || x > stageWidth || y + noteHeight < 0 || y > noteGridHeight) return null;
       const tintColor = MULTI_CLIP_TINTS[pair.clipIndex % MULTI_CLIP_TINTS.length] || "#ff6b9d";
       return (
         <Group
@@ -4047,7 +4699,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             x={x}
             y={y}
             width={width}
-            height={NOTE_HEIGHT - 1}
+            height={noteHeight - 1}
             fill={tintColor}
             opacity={0.74}
             stroke={tintColor}
@@ -4074,7 +4726,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         x={x}
         y={y}
         width={width}
-        height={NOTE_HEIGHT - 1}
+        height={noteHeight - 1}
         fill="#ffffff"
         opacity={0.35}
         stroke="#4cc9f0"
@@ -4113,13 +4765,13 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const x = PIANO_WIDTH + activeRange.startTime * pixelsPerSecond - scrollX;
     const width = Math.max(1, (activeRange.endTime - activeRange.startTime) * pixelsPerSecond);
     const topY = getNoteY(activeRange.maxNote);
-    const bottomY = getNoteY(activeRange.minNote) + NOTE_HEIGHT;
+    const bottomY = getNoteY(activeRange.minNote) + noteHeight;
     return (
       <Rect
         x={x}
         y={topY}
         width={width}
-        height={Math.max(NOTE_HEIGHT, bottomY - topY)}
+        height={Math.max(noteHeight, bottomY - topY)}
         fill="rgba(250, 204, 21, 0.14)"
         stroke="#facc15"
         strokeWidth={1}
@@ -4434,12 +5086,12 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
   const renderPianoKeys = () => {
     const keys: React.ReactNode[] = [];
-    const firstRow = Math.max(0, Math.floor(scrollY / NOTE_HEIGHT) - 1);
-    const lastRow = Math.min(TOTAL_NOTES - 1, Math.ceil((scrollY + noteGridHeight) / NOTE_HEIGHT) + 1);
+    const firstRow = Math.max(0, Math.floor(scrollY / noteHeight) - 1);
+    const lastRow = Math.min(TOTAL_NOTES - 1, Math.ceil((scrollY + noteGridHeight) / noteHeight) + 1);
 
     for (let row = firstRow; row <= lastRow; row += 1) {
       const noteNumber = TOTAL_NOTES - 1 - row;
-      const y = row * NOTE_HEIGHT - scrollY;
+      const y = row * noteHeight - scrollY;
       const noteName = NOTE_NAMES[noteNumber % NOTES_PER_OCTAVE];
       const isBlackKey = noteName.includes("#");
       const isC = noteName === "C";
@@ -4455,7 +5107,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           ].filter(Boolean).join(" ")}
           style={{
             top: y,
-            height: NOTE_HEIGHT,
+            height: noteHeight,
             width: isBlackKey ? "64%" : "100%",
           }}
           title={`${getNoteNameFromPitch(noteNumber)} audition`}
@@ -4708,7 +5360,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         ? [
             {
               label: "Paste Here",
-              shortcut: "Ctrl+V",
+              shortcut: shortcut("midi.pasteSelection", "Ctrl+V"),
               disabled: !midiNoteClipboard.notes.length && !hasRangeClipboard,
               onClick: () => {
                 if (hasRangeClipboard) pasteMIDIRange(trackId, clipId, pasteTime);
@@ -4779,13 +5431,13 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
             },
           ]
         : [
-            { label: "Cut Notes", shortcut: "Ctrl+X", disabled: !hasSelection, onClick: () => cutSelectedMIDINotes(trackId, clipId) },
-            { label: "Copy Notes", shortcut: "Ctrl+C", disabled: !hasSelection, onClick: () => copySelectedMIDINotes(trackId, clipId) },
-            { label: "Paste Notes", shortcut: "Ctrl+V", disabled: !midiNoteClipboard.notes.length && !hasRangeClipboard, onClick: () => hasRangeClipboard ? pasteMIDIRange(trackId, clipId, pasteTime) : pasteMIDINotes(trackId, clipId, pasteTime) },
-            { label: "Duplicate Notes", disabled: !hasSelection, onClick: () => duplicateSelectedMIDINotes(trackId, clipId) },
+            { label: "Cut Notes", shortcut: shortcut("midi.cutSelection", "Ctrl+X"), disabled: !hasSelection, onClick: () => cutSelectedMIDINotes(trackId, clipId) },
+            { label: "Copy Notes", shortcut: shortcut("midi.copySelection", "Ctrl+C"), disabled: !hasSelection, onClick: () => copySelectedMIDINotes(trackId, clipId) },
+            { label: "Paste Notes", shortcut: shortcut("midi.pasteSelection", "Ctrl+V"), disabled: !midiNoteClipboard.notes.length && !hasRangeClipboard, onClick: () => hasRangeClipboard ? pasteMIDIRange(trackId, clipId, pasteTime) : pasteMIDINotes(trackId, clipId, pasteTime) },
+            { label: "Duplicate Notes", shortcut: shortcut("midi.duplicateSelection", "Ctrl+D"), disabled: !hasSelection, onClick: () => duplicateSelectedMIDINotes(trackId, clipId) },
             {
               label: "Delete Notes",
-              shortcut: "Del",
+              shortcut: shortcut("midi.deleteSelection", "Del"),
               disabled: !hasSelection,
               onClick: () => {
                 removeMIDINotes(trackId, clipId, selectedNoteIds);
@@ -4793,7 +5445,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
               },
             },
             { divider: true, label: "" },
-            { label: "Select All Notes", shortcut: "Ctrl+A", onClick: selectAllMIDINotes },
+            { label: "Select All Notes", shortcut: shortcut("midi.selectAll", "Ctrl+A"), onClick: selectAllMIDINotes },
             { label: "Invert Selection", onClick: () => invertMIDISelection(clipId) },
             { label: "Select Same Pitch", onClick: () => selectMIDINotesByPitch(clipId, menu.noteNumber) },
           ]),
@@ -4893,7 +5545,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   };
 
   return (
-    <div className="piano-roll" ref={containerRef}>
+    <div
+      className="piano-roll"
+      ref={containerRef}
+      onPointerDownCapture={() => activateShortcutContext(pianoShortcutContext)}
+      onContextMenuCapture={() => activateShortcutContext(pianoShortcutContext)}
+      onFocusCapture={() => activateShortcutContext(pianoShortcutContext)}
+      data-shortcut-context={`piano_roll:${shortcutSessionId}`}
+    >
       <PianoRollToolbar
         ref={toolbarRef}
         tool={tool}
@@ -5108,7 +5767,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         </Button>
         <div className="toolbar-divider" />
         <label htmlFor="pr-cc">CC</label>
-        <select id="pr-cc" className="piano-roll-select" value={selectedCC} onChange={(event) => {
+        <select ref={controllerLaneSelectorRef} id="pr-cc" className="piano-roll-select" value={selectedCC} onChange={(event) => {
           const nextCC = Number.parseInt(event.target.value, 10);
           setSelectedCC(nextCC);
           if (nextCC < 0 || nextCC > 31) setCC14BitMode(false);
@@ -5232,24 +5891,22 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         )}
         <div className="toolbar-divider" />
         <label htmlFor="pr-vel-lane-height">Vel H</label>
-        <input
+        <ProfiledRangeInput
           id="pr-vel-lane-height"
-          type="range"
           min={40}
           max={140}
           value={velocityLaneHeight}
-          onChange={(event) => setVelocityLaneHeight(clamp(Number(event.target.value), 40, 140))}
+          onValueChange={(value) => setVelocityLaneHeight(clamp(value, 40, 140))}
           className="zoom-slider"
           title="Velocity lane height"
         />
         <label htmlFor="pr-cc-lane-height">CC H</label>
-        <input
+        <ProfiledRangeInput
           id="pr-cc-lane-height"
-          type="range"
           min={48}
           max={180}
           value={ccLaneHeight}
-          onChange={(event) => setCCLaneHeight(clamp(Number(event.target.value), 48, 180))}
+          onValueChange={(value) => setCCLaneHeight(clamp(value, 48, 180))}
           className="zoom-slider"
           title="Controller lane height"
         />
@@ -5583,7 +6240,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
               data-qa="piano-roll-vertical-scrollbar"
               aria-label="Piano roll vertical scroll"
             >
-              <div style={{ height: TOTAL_NOTES * NOTE_HEIGHT, width: 1 }} />
+              <div style={{ height: TOTAL_NOTES * noteHeight, width: 1 }} />
             </div>
           </div>
 

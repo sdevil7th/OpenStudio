@@ -23,4 +23,12 @@ describe("timeline track drop regression guards", () => {
     expect(trackActionsSource).toContain("const includeAddTrack = !(options.backendAlreadyCreated && !hasExecutedOnce)");
     expect(trackActionsSource).toContain("syncTrackCoreToBackend(fullTrack, { includeAddTrack })");
   });
+
+  it("dedupes external file drops and allows multi-track MIDI files to land on one compatible track", () => {
+    expect(timelineSource).toContain("dedupeExternalMediaFiles");
+    expect(timelineSource).toContain("processedExternalDropKeysRef");
+    expect(timelineSource).toContain("getExternalMediaDropKey");
+    expect(timelineSource).toContain('isExternalTrackCompatible(targetTrack, "midi");');
+    expect(timelineSource).not.toContain("(preview.midiTrackCount ?? 1) <= 1");
+  });
 });

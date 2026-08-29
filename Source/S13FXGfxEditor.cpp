@@ -150,7 +150,7 @@ void S13FXGfxEditor::timerCallback()
     if (ysfx_gfx_wants_retina(effect))
     {
         auto* display = juce::Desktop::getInstance().getDisplays()
-                           .getDisplayForPoint(getScreenPosition());
+                           .getDisplayForPoint(getScreenPosition().toFloat());
         if (display)
             scaleFactor = static_cast<float>(display->scale);
     }

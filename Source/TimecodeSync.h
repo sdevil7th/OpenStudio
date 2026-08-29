@@ -4,6 +4,8 @@
 #include <atomic>
 #include <memory>
 
+class TimecodeMIDIOutputDispatcher;
+
 //==============================================================================
 // SMPTE Frame Rates
 //==============================================================================
@@ -23,27 +25,29 @@ enum class SMPTEFrameRate
 class MIDIClockOutput
 {
 public:
-    MIDIClockOutput() = default;
+    MIDIClockOutput();
     ~MIDIClockOutput();
 
     bool connect(const juce::String& midiOutputName);
     void disconnect();
-    bool isConnected() const { return output != nullptr; }
+    bool isConnected() const noexcept;
 
-    void setEnabled(bool enabled) { isEnabled = enabled; }
-    bool getEnabled() const { return isEnabled; }
+    void setEnabled(bool enabled) noexcept;
+    bool getEnabled() const noexcept { return isEnabled.load(std::memory_order_acquire); }
 
     // Call from audio callback
     void processBlock(int numSamples, double sampleRate, double bpm, bool playing);
 
-    // Call on transport start/stop/continue
+    // Call from a non-audio transport/control thread. These messages may block
+    // in the operating-system MIDI driver, but never contend with processBlock().
     void sendStart();
     void sendStop();
     void sendContinue();
 
 private:
-    std::unique_ptr<juce::MidiOutput> output;
+    std::unique_ptr<TimecodeMIDIOutputDispatcher> outputDispatcher;
     std::atomic<bool> isEnabled { false };
+    std::atomic<bool> resetClockAccumulatorRequested { false };
     double clockAccumulator = 0.0;  // Fractional clock tick accumulator
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MIDIClockOutput)
@@ -103,36 +107,38 @@ private:
 class MTCGenerator
 {
 public:
-    MTCGenerator() = default;
+    MTCGenerator();
     ~MTCGenerator();
 
     bool connect(const juce::String& midiOutputName);
     void disconnect();
-    bool isConnected() const { return output != nullptr; }
+    bool isConnected() const noexcept;
 
-    void setEnabled(bool enabled) { isEnabled = enabled; }
-    bool getEnabled() const { return isEnabled; }
+    void setEnabled(bool enabled) noexcept;
+    bool getEnabled() const noexcept { return isEnabled.load(std::memory_order_acquire); }
 
-    void setFrameRate(SMPTEFrameRate rate) { frameRate = rate; }
-    SMPTEFrameRate getFrameRate() const { return frameRate; }
+    void setFrameRate(SMPTEFrameRate rate) noexcept;
+    SMPTEFrameRate getFrameRate() const noexcept { return frameRate.load(std::memory_order_acquire); }
 
     // Call from audio callback to send quarter-frame messages
     void processBlock(int numSamples, double sampleRate, double positionSeconds, bool playing);
 
-    // Send a full-frame MTC message (for locate/scrub)
+    // Send a full-frame MTC message from a non-audio control thread
+    // (for locate/scrub).
     void sendFullFrame(double positionSeconds);
 
 private:
-    std::unique_ptr<juce::MidiOutput> output;
+    std::unique_ptr<TimecodeMIDIOutputDispatcher> outputDispatcher;
     std::atomic<bool> isEnabled { false };
-    SMPTEFrameRate frameRate = SMPTEFrameRate::fps25;
+    std::atomic<SMPTEFrameRate> frameRate { SMPTEFrameRate::fps25 };
+    std::atomic<bool> resetGeneratorStateRequested { false };
 
     int qfCounter = 0; // Quarter-frame counter (0-7)
     double qfAccumulator = 0.0;
 
     struct SMPTETime { int hours; int minutes; int seconds; int frames; };
-    SMPTETime positionToSMPTE(double seconds) const;
-    double getActualFrameRate() const;
+    static SMPTETime positionToSMPTE(double seconds, SMPTEFrameRate rate);
+    static double getActualFrameRate(SMPTEFrameRate rate) noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MTCGenerator)
 };

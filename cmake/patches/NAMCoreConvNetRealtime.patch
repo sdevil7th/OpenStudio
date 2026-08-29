@@ -1,0 +1,227 @@
+diff --git a/NAM/convnet.cpp b/NAM/convnet.cpp
+index 329caf6..895e5e3 100644
+--- a/NAM/convnet.cpp
++++ b/NAM/convnet.cpp
+@@ -157,20 +157,24 @@ void nam::convnet::_Head::process_(const Eigen::MatrixXf& input, Eigen::MatrixXf
+ {
+   const long length = i_end - i_start;
+   const long out_channels = this->_weight.rows();
++  const long in_channels = this->_weight.cols();
+ 
+-  // Resize output to (out_channels x length)
+-  output.resize(out_channels, length);
+-
+-  // Extract input slice: (in_channels x length)
+-  Eigen::MatrixXf input_slice = input.middleCols(i_start, length);
+-
+-  // Compute output = weight * input_slice: (out_channels x in_channels) * (in_channels x length) = (out_channels x
+-  // length)
+-  output.noalias() = this->_weight * input_slice;
+-
+-  // Add bias to each column: output.colwise() += bias
+-  // output is (out_channels x length), bias is (out_channels x 1), so colwise() += works
+-  output.colwise() += this->_bias;
++  if (length <= 0 || i_start < 0 || i_end > input.cols() || input.rows() != in_channels
++      || output.rows() != out_channels || output.cols() < length)
++    return;
++
++  // Manual multiply keeps the head allocation-free for every dynamic block size.
++  // Accumulation order is deterministic and matches the scalar reference equation.
++  for (long frame = 0; frame < length; ++frame)
++  {
++    for (long out_ch = 0; out_ch < out_channels; ++out_ch)
++    {
++      float value = this->_bias(out_ch);
++      for (long in_ch = 0; in_ch < in_channels; ++in_ch)
++        value += this->_weight(out_ch, in_ch) * input(in_ch, i_start + frame);
++      output(out_ch, frame) = value;
++    }
++  }
+ }
+ 
+ nam::convnet::ConvNet::ConvNet(const int in_channels, const int out_channels, const int channels,
+@@ -186,11 +190,6 @@ nam::convnet::ConvNet::ConvNet(const int in_channels, const int out_channels, co
+   for (size_t i = 0; i < dilations.size(); i++)
+     this->_blocks[i].set_weights_(
+       i == 0 ? in_channels : channels, channels, dilations[i], batchnorm, activation_config, groups, it);
+-  // Only need _block_vals for the head (one entry)
+-  // Conv1D layers manage their own buffers now
+-  this->_block_vals.resize(1);
+-  this->_block_vals[0].setZero();
+-
+   // Create single head that outputs all channels
+   this->_head = _Head(channels, out_channels, it);
+ 
+@@ -206,75 +205,44 @@ nam::convnet::ConvNet::ConvNet(const int in_channels, const int out_channels, co
+ void nam::convnet::ConvNet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames)
+ 
+ {
+-  this->_update_buffers_(input, num_frames);
+   const int in_channels = NumInputChannels();
+   const int out_channels = NumOutputChannels();
+ 
+-  // For multi-channel, we process each input channel independently through the network
+-  // and sum outputs to each output channel (simple implementation)
+-  // This can be extended later for more sophisticated cross-channel processing
++  if (num_frames <= 0)
++    return;
+ 
+-  // Convert input buffers to matrix for first layer (stack input channels)
+-  Eigen::MatrixXf input_matrix(in_channels, num_frames);
+-  const long i_start = this->_input_buffer_offset;
++  if (num_frames > GetMaxBufferSize() || _blocks.empty() || _input_matrix.rows() != in_channels
++      || _input_matrix.cols() < num_frames || _head_output.rows() != out_channels
++      || _head_output.cols() < num_frames)
++  {
++    for (int ch = 0; ch < out_channels; ++ch)
++      std::fill_n(output[ch], num_frames, 0.0f);
++    return;
++  }
++
++  // Conv1D owns the required history. Copy only the current host block into the
++  // pre-allocated matrix instead of updating Buffer's deprecated vector history.
+   for (int ch = 0; ch < in_channels; ch++)
+   {
+     for (int i = 0; i < num_frames; i++)
+-      input_matrix(ch, i) = this->_input_buffers[ch][i_start + i];
++      _input_matrix(ch, i) = input[ch][i];
+   }
+ 
+-  // Process through ConvNetBlock layers
+-  // Each block now uses Conv1D's internal buffers via Process() and GetOutput()
+   for (size_t i = 0; i < this->_blocks.size(); i++)
+   {
+-    // Get input for this block
+-    Eigen::MatrixXf block_input;
+     if (i == 0)
+-    {
+-      // First block uses the input matrix
+-      block_input = input_matrix;
+-    }
++      this->_blocks[i].Process(_input_matrix, num_frames);
+     else
+-    {
+-      // Subsequent blocks use output from previous block
+-      auto prev_output = this->_blocks[i - 1].GetOutput(num_frames);
+-      block_input = prev_output; // Copy to matrix
+-    }
+-
+-    // Process block (handles Conv1D, batchnorm, and activation internally)
+-    this->_blocks[i].Process(block_input, num_frames);
+-  }
+-
+-  // Process head for all output channels at once
+-  // We need _block_vals[0] for the head interface
+-  const long buffer_size = (long)this->_input_buffers[0].size();
+-  if (this->_block_vals[0].rows() != this->_blocks.back().get_out_channels()
+-      || this->_block_vals[0].cols() != buffer_size)
+-  {
+-    this->_block_vals[0].resize(this->_blocks.back().get_out_channels(), buffer_size);
++      this->_blocks[i].Process(this->_blocks[i - 1].GetOutput(), num_frames);
+   }
+ 
+-  // Copy last block output to _block_vals for head
+-  auto last_output = this->_blocks.back().GetOutput(num_frames);
+-  const long buffer_offset = this->_input_buffer_offset;
+-  const long buffer_i_end = buffer_offset + num_frames;
+-  // last_output is (channels x num_frames), _block_vals[0] is (channels x buffer_size)
+-  // Copy to the correct location in _block_vals
+-  this->_block_vals[0].block(0, buffer_offset, last_output.rows(), num_frames) = last_output;
+-
+-  // Process head - outputs all channels at once
+-  // Head will resize _head_output internally
+-  this->_head.process_(this->_block_vals[0], this->_head_output, buffer_offset, buffer_i_end);
++  this->_head.process_(this->_blocks.back().GetOutput(), this->_head_output, 0, num_frames);
+ 
+-  // Copy to output arrays for each channel
+   for (int ch = 0; ch < out_channels; ch++)
+   {
+     for (int s = 0; s < num_frames; s++)
+       output[ch][s] = this->_head_output(ch, s);
+   }
+-
+-  // Prepare for next call:
+-  nam::Buffer::_advance_input_buffer_(num_frames);
+ }
+ 
+ void nam::convnet::ConvNet::_verify_weights(const int channels, const std::vector<int>& dilations, const bool batchnorm,
+@@ -285,41 +253,16 @@ void nam::convnet::ConvNet::_verify_weights(const int channels, const std::vecto
+ 
+ void nam::convnet::ConvNet::SetMaxBufferSize(const int maxBufferSize)
+ {
+-  nam::Buffer::SetMaxBufferSize(maxBufferSize);
++  nam::DSP::SetMaxBufferSize(maxBufferSize);
++  const int prepared_size = std::max(0, maxBufferSize);
+ 
+-  // Reset all ConvNetBlock instances with the new buffer size
+-  for (auto& block : _blocks)
+-  {
+-    block.SetMaxBufferSize(maxBufferSize);
+-  }
+-}
+-
+-void nam::convnet::ConvNet::_update_buffers_(NAM_SAMPLE** input, const int num_frames)
+-{
+-  this->Buffer::_update_buffers_(input, num_frames);
++  _input_matrix.resize(NumInputChannels(), prepared_size);
++  _input_matrix.setZero();
++  _head_output.resize(NumOutputChannels(), prepared_size);
++  _head_output.setZero();
+ 
+-  // All channels use the same buffer size
+-  const long buffer_size = (long)this->_input_buffers[0].size();
+-
+-  // Only need _block_vals[0] for the head
+-  // Conv1D layers manage their own buffers now
+-  if (this->_block_vals[0].rows() != this->_blocks.back().get_out_channels()
+-      || this->_block_vals[0].cols() != buffer_size)
+-  {
+-    this->_block_vals[0].resize(this->_blocks.back().get_out_channels(), buffer_size);
+-    this->_block_vals[0].setZero();
+-  }
+-}
+-
+-void nam::convnet::ConvNet::_rewind_buffers_()
+-{
+-  // Conv1D instances now manage their own ring buffers and handle rewinding internally
+-  // So we don't need to rewind _block_vals for Conv1D layers
+-  // We only need _block_vals for the head, and it doesn't need rewinding since it's only used
+-  // for the current frame range
+-
+-  // Just rewind the input buffer (for Buffer base class)
+-  this->Buffer::_rewind_buffers_();
++  for (auto& block : _blocks)
++    block.SetMaxBufferSize(prepared_size);
+ }
+ 
+ // Config parser
+diff --git a/NAM/convnet.h b/NAM/convnet.h
+index 394389e..a34fe23 100644
+--- a/NAM/convnet.h
++++ b/NAM/convnet.h
+@@ -92,6 +92,10 @@ public:
+   /// \return Block reference to the output
+   Eigen::Block<Eigen::MatrixXf> GetOutput(const int num_frames);
+ 
++  /// \brief Get the full pre-allocated output buffer
++  /// \return Const reference; only the first num_frames columns are valid
++  const Eigen::MatrixXf& GetOutput() const { return _output; }
++
+   /// \brief Get the number of output channels
+   /// \return Number of output channels
+   long get_out_channels() const;
+@@ -155,13 +159,11 @@ public:
+ 
+ protected:
+   std::vector<ConvNetBlock> _blocks;
+-  std::vector<Eigen::MatrixXf> _block_vals;
++  Eigen::MatrixXf _input_matrix; // (in_channels, prepared maximum frames)
+   Eigen::MatrixXf _head_output; // (out_channels, num_frames)
+   _Head _head;
+   void _verify_weights(const int channels, const std::vector<int>& dilations, const bool batchnorm,
+                        const size_t actual_weights);
+-  void _update_buffers_(NAM_SAMPLE** input, const int num_frames) override;
+-  void _rewind_buffers_() override;
+ 
+   int mPrewarmSamples = 0; // Pre-compute during initialization
+ };

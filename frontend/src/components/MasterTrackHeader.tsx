@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useDAWStore, AUTOMATION_LANE_HEIGHT } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Knob } from "./ui";
@@ -11,6 +11,8 @@ import {
   TCP_HEADER_PRIMARY_BUTTON_CLASS,
   TCP_HEADER_TOGGLE_BUTTON_CLASS,
 } from "./tcpHeaderButtonStyles";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 /**
  * MasterTrackHeader - Compact master channel displayed at the bottom of the TCP sidebar
@@ -33,8 +35,8 @@ export function MasterTrackHeader() {
     toggleMasterAutomation,
     toggleMasterAutomationRead,
     toggleMasterAutomationWrite,
-    beginAutomationParamTouch,
-    endAutomationParamTouch,
+    beginMasterVolumeEdit,
+    commitMasterVolumeEdit,
     openEnvelopeManager,
     toggleMasterAutomationLaneVisibility,
     toggleMasterAutomationLaneRead,
@@ -54,8 +56,8 @@ export function MasterTrackHeader() {
     toggleMasterAutomation: s.toggleMasterAutomation,
     toggleMasterAutomationRead: s.toggleMasterAutomationRead,
     toggleMasterAutomationWrite: s.toggleMasterAutomationWrite,
-    beginAutomationParamTouch: s.beginAutomationParamTouch,
-    endAutomationParamTouch: s.endAutomationParamTouch,
+    beginMasterVolumeEdit: s.beginMasterVolumeEdit,
+    commitMasterVolumeEdit: s.commitMasterVolumeEdit,
     openEnvelopeManager: s.openEnvelopeManager,
     toggleMasterAutomationLaneVisibility: s.toggleMasterAutomationLaneVisibility,
     toggleMasterAutomationLaneRead: s.toggleMasterAutomationLaneRead,
@@ -63,6 +65,16 @@ export function MasterTrackHeader() {
 
   const [showFXChain, setShowFXChain] = useState(false);
   const [fxBypassed, setFxBypassed] = useState(false);
+
+  useEffect(() => registerScopedActionExecutor(
+    { kind: "track_control_panel" },
+    (actionId) => {
+      if (actionId !== "mixer.openMasterFxChain") return "unmatched";
+      setShowFXChain(true);
+      return "handled";
+    },
+    ["mixer.openMasterFxChain"],
+  ), []);
 
   const hasFx = masterFxCount > 0;
   const hasAutomationLane = masterAutomationLanes.length > 0;
@@ -103,12 +115,12 @@ export function MasterTrackHeader() {
     db <= -60 ? "-inf dB" : `${db.toFixed(1)} dB`;
 
   const handleMasterVolumeBeginEdit = useCallback(() => {
-    beginAutomationParamTouch("master", "volume");
-  }, [beginAutomationParamTouch]);
+    beginMasterVolumeEdit();
+  }, [beginMasterVolumeEdit]);
 
   const handleMasterVolumeCommitEdit = useCallback(() => {
-    endAutomationParamTouch("master", "volume");
-  }, [endAutomationParamTouch]);
+    commitMasterVolumeEdit();
+  }, [commitMasterVolumeEdit]);
 
   const handleAutomationContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -118,7 +130,13 @@ export function MasterTrackHeader() {
 
   return (
     <>
-      <div className="border-t border-daw-border bg-daw-panel px-2 py-1.5 shrink-0">
+      <div
+        className="border-t border-daw-border bg-daw-panel px-2 py-1.5 shrink-0"
+        onPointerDownCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
+        data-shortcut-context="track_control_panel"
+      >
         <div className="flex min-h-6 items-center gap-1.5">
           {/* Label */}
           <span className="self-center leading-none text-[10px] font-bold uppercase text-daw-text-muted shrink-0">
@@ -272,6 +290,17 @@ export function MasterTrackHeader() {
           return (
             <div
               key={lane.id}
+              data-automation-lane-id={lane.id}
+              data-shortcut-context="automation"
+              tabIndex={0}
+              onPointerDownCapture={() => {
+                activateShortcutContext({ kind: "automation" });
+                useDAWStore.getState().setSelectedAutomationLane({ kind: "master", laneId: lane.id });
+              }}
+              onFocusCapture={() => {
+                activateShortcutContext({ kind: "automation" });
+                useDAWStore.getState().setSelectedAutomationLane({ kind: "master", laneId: lane.id });
+              }}
               className="flex items-center gap-1 px-1 border-t border-neutral-700/50 shrink-0"
               style={{ height: AUTOMATION_LANE_HEIGHT }}
             >

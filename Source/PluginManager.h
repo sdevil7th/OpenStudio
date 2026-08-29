@@ -14,21 +14,28 @@ struct S13FXInfo
     bool isStock = false;  // true = shipped with app (read-only)
 };
 
-// Manages VST3 plugin scanning and S13FX/JSFX script discovery
+// Manages external plugin scanning and S13FX/JSFX script discovery
 class PluginManager
 {
 public:
     PluginManager();
     ~PluginManager();
 
-    // Scan for available plugins (VST3 + S13FX/JSFX)
-    void scanForPlugins();
+    // Scan for available external plugins. The returned object contains a
+    // per-format discovery report suitable for presenting in the UI.
+    juce::var scanForPlugins(bool forceRescan = false);
 
-    // Get list of available VST3 plugins
+    // Persistent folders supplied by the user are searched by every supported
+    // external plugin format, in addition to that format's standard locations.
+    juce::var getPluginScanConfiguration() const;
+    bool addPluginSearchPath(const juce::String& directoryPath);
+    bool removePluginSearchPath(const juce::String& directoryPath);
+
+    // Get all discovered external plugins
     juce::Array<juce::PluginDescription> getAvailablePlugins() const;
 
     // Get list of available S13FX/JSFX scripts
-    const std::vector<S13FXInfo>& getAvailableS13FX() const { return s13fxList; }
+    std::vector<S13FXInfo> getAvailableS13FX() const;
 
     // Scan for S13FX/JSFX scripts only
     void scanForS13FX();
@@ -54,7 +61,7 @@ public:
     // Plugin crash isolation: check if a plugin previously crashed
     bool isPluginBlacklisted(const juce::String& pluginId) const;
     void blacklistPlugin(const juce::String& pluginId);
-    void removeFromBlacklist(const juce::String& pluginId);
+    bool removeFromBlacklist(const juce::String& pluginId);
     juce::StringArray getBlacklistedPlugins() const;
 
 private:
@@ -62,12 +69,23 @@ private:
     juce::KnownPluginList knownPluginList;
     juce::File pluginListFile;
     juce::File blacklistFile;
+    juce::File pluginSearchPathsFile;
+    juce::File pluginScanDeadMansPedalFile;
     juce::StringArray blacklistedPlugins;
+    juce::StringArray customPluginSearchPaths;
     std::vector<S13FXInfo> s13fxList;
+    mutable juce::CriticalSection pluginManagerLock;
+    juce::CriticalSection pluginScanLock;
+    bool liveLv2PathsNeedPriming = true;
+    juce::uint64 pluginStateRevision = 0;
 
-    void savePluginList();
+    bool savePluginList();
     void loadPluginList();
-    void scanDirectory(const juce::File& dir, bool isStock);
+    bool savePluginSearchPaths() const;
+    void loadPluginSearchPaths();
+    static void scanDirectory(const juce::File& dir,
+                              bool isStock,
+                              std::vector<S13FXInfo>& destination);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginManager)
 };

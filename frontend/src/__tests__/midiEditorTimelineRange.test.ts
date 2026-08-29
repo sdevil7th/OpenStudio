@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import pianoRollSource from "../components/PianoRoll.tsx?raw";
 import timelineSource from "../components/Timeline.tsx?raw";
+import { getTimelineVisibleContentEnd } from "../utils/contextWheelBehaviors";
 import { serializeMIDIClipsForBackend } from "../utils/midiClipSerialization";
 
 describe("MIDI editor timeline range", () => {
@@ -20,8 +21,11 @@ describe("MIDI editor timeline range", () => {
   });
 
   it("counts MIDI clips when sizing the main timeline scroll range", () => {
-    expect(timelineSource).toContain("track.midiClips.forEach");
-    expect(timelineSource).toContain("const clipEnd = clip.startTime + clip.duration");
+    expect(timelineSource).toContain("const maxClipEnd = getTimelineVisibleContentEnd(");
+    expect(getTimelineVisibleContentEnd([{
+      clips: [{ startTime: 2, duration: 3 }],
+      midiClips: [{ startTime: 20, duration: 4 }],
+    }])).toBe(24);
   });
 
   it("preserves overlapping MIDI clips as separate scheduled clips", () => {

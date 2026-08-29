@@ -1,14 +1,16 @@
 ---
-description: Project-specific settings and preferences for Studio13-v3
+description: Project-specific settings and preferences for OpenStudio
 ---
 
 # Project Settings
 
 ## Build Verification
 
-- **Do NOT auto-run build verification commands** after making code changes
-- **Do NOT proactively check if builds work** - the user will inform you if something is broken
-- Only run build commands when explicitly requested by the user
+- Verify every code change in proportion to its risk before handing it off.
+- Frontend changes require targeted tests plus `npm run build`; native changes
+  require the relevant CMake Debug build and deterministic regression harnesses.
+- Never treat a successful incremental build as proof that a clean dependency
+  install or clean CI build works.
 
 ## Error Handling
 
@@ -88,16 +90,17 @@ All UI components are located in `frontend/src/components/ui/` and should be use
 
 ### Component Reference Files
 
-- [Button.tsx](frontend/src/components/ui/Button/Button.tsx) - Full JSDoc with examples
-- [Input.tsx](frontend/src/components/ui/Input/Input.tsx)
-- [Select.tsx](frontend/src/components/ui/Select/Select.tsx)
-- [Checkbox.tsx](frontend/src/components/ui/Checkbox/Checkbox.tsx)
-- [Textarea.tsx](frontend/src/components/ui/Textarea/Textarea.tsx)
-- [Slider.tsx](frontend/src/components/ui/Slider/Slider.tsx)
-- [Modal.tsx](frontend/src/components/ui/Modal/Modal.tsx)
+- [Button.tsx](../../frontend/src/components/ui/Button/Button.tsx) - Full JSDoc with examples
+- [Input.tsx](../../frontend/src/components/ui/Input/Input.tsx)
+- [Select.tsx](../../frontend/src/components/ui/Select/Select.tsx)
+- [Checkbox.tsx](../../frontend/src/components/ui/Checkbox/Checkbox.tsx)
+- [Textarea.tsx](../../frontend/src/components/ui/Textarea/Textarea.tsx)
+- [Slider.tsx](../../frontend/src/components/ui/Slider/Slider.tsx)
+- [Modal.tsx](../../frontend/src/components/ui/Modal/Modal.tsx)
 
 ## General Workflow
 
 - Make the requested changes directly
-- Trust the user to test and report any issues
+- Run the automated checks that cover the changed behavior before asking the
+  user to perform subjective or hardware-dependent testing
 - Keep explanations concise unless the user asks for details

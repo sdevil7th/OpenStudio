@@ -3,6 +3,9 @@
 #include <JuceHeader.h>
 #include <array>
 #include <mutex>
+#include <vector>
+
+using S13IIRCoefficientSet = std::array<float, 5>;
 
 //==============================================================================
 /**
@@ -67,6 +70,7 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -107,6 +111,17 @@ public:
     std::atomic<float> auditionBand { 0.0f };  // 0 = off, 1-8 = solo/audition band
     std::atomic<float> stereoMode { 0.0f };    // 0 = stereo, 1 = mid, 2 = side
 
+    // Used by the channel-strip host. The EQ stays in the callback so that
+    // enable/disable transitions can be ramped instead of hard-skipped.
+    void setPowerEnabled(bool enabled) noexcept
+    {
+        powerEnabled.store(enabled, std::memory_order_release);
+    }
+    bool isPowerEnabled() const noexcept
+    {
+        return powerEnabled.load(std::memory_order_acquire);
+    }
+
     // Spectrum analyzer data
     static constexpr int fftOrder = 11;        // 2048-point FFT
     static constexpr int fftSize = 1 << fftOrder;
@@ -117,7 +132,7 @@ public:
         std::array<float, fftSize / 2> postEQ {};
         bool ready = false;
     };
-    SpectrumData getSpectrumData() const;
+    SpectrumData getSpectrumData();
 
     // Get magnitude response at given frequencies (for drawing the EQ curve)
     std::vector<float> getMagnitudeResponse(const std::vector<float>& frequencies) const;
@@ -125,16 +140,32 @@ public:
 
 private:
     static constexpr int maxStagesPerBand = 4; // for 48 dB/oct cascaded biquads
+    static constexpr int coefficientMorphChunkSize = 16;
     using StereoIIR = juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                                       juce::dsp::IIR::Coefficients<float>>;
 
     StereoIIR bandFilters[numBands][maxStagesPerBand];
     int activeStages[numBands] = {};
+    int targetStages[numBands] = {};
+    std::array<std::array<S13IIRCoefficientSet, maxStagesPerBand>, numBands>
+        targetBandCoefficients {};
+    bool filtersPrepared = false;
+    bool filtersNeedSmoothing = false;
+    float coefficientMorphProportion = 1.0f;
     juce::dsp::IIR::Filter<float> dynamicDetectorFilters[numBands][2];
     std::array<float, numBands> dynamicEnvelope {};
     std::array<std::atomic<float>, numBands> dynamicGainDB {};
     juce::AudioBuffer<float> msScratch;
-    int lastProcessingMode = 0;
+    juce::AudioBuffer<float> dryScratch;
+
+    std::atomic<bool> powerEnabled { true };
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedPowerMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedModeMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedOutputGain;
+    int activeProcessingMode = 0;
+    int pendingProcessingMode = 0;
+    bool modeTransitionPending = false;
+    bool wetPathHasState = false;
 
     struct CachedBandState
     {
@@ -155,30 +186,56 @@ private:
         float q = -1.0f;
     };
     std::array<CachedDynamicDetectorState, numBands> cachedDynamicDetectorStates {};
+    int cachedAuditionIndex = -2;
 
-    double cachedSampleRate = 44100.0;
+    double cachedSampleRate = 44100.0; // callback-owned after prepare
+    std::atomic<double> publishedSampleRate { 44100.0 };
     float smoothedAutoGainDB = 0.0f;
+    float cachedAutoGainTargetDB = 0.0f;
+    float autoGainProbeWeightedSum = 0.0f;
+    float autoGainProbeWeightTotal = 0.0f;
+    int autoGainProbeIndex = 0;
+    int autoGainProbeSamplesUntilAdvance = 0;
 
-    void updateFilters();
-    void updateBand(int bandIndex);
-    void updateDynamicBands(const juce::AudioBuffer<float>& buffer);
+    void updateFilters(bool forceImmediate = false);
+    void updateBand(int bandIndex, int auditionIndex, bool forceImmediate);
+    void updateDynamicBands(const juce::AudioBuffer<float>& buffer,
+                            int detectorChannels);
     int getNumStagesForSlope(FilterSlope slope) const;
-    float estimateAutoGainCompensationDB() const;
+    int buildBandTargets(
+        int bandIndex,
+        bool shouldProcess,
+        std::array<S13IIRCoefficientSet, maxStagesPerBand>& targets) const noexcept;
+    bool advanceStageCoefficients(int bandIndex, int stageIndex) noexcept;
+    void resetWetPathState() noexcept;
+    void advanceAutoGainEstimateProbe() noexcept;
 
-    // FFT for spectrum analyzer
+    // Spectrum capture is lock-free on the callback. FFT work is performed by
+    // getSpectrumData() on the UI/schema caller only while it is polling.
     juce::dsp::FFT fft { fftOrder };
     juce::dsp::WindowingFunction<float> window { fftSize, juce::dsp::WindowingFunction<float>::hann };
 
-    std::array<float, fftSize> preEQBuffer {};
-    std::array<float, fftSize> postEQBuffer {};
-    int fftWritePos = 0;
-
-    mutable std::mutex spectrumMutex;
-    SpectrumData spectrumOutput;
-    int fftBlockCounter = 0;
-    static constexpr int fftUpdateInterval = 4;
+    struct SpectrumCaptureSlot
+    {
+        // 0 = free, 1 = callback is writing, 2 = ready, 3 = consumer is reading
+        std::atomic<int> state { 0 };
+        std::atomic<juce::uint64> generation { 0 };
+        std::array<float, fftSize> preEQ {};
+        std::array<float, fftSize> postEQ {};
+    };
+    std::array<SpectrumCaptureSlot, 2> spectrumCaptureSlots {};
+    std::atomic<int> spectrumDemandSamplesRemaining { 0 };
+    int spectrumCaptureSlot = -1;
+    int spectrumCaptureWritePos = 0;
+    juce::uint64 spectrumCaptureGeneration = 0;
+    std::mutex spectrumConsumerMutex;
+    SpectrumData lastSpectrumOutput;
 
     void computeSpectrum(const std::array<float, fftSize>& input, std::array<float, fftSize / 2>& output);
+    bool isSpectrumCaptureRequested(int numSamples) noexcept;
+    int claimSpectrumCaptureSlot() noexcept;
+    void captureSpectrumBlock(const juce::AudioBuffer<float>& preEQ,
+                              const juce::AudioBuffer<float>& postEQ) noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13EQ)
 };
@@ -202,6 +259,7 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -219,7 +277,7 @@ public:
     std::atomic<float> style { 0.0f };         // Style as float
     std::atomic<float> autoMakeup { 0.0f };    // 0 = off, 1 = on
     std::atomic<float> autoRelease { 0.0f };   // 0 = off, 1 = on
-    std::atomic<float> sidechainHPF { 20.0f }; // 20-500 Hz
+    std::atomic<float> sidechainHPF { 20.0f }; // <= 0 = bypass, otherwise 20-500 Hz
     std::atomic<float> lookaheadMs { 0.0f };   // 0-20 ms
     std::atomic<float> detectorMode { 0.0f };  // 0=Peak, 1=RMS, 2=Auto
     std::atomic<float> stereoLink { 1.0f };    // 0=average detector, 1=linked peak detector
@@ -235,19 +293,37 @@ private:
     float currentGainLin = 1.0f;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMakeup;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedThresholdDb;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCompressionSlope;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedKneeDb;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedSidechainHPFWet;
     double cachedSampleRate = 44100.0;
 
     juce::dsp::IIR::Filter<float> scHPF_L;
     juce::dsp::IIR::Filter<float> scHPF_R;
     float lastSCHPFFreq = 20.0f;
+    std::vector<S13IIRCoefficientSet> scHPFCoefficientLut;
+    S13IIRCoefficientSet targetSCHPFCoefficients {};
+    float scHPFCoefficientSmoothingProportion = 1.0f;
+    bool scHPFCoefficientsSmoothing = false;
 
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayL { 2048 };
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayR { 2048 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayL { 8192 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lookaheadDelayR { 8192 };
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        smoothedLookaheadMorph;
+    float activeLookaheadSamples = 0.0f;
+    float targetLookaheadSamples = 0.0f;
+    float pendingLookaheadSamples = 0.0f;
+    bool lookaheadMorphActive = false;
 
     std::atomic<float> inputLevelDB { -100.0f };
     std::atomic<float> outputLevelDB { -100.0f };
 
-    float computeGain(float inputDB) const;
+    static float computeGain(float inputDB,
+                             float thresholdDB,
+                             float compressionSlope,
+                             float kneeDB) noexcept;
     void getStyleBallistics(float& atkMs, float& relMs) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Compressor)
@@ -268,6 +344,7 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -302,12 +379,20 @@ private:
 
     juce::dsp::IIR::Filter<float> scHPF_L, scHPF_R;
     juce::dsp::IIR::Filter<float> scLPF_L, scLPF_R;
+    std::vector<S13IIRCoefficientSet> scHPFCoefficientLut;
+    std::vector<S13IIRCoefficientSet> scLPFCoefficientLut;
+    S13IIRCoefficientSet targetHPFCoefficients {};
+    S13IIRCoefficientSet targetLPFCoefficients {};
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMix;
+    float sidechainCoefficientSmoothingProportion = 1.0f;
+    bool hpfCoefficientsSmoothing = false;
+    bool lpfCoefficientsSmoothing = false;
 
     double cachedSampleRate = 44100.0;
     float lastSidechainHPF = -1.0f;
     float lastSidechainLPF = -1.0f;
 
-    void updateCoefficients();
+    void updateCoefficients(bool forceImmediate);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Gate)
 };
@@ -327,6 +412,7 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -339,12 +425,17 @@ public:
 
 private:
     juce::dsp::Limiter<float> limiter;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedThresholdGain;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCeiling;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedLookaheadMorph;
     double cachedSampleRate = 44100.0;
 
     juce::AudioBuffer<float> lookaheadBuffer;
-    juce::AudioBuffer<float> truePeakScratch;
     int lookaheadWriteIndex = 0;
+    int activeLookaheadSamples = 0;
+    int targetLookaheadSamples = 0;
+    int pendingLookaheadSamples = 0;
+    bool lookaheadMorphActive = false;
     float gainEnvelope = 1.0f;
     std::array<float, 2> previousDetectorSample {};
 

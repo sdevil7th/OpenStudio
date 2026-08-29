@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { nativeBridge, PitchCorrectorData, PitchHistoryFrame } from "../services/NativeBridge";
 import { FACTORY_PRESETS, PRESET_CATEGORIES, PitchCorrectorPreset } from "./pitchCorrectorPresets";
+import { ProfiledRangeInput } from "./ui";
 
 // Scale names matching C++ PitchMapper::Scale enum
 const SCALE_NAMES = [
@@ -56,13 +57,12 @@ function Knob({ label, value, min, max, step, unit, onChange, formatValue, toolt
   return (
     <div className="flex flex-col items-center gap-1" title={tooltip || `${label}: ${display}`}>
       <label className="text-[9px] text-neutral-500 uppercase tracking-wider">{label}</label>
-      <input
-        type="range"
+      <ProfiledRangeInput
         min={min}
         max={max}
         step={step || 1}
         value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onValueChange={onChange}
         className="w-16 h-1 accent-blue-500"
         style={{ writingMode: "horizontal-tb" }}
       />
@@ -626,11 +626,10 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
             {formantCorrection ? "ON" : "OFF"}
           </button>
           {formantCorrection && (
-            <input
-              type="range"
+            <ProfiledRangeInput
               min={-12} max={12} step={0.1}
               value={formantShift}
-              onChange={(e) => setParam("formantShift", parseFloat(e.target.value))}
+              onValueChange={(value) => setParam("formantShift", value)}
               className="w-14 h-1 accent-green-500"
               title={`Formant shift: ${formantShift.toFixed(1)} semitones`}
             />

@@ -1,12 +1,19 @@
 {
-  "name": "studio13-frontend",
+  "name": "openstudio-frontend",
   "private": true,
   "version": "0.0.1",
+  "packageManager": "npm@10.9.8",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "test": "vitest run",
-    "build": "tsc && vite build",
+    "test:e2e": "playwright test",
+    "notices:generate": "node scripts/generate-third-party-notices.mjs",
+    "notices:check": "node scripts/generate-third-party-notices.mjs --check",
+    "build": "npm run notices:check && tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -14,23 +21,24 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@headlessui/react": "^2.2.9",
-    "@tailwindcss/vite": "^4.1.18",
     "classnames": "^2.5.1",
     "konva": "^9.3.22",
     "lucide-react": "^0.562.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-konva": "^19.2.1",
-    "tailwindcss": "^4.1.18",
     "zustand": "^5.0.10"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^4.2.1",
-    "sharp": "^0.34.5",
+    "@vitejs/plugin-react": "^6.0.4",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.2.2",
-    "vite": "^5.0.8",
+    "vite": "^8.1.5",
     "vitest": "^4.1.2"
   }
 }

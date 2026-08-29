@@ -346,6 +346,10 @@ export function pluginAutomationParamId(isInputFX: boolean, fxIndex: number, par
   return `plugin_${isInputFX ? "input" : "track"}_${fxIndex}_${paramIndex}`;
 }
 
+export function builtInAutomationParamId(isInputFX: boolean, fxIndex: number, paramId: string): string {
+  return `builtin_${isInputFX ? "input" : "track"}_${fxIndex}_${encodeURIComponent(paramId)}`;
+}
+
 export function getMasterAutomationParams(): AutomationParamDef[] {
   return AUTOMATION_PARAMS.filter((p) => p.id === "volume" || p.id === "pan");
 }

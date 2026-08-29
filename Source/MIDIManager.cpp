@@ -13,9 +13,9 @@ MIDIManager::~MIDIManager()
 juce::StringArray MIDIManager::getAvailableDevices() const
 {
     juce::StringArray deviceNames;
-    auto devices = juce::MidiInput::getAvailableDevices();
+    const auto availableDevices = juce::MidiInput::getAvailableDevices();
     
-    for (const auto& device : devices)
+    for (const auto& device : availableDevices)
     {
         deviceNames.add(device.name);
     }

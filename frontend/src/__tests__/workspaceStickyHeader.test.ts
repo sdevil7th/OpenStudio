@@ -23,4 +23,14 @@ describe("workspace sticky header structure", () => {
     expect(rulerSource).toContain("TIMELINE_RULER_HEIGHT = 30");
     expect(rulerSource).toContain('className="workspace-sticky-ruler"');
   });
+
+  it("routes ruler wheel gestures through the selected DAW profile", () => {
+    expect(rulerSource).toContain("getMouseBehaviorProfile(");
+    expect(rulerSource).toContain('surface: "timeline"');
+    expect(rulerSource).toContain('subtarget: "ruler"');
+    expect(rulerSource).toContain('container.addEventListener("wheel", handleWheel, { passive: false })');
+    expect(rulerSource).toContain("getTimelineHorizontalScrollMax(");
+    expect(rulerSource).toContain("state.recordingClips.length > 0");
+    expect(timelineSource).toContain('data-wheel-subtarget="ruler"');
+  });
 });

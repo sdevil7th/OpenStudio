@@ -65,7 +65,7 @@ describe("render in place alignment", () => {
     vi.spyOn(nativeBridge, "addTrack").mockResolvedValue("rendered-track");
     vi.spyOn(nativeBridge, "reorderTrack").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "addPlaybackClip").mockResolvedValue(true);
-    vi.spyOn(nativeBridge, "removePlaybackClip").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "removePlaybackClipById").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "removeTrack").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "refreshWaveformPeaks").mockResolvedValue(true);
   });

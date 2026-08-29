@@ -1,0 +1,115 @@
+name: Window or embedded UI failure
+description: Report startup, Mixer, MIDI editor, or built-in plug-in window failures.
+title: "[Window/UI]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping test OpenStudio on real hardware. The OS/build details and startup log below let us distinguish a missing runtime from a WebView/WKWebView lifecycle failure.
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenStudio version
+      description: Use the release/tag shown in the app or the exact commit hash for a development build.
+      placeholder: v0.0.40 or commit abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options:
+        - Windows 10
+        - Windows 11
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: Exact OS version and build
+      description: On Windows, run `winver`. On macOS, use About This Mac.
+      placeholder: Windows 10 22H2 build 19045.6466; macOS 14.7.6
+    validations:
+      required: true
+
+  - type: dropdown
+    id: window
+    attributes:
+      label: Affected window
+      options:
+        - Main application startup
+        - Detached Mixer
+        - Detached MIDI editor
+        - Built-in plug-in editor
+        - Native VST3/CLAP/AU plug-in editor
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include open/close/dock/reopen order, whether this was the first launch, and whether another OpenStudio window was still loading.
+      placeholder: |
+        1. Launch OpenStudio
+        2. Open ...
+        3. Close ... immediately
+        4. Reopen ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Say whether the window was blank, never appeared, froze, crashed, or showed a recovery message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: startup_log
+    attributes:
+      label: Startup log
+      description: Paste or attach `OpenStudio_Startup.log`. On Windows it is under `%APPDATA%\OpenStudio\logs`; on macOS it is under `~/Library/Application Support/OpenStudio/logs`. Remove any private project paths if needed.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Additional environment details
+      description: On Windows include the WebView2 version, SmartScreen/Smart App Control result, and any Controlled Folder Access, antivirus, EDR, AppLocker, or WDAC policy. On macOS include Intel/Apple Silicon, whether the DMG/app was signed and notarized, the exact Gatekeeper message, how launch was approved, whether quarantine was removed, and whether Rosetta is installed.
+
+  - type: dropdown
+    id: trust_state
+    attributes:
+      label: Download and first-launch state
+      options:
+        - Signed/notarized or verified-publisher build; no warning
+        - Warning shown; approved with the operating system UI
+        - macOS quarantine removed with xattr
+        - Windows security or organization policy blocked launch
+        - Local development build; no download quarantine
+        - Unknown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I tested a current release or included the exact development commit.
+          required: true
+        - label: I included the complete startup section of the log, including browser backend and frontend startup state.
+          required: true

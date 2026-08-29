@@ -1,6 +1,13 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { PitchNoteData } from "../services/NativeBridge";
 import { usePitchEditorStore } from "../store/pitchEditorStore";
+import { createDefaultTrack, useDAWStore } from "../store/useDAWStore";
+
+const originalDAWState = {
+  tracks: useDAWStore.getState().tracks,
+  globalLocked: useDAWStore.getState().globalLocked,
+  lockSettings: useDAWStore.getState().lockSettings,
+};
 
 function makeNote(id: string, correctedPitch: number, wordGroupId = "word_a"): PitchNoteData {
   const index = Number(id.replace(/\D/g, "")) || 0;
@@ -31,6 +38,26 @@ describe("pitch editor single-note ownership", () => {
     vi.stubGlobal("window", {
       location: { hostname: "test.local" },
     });
+    useDAWStore.setState({
+      tracks: [{
+        ...createDefaultTrack("track-a", "Track A"),
+        clips: [{
+          id: "clip-a",
+          filePath: "C:/audio.wav",
+          name: "Audio",
+          startTime: 0,
+          duration: 3,
+          offset: 0,
+          color: "#123456",
+          volumeDB: 0,
+          fadeIn: 0,
+          fadeOut: 0,
+          locked: false,
+        }],
+      }],
+      globalLocked: false,
+      lockSettings: { ...useDAWStore.getState().lockSettings, items: false },
+    });
     usePitchEditorStore.setState({
       trackId: "track-a",
       clipId: "clip-a",
@@ -54,6 +81,7 @@ describe("pitch editor single-note ownership", () => {
 
   afterEach(() => {
     vi.clearAllTimers();
+    useDAWStore.setState(originalDAWState);
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });

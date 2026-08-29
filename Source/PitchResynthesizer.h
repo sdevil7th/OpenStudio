@@ -9,7 +9,7 @@
  * PitchResynthesizer — Offline pitch correction from graphical edits.
  *
  * Takes original audio + edited notes, produces corrected audio.
- * Uses the Studio13 native VSF renderer for graphical offline pitch-only edits.
+ * Uses the OpenStudio native VSF renderer for graphical offline pitch-only edits.
  *
  * Non-destructive: original audio is never modified.
  */

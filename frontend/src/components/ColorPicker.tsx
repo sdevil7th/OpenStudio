@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 
 interface ColorPickerProps {
   currentColor: string;
@@ -42,6 +44,7 @@ export function ColorPicker({
     recentColors: s.recentColors,
     addRecentColor: s.addRecentColor,
   })));
+  useTransientOverlayShortcutScope(true, onClose);
 
   const handleColorSelect = (color: string) => {
     addRecentColor(color);
@@ -85,18 +88,6 @@ export function ColorPicker({
     };
   }, [onClose]);
 
-  // Close on Escape key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
   const style: React.CSSProperties = position
     ? { position: "fixed", top: position.top, left: position.left, zIndex: 9999 }
     : { position: "absolute", left: 4, top: 0, zIndex: 50 };
@@ -107,6 +98,8 @@ export function ColorPicker({
       className="bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl p-2"
       style={style}
       onClick={(e) => e.stopPropagation()}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
     >
       <div className="text-xs text-neutral-400 mb-2 px-1">Track Color</div>
       <div className="grid grid-cols-4 gap-1.5">

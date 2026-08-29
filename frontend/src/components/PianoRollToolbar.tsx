@@ -25,6 +25,8 @@ import { chooseResponsiveToolbarGroups } from "../utils/responsiveToolbar";
 import type { ResponsiveToolbarGroup } from "../utils/responsiveToolbar";
 import { NOTE_NAMES, SCALE_DISPLAY_NAMES } from "../utils/pianoRollPitch";
 import { PIANO_ROLL_TOOL_BUTTONS } from "../utils/pianoRollTools";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
+import { activateShortcutContext } from "../utils/shortcutContext";
 import {
   SNAP_TYPE_OPTIONS,
   type GridSize,
@@ -220,6 +222,10 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
     });
     const [isOverflowOpen, setIsOverflowOpen] = useState(false);
     const resizeObserverAvailable = typeof ResizeObserver !== "undefined";
+    useTransientOverlayShortcutScope(
+      isOverflowOpen,
+      () => setIsOverflowOpen(false),
+    );
 
     const setRootRef = useCallback((node: HTMLDivElement | null) => {
       rootRef.current = node;
@@ -346,14 +352,9 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
           setIsOverflowOpen(false);
         }
       };
-      const handleKeyDown = (event: KeyboardEvent) => {
-        if (event.key === "Escape") setIsOverflowOpen(false);
-      };
       document.addEventListener("mousedown", handlePointerDown);
-      document.addEventListener("keydown", handleKeyDown);
       return () => {
         document.removeEventListener("mousedown", handlePointerDown);
-        document.removeEventListener("keydown", handleKeyDown);
       };
     }, [isOverflowOpen]);
 
@@ -820,6 +821,8 @@ export const PianoRollToolbar = forwardRef<HTMLDivElement, PianoRollToolbarProps
                 data-qa="piano-roll-toolbar-overflow-menu"
                 role="menu"
                 aria-label="More MIDI editor toolbar controls"
+                onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+                onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
               >
                 {overflowGroupIds.map((id) => renderGroup(id, "overflow"))}
               </div>

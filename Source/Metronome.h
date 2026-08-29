@@ -11,6 +11,10 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 class Metronome
 {
@@ -28,7 +32,10 @@ public:
     void setVolume(float newVolume);
     void setEnabled(bool shouldBeEnabled);
     void setAccentBeats(const std::vector<bool>& accents);
-    bool isEnabled() const { return enabled; }
+    bool isEnabled() const
+    {
+        return enabled.load(std::memory_order_acquire);
+    }
 
     // Custom click sounds (Phase 9C)
     bool setClickSound(const juce::String& filePath);    // Load custom WAV for regular beats
@@ -36,28 +43,47 @@ public:
     void resetToDefaultSounds();                          // Restore synthesized clicks
 
     // Getters for offline rendering
-    const std::vector<bool>& getAccentBeats() const { return accentBeats; }
-    float getVolume() const { return volume; }
-    double getBpm() const { return bpm; }
-    int getNumerator() const { return numerator; }
-    int getDenominator() const { return denominator; }
+    std::vector<bool> getAccentBeats() const;
+    float getVolume() const
+    {
+        return volume.load(std::memory_order_relaxed);
+    }
+    double getBpm() const
+    {
+        return bpm.load(std::memory_order_relaxed);
+    }
+    int getNumerator() const;
+    int getDenominator() const;
 
     // Render metronome audio to a WAV file offline (for export/render track)
     bool renderToFile(const juce::File& outputFile, double startTimeSeconds, double endTimeSeconds);
 
 private:
-    double sampleRate = 44100.0;
-    double bpm = 120.0;
-    int numerator = 4;
-    int denominator = 4;
-    float volume = 0.5f;
-    bool enabled = false;
-    std::vector<bool> accentBeats = {true, false, false, false}; // Default 4/4 with only beat 1 accented
+    struct ClickData
+    {
+        std::vector<bool> accentBeats {
+            true, false, false, false
+        };
+        juce::AudioBuffer<float> highClickBuffer;
+        juce::AudioBuffer<float> lowClickBuffer;
+        bool usingCustomClick = false;
+        bool usingCustomAccent = false;
+        juce::String customClickPath;
+        juce::String customAccentPath;
+    };
 
-    // Buffers for cached click sounds
-    juce::AudioBuffer<float> highClickBuffer;
-    juce::AudioBuffer<float> lowClickBuffer;
-    
+    static constexpr std::uint64_t defaultTimeSignature =
+        (static_cast<std::uint64_t>(4) << 32)
+        | static_cast<std::uint64_t>(4);
+
+    std::atomic<double> sampleRate { 44100.0 };
+    std::atomic<double> bpm { 120.0 };
+    std::atomic<std::uint64_t> packedTimeSignature {
+        defaultTimeSignature
+    };
+    std::atomic<float> volume { 0.5f };
+    std::atomic<bool> enabled { false };
+
     // Playback state
     int clickSampleCounter = 0; // Current position within the click sound
     bool isClicking = false;    // Are we currently playing a click?
@@ -65,14 +91,39 @@ private:
     double lastSamplePosition = -1.0; // Track last position to detect playback restart
     
     // Internal helpers
-    void generateClickSounds();
-    bool loadSoundFromFile(const juce::String& filePath, juce::AudioBuffer<float>& targetBuffer);
+    static std::uint64_t packTimeSignature(
+        int numerator, int denominator) noexcept;
+    static int unpackNumerator(
+        std::uint64_t timeSignature) noexcept;
+    static int unpackDenominator(
+        std::uint64_t timeSignature) noexcept;
+    static void generateDefaultClickSounds(
+        double targetSampleRate,
+        juce::AudioBuffer<float>& highClick,
+        juce::AudioBuffer<float>& lowClick);
+    std::shared_ptr<ClickData> createDefaultClickData(
+        double targetSampleRate) const;
+    std::shared_ptr<const ClickData>
+        getClickDataSnapshot() const;
+    void publishClickData(
+        std::shared_ptr<const ClickData> nextData);
+    bool loadSoundFromFile(
+        const juce::String& filePath,
+        double targetSampleRate,
+        juce::AudioBuffer<float>& targetBuffer);
 
-    // Custom click sound state
-    bool usingCustomClick = false;
-    bool usingCustomAccent = false;
-    juce::String customClickPath;
-    juce::String customAccentPath;
+    // Control-side writes are serialised independently from publication.
+    // The audio thread never acquires either lock.
+    mutable juce::CriticalSection clickDataPublicationLock;
+    juce::CriticalSection clickDataMutationLock;
+    std::shared_ptr<const ClickData> clickDataOwner;
+    std::atomic<const ClickData*> clickDataForAudio {
+        nullptr
+    };
+    std::atomic<std::uint32_t> clickDataAudioReaders { 0 };
+    std::vector<std::shared_ptr<const ClickData>>
+        retiredClickDataOwners;
+
     juce::AudioFormatManager formatManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Metronome)

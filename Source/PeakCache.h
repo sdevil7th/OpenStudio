@@ -124,7 +124,11 @@ private:
 
     // Keep waveform generation serialized and low-impact; concurrent full-file
     // peak scans can steal disk/CPU from 32/64-sample monitoring callbacks.
-    juce::ThreadPool backgroundPool { 1 };
+    juce::ThreadPool backgroundPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeakCache)
 };

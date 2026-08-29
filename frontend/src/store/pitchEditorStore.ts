@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { nativeBridge, PitchNoteData, PitchContourData, type PitchCorrectionCompletionData, type PitchCorrectionRenderMode, type PitchPreviewRoutingStatus } from "../services/NativeBridge";
 import { useDAWStore } from "./useDAWStore";
 import { logBridgeError } from "../utils/bridgeErrorHandler";
+import { isClipEditLocked } from "../utils/clipEditLock";
 
 export type PitchEditorTool = "select" | "pitch" | "drift" | "vibrato" | "transition" | "draw" | "split";
 export type PitchSnapMode = "off" | "chromatic" | "scale";
@@ -240,6 +241,7 @@ let _applyStateResetTimer: ReturnType<typeof setTimeout> | null = null;
 let _rollingPreviewRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let _fullClipHqTimer: ReturnType<typeof setTimeout> | null = null;
 let _dawTransportSubscriptionInitialized = false;
+let _dawPitchEditAuthoritySubscriptionInitialized = false;
 let _editRevision = 0;
 let _requestedApplyRevision = 0;
 let _appliedRevision = 0;
@@ -247,6 +249,17 @@ type PitchApplyRenderStage = "single" | "preview_segment" | "full_clip_hq" | "no
 type PitchPreviewMonitorMode = "none" | "scrub" | "clip_live_preview";
 let _interactivePreviewNoteId: string | null = null;
 let _interactivePreviewActive = false;
+interface InteractivePitchEditBaseline {
+  notes: PitchNoteData[];
+  selectedNoteIds: string[];
+  undoStack: UndoEntry[];
+  redoStack: UndoEntry[];
+}
+let _interactiveEditBaseline: InteractivePitchEditBaseline | null = null;
+let _interactiveEditCancelled = false;
+let _pitchLockCancellationPending: Promise<void> | null = null;
+let _hiddenForFrozenTarget: { trackId: string; clipId: string } | null = null;
+let _lockedHistoryReplayRevision: number | null = null;
 let _activePitchPreviewMonitorMode: PitchPreviewMonitorMode = "none";
 let _dirtyPitchNoteIds = new Set<string>();
 const _requestRevisionById = new Map<string, number>();
@@ -286,6 +299,7 @@ interface PitchCorrectionRequestMeta {
   coverageRanges?: PitchRenderCoverageRange[];
   requestGroupId: string;
   segmentIndex?: number;
+  allowLockedHistoryReplay?: boolean;
 }
 const _requestMetaById = new Map<string, PitchCorrectionRequestMeta>();
 
@@ -374,6 +388,207 @@ function clearStagedPreviewQueue() {
   clearFullClipHqTimer();
 }
 
+function clearPitchMutationTimers() {
+  if (_autoApplyTimer) {
+    clearTimeout(_autoApplyTimer);
+    _autoApplyTimer = null;
+  }
+  if (_dragPreviewThrottle) {
+    clearTimeout(_dragPreviewThrottle);
+    _dragPreviewThrottle = null;
+  }
+  clearApplyStateResetTimer();
+  clearRollingPreviewRefreshTimer();
+  clearStagedPreviewQueue();
+}
+
+interface PitchEditorTargetAuthority {
+  exists: boolean;
+  frozen: boolean;
+  locked: boolean;
+  authoritativeFilePath: string;
+}
+
+function resolvePitchEditorTargetAuthority(
+  trackId: string | null,
+  clipId: string | null,
+  dawState = useDAWStore.getState(),
+): PitchEditorTargetAuthority {
+  if (!trackId || !clipId) {
+    return { exists: false, frozen: false, locked: true, authoritativeFilePath: "" };
+  }
+  const track = dawState.tracks.find((candidate) => candidate.id === trackId);
+  const clip = track?.clips.find((candidate) => candidate.id === clipId);
+  return {
+    exists: Boolean(track && clip),
+    frozen: Boolean(track?.frozen),
+    locked: !track || !clip || isClipEditLocked(dawState, clip),
+    authoritativeFilePath: clip?.filePath ?? "",
+  };
+}
+
+export function isCurrentPitchEditorClipEditable(): boolean {
+  const { trackId, clipId } = usePitchEditorStore.getState();
+  const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+  return authority.exists && !authority.frozen && !authority.locked && !_pitchLockCancellationPending;
+}
+
+function canReplayPitchEditorHistory(): boolean {
+  const { trackId, clipId } = usePitchEditorStore.getState();
+  const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+  // Global/item/clip locks block new edits, but must not invalidate historical
+  // undo/redo. Frozen tracks are a different authority: their playback source
+  // must remain immutable until the track is unfrozen.
+  return authority.exists && !authority.frozen;
+}
+
+function canUsePitchEditorTarget(
+  trackId: string,
+  clipId: string,
+  allowLockedHistoryReplay = false,
+): boolean {
+  const pitchState = usePitchEditorStore.getState();
+  if (pitchState.trackId !== trackId || pitchState.clipId !== clipId) return false;
+  if (_pitchLockCancellationPending) return false;
+  const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+  return authority.exists
+    && !authority.frozen
+    && (allowLockedHistoryReplay || !authority.locked);
+}
+
+function canStartPitchEditorMutation(): boolean {
+  if (isCurrentPitchEditorClipEditable()) return true;
+  const { trackId, clipId } = usePitchEditorStore.getState();
+  const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+  const hasTransientWork = _interactiveEditBaseline !== null
+    || _interactivePreviewActive
+    || _requestMetaById.size > 0
+    || _activePitchCorrectionRequestId !== null;
+  if (hasTransientWork && (authority.locked || authority.frozen || !authority.exists)) {
+    cancelPitchEditorForAuthorityLoss("mutation_blocked");
+  }
+  return false;
+}
+
+function cancelPitchEditorForAuthorityLoss(reason: string) {
+  const pitchState = usePitchEditorStore.getState();
+  const { trackId, clipId } = pitchState;
+  const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+  const hadNativeWork = _requestMetaById.size > 0
+    || _activePitchCorrectionRequestId !== null
+    || _activePreviewRequestGroupId !== null
+    || _noteHqApplyInFlight
+    || _interactivePreviewActive;
+  const cancelledInteractiveEdit = _interactiveEditBaseline !== null;
+
+  clearPitchMutationTimers();
+  if (_interactiveEditBaseline) {
+    const baseline = _interactiveEditBaseline;
+    usePitchEditorStore.setState({
+      notes: clonePitchNotes(baseline.notes),
+      selectedNoteIds: [...baseline.selectedNoteIds],
+      undoStack: [...baseline.undoStack],
+      redoStack: [...baseline.redoStack],
+    });
+  }
+  _interactiveEditBaseline = null;
+  _interactiveEditCancelled = cancelledInteractiveEdit;
+  _interactivePreviewActive = false;
+  _interactivePreviewNoteId = null;
+  _activePitchPreviewMonitorMode = "none";
+  _requestRevisionById.clear();
+  _requestMetaById.clear();
+  _requestedApplyRevision = _appliedRevision;
+  _activePitchCorrectionRequestId = null;
+  _noteHqApplyInFlight = false;
+  _deferredAnalysisRange = null;
+  if (authority.frozen) _lockedHistoryReplayRevision = null;
+  usePitchEditorStore.setState({
+    isApplying: false,
+    applyState: "idle",
+    applyMessage: authority.frozen ? "Track frozen" : "Editing locked",
+    lastApplyRequestId: null,
+    renderCoverage: [],
+    activeLogicalRequestId: null,
+  });
+
+  if (clipId) {
+    const cancellation = (hadNativeWork
+      ? nativeBridge.cancelPitchCorrectionRequests(clipId, authority.authoritativeFilePath)
+      : nativeBridge.clearAllPitchPreviewRoutes(clipId))
+      .catch(logBridgeError(hadNativeWork ? "cancelPitchCorrectionRequests" : "clearAllPitchPreviewRoutes"))
+      .then(() => undefined);
+    _pitchLockCancellationPending = cancellation;
+    void cancellation.finally(() => {
+      if (_pitchLockCancellationPending === cancellation) {
+        _pitchLockCancellationPending = null;
+      }
+    });
+  }
+
+  logPitchEditorFormant("pitch edit authority revoked", {
+    trackId,
+    clipId,
+    reason,
+    frozen: authority.frozen,
+    locked: authority.locked,
+    cancelledInteractiveEdit,
+    cancelledNativeWork: hadNativeWork,
+  });
+}
+
+function ensureDAWPitchEditAuthoritySubscription() {
+  if (_dawPitchEditAuthoritySubscriptionInitialized) return;
+  _dawPitchEditAuthoritySubscriptionInitialized = true;
+
+  useDAWStore.subscribe(
+    (dawState) => {
+      const { trackId, clipId } = usePitchEditorStore.getState();
+      const authority = resolvePitchEditorTargetAuthority(trackId, clipId, dawState);
+      return { trackId, clipId, ...authority };
+    },
+    (authority, previous) => {
+      if (!authority.trackId || !authority.clipId) return;
+      const sameTarget = previous?.trackId === authority.trackId && previous?.clipId === authority.clipId;
+      const newlyMissing = !authority.exists && (!sameTarget || Boolean(previous?.exists));
+      const newlyFrozen = authority.frozen && (!sameTarget || !previous?.frozen);
+      const newlyLocked = authority.locked && (!sameTarget || !previous?.locked);
+
+      if (newlyMissing || newlyFrozen || newlyLocked) {
+        cancelPitchEditorForAuthorityLoss(authority.frozen ? "track_frozen" : "lock_enabled");
+      }
+
+      if (authority.frozen) {
+        _hiddenForFrozenTarget = { trackId: authority.trackId, clipId: authority.clipId };
+        if (useDAWStore.getState().showPitchEditor) {
+          useDAWStore.setState({ showPitchEditor: false });
+        }
+        return;
+      }
+
+      if (_hiddenForFrozenTarget
+        && _hiddenForFrozenTarget.trackId === authority.trackId
+        && _hiddenForFrozenTarget.clipId === authority.clipId
+        && authority.exists) {
+        const dawState = useDAWStore.getState();
+        if (dawState.pitchEditorTrackId === authority.trackId
+          && dawState.pitchEditorClipId === authority.clipId) {
+          useDAWStore.setState({ showPitchEditor: true });
+        }
+        _hiddenForFrozenTarget = null;
+      }
+    },
+    {
+      equalityFn: (a, b) => a.trackId === b.trackId
+        && a.clipId === b.clipId
+        && a.exists === b.exists
+        && a.frozen === b.frozen
+        && a.locked === b.locked
+        && a.authoritativeFilePath === b.authoritativeFilePath,
+    },
+  );
+}
+
 function deferPitchAnalysis(start?: number, end?: number, reason = "hq_priority") {
   _deferredAnalysisRange = { start, end };
   logPitchEditorFormant("pitch analysis deferred", { start: start ?? null, end: end ?? null, reason });
@@ -427,6 +642,9 @@ function resetApplyRevisions() {
   _appliedRevision = 0;
   _interactivePreviewNoteId = null;
   _interactivePreviewActive = false;
+  _interactiveEditBaseline = null;
+  _interactiveEditCancelled = false;
+  _lockedHistoryReplayRevision = null;
   _activePitchPreviewMonitorMode = "none";
   _dirtyPitchNoteIds.clear();
   _requestRevisionById.clear();
@@ -970,6 +1188,7 @@ function buildInteractivePreviewPayload(note: PitchNoteData, globalFormantSt: nu
 function startPitchScrubPreviewForNote(noteId: string) {
   const { trackId, clipId, notes, contour } = usePitchEditorStore.getState();
   if (!trackId || !clipId) return;
+  if (!canUsePitchEditorTarget(trackId, clipId)) return;
   const note = notes.find((candidate) => candidate.id === noteId);
   if (!note) return;
   nativeBridge.startPitchScrubPreview(trackId, clipId, note, contour?.frames)
@@ -1058,6 +1277,7 @@ async function captureAppFinalPitchContext(
   routeAfterRepair: PitchPreviewRoutingStatus | null,
   routeSuspect: boolean,
 ) {
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
   if (!data.outputFile || !shouldCaptureAppFinalPitchContext(routeSuspect)) return;
 
   const editedNotes = meta.notes.filter((note) => Math.abs(note.correctedPitch - note.detectedPitch) > 0.01);
@@ -1132,6 +1352,7 @@ async function captureAppFinalPitchContext(
       backendAppFinalParityReport: data.appFinalParityReport ?? null,
     },
   });
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
 
   const debugPaths = {
     backendBakedContextPath: data.appFinalBakedContextPath ?? data.appFinalBakedCapture?.filePath ?? null,
@@ -1163,6 +1384,7 @@ async function verifyNoteHqFinalRoute(
   reason: string,
   captureIfEnabled: boolean,
 ) {
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
   let routeBeforeRepair: PitchPreviewRoutingStatus | null = null;
   try {
     routeBeforeRepair = await nativeBridge.getPitchPreviewRoutingStatus(meta.clipId);
@@ -1180,6 +1402,8 @@ async function verifyNoteHqFinalRoute(
     return;
   }
 
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
+
   const wasClean = isCleanNoteHqFinalRoute(routeBeforeRepair);
   let routeAfterRepair = routeBeforeRepair;
   if (!wasClean) {
@@ -1191,6 +1415,7 @@ async function verifyNoteHqFinalRoute(
       route: routeSummary(routeBeforeRepair),
     });
     await clearAllPitchPreviewRoutes(meta.clipId, `note_hq_route_repair:${reason}`);
+    if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
     routeAfterRepair = await nativeBridge.getPitchPreviewRoutingStatus(meta.clipId).catch(() => null);
     const repaired = isCleanNoteHqFinalRoute(routeAfterRepair);
     setApplyStatus(
@@ -1262,8 +1487,8 @@ function buildAutoBakeWindow() {
 
 /** Legacy rolling preview path. Pitch/formant preview now prefers rendered segments. */
 function sendPitchPreviewMap(reason: "edit" | "transport" | "sync" = "edit") {
-  const { clipId, notes, globalFormantCents } = usePitchEditorStore.getState();
-  if (!clipId) return;
+  const { trackId, clipId, notes, globalFormantCents } = usePitchEditorStore.getState();
+  if (!trackId || !clipId || !canUsePitchEditorTarget(trackId, clipId)) return;
   const globalFormantSt = getEffectivePitchEditorGlobalFormantSt(globalFormantCents / 100);
   const monitorMode = resolvePitchPreviewMonitorMode();
   const previewNote = _interactivePreviewActive && _interactivePreviewNoteId
@@ -1323,6 +1548,8 @@ function scheduleRollingPreviewRefresh() {
     _rollingPreviewRefreshTimer = null;
     const { clipId, notes, globalFormantCents } = usePitchEditorStore.getState();
     if (!clipId) return;
+    const trackId = usePitchEditorStore.getState().trackId;
+    if (!trackId || !canUsePitchEditorTarget(trackId, clipId)) return;
     if (!useDAWStore.getState().transport.isPlaying) return;
     if (!hasRealtimePitchPreviewWork(notes, globalFormantCents / 100)) return;
     sendPitchPreviewMap("transport");
@@ -1338,6 +1565,7 @@ function ensureDAWTransportSubscription() {
     (transport, prevTransport) => {
       const pitchState = usePitchEditorStore.getState();
       if (!pitchState.clipId) return;
+      if (!pitchState.trackId || !canUsePitchEditorTarget(pitchState.trackId, pitchState.clipId)) return;
       const globalFormantSt = pitchState.globalFormantCents / 100;
       if (!hasRealtimePitchPreviewWork(pitchState.notes, globalFormantSt)) return;
 
@@ -1380,43 +1608,67 @@ function ensureDAWTransportSubscription() {
   );
 }
 
-function applyPitchCorrectionResultToClip(clipId: string, outputFile: string, restored: boolean) {
-  useDAWStore.setState((s) => ({
-    tracks: s.tracks.map((track) => ({
-      ...track,
-      clips: track.clips.map((clip) => {
-        if (clip.id !== clipId) return clip;
-
-        const sourceFilePath = clip.pitchCorrectionSourceFilePath ?? clip.filePath;
-        const sourceOffset = clip.pitchCorrectionSourceOffset ?? clip.offset ?? 0;
-
-        if (restored) {
-          return {
-            ...clip,
-            filePath: sourceFilePath,
-            offset: sourceOffset,
-            pitchCorrectionSourceFilePath: undefined,
-            pitchCorrectionSourceOffset: undefined,
-          };
-        }
-
+function applyPitchCorrectionResultToClip(
+  trackId: string,
+  clipId: string,
+  outputFile: string,
+  restored: boolean,
+  allowLockedHistoryReplay = false,
+): boolean {
+  if (!canUsePitchEditorTarget(trackId, clipId, allowLockedHistoryReplay)) return false;
+  let applied = false;
+  useDAWStore.setState((s) => {
+    const targetTrack = s.tracks.find((track) => track.id === trackId);
+    const targetClip = targetTrack?.clips.find((clip) => clip.id === clipId);
+    if (!targetTrack || !targetClip || targetTrack.frozen
+      || (!allowLockedHistoryReplay && isClipEditLocked(s, targetClip))) {
+      return s;
+    }
+    applied = true;
+    return {
+      tracks: s.tracks.map((track) => {
+        if (track.id !== trackId) return track;
         return {
-          ...clip,
-          filePath: outputFile,
-          offset: 0,
-          pitchCorrectionSourceFilePath: sourceFilePath,
-          pitchCorrectionSourceOffset: sourceOffset,
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId) return clip;
+
+            const sourceFilePath = clip.pitchCorrectionSourceFilePath ?? clip.filePath;
+            const sourceOffset = clip.pitchCorrectionSourceOffset ?? clip.offset ?? 0;
+
+            if (restored) {
+              return {
+                ...clip,
+                filePath: sourceFilePath,
+                offset: sourceOffset,
+                pitchCorrectionSourceFilePath: undefined,
+                pitchCorrectionSourceOffset: undefined,
+              };
+            }
+
+            return {
+              ...clip,
+              filePath: outputFile,
+              offset: 0,
+              pitchCorrectionSourceFilePath: sourceFilePath,
+              pitchCorrectionSourceOffset: sourceOffset,
+            };
+          }),
         };
       }),
-    })),
-  }));
+    };
+  });
+  return applied;
 }
 
 function isCurrentRevision(revision: number) {
   return revision === _editRevision;
 }
 
-function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
+function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta): boolean {
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) {
+    return false;
+  }
   const effectiveNotes = sanitizePitchEditorNotesForApply(meta.notes);
   const effectiveGlobalFormantSt = getEffectivePitchEditorGlobalFormantSt(meta.globalFormantSt);
   registerRequestMeta(meta);
@@ -1466,6 +1718,8 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
   ).then((result) => {
     if (result) return;
 
+    if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
+
     consumeRequestRevision(meta.requestId);
     consumeRequestMeta(meta.requestId);
     if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
@@ -1483,6 +1737,7 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
       renderMode: meta.renderMode,
     });
   }).catch((err) => {
+    if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) return;
     consumeRequestRevision(meta.requestId);
     consumeRequestMeta(meta.requestId);
     if (_activePitchCorrectionRequestId === meta.logicalRequestId) {
@@ -1501,6 +1756,7 @@ function dispatchNativePitchCorrection(meta: PitchCorrectionRequestMeta) {
       error: err instanceof Error ? err.message : String(err),
     });
   });
+  return true;
 }
 
 function dispatchSingleApplyRequest(
@@ -1531,6 +1787,7 @@ function dispatchSingleApplyRequest(
     windowStartSec,
     windowEndSec,
     requestGroupId: logicalRequestId,
+    allowLockedHistoryReplay: _lockedHistoryReplayRevision === requestRevision,
   });
 }
 
@@ -1561,7 +1818,7 @@ function dispatchNoteHqApplyRequest(
   } else {
     setRenderCoverage([], logicalRequestId);
   }
-  dispatchNativePitchCorrection({
+  const dispatched = dispatchNativePitchCorrection({
     clipId,
     trackId,
     requestId,
@@ -1577,7 +1834,9 @@ function dispatchNoteHqApplyRequest(
     windowEndSec,
     coverageRanges: coverageRanges?.map((range) => ({ ...range })),
     requestGroupId: logicalRequestId,
+    allowLockedHistoryReplay: _lockedHistoryReplayRevision === requestRevision,
   });
+  if (!dispatched) finishNoteHqPriority(logicalRequestId);
 }
 
 function dispatchNextPreviewSegments() {
@@ -1586,7 +1845,7 @@ function dispatchNextPreviewSegments() {
     const segment = _pendingPreviewSegments.shift();
     if (!segment) return;
     _runningPreviewSegmentJobs += 1;
-    dispatchNativePitchCorrection({
+    const dispatched = dispatchNativePitchCorrection({
       ..._stagedPreviewBase,
       requestId: buildStageRequestId(_stagedPreviewBase.logicalRequestId, "preview_segment"),
       stage: "preview_segment",
@@ -1596,6 +1855,11 @@ function dispatchNextPreviewSegments() {
       requestGroupId: _stagedPreviewBase.logicalRequestId,
       segmentIndex: segment.index,
     });
+    if (!dispatched) {
+      _runningPreviewSegmentJobs = Math.max(0, _runningPreviewSegmentJobs - 1);
+      clearStagedPreviewQueue();
+      return;
+    }
   }
 }
 
@@ -1648,6 +1912,7 @@ function dispatchStagedRenderedApply(
     globalFormantSt,
     summary,
     requestGroupId: logicalRequestId,
+    allowLockedHistoryReplay: _lockedHistoryReplayRevision === requestRevision,
   };
   dispatchNextPreviewSegments();
   clearFullClipHqTimer();
@@ -1670,9 +1935,22 @@ const _deferredPitchEditorHelpers = [
 ];
 void _deferredPitchEditorHelpers;
 
-function scheduleAutoApply(delayMs = 300) {
+function scheduleAutoApply(delayMs = 300, allowLockedHistoryReplay = false) {
   if (_autoApplyTimer) clearTimeout(_autoApplyTimer);
-  const { notes, globalFormantCents, clipId } = usePitchEditorStore.getState();
+  const { trackId, notes, globalFormantCents, clipId } = usePitchEditorStore.getState();
+  if (!trackId || !clipId) return;
+  if (_pitchLockCancellationPending) {
+    if (allowLockedHistoryReplay) {
+      const pending = _pitchLockCancellationPending;
+      void pending.finally(() => {
+        if (_editRevision === _lockedHistoryReplayRevision) {
+          scheduleAutoApply(delayMs, true);
+        }
+      });
+    }
+    return;
+  }
+  if (!canUsePitchEditorTarget(trackId, clipId, allowLockedHistoryReplay)) return;
   const globalFormantSt = globalFormantCents / 100;
   const requestSummary = summarizeApplyRequest(notes, globalFormantSt);
   const queuedRevision = _editRevision;
@@ -1690,6 +1968,18 @@ function scheduleAutoApply(delayMs = 300) {
     _autoApplyTimer = null;
     const { trackId, clipId, notes, contour, globalFormantCents, clipDuration } = usePitchEditorStore.getState();
     if (!trackId || !clipId) return;
+    if (_pitchLockCancellationPending) {
+      if (allowLockedHistoryReplay) {
+        const pending = _pitchLockCancellationPending;
+        void pending.finally(() => {
+          if (_editRevision === queuedRevision && _lockedHistoryReplayRevision === queuedRevision) {
+            scheduleAutoApply(0, true);
+          }
+        });
+      }
+      return;
+    }
+    if (!canUsePitchEditorTarget(trackId, clipId, allowLockedHistoryReplay)) return;
     if (_editRevision <= _appliedRevision) {
       logPitchEditorFormant("skipping auto-apply because edit revision is already applied", {
         clipId,
@@ -1718,6 +2008,7 @@ function scheduleAutoApply(delayMs = 300) {
     } catch (e) {
       console.warn("[pitchEditor] syncClipsWithBackend failed before apply:", e);
     }
+    if (!canUsePitchEditorTarget(trackId, clipId, allowLockedHistoryReplay)) return;
     // ALWAYS send ALL notes to the backend. The backend reads from the ORIGINAL
     // audio file every time (so corrections don't compound through the vocoder).
     // If we only sent dirty notes, the backend would only correct those notes and
@@ -1769,10 +2060,17 @@ function scheduleAutoApply(delayMs = 300) {
 }
 
 /** Wrapper: send real-time preview immediately + queue high-quality WORLD correction. */
-function onNotesChanged() {
+function onNotesChanged(options: { historicalReplay?: boolean } = {}) {
   markPitchEditorDirty("notesChanged");
-  sendPitchPreviewMap("edit");
-  scheduleAutoApply();
+  _interactiveEditBaseline = null;
+  _interactiveEditCancelled = false;
+  if (options.historicalReplay) {
+    _lockedHistoryReplayRevision = _editRevision;
+  } else {
+    _lockedHistoryReplayRevision = null;
+    sendPitchPreviewMap("edit");
+  }
+  scheduleAutoApply(300, Boolean(options.historicalReplay));
 }
 
 export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
@@ -1815,6 +2113,13 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   open: (trackId, clipId, fxIndex) => {
     ensureDAWTransportSubscription();
+    ensureDAWPitchEditAuthoritySubscription();
+    const previousTarget = get();
+    if (previousTarget.clipId
+      && (previousTarget.clipId !== clipId || previousTarget.trackId !== trackId)) {
+      cancelPitchEditorForAuthorityLoss("target_changed");
+    }
+    clearPitchMutationTimers();
     resetApplyRevisions();
     const dawState = useDAWStore.getState();
     const track = dawState.tracks.find((t) => t.id === trackId);
@@ -1852,15 +2157,17 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       scrollY: 48, // Reset to middle C, will be auto-fit after analysis
       globalFormantCents: 0,
     });
+    const authority = resolvePitchEditorTargetAuthority(trackId, clipId);
+    if (authority.frozen) {
+      _hiddenForFrozenTarget = { trackId, clipId };
+      useDAWStore.setState({ showPitchEditor: false });
+    }
   },
 
   close: () => {
     // Clear real-time pitch preview when closing the editor
     const { clipId } = get();
-    if (clipId) {
-      clearTransientPitchPreview(clipId, "close");
-      nativeBridge.clearClipRenderedPreviewSegments(clipId).catch(logBridgeError("clearClipRenderedPreviewSegments"));
-    }
+    if (clipId) cancelPitchEditorForAuthorityLoss("close");
     set({
       trackId: null,
       clipId: null,
@@ -1882,6 +2189,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     });
     clearApplyStateResetTimer();
     clearRollingPreviewRefreshTimer();
+    clearPitchMutationTimers();
+    _hiddenForFrozenTarget = null;
     resetApplyRevisions();
   },
 
@@ -2156,6 +2465,17 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   setSelectedNoteIds: (ids) => set({ selectedNoteIds: ids }),
 
   beginInteractivePreview: (noteId) => {
+    if (!canStartPitchEditorMutation()) return;
+    if (!_interactiveEditBaseline) {
+      const state = get();
+      _interactiveEditBaseline = {
+        notes: clonePitchNotes(state.notes),
+        selectedNoteIds: [...state.selectedNoteIds],
+        undoStack: [...state.undoStack],
+        redoStack: [...state.redoStack],
+      };
+    }
+    _interactiveEditCancelled = false;
     replaceDirtyPitchNotes(expandDirtyPitchNoteIdsWithNeighbors([noteId], get().notes));
     _interactivePreviewNoteId = noteId;
     _interactivePreviewActive = true;
@@ -2182,7 +2502,17 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   pushUndo: (description) => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes, selectedNoteIds, undoStack } = get();
+    if (!_interactiveEditBaseline) {
+      _interactiveEditBaseline = {
+        notes: clonePitchNotes(notes),
+        selectedNoteIds: [...selectedNoteIds],
+        undoStack: [...undoStack],
+        redoStack: [...get().redoStack],
+      };
+    }
+    _interactiveEditCancelled = false;
     const snapshot = clonePitchNotes(notes);
     const last = undoStack[undoStack.length - 1];
     if (last && pitchNotesEqual(last.notes, snapshot)) {
@@ -2198,6 +2528,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   // Called many times per drag; auto-apply is deferred to commitNoteEdit() on mouseup.
   // Sends a throttled real-time preview so the user hears the new pitch while dragging.
   updateNote: (noteId, changes) => {
+    if (!canStartPitchEditorMutation()) return;
     const currentNotes = get().notes;
     const boundaryAffectingChange =
       Object.prototype.hasOwnProperty.call(changes, "startTime")
@@ -2226,17 +2557,28 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Call once when an interactive drag/resize ends to schedule the debounced backend apply.
   commitNoteEdit: () => {
+    if (_interactiveEditCancelled) {
+      _interactiveEditCancelled = false;
+      get().endInteractivePreview();
+      return;
+    }
+    if (!canStartPitchEditorMutation()) {
+      get().endInteractivePreview();
+      return;
+    }
     get().endInteractivePreview();
     const { undoStack, notes } = get();
     const last = undoStack[undoStack.length - 1];
     if (last && pitchNotesEqual(last.notes, notes)) {
       set({ undoStack: undoStack.slice(0, -1) });
+      _interactiveEditBaseline = null;
       return;
     }
     onNotesChanged();
   },
 
   updateSelectedNotes: (changes) => {
+    if (!canStartPitchEditorMutation()) return;
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
     const targetIds = new Set(selectedNoteIds);
@@ -2252,6 +2594,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   moveSelectedPitch: (semitones) => {
+    if (!canStartPitchEditorMutation()) return;
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
     const targetIds = new Set(selectedNoteIds);
@@ -2269,6 +2612,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   splitNote: (noteId, time) => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes } = get();
     const note = notes.find(n => n.id === noteId);
     console.log("[splitNote] id=%s time=%f note=%o", noteId, time,
@@ -2339,6 +2683,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   correctSelectedToScale: () => {
+    if (!canStartPitchEditorMutation()) return;
     const { selectedNoteIds, notes } = get();
     if (selectedNoteIds.length === 0) return;
     const targetIds = new Set(selectedNoteIds);
@@ -2355,6 +2700,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   correctAllToScale: () => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes } = get();
     replaceDirtyPitchNotes(notes.map((note) => note.id));
     get().pushUndo("Correct all to scale");
@@ -2365,6 +2711,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   undo: () => {
+    if (!canReplayPitchEditorHistory() || _interactiveEditBaseline) return;
     const { undoStack, notes, selectedNoteIds } = get();
     if (undoStack.length === 0) return;
     const entry = undoStack[undoStack.length - 1];
@@ -2375,10 +2722,11 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       notes: normalizePitchNotes(entry.notes),
       selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
     });
-    onNotesChanged();
+    onNotesChanged({ historicalReplay: true });
   },
 
   redo: () => {
+    if (!canReplayPitchEditorHistory() || _interactiveEditBaseline) return;
     const { redoStack, notes, selectedNoteIds } = get();
     if (redoStack.length === 0) return;
     const entry = redoStack[redoStack.length - 1];
@@ -2389,7 +2737,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       notes: normalizePitchNotes(entry.notes),
       selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
     });
-    onNotesChanged();
+    onNotesChanged({ historicalReplay: true });
   },
 
   setScrollX: (x) => set({ scrollX: Math.max(0, x) }),
@@ -2400,6 +2748,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   applyCorrection: async () => {
     const { trackId, clipId, notes, contour, globalFormantCents, clipDuration } = get();
     if (!trackId || !clipId) return;
+    if (!canUsePitchEditorTarget(trackId, clipId)) return;
     const globalFormantSt = globalFormantCents / 100;
     const summary = summarizeApplyRequest(notes, globalFormantSt);
     const requestRevision = _editRevision;
@@ -2442,11 +2791,14 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   previewCorrection: async () => {
     const { trackId, clipId, notes } = get();
     if (!trackId || !clipId) return;
+    if (!canUsePitchEditorTarget(trackId, clipId)) return;
     set({ isApplying: true });
     try {
       await nativeBridge.previewPitchCorrection(trackId, clipId, notes);
     } finally {
-      set({ isApplying: false });
+      if (get().trackId === trackId && get().clipId === clipId) {
+        set({ isApplying: false });
+      }
     }
   },
 
@@ -2521,6 +2873,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   toggleCorrectPitchModal: () => set({ showCorrectPitchModal: !get().showCorrectPitchModal }),
 
   setGlobalFormantCents: (cents) => {
+    if (!canStartPitchEditorMutation()) return;
     if (!PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
       logPitchEditorFormant("ignored global formant change because pitch editor is in pitch-only rebuild mode", {
         clipId: get().clipId,
@@ -2546,6 +2899,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Inspector editing actions
   setNoteFormant: (noteId, semitones) => {
+    if (!canStartPitchEditorMutation()) return;
     if (!PITCH_EDITOR_FORMANT_EDITING_ENABLED) {
       logPitchEditorFormant("ignored note formant change because pitch editor is in pitch-only rebuild mode", {
         clipId: get().clipId,
@@ -2562,6 +2916,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   setNoteGain: (noteId, dB) => {
+    if (!canStartPitchEditorMutation()) return;
     get().pushUndo("Change gain");
     replaceDirtyPitchNotes([noteId]);
     set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, gain: dB }) : n)) });
@@ -2569,6 +2924,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   setNoteModulation: (noteId, percent) => {
+    if (!canStartPitchEditorMutation()) return;
     get().pushUndo("Change modulation");
     replaceDirtyPitchNotes([noteId]);
     set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, vibratoDepth: percent / 100 }) : n)) });
@@ -2576,6 +2932,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   setNoteDrift: (noteId, percent) => {
+    if (!canStartPitchEditorMutation()) return;
     get().pushUndo("Change drift");
     replaceDirtyPitchNotes([noteId]);
     set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, driftCorrectionAmount: percent / 100 }) : n)) });
@@ -2583,6 +2940,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   setNoteTransition: (noteId, inMs, outMs) => {
+    if (!canStartPitchEditorMutation()) return;
     get().pushUndo("Change transition");
     replaceDirtyPitchNotes([noteId]);
     set({ notes: normalizePitchNotes(get().notes.map(n => n.id === noteId ? normalizePitchNote({ ...n, transitionIn: inMs, transitionOut: outMs }) : n)) });
@@ -2591,6 +2949,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Macro correction
   applyCorrectPitchMacro: (pitchCenter, pitchDriftAmount, useScale) => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes, scaleNotes } = get();
     if (notes.length === 0) return;
     get().pushUndo("Correct pitch macro");
@@ -2637,6 +2996,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Merge notes
   mergeNotes: (noteIds) => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes } = get();
     const toMerge = notes.filter(n => noteIds.includes(n.id)).sort((a, b) => a.startTime - b.startTime);
     if (toMerge.length < 2) return;
@@ -2676,10 +3036,12 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   // Draw pitch tool
   beginDrawPitch: () => {
+    if (!canStartPitchEditorMutation()) return;
     get().pushUndo("Draw pitch");
   },
 
   drawPitchOnNote: (noteId, clipTime, midiPitch) => {
+    if (!canStartPitchEditorMutation()) return;
     const { notes, contour } = get();
     const note = notes.find(n => n.id === noteId);
     if (!note) return;
@@ -2735,10 +3097,16 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 
   commitDrawPitch: () => {
+    if (_interactiveEditCancelled) {
+      _interactiveEditCancelled = false;
+      return;
+    }
+    if (!canStartPitchEditorMutation()) return;
     const { undoStack, notes } = get();
     const last = undoStack[undoStack.length - 1];
     if (last && pitchNotesEqual(last.notes, notes)) {
       set({ undoStack: undoStack.slice(0, -1) });
+      _interactiveEditBaseline = null;
       return;
     }
     onNotesChanged();
@@ -2747,6 +3115,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   // A/B comparison
   toggleABCompare: () => {
     const { abCompareMode, trackId, clipId } = get();
+    if (!trackId || !clipId || !canUsePitchEditorTarget(trackId, clipId)) return;
     const newBypass = !abCompareMode;
     set({ abCompareMode: newBypass });
     // Tell backend to bypass/restore pitch correction
@@ -2756,7 +3125,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
   },
 }));
 
-nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => {
+export function handlePitchCorrectionComplete(data: PitchCorrectionCompletionData) {
   const state = usePitchEditorStore.getState();
   const meta = consumeRequestMeta(data.requestId);
   const completedRevision = consumeRequestRevision(data.requestId) ?? meta?.revision ?? null;
@@ -2772,7 +3141,9 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
     return;
   }
 
-  const currentClipMatches = state.clipId === data.clipId && meta.clipId === data.clipId;
+  const currentClipMatches = state.trackId === meta.trackId
+    && state.clipId === data.clipId
+    && meta.clipId === data.clipId;
   const revisionStillCurrent = completedRevision !== null && isCurrentRevision(completedRevision);
 
   logPitchEditorFormant("received pitch correction completion", {
@@ -2789,6 +3160,14 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
   });
 
   if (!currentClipMatches) {
+    if (meta.stage === "note_hq") {
+      finishNoteHqPriority(meta.logicalRequestId);
+    }
+    return;
+  }
+
+  if (!canUsePitchEditorTarget(meta.trackId, meta.clipId, meta.allowLockedHistoryReplay)) {
+    cancelPitchEditorForAuthorityLoss("completion_blocked");
     if (meta.stage === "note_hq") {
       finishNoteHqPriority(meta.logicalRequestId);
     }
@@ -2889,7 +3268,18 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
     clearStagedPreviewQueue();
     clearRenderedPreviewForInteractiveEdit(data.clipId, "note_hq_complete");
     if (data.outputFile) {
-      applyPitchCorrectionResultToClip(data.clipId, data.outputFile, Boolean(data.restored));
+      const applied = applyPitchCorrectionResultToClip(
+        meta.trackId,
+        data.clipId,
+        data.outputFile,
+        Boolean(data.restored),
+        meta.allowLockedHistoryReplay,
+      );
+      if (!applied) {
+        cancelPitchEditorForAuthorityLoss("note_hq_swap_blocked");
+        finishNoteHqPriority(meta.logicalRequestId);
+        return;
+      }
     } else {
       warnPitchEditorFormant("note-HQ completion did not include an output file", {
         clipId: data.clipId,
@@ -2905,6 +3295,7 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
       updateRenderCoverageRange(meta.windowStartSec, meta.windowEndSec, "hq_ready");
     }
     _dirtyPitchNoteIds.clear();
+    if (_lockedHistoryReplayRevision === completedRevision) _lockedHistoryReplayRevision = null;
     finishNoteHqPriority(meta.logicalRequestId);
     _activePitchCorrectionRequestId = null;
     setApplyStatus("final_processing", "Verifying HQ note route...", meta.logicalRequestId);
@@ -2923,8 +3314,19 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
     return;
   }
 
-  applyPitchCorrectionResultToClip(data.clipId, data.outputFile, Boolean(data.restored));
+  const applied = applyPitchCorrectionResultToClip(
+    meta.trackId,
+    data.clipId,
+    data.outputFile,
+    Boolean(data.restored),
+    meta.allowLockedHistoryReplay,
+  );
+  if (!applied) {
+    cancelPitchEditorForAuthorityLoss("completion_swap_blocked");
+    return;
+  }
   _dirtyPitchNoteIds.clear();
+  if (_lockedHistoryReplayRevision === completedRevision) _lockedHistoryReplayRevision = null;
   markAllRenderCoverage("hq_ready", meta.logicalRequestId);
   clearStagedPreviewQueue();
   _activePitchCorrectionRequestId = null;
@@ -2948,4 +3350,6 @@ nativeBridge.onPitchCorrectionComplete((data: PitchCorrectionCompletionData) => 
   } else {
     console.warn("[pitchEditor] SMS correction failed for clip", data.clipId);
   }
-});
+}
+
+nativeBridge.onPitchCorrectionComplete(handlePitchCorrectionComplete);

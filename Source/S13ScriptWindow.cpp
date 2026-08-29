@@ -196,7 +196,7 @@ void S13ScriptWindow::drawString(const juce::String& text, int drawFlags)
     fbGraphics->setFont(currentFont);
     fbGraphics->drawText(text, drawX, drawY, 1000, static_cast<int>(currentFont.getHeight()) + 2,
                           juce::Justification::topLeft, false);
-    drawX += static_cast<int>(currentFont.getStringWidthFloat(text));
+    drawX += juce::GlyphArrangement::getStringWidthInt(currentFont, text);
 }
 
 void S13ScriptWindow::setFont(int size, const juce::String& face, int style)
@@ -213,7 +213,7 @@ void S13ScriptWindow::setFont(int size, const juce::String& face, int style)
 
 std::pair<int, int> S13ScriptWindow::measureString(const juce::String& text) const
 {
-    int w = static_cast<int>(currentFont.getStringWidthFloat(text));
+    int w = juce::GlyphArrangement::getStringWidthInt(currentFont, text);
     int h = static_cast<int>(currentFont.getHeight());
     return { w, h };
 }

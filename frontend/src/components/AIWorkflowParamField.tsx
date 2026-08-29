@@ -6,6 +6,8 @@ interface NumericWorkflowParamFieldProps {
   param: AIWorkflowParam;
   value: unknown;
   onChange: (value: number) => void;
+  onBeginEdit?: () => void;
+  onCommitEdit?: () => void;
   disabled?: boolean;
 }
 
@@ -36,6 +38,8 @@ export function NumericWorkflowParamField({
   param,
   value,
   onChange,
+  onBeginEdit,
+  onCommitEdit,
   disabled = false,
 }: NumericWorkflowParamFieldProps) {
   const inputId = useId();
@@ -114,6 +118,8 @@ export function NumericWorkflowParamField({
         max={max}
         step={step}
         onChange={handleSliderChange}
+        onBeginEdit={onBeginEdit}
+        onCommitEdit={onCommitEdit}
         disabled={disabled}
       />
       {param.description ? (

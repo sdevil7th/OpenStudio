@@ -1,0 +1,12 @@
+{
+  "name": "Spotify Basic Pitch ICASSP 2022 ONNX model",
+  "file": "basic_pitch_nmp.onnx",
+  "upstreamRepository": "https://github.com/spotify/basic-pitch",
+  "upstreamVersion": "v0.4.0",
+  "upstreamCommit": "9991303bba609a3b93089d13ec80d1d495083596",
+  "upstreamPath": "basic_pitch/saved_models/icassp_2022/nmp.onnx",
+  "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec",
+  "sizeBytes": 230444,
+  "license": "Apache-2.0",
+  "copyright": "Copyright 2022 Spotify AB"
+}

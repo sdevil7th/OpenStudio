@@ -1,0 +1,1352 @@
+/* NAMRackMixer component-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-rack-mixer-view {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.nam-rack-mixer-header,
+.nam-rack-mixer-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 200, 106, 0.14);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(0, 0, 0, 0.20)),
+    rgba(0, 0, 0, 0.24);
+}
+
+.nam-rack-mixer-header strong {
+  display: block;
+  color: #f8fafc;
+  font-size: 15px;
+}
+
+.nam-rack-mixer-header small,
+.nam-rack-mixer-foot {
+  color: rgba(226, 232, 240, 0.62);
+  font-size: 11px;
+}
+
+.nam-rack-mixer-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(9, minmax(128px, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  overflow: auto;
+  padding-bottom: 2px;
+}
+
+.nam-rack-mixer-strip {
+  min-width: 128px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(0, 0, 0, 0.24)),
+    #111111;
+}
+
+.nam-rack-mixer-strip[data-active="true"] {
+  border-color: rgba(142, 245, 194, 0.28);
+}
+
+.nam-rack-mixer-strip[data-warning="true"] {
+  border-color: rgba(245, 174, 39, 0.42);
+}
+
+.nam-rack-mixer-strip-head {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.nam-rack-mixer-strip-head span {
+  color: #8ef5c2;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.nam-rack-mixer-strip-head strong {
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rack-mixer-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.nam-rack-mixer-meter i {
+  display: block;
+  width: var(--nam-meter-pct, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2de064 0%, #9dda3f 62%, #ffd84d 78%, #e33838 100%);
+}
+
+.nam-rack-mixer-controls {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+}
+
+.nam-rack-mixer-controls > small {
+  align-self: start;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.58);
+  background: rgba(0, 0, 0, 0.16);
+  font-size: 10.5px;
+}
+
+.nam-rack-mixer-foot {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.nam-rack-mixer-foot span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rack-mixer-foot strong {
+  flex: 0 0 auto;
+  color: rgba(248, 250, 252, 0.82);
+}
+
+@media (max-width: 1280px) {
+
+  .nam-rack-mixer-grid {
+    grid-template-columns: repeat(9, minmax(116px, 1fr));
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+
+  .nam-rack-mixer-grid {
+    grid-template-columns: repeat(3, minmax(156px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-rack-mixer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.nam-product[data-view="mixer"] .nam-rack-mixer-view {
+  border-color: rgba(255, 255, 255, 0.09);
+  border-radius: 0;
+  background:
+    radial-gradient(ellipse at 35% 12%, rgba(240, 169, 37, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(17, 19, 19, 0.98), rgba(7, 8, 8, 0.98));
+}
+
+.nam-product[data-view="mixer"] .nam-rack-mixer-view {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(230, 163, 43, 0.1), transparent 26%),
+    linear-gradient(180deg, rgba(24, 26, 24, 0.98), rgba(6, 7, 6, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.66),
+    0 24px 50px rgba(0, 0, 0, 0.32);
+}
+
+.nam-product[data-view="mixer"] .nam-rack-mixer-view::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 1px solid rgba(245, 230, 190, 0.08);
+  pointer-events: none;
+}
+
+.nam-rack-mixer-header {
+  min-height: 50px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(35, 37, 34, 0.92), rgba(10, 11, 10, 0.96));
+}
+
+.nam-rack-mixer-header strong {
+  color: var(--nam-text);
+  font-size: 16px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.nam-rack-mixer-header small {
+  color: var(--nam-muted);
+  font-size: 11px;
+}
+
+.nam-rack-mixer-view {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) 38px;
+  gap: 10px;
+}
+
+.nam-rack-mixer-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 8px;
+  overflow: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+}
+
+.nam-rack-mixer-strip {
+  position: relative;
+  min-width: 0;
+  min-height: 430px;
+  display: grid;
+  grid-template-rows: 68px 20px minmax(0, 1fr);
+  gap: 10px;
+  padding: 11px 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 0;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 18px),
+    linear-gradient(180deg, rgba(35, 37, 34, 0.97), rgba(9, 10, 9, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -22px 32px rgba(0, 0, 0, 0.42);
+}
+
+.nam-rack-mixer-strip::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(71, 85, 73, 0.9);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.34);
+}
+
+.nam-rack-mixer-strip[data-active="true"]::after {
+  background: var(--nam-rack-green);
+  box-shadow: 0 0 12px rgba(51, 204, 102, 0.55), 0 0 0 3px rgba(0, 0, 0, 0.34);
+}
+
+.nam-rack-mixer-strip[data-warning="true"]::after {
+  background: var(--nam-danger);
+  box-shadow: 0 0 12px rgba(226, 77, 77, 0.5), 0 0 0 3px rgba(0, 0, 0, 0.34);
+}
+
+.nam-rack-mixer-strip-head {
+  align-content: end;
+  padding-right: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.nam-rack-mixer-strip-head span {
+  color: var(--nam-rack-green);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.nam-rack-mixer-strip-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--nam-text);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rack-mixer-meter {
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.45) 0 5px, transparent 5px 7px),
+    linear-gradient(90deg, rgba(40, 48, 39, 0.9), rgba(62, 38, 28, 0.9));
+}
+
+.nam-rack-mixer-meter i {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3dde65, #d9e452 72%, #f05d42);
+  box-shadow: 0 0 10px rgba(51, 204, 102, 0.28);
+}
+
+.nam-rack-mixer-controls {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+
+.nam-rack-mixer-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(22, 24, 22, 0.92), rgba(5, 6, 5, 0.98));
+}
+
+@media (max-width: 760px) {
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-view {
+    overflow: visible;
+  }
+
+  .nam-rack-mixer-grid {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
+  }
+
+  .nam-rack-mixer-strip {
+    min-height: 320px;
+  }
+}
+
+.nam-product[data-view="mixer"] .nam-rack-mixer-view {
+  border-color: rgba(243, 230, 200, 0.16);
+  background:
+    radial-gradient(circle at 18% 0%, rgba(245, 174, 39, 0.12), transparent 27%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 56px),
+    linear-gradient(180deg, rgba(26, 28, 25, 0.99), rgba(5, 6, 5, 0.99));
+  box-shadow:
+    0 32px 82px rgba(0, 0, 0, 0.54),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -28px 42px rgba(0, 0, 0, 0.36);
+}
+
+.nam-product[data-view="mixer"] .nam-rack-mixer-view::before {
+  inset: 8px;
+  border-color: rgba(245, 230, 190, 0.11);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+.nam-rack-mixer-header {
+  border-color: rgba(243, 230, 200, 0.13);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 44%),
+    linear-gradient(180deg, rgba(37, 39, 35, 0.96), rgba(8, 9, 8, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.11),
+    inset 0 -12px 20px rgba(0, 0, 0, 0.4);
+}
+
+.nam-rack-mixer-header strong {
+  color: #f7e7c0;
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.8),
+    0 0 16px rgba(245, 174, 39, 0.14);
+}
+
+.nam-rack-mixer-strip,
+.nam-rack-mixer-foot {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.065), transparent 42%),
+    linear-gradient(180deg, rgba(23, 25, 22, 0.97), rgba(5, 6, 5, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    inset 0 -14px 24px rgba(0, 0, 0, 0.38),
+    0 10px 18px rgba(0, 0, 0, 0.2);
+}
+
+.nam-rack-mixer-strip {
+  border-color: rgba(126, 231, 185, 0.18);
+}
+
+.nam-rack-mixer-strip[data-active="true"] {
+  border-color: rgba(126, 231, 185, 0.34);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(126, 231, 185, 0.08), transparent 38%),
+    linear-gradient(180deg, rgba(22, 28, 23, 0.97), rgba(5, 7, 5, 0.99));
+}
+
+.nam-rack-mixer-strip[data-warning="true"] {
+  border-color: rgba(226, 77, 77, 0.38);
+}
+
+.nam-rack-mixer-meter {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.52) 0 5px, transparent 5px 7px),
+    linear-gradient(90deg, rgba(35, 44, 35, 0.9), rgba(62, 38, 28, 0.9));
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="mixer"] .nam-rack-mixer-view {
+    box-shadow:
+      0 20px 54px rgba(0, 0, 0, 0.48),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -18px 28px rgba(0, 0, 0, 0.32);
+  }
+
+  .nam-rack-mixer-strip {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      inset 0 -10px 16px rgba(0, 0, 0, 0.34);
+  }
+}
+@media (max-width: 1100px) {
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-view {
+    height: auto;
+    min-height: 0;
+    grid-template-rows: auto auto auto;
+    gap: 10px;
+    overflow: visible;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: 10px;
+    overflow: visible;
+    padding: 2px;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-strip {
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: auto 16px auto;
+    gap: 9px;
+    padding: 10px;
+    overflow: visible;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-strip-head {
+    min-height: 54px;
+    align-content: end;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-strip-head strong {
+    white-space: normal;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-controls {
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+    gap: 8px;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-foot {
+    min-height: 40px;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nam-product[data-view="mixer"] .nam-rack-mixer-controls {
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  }
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-view {
+  position: relative;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 78px max-content 44px;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  color: #e7eaed;
+  background:
+    linear-gradient(180deg, rgba(5, 7, 9, 0.88), rgba(5, 6, 8, 0.74)),
+    url("../assets/nam/rack-studio-backdrop-v2.webp") center / cover no-repeat;
+  box-shadow: none;
+  scrollbar-color: rgba(217, 155, 74, 0.58) rgba(255, 255, 255, 0.045);
+  scrollbar-width: thin;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-view::before {
+  content: "";
+  position: absolute;
+  inset: 78px 0 44px;
+  z-index: 0;
+  pointer-events: none;
+  border: 0;
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.28), transparent 14%, transparent 86%, rgba(0, 0, 0, 0.28)),
+    radial-gradient(circle at 50% 0%, rgba(213, 147, 58, 0.055), transparent 35%);
+  box-shadow: inset 0 18px 35px rgba(0, 0, 0, 0.34);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 28px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.105);
+  border-radius: 0;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(216, 151, 65, 0.09), transparent 27%),
+    linear-gradient(180deg, #12161a, #090c0f);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.045);
+  flex-direction: row;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header > svg {
+  width: 18px;
+  height: 18px;
+  color: #d99b4a;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header > div {
+  min-width: 0;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header span {
+  display: block;
+  margin-bottom: 2px;
+  color: #d99b4a;
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header strong {
+  display: block;
+  overflow: hidden;
+  color: #f0f2f4;
+  font-size: 17px;
+  font-weight: 680;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: none;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header small {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: #7f8790;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid rgba(218, 154, 69, 0.42);
+  border-radius: 5px;
+  color: #e5e8eb;
+  font-size: 10px;
+  font-weight: 680;
+  background: linear-gradient(180deg, rgba(218, 154, 69, 0.13), rgba(19, 16, 12, 0.94));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header button:hover {
+  border-color: rgba(230, 169, 86, 0.72);
+  background: linear-gradient(180deg, rgba(218, 154, 69, 0.21), rgba(25, 19, 12, 0.97));
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(260px, 1fr));
+  grid-auto-rows: max-content;
+  align-items: start;
+  align-content: start;
+  gap: 12px;
+  padding: 18px 22px 22px;
+  overflow: visible;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 13px;
+  align-self: start;
+  overflow: visible;
+  border: 1px solid rgba(255, 255, 255, 0.105);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.055), transparent 32%),
+    linear-gradient(180deg, rgba(28, 31, 34, 0.97), rgba(8, 10, 12, 0.985));
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.31),
+    inset 0 1px rgba(255, 255, 255, 0.055),
+    inset 0 -18px 26px rgba(0, 0, 0, 0.25);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.025);
+  border-radius: 4px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-active="true"] {
+  border-color: rgba(219, 153, 66, 0.42);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(219, 153, 66, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(32, 30, 26, 0.98), rgba(9, 9, 9, 0.99));
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-warning="true"] {
+  border-color: rgba(225, 105, 77, 0.5);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip-head {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 0 1px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip-head span {
+  color: #d99b4a;
+  font-size: 8px;
+  font-weight: 780;
+  letter-spacing: 0.15em;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip-head strong {
+  color: #eceef0;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-meter {
+  height: 7px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 2px;
+  background: #07090a;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-meter i {
+  border-radius: 1px;
+  background: linear-gradient(90deg, #4bca80 0%, #9ed060 65%, #dfb34c 82%, #db6255 100%);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls {
+  min-height: max-content;
+  height: auto;
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  align-items: stretch;
+  gap: 8px;
+  padding-right: 2px;
+  overflow: visible;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-controls > small {
+  flex: 1 0 100%;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-unavailable="true"] {
+  border-color: rgba(255, 255, 255, 0.075);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-unavailable="true"] .nam-rack-mixer-meter {
+  filter: grayscale(0.82);
+  opacity: 0.42;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-unavailable {
+  padding: 8px 9px;
+  border: 1px solid rgba(218, 154, 69, 0.2);
+  border-radius: 4px;
+  color: #c9a775;
+  background: rgba(218, 154, 69, 0.055);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-dependency-note {
+  padding: 8px 9px;
+  border: 1px solid rgba(111, 147, 178, 0.2);
+  border-radius: 4px;
+  color: #a9bccb;
+  background: rgba(90, 128, 160, 0.055);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-foot {
+  position: relative;
+  z-index: 2;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  padding: 0 24px;
+  overflow: hidden;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0;
+  color: #747d86;
+  font-size: 9px;
+  background: linear-gradient(180deg, #090c0f, #06080a);
+  box-shadow: none;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-foot span {
+  margin-right: auto;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-foot strong {
+  color: #aeb5bc;
+  font-weight: 620;
+}
+
+@media (max-width: 1280px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: repeat(4, minmax(190px, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: repeat(3, minmax(210px, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header {
+    padding-inline: 16px;
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header small {
+    display: none;
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: repeat(3, minmax(175px, 1fr));
+    padding: 14px;
+  }
+}
+
+@media (max-width: 640px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+    grid-template-columns: repeat(2, minmax(155px, 1fr));
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header button {
+    width: 36px;
+    justify-content: center;
+    overflow: hidden;
+    padding: 0;
+    color: transparent;
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header button svg {
+    color: #e5e8eb;
+  }
+}
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-focused="true"] {
+  border-color: rgba(231, 166, 78, 0.86);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(224, 157, 67, 0.14), transparent 52%),
+    linear-gradient(180deg, rgba(34, 29, 22, 0.98), rgba(14, 16, 18, 0.98));
+  box-shadow:
+    0 0 0 1px rgba(225, 160, 72, 0.22),
+    0 14px 38px rgba(0, 0, 0, 0.46),
+    inset 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip[data-focused="true"] .nam-rack-mixer-strip-head span {
+  color: #efb25f;
+}
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header {
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-heading {
+  min-width: 0;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker > span {
+  margin: 0;
+  color: #8e969e;
+  font-size: 7px;
+  letter-spacing: 0.14em;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker > select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 30px 0 10px;
+  border: 1px solid rgba(218, 154, 69, 0.34);
+  border-radius: 5px;
+  color: #e6e9eb;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  background: #090c0f;
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.045),
+    0 4px 12px rgba(0, 0, 0, 0.22);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker > select:focus-visible {
+  outline: 2px solid rgba(231, 166, 78, 0.76);
+  outline-offset: 2px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-grid {
+  grid-template-columns: minmax(0, 860px);
+  justify-content: center;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-strip {
+  width: 100%;
+  max-width: var(--nam-inspector-width, 860px);
+  justify-self: center;
+}
+
+/* Contextual advanced controls: retain the rack and present one selected stage
+   as a reversible drawer above the rack footer. */
+.nam-product[data-view="rack"] .nam-product-main {
+  position: relative;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector {
+  position: absolute;
+  right: 0;
+  bottom: 47px;
+  left: 0;
+  z-index: 45;
+  width: auto;
+  height: clamp(210px, 28dvh, 290px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  border-top: 1px solid rgba(245, 174, 39, 0.72);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.055), transparent 38%),
+    linear-gradient(180deg, rgba(22, 24, 22, 0.99), rgba(5, 7, 8, 0.995));
+  box-shadow: 0 -18px 44px rgba(0, 0, 0, 0.64);
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector[data-compact="true"] {
+  height: clamp(190px, 24dvh, 240px);
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header {
+  min-height: 58px;
+  flex-wrap: nowrap;
+  padding: 8px 16px;
+  border: 0;
+  border-bottom: 1px solid rgba(243, 230, 200, 0.12);
+  background: rgba(6, 9, 11, 0.72);
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading {
+  min-width: 0;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading strong,
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-stage-picker {
+  margin-left: auto;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-stage-picker > span {
+  color: #8f99a6;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-stage-picker select {
+  min-width: 172px;
+  border-color: rgba(245, 174, 39, 0.34);
+  color: #eef1f4;
+  background: #0b0f13;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header > button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding-inline: 12px;
+  border: 1px solid rgba(245, 174, 39, 0.38);
+  border-radius: 4px;
+  color: #e7b760;
+  background: rgba(245, 174, 39, 0.075);
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip,
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip[data-focused="true"] {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border-color: rgba(243, 230, 200, 0.14);
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip-head,
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-meter {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-controls {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px 2px 2px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-controls > .nam-rack-control {
+  flex: 0 1 148px;
+  min-width: 112px;
+  max-width: 168px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-control-groups {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-control-group {
+  flex: 1 1 240px;
+  min-height: 0;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-control-group > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-unavailable {
+  grid-column: 1 / -1;
+  align-self: center;
+  justify-self: center;
+  width: min(520px, 100%);
+  padding: 18px;
+  border-color: rgba(245, 174, 39, 0.26);
+  color: #d5b77c;
+  background: rgba(245, 174, 39, 0.06);
+  text-align: center;
+}
+
+.nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-foot {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="rack"] .nam-rack-context-inspector {
+    height: clamp(230px, 36dvh, 330px);
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header small {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-rack-context-inspector {
+    position: fixed;
+    right: 6px;
+    bottom: 6px;
+    left: 6px;
+    height: min(52dvh, 390px);
+    border: 1px solid rgba(245, 174, 39, 0.5);
+    border-radius: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header {
+    flex-wrap: wrap;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-stage-picker {
+    order: 3;
+    width: 100%;
+    margin-left: 24px;
+  }
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-control-groups {
+  width: 100%;
+  min-width: 0;
+  flex: 1 0 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-control-group {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-control-group > strong {
+  color: #c7ccd1;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-control-group > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-empty {
+  min-height: 190px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  color: #8e969e;
+  font-size: 11px;
+  background: rgba(9, 12, 15, 0.9);
+}
+
+@media (max-width: 900px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header {
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-control-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header {
+    gap: 8px;
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker > span {
+    display: none;
+  }
+
+  .nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-stage-picker > select {
+    height: 32px;
+    padding-left: 8px;
+    font-size: 9px;
+  }
+}
+
+/* One-dimensional Flex ownership helpers. */
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header > :first-child {
+  flex: 0 0 22px;
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] .nam-rack-mixer-header > :nth-child(2) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* Contextual advanced controls overlay the rack instead of creating a second
+   full-width hardware surface beneath it. */
+.nam-product.nam-neural-product[data-view="rack"] .nam-product-main {
+  position: relative;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector {
+  position: absolute;
+  left: auto;
+  right: clamp(16px, 2vw, 32px);
+  bottom: clamp(62px, 6vh, 78px);
+  z-index: 70;
+  width: clamp(320px, 31vw, 520px);
+  max-width: calc(100% - 32px);
+  height: auto;
+  max-height: min(42vh, 410px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid rgba(218, 154, 69, 0.42);
+  border-radius: 8px;
+  color: #e7eaed;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(218, 154, 69, 0.11), transparent 34%),
+    linear-gradient(180deg, rgba(22, 25, 28, 0.985), rgba(7, 9, 11, 0.995));
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.66),
+    inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector::before {
+  content: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header {
+  min-height: 52px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.08));
+  box-shadow: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header > svg {
+  flex: 0 0 auto;
+  color: #d99b4a;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading > span {
+  color: #d99b4a;
+  font-size: 8px;
+  font-weight: 780;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading > strong {
+  overflow: hidden;
+  color: #f0f2f4;
+  font-size: 14px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading > small {
+  overflow: hidden;
+  color: #7f8790;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-header > button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  flex: 0 0 32px;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 4px;
+  color: #aeb5bc;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-grid {
+  min-height: 0;
+  display: block;
+  overflow: auto;
+  padding: 12px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip {
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip::after,
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-strip-head,
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-meter,
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-foot {
+  display: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-controls {
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  overflow: visible;
+  padding: 0;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-control {
+  min-width: 118px;
+  min-height: 72px;
+  flex: 1 1 118px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 5px;
+  color: #b7bdc4;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.045), transparent 45%),
+    linear-gradient(180deg, rgba(22, 24, 24, 0.94), rgba(7, 8, 9, 0.98));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-control-knob {
+  min-height: 72px;
+  padding: 7px 6px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-knob-cap-raster {
+  width: 48px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-knob-label {
+  margin-top: 4px;
+  color: #d7dade;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-control > strong {
+  color: #d99b4a;
+  font-size: 9px;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-control-switch,
+.nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-control-select {
+  min-height: 72px;
+  padding: 10px;
+}
+
+@media (max-width: 760px) {
+  .nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector {
+    left: 10px;
+    right: 10px;
+    bottom: 56px;
+    width: auto;
+    max-width: none;
+    max-height: 40vh;
+  }
+
+  .nam-product.nam-neural-product[data-view="rack"] .nam-rack-context-inspector .nam-rack-mixer-heading > small {
+    display: none;
+  }
+}

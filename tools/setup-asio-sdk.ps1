@@ -6,6 +6,9 @@ param(
     [string]$Destination = "thirdparty/asio",
 
     [Parameter(Mandatory = $false)]
+    [string]$ExpectedSha256 = "56357934cba7dc81836841fdeaeb5d4565fe1d6adc7f5f03ceb369c492d95d2e",
+
+    [Parameter(Mandatory = $false)]
     [switch]$Force
 )
 
@@ -35,6 +38,11 @@ New-Item -ItemType Directory -Path $downloadRoot | Out-Null
 
 Write-Host "Downloading ASIO SDK from $downloadUrl"
 Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath
+
+$actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
+if (-not $actualSha256.Equals($ExpectedSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "ASIO SDK archive checksum mismatch. Expected $ExpectedSha256, received $actualSha256."
+}
 
 Write-Host "Extracting ASIO SDK package"
 Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force

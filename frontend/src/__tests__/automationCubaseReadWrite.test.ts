@@ -32,6 +32,15 @@ function volumeLane(overrides: Partial<AutomationLane> = {}): AutomationLane {
   };
 }
 
+function expectStablePointValues(
+  points: AutomationLane["points"] | undefined,
+  expected: Array<{ time: number; value: number }>,
+) {
+  expect(points?.map(({ time, value }) => ({ time, value }))).toEqual(expected);
+  expect(points?.every((point) => typeof point.id === "string" && point.id.length > 0)).toBe(true);
+  expect(new Set(points?.map((point) => point.id)).size).toBe(expected.length);
+}
+
 function loadTrack(track: Track, isPlaying = false, currentTime = 1) {
   useDAWStore.setState({
     tracks: [track],
@@ -172,7 +181,7 @@ describe("Cubase-style automation read/write state", () => {
     expect(updated.automationLanes).toHaveLength(1);
     expect(updated.automationLanes[0].readEnabled).toBe(true);
     expect(updated.automationLanes[0].mode).toBe("off");
-    expect(updated.automationLanes[0].points).toEqual([{ time: 2, value: 0.75 }]);
+    expectStablePointValues(updated.automationLanes[0].points, [{ time: 2, value: 0.75 }]);
   });
 
   it("write enabled with no touched parameter writes no points", () => {
@@ -253,7 +262,7 @@ describe("Cubase-style automation read/write state", () => {
     expect(updated.showAutomation).toBe(true);
     expect(lane?.visible).toBe(true);
     expect(lane?.readEnabled).toBe(true);
-    expect(lane?.points).toEqual([{ time: 3, value: 0.75 }]);
+    expectStablePointValues(lane?.points, [{ time: 3, value: 0.75 }]);
   });
 
   it("continuous touch writing simplifies simple ramps into sparse points", () => {
@@ -281,7 +290,8 @@ describe("Cubase-style automation read/write state", () => {
 
     const points = useDAWStore.getState().tracks[0].automationLanes[0].points;
     expect(points.length).toBeLessThanOrEqual(6);
-    expect(points[0]).toEqual({ time: 0, value: 0 });
+    expect(points[0]).toMatchObject({ time: 0, value: 0 });
+    expect(points.every((point) => typeof point.id === "string" && point.id.length > 0)).toBe(true);
     expect(points[points.length - 1].time).toBeCloseTo(2);
     expect(points[points.length - 1].value).toBeCloseTo(1);
   });
@@ -322,7 +332,7 @@ describe("Cubase-style automation read/write state", () => {
     let updated = useDAWStore.getState().tracks[0];
     expect(updated.automationReadEnabled).toBe(true);
     expect(updated.automationLanes[0].readEnabled).toBe(true);
-    expect(updated.automationLanes[0].points).toEqual([{ time: 1.25, value: 0.5 }]);
+    expectStablePointValues(updated.automationLanes[0].points, [{ time: 1.25, value: 0.5 }]);
 
     useDAWStore.getState().undo();
 
@@ -354,7 +364,7 @@ describe("Cubase-style automation read/write state", () => {
 
     const updated = useDAWStore.getState().tracks[0];
     expect(updated.automationWriteEnabled).toBe(true);
-    expect(updated.automationLanes[0].points).toEqual([{ time: 1.25, value: 0.5 }]);
+    expectStablePointValues(updated.automationLanes[0].points, [{ time: 1.25, value: 0.5 }]);
     expect(_automationTouchedParams.has(key)).toBe(false);
     expect(_automationLatchedParams.has(key)).toBe(false);
     expect(_automationWriteValues.has(key)).toBe(false);
@@ -385,7 +395,7 @@ describe("Cubase-style automation read/write state", () => {
     let updated = useDAWStore.getState().tracks[0];
     expect(updated.automationWriteEnabled).toBe(true);
     expect(updated.automationLanes[0].readEnabled).toBe(true);
-    expect(updated.automationLanes[0].points).toEqual([
+    expectStablePointValues(updated.automationLanes[0].points, [
       { time: 1, value: 0.25 },
       { time: 1.5, value: 0.75 },
     ]);
@@ -410,7 +420,7 @@ describe("Cubase-style automation read/write state", () => {
     const updated = useDAWStore.getState().tracks[0];
     const muteLane = updated.automationLanes.find((lane) => lane.param === "mute");
     expect(updated.muted).toBe(true);
-    expect(muteLane?.points).toEqual([{ time: 5, value: 1 }]);
+    expectStablePointValues(muteLane?.points, [{ time: 5, value: 1 }]);
   });
 
   it("toggle mute does not create write data while stopped", async () => {
@@ -476,7 +486,7 @@ describe("Cubase-style automation read/write state", () => {
     useDAWStore.getState().endAutomationParamTouch("master", "pan");
 
     const lane = useDAWStore.getState().masterAutomationLanes.find((candidate) => candidate.param === "pan");
-    expect(lane?.points).toEqual([{ time: 7, value: 0.625 }]);
+    expectStablePointValues(lane?.points, [{ time: 7, value: 0.625 }]);
   });
 
   it("master write while stopped does not create automation lanes", async () => {
@@ -526,6 +536,6 @@ describe("Cubase-style automation read/write state", () => {
     expect(state.masterAutomationReadEnabled).toBe(false);
     expect(state.masterAutomationWriteEnabled).toBe(true);
     expect(lane?.mode).toBe("off");
-    expect(lane?.points).toEqual([{ time: 9, value: 60 / 72 }]);
+    expectStablePointValues(lane?.points, [{ time: 9, value: 60 / 72 }]);
   });
 });

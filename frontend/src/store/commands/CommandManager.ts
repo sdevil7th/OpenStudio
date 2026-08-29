@@ -41,6 +41,16 @@ export interface SerializedUndoHistory {
   redoStack: SerializedCommand[];
 }
 
+export interface CommandBatchMetadata {
+  type: string;
+  description: string;
+  timestamp?: number;
+  /** Restore ephemeral selection/focus after replaying the child commands. */
+  afterExecute?: () => void;
+  /** Restore ephemeral selection/focus after undoing the child commands. */
+  afterUndo?: () => void;
+}
+
 /**
  * CommandManager handles the undo/redo stacks and execution
  */
@@ -49,6 +59,8 @@ export class CommandManager {
   private redoStack: Command[] = [];
   private maxHistory: number;
   private onChangeCallback?: () => void;
+  private activeBatch: Command[] | null = null;
+  private revision = 0;
 
   constructor(maxHistory: number = 50) {
     this.maxHistory = maxHistory;
@@ -67,6 +79,10 @@ export class CommandManager {
    * Use when the action has already been performed and you only need undo tracking.
    */
   push(command: Command): void {
+    if (this.activeBatch) {
+      this.activeBatch.push(command);
+      return;
+    }
     this.undoStack.push(command);
 
     // Clear redo stack when new command is executed
@@ -78,6 +94,49 @@ export class CommandManager {
     }
 
     this.notifyChange();
+  }
+
+  /**
+   * Coalesce synchronous commands produced by one user gesture into one undo
+   * entry. This intentionally rejects Promise-returning work: resource-backed
+   * async mutations need their own snapshot/rollback contract.
+   */
+  runBatch(metadata: CommandBatchMetadata, operation: () => void): boolean {
+    if (this.activeBatch) {
+      operation();
+      return false;
+    }
+
+    const commands: Command[] = [];
+    this.activeBatch = commands;
+    try {
+      const result = operation() as unknown;
+      if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+        throw new Error("CommandManager.runBatch only supports synchronous operations");
+      }
+    } catch (error) {
+      this.activeBatch = null;
+      for (const command of [...commands].reverse()) command.undo();
+      throw error;
+    }
+    this.activeBatch = null;
+
+    if (commands.length === 0) return false;
+    metadata.afterExecute?.();
+    this.push({
+      type: metadata.type,
+      description: metadata.description,
+      timestamp: metadata.timestamp ?? Date.now(),
+      execute: () => {
+        for (const command of commands) command.execute();
+        metadata.afterExecute?.();
+      },
+      undo: () => {
+        for (const command of [...commands].reverse()) command.undo();
+        metadata.afterUndo?.();
+      },
+    });
+    return true;
   }
 
   /**
@@ -135,11 +194,21 @@ export class CommandManager {
   }
 
   /**
+   * Monotonic history boundary for cross-window gesture synchronization.
+   * Continuous previews leave this unchanged; commit/undo/redo/clear advance
+   * it, allowing another WebView to distinguish two quick edits of one target.
+   */
+  getRevision(): number {
+    return this.revision;
+  }
+
+  /**
    * Clear all history
    */
   clear(): void {
     this.undoStack = [];
     this.redoStack = [];
+    this.activeBatch = null;
     this.notifyChange();
   }
 
@@ -204,6 +273,7 @@ export class CommandManager {
   }
 
   private notifyChange(): void {
+    this.revision += 1;
     this.onChangeCallback?.();
   }
 }

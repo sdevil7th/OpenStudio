@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } fr
 import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
-import { getGlobalShortcutConflicts } from "./store/actionRegistry";
+import { bootstrapTONE3000Session } from "./services/tone3000Session";
+import {
+  getGlobalShortcutConflicts,
+  getRegisteredAction,
+} from "./store/actionRegistry";
 import {
   useDAWStore,
   getEffectiveTrackHeight,
@@ -12,19 +16,36 @@ import {
 } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
+  activateShortcutContext,
+  isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
+} from "./utils/shortcutContext";
+import {
   installModalContextMenuLeakGuard,
   shouldSuppressWorkspaceContextMenu,
 } from "./utils/modalEventGuards";
 import {
+  flushPendingMixerRemoteEdit,
   publishCurrentMixerUISnapshot,
   startMixerUISync,
 } from "./utils/mixerWindowSync";
 import {
+  flushPendingMidiRemoteEdits,
   publishMidiEditorSessionSnapshot,
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
+import {
+  applyDetachedMidiQuantizeRequest,
+  applyDetachedLoopRegionRequest,
+  executeDetachedMainActionRequest,
+  isLiveDetachedMidiSessionId,
+} from "./utils/detachedMainActionRouting";
 import { maybeRunPitchRegressionDriver } from "./utils/pitchRegressionDriver";
 import { shouldAutoStopPlayback } from "./utils/transportAutoStop";
+import { getShortcutPlatform } from "./utils/platform";
+import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "./utils/mouseBehaviorProfiles";
+import { resolveWheelGesture } from "./utils/wheelGestureResolver";
+import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
 import { Button } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { TimelineRuler } from "./components/TimelineRuler";
@@ -34,11 +55,13 @@ import { TransportBar as BottomTransportBar } from "./components/TransportBar";
 import { MenuBar } from "./components/MenuBar";
 import { MasterTrackHeader } from "./components/MasterTrackHeader";
 import { ProjectTabBar } from "./components/ProjectTabBar";
-import { CustomToolbarStrip } from "./components/ToolbarEditor";
+import { CustomToolbarStrip, ToolbarEditor } from "./components/ToolbarEditor";
+import { PluginBrowser } from "./components/PluginBrowser";
 import { SortableTrackHeader } from "./components/SortableTrackHeader";
 import { AddMultipleTracksModal } from "./components/AddMultipleTracksModal";
 import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { EssentialControlsCard } from "./components/EssentialControlsCard";
+import { InputProfileOnboardingCard } from "./components/InputProfileOnboardingCard";
 import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
 import {
   createMultipleTracks,
@@ -70,10 +93,8 @@ const ThemeEditor = React.lazy(() => import("./components/ThemeEditor").then(m =
 const VideoWindow = React.lazy(() => import("./components/VideoWindow").then(m => ({ default: m.VideoWindow })));
 const ScriptEditor = React.lazy(() => import("./components/ScriptEditor").then(m => ({ default: m.ScriptEditor })));
 const PitchEditorLowerZone = React.lazy(() => import("./components/PitchEditorLowerZone").then(m => ({ default: m.PitchEditorLowerZone })));
-const ToolbarEditor = React.lazy(() => import("./components/ToolbarEditor").then(m => ({ default: m.ToolbarEditor })));
 const DDPExportModal = React.lazy(() => import("./components/DDPExportModal").then(m => ({ default: m.DDPExportModal })));
 const ProjectCompareModal = React.lazy(() => import("./components/ProjectCompareModal").then(m => ({ default: m.ProjectCompareModal })));
-const PluginBrowser = React.lazy(() => import("./components/PluginBrowser").then(m => ({ default: m.PluginBrowser })));
 const EnvelopeManagerModal = React.lazy(() => import("./components/EnvelopeManagerModal").then(m => ({ default: m.EnvelopeManagerModal })));
 const ChannelStripEQModal = React.lazy(() => import("./components/ChannelStripEQModal").then(m => ({ default: m.ChannelStripEQModal })));
 const TrackRoutingModal = React.lazy(() => import("./components/TrackRoutingModal").then(m => ({ default: m.TrackRoutingModal })));
@@ -100,6 +121,18 @@ import {
 
 function App() {
   const startupReadyReportedRef = useRef(false);
+  const autoSaveInFlightRef = useRef(false);
+  const [isStartupLoading, setIsStartupLoading] = useState(true);
+  const [startupLoadingMessage, setStartupLoadingMessage] = useState("Preparing OpenStudio...");
+
+  const reportStartupReady = useCallback((detail: string) => {
+    if (startupReadyReportedRef.current) {
+      return;
+    }
+
+    startupReadyReportedRef.current = true;
+    window.dispatchEvent(new CustomEvent("openstudio:app-ready", { detail }));
+  }, []);
 
   // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
   const {
@@ -170,6 +203,7 @@ function App() {
     showGettingStarted,
     showMissingMedia,
     missingMediaFiles,
+    resolveMissingNAMAsset,
     masterAutomationLanes,
     showMasterAutomation,
     showStemSeparation,
@@ -246,6 +280,7 @@ function App() {
       showGettingStarted: state.showGettingStarted,
       showMissingMedia: state.showMissingMedia,
       missingMediaFiles: state.missingMediaFiles,
+      resolveMissingNAMAsset: state.resolveMissingNAMAsset,
       masterAutomationLanes: state.masterAutomationLanes,
       showMasterAutomation: state.showMasterAutomation,
       showStemSeparation: state.showStemSeparation,
@@ -256,32 +291,6 @@ function App() {
     }))
   );
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const markAppReady = (detail: string) => {
-      if (cancelled || startupReadyReportedRef.current) {
-        return;
-      }
-
-      startupReadyReportedRef.current = true;
-      window.dispatchEvent(new CustomEvent("openstudio:app-ready", { detail }));
-    };
-
-    void (async () => {
-      try {
-        await hydrateRecentProjects();
-        markAppReady("main-app-hydrated");
-      } catch (error) {
-        console.error("[startup] Failed to hydrate recent projects:", error);
-        markAppReady("main-app-hydration-failed");
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hydrateRecentProjects]);
 
   // Compute visible tracks — hides children of collapsed folder tracks
   const visibleTracks = useMemo(() => {
@@ -414,8 +423,91 @@ function App() {
   useEffect(() => startMidiEditorUISync(), []);
 
   useEffect(() => {
-    void refreshAiToolsStatus(true);
-  }, [refreshAiToolsStatus]);
+    let cancelled = false;
+    let finishTimer: number | undefined;
+    let readyDetail = "main-app-startup-ready";
+    const startupGateStartedAt = performance.now();
+
+    const setStartupStep = (message: string) => {
+      if (!cancelled) {
+        setStartupLoadingMessage(message);
+      }
+    };
+
+    const finishStartupGate = () => {
+      if (cancelled) {
+        return;
+      }
+
+      setStartupLoadingMessage("Opening workspace...");
+      const remainingMs = Math.max(0, 650 - (performance.now() - startupGateStartedAt));
+      finishTimer = window.setTimeout(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setIsStartupLoading(false);
+        reportStartupReady(readyDetail);
+      }, remainingMs);
+    };
+
+    const openLaunchProjectIfPresent = async () => {
+      const pendingProjectPath = await nativeBridge.consumePendingLaunchProjectPath();
+      if (!pendingProjectPath || cancelled) {
+        return;
+      }
+
+      const lowerPath = pendingProjectPath.toLowerCase();
+      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) {
+        return;
+      }
+
+      const launchProjectName = pendingProjectPath.split(/[\\/]/).pop() || "project";
+      setStartupStep(`Opening ${launchProjectName}...`);
+      const success = await useDAWStore.getState().requestOpenProject(pendingProjectPath);
+      if (!success) {
+        readyDetail = "main-app-launch-project-failed";
+        console.error("[App] Failed to open launch project:", pendingProjectPath);
+      }
+    };
+
+    void (async () => {
+      try {
+        setStartupStep("Loading recent projects...");
+        await hydrateRecentProjects();
+      } catch (error) {
+        readyDetail = "main-app-startup-recovered";
+        console.error("[startup] Failed to hydrate recent projects:", error);
+      }
+
+      // Network-backed session refresh and optional AI runtime inspection must
+      // never hold the workspace behind the startup overlay. Both services
+      // publish their own busy/status state when their background checks finish.
+      void bootstrapTONE3000Session().catch((error) => {
+        console.warn("[startup] TONE3000 silent auth bootstrap failed:", error);
+      });
+      void refreshAiToolsStatus(true).catch((error) => {
+        console.warn("[startup] AI tools status check failed:", error);
+      });
+
+      try {
+        setStartupStep("Checking startup project...");
+        await openLaunchProjectIfPresent();
+      } catch (error) {
+        readyDetail = "main-app-startup-recovered";
+        console.error("[App] Failed to consume launch project path:", error);
+      }
+
+      finishStartupGate();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (finishTimer !== undefined) {
+        window.clearTimeout(finishTimer);
+      }
+    };
+  }, [hydrateRecentProjects, refreshAiToolsStatus, reportStartupReady]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.onAiToolsStatusUpdate((status) => {
@@ -711,12 +803,35 @@ function App() {
         return;
       }
 
-      const state = useDAWStore.getState();
       const command = typeof payload.command === "string" ? payload.command : "";
+      const flushDetachedEdits = () => {
+        flushPendingMixerRemoteEdit();
+        flushPendingMidiRemoteEdits();
+      };
+      if (command === "action.execute") {
+        executeDetachedMainActionRequest(payload, getRegisteredAction, {
+          flushPendingEdits: flushDetachedEdits,
+        });
+        return;
+      }
+
+      if (command === "transport.setLoopRegion") {
+        applyDetachedLoopRegionRequest(payload);
+        return;
+      }
+
+      if (command === "automation.action") {
+        // Legacy senders are accepted only when they provide the same explicit
+        // selection payload as action.execute. Target-less packets are unsafe.
+        executeDetachedMainActionRequest({
+          ...payload,
+          command: "action.execute",
+        }, getRegisteredAction, { flushPendingEdits: flushDetachedEdits });
+        return;
+      }
+
+      const state = useDAWStore.getState();
       const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
-      const session = sessionId
-        ? state.midiEditorSessions.find((candidate) => candidate.sessionId === sessionId)
-        : null;
 
       if (command === "transport.toggle") {
         if (state.transport.isRecording || state.transport.isPlaying) void state.stop();
@@ -735,12 +850,14 @@ function App() {
       }
 
       if (command === "transport.seek") {
+        if (sessionId && !isLiveDetachedMidiSessionId(sessionId)) return;
         const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
         void state.seekTo(Math.max(0, time));
         return;
       }
 
       if (command === "transport.seekPreview") {
+        if (sessionId && !isLiveDetachedMidiSessionId(sessionId)) return;
         const time = typeof payload.time === "number" ? payload.time : state.transport.currentTime;
         const clampedTime = Math.max(0, time);
         state.setCurrentTime(clampedTime);
@@ -749,19 +866,20 @@ function App() {
       }
 
       if (command === "edit.undo") {
-        state.undo();
+        flushDetachedEdits();
+        useDAWStore.getState().undo();
         return;
       }
 
       if (command === "edit.redo") {
-        state.redo();
+        flushDetachedEdits();
+        useDAWStore.getState().redo();
         return;
       }
 
       if (command === "midi.quantize") {
-        const targetTrackId = session?.trackId || state.pianoRollTrackId || undefined;
-        const targetClipId = session?.clipId || state.pianoRollClipId || undefined;
-        state.quantizeSelectedMIDINotesUsingLast(targetTrackId, targetClipId);
+        flushDetachedEdits();
+        applyDetachedMidiQuantizeRequest(payload);
       }
     });
 
@@ -858,11 +976,6 @@ function App() {
             if (autoStopDecision.stopTime !== null) {
               currentState.setCurrentTime(autoStopDecision.stopTime);
             }
-            console.log("[App] Auto-stopping silent playback", {
-              reason: autoStopDecision.reason,
-              stopTime: autoStopDecision.stopTime,
-              latestEndTime: autoStopDecision.bounds.latestEndTime,
-            });
             void currentState.stop().catch((error) => {
               console.warn("[App] Auto-stop silent playback failed", error);
               autoStopInFlight = false;
@@ -874,12 +987,6 @@ function App() {
         // Loop: wrap back to loopStart when reaching loopEnd
         const { loopEnabled, loopStart, loopEnd } = currentState.transport;
         if (loopEnabled && loopEnd > loopStart && newTime >= loopEnd) {
-          console.log("[App] Playback loop wrap", {
-            currentTime: currentState.transport.currentTime,
-            newTime,
-            loopStart,
-            loopEnd,
-          });
           newTime = loopStart + (newTime - loopEnd);
           // Sync backend position on loop wrap
           nativeBridge.setTransportPosition(newTime);
@@ -950,65 +1057,36 @@ function App() {
     return unsub;
   }, []);
 
-  // Auto-save with rotating backups (Sprint 20.8)
+  // Auto-save with rotating backups (Sprint 20.8). Preferences expose the
+  // autoBackup fields, so keep one reactive scheduler driven by that setting.
+  // The historical autoSave fields remain in persisted state for compatibility
+  // but no longer create a second competing timer.
+  const { autoBackupEnabled, autoBackupInterval } = useDAWStore(useShallow((s) => ({
+    autoBackupEnabled: s.autoBackupEnabled,
+    autoBackupInterval: s.autoBackupInterval,
+  })));
+
   useEffect(() => {
-    const state = useDAWStore.getState();
-    if (!state.autoBackupEnabled) return;
+    if (!autoBackupEnabled) return;
 
     const interval = setInterval(async () => {
       const s = useDAWStore.getState();
-      if (s.isModified && s.projectPath) {
+      if (s.isModified
+          && s.projectPath
+          && !autoSaveInFlightRef.current) {
+        autoSaveInFlightRef.current = true;
         try {
-          const ok = await s.saveProject(false);
-          if (ok) console.log("[App] Auto-save completed");
+          await s.saveProject(false);
         } catch {
           // Auto-save failure is non-critical
+        } finally {
+          autoSaveInFlightRef.current = false;
         }
       }
-    }, state.autoBackupInterval);
+    }, autoBackupInterval);
 
     return () => clearInterval(interval);
-  }, []);
-
-  // Enhanced auto-save: uses autoSaveEnabled / autoSaveIntervalMinutes from store.
-  // Reactively subscribes to changes so toggling or changing interval takes effect immediately.
-  useEffect(() => {
-    const unsubscribe = useDAWStore.subscribe(
-      (state) => ({ enabled: state.autoSaveEnabled, minutes: state.autoSaveIntervalMinutes }),
-      ({ enabled, minutes }) => {
-        // Clear any previous timer first (handled below via closure)
-        // This subscription just triggers re-evaluation; the actual timer is managed
-        // by the outer effect dependencies.
-        void enabled;
-        void minutes;
-      },
-      { equalityFn: (a, b) => a.enabled === b.enabled && a.minutes === b.minutes },
-    );
-    return unsubscribe;
-  }, []);
-
-  // Separate interval effect for the improved auto-save
-  const autoSaveEnabled = useDAWStore((s) => s.autoSaveEnabled);
-  const autoSaveIntervalMinutes = useDAWStore((s) => s.autoSaveIntervalMinutes);
-
-  useEffect(() => {
-    if (!autoSaveEnabled) return;
-
-    const intervalMs = autoSaveIntervalMinutes * 60 * 1000;
-    const timerId = setInterval(async () => {
-      const s = useDAWStore.getState();
-      if (s.isModified && s.projectPath) {
-        try {
-          const ok = await s.saveProject(false);
-          if (ok) console.log("[App] Auto-save completed");
-        } catch {
-          // Auto-save failure is non-critical
-        }
-      }
-    }, intervalMs);
-
-    return () => clearInterval(timerId);
-  }, [autoSaveEnabled, autoSaveIntervalMinutes]);
+  }, [autoBackupEnabled, autoBackupInterval]);
 
   // Event-based metering — single batched store update for all tracks + master
   useEffect(() => {
@@ -1019,9 +1097,12 @@ function App() {
       const trackClipping: Record<string, boolean> = data.trackClipping && typeof data.trackClipping === "object" && !Array.isArray(data.trackClipping)
         ? data.trackClipping
         : {};
+      const midiInputLevels: Record<string, number> = data.midiInputLevels && typeof data.midiInputLevels === "object" && !Array.isArray(data.midiInputLevels)
+        ? data.midiInputLevels
+        : {};
       const masterLevel = typeof data.masterLevel === "number" ? data.masterLevel : 0;
       const masterClipping = data.masterClipping === true;
-      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping);
+      batchUpdateMeterLevels(trackLevels, masterLevel, trackClipping, masterClipping, midiInputLevels);
     });
   }, [batchUpdateMeterLevels]);
 
@@ -1033,36 +1114,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const openLaunchProject = async () => {
-      const pendingProjectPath = await nativeBridge.consumePendingLaunchProjectPath();
-      if (!pendingProjectPath || cancelled) return;
-
-      const lowerPath = pendingProjectPath.toLowerCase();
-      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) return;
-
-      try {
-        const success = await useDAWStore.getState().requestOpenProject(pendingProjectPath);
-        if (!success) {
-          console.error("[App] Failed to open launch project:", pendingProjectPath);
-        }
-      } catch (error) {
-        console.error("[App] Failed to consume launch project path:", error);
-      }
-    };
-
-    void openLaunchProject();
-
-    return () => {
-      cancelled = true;
-    };
+    activateShortcutContext({ kind: "timeline" });
   }, []);
 
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
       void dispatchGlobalShortcut({
         key: e.key,
         code: e.code,
@@ -1072,14 +1129,11 @@ function App() {
         metaKey: e.metaKey,
         repeat: e.repeat,
         source: "browser",
-        targetIsEditable:
-          !!target &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLSelectElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable),
+        targetIsEditable: isEditableShortcutTarget(e.target),
+        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
+        stopImmediatePropagation: () => e.stopImmediatePropagation(),
       });
     };
 
@@ -1246,21 +1300,11 @@ function App() {
     return () => ro.disconnect();
   }, []);
 
-  // Workspace wheel handler — only prevents browser default zoom (Ctrl+scroll).
+  // App-wide wheel guard — prevents WebView/browser zoom (Ctrl/Cmd+scroll)
+  // even when focus is in a modal, browser, detached-style panel, or control.
   // Actual zoom logic is handled by Timeline's RAF-batched handler.
   useEffect(() => {
-    const workspace = workspaceRef.current;
-    if (!workspace) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) {
-        // Prevent browser zoom / native scroll — let Timeline handle the rest
-        e.preventDefault();
-      }
-    };
-
-    workspace.addEventListener("wheel", handleWheel, { passive: false, capture: true });
-    return () => workspace.removeEventListener("wheel", handleWheel, { capture: true });
+    return installBrowserZoomWheelGuard(document);
   }, []);
 
   const [showAddMultipleTracksModal, setShowAddMultipleTracksModal] =
@@ -1415,7 +1459,17 @@ function App() {
           />
         </Suspense>
       )}
-      <div ref={workspaceRef} className="workspace relative flex-1" role="main" aria-label="Main workspace">
+      <div
+        ref={workspaceRef}
+        className="workspace relative flex-1"
+        role="main"
+        aria-label="Main workspace"
+        onPointerDownCapture={() => activateShortcutContext({ kind: "timeline" })}
+        onContextMenuCapture={() => activateShortcutContext({ kind: "timeline" })}
+        onFocusCapture={() => activateShortcutContext({ kind: "timeline" })}
+        data-shortcut-context="timeline"
+      >
+        <InputProfileOnboardingCard />
         <EssentialControlsCard />
         <div className="workspace-sticky-header">
           <div className="workspace-sticky-tcp-header" style={{ width: tcpWidth }}>
@@ -1441,14 +1495,23 @@ function App() {
             useDAWStore.getState().deselectAllTracks();
           }
         }} onWheel={(e) => {
-          // Alt+scroll to resize track height (mirrors Timeline behavior)
-          if (e.altKey) {
-            e.preventDefault();
-            e.stopPropagation();
+          const shortcutPlatform = getShortcutPlatform();
+          const behaviorProfile = getMouseBehaviorProfile(
+            useDAWStore.getState().mouseBehaviorProfileId,
+            shortcutPlatform,
+          );
+          const gesture = resolveWheelGesture(e, {
+            surface: "tcp",
+            subtarget: "track",
+            platform: toMouseBehaviorPlatform(shortcutPlatform),
+          }, behaviorProfile.wheel);
+          if (gesture.preventDefault) e.preventDefault();
+          if (gesture.stopPropagation) e.stopPropagation();
+          if (gesture.operation === "resize" && gesture.target === "track-height" && gesture.amount !== 0) {
             const store = useDAWStore.getState();
             const curHeight = store.trackHeight;
-            const delta = e.deltaY > 0 ? 0.9 : 1.1;
-            store.setTrackHeight(curHeight * delta);
+            const factor = gesture.amount > 0 ? 0.9 : 1.1;
+            store.setTrackHeight(curHeight * factor);
           }
         }}>
           <div className="tcp-tracks z-20 min-h-0" onClick={(e) => {
@@ -1624,7 +1687,20 @@ function App() {
           className="shrink-0 min-h-0 bg-neutral-950 border-t border-neutral-700 flex flex-col"
           style={{ height: lowerZoneHeight }}
           aria-label="Docked Piano Roll editor"
+          data-shortcut-context={`piano_roll:${dockedMidiEditorSession.sessionId}`}
           data-qa="docked-piano-roll"
+          onPointerDownCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
+          onContextMenuCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
+          onFocusCapture={() => activateShortcutContext({
+            kind: "piano_roll",
+            sessionId: dockedMidiEditorSession.sessionId,
+          })}
         >
           <div
             role="separator"
@@ -2017,6 +2093,7 @@ function App() {
             onResolve={(originalPath, newPath) =>
               useDAWStore.getState().resolveMissingMedia(originalPath, newPath)
             }
+            onResolveNAMAsset={(target, newPath) => resolveMissingNAMAsset(target, newPath)}
             onResolveAll={() => useDAWStore.getState().closeMissingMedia()}
           />
         </Suspense>
@@ -2034,6 +2111,19 @@ function App() {
         <Suspense fallback={null}>
           <GettingStartedGuide />
         </Suspense>
+      )}
+
+      {/* Startup Loading Overlay */}
+      {isStartupLoading && (
+        <div className="openstudio-startup-overlay" role="status" aria-live="polite" data-qa="app-startup-loading">
+          <div className="openstudio-startup-card">
+            <div className="openstudio-startup-spinner" aria-hidden="true" />
+            <div className="openstudio-startup-copy">
+              <strong>Starting OpenStudio</strong>
+              <span>{startupLoadingMessage}</span>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Project Loading Overlay */}

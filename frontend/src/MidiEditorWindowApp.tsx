@@ -6,6 +6,10 @@ import { PianoRoll } from "./components/PianoRoll";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
+import {
+  isEditableShortcutTarget,
+  isNonTextControlShortcutTarget,
+} from "./utils/shortcutContext";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import { windowSessionId } from "./utils/windowEnvironment";
 import {
@@ -14,9 +18,13 @@ import {
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
+import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
+import { startDetachedInputProfileSync } from "./utils/inputProfileWindowSync";
 
 export default function MidiEditorWindowApp() {
   const [hydrated, setHydrated] = useState(false);
+  useEffect(() => installBrowserZoomWheelGuard(document), []);
+  useEffect(() => startDetachedInputProfileSync(), []);
   const {
     tracks,
     pianoRollTrackId,
@@ -66,7 +74,6 @@ export default function MidiEditorWindowApp() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
       void dispatchGlobalShortcut({
         key: e.key,
         code: e.code,
@@ -76,14 +83,11 @@ export default function MidiEditorWindowApp() {
         metaKey: e.metaKey,
         repeat: e.repeat,
         source: "browser",
-        targetIsEditable:
-          !!target &&
-          (target instanceof HTMLInputElement ||
-            target instanceof HTMLSelectElement ||
-            target instanceof HTMLTextAreaElement ||
-            target.isContentEditable),
+        targetIsEditable: isEditableShortcutTarget(e.target),
+        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
         preventDefault: () => e.preventDefault(),
         stopPropagation: () => e.stopPropagation(),
+        stopImmediatePropagation: () => e.stopImmediatePropagation(),
       });
     };
 

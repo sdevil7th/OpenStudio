@@ -1,5 +1,12 @@
+import { useCallback, useSyncExternalStore } from "react";
 import { MenuDropdown, MenuItemProps } from "./MenuDropdown";
+import { getDisplayEffectiveShortcut } from "../../store/actionRegistry";
 import { useDAWStore } from "../../store/useDAWStore";
+import { usePitchEditorStore } from "../../store/pitchEditorStore";
+import {
+  getActiveShortcutContext,
+  subscribeShortcutContext,
+} from "../../utils/shortcutContext";
 import { useShallow } from "zustand/shallow";
 
 /**
@@ -23,6 +30,8 @@ export function EditMenu() {
     deselectAllTracks,
     deleteSelectedTracks,
     transport,
+    keyboardShortcutProfileId,
+    customShortcuts,
   } = useDAWStore(useShallow((s) => ({
     canUndo: s.canUndo,
     canRedo: s.canRedo,
@@ -39,37 +48,66 @@ export function EditMenu() {
     deselectAllTracks: s.deselectAllTracks,
     deleteSelectedTracks: s.deleteSelectedTracks,
     transport: s.transport,
+    keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+    customShortcuts: s.customShortcuts,
   })));
+  const {
+    pitchUndo,
+    pitchRedo,
+    pitchCanUndo,
+    pitchCanRedo,
+  } = usePitchEditorStore(useShallow((s) => ({
+    pitchUndo: s.undo,
+    pitchRedo: s.redo,
+    pitchCanUndo: s.undoStack.length > 0,
+    pitchCanRedo: s.redoStack.length > 0,
+  })));
+  const activeShortcutContext = useSyncExternalStore(
+    subscribeShortcutContext,
+    getActiveShortcutContext,
+    getActiveShortcutContext,
+  );
+  const pitchOwnsHistory = activeShortcutContext.kind === "pitch_editor";
+  const effectiveUndo = pitchOwnsHistory ? pitchUndo : undo;
+  const effectiveRedo = pitchOwnsHistory ? pitchRedo : redo;
+  const effectiveCanUndo = pitchOwnsHistory ? pitchCanUndo : canUndo;
+  const effectiveCanRedo = pitchOwnsHistory ? pitchCanRedo : canRedo;
+  const shortcut = useCallback(
+    (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
+    [customShortcuts, keyboardShortcutProfileId],
+  );
+  const trackSelectionOwnsDelete = activeShortcutContext.kind === "track_control_panel"
+    || activeShortcutContext.kind === "mixer";
 
   const menuItems: MenuItemProps[] = [
     {
       label: "Undo",
-      shortcut: "Ctrl+Z",
-      onClick: undo,
-      disabled: !canUndo,
+      shortcut: shortcut("edit.undo", "Ctrl+Z"),
+      onClick: effectiveUndo,
+      disabled: !effectiveCanUndo,
     },
     {
       label: "Redo",
-      shortcut: "Ctrl+Shift+Z",
-      onClick: redo,
-      disabled: !canRedo,
+      shortcut: shortcut("edit.redo", "Ctrl+Shift+Z"),
+      onClick: effectiveRedo,
+      disabled: !effectiveCanRedo,
       dividerAfter: true,
     },
     {
       label: "Cut",
-      shortcut: "Ctrl+X",
+      shortcut: shortcut("edit.cut", "Ctrl+X"),
       onClick: () => selectedClipId && cutClip(selectedClipId),
       disabled: !selectedClipId,
     },
     {
       label: "Copy",
-      shortcut: "Ctrl+C",
+      shortcut: shortcut("edit.copy", "Ctrl+C"),
       onClick: () => selectedClipId && copyClip(selectedClipId),
       disabled: !selectedClipId,
     },
     {
       label: "Paste",
-      shortcut: "Ctrl+V",
+      shortcut: shortcut("edit.paste", "Ctrl+V"),
       onClick: () => {
         const clipboard = useDAWStore.getState().clipboard;
         if (clipboard.clip && selectedTrackIds.length > 0) {
@@ -80,13 +118,13 @@ export function EditMenu() {
     },
     {
       label: "Duplicate",
-      shortcut: "Ctrl+D",
+      shortcut: shortcut("edit.duplicateClips", "Ctrl+D"),
       onClick: () => selectedClipId && duplicateClip(selectedClipId),
       disabled: !selectedClipId,
     },
     {
       label: "Delete",
-      shortcut: "Delete",
+      shortcut: shortcut(trackSelectionOwnsDelete ? "track.deleteSelected" : "edit.delete", "Delete"),
       onClick: () => {
         if (selectedTrackIds.length > 0) {
           deleteSelectedTracks();
@@ -98,8 +136,8 @@ export function EditMenu() {
       dividerAfter: true,
     },
     {
-      label: "Split at Cursor",
-      shortcut: "S",
+      label: "Split at Playhead",
+      shortcut: shortcut("edit.splitAtCursor", "S"),
       onClick: () => useDAWStore.getState().splitClipAtPlayhead(),
     },
     {
@@ -144,13 +182,13 @@ export function EditMenu() {
     },
     {
       label: "Group Selected Clips",
-      shortcut: "Ctrl+G",
+      shortcut: shortcut("edit.groupClips", "Ctrl+G"),
       onClick: () => useDAWStore.getState().groupSelectedClips(),
       disabled: !selectedClipId,
     },
     {
       label: "Ungroup Selected Clips",
-      shortcut: "Ctrl+Shift+G",
+      shortcut: shortcut("edit.ungroupClips", "Ctrl+Shift+G"),
       onClick: () => useDAWStore.getState().ungroupSelectedClips(),
       disabled: !selectedClipId,
     },
@@ -167,17 +205,17 @@ export function EditMenu() {
     },
     {
       label: "Select All Tracks",
-      shortcut: "Ctrl+A",
+      shortcut: shortcut("track.selectAll", "Ctrl+A"),
       onClick: selectAllTracks,
     },
     {
       label: "Select All Clips",
-      shortcut: "Ctrl+Shift+A",
+      shortcut: shortcut("edit.selectAllClips", "Ctrl+Shift+A"),
       onClick: () => useDAWStore.getState().selectAllClips(),
     },
     {
       label: "Deselect All",
-      shortcut: "Esc",
+      shortcut: shortcut(trackSelectionOwnsDelete ? "track.deselectAll" : "edit.deselectAll", "Esc"),
       onClick: deselectAllTracks,
     },
   ];

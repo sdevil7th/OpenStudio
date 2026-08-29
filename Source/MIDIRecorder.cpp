@@ -86,10 +86,7 @@ void MIDIRecorder::recordEvent(const juce::String& trackId, double timeInSeconds
 
 void MIDIRecorder::setRecordingStartTime(const juce::String& trackId, double timeInSeconds)
 {
-    const juce::ScopedTryLock stl(recLock);
-    if (!stl.isLocked())
-        return;
-
+    const juce::ScopedLock stl(recLock);
     auto it = activeRecordings.find(trackId);
     if (it != activeRecordings.end())
     {
@@ -109,14 +106,63 @@ bool MIDIRecorder::isRecording(const juce::String& trackId) const
 
 std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::stopAllRecordings(const juce::File& outputFolder, double tempo)
 {
-    std::vector<CompletedMIDIRecording> completed;
-
-    const juce::ScopedLock sl(recLock);
-
-    for (auto& [trackId, state] : activeRecordings)
+    std::map<juce::String, ActiveMIDIRecording> recordingsToFinalize;
     {
-        state.isActive = false;
+        const juce::ScopedLock sl(recLock);
+        for (auto& [trackId, state] : activeRecordings)
+        {
+            juce::ignoreUnused(trackId);
+            state.isActive = false;
+        }
+        recordingsToFinalize.swap(activeRecordings);
+    }
 
+    return finalizeDetachedRecordings(recordingsToFinalize, outputFolder, tempo);
+}
+
+std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::rolloverRecordings(
+    const std::vector<juce::String>& trackIds,
+    double sampleRate,
+    double newStartTime,
+    const juce::File& outputFolder,
+    double tempo)
+{
+    std::map<juce::String, ActiveMIDIRecording> replacementRecordings;
+    for (const auto& trackId : trackIds)
+    {
+        auto& state = replacementRecordings[trackId];
+        state.trackId = trackId;
+        state.events.reserve(1024);
+        state.previewNoteEvents.reserve(1024);
+        state.startTime = newStartTime;
+        state.sampleRate = sampleRate;
+        state.generation = nextPreviewGeneration.fetch_add(1, std::memory_order_relaxed);
+        state.isActive = true;
+    }
+
+    std::map<juce::String, ActiveMIDIRecording> recordingsToFinalize;
+    {
+        const juce::ScopedLock sl(recLock);
+        for (auto& [trackId, state] : activeRecordings)
+        {
+            juce::ignoreUnused(trackId);
+            state.isActive = false;
+        }
+        recordingsToFinalize.swap(activeRecordings);
+        activeRecordings.swap(replacementRecordings);
+    }
+
+    return finalizeDetachedRecordings(recordingsToFinalize, outputFolder, tempo);
+}
+
+std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::finalizeDetachedRecordings(
+    std::map<juce::String, ActiveMIDIRecording>& recordings,
+    const juce::File& outputFolder,
+    double tempo)
+{
+    std::vector<CompletedMIDIRecording> completed;
+    for (auto& [trackId, state] : recordings)
+    {
         if (state.events.empty())
             continue;
 
@@ -162,8 +208,6 @@ std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::stopAllRecording
 
         completed.push_back(std::move(clip));
     }
-
-    activeRecordings.clear();
 
     juce::Logger::writeToLog("MIDIRecorder: Stopped all recordings. Completed " +
                              juce::String(completed.size()) + " MIDI clips.");

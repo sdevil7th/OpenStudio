@@ -1,8 +1,222 @@
 #include "TimecodeSync.h"
 
+#include <array>
+#include <cstdint>
+
+static_assert(std::atomic<SMPTEFrameRate>::is_always_lock_free);
+
+//==============================================================================
+// Realtime MIDI output handoff
+//==============================================================================
+
+class TimecodeMIDIOutputDispatcher final : private juce::Thread
+{
+public:
+    TimecodeMIDIOutputDispatcher()
+        : juce::Thread("OpenStudio Timecode MIDI Sender")
+    {
+    }
+
+    ~TimecodeMIDIOutputDispatcher() override
+    {
+        realtimeEnabled.store(false, std::memory_order_release);
+        connected.store(false, std::memory_order_release);
+        generation.fetch_add(1, std::memory_order_acq_rel);
+        signalThreadShouldExit();
+        stopThread(2000);
+
+        const juce::ScopedLock sl(outputLock);
+        output.reset();
+    }
+
+    bool connect(const juce::String& midiOutputName)
+    {
+        disconnect();
+
+        std::unique_ptr<juce::MidiOutput> newOutput;
+        for (const auto& device : juce::MidiOutput::getAvailableDevices())
+        {
+            if (device.name == midiOutputName)
+            {
+                newOutput = juce::MidiOutput::openDevice(device.identifier);
+                break;
+            }
+        }
+
+        if (newOutput == nullptr)
+            return false;
+
+        {
+            const juce::ScopedLock sl(outputLock);
+            output = std::move(newOutput);
+            generation.fetch_add(1, std::memory_order_acq_rel);
+            connected.store(true, std::memory_order_release);
+        }
+
+        if (!isThreadRunning()
+            && !startThread(juce::Thread::Priority::normal))
+        {
+            disconnect();
+            return false;
+        }
+        return true;
+    }
+
+    void disconnect()
+    {
+        connected.store(false, std::memory_order_release);
+        generation.fetch_add(1, std::memory_order_acq_rel);
+        notify();
+
+        const juce::ScopedLock sl(outputLock);
+        output.reset();
+    }
+
+    bool isConnected() const noexcept
+    {
+        return connected.load(std::memory_order_acquire);
+    }
+
+    void setRealtimeEnabled(bool shouldEnable) noexcept
+    {
+        if (shouldEnable)
+        {
+            generation.fetch_add(1, std::memory_order_acq_rel);
+            realtimeEnabled.store(true, std::memory_order_release);
+        }
+        else
+        {
+            realtimeEnabled.store(false, std::memory_order_release);
+            generation.fetch_add(1, std::memory_order_acq_rel);
+        }
+        notify();
+    }
+
+    bool enqueueRealtimeByte(std::uint8_t byte) noexcept
+    {
+        return enqueueRealtimeMessage(&byte, 1);
+    }
+
+    bool enqueueRealtimeMessage(const std::uint8_t* bytes, int size) noexcept
+    {
+        if (!realtimeEnabled.load(std::memory_order_acquire)
+            || !connected.load(std::memory_order_acquire)
+            || bytes == nullptr
+            || size <= 0
+            || size > kMaxRealtimeMessageBytes)
+        {
+            return false;
+        }
+
+        const auto write = writePosition.load(std::memory_order_relaxed);
+        const auto read = readPosition.load(std::memory_order_acquire);
+        if (write - read >= kQueueCapacity)
+        {
+            droppedMessageCount.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+
+        auto& packet = queue[write & (kQueueCapacity - 1)];
+        packet.generation = generation.load(std::memory_order_acquire);
+        packet.size = static_cast<std::uint8_t>(size);
+        for (int index = 0; index < size; ++index)
+            packet.bytes[static_cast<std::size_t>(index)] = bytes[index];
+
+        writePosition.store(write + 1, std::memory_order_release);
+        return true;
+    }
+
+    void sendControlMessage(const std::uint8_t* bytes, int size)
+    {
+        if (bytes == nullptr || size <= 0)
+            return;
+
+        const juce::ScopedLock sl(outputLock);
+        if (output != nullptr && connected.load(std::memory_order_acquire))
+            output->sendMessageNow(juce::MidiMessage(bytes, size));
+    }
+
+private:
+    struct Packet
+    {
+        std::array<std::uint8_t, 3> bytes {};
+        std::uint32_t generation = 0;
+        std::uint8_t size = 0;
+    };
+
+    static constexpr std::uint32_t kQueueCapacity = 1024;
+    static constexpr int kMaxRealtimeMessageBytes = 3;
+    static_assert((kQueueCapacity & (kQueueCapacity - 1)) == 0);
+    static_assert(std::atomic<bool>::is_always_lock_free);
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+
+    bool dequeue(Packet& packet) noexcept
+    {
+        const auto read = readPosition.load(std::memory_order_relaxed);
+        if (read == writePosition.load(std::memory_order_acquire))
+            return false;
+
+        packet = queue[read & (kQueueCapacity - 1)];
+        readPosition.store(read + 1, std::memory_order_release);
+        return true;
+    }
+
+    void run() override
+    {
+        while (!threadShouldExit())
+        {
+            bool consumedPacket = false;
+            Packet packet;
+            while (dequeue(packet))
+            {
+                consumedPacket = true;
+                const auto currentGeneration = generation.load(std::memory_order_acquire);
+                if (packet.generation != currentGeneration
+                    || !connected.load(std::memory_order_acquire)
+                    || !realtimeEnabled.load(std::memory_order_acquire))
+                {
+                    continue;
+                }
+
+                const juce::ScopedLock sl(outputLock);
+                if (output != nullptr
+                    && connected.load(std::memory_order_acquire)
+                    && realtimeEnabled.load(std::memory_order_acquire)
+                    && packet.generation == generation.load(std::memory_order_acquire))
+                {
+                    output->sendMessageNow(
+                        juce::MidiMessage(packet.bytes.data(), static_cast<int>(packet.size)));
+                }
+            }
+
+            if (!consumedPacket)
+            {
+                const bool active = connected.load(std::memory_order_relaxed)
+                    && realtimeEnabled.load(std::memory_order_relaxed);
+                wait(active ? 1 : 20);
+            }
+        }
+    }
+
+    std::array<Packet, kQueueCapacity> queue {};
+    std::atomic<std::uint32_t> writePosition { 0 };
+    std::atomic<std::uint32_t> readPosition { 0 };
+    std::atomic<std::uint32_t> generation { 1 };
+    std::atomic<std::uint32_t> droppedMessageCount { 0 };
+    std::atomic<bool> connected { false };
+    std::atomic<bool> realtimeEnabled { false };
+    juce::CriticalSection outputLock;
+    std::unique_ptr<juce::MidiOutput> output;
+};
+
 //==============================================================================
 // MIDIClockOutput
 //==============================================================================
+
+MIDIClockOutput::MIDIClockOutput()
+    : outputDispatcher(std::make_unique<TimecodeMIDIOutputDispatcher>())
+{
+}
 
 MIDIClockOutput::~MIDIClockOutput()
 {
@@ -12,33 +226,46 @@ MIDIClockOutput::~MIDIClockOutput()
 bool MIDIClockOutput::connect(const juce::String& midiOutputName)
 {
     disconnect();
-    auto devices = juce::MidiOutput::getAvailableDevices();
-    for (const auto& d : devices)
-    {
-        if (d.name == midiOutputName)
-        {
-            output = juce::MidiOutput::openDevice(d.identifier);
-            if (output)
-                juce::Logger::writeToLog("MIDIClockOutput: Connected to " + midiOutputName);
-            break;
-        }
-    }
-    return output != nullptr;
+    const bool connected = outputDispatcher->connect(midiOutputName);
+    outputDispatcher->setRealtimeEnabled(isEnabled.load(std::memory_order_acquire));
+    resetClockAccumulatorRequested.store(true, std::memory_order_release);
+    if (connected)
+        juce::Logger::writeToLog("MIDIClockOutput: Connected to " + midiOutputName);
+    return connected;
 }
 
 void MIDIClockOutput::disconnect()
 {
-    if (output)
-    {
+    const bool wasConnected = outputDispatcher->isConnected();
+    outputDispatcher->setRealtimeEnabled(false);
+    if (wasConnected)
         sendStop();
-        output.reset();
-    }
-    clockAccumulator = 0.0;
+    outputDispatcher->disconnect();
+    resetClockAccumulatorRequested.store(true, std::memory_order_release);
+}
+
+bool MIDIClockOutput::isConnected() const noexcept
+{
+    return outputDispatcher->isConnected();
+}
+
+void MIDIClockOutput::setEnabled(bool enabled) noexcept
+{
+    isEnabled.store(enabled, std::memory_order_release);
+    outputDispatcher->setRealtimeEnabled(enabled);
+    if (!enabled)
+        resetClockAccumulatorRequested.store(true, std::memory_order_release);
 }
 
 void MIDIClockOutput::processBlock(int numSamples, double sampleRate, double bpm, bool playing)
 {
-    if (!output || !isEnabled || !playing || bpm <= 0.0 || sampleRate <= 0.0)
+    if (!isEnabled.load(std::memory_order_relaxed))
+        return;
+
+    if (resetClockAccumulatorRequested.exchange(false, std::memory_order_acq_rel))
+        clockAccumulator = 0.0;
+
+    if (!playing || bpm <= 0.0 || sampleRate <= 0.0 || !outputDispatcher->isConnected())
         return;
 
     // MIDI Clock: 24 pulses per quarter note
@@ -48,30 +275,37 @@ void MIDIClockOutput::processBlock(int numSamples, double sampleRate, double bpm
 
     while (clockAccumulator >= samplesPerClock)
     {
-        output->sendMessageNow(juce::MidiMessage(0xF8)); // Timing Clock
+        outputDispatcher->enqueueRealtimeByte(0xF8); // Timing Clock
         clockAccumulator -= samplesPerClock;
     }
 }
 
 void MIDIClockOutput::sendStart()
 {
-    if (output && isEnabled)
+    if (isEnabled.load(std::memory_order_acquire) && outputDispatcher->isConnected())
     {
-        clockAccumulator = 0.0;
-        output->sendMessageNow(juce::MidiMessage(0xFA)); // Start
+        resetClockAccumulatorRequested.store(true, std::memory_order_release);
+        const std::uint8_t start = 0xFA;
+        outputDispatcher->sendControlMessage(&start, 1);
     }
 }
 
 void MIDIClockOutput::sendStop()
 {
-    if (output && isEnabled)
-        output->sendMessageNow(juce::MidiMessage(0xFC)); // Stop
+    if (isEnabled.load(std::memory_order_acquire) && outputDispatcher->isConnected())
+    {
+        const std::uint8_t stop = 0xFC;
+        outputDispatcher->sendControlMessage(&stop, 1);
+    }
 }
 
 void MIDIClockOutput::sendContinue()
 {
-    if (output && isEnabled)
-        output->sendMessageNow(juce::MidiMessage(0xFB)); // Continue
+    if (isEnabled.load(std::memory_order_acquire) && outputDispatcher->isConnected())
+    {
+        const std::uint8_t resume = 0xFB;
+        outputDispatcher->sendControlMessage(&resume, 1);
+    }
 }
 
 //==============================================================================
@@ -174,6 +408,11 @@ void MIDIClockInput::handleIncomingMidiMessage(juce::MidiInput* source, const ju
 // MTCGenerator
 //==============================================================================
 
+MTCGenerator::MTCGenerator()
+    : outputDispatcher(std::make_unique<TimecodeMIDIOutputDispatcher>())
+{
+}
+
 MTCGenerator::~MTCGenerator()
 {
     disconnect();
@@ -182,30 +421,43 @@ MTCGenerator::~MTCGenerator()
 bool MTCGenerator::connect(const juce::String& midiOutputName)
 {
     disconnect();
-    auto devices = juce::MidiOutput::getAvailableDevices();
-    for (const auto& d : devices)
-    {
-        if (d.name == midiOutputName)
-        {
-            output = juce::MidiOutput::openDevice(d.identifier);
-            if (output)
-                juce::Logger::writeToLog("MTCGenerator: Connected to " + midiOutputName);
-            break;
-        }
-    }
-    return output != nullptr;
+    const bool connected = outputDispatcher->connect(midiOutputName);
+    outputDispatcher->setRealtimeEnabled(isEnabled.load(std::memory_order_acquire));
+    resetGeneratorStateRequested.store(true, std::memory_order_release);
+    if (connected)
+        juce::Logger::writeToLog("MTCGenerator: Connected to " + midiOutputName);
+    return connected;
 }
 
 void MTCGenerator::disconnect()
 {
-    output.reset();
-    qfCounter = 0;
-    qfAccumulator = 0.0;
+    outputDispatcher->setRealtimeEnabled(false);
+    outputDispatcher->disconnect();
+    resetGeneratorStateRequested.store(true, std::memory_order_release);
 }
 
-double MTCGenerator::getActualFrameRate() const
+bool MTCGenerator::isConnected() const noexcept
 {
-    switch (frameRate)
+    return outputDispatcher->isConnected();
+}
+
+void MTCGenerator::setEnabled(bool enabled) noexcept
+{
+    isEnabled.store(enabled, std::memory_order_release);
+    outputDispatcher->setRealtimeEnabled(enabled);
+    if (!enabled)
+        resetGeneratorStateRequested.store(true, std::memory_order_release);
+}
+
+void MTCGenerator::setFrameRate(SMPTEFrameRate rate) noexcept
+{
+    frameRate.store(rate, std::memory_order_release);
+    resetGeneratorStateRequested.store(true, std::memory_order_release);
+}
+
+double MTCGenerator::getActualFrameRate(SMPTEFrameRate rate) noexcept
+{
+    switch (rate)
     {
         case SMPTEFrameRate::fps24:     return 24.0;
         case SMPTEFrameRate::fps25:     return 25.0;
@@ -215,15 +467,15 @@ double MTCGenerator::getActualFrameRate() const
     return 25.0;
 }
 
-MTCGenerator::SMPTETime MTCGenerator::positionToSMPTE(double seconds) const
+MTCGenerator::SMPTETime MTCGenerator::positionToSMPTE(double seconds, SMPTEFrameRate rate)
 {
     SMPTETime t;
-    double fps = getActualFrameRate();
+    const double fps = getActualFrameRate(rate);
 
     int totalFrames = (int)(seconds * fps);
 
     // Drop frame compensation for 29.97
-    if (frameRate == SMPTEFrameRate::fps2997df)
+    if (rate == SMPTEFrameRate::fps2997df)
     {
         // Drop frame: skip frame 0 and 1 at the start of each minute
         // except every 10th minute
@@ -256,20 +508,30 @@ MTCGenerator::SMPTETime MTCGenerator::positionToSMPTE(double seconds) const
 
 void MTCGenerator::processBlock(int numSamples, double sampleRate, double positionSeconds, bool playing)
 {
-    if (!output || !isEnabled || !playing || sampleRate <= 0.0)
+    if (!isEnabled.load(std::memory_order_relaxed))
+        return;
+
+    if (resetGeneratorStateRequested.exchange(false, std::memory_order_acq_rel))
+    {
+        qfCounter = 0;
+        qfAccumulator = 0.0;
+    }
+
+    if (!playing || sampleRate <= 0.0 || !outputDispatcher->isConnected())
         return;
 
     // MTC quarter-frame rate: 2 per frame × fps / 4 = fps/2 quarter-frames per second
     // But the standard says: 4 quarter-frames per frame, so 4 * fps QF per second
     // Each QF is sent at fps * 4 rate (e.g., at 25fps = 100 QF/sec)
-    double fps = getActualFrameRate();
-    double samplesPerQF = sampleRate / (fps * 4.0);
+    const auto currentFrameRate = frameRate.load(std::memory_order_acquire);
+    const double fps = getActualFrameRate(currentFrameRate);
+    const double samplesPerQF = sampleRate / (fps * 4.0);
 
     qfAccumulator += numSamples;
 
     while (qfAccumulator >= samplesPerQF)
     {
-        SMPTETime t = positionToSMPTE(positionSeconds);
+        const SMPTETime t = positionToSMPTE(positionSeconds, currentFrameRate);
 
         int data = 0;
         switch (qfCounter)
@@ -281,11 +543,16 @@ void MTCGenerator::processBlock(int numSamples, double sampleRate, double positi
             case 4: data = (0x40) | (t.minutes & 0x0F); break;
             case 5: data = (0x50) | ((t.minutes >> 4) & 0x03); break;
             case 6: data = (0x60) | (t.hours & 0x0F); break;
-            case 7: data = (0x70) | ((t.hours >> 4) & 0x01) | ((int)frameRate << 1); break;
+            case 7: data = (0x70) | ((t.hours >> 4) & 0x01)
+                | (static_cast<int>(currentFrameRate) << 1); break;
         }
 
         // Quarter-frame message: F1 <data>
-        output->sendMessageNow(juce::MidiMessage(0xF1, data));
+        const std::uint8_t message[2] {
+            0xF1,
+            static_cast<std::uint8_t>(data)
+        };
+        outputDispatcher->enqueueRealtimeMessage(message, 2);
 
         qfCounter = (qfCounter + 1) & 7;
         qfAccumulator -= samplesPerQF;
@@ -294,24 +561,27 @@ void MTCGenerator::processBlock(int numSamples, double sampleRate, double positi
 
 void MTCGenerator::sendFullFrame(double positionSeconds)
 {
-    if (!output || !isEnabled) return;
+    if (!isEnabled.load(std::memory_order_acquire) || !outputDispatcher->isConnected())
+        return;
 
-    SMPTETime t = positionToSMPTE(positionSeconds);
+    const auto currentFrameRate = frameRate.load(std::memory_order_acquire);
+    const SMPTETime t = positionToSMPTE(positionSeconds, currentFrameRate);
 
     // Full frame SysEx: F0 7F 7F 01 01 hr mn sc fr F7
-    uint8_t sysex[10];
+    std::uint8_t sysex[10];
     sysex[0] = 0xF0;
     sysex[1] = 0x7F; // Universal real-time
     sysex[2] = 0x7F; // All devices
     sysex[3] = 0x01; // MTC
     sysex[4] = 0x01; // Full frame
-    sysex[5] = (uint8_t)(((int)frameRate << 5) | (t.hours & 0x1F));
-    sysex[6] = (uint8_t)(t.minutes & 0x3F);
-    sysex[7] = (uint8_t)(t.seconds & 0x3F);
-    sysex[8] = (uint8_t)(t.frames & 0x1F);
+    sysex[5] = static_cast<std::uint8_t>(
+        (static_cast<int>(currentFrameRate) << 5) | (t.hours & 0x1F));
+    sysex[6] = static_cast<std::uint8_t>(t.minutes & 0x3F);
+    sysex[7] = static_cast<std::uint8_t>(t.seconds & 0x3F);
+    sysex[8] = static_cast<std::uint8_t>(t.frames & 0x1F);
     sysex[9] = 0xF7;
 
-    output->sendMessageNow(juce::MidiMessage(sysex, 10));
+    outputDispatcher->sendControlMessage(sysex, 10);
 }
 
 //==============================================================================

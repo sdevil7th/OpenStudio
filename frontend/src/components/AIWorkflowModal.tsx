@@ -39,6 +39,8 @@ interface AIWorkflowModalProps {
   onModelChange: (modelId: AiMusicModelId) => void;
   onWorkflowChange: (workflowId: string) => void;
   onParamsChange: (params: Record<string, unknown>) => void;
+  onBeginParamsEdit?: () => void;
+  onCommitParamsEdit?: () => void;
 }
 
 const SECTION_ORDER: AIWorkflowSection[] = [
@@ -147,6 +149,8 @@ export function AIWorkflowModal({
   onModelChange,
   onWorkflowChange,
   onParamsChange,
+  onBeginParamsEdit,
+  onCommitParamsEdit,
 }: AIWorkflowModalProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -260,6 +264,8 @@ export function AIWorkflowModal({
           param={param}
           value={value}
           onChange={(nextValue) => handleParamChange(param.key, nextValue)}
+          onBeginEdit={onBeginParamsEdit}
+          onCommitEdit={onCommitParamsEdit}
         />
       );
     }

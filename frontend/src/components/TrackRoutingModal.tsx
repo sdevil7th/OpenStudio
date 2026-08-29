@@ -2,17 +2,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import classNames from "classnames";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
-import { Modal } from "./ui";
+import { Modal, Slider } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function linearToDb(linear: number): number {
   return linear > 0 ? 20 * Math.log10(linear) : -Infinity;
-}
-
-function dbToLinear(db: number): number {
-  return db <= -60 ? 0 : Math.pow(10, db / 20);
 }
 
 function formatDb(db: number): string {
@@ -58,17 +54,263 @@ interface SendItemProps {
   onRemove: () => void;
 }
 
+interface SendLevelSliderProps {
+  sourceTrackId: string;
+  sendIndex: number;
+  level: number;
+  ariaLabel: string;
+}
+
+function SendLevelSlider({
+  sourceTrackId,
+  sendIndex,
+  level,
+  ariaLabel,
+}: SendLevelSliderProps) {
+  const {
+    beginTrackSendLevelEdit,
+    setTrackSendLevel,
+    commitTrackSendLevelEdit,
+  } = useDAWStore(
+    useShallow((state) => ({
+      beginTrackSendLevelEdit: state.beginTrackSendLevelEdit,
+      setTrackSendLevel: state.setTrackSendLevel,
+      commitTrackSendLevelEdit: state.commitTrackSendLevelEdit,
+    })),
+  );
+  const beginEdit = useCallback(() => {
+    beginTrackSendLevelEdit(sourceTrackId, sendIndex);
+  }, [beginTrackSendLevelEdit, sendIndex, sourceTrackId]);
+  const changeLevel = useCallback((percent: number) => {
+    void setTrackSendLevel(sourceTrackId, sendIndex, percent / 100);
+  }, [sendIndex, setTrackSendLevel, sourceTrackId]);
+  const commitEdit = useCallback(() => {
+    commitTrackSendLevelEdit(sourceTrackId, sendIndex);
+  }, [commitTrackSendLevelEdit, sendIndex, sourceTrackId]);
+
+  return (
+    <div className="flex-1">
+      <Slider
+        min={0}
+        max={100}
+        step={1}
+        value={Math.round(level * 100)}
+        defaultValue={50}
+        onBeginEdit={beginEdit}
+        onChange={changeLevel}
+        onCommitEdit={commitEdit}
+        className="h-1.5 accent-cyan-500"
+        aria-label={ariaLabel}
+      />
+    </div>
+  );
+}
+
+interface SendPanSliderProps {
+  sourceTrackId: string;
+  sendIndex: number;
+  pan: number;
+  ariaLabel: string;
+}
+
+function SendPanSlider({
+  sourceTrackId,
+  sendIndex,
+  pan,
+  ariaLabel,
+}: SendPanSliderProps) {
+  const {
+    beginTrackSendPanEdit,
+    setTrackSendPan,
+    commitTrackSendPanEdit,
+  } = useDAWStore(
+    useShallow((state) => ({
+      beginTrackSendPanEdit: state.beginTrackSendPanEdit,
+      setTrackSendPan: state.setTrackSendPan,
+      commitTrackSendPanEdit: state.commitTrackSendPanEdit,
+    })),
+  );
+  const beginEdit = useCallback(() => {
+    beginTrackSendPanEdit(sourceTrackId, sendIndex);
+  }, [beginTrackSendPanEdit, sendIndex, sourceTrackId]);
+  const changePan = useCallback((percent: number) => {
+    void setTrackSendPan(sourceTrackId, sendIndex, percent / 100);
+  }, [sendIndex, setTrackSendPan, sourceTrackId]);
+  const commitEdit = useCallback(() => {
+    commitTrackSendPanEdit(sourceTrackId, sendIndex);
+  }, [commitTrackSendPanEdit, sendIndex, sourceTrackId]);
+
+  return (
+    <div className="flex-1">
+      <Slider
+        min={-100}
+        max={100}
+        step={1}
+        value={Math.round(pan * 100)}
+        defaultValue={0}
+        variant="pan"
+        onBeginEdit={beginEdit}
+        onChange={changePan}
+        onCommitEdit={commitEdit}
+        aria-label={ariaLabel}
+      />
+    </div>
+  );
+}
+
+interface TrackContinuousControlProps {
+  trackId: string;
+  value: number;
+}
+
+function TrackPanSlider({ trackId, value }: TrackContinuousControlProps) {
+  const { beginTrackPanEdit, setTrackPan, commitTrackPanEdit } = useDAWStore(
+    useShallow((state) => ({
+      beginTrackPanEdit: state.beginTrackPanEdit,
+      setTrackPan: state.setTrackPan,
+      commitTrackPanEdit: state.commitTrackPanEdit,
+    })),
+  );
+  const beginEdit = useCallback(() => beginTrackPanEdit(trackId), [beginTrackPanEdit, trackId]);
+  const changePan = useCallback((percent: number) => {
+    void setTrackPan(trackId, percent / 100);
+  }, [setTrackPan, trackId]);
+  const commitEdit = useCallback(() => commitTrackPanEdit(trackId), [commitTrackPanEdit, trackId]);
+
+  return (
+    <div className="flex-1">
+      <Slider
+        min={-100}
+        max={100}
+        step={1}
+        value={Math.round(value * 100)}
+        defaultValue={0}
+        variant="pan"
+        onBeginEdit={beginEdit}
+        onChange={changePan}
+        onCommitEdit={commitEdit}
+        aria-label="Track pan"
+      />
+    </div>
+  );
+}
+
+function TrackStereoWidthSlider({ trackId, value }: TrackContinuousControlProps) {
+  const {
+    beginTrackStereoWidthEdit,
+    setTrackStereoWidth,
+    commitTrackStereoWidthEdit,
+  } = useDAWStore(
+    useShallow((state) => ({
+      beginTrackStereoWidthEdit: state.beginTrackStereoWidthEdit,
+      setTrackStereoWidth: state.setTrackStereoWidth,
+      commitTrackStereoWidthEdit: state.commitTrackStereoWidthEdit,
+    })),
+  );
+  const beginEdit = useCallback(() => beginTrackStereoWidthEdit(trackId), [beginTrackStereoWidthEdit, trackId]);
+  const changeWidth = useCallback((width: number) => {
+    void setTrackStereoWidth(trackId, width);
+  }, [setTrackStereoWidth, trackId]);
+  const commitEdit = useCallback(
+    () => commitTrackStereoWidthEdit(trackId),
+    [commitTrackStereoWidthEdit, trackId],
+  );
+
+  return (
+    <div className="flex-1">
+      <Slider
+        min={0}
+        max={200}
+        step={1}
+        value={value}
+        defaultValue={100}
+        onBeginEdit={beginEdit}
+        onChange={changeWidth}
+        onCommitEdit={commitEdit}
+        className="h-1.5 accent-cyan-500"
+        aria-label="Track stereo width"
+      />
+    </div>
+  );
+}
+
+function TrackVolumeDbField({ trackId, value }: TrackContinuousControlProps) {
+  const { beginTrackVolumeEdit, setTrackVolume, commitTrackVolumeEdit } = useDAWStore(
+    useShallow((state) => ({
+      beginTrackVolumeEdit: state.beginTrackVolumeEdit,
+      setTrackVolume: state.setTrackVolume,
+      commitTrackVolumeEdit: state.commitTrackVolumeEdit,
+    })),
+  );
+  const [draft, setDraft] = useState(() => formatDb(value));
+  const editingRef = useRef(false);
+
+  useEffect(() => {
+    if (!editingRef.current) setDraft(formatDb(value));
+  }, [value]);
+  useEffect(() => () => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    useDAWStore.getState().commitTrackVolumeEdit(trackId);
+  }, [trackId]);
+
+  const beginEdit = useCallback(() => {
+    if (editingRef.current) return;
+    editingRef.current = true;
+    beginTrackVolumeEdit(trackId);
+  }, [beginTrackVolumeEdit, trackId]);
+  const commitDraft = useCallback(() => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    const parsed = Number(draft);
+    if (Number.isFinite(parsed)) {
+      const nextValue = Math.max(-60, Math.min(12, parsed));
+      void setTrackVolume(trackId, nextValue);
+      setDraft(formatDb(nextValue));
+    } else {
+      setDraft(formatDb(value));
+    }
+    commitTrackVolumeEdit(trackId);
+  }, [commitTrackVolumeEdit, draft, setTrackVolume, trackId, value]);
+  const cancelDraft = useCallback(() => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    setDraft(formatDb(value));
+    commitTrackVolumeEdit(trackId);
+  }, [commitTrackVolumeEdit, trackId, value]);
+
+  return (
+    <input
+      type="text"
+      className="bg-neutral-800 border border-neutral-600 rounded text-[10px] text-neutral-300 w-16 h-5 px-1 text-center font-mono"
+      value={draft}
+      onFocus={beginEdit}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commitDraft}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitDraft();
+          event.currentTarget.blur();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          cancelDraft();
+          event.currentTarget.blur();
+        }
+      }}
+      title="Track volume in dB"
+      aria-label="Track volume in dB"
+    />
+  );
+}
+
 function SendItem({ sourceTrackId, sendIndex, send, destTrackName, onRemove }: SendItemProps) {
   const {
-    setTrackSendLevel,
-    setTrackSendPan,
     setTrackSendEnabled,
     setTrackSendPreFader,
     setTrackSendPhaseInvert,
   } = useDAWStore(
     useShallow((s) => ({
-      setTrackSendLevel: s.setTrackSendLevel,
-      setTrackSendPan: s.setTrackSendPan,
       setTrackSendEnabled: s.setTrackSendEnabled,
       setTrackSendPreFader: s.setTrackSendPreFader,
       setTrackSendPhaseInvert: s.setTrackSendPhaseInvert,
@@ -142,24 +384,18 @@ function SendItem({ sourceTrackId, sendIndex, send, destTrackName, onRemove }: S
       {/* Volume + Pan sliders */}
       <div className="flex items-center gap-2">
         <label className="text-[9px] text-neutral-500 w-6">Vol</label>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={Math.round(send.level * 100)}
-          onChange={(e) => setTrackSendLevel(sourceTrackId, sendIndex, Number(e.target.value) / 100)}
-          className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
+        <SendLevelSlider
+          sourceTrackId={sourceTrackId}
+          sendIndex={sendIndex}
+          level={send.level}
+          ariaLabel={`Send level to ${destTrackName}`}
         />
         <label className="text-[9px] text-neutral-500 w-6">Pan</label>
-        <input
-          type="range"
-          min={-100}
-          max={100}
-          step={1}
-          value={Math.round(send.pan * 100)}
-          onChange={(e) => setTrackSendPan(sourceTrackId, sendIndex, Number(e.target.value) / 100)}
-          className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
+        <SendPanSlider
+          sourceTrackId={sourceTrackId}
+          sendIndex={sendIndex}
+          pan={send.pan}
+          ariaLabel={`Send pan to ${destTrackName}`}
         />
       </div>
     </div>
@@ -186,15 +422,11 @@ interface ReceiveItemProps {
 function ReceiveItem({ sourceTrackId, sourceTrackName, sendIndex, send, onRemove }: ReceiveItemProps) {
   // Receives control the SOURCE track's send
   const {
-    setTrackSendLevel,
-    setTrackSendPan,
     setTrackSendEnabled,
     setTrackSendPreFader,
     setTrackSendPhaseInvert,
   } = useDAWStore(
     useShallow((s) => ({
-      setTrackSendLevel: s.setTrackSendLevel,
-      setTrackSendPan: s.setTrackSendPan,
       setTrackSendEnabled: s.setTrackSendEnabled,
       setTrackSendPreFader: s.setTrackSendPreFader,
       setTrackSendPhaseInvert: s.setTrackSendPhaseInvert,
@@ -260,24 +492,18 @@ function ReceiveItem({ sourceTrackId, sourceTrackName, sendIndex, send, onRemove
 
       <div className="flex items-center gap-2">
         <label className="text-[9px] text-neutral-500 w-6">Vol</label>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={Math.round(send.level * 100)}
-          onChange={(e) => setTrackSendLevel(sourceTrackId, sendIndex, Number(e.target.value) / 100)}
-          className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
+        <SendLevelSlider
+          sourceTrackId={sourceTrackId}
+          sendIndex={sendIndex}
+          level={send.level}
+          ariaLabel={`Receive level from ${sourceTrackName}`}
         />
         <label className="text-[9px] text-neutral-500 w-6">Pan</label>
-        <input
-          type="range"
-          min={-100}
-          max={100}
-          step={1}
-          value={Math.round(send.pan * 100)}
-          onChange={(e) => setTrackSendPan(sourceTrackId, sendIndex, Number(e.target.value) / 100)}
-          className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
+        <SendPanSlider
+          sourceTrackId={sourceTrackId}
+          sendIndex={sendIndex}
+          pan={send.pan}
+          ariaLabel={`Receive pan from ${sourceTrackName}`}
         />
       </div>
     </div>
@@ -298,14 +524,11 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
     addTrackSend,
     removeTrackSend,
     setTrackPhaseInvert,
-    setTrackStereoWidth,
     setTrackMasterSendEnabled,
     setTrackOutputChannels,
     setTrackPlaybackOffset,
     setTrackChannelCount,
     setTrackMIDIOutput,
-    setTrackVolume,
-    setTrackPan,
   } = useDAWStore(
     useShallow((s) => ({
       trackId: s.trackRoutingTrackId,
@@ -313,14 +536,11 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
       addTrackSend: s.addTrackSend,
       removeTrackSend: s.removeTrackSend,
       setTrackPhaseInvert: s.setTrackPhaseInvert,
-      setTrackStereoWidth: s.setTrackStereoWidth,
       setTrackMasterSendEnabled: s.setTrackMasterSendEnabled,
       setTrackOutputChannels: s.setTrackOutputChannels,
       setTrackPlaybackOffset: s.setTrackPlaybackOffset,
       setTrackChannelCount: s.setTrackChannelCount,
       setTrackMIDIOutput: s.setTrackMIDIOutput,
-      setTrackVolume: s.setTrackVolume,
-      setTrackPan: s.setTrackPan,
     })),
   );
 
@@ -397,8 +617,6 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
 
   if (!track || !trackId) return null;
 
-  const volumeDb = linearToDb(track.volume);
-
   return (
     <Modal
       isOpen={isOpen}
@@ -445,16 +663,7 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1">
               <span className="text-neutral-500 text-[10px] w-7">Vol:</span>
-              <input
-                type="text"
-                className="bg-neutral-800 border border-neutral-600 rounded text-[10px] text-neutral-300 w-16 h-5 px-1 text-center font-mono"
-                value={formatDb(volumeDb)}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  if (!isNaN(val)) setTrackVolume(trackId, dbToLinear(val));
-                }}
-                title="Track volume in dB"
-              />
+              <TrackVolumeDbField trackId={trackId} value={track.volumeDB} />
               <span className="text-neutral-500 text-[10px]">dB</span>
             </div>
             <div className="flex items-center gap-1">
@@ -474,15 +683,7 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
           {/* Pan slider */}
           <div className="flex items-center gap-2">
             <span className="text-neutral-500 text-[10px] w-7">Pan:</span>
-            <input
-              type="range"
-              min={-100}
-              max={100}
-              step={1}
-              value={Math.round(track.pan * 100)}
-              onChange={(e) => setTrackPan(trackId, Number(e.target.value) / 100)}
-              className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
-            />
+            <TrackPanSlider trackId={trackId} value={track.pan} />
             <span className="text-[10px] font-mono text-neutral-400 w-12 text-right">
               {formatPan(track.pan)}
             </span>
@@ -491,15 +692,7 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
           {/* Width slider */}
           <div className="flex items-center gap-2">
             <span className="text-neutral-500 text-[10px] w-7">Width:</span>
-            <input
-              type="range"
-              min={0}
-              max={200}
-              step={1}
-              value={track.stereoWidth}
-              onChange={(e) => setTrackStereoWidth(trackId, Number(e.target.value))}
-              className="flex-1 h-1.5 accent-cyan-500 cursor-pointer"
-            />
+            <TrackStereoWidthSlider trackId={trackId} value={track.stereoWidth} />
             <span className="text-[10px] font-mono text-neutral-400 w-12 text-right">
               {track.stereoWidth}%
             </span>

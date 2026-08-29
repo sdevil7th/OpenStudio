@@ -797,7 +797,7 @@ void ARAHostController::processBlock (juce::AudioBuffer<float>& buffer, int numS
     // full position info), so no manual playhead update is needed here.
     // Kept for potential future use (e.g., custom ARA rendering paths).
     if (! araActive || ! araProcessor) return;
-    juce::ignoreUnused (numSamples, playbackPositionSeconds, playing);
+    juce::ignoreUnused (buffer, numSamples, playbackPositionSeconds, playing);
 }
 
 juce::MemoryBlock ARAHostController::saveState() const
@@ -873,7 +873,7 @@ juce::AudioProcessorEditor* ARAHostController::createEditor()
 {
     if (! araActive || ! araProcessor) return nullptr;
     if (! araProcessor->hasEditor()) return nullptr;
-    return araProcessor->createEditor();
+    return araProcessor->createEditorAndMakeActive();
 }
 
 void ARAHostController::updateMusicalContext (double bpm, int timeSigNumerator, int timeSigDenominator)

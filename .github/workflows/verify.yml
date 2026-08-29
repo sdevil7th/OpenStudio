@@ -7,19 +7,55 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  verify-input-profiles:
+    name: Input profiles (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend unit tests
+        run: npm test
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run shortcut and input-profile browser tests
+        run: npm run test:e2e
+
   verify-windows:
     runs-on: windows-latest
     env:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-windows
       ASIO_SDK_DIR: thirdparty/asio
+      ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -28,11 +64,17 @@ jobs:
         run: |
           cd frontend
           npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install ASIO SDK
         shell: pwsh
         run: ./tools/setup-asio-sdk.ps1 -Destination $env:ASIO_SDK_DIR
+
+      - name: Install ONNX Runtime
+        shell: pwsh
+        run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
       - name: Install Windows prerequisite installers
         shell: pwsh
@@ -112,17 +154,101 @@ jobs:
             throw "Windows startup self-test failed."
           }
 
+      - name: Regress WebView2 preflight from a non-writable install directory
+        shell: pwsh
+        run: |
+          $sourceBundle = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          $protectedBundle = Join-Path $env:RUNNER_TEMP "OpenStudio-Protected-Install"
+          Copy-Item -LiteralPath $sourceBundle -Destination $protectedBundle -Recurse
+
+          # Model Program Files precisely: the test identity may read and
+          # execute the bundle but may not write beside OpenStudio.exe.
+          $acl = New-Object System.Security.AccessControl.DirectorySecurity
+          $acl.SetAccessRuleProtection($true, $false)
+          $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+          $none = [System.Security.AccessControl.PropagationFlags]::None
+          $allow = [System.Security.AccessControl.AccessControlType]::Allow
+          $deny = [System.Security.AccessControl.AccessControlType]::Deny
+          $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          # GitHub-hosted Windows runners execute as an administrator. An explicit
+          # user deny keeps the probe non-writable while the Administrators group
+          # retains the delete and ACL rights needed for runner cleanup.
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentUser, 'Write', $inheritance, $none, $deny)))
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $currentUser, 'ReadAndExecute, Synchronize', $inheritance, $none, $allow)))
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'NT AUTHORITY\SYSTEM', 'FullControl', $inheritance, $none, $allow)))
+          $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'BUILTIN\Administrators', 'FullControl', $inheritance, $none, $allow)))
+          Set-Acl -LiteralPath $protectedBundle -AclObject $acl
+
+          $writeProbe = Join-Path $protectedBundle 'must-not-write.tmp'
+          $writeDenied = $false
+          try {
+            [System.IO.File]::WriteAllText($writeProbe, 'probe')
+          } catch [System.UnauthorizedAccessException] {
+            $writeDenied = $true
+          }
+          if ((Test-Path -LiteralPath $writeProbe) -or -not $writeDenied) {
+            throw "Staged install directory remained writable."
+          }
+
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_ProtectedInstallStartupSelfTest.txt"
+          $exePath = Join-Path $protectedBundle "OpenStudio.exe"
+          $process = Start-Process -FilePath $exePath -ArgumentList @("--startup-self-test", "--report", "`"$report`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $report) {
+              Get-Content -LiteralPath $report
+            }
+            throw "WebView2 preflight failed from a non-writable install directory."
+          }
+
+          $reportText = [System.IO.File]::ReadAllText($report)
+          $userDataMatch = [regex]::Match($reportText, '(?m)^webView2UserDataPath=(.+)$')
+          if (-not $userDataMatch.Success) {
+            throw "Protected-install self-test did not report its WebView2 user-data folder."
+          }
+          $userDataPath = [System.IO.Path]::GetFullPath($userDataMatch.Groups[1].Value.Trim())
+          $protectedRoot = [System.IO.Path]::GetFullPath($protectedBundle).TrimEnd('\') + '\'
+          if ($userDataPath.StartsWith($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "WebView2 user data incorrectly resolves inside the protected install tree: $userDataPath"
+          }
+
+      - name: Run Windows native-window lifecycle smoke test
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
+          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
+
+      - name: Run NAM Rack deterministic regression
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-nam-rack-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "ci-release" `
+            -TimeoutSeconds 360 `
+            -SkipBuild
+
   verify-macos:
-    runs-on: macos-14
+    name: macOS native windows (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
     env:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-macos
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -159,6 +285,14 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform macos -BundlePath "$env:APP_BUNDLE" -ExpectedVersion "$env:VERSION" -EnforceLeanBundle
 
+      - name: Validate universal macOS executable
+        shell: bash
+        run: |
+          ARCHS="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/OpenStudio")"
+          echo "OpenStudio architectures: $ARCHS"
+          [[ " $ARCHS " == *" arm64 "* ]]
+          [[ " $ARCHS " == *" x86_64 "* ]]
+
       - name: Run macOS startup self-test
         shell: bash
         run: |
@@ -171,14 +305,22 @@ jobs:
             exit 1
           fi
 
+      - name: Run macOS native-window lifecycle smoke test
+        shell: pwsh
+        run: |
+          $executable = Join-Path $env:APP_BUNDLE "Contents/MacOS/OpenStudio"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
+          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $executable -ReportPath $report -TimeoutSeconds 180
+
   verify-linux:
     runs-on: ubuntu-24.04
     env:
       VERSION: 0.0.0
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
+      ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install system dependencies
         shell: bash
@@ -186,9 +328,9 @@ jobs:
           bash ./tools/setup-linux-prereqs.sh
           sudo apt-get install -y xvfb
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 20
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -204,6 +346,7 @@ jobs:
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
           wget -q "$URL" -O onnxruntime.tgz
+          echo "${ONNXRUNTIME_LINUX_X64_SHA256}  onnxruntime.tgz" | sha256sum --check --strict
           mkdir -p thirdparty/onnxruntime
           tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime
 
@@ -249,3 +392,21 @@ jobs:
       - name: Verify Linux AppImage output
         shell: bash
         run: test -f "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Validate packaged Linux AppImage contents
+        shell: bash
+        run: |
+          APPIMAGE="$GITHUB_WORKSPACE/dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+          EXTRACT_ROOT="$(mktemp -d)"
+          cleanup() { rm -rf -- "$EXTRACT_ROOT"; }
+          trap cleanup EXIT
+          chmod +x "$APPIMAGE"
+          (
+            cd "$EXTRACT_ROOT"
+            "$APPIMAGE" --appimage-extract >/dev/null
+          )
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/tools/validate-runtime-bundle.ps1" \
+            -Platform linux \
+            -BundlePath "$EXTRACT_ROOT/squashfs-root/usr/bin" \
+            -ExpectedVersion "$VERSION" \
+            -EnforceLeanBundle
