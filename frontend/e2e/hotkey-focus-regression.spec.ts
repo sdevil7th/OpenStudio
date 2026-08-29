@@ -124,14 +124,20 @@ test("remapped Play works from a focused button without reserving Space", async 
 test("editable Space types while stopped and stops active transport", async ({ page }) => {
   const input = page.getByRole("textbox", { name: "Text input" });
   await input.focus();
-  await page.keyboard.press("End");
+  await input.evaluate((element) => {
+    const textInput = element as HTMLInputElement;
+    textInput.setSelectionRange(textInput.value.length, textInput.value.length);
+  });
   await page.keyboard.press("Space");
   await expect(input).toHaveValue("select this text ");
   await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"native"');
 
   await setShortcutState(page, { playing: true });
   await input.focus();
-  await page.keyboard.press("End");
+  await input.evaluate((element) => {
+    const textInput = element as HTMLInputElement;
+    textInput.setSelectionRange(textInput.value.length, textInput.value.length);
+  });
   await page.keyboard.press("Space");
 
   await expect(input).toHaveValue("select this text ");

@@ -6,6 +6,7 @@ const MOUSE_MODIFIER_OVERRIDES_KEY = "openstudio.mouseModifierOverrides.v1";
 const IS_MAC_HOST = process.platform === "darwin";
 const PRIMARY_KEY = IS_MAC_HOST ? "Meta" : "Control";
 const PRIMARY_LABEL = IS_MAC_HOST ? "Cmd" : "Ctrl";
+const HOST_OVERRIDE_TARGET = IS_MAC_HOST ? "macos" : "windows";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
@@ -45,11 +46,11 @@ test("chooser exposes the additional platform-qualified DAW profiles", async ({ 
   const keyboard = page.getByLabel("Keyboard profile");
   const mouse = page.getByLabel("Mouse & scroll profile");
   for (const [value, label] of [
-    ["cakewalk_sonar", "Cakewalk / Sonar"],
-    ["garageband", "GarageBand (cross-platform emulation)"],
+    ["cakewalk_sonar", IS_MAC_HOST ? "Cakewalk / Sonar (cross-platform emulation)" : "Cakewalk / Sonar"],
+    ["garageband", IS_MAC_HOST ? "GarageBand" : "GarageBand (cross-platform emulation)"],
     ["digital_performer", "Digital Performer"],
     ["adobe_audition", "Adobe Audition"],
-    ["mixcraft", "Mixcraft"],
+    ["mixcraft", IS_MAC_HOST ? "Mixcraft (cross-platform emulation)" : "Mixcraft"],
     ["waveform", "Waveform"],
     ["renoise", "Renoise"],
   ] as const) {
@@ -94,7 +95,7 @@ test("Review shortcuts carries selections into the full editor", async ({ page }
   await expect(dialog.getByLabel("Mouse & scroll profile")).toHaveValue("cubase");
   await expect(dialog.getByText(/Scoped bindings apply only in their named editors/)).toBeVisible();
   const recordRow = dialog.getByTitle("Record").locator("..");
-  await expect(recordRow.getByText("Ctrl+Space", { exact: true })).toBeVisible();
+  await expect(recordRow.getByText(`${PRIMARY_LABEL}+Space`, { exact: true })).toBeVisible();
   await expect(recordRow.getByText("F12", { exact: true })).toBeVisible();
 });
 
@@ -196,7 +197,7 @@ test("selected profile updates shortcut hints outside the shortcut editor", asyn
   await page.getByLabel("Keyboard profile").selectOption("pro_tools");
   await page.getByRole("button", { name: "Use these profiles" }).click();
 
-  await expect(page.getByTitle("Toggle Mixer (Ctrl+=)")).toBeVisible();
+  await expect(page.getByTitle(`Toggle Mixer (${PRIMARY_LABEL}+=)`)).toBeVisible();
   await expect(page.getByTitle("Select Tool (Timeline: F7)")).toBeVisible();
 });
 
@@ -277,7 +278,7 @@ test("named profiles keep multiple keys, platform unbinds, persistence, and expo
   await page.keyboard.press(`${PRIMARY_KEY}+Shift+F11`);
   await expect(playRow.getByText(`${PRIMARY_LABEL}+Shift+F11`, { exact: true })).toBeVisible();
 
-  await dialog.getByLabel("Edit overrides for").selectOption("windows");
+  await dialog.getByLabel("Edit overrides for").selectOption(HOST_OVERRIDE_TARGET);
   await playRow.getByRole("button", { name: "Disable" }).click();
   await expect(playRow.getByText("Disabled here", { exact: true })).toBeVisible();
   await expect(playRow.getByText("Unassigned (custom)", { exact: true })).toBeVisible();
@@ -292,7 +293,7 @@ test("named profiles keep multiple keys, platform unbinds, persistence, and expo
       bindings: {
         "transport.play": {
           common: ["Ctrl+Shift+F10", "Ctrl+Shift+F11"],
-          windows: [],
+          [HOST_OVERRIDE_TARGET]: [],
         },
       },
     }],

@@ -203,17 +203,17 @@ public:
     }
 
 private:
+    static constexpr int kMaxMessageBytes = 256;
+
     struct Packet
     {
-        std::array<std::uint8_t, 256> bytes {};
+        std::array<std::uint8_t, kMaxMessageBytes> bytes {};
         double eventTimeMs = 0.0;
         std::uint32_t generation = 0;
         std::uint16_t size = 0;
     };
 
     static constexpr std::uint32_t kQueueCapacity = 512;
-    static constexpr int kMaxMessageBytes =
-        static_cast<int>(Packet{}.bytes.size());
     static_assert(
         (kQueueCapacity & (kQueueCapacity - 1)) == 0);
     static_assert(std::atomic<bool>::is_always_lock_free);

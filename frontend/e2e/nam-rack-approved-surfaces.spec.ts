@@ -96,7 +96,10 @@ async function openRackSection(page: Page, section: RackSection) {
   const host = page.locator(
     `.nam-rack-design-port.nam-native-design-surface[data-design-section="${section}"]`,
   );
-  await expect(host).toBeVisible();
+  // The detached editor is bootstrapped through a dynamic import. On a cold
+  // Windows CI worker Vite can need longer than Playwright's 5 s assertion
+  // default to transform the full NAM Rack surface before its host mounts.
+  await expect(host).toBeVisible({ timeout: 15_000 });
   await expect(host.locator(".nam-rack-artboard")).toBeVisible();
   await page.evaluate(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
