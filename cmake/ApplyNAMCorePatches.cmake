@@ -13,9 +13,14 @@ function(nam_apply_git_patch PATCH_NAME PATCH_DESCRIPTION)
         message(FATAL_ERROR "NeuralAmpModelerCore patch was not found: ${PATCH_PATH}")
     endif()
 
+    # FetchContent checks out dependencies using the developer's Git settings.
+    # On Windows, core.autocrlf may therefore make untouched source lines CRLF,
+    # while git apply writes the patch's added lines as LF.  Ignore whitespace
+    # changes while matching patch context so a later configure can recognize
+    # that the exact patch is already present in this mixed-ending worktree.
     execute_process(
         COMMAND "${NAM_GIT_EXECUTABLE}" -C "${NAM_SOURCE_DIR}"
-                apply --check --whitespace=nowarn "${PATCH_PATH}"
+                apply --check --ignore-space-change --whitespace=nowarn "${PATCH_PATH}"
         RESULT_VARIABLE PATCH_CHECK_RESULT
         OUTPUT_VARIABLE PATCH_CHECK_OUTPUT
         ERROR_VARIABLE PATCH_CHECK_ERROR
@@ -23,7 +28,7 @@ function(nam_apply_git_patch PATCH_NAME PATCH_DESCRIPTION)
     if(PATCH_CHECK_RESULT EQUAL 0)
         execute_process(
             COMMAND "${NAM_GIT_EXECUTABLE}" -C "${NAM_SOURCE_DIR}"
-                    apply --whitespace=nowarn "${PATCH_PATH}"
+                    apply --ignore-space-change --whitespace=nowarn "${PATCH_PATH}"
             RESULT_VARIABLE PATCH_APPLY_RESULT
             OUTPUT_VARIABLE PATCH_APPLY_OUTPUT
             ERROR_VARIABLE PATCH_APPLY_ERROR
@@ -39,7 +44,7 @@ function(nam_apply_git_patch PATCH_NAME PATCH_DESCRIPTION)
 
     execute_process(
         COMMAND "${NAM_GIT_EXECUTABLE}" -C "${NAM_SOURCE_DIR}"
-                apply --reverse --check --whitespace=nowarn "${PATCH_PATH}"
+                apply --reverse --check --ignore-space-change --whitespace=nowarn "${PATCH_PATH}"
         RESULT_VARIABLE PATCH_REVERSE_CHECK_RESULT
         OUTPUT_VARIABLE PATCH_REVERSE_CHECK_OUTPUT
         ERROR_VARIABLE PATCH_REVERSE_CHECK_ERROR

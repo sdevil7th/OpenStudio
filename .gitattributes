@@ -1,6 +1,6 @@
 # Unified-diff context lines contain one required leading space. Treat those
 # syntax markers as valid instead of reporting them as trailing whitespace.
-*.patch whitespace=-blank-at-eol
+*.patch text eol=lf whitespace=-blank-at-eol
 *.onnx binary
 thirdparty/basic-pitch/LICENSE text eol=lf
 thirdparty/basic-pitch/NOTICE text eol=lf
