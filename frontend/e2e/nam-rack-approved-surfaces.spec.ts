@@ -472,6 +472,12 @@ test("approved post-cab EQ has nine faders and a three-rotary utility tier", asy
 });
 
 test("Amp, EQ, EQ Boost, and Drive hardware remain inside their painted borders at every supported host size", async ({ page }) => {
+  // This matrix performs 15 full detached-editor navigations (three rack
+  // sections at five viewport sizes). Cold Windows CI workers can complete
+  // every mount and assertion correctly while exceeding Playwright's 30 s
+  // default whole-test budget.
+  test.setTimeout(90_000);
+
   const viewports = [
     { width: 920, height: 760 },
     { width: 1024, height: 700 },
