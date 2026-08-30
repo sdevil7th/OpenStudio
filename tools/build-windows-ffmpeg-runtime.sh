@@ -140,7 +140,7 @@ build_autotools_dependency() {
 
 build_autotools_dependency libogg
 build_autotools_dependency libvorbis "--with-ogg=$prefix_dir"
-build_autotools_dependency lame --disable-frontend --disable-decoder
+build_autotools_dependency lame --disable-frontend
 
 ffmpeg_configure=(
   "--prefix=$prefix_dir"
