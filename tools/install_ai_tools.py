@@ -965,9 +965,9 @@ def get_music_generation_runtime_requirements(
         return []
 
     return [
-        "git+https://github.com/huggingface/diffusers.git",
-        "transformers",
-        "accelerate",
+        "diffusers==0.39.0",
+        "transformers==4.57.6",
+        "accelerate==1.12.0",
         "soundfile",
         "numpy",
         "huggingface_hub>=0.34,<1.0",
