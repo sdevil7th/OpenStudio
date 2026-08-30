@@ -11,6 +11,7 @@ download_dir="$work_root/downloads"
 source_dir="$work_root/sources"
 build_dir="$work_root/build"
 prefix_dir="$work_root/prefix"
+host_tools_dir="$work_root/host-tools"
 toolchain_dir="$work_root/toolchain"
 runtime_dir="$work_root/runtime"
 corresponding_dir="$work_root/corresponding-source"
@@ -47,7 +48,7 @@ assert_safe_build_path "$work_root"
 assert_safe_build_path "$output_root"
 rm -rf "$work_root" "$output_root"
 mkdir -p "$download_dir" "$source_dir" "$build_dir" "$prefix_dir" \
-  "$toolchain_dir" "$runtime_dir/licenses" "$corresponding_dir/sources" \
+  "$host_tools_dir" "$toolchain_dir" "$runtime_dir/licenses" "$corresponding_dir/sources" \
   "$corresponding_dir/build"
 
 read_lock_value() {
@@ -85,6 +86,20 @@ toolchain_archive="$download_dir/$(basename "${toolchain_url%%\?*}")"
 download_verified "$toolchain_url" "$toolchain_sha256" "$toolchain_archive"
 tar -xf "$toolchain_archive" -C "$toolchain_dir" --strip-components=1
 
+nasm_url="$(read_lock_value buildTools.0.url)"
+nasm_sha256="$(read_lock_value buildTools.0.sha256)"
+nasm_archive_name="$(read_lock_value buildTools.0.archive)"
+nasm_archive="$download_dir/$nasm_archive_name"
+download_verified "$nasm_url" "$nasm_sha256" "$nasm_archive"
+cp "$nasm_archive" "$corresponding_dir/sources/$nasm_archive_name"
+mkdir -p "$source_dir/nasm" "$build_dir/nasm"
+tar -xf "$nasm_archive" -C "$source_dir/nasm" --strip-components=1
+pushd "$build_dir/nasm" >/dev/null
+"$source_dir/nasm/configure" "--prefix=$host_tools_dir"
+make -j"$(getconf _NPROCESSORS_ONLN)"
+make install
+popd >/dev/null
+
 source_count="$(python3 - "$lock_file" <<'PY'
 import json
 import sys
@@ -113,7 +128,7 @@ patch -d "$source_dir/lame" -p1 \
   < "$repo_root/thirdparty/ffmpeg/patches/lame-3.100-windows-exports.patch"
 
 target="x86_64-w64-mingw32"
-export PATH="$toolchain_dir/bin:$PATH"
+export PATH="$host_tools_dir/bin:$toolchain_dir/bin:$PATH"
 export CC="$target-clang"
 export CXX="$target-clang++"
 export AR="$target-ar"
@@ -229,6 +244,7 @@ EOF
   echo "OpenStudio FFmpeg runtime: $runtime_version"
   echo "Target: x86_64 Windows UCRT"
   echo "Toolchain: llvm-mingw $toolchain_version"
+  echo "Assembler: $(nasm -v)"
   echo "Compiler: $($CC --version | head -n 1)"
   echo ""
   printf 'FFmpeg configure:'
