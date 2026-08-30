@@ -1869,6 +1869,8 @@ private:
         const auto pluginBounds = juce::Rectangle<int>(180, 90, 1040, 680);
         const juce::String midiSessionId = "window-lifecycle-midi";
         const juce::String pluginSessionId = R"({"title":"Window Lifecycle Harness","fallbackName":"OpenStudio Built-in","address":{"trackId":"window-lifecycle","chain":"track","fxIndex":0}})";
+        constexpr int frontendReadyMaxAttempts = 120;
+        constexpr int frontendReadyRetryDelayMs = 250;
 
         auto checks = std::make_shared<juce::Array<juce::var>>();
         auto steps = std::make_shared<std::vector<HarnessStep>>();
@@ -1877,7 +1879,7 @@ private:
         {
             auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr;
             return component != nullptr && component->hasFrontendStartupSucceeded();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
 
         steps->push_back({ "mixer_prewarm", 700, [this, mixerBounds]()
         {
@@ -1890,7 +1892,7 @@ private:
         steps->push_back({ "mixer_frontend_ready", 0, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "mixer_focus", 300, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->focus();
@@ -1906,7 +1908,7 @@ private:
         steps->push_back({ "mixer_reopened_frontend_ready", 0, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "mixer_final_close", 2200, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->close();
@@ -1926,7 +1928,7 @@ private:
             return existing != midiEditorWindowManagers.end()
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "midi_close", 50, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -1941,7 +1943,7 @@ private:
             return existing != midiEditorWindowManagers.end()
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "midi_final_close", 2200, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -1957,7 +1959,7 @@ private:
             return existing != pluginEditorWindowManagers.end()
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "plugin_close", 50, [this, pluginSessionId]()
         {
             return closePluginEditorWindow(pluginSessionId, "close");
@@ -1972,7 +1974,7 @@ private:
             return existing != pluginEditorWindowManagers.end()
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
-        }, 50, 250 });
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
         steps->push_back({ "plugin_final_close", 2200, [this, pluginSessionId]()
         {
             return closePluginEditorWindow(pluginSessionId, "close");
