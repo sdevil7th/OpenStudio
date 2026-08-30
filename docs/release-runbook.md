@@ -69,11 +69,14 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - Official Windows and Linux CI/release jobs provision the pinned ONNX Runtime
   and validate its redistributed license notices. The current macOS release job
   does not provision ONNX Runtime.
-- Windows packages include one checksum-pinned, provenance-recorded FFmpeg
-  executable. macOS and Linux packages intentionally do not redistribute an
-  unpinned FFmpeg binary and use an optional system `ffmpeg` on `PATH`.
-- Windows configuration and runtime validation fail if the pinned FFmpeg
-  executable or its required legal/provenance files are absent or altered.
+- Windows packages include the checksum-pinned OpenStudio FFmpeg runtime: the
+  executable, its shared libraries, exact license texts, source lock, runtime
+  manifest, and release provenance. macOS and Linux packages intentionally do
+  not redistribute an unpinned FFmpeg binary and use an optional system
+  `ffmpeg` on `PATH`.
+- Windows setup, CMake configuration, and runtime validation fail if any pinned
+  FFmpeg runtime, manifest, source-lock, license, or provenance file is absent
+  or altered.
 - Linux release automation extracts the completed AppImage and reruns the
   runtime-bundle contract against its packaged `usr/bin` payload.
 
@@ -89,16 +92,15 @@ OpenStudio now follows the policy documented in `docs/runtime-dependency-contrac
 
 ## Release decision rules
 
-- Do not publish a Windows artifact containing the bundled `ffmpeg.exe` until
-  complete corresponding source for that exact static build (including its
-  linked libraries) is made available through the release distribution. The
-  packaged GPL text and provenance manifest are necessary notices, but are not
-  a substitute for corresponding source.
-- Configure repository variables `OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_URL`
-  and `OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_SHA256` with an HTTPS archive and
-  digest for that exact complete source package. Release automation downloads,
-  verifies, checksums, and publishes it beside the Windows installer; missing
-  or mismatched configuration blocks the release.
+- Do not publish a Windows artifact containing the bundled FFmpeg runtime unless
+  its matching immutable complete corresponding-source asset is still
+  available. `thirdparty/ffmpeg/runtime-lock.json` pins both assets and their
+  digests; release automation downloads and verifies the source companion
+  without relying on mutable repository variables.
+- A runtime update must be made through `.github/workflows/ffmpeg-runtime.yml`.
+  Update source/toolchain pins and patches, pass the real-Windows capability
+  suite, publish a new immutable `ffmpeg-runtime-v*` release, and only then
+  update `runtime-lock.json`. Never move or replace an existing runtime tag.
 - A passing `--startup-self-test` proves dependency and asset preflight, not a
   rendered UI. The packaged main shell, detached Mixer, detached MIDI editor,
   and built-in effect editor must each report `boot-ready` through close/reopen

@@ -135,7 +135,7 @@ OpenStudio/
 │   ├── vite.config.ts
 │   └── tsconfig.json
 │
-├── tools/                       # ffmpeg.exe, stem_separator.py, setup scripts
+├── tools/                       # FFmpeg runtime setup, stem_separator.py, setup scripts
 ├── resources/                   # ONNX models, presets, resources
 ├── build/                       # CMake build output
 ├── CMakeLists.txt               # C++ build: JUCE 9.0.1, ASIO SDK, WebView2, VST3, ONNX Runtime

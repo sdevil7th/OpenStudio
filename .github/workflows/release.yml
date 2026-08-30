@@ -26,8 +26,6 @@ jobs:
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
-      FFMPEG_CORRESPONDING_SOURCE_URL: ${{ vars.OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_URL }}
-      FFMPEG_CORRESPONDING_SOURCE_SHA256: ${{ vars.OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_SHA256 }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.10.20' }}
@@ -74,6 +72,10 @@ jobs:
       - name: Install ONNX Runtime
         shell: pwsh
         run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
+
+      - name: Install checksum-pinned FFmpeg runtime
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
 
       - name: Detect Doppler fallback
         shell: pwsh
@@ -239,25 +241,7 @@ jobs:
 
       - name: Stage checksum-pinned FFmpeg corresponding source
         shell: pwsh
-        run: |
-          $sourceUrl = ([string]$env:FFMPEG_CORRESPONDING_SOURCE_URL).Trim()
-          $expectedSha256 = ([string]$env:FFMPEG_CORRESPONDING_SOURCE_SHA256).Trim().ToLowerInvariant()
-          if ([string]::IsNullOrWhiteSpace($sourceUrl) -or
-              $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
-            throw "Set OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_URL and OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_SHA256 to the complete corresponding-source archive for the exact bundled FFmpeg 8.0.1 static build."
-          }
-          $sourceUri = [Uri]$sourceUrl
-          if (-not $sourceUri.IsAbsoluteUri -or $sourceUri.Scheme -ne "https") {
-            throw "OPENSTUDIO_FFMPEG_CORRESPONDING_SOURCE_URL must be an absolute HTTPS URL."
-          }
-
-          $sourcePath = "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
-          Invoke-WebRequest -Uri $sourceUri -OutFile $sourcePath -UseBasicParsing
-          $actualSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualSha256 -ne $expectedSha256) {
-            Remove-Item -LiteralPath $sourcePath -Force
-            throw "FFmpeg corresponding-source checksum mismatch. Expected '$expectedSha256' but found '$actualSha256'."
-          }
+        run: ./tools/setup-ffmpeg.ps1 -CorrespondingSourceDestination "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -89,6 +89,10 @@ jobs:
         shell: pwsh
         run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
+      - name: Install checksum-pinned FFmpeg runtime
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
+
       - name: Install Windows prerequisite installers
         shell: pwsh
         run: |

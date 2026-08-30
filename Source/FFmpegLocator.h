@@ -23,7 +23,11 @@ inline juce::Array<juce::File> bundledCandidates()
     juce::Array<juce::File> candidates;
     candidates.add(executableDirectory.getChildFile(name));
     candidates.add(
-        executableDirectory.getChildFile("tools").getChildFile(name));
+        executableDirectory.getChildFile("ffmpeg-runtime").getChildFile(name));
+    candidates.add(
+        executableDirectory.getChildFile("tools")
+            .getChildFile("ffmpeg-runtime")
+            .getChildFile(name));
 #if JUCE_MAC
     candidates.add(
         executableDirectory.getParentDirectory()
@@ -34,7 +38,9 @@ inline juce::Array<juce::File> bundledCandidates()
     for (int level = 0; level < 3; ++level)
     {
         candidates.add(
-            parent.getChildFile("tools").getChildFile(name));
+            parent.getChildFile("tools")
+                .getChildFile("ffmpeg-runtime")
+                .getChildFile(name));
         parent = parent.getParentDirectory();
     }
     return candidates;

@@ -3,7 +3,17 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-lock_file="${OPENSTUDIO_FFMPEG_SOURCE_LOCK:-$repo_root/thirdparty/ffmpeg/source-lock.json}"
+default_lock_file="$repo_root/thirdparty/ffmpeg/source-lock.json"
+if [[ ! -f "$default_lock_file" && -f "$repo_root/source-lock.json" ]]; then
+  default_lock_file="$repo_root/source-lock.json"
+fi
+lock_file="${OPENSTUDIO_FFMPEG_SOURCE_LOCK:-$default_lock_file}"
+default_patch_dir="$repo_root/thirdparty/ffmpeg/patches"
+if [[ ! -d "$default_patch_dir" && -d "$repo_root/patches" ]]; then
+  default_patch_dir="$repo_root/patches"
+fi
+patch_dir="${OPENSTUDIO_FFMPEG_PATCH_DIR:-$default_patch_dir}"
+source_archive_dir="${OPENSTUDIO_FFMPEG_SOURCE_ARCHIVE_DIR:-$repo_root/sources}"
 work_root="${OPENSTUDIO_FFMPEG_WORK_ROOT:-$repo_root/build-ffmpeg-runtime}"
 output_root="${OPENSTUDIO_FFMPEG_OUTPUT_ROOT:-$repo_root/dist/ffmpeg-runtime}"
 
@@ -68,8 +78,15 @@ download_verified() {
   local url="$1"
   local expected_sha256="$2"
   local destination="$3"
-  echo "Downloading $(basename "$destination")"
-  curl --fail --location --retry 3 --retry-delay 2 --output "$destination" "$url"
+  local archive_name
+  archive_name="$(basename "$destination")"
+  if [[ -f "$source_archive_dir/$archive_name" ]]; then
+    echo "Using packaged source archive $archive_name"
+    cp "$source_archive_dir/$archive_name" "$destination"
+  else
+    echo "Downloading $archive_name"
+    curl --fail --location --retry 3 --retry-delay 2 --output "$destination" "$url"
+  fi
   local actual_sha256
   actual_sha256="$(sha256sum "$destination" | awk '{print $1}')"
   if [[ "$actual_sha256" != "$expected_sha256" ]]; then
@@ -125,7 +142,7 @@ done
 # export keeps the public, supported lame_init API and makes the DLL export
 # table agree with the compiled source.
 patch -d "$source_dir/lame" -p1 \
-  < "$repo_root/thirdparty/ffmpeg/patches/lame-3.100-windows-exports.patch"
+  < "$patch_dir/lame-3.100-windows-exports.patch"
 
 target="x86_64-w64-mingw32"
 export PATH="$host_tools_dir/bin:$toolchain_dir/bin:$PATH"
@@ -213,7 +230,7 @@ cp "$source_dir/libogg/COPYING" "$runtime_dir/licenses/libogg-COPYING.txt"
 cp "$source_dir/libvorbis/COPYING" "$runtime_dir/licenses/libvorbis-COPYING.txt"
 
 cp "$lock_file" "$corresponding_dir/source-lock.json"
-cp -R "$repo_root/thirdparty/ffmpeg/patches" "$corresponding_dir/patches"
+cp -R "$patch_dir" "$corresponding_dir/patches"
 cp "$script_dir/build-windows-ffmpeg-runtime.sh" "$corresponding_dir/build/"
 cp "$script_dir/test-windows-ffmpeg-runtime.ps1" "$corresponding_dir/build/"
 
@@ -231,13 +248,14 @@ FFmpeg libraries into OpenStudio. The runtime is a shared-library build with
 GPL and non-free components disabled.
 
 To rebuild on an x86_64 Linux host, install bash, curl, Python 3, make,
-pkg-config, tar and zip, then run:
+pkg-config, tar and zip, then run from the extracted archive root:
 
-    ./build/build-windows-ffmpeg-runtime.sh
+    bash ./build/build-windows-ffmpeg-runtime.sh
 
 The build script downloads the checksum-pinned llvm-mingw $toolchain_version
-toolchain recorded by source-lock.json. No unlisted media library is detected
-or linked because FFmpeg is configured with --disable-autodetect.
+toolchain recorded by source-lock.json and consumes the included upstream source
+archives from sources/. No unlisted media library is detected or linked because
+FFmpeg is configured with --disable-autodetect.
 EOF
 
 {

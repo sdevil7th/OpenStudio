@@ -3,9 +3,15 @@ name: FFmpeg Runtime
 on:
   push:
     branches:
-      - fix/reproducible-ffmpeg-runtime
+      - main
     tags:
       - "ffmpeg-runtime-v*"
+    paths:
+      - ".github/workflows/ffmpeg-runtime.yml"
+      - "thirdparty/ffmpeg/**"
+      - "tools/build-windows-ffmpeg-runtime.sh"
+      - "tools/test-windows-ffmpeg-runtime.ps1"
+  pull_request:
     paths:
       - ".github/workflows/ffmpeg-runtime.yml"
       - "thirdparty/ffmpeg/**"
@@ -30,6 +36,34 @@ jobs:
 
       - name: Build runtime and complete corresponding source
         run: bash ./tools/build-windows-ffmpeg-runtime.sh
+
+      - name: Rebuild from the complete corresponding-source archive
+        run: |
+          rm -rf "$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild"
+          mkdir -p "$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/source"
+          unzip -q \
+            dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip \
+            -d "$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/source"
+          OPENSTUDIO_FFMPEG_WORK_ROOT="$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/work" \
+          OPENSTUDIO_FFMPEG_OUTPUT_ROOT="$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/output" \
+            bash "$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/source/build/build-windows-ffmpeg-runtime.sh"
+          python3 - \
+            build-ffmpeg-runtime/runtime/runtime-manifest.json \
+            "$RUNNER_TEMP/openstudio-ffmpeg-source-rebuild/work/runtime/runtime-manifest.json" <<'PY'
+          import json
+          import sys
+
+          manifests = []
+          for path in sys.argv[1:]:
+              with open(path, "r", encoding="utf-8") as handle:
+                  manifests.append(json.load(handle))
+          for key in ("runtimeVersion", "target", "license", "gplComponentsEnabled", "nonFreeComponentsEnabled"):
+              if manifests[0][key] != manifests[1][key]:
+                  raise SystemExit(f"Rebuilt manifest differs for {key}")
+          paths = [{item["path"] for item in manifest["files"]} for manifest in manifests]
+          if paths[0] != paths[1]:
+              raise SystemExit("Rebuilt runtime file set differs")
+          PY
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

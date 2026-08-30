@@ -40,7 +40,7 @@ function Resolve-AppPath {
 
 function Resolve-FFmpegPath {
     $candidates = @(
-        (Join-Path $repoRoot "tools\ffmpeg.exe"),
+        (Join-Path $repoRoot "tools\ffmpeg-runtime\ffmpeg.exe"),
         (Join-Path $repoRoot "build\OpenStudio_artefacts\Debug\ffmpeg.exe"),
         (Join-Path $repoRoot "build\OpenStudio_artefacts\Release\ffmpeg.exe")
     )
@@ -56,7 +56,7 @@ function Resolve-FFmpegPath {
         return $fromPath.Source
     }
 
-    throw "ffmpeg.exe not found. Expected tools\ffmpeg.exe or ffmpeg on PATH."
+    throw "ffmpeg.exe not found. Run tools\setup-ffmpeg.ps1 or install ffmpeg on PATH."
 }
 
 function New-RunDirectory {
