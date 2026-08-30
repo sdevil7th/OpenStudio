@@ -25,7 +25,7 @@ require_command() {
   fi
 }
 
-for command_name in curl python3 sha256sum tar make pkg-config zip; do
+for command_name in curl patch python3 sha256sum tar make pkg-config zip; do
   require_command "$command_name"
 done
 
@@ -104,6 +104,13 @@ for ((index = 0; index < source_count; ++index)); do
   mkdir -p "$source_dir/$source_name"
   tar -xf "$source_archive_path" -C "$source_dir/$source_name" --strip-components=1
 done
+
+# LAME 3.100's Windows export list contains lame_init_old even when its
+# configure result removes that deprecated implementation. Removing the stale
+# export keeps the public, supported lame_init API and makes the DLL export
+# table agree with the compiled source.
+patch -d "$source_dir/lame" -p1 \
+  < "$repo_root/thirdparty/ffmpeg/patches/lame-3.100-windows-exports.patch"
 
 target="x86_64-w64-mingw32"
 export PATH="$toolchain_dir/bin:$PATH"
@@ -191,6 +198,7 @@ cp "$source_dir/libogg/COPYING" "$runtime_dir/licenses/libogg-COPYING.txt"
 cp "$source_dir/libvorbis/COPYING" "$runtime_dir/licenses/libvorbis-COPYING.txt"
 
 cp "$lock_file" "$corresponding_dir/source-lock.json"
+cp -R "$repo_root/thirdparty/ffmpeg/patches" "$corresponding_dir/patches"
 cp "$script_dir/build-windows-ffmpeg-runtime.sh" "$corresponding_dir/build/"
 cp "$script_dir/test-windows-ffmpeg-runtime.ps1" "$corresponding_dir/build/"
 
