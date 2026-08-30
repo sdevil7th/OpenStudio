@@ -189,6 +189,10 @@ FetchContent_Declare(
     GIT_TAG        v0.5.4
     GIT_SHALLOW    TRUE
     GIT_SUBMODULES Dependencies/eigen
+    # NAM Core pins Eigen 5.0.1 as a submodule. Use Eigen's official GitHub
+    # mirror for that exact commit so builds do not depend on GitLab uptime.
+    GIT_CONFIG
+        submodule.Dependencies/eigen.url=https://github.com/eigen-mirror/eigen.git
     # Keep OpenStudio's verified v0.5.4 real-time fixes reproducible:
     # active-column WaveNet clearing, a lock-free SlimmableWavenet pending
     # fast path, allocation-free ConvNet processing after Reset(), and an A2
