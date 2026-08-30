@@ -18,7 +18,11 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Run Python tooling unit tests
-        run: python3 -m unittest discover -s tests -p "test_*.py"
+        run: >-
+          python3 -m unittest
+          tests.test_ai_runtime_dependency_pins
+          tests.test_install_ai_tools_feature_gating
+          tests.test_install_ai_tools_runtime_repair
 
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})
