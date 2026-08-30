@@ -213,11 +213,12 @@ class AceDiffusersGenerationTests(unittest.TestCase):
             self.assertEqual(resolved, str(override))
             self.assertEqual(searched[0], str(override))
 
-    def test_ffmpeg_resolver_finds_source_tree_tools_binary(self):
+    def test_ffmpeg_resolver_finds_source_tree_pinned_runtime(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tools_dir = Path(temp_dir) / "tools"
-            tools_dir.mkdir()
-            bundled = tools_dir / music.ffmpeg_binary_name()
+            runtime_dir = tools_dir / "ffmpeg-runtime"
+            runtime_dir.mkdir(parents=True)
+            bundled = runtime_dir / music.ffmpeg_binary_name()
             bundled.write_bytes(b"")
 
             with mock.patch.dict(os.environ, {"OPENSTUDIO_FFMPEG_PATH": ""}), \

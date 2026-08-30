@@ -41,23 +41,39 @@ try {
         throw "Window lifecycle smoke test timed out after $TimeoutSeconds seconds."
     }
 
-    if ($process.ExitCode -ne 0) {
-        throw "Window lifecycle smoke test process exited with code $($process.ExitCode)."
-    }
-
     if (-not (Test-Path -LiteralPath $ReportPath)) {
+        if ($process.ExitCode -ne 0) {
+            throw "Window lifecycle smoke test process exited with code $($process.ExitCode) and did not write its report: $ReportPath"
+        }
         throw "Window lifecycle smoke test did not write its report: $ReportPath"
     }
 
-    $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+    $reportText = Get-Content -LiteralPath $ReportPath -Raw
+    try {
+        $report = $reportText | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "Invalid window lifecycle report content:"
+        Write-Host $reportText
+        throw "Window lifecycle smoke test wrote invalid JSON: $($_.Exception.Message)"
+    }
+
     if ($report.harnessMode -ne "window_lifecycle") {
         throw "Unexpected window lifecycle report type: '$($report.harnessMode)'."
     }
 
     if ($report.success -ne $true) {
+        Write-Host "Failed window lifecycle report:"
+        Write-Host $reportText
         $failedChecks = @($report.checks | Where-Object { $_.status -eq "fail" })
         $failedSummary = ($failedChecks | ForEach-Object { "$($_.id): $($_.detail)" }) -join "; "
         throw "Window lifecycle smoke test reported failure. $failedSummary"
+    }
+
+    if ($process.ExitCode -ne 0) {
+        Write-Host "Window lifecycle report:"
+        Write-Host $reportText
+        throw "Window lifecycle smoke test process exited with code $($process.ExitCode) after reporting success."
     }
 
     $requiredReadyChecks = @(

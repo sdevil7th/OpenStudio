@@ -44,8 +44,8 @@ These are bundled with OpenStudio and should be present in the installed/runtime
 - `LICENSE`, `THIRD_PARTY_LICENSES.md`, and the packaged dependency notices
   under `licenses/`; notices with repository-pinned digests are checksum
   validated before packaging
-- Windows: the checksum-pinned `ffmpeg.exe` plus its exact GPL and provenance
-  files
+- Windows: the checksum-pinned FFmpeg executable, shared-library set, runtime
+  manifest, source lock, provenance, and applicable license files
 
 If a bundled feature asset is missing:
 

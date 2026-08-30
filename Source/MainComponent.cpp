@@ -11465,7 +11465,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("renderProject", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Render/Export project to audio file
-                        // Args: [source, startTime, endTime, filePath, format, sampleRate, bitDepth, channels, normalize, addTail, tailLength, includeMetronome?]
+                        // Args: [source, startTime, endTime, filePath, format, sampleRate, bitDepth, channels, normalize, addTail, tailLength, includeMetronome?, includedClipIds?]
                         if (args.size() >= 11) {
                             juce::String source = args[0].toString();
                             double startTime = (double)args[1];
@@ -11479,17 +11479,24 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             bool addTail = (bool)args[9];
                             double tailLength = (double)args[10];
                             bool includeMetronome = args.size() >= 12 ? (bool)args[11] : false;
+                            juce::StringArray includedClipIds;
+                            if (args.size() >= 13)
+                            {
+                                if (const auto* ids = args[12].getArray())
+                                    for (const auto& id : *ids)
+                                        includedClipIds.addIfNotAlreadyThere(id.toString());
+                            }
 
                             // Run on background thread to avoid blocking message thread
                             std::thread([this, source, startTime, endTime, filePathArg, format,
                                          sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength,
-                                         includeMetronome,
+                                         includeMetronome, includedClipIds,
                                          completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
                                 const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                                 bool success = audioEngine.renderProject(
                                     source, startTime, endTime, filePathArg, format,
                                     sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength,
-                                    includeMetronome);
+                                    includeMetronome, includedClipIds);
                                 // Call completion on the message thread to avoid crash
                                 // (WebView callbacks must not be invoked from background threads)
                                 juce::MessageManager::callAsync([completion, success]() {
@@ -11646,7 +11653,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("renderProjectWithDither", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        // Args: [source, startTime, endTime, filePath, format, sampleRate, bitDepth, channels, normalize, addTail, tailLength, ditherType, includeMetronome?]
+                        // Args: [source, startTime, endTime, filePath, format, sampleRate, bitDepth, channels, normalize, addTail, tailLength, ditherType, includeMetronome?, includedClipIds?]
                         if (args.size() >= 12) {
                             juce::String source = args[0].toString();
                             double startTime = (double)args[1];
@@ -11661,16 +11668,23 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             double tailLength = (double)args[10];
                             juce::String ditherType = args[11].toString();
                             bool includeMetronome = args.size() >= 13 ? (bool)args[12] : false;
+                            juce::StringArray includedClipIds;
+                            if (args.size() >= 14)
+                            {
+                                if (const auto* ids = args[13].getArray())
+                                    for (const auto& id : *ids)
+                                        includedClipIds.addIfNotAlreadyThere(id.toString());
+                            }
 
                             std::thread([this, source, startTime, endTime, filePathArg, format,
                                          sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength, ditherType,
-                                         includeMetronome,
+                                         includeMetronome, includedClipIds,
                                          completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
                                 const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                                 bool success = audioEngine.renderProjectWithDither(
                                     source, startTime, endTime, filePathArg, format,
                                     sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength, ditherType,
-                                    includeMetronome);
+                                    includeMetronome, includedClipIds);
                                 juce::MessageManager::callAsync([completion, success]() {
                                     (*completion)(success);
                                 });

@@ -4,7 +4,7 @@
 *.onnx binary
 thirdparty/basic-pitch/LICENSE text eol=lf
 thirdparty/basic-pitch/NOTICE text eol=lf
-thirdparty/ffmpeg/COPYING.GPLv3 text eol=lf
-thirdparty/ffmpeg/PROVENANCE.json text eol=lf
+thirdparty/ffmpeg/source-lock.json text eol=lf
+thirdparty/ffmpeg/runtime-lock.json text eol=lf
 thirdparty/signalsmith/LICENSE.txt text eol=lf
 thirdparty/signalsmith/signalsmith-linear/LICENSE.txt text eol=lf

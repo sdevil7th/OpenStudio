@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { prepareForManualRender } from "../utils/renderPreparation";
 import { joinNativePath } from "../utils/nativePath";
+import { reserveUniqueRenderPath, resolveRenderWildcards } from "../utils/renderJobPlanning";
 import {
   Button,
   Input,
@@ -39,6 +40,7 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
   const [filePattern, setFilePattern] = useState("$project_$track_$region");
   const [format, setFormat] = useState<"wav" | "aiff" | "flac" | "mp3">("wav");
   const [bitDepth, setBitDepth] = useState(24);
+  const [mp3Bitrate, setMp3Bitrate] = useState(320);
   const [isRendering, setIsRendering] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("");
@@ -65,13 +67,12 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
   const checkedCount = Object.values(checked).filter(Boolean).length;
 
   const resolveFilename = (trackName: string, regionName: string, index: number) => {
-    const now = new Date();
-    return filePattern
-      .replace(/\$project/g, projectName || "untitled")
-      .replace(/\$track/g, trackName)
-      .replace(/\$region/g, regionName)
-      .replace(/\$date/g, now.toISOString().slice(0, 10))
-      .replace(/\$index/g, String(index).padStart(2, "0"));
+    return resolveRenderWildcards(filePattern, {
+      projectName,
+      trackName,
+      regionName,
+      index,
+    });
   };
 
   const handleBrowse = async () => {
@@ -100,27 +101,35 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
 
     try {
       await prepareForManualRender(syncClipsWithBackend, "region-render-matrix");
+      const reservedPaths = new Set<string>();
 
       for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
         const fileName = resolveFilename(job.trackName, job.regionName, i + 1);
-        const filePath = joinNativePath(directory, `${fileName}.${format}`);
+        const filePath = reserveUniqueRenderPath(
+          joinNativePath(directory, `${fileName}.${format}`),
+          `${job.trackName}-${job.regionName}-${i + 1}`,
+          reservedPaths,
+        );
         setStatus(`Rendering ${i + 1}/${jobs.length}: ${job.trackName} × ${job.regionName}`);
 
-        await nativeBridge.renderProject({
+        const success = await nativeBridge.renderProject({
           source: `stem:${job.trackId}`,
           startTime: job.start,
           endTime: job.end,
           filePath,
           format,
           sampleRate: 44100,
-          bitDepth,
+          bitDepth: format === "mp3" ? mp3Bitrate : bitDepth,
           channels: 2,
           normalize: false,
           addTail: false,
           tailLength: 0,
           includeMetronome: false,
         });
+        if (!success) {
+          throw new Error(`Audio engine rejected "${filePath}".`);
+        }
 
         setProgress(Math.round(((i + 1) / jobs.length) * 100));
       }
@@ -220,11 +229,19 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <span className="text-xs text-daw-text-muted">Format:</span>
-              <Select size="xs" options={[{ value: "wav", label: "WAV" }, { value: "aiff", label: "AIFF" }, { value: "flac", label: "FLAC" }, { value: "mp3", label: "MP3" }]} value={format} onChange={(v) => setFormat(v as typeof format)} disabled={isRendering} />
+              <Select size="xs" options={[{ value: "wav", label: "WAV" }, { value: "aiff", label: "AIFF" }, { value: "flac", label: "FLAC" }, { value: "mp3", label: "MP3" }]} value={format} onChange={(v) => {
+                const nextFormat = v as typeof format;
+                setFormat(nextFormat);
+                if (nextFormat === "flac" && bitDepth === 32) setBitDepth(24);
+              }} disabled={isRendering} />
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-daw-text-muted">Bit depth:</span>
-              <Select size="xs" options={[{ value: 16, label: "16-bit" }, { value: 24, label: "24-bit" }, { value: 32, label: "32-bit" }]} value={bitDepth} onChange={(v) => setBitDepth(v as number)} disabled={isRendering} />
+              <span className="text-xs text-daw-text-muted">{format === "mp3" ? "Bitrate:" : "Bit depth:"}</span>
+              {format === "mp3" ? (
+                <Select size="xs" options={[{ value: 128, label: "128 kbps" }, { value: 192, label: "192 kbps" }, { value: 256, label: "256 kbps" }, { value: 320, label: "320 kbps" }]} value={mp3Bitrate} onChange={(v) => setMp3Bitrate(v as number)} disabled={isRendering} />
+              ) : (
+                <Select size="xs" options={format === "flac" ? [{ value: 16, label: "16-bit" }, { value: 24, label: "24-bit" }] : [{ value: 16, label: "16-bit" }, { value: 24, label: "24-bit" }, { value: 32, label: "32-bit" }]} value={bitDepth} onChange={(v) => setBitDepth(v as number)} disabled={isRendering} />
+              )}
             </div>
           </div>
 

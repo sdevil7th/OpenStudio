@@ -89,6 +89,10 @@ jobs:
         shell: pwsh
         run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
+      - name: Install checksum-pinned FFmpeg runtime
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
+
       - name: Install Windows prerequisite installers
         shell: pwsh
         run: |
@@ -167,6 +171,17 @@ jobs:
             throw "Windows startup self-test failed."
           }
 
+      - name: Run render and export regression matrix
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-render-export-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "ci-release" `
+            -TimeoutSeconds 180 `
+            -SkipBuild
+
       - name: Regress WebView2 preflight from a non-writable install directory
         shell: pwsh
         run: |
@@ -234,6 +249,14 @@ jobs:
           $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
           $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
           ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
+
+      - name: Upload Windows native-window lifecycle report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: window-lifecycle-windows-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          if-no-files-found: warn
 
       - name: Run NAM Rack deterministic regression
         shell: pwsh
@@ -324,6 +347,14 @@ jobs:
           $executable = Join-Path $env:APP_BUNDLE "Contents/MacOS/OpenStudio"
           $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
           ./tools/run-window-lifecycle-smoke.ps1 -AppPath $executable -ReportPath $report -TimeoutSeconds 180
+
+      - name: Upload macOS native-window lifecycle report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: window-lifecycle-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          if-no-files-found: warn
 
   verify-linux:
     runs-on: ubuntu-24.04

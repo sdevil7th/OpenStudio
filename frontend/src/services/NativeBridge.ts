@@ -2421,6 +2421,7 @@ declare global {
           filePath: string, format: string, sampleRate: number,
           bitDepth: number, channels: number, normalize: boolean,
           addTail: boolean, tailLength: number, includeMetronome?: boolean,
+          includedClipIds?: string[],
         ) => Promise<boolean>;
         capturePitchAuditionPlayback?: (
           trackId: string, clipId: string, startTime: number, duration: number,
@@ -2435,6 +2436,7 @@ declare global {
           filePath: string, format: string, sampleRate: number,
           bitDepth: number, channels: number, normalize: boolean,
           addTail: boolean, tailLength: number, ditherType: string, includeMetronome?: boolean,
+          includedClipIds?: string[],
         ) => Promise<boolean>;
 
         // Phase 9: Audio Engine Enhancements
@@ -5738,6 +5740,7 @@ class NativeBridge {
     addTail: boolean;
     tailLength: number;
     includeMetronome?: boolean;
+    includedClipIds?: string[];
   }): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.renderProject) {
       const success = await window.__JUCE__.backend.renderProject(
@@ -5753,6 +5756,7 @@ class NativeBridge {
         options.addTail,
         options.tailLength,
         options.includeMetronome ?? false,
+        options.includedClipIds ?? [],
       );
       if (success) {
         const dot = options.filePath.lastIndexOf(".");
@@ -5832,6 +5836,7 @@ class NativeBridge {
     tailLength: number;
     ditherType: string;
     includeMetronome?: boolean;
+    includedClipIds?: string[];
   }): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.renderProjectWithDither) {
       const success = await window.__JUCE__.backend.renderProjectWithDither(
@@ -5848,6 +5853,7 @@ class NativeBridge {
         options.tailLength,
         options.ditherType,
         options.includeMetronome ?? false,
+        options.includedClipIds ?? [],
       );
       if (success) {
         const dot = options.filePath.lastIndexOf(".");
