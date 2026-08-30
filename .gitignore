@@ -42,6 +42,9 @@ get-pip.py
 /tools/python/
 /tools/ffmpeg.exe
 /tools/ffprobe.exe
+/tools/ffmpeg-runtime/
+/tools/ffmpeg-download.zip
+/tools/ffmpeg-extract/
 /tools/sox/
 /tools/praat/
 /tools/audio-analysis-cache/

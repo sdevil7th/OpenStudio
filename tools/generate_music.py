@@ -84,12 +84,11 @@ def resolve_ffmpeg_executable() -> tuple[str | None, list[str]]:
         return path_match, searched
 
     candidate_dirs = [
-        SCRIPT_PATH.parent,
+        SCRIPT_PATH.parent / "ffmpeg-runtime",
         SCRIPT_PATH.parent.parent,
+        SCRIPT_PATH.parent.parent / "tools" / "ffmpeg-runtime",
         Path.cwd(),
-        Path.cwd() / "tools",
-        SCRIPT_PATH.parent / "tools",
-        SCRIPT_PATH.parent.parent / "tools",
+        Path.cwd() / "tools" / "ffmpeg-runtime",
     ]
     seen: set[str] = set()
     for directory in candidate_dirs:

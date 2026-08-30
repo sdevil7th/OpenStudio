@@ -892,56 +892,91 @@ foreach(eigen_notice IN ITEMS COPYING.MPL2 COPYING.BSD COPYING.APACHE COPYING.MI
 endforeach()
 
 if(WIN32)
-    set(FFMPEG_EXE "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg.exe")
-    set(OPENSTUDIO_FFMPEG_WINDOWS_SHA256
-        "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d")
-    set(OPENSTUDIO_FFMPEG_GPLV3
-        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/COPYING.GPLv3")
-    set(OPENSTUDIO_FFMPEG_PROVENANCE
-        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/PROVENANCE.json")
-    set(OPENSTUDIO_FFMPEG_GPLV3_SHA256
-        "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903")
-    set(OPENSTUDIO_FFMPEG_PROVENANCE_SHA256
-        "30fc0edca9acc1d7a3253a81afe485a44f1de3c4b86542a18f644c1f71f312d4")
-    if(EXISTS "${FFMPEG_EXE}")
-        file(SHA256 "${FFMPEG_EXE}" ffmpeg_actual_sha256)
-        if(NOT "${ffmpeg_actual_sha256}" STREQUAL "${OPENSTUDIO_FFMPEG_WINDOWS_SHA256}")
-            message(FATAL_ERROR
-                "Bundled tools/ffmpeg.exe checksum mismatch. Refusing to package an unverified FFmpeg build.")
-        endif()
-        foreach(ffmpeg_legal_file IN ITEMS GPLV3 PROVENANCE)
-            set(ffmpeg_legal_path "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}}")
-            if(NOT EXISTS "${ffmpeg_legal_path}")
-                message(FATAL_ERROR
-                    "Bundled FFmpeg requires ${ffmpeg_legal_path}, but that legal/provenance file is missing.")
-            endif()
-            file(SHA256 "${ffmpeg_legal_path}" ffmpeg_legal_actual_sha256)
-            if(NOT "${ffmpeg_legal_actual_sha256}" STREQUAL
-                   "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}_SHA256}")
-                message(FATAL_ERROR
-                    "Bundled FFmpeg ${ffmpeg_legal_file} checksum mismatch. Refusing to package an unverified legal/provenance file.")
-            endif()
-        endforeach()
-        openstudio_copy_runtime_file(
-            "${FFMPEG_EXE}"
-            "ffmpeg.exe"
-            "Copying bundled ffmpeg.exe to output directory"
-        )
-        openstudio_copy_runtime_file(
-            "${OPENSTUDIO_FFMPEG_GPLV3}"
-            "licenses/FFmpeg-COPYING.GPLv3.txt"
-            "Copying FFmpeg GPLv3 license to output directory"
-        )
-        openstudio_copy_runtime_file(
-            "${OPENSTUDIO_FFMPEG_PROVENANCE}"
-            "licenses/FFmpeg-PROVENANCE.json"
-            "Copying FFmpeg provenance to output directory"
-        )
-    else()
+    set(OPENSTUDIO_FFMPEG_RUNTIME_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg-runtime")
+    set(OPENSTUDIO_FFMPEG_RUNTIME_LOCK
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/runtime-lock.json")
+    set(OPENSTUDIO_FFMPEG_RUNTIME_MANIFEST
+        "${OPENSTUDIO_FFMPEG_RUNTIME_DIR}/runtime-manifest.json")
+    set(OPENSTUDIO_FFMPEG_SOURCE_LOCK
+        "${OPENSTUDIO_FFMPEG_RUNTIME_DIR}/source-lock.json")
+
+    if(NOT EXISTS "${OPENSTUDIO_FFMPEG_RUNTIME_LOCK}" OR
+       NOT EXISTS "${OPENSTUDIO_FFMPEG_RUNTIME_MANIFEST}" OR
+       NOT EXISTS "${OPENSTUDIO_FFMPEG_SOURCE_LOCK}")
         message(FATAL_ERROR
-            "Required bundled tools/ffmpeg.exe is missing. Run: "
+            "The pinned Windows FFmpeg runtime is missing or incomplete. Run: "
             "powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
     endif()
+
+    file(READ "${OPENSTUDIO_FFMPEG_RUNTIME_LOCK}" ffmpeg_runtime_lock_json)
+    file(READ "${OPENSTUDIO_FFMPEG_RUNTIME_MANIFEST}" ffmpeg_runtime_manifest_json)
+    string(JSON ffmpeg_expected_manifest_sha256 GET
+        "${ffmpeg_runtime_lock_json}" runtimeManifestSha256)
+    string(JSON ffmpeg_expected_source_lock_sha256 GET
+        "${ffmpeg_runtime_lock_json}" sourceLockSha256)
+    file(SHA256 "${OPENSTUDIO_FFMPEG_RUNTIME_MANIFEST}" ffmpeg_actual_manifest_sha256)
+    file(SHA256 "${OPENSTUDIO_FFMPEG_SOURCE_LOCK}" ffmpeg_actual_source_lock_sha256)
+    if(NOT "${ffmpeg_actual_manifest_sha256}" STREQUAL
+           "${ffmpeg_expected_manifest_sha256}" OR
+       NOT "${ffmpeg_actual_source_lock_sha256}" STREQUAL
+           "${ffmpeg_expected_source_lock_sha256}")
+        message(FATAL_ERROR
+            "The Windows FFmpeg manifest/source lock does not match the repository pin. Run tools/setup-ffmpeg.ps1 again.")
+    endif()
+
+    string(JSON ffmpeg_runtime_version GET "${ffmpeg_runtime_manifest_json}" runtimeVersion)
+    string(JSON ffmpeg_expected_runtime_version GET "${ffmpeg_runtime_lock_json}" runtimeVersion)
+    string(JSON ffmpeg_runtime_license GET "${ffmpeg_runtime_manifest_json}" license)
+    string(JSON ffmpeg_gpl_enabled GET "${ffmpeg_runtime_manifest_json}" gplComponentsEnabled)
+    string(JSON ffmpeg_nonfree_enabled GET "${ffmpeg_runtime_manifest_json}" nonFreeComponentsEnabled)
+    if(NOT "${ffmpeg_runtime_version}" STREQUAL "${ffmpeg_expected_runtime_version}" OR
+       NOT "${ffmpeg_runtime_license}" STREQUAL "LGPL-2.1-or-later" OR
+       ffmpeg_gpl_enabled OR ffmpeg_nonfree_enabled)
+        message(FATAL_ERROR
+            "The Windows FFmpeg runtime identity or license configuration is not approved for packaging.")
+    endif()
+
+    string(JSON ffmpeg_file_count LENGTH "${ffmpeg_runtime_manifest_json}" files)
+    math(EXPR ffmpeg_file_last "${ffmpeg_file_count} - 1")
+    foreach(ffmpeg_file_index RANGE 0 ${ffmpeg_file_last})
+        string(JSON ffmpeg_relative_path GET
+            "${ffmpeg_runtime_manifest_json}" files ${ffmpeg_file_index} path)
+        string(JSON ffmpeg_expected_sha256 GET
+            "${ffmpeg_runtime_manifest_json}" files ${ffmpeg_file_index} sha256)
+        set(ffmpeg_source_path
+            "${OPENSTUDIO_FFMPEG_RUNTIME_DIR}/${ffmpeg_relative_path}")
+        if(NOT EXISTS "${ffmpeg_source_path}")
+            message(FATAL_ERROR
+                "Pinned Windows FFmpeg runtime file is missing: ${ffmpeg_relative_path}")
+        endif()
+        file(SHA256 "${ffmpeg_source_path}" ffmpeg_actual_sha256)
+        if(NOT "${ffmpeg_actual_sha256}" STREQUAL "${ffmpeg_expected_sha256}")
+            message(FATAL_ERROR
+                "Pinned Windows FFmpeg runtime checksum mismatch: ${ffmpeg_relative_path}")
+        endif()
+        openstudio_copy_runtime_file(
+            "${ffmpeg_source_path}"
+            "${ffmpeg_relative_path}"
+            "Copying FFmpeg runtime file ${ffmpeg_relative_path}"
+        )
+    endforeach()
+
+    openstudio_copy_runtime_file(
+        "${OPENSTUDIO_FFMPEG_RUNTIME_LOCK}"
+        "licenses/FFmpeg-PROVENANCE.json"
+        "Copying FFmpeg release provenance to output directory"
+    )
+    openstudio_copy_runtime_file(
+        "${OPENSTUDIO_FFMPEG_RUNTIME_MANIFEST}"
+        "licenses/FFmpeg-RUNTIME-MANIFEST.json"
+        "Copying FFmpeg runtime manifest to output directory"
+    )
+    openstudio_copy_runtime_file(
+        "${OPENSTUDIO_FFMPEG_SOURCE_LOCK}"
+        "licenses/FFmpeg-SOURCE-LOCK.json"
+        "Copying FFmpeg source lock to output directory"
+    )
 
     set(OPENSTUDIO_WINDOWS_PREREQS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/windows-prereqs")
     if(EXISTS "${OPENSTUDIO_WINDOWS_PREREQS_DIR}")

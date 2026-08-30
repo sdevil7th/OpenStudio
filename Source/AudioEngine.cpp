@@ -58417,6 +58417,10 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
         juce::File::tempDirectory).getChildFile(
             "openstudio_playback_streaming_fixture_"
             + fixtureId + ".wav");
+    const auto monoFixtureFile = juce::File::getSpecialLocation(
+        juce::File::tempDirectory).getChildFile(
+            "openstudio_playback_mono_fixture_"
+            + fixtureId + ".wav");
 
     juce::AudioBuffer<float> source(2, sourceSamples);
     for (int sample = 0; sample < sourceSamples; ++sample)
@@ -58436,6 +58440,10 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
 
     const bool fixtureWritten = writeBufferToWavFile(
         source, sourceSamples, sourceSampleRate, fixtureFile);
+    juce::AudioBuffer<float> monoSource(1, sourceSamples);
+    monoSource.copyFrom(0, 0, source, 0, 0, sourceSamples);
+    const bool monoFixtureWritten = writeBufferToWavFile(
+        monoSource, sourceSamples, sourceSampleRate, monoFixtureFile);
 
     const auto writeOversizedSparseWav =
         [&oversizedFile, sourceSampleRate] ()
@@ -58501,6 +58509,11 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
     double resampledPartitionMaxDiff =
         std::numeric_limits<double>::infinity();
     double exactSampleMaxDiff =
+        std::numeric_limits<double>::infinity();
+    bool monoExpandedToStereo = false;
+    double monoChannelMaxDiff =
+        std::numeric_limits<double>::infinity();
+    double monoSourceMaxDiff =
         std::numeric_limits<double>::infinity();
 
     if (fixtureWritten)
@@ -58647,6 +58660,54 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
             exactSampleMaxDiff <= 1.0e-6;
     }
 
+    if (monoFixtureWritten)
+    {
+        auto monoPlaybackProbe =
+            std::make_unique<PlaybackEngine>();
+        monoPlaybackProbe->addClip(
+            monoFixtureFile,
+            0.0,
+            static_cast<double>(sourceSamples)
+                / sourceSampleRate,
+            "mono-fixture-track",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            "mono-fixture-clip");
+
+        juce::AudioBuffer<float> renderedMono(2, outputSamples);
+        renderedMono.clear();
+        monoPlaybackProbe->fillTrackBuffer(
+            "mono-fixture-track",
+            renderedMono,
+            0.0,
+            outputSamples,
+            sourceSampleRate);
+
+        monoChannelMaxDiff = 0.0;
+        monoSourceMaxDiff = 0.0;
+        for (int sample = 0; sample < outputSamples; ++sample)
+        {
+            const float expected = monoSource.getSample(0, sample);
+            monoChannelMaxDiff = juce::jmax(
+                monoChannelMaxDiff,
+                static_cast<double>(std::abs(
+                    renderedMono.getSample(0, sample)
+                    - renderedMono.getSample(1, sample))));
+            for (int channel = 0; channel < 2; ++channel)
+            {
+                monoSourceMaxDiff = juce::jmax(
+                    monoSourceMaxDiff,
+                    static_cast<double>(std::abs(
+                        renderedMono.getSample(channel, sample)
+                        - expected)));
+            }
+        }
+        monoExpandedToStereo = monoChannelMaxDiff <= 1.0e-6
+            && monoSourceMaxDiff <= 1.0e-6;
+    }
+
     const bool oversizedWritten =
         writeOversizedSparseWav();
     bool oversizedUsesStreaming = false;
@@ -58693,6 +58754,7 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
 
     fixtureFile.deleteFile();
     oversizedFile.deleteFile();
+    monoFixtureFile.deleteFile();
 
     RealtimeSafetyFixtureResult result;
     result.pass =
@@ -58700,6 +58762,7 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
         && exactPartitionPass
         && resampledPartitionPass
         && exactSamplePass
+        && monoExpandedToStereo
         && oversizedUsesStreaming
         && continuityRegression.passed
         && outerLockContinuityRegression.passed;
@@ -58719,6 +58782,12 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
         + ", exactSampleMaxDiff="
         + juce::String(
             exactSampleMaxDiff, 9)
+        + ", monoChannelMaxDiff="
+        + juce::String(
+            monoChannelMaxDiff, 9)
+        + ", monoSourceMaxDiff="
+        + juce::String(
+            monoSourceMaxDiff, 9)
         + ", oversizedStreamingReaders="
         + juce::String(
             oversizedStreamingReaders)
@@ -68818,6 +68887,10 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     juce::StringArray args;
     args.add(ffmpeg.getFullPathName());
     args.add("-y");                                // Overwrite output
+    args.add("-hide_banner");
+    args.add("-loglevel");
+    args.add("error");
+    args.add("-nostats");
     args.add("-i");
     args.add(inputFile.getFullPathName());         // Input file
     args.add("-map");
@@ -68851,8 +68924,8 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     {
         args.add("-codec:a");
         args.add("libmp3lame");
-        // quality = bitrate in kbps (128, 192, 256, 320)
-        int bitrate = (quality > 0) ? quality : 320;
+        // quality = bitrate in kbps (the UI offers 128, 192, 256, and 320)
+        int bitrate = quality >= 32 ? juce::jlimit(32, 320, quality) : 320;
         args.add("-b:a");
         args.add(juce::String(bitrate) + "k");
     }
@@ -68860,8 +68933,8 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     {
         args.add("-codec:a");
         args.add("libvorbis");
-        // quality = vorbis quality level (0-10, default 6)
-        int q = (quality > 0) ? quality : 6;
+        // quality = Vorbis quality level (0-10, default 6)
+        int q = quality >= 0 ? juce::jlimit(0, 10, quality) : 6;
         args.add("-q:a");
         args.add(juce::String(q));
     }
@@ -68888,6 +68961,19 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
             args.add("24");
         }
     }
+    else if (formatLower == "raw")
+    {
+        const juce::String codec = bitDepth == 32
+            ? "pcm_f32le"
+            : (bitDepth == 16 ? "pcm_s16le" : "pcm_s24le");
+        const juce::String muxer = bitDepth == 32
+            ? "f32le"
+            : (bitDepth == 16 ? "s16le" : "s24le");
+        args.add("-codec:a");
+        args.add(codec);
+        args.add("-f");
+        args.add(muxer);
+    }
     else
     {
         // WAV/AIFF/FLAC sample rate conversion only — keep format as-is
@@ -68911,6 +68997,7 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     {
         logToDisk("convertWithFFmpeg: FAIL - ffmpeg timed out after 5 minutes");
         process.kill();
+        outputFile.deleteFile();
         return false;
     }
 
@@ -68919,12 +69006,14 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     {
         juce::String errOutput = process.readAllProcessOutput();
         logToDisk("convertWithFFmpeg: FAIL - ffmpeg exit code " + juce::String(exitCode) + " output: " + errOutput);
+        outputFile.deleteFile();
         return false;
     }
 
-    if (!outputFile.existsAsFile())
+    if (!outputFile.existsAsFile() || outputFile.getSize() <= 0)
     {
-        logToDisk("convertWithFFmpeg: FAIL - output file not created");
+        logToDisk("convertWithFFmpeg: FAIL - output file was not created or is empty");
+        outputFile.deleteFile();
         return false;
     }
 
@@ -68940,9 +69029,13 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                                 const juce::String& filePath, const juce::String& format,
                                 double renderSampleRate, int bitDepth, int numChannels,
                                 bool normalize, bool addTail, double tailLengthMs,
-                                bool includeMetronome)
+                                bool includeMetronome,
+                                const juce::StringArray& includedClipIds)
 {
     const juce::ScopedLock offlineRenderTransaction(offlineRenderTransactionLock);
+    // Consume the request at transaction entry so invalid ranges, unsupported
+    // formats, and unwritable paths cannot leak dither into the next render.
+    const int ditherMode = pendingDitherMode_.exchange(0);
     logToDisk("renderProject: START - file=" + filePath + " format=" + format +
               " range=" + juce::String(startTime) + "-" + juce::String(endTime) +
               " sr=" + juce::String(renderSampleRate) + " bits=" + juce::String(bitDepth) +
@@ -68965,33 +69058,51 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     double requestedOutputSampleRate = (renderSampleRate > 0) ? renderSampleRate : currentSampleRate;
     if (requestedOutputSampleRate <= 0) requestedOutputSampleRate = 44100.0;
     double actualSampleRate = requestedOutputSampleRate;
-    if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 24;
     if (numChannels < 1 || numChannels > 2) numChannels = 2;
 
     // Determine if we need post-processing (lossy encoding only — SR conversion
     // is now handled natively by rendering at the target rate)
     juce::String formatLower = format.toLowerCase();
     bool isLossyFormat = (formatLower == "mp3" || formatLower == "ogg");
-    bool needsFFmpegPostProcess = isLossyFormat;
+    const bool isRawFormat = formatLower == "raw";
+    bool needsFFmpegPostProcess = isLossyFormat || isRawFormat;
 
     // For lossy formats, bitDepth holds codec quality:
     //   MP3: bitrate in kbps (128, 192, 256, 320)
-    //   OGG: quality level (1-10)
-    int codecQuality = isLossyFormat ? bitDepth : 0;
-    if (isLossyFormat) bitDepth = 24; // Render intermediate WAV at 24-bit
+    //   OGG: quality level (0-10)
+    int codecQuality = 0;
+    if (formatLower == "mp3")
+    {
+        codecQuality = bitDepth >= 32 ? juce::jlimit(32, 320, bitDepth) : 320;
+        bitDepth = 24; // Render intermediate WAV at 24-bit.
+    }
+    else if (formatLower == "ogg")
+    {
+        codecQuality = bitDepth >= 0 ? juce::jlimit(0, 10, bitDepth) : 6;
+        bitDepth = 24; // Render intermediate WAV at 24-bit.
+    }
+    else if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32)
+    {
+        bitDepth = 24;
+    }
 
     // Parse stem track filter from source (e.g., "stem:trackId123")
     juce::String stemTrackId;
     bool isStemRender = source.startsWith("stem:");
     if (isStemRender)
         stemTrackId = source.substring(5); // After "stem:"
+    const bool isSelectedItemRender = source == "selected_items"
+        || source == "selected_items_master";
+    const bool bypassMasterProcessing = isStemRender
+        || source == "selected_items";
 
     const bool canUseFFmpegSampleRatePostProcess =
         isLossyFormat
         || formatLower == "wav"
         || formatLower == "aiff"
         || formatLower == "aif"
-        || formatLower == "flac";
+        || formatLower == "flac"
+        || isRawFormat;
 
     if (isLossyFormat)
         logToDisk("renderProject: Lossy format=" + formatLower + " codecQuality=" + juce::String(codecQuality));
@@ -69036,6 +69147,33 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
     // ========== 3. Snapshot clip data ==========
     auto clipSnapshot = playbackEngine.getClipSnapshot();
+    std::set<juce::String> selectedItemTrackIds;
+    if (isSelectedItemRender)
+    {
+        if (includedClipIds.isEmpty())
+        {
+            logToDisk("renderProject: FAIL - selected-item render did not include any clip IDs");
+            return false;
+        }
+
+        clipSnapshot.erase(
+            std::remove_if(
+                clipSnapshot.begin(),
+                clipSnapshot.end(),
+                [&includedClipIds] (const PlaybackEngine::ClipInfo& clip)
+                {
+                    return clip.clipId.isEmpty()
+                        || ! includedClipIds.contains(clip.clipId);
+                }),
+            clipSnapshot.end());
+        if (clipSnapshot.empty())
+        {
+            logToDisk("renderProject: FAIL - selected clip IDs did not match any active playback clips");
+            return false;
+        }
+        for (const auto& clip : clipSnapshot)
+            selectedItemTrackIds.insert(clip.trackId);
+    }
     auto renderedPreviewSegmentSnapshot = playbackEngine.getRenderedPreviewSegmentSnapshot();
     int staleRenderedPitchSegmentsDropped = 0;
     const bool includePitchPreviewSegmentsInRender = getPitchEnvFlag ("OPENSTUDIO_RENDER_INCLUDE_PITCH_PREVIEW_SEGMENTS", false);
@@ -69259,13 +69397,19 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     // ========== 5. Create format writer ==========
     // For lossy formats (mp3/ogg) or sample rate conversion, render to temp WAV first
     juce::File outputFile(filePath);
-    juce::File renderFile = outputFile; // File we actually write to (may be temp WAV)
+    juce::TemporaryFile stagedOutput(outputFile);
+    juce::TemporaryFile intermediateRender(
+        outputFile.getSiblingFile(
+            outputFile.getFileNameWithoutExtension()
+                + "_intermediate.wav"));
+    juce::File renderFile = stagedOutput.getFile();
 
     if (needsFFmpegPostProcess)
     {
-        // Create temp WAV file next to the output
-        renderFile = outputFile.getParentDirectory().getChildFile(
-            outputFile.getFileNameWithoutExtension() + "_temp_render.wav");
+        // Render an intermediate WAV while the final encoded file is staged
+        // separately. Neither temporary can replace an existing user file
+        // until the entire render and encode transaction succeeds.
+        renderFile = intermediateRender.getFile();
     }
 
     std::unique_ptr<juce::AudioFormat> audioFormat;
@@ -69289,8 +69433,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     renderFile.getParentDirectory().createDirectory();
     if (renderFile.existsAsFile())
         renderFile.deleteFile();
-    if (outputFile.existsAsFile())
-        outputFile.deleteFile();
+    if (stagedOutput.getFile().existsAsFile())
+        stagedOutput.getFile().deleteFile();
 
     std::unique_ptr<juce::OutputStream> fileStream = std::make_unique<juce::FileOutputStream>(renderFile);
     if (static_cast<juce::FileOutputStream&>(*fileStream).failedToOpen())
@@ -69522,13 +69666,17 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         }
     }
 
-    const bool hasMasterAutomation = !isStemRender
+    const bool hasMasterAutomation = !bypassMasterProcessing
         && (automationIsActive(masterVolumeAutomation) || automationIsActive(masterPanAutomation));
 
     bool includedTracksCanUseSimplePath = true;
     for (const auto& snap : trackSnapshots)
     {
         if (isStemRender && snap.id != stemTrackId)
+            continue;
+        if (isSelectedItemRender
+            && selectedItemTrackIds.find(snap.id)
+                == selectedItemTrackIds.end())
             continue;
         if (!isStemRender && snap.muted)
             continue;
@@ -69544,13 +69692,17 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
     const bool useSimpleNoFxRenderLoop =
         includedTracksCanUseSimplePath
-        && activeMasterFxCount == 0
+        && (activeMasterFxCount == 0 || bypassMasterProcessing)
         && !hasMasterAutomation;
 
     const auto trackIsIncludedInRender = [&] (const TrackSnapshot& snap)
     {
         if (isStemRender)
             return snap.id == stemTrackId;
+        if (isSelectedItemRender
+            && selectedItemTrackIds.find(snap.id)
+                == selectedItemTrackIds.end())
+            return false;
         if (snap.muted)
             return false;
         return ! anySoloed || snap.soloed;
@@ -69678,9 +69830,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     float normGain = 1.0f;
     float peakLevel = 0.0f;
 
-    // Dither state (0 = off, 1 = TPDF, 2 = noise-shaped)
-    int ditherMode = pendingDitherMode_.load();
-    pendingDitherMode_ = 0; // Reset for next render call
+    // Dither state: 0 = off, 1 = TPDF, 2 = noise-shaped. The request was
+    // consumed at transaction entry so it cannot survive an early return.
     juce::Random ditherRng;
     float ditherErrorState[2] = { 0.0f, 0.0f }; // Per-channel error feedback for noise shaping
 
@@ -70076,6 +70227,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 {
                     if (isStemRender && snap.id != stemTrackId)
                         continue;
+                    if (isSelectedItemRender
+                        && selectedItemTrackIds.find(snap.id)
+                            == selectedItemTrackIds.end())
+                        continue;
                     if (!isStemRender && snap.muted)
                         continue;
                     if (!isStemRender && anySoloed && !snap.soloed)
@@ -70151,6 +70306,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                         continue;
 
                     if (isStemRender && trackEntry.id != stemTrackId)
+                        continue;
+                    if (isSelectedItemRender
+                        && selectedItemTrackIds.find(trackEntry.id)
+                            == selectedItemTrackIds.end())
                         continue;
 
                     auto snapshotIt = trackSnapshotById.find(trackEntry.id);
@@ -70344,7 +70503,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 copyToSignalChainCapture (chainMasterPreTap, chainCaptureOffset, masterBuffer, samplesThisBlock);
             }
 
-            if (!isStemRender && renderMasterStage && !renderMasterStage->slots.empty())
+            if (!bypassMasterProcessing && renderMasterStage && !renderMasterStage->slots.empty())
             {
                 float* masterChannelData[2] { masterBuffer.getWritePointer(0), masterBuffer.getWritePointer(1) };
                 processMasterFXChain(renderMasterStage.get(),
@@ -70364,7 +70523,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 copyToSignalChainCapture (chainMasterPostTap, chainCaptureOffset, masterBuffer, samplesThisBlock);
             }
 
-            if (!isStemRender)
+            if (!bypassMasterProcessing)
             {
                 float* masterChannelData[2] { masterBuffer.getWritePointer(0), masterBuffer.getWritePointer(1) };
                 applyMasterGainPanMono(masterChannelData, 2, samplesThisBlock,
@@ -70507,13 +70666,27 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                                        outputWindow.numSamples, 0.5f);
                     monoBuffer.addFrom(0, 0, masterBuffer, 1, outputWindow.sourceOffset,
                                        outputWindow.numSamples, 0.5f);
-                    writer->writeFromAudioSampleBuffer(monoBuffer, 0, outputWindow.numSamples);
+                    if (! writer->writeFromAudioSampleBuffer(
+                            monoBuffer, 0, outputWindow.numSamples))
+                    {
+                        logToDisk("renderProject: FAIL - audio writer rejected a mono output block");
+                        writer.reset();
+                        restorePreparedTracksForRealtime();
+                        return false;
+                    }
                 }
                 else
                 {
-                    writer->writeFromAudioSampleBuffer(masterBuffer,
-                                                       outputWindow.sourceOffset,
-                                                       outputWindow.numSamples);
+                    if (! writer->writeFromAudioSampleBuffer(
+                            masterBuffer,
+                            outputWindow.sourceOffset,
+                            outputWindow.numSamples))
+                    {
+                        logToDisk("renderProject: FAIL - audio writer rejected a stereo output block");
+                        writer.reset();
+                        restorePreparedTracksForRealtime();
+                        return false;
+                    }
                 }
             }
 
@@ -70541,6 +70714,12 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
     // Flush and close
     writer.reset();
+    if (! renderFile.existsAsFile() || renderFile.getSize() <= 0)
+    {
+        logToDisk("renderProject: FAIL - writer did not produce a non-empty audio file");
+        restorePreparedTracksForRealtime();
+        return false;
+    }
 
     if (renderChainDebugEnabled)
     {
@@ -70626,7 +70805,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     {
         logToDisk("renderProject: Starting FFmpeg post-processing (encoding/final SRC)...");
         // Let FFmpeg perform the final output SRC/encode step.
-        bool ffmpegOk = convertWithFFmpeg(renderFile, outputFile, formatLower,
+        bool ffmpegOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
                                           requestedOutputSampleRate, codecQuality,
                                           bitDepth, numChannels);
 
@@ -70641,12 +70820,27 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         }
     }
 
+    if (! stagedOutput.getFile().existsAsFile()
+        || stagedOutput.getFile().getSize() <= 0)
+    {
+        logToDisk("renderProject: FAIL - staged output is missing or empty");
+        restorePreparedTracksForRealtime();
+        return false;
+    }
+
     // ========== 10. Restore plugin state for real-time playback ==========
     // Re-prepare all FX plugins for the device's buffer size and restore their
     // saved state so real-time playback continues as if render never happened.
     // Clamp max-block to at least 512 (same rationale as track FX preparation).
     restorePreparedTracksForRealtime();
     logToDisk("renderProject: Restored " + juce::String((int)pluginBackups.size()) + " FX plugins for real-time");
+
+    if (! stagedOutput.overwriteTargetFileWithTemporary())
+    {
+        logToDisk("renderProject: FAIL - could not atomically publish staged output to "
+                  + outputFile.getFullPathName());
+        return false;
+    }
 
     logToDisk("renderProject: SUCCESS - " + outputFile.getFullPathName() +
               " (" + juce::String(outputFile.getSize() / 1024) + " KB)");
@@ -70789,8 +70983,13 @@ bool AudioEngine::renderProjectWithDither(const juce::String& source, double sta
                                           double renderSampleRate, int bitDepth, int numChannels,
                                           bool normalize, bool addTail, double tailLengthMs,
                                           const juce::String& ditherType,
-                                          bool includeMetronome)
+                                          bool includeMetronome,
+                                          const juce::StringArray& includedClipIds)
 {
+    // Keep publication and consumption of this one-shot request inside the
+    // same recursive render transaction. Otherwise a simultaneous plain
+    // render could consume another caller's pending dither mode.
+    const juce::ScopedLock offlineRenderTransaction(offlineRenderTransactionLock);
     // Map dither type string to mode: "tpdf" → 1, "shaped" → 2, else → 0
     if (ditherType == "tpdf")
         pendingDitherMode_ = 1;
@@ -70801,7 +71000,569 @@ bool AudioEngine::renderProjectWithDither(const juce::String& source, double sta
 
     return renderProject(source, startTime, endTime, filePath, format,
                          renderSampleRate, bitDepth, numChannels,
-                         normalize, addTail, tailLengthMs, includeMetronome);
+                         normalize, addTail, tailLengthMs, includeMetronome,
+                         includedClipIds);
+}
+
+juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirectory)
+{
+    juce::Array<juce::var> checks;
+    juce::Array<juce::var> artifacts;
+    bool overallPass = true;
+    const auto addCheck = [&] (const juce::String& id,
+                               bool pass,
+                               const juce::String& detail,
+                               const juce::var& diagnostic = {})
+    {
+        auto* check = new juce::DynamicObject();
+        check->setProperty("id", id);
+        check->setProperty("status", pass ? "pass" : "fail");
+        check->setProperty("detail", detail);
+        if (! diagnostic.isVoid())
+            check->setProperty("diagnostic", diagnostic);
+        checks.add(juce::var(check));
+        overallPass = overallPass && pass;
+    };
+
+    const bool outputDirectoryReady = outputDirectory.createDirectory()
+        || outputDirectory.isDirectory();
+    addCheck("output_directory_ready",
+             outputDirectoryReady,
+             outputDirectory.getFullPathName());
+
+    constexpr double fixtureSampleRate = 48000.0;
+    constexpr double fixtureDurationSeconds = 1.0;
+    constexpr int fixtureSamples = static_cast<int>(
+        fixtureSampleRate * fixtureDurationSeconds);
+    const auto fixtureFile = outputDirectory.getChildFile(
+        "render export mono source.wav");
+    juce::AudioBuffer<float> fixture(1, fixtureSamples);
+    for (int sample = 0; sample < fixtureSamples; ++sample)
+    {
+        const float time = static_cast<float>(sample / fixtureSampleRate);
+        const float envelope = juce::jlimit(
+            0.0f,
+            1.0f,
+            static_cast<float>(sample) / 400.0f)
+            * juce::jlimit(
+                0.0f,
+                1.0f,
+                static_cast<float>(fixtureSamples - sample) / 600.0f);
+        const float value = envelope
+            * (0.31f * std::sin(juce::MathConstants<float>::twoPi * 347.0f * time)
+               + 0.07f * std::sin(juce::MathConstants<float>::twoPi * 997.0f * time));
+        fixture.setSample(0, sample, value);
+    }
+    const bool fixtureWritten = outputDirectoryReady
+        && writeBufferToWavFile(
+            fixture,
+            fixtureSamples,
+            fixtureSampleRate,
+            fixtureFile);
+    addCheck("mono_fixture_written",
+             fixtureWritten,
+             fixtureFile.getFullPathName());
+
+    const juce::String trackId =
+        "render-export-regression-" + juce::Uuid().toString();
+    const bool trackAdded = fixtureWritten
+        && addTrack(trackId, "audio") == trackId;
+    if (trackAdded)
+    {
+        addPlaybackClip(trackId,
+                        fixtureFile.getFullPathName(),
+                        0.0,
+                        fixtureDurationSeconds,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        "render-export-regression-clip");
+    }
+    addCheck("fixture_track_ready",
+             trackAdded,
+             trackAdded ? trackId : "Failed to create the fixture track.");
+
+    struct RenderCase
+    {
+        juce::String id;
+        juce::String source;
+        juce::String format;
+        double sampleRate = 48000.0;
+        int bitDepthOrQuality = 24;
+        int channels = 2;
+        bool normalize = false;
+        bool addTail = false;
+        double tailMs = 0.0;
+        juce::String ditherType;
+        bool expectDualMono = true;
+    };
+
+    const std::vector<RenderCase> cases {
+        { "wav_44100_16_stereo", "master", "wav", 44100.0, 16, 2 },
+        { "wav_48000_24_stereo", "master", "wav", 48000.0, 24, 2 },
+        { "wav_88200_32_mono", "master", "wav", 88200.0, 32, 1 },
+        { "wav_96000_16_tpdf", "master", "wav", 96000.0, 16, 2, false, false, 0.0, "tpdf", false },
+        { "wav_48000_24_shaped", "master", "wav", 48000.0, 24, 2, false, false, 0.0, "shaped", false },
+        { "wav_192000_24_stereo", "master", "wav", 192000.0, 24, 2 },
+        { "wav_normalized", "master", "wav", 48000.0, 24, 2, true },
+        { "wav_tail_250ms", "master", "wav", 48000.0, 24, 2, false, true, 250.0 },
+        { "wav_stem", "stem:" + trackId, "wav", 48000.0, 24, 2 },
+        { "aiff_44100_16", "master", "aiff", 44100.0, 16, 2 },
+        { "aiff_96000_32", "master", "aiff", 96000.0, 32, 2 },
+        { "flac_44100_16", "master", "flac", 44100.0, 16, 1 },
+        { "flac_48000_24", "master", "flac", 48000.0, 24, 2 },
+        { "raw_44100_16_mono", "master", "raw", 44100.0, 16, 1, false, false, 0.0, juce::String(), false },
+        { "raw_48000_24_stereo", "master", "raw", 48000.0, 24, 2, false, false, 0.0, juce::String(), false },
+        { "mp3_128", "master", "mp3", 44100.0, 128, 2 },
+        { "mp3_192", "master", "mp3", 44100.0, 192, 2 },
+        { "mp3_256", "master", "mp3", 44100.0, 256, 2 },
+        { "mp3_320", "master", "mp3", 96000.0, 320, 2 },
+        { "ogg_q3", "master", "ogg", 44100.0, 3, 2 },
+        { "ogg_q5", "master", "ogg", 48000.0, 5, 2 },
+        { "ogg_q6", "master", "ogg", 48000.0, 6, 2 },
+        { "ogg_q7", "master", "ogg", 48000.0, 7, 2 },
+        { "ogg_q8", "master", "ogg", 48000.0, 8, 2 },
+        { "ogg_q10_unicode_space", "master", "ogg", 48000.0, 10, 2 }
+    };
+
+    std::map<int, juce::int64> mp3Sizes;
+    juce::AudioBuffer<float> firstPlain16BitRender;
+    double firstPlain16BitRate = 0.0;
+
+    for (const auto& renderCase : cases)
+    {
+        const auto extension = renderCase.format == "aiff" ? ".aiff" : "." + renderCase.format;
+        juce::String baseName = renderCase.id;
+        if (renderCase.id == "ogg_q10_unicode_space")
+            baseName = juce::String::fromUTF8("OGG quality 10 音 test");
+        const auto outputFile = outputDirectory.getChildFile(baseName + extension);
+
+        const bool renderOk = renderCase.ditherType.isNotEmpty()
+            ? renderProjectWithDither(renderCase.source,
+                                      0.0,
+                                      fixtureDurationSeconds,
+                                      outputFile.getFullPathName(),
+                                      renderCase.format,
+                                      renderCase.sampleRate,
+                                      renderCase.bitDepthOrQuality,
+                                      renderCase.channels,
+                                      renderCase.normalize,
+                                      renderCase.addTail,
+                                      renderCase.tailMs,
+                                      renderCase.ditherType,
+                                      false)
+            : renderProject(renderCase.source,
+                            0.0,
+                            fixtureDurationSeconds,
+                            outputFile.getFullPathName(),
+                            renderCase.format,
+                            renderCase.sampleRate,
+                            renderCase.bitDepthOrQuality,
+                            renderCase.channels,
+                            renderCase.normalize,
+                            renderCase.addTail,
+                            renderCase.tailMs,
+                            false);
+
+        juce::AudioBuffer<float> rendered;
+        double renderedSampleRate = 0.0;
+        const bool readable = renderOk
+            && readAudioFileForParity(outputFile, rendered, renderedSampleRate);
+        float peak = 0.0f;
+        int nonFiniteSamples = 0;
+        double channelMaxDifference = 0.0;
+        if (readable)
+        {
+            for (int channel = 0; channel < rendered.getNumChannels(); ++channel)
+            {
+                for (int sample = 0; sample < rendered.getNumSamples(); ++sample)
+                {
+                    const float value = rendered.getSample(channel, sample);
+                    if (! std::isfinite(value))
+                        ++nonFiniteSamples;
+                    peak = juce::jmax(peak, std::abs(value));
+                }
+            }
+            if (rendered.getNumChannels() == 2 && renderCase.expectDualMono)
+            {
+                for (int sample = 0; sample < rendered.getNumSamples(); ++sample)
+                {
+                    channelMaxDifference = juce::jmax(
+                        channelMaxDifference,
+                        static_cast<double>(std::abs(
+                            rendered.getSample(0, sample)
+                            - rendered.getSample(1, sample))));
+                }
+            }
+        }
+
+        const double expectedSampleRate = renderCase.format == "mp3"
+            ? juce::jmin(48000.0, renderCase.sampleRate)
+            : renderCase.sampleRate;
+        const double expectedDuration = fixtureDurationSeconds
+            + (renderCase.addTail ? renderCase.tailMs * 0.001 : 0.0);
+        const double actualDuration = readable && renderedSampleRate > 0.0
+            ? static_cast<double>(rendered.getNumSamples()) / renderedSampleRate
+            : 0.0;
+        const double durationTolerance = renderCase.format == "mp3"
+            || renderCase.format == "ogg"
+            ? 0.12
+            : 2.0 / juce::jmax(1.0, expectedSampleRate);
+        const bool isRaw = renderCase.format == "raw";
+        const int rawBytesPerSample = renderCase.bitDepthOrQuality == 32
+            ? 4
+            : (renderCase.bitDepthOrQuality == 16 ? 2 : 3);
+        const auto expectedRawBytes = static_cast<juce::int64>(std::llround(
+            expectedDuration * expectedSampleRate))
+            * renderCase.channels
+            * rawBytesPerSample;
+        const bool rawFileValid = isRaw
+            && renderOk
+            && outputFile.getSize() == expectedRawBytes;
+        const bool normalizedPeakOk = ! renderCase.normalize
+            || (peak >= 0.98f && peak <= 1.001f);
+        const bool channelLayoutOk = readable
+            && rendered.getNumChannels() == renderCase.channels
+            && (! renderCase.expectDualMono
+                || renderCase.channels != 2
+                || channelMaxDifference <= 1.0e-4);
+        juce::Array<juce::File> leakedTemporaryFiles;
+        outputFile.getParentDirectory().findChildFiles(
+            leakedTemporaryFiles,
+            juce::File::findFiles,
+            false,
+            outputFile.getFileNameWithoutExtension() + "_temp*");
+        outputFile.getParentDirectory().findChildFiles(
+            leakedTemporaryFiles,
+            juce::File::findFiles,
+            false,
+            outputFile.getFileNameWithoutExtension()
+                + "_intermediate_temp*");
+        const bool commonCleanupPass = leakedTemporaryFiles.isEmpty();
+        const bool casePass = isRaw
+            ? rawFileValid && commonCleanupPass
+            : renderOk
+                && readable
+                && outputFile.getSize() > 0
+                && std::abs(renderedSampleRate - expectedSampleRate) <= 1.0
+                && std::abs(actualDuration - expectedDuration) <= durationTolerance
+                && peak > 1.0e-4f
+                && peak <= 1.001f
+                && nonFiniteSamples == 0
+                && normalizedPeakOk
+                && channelLayoutOk
+                && commonCleanupPass;
+
+        auto* diagnostic = new juce::DynamicObject();
+        diagnostic->setProperty("filePath", outputFile.getFullPathName());
+        diagnostic->setProperty("fileSize", outputFile.getSize());
+        diagnostic->setProperty("sampleRate", renderedSampleRate);
+        diagnostic->setProperty("channels", rendered.getNumChannels());
+        diagnostic->setProperty("duration", actualDuration);
+        diagnostic->setProperty("expectedRawBytes", expectedRawBytes);
+        diagnostic->setProperty("peak", peak);
+        diagnostic->setProperty("nonFiniteSamples", nonFiniteSamples);
+        diagnostic->setProperty("channelMaxDifference", channelMaxDifference);
+        diagnostic->setProperty(
+            "leakedTemporaryFileCount",
+            leakedTemporaryFiles.size());
+        addCheck("render_" + renderCase.id,
+                 casePass,
+                 casePass
+                     ? "Render completed and the output passed structural/audio invariants."
+                     : "Render failed one or more structural/audio invariants.",
+                 juce::var(diagnostic));
+
+        auto* artifact = new juce::DynamicObject();
+        artifact->setProperty("id", renderCase.id);
+        artifact->setProperty("filePath", outputFile.getFullPathName());
+        artifacts.add(juce::var(artifact));
+
+        if (renderCase.format == "mp3")
+            mp3Sizes[renderCase.bitDepthOrQuality] = outputFile.getSize();
+        if (renderCase.id == "wav_44100_16_stereo" && readable)
+        {
+            firstPlain16BitRender.makeCopyOf(rendered);
+            firstPlain16BitRate = renderedSampleRate;
+        }
+    }
+
+    bool mp3BitratesIncrease = mp3Sizes.size() == 4;
+    if (mp3BitratesIncrease)
+    {
+        mp3BitratesIncrease = mp3Sizes[128] < mp3Sizes[192]
+            && mp3Sizes[192] < mp3Sizes[256]
+            && mp3Sizes[256] < mp3Sizes[320];
+    }
+    auto* mp3Diagnostic = new juce::DynamicObject();
+    for (const auto& [bitrate, size] : mp3Sizes)
+        mp3Diagnostic->setProperty(juce::String(bitrate), size);
+    addCheck("mp3_bitrate_choices_preserved",
+             mp3BitratesIncrease,
+             "128/192/256/320 kbps exports must produce increasing CBR payload sizes.",
+             juce::var(mp3Diagnostic));
+
+    const auto invalidOutput = outputDirectory.getChildFile("invalid range.wav");
+    const bool invalidDitherRejected = ! renderProjectWithDither(
+        "master",
+        1.0,
+        1.0,
+        invalidOutput.getFullPathName(),
+        "wav",
+        44100.0,
+        16,
+        2,
+        false,
+        false,
+        0.0,
+        "tpdf",
+        false);
+    const auto postFailureOutput = outputDirectory.getChildFile(
+        "post invalid dither plain.wav");
+    const bool postFailureRenderOk = renderProject(
+        "master",
+        0.0,
+        fixtureDurationSeconds,
+        postFailureOutput.getFullPathName(),
+        "wav",
+        44100.0,
+        16,
+        2,
+        false,
+        false,
+        0.0,
+        false);
+    juce::AudioBuffer<float> postFailureRender;
+    double postFailureRate = 0.0;
+    const bool postFailureReadable = postFailureRenderOk
+        && readAudioFileForParity(
+            postFailureOutput,
+            postFailureRender,
+            postFailureRate);
+    double postFailureMaxDifference =
+        std::numeric_limits<double>::infinity();
+    if (postFailureReadable
+        && firstPlain16BitRender.getNumChannels()
+            == postFailureRender.getNumChannels()
+        && firstPlain16BitRender.getNumSamples()
+            == postFailureRender.getNumSamples())
+    {
+        postFailureMaxDifference = 0.0;
+        for (int channel = 0;
+             channel < postFailureRender.getNumChannels();
+             ++channel)
+        {
+            for (int sample = 0;
+                 sample < postFailureRender.getNumSamples();
+                 ++sample)
+            {
+                postFailureMaxDifference = juce::jmax(
+                    postFailureMaxDifference,
+                    static_cast<double>(std::abs(
+                        postFailureRender.getSample(channel, sample)
+                        - firstPlain16BitRender.getSample(channel, sample))));
+            }
+        }
+    }
+    const bool ditherRequestDidNotLeak = invalidDitherRejected
+        && ! invalidOutput.existsAsFile()
+        && postFailureReadable
+        && std::abs(postFailureRate - firstPlain16BitRate) <= 1.0
+        && postFailureMaxDifference == 0.0;
+    addCheck("failed_dither_render_does_not_affect_next_export",
+             ditherRequestDidNotLeak,
+             "An invalid dithered request must fail without changing the next plain render.",
+             postFailureMaxDifference);
+
+    const auto unsupportedOutput = outputDirectory.getChildFile(
+        "unsupported-format.invalid");
+    const bool unsupportedRejected = ! renderProject(
+        "master",
+        0.0,
+        fixtureDurationSeconds,
+        unsupportedOutput.getFullPathName(),
+        "invalid",
+        48000.0,
+        24,
+        2,
+        false,
+        false,
+        0.0,
+        false)
+        && ! unsupportedOutput.existsAsFile();
+    addCheck("unsupported_format_rejected_cleanly",
+             unsupportedRejected,
+             "Unsupported formats must fail without leaving a partial output.");
+
+    const auto existingUnsupportedOutput = outputDirectory.getChildFile(
+        "existing unsupported target.keep");
+    const juce::String existingSentinel = "preserve-existing-output";
+    const bool existingSentinelWritten =
+        existingUnsupportedOutput.replaceWithText(existingSentinel);
+    const bool existingUnsupportedRejected = ! renderProject(
+        "master",
+        0.0,
+        fixtureDurationSeconds,
+        existingUnsupportedOutput.getFullPathName(),
+        "invalid",
+        48000.0,
+        24,
+        2,
+        false,
+        false,
+        0.0,
+        false);
+    const bool existingUnsupportedPreserved = existingSentinelWritten
+        && existingUnsupportedRejected
+        && existingUnsupportedOutput.loadFileAsString()
+            == existingSentinel;
+    addCheck("unsupported_format_preserves_existing_target",
+             existingUnsupportedPreserved,
+             "A rejected format must not delete or replace an existing target file.");
+
+    const juce::String selectedClipId =
+        "render-export-selected-clip";
+    if (trackAdded)
+    {
+        addPlaybackClip(trackId,
+                        fixtureFile.getFullPathName(),
+                        0.0,
+                        fixtureDurationSeconds,
+                        0.0,
+                        -12.0,
+                        0.0,
+                        0.0,
+                        selectedClipId);
+    }
+    juce::StringArray selectedClipIds;
+    selectedClipIds.add(selectedClipId);
+    const auto selectedDirectOutput = outputDirectory.getChildFile(
+        "selected item direct.wav");
+    const auto selectedMasterOutput = outputDirectory.getChildFile(
+        "selected item via master.wav");
+    const bool selectedDirectOk = trackAdded && renderProject(
+        "selected_items",
+        0.0,
+        fixtureDurationSeconds,
+        selectedDirectOutput.getFullPathName(),
+        "wav",
+        48000.0,
+        24,
+        2,
+        false,
+        false,
+        0.0,
+        false,
+        selectedClipIds);
+    const bool selectedMasterOk = trackAdded && renderProject(
+        "selected_items_master",
+        0.0,
+        fixtureDurationSeconds,
+        selectedMasterOutput.getFullPathName(),
+        "wav",
+        48000.0,
+        24,
+        2,
+        false,
+        false,
+        0.0,
+        false,
+        selectedClipIds);
+    juce::AudioBuffer<float> selectedDirectBuffer;
+    juce::AudioBuffer<float> selectedMasterBuffer;
+    double selectedDirectRate = 0.0;
+    double selectedMasterRate = 0.0;
+    const bool selectedDirectReadable = selectedDirectOk
+        && readAudioFileForParity(
+            selectedDirectOutput,
+            selectedDirectBuffer,
+            selectedDirectRate);
+    const bool selectedMasterReadable = selectedMasterOk
+        && readAudioFileForParity(
+            selectedMasterOutput,
+            selectedMasterBuffer,
+            selectedMasterRate);
+    const float selectedDirectPeak = selectedDirectReadable
+        ? peakFromFloatBuffer(
+            selectedDirectBuffer,
+            selectedDirectBuffer.getNumSamples())
+        : 0.0f;
+    const float fixturePeak = peakFromFloatBuffer(
+        fixture,
+        fixture.getNumSamples());
+    const float expectedSelectedPeak = fixturePeak
+        * juce::Decibels::decibelsToGain(-12.0f);
+    double selectedRouteMaxDifference =
+        std::numeric_limits<double>::infinity();
+    if (selectedDirectReadable
+        && selectedMasterReadable
+        && selectedDirectBuffer.getNumChannels()
+            == selectedMasterBuffer.getNumChannels()
+        && selectedDirectBuffer.getNumSamples()
+            == selectedMasterBuffer.getNumSamples())
+    {
+        selectedRouteMaxDifference = 0.0;
+        for (int channel = 0;
+             channel < selectedDirectBuffer.getNumChannels();
+             ++channel)
+        {
+            for (int sample = 0;
+                 sample < selectedDirectBuffer.getNumSamples();
+                 ++sample)
+            {
+                selectedRouteMaxDifference = juce::jmax(
+                    selectedRouteMaxDifference,
+                    static_cast<double>(std::abs(
+                        selectedDirectBuffer.getSample(channel, sample)
+                        - selectedMasterBuffer.getSample(channel, sample))));
+            }
+        }
+    }
+    const bool missingSelectedIdsRejected = ! renderProject(
+        "selected_items",
+        0.0,
+        fixtureDurationSeconds,
+        outputDirectory.getChildFile(
+            "selected items missing IDs.wav").getFullPathName(),
+        "wav",
+        48000.0,
+        24,
+        2,
+        false,
+        false,
+        0.0,
+        false);
+    const bool selectedItemPass = selectedDirectReadable
+        && selectedMasterReadable
+        && std::abs(selectedDirectRate - 48000.0) <= 1.0
+        && std::abs(selectedMasterRate - 48000.0) <= 1.0
+        && std::abs(selectedDirectPeak - expectedSelectedPeak) <= 0.002f
+        && selectedRouteMaxDifference <= 1.0e-6
+        && missingSelectedIdsRejected;
+    auto* selectedDiagnostic = new juce::DynamicObject();
+    selectedDiagnostic->setProperty("expectedPeak", expectedSelectedPeak);
+    selectedDiagnostic->setProperty("actualPeak", selectedDirectPeak);
+    selectedDiagnostic->setProperty(
+        "directVsMasterMaxDifference",
+        selectedRouteMaxDifference);
+    addCheck("selected_items_filter_and_routes",
+             selectedItemPass,
+             "Selected-item exports must include only the requested clip IDs; empty selections must fail.",
+             juce::var(selectedDiagnostic));
+
+    if (trackAdded)
+        removeTrack(trackId);
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("harnessMode", "render_export_regression");
+    root->setProperty("claimLevel", "objective_only");
+    root->setProperty("objectiveGateStatus", overallPass ? "pass" : "fail");
+    root->setProperty("subjectiveAudioQuality", "not_asserted");
+    root->setProperty("outputDirectory", outputDirectory.getFullPathName());
+    root->setProperty("checks", juce::var(checks));
+    root->setProperty("artifacts", juce::var(artifacts));
+    return juce::var(root);
 }
 
 //==============================================================================

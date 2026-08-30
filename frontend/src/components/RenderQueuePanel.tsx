@@ -61,7 +61,11 @@ export function RenderQueuePanel() {
                   {job.options.fileName}.{job.options.format}
                 </div>
                 <div className="text-[10px] text-daw-text-muted">
-                  {job.options.source} / {job.options.channels} / {job.options.bitDepth}bit
+                  {job.options.source} / {job.options.channels} / {job.options.format === "mp3"
+                    ? `${job.options.mp3Bitrate}kbps`
+                    : job.options.format === "ogg"
+                      ? `quality ${job.options.oggQuality}`
+                      : `${job.options.bitDepth}bit`}
                 </div>
               </div>
               {job.status === "error" && (

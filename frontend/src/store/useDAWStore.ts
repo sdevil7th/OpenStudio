@@ -1226,15 +1226,15 @@ function commitActiveCustomShortcutBindings(
 export interface RenderJob {
   id: string;
   options: {
-    source: string;
-    bounds: string;
+    source: RenderSource;
+    bounds: RenderBounds;
     startTime: number;
     endTime: number;
     tailLength: number;
     addTail: boolean;
     directory: string;
     fileName: string;
-    format: string;
+    format: AudioFormat;
     sampleRate: number;
     bitDepth: number;
     channels: string;
@@ -1242,6 +1242,17 @@ export interface RenderJob {
     dither: boolean;
     mp3Bitrate: number;
     oggQuality: number;
+    projectName?: string;
+    tracks?: Array<{ id: string; name: string }>;
+    selectedTrackIds?: string[];
+    selectedClipIds?: string[];
+    regions?: Region[];
+    selectedRegionIds?: string[];
+    razorEdits?: Array<{ trackId: string; start: number; end: number }>;
+    ditherType?: "none" | "tpdf" | "shaped";
+    secondaryOutputEnabled?: boolean;
+    secondaryOutputFormat?: string;
+    secondaryOutputBitDepth?: number;
   };
   status: "pending" | "rendering" | "done" | "error";
   error?: string;

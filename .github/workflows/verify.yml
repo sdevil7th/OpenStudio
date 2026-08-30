@@ -89,6 +89,10 @@ jobs:
         shell: pwsh
         run: ./tools/setup-onnxruntime.ps1 -Version $env:ONNXRUNTIME_VERSION -ExpectedSha256 $env:ONNXRUNTIME_WIN_X64_SHA256
 
+      - name: Install checksum-pinned FFmpeg runtime
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
+
       - name: Install Windows prerequisite installers
         shell: pwsh
         run: |
@@ -166,6 +170,17 @@ jobs:
             }
             throw "Windows startup self-test failed."
           }
+
+      - name: Run render and export regression matrix
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-render-export-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "ci-release" `
+            -TimeoutSeconds 180 `
+            -SkipBuild
 
       - name: Regress WebView2 preflight from a non-writable install directory
         shell: pwsh
