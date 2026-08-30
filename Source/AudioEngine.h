@@ -263,6 +263,7 @@ public:
     bool setMonitoringFXPrecisionOverride(int fxIndex, const juce::String& mode);
     juce::var runReleaseGuardrails();
     juce::var runAutomatedRegressionSuite();
+    juce::var runRenderExportRegression(const juce::File& outputDirectory);
     juce::var runCleanGuitarPitchBendRegression();
     juce::var runNAMRackRegression();
     juce::var runNAMRackDIRegression(const juce::File& inputFile,
@@ -359,7 +360,8 @@ public:
                        const juce::String& filePath, const juce::String& format,
                        double renderSampleRate, int bitDepth, int numChannels,
                        bool normalize, bool addTail, double tailLengthMs,
-                       bool includeMetronome = false);
+                       bool includeMetronome = false,
+                       const juce::StringArray& includedClipIds = {});
     juce::var capturePitchAuditionPlayback(const juce::String& trackId,
                                            const juce::String& clipId,
                                            double startTime,
@@ -383,7 +385,8 @@ public:
                                  double renderSampleRate, int bitDepth, int numChannels,
                                  bool normalize, bool addTail, double tailLengthMs,
                                  const juce::String& ditherType,
-                                 bool includeMetronome = false);
+                                 bool includeMetronome = false,
+                                 const juce::StringArray& includedClipIds = {});
 
     // Plugin Delay Compensation (PDC)
     void recalculatePDC();

@@ -147,6 +147,17 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
+      - name: Run render and export release gate
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-render-export-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "release" `
+            -TimeoutSeconds 180 `
+            -SkipBuild
+
       - name: Run Windows native-window lifecycle release gate
         shell: pwsh
         run: |

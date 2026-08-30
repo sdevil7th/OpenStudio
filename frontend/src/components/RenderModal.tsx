@@ -13,6 +13,11 @@ import { nativeBridge } from "../services/NativeBridge";
 import { prepareForManualRender } from "../utils/renderPreparation";
 import { joinNativePath } from "../utils/nativePath";
 import {
+  countRenderOutputs,
+  reserveUniqueRenderPath,
+  resolveRenderWildcards,
+} from "../utils/renderJobPlanning";
+import {
   Button,
   Input,
   Select,
@@ -29,35 +34,6 @@ interface RenderModalProps {
 }
 
 const isLossyFormat = (format: AudioFormat) => format === "mp3" || format === "ogg";
-
-/**
- * Resolve wildcard variables in filename template
- */
-function resolveWildcards(
-  template: string,
-  context: { projectName?: string; trackName?: string; index?: number; regionName?: string }
-): string {
-  const now = new Date();
-  let result = template;
-  result = result.replace(/\$project/g, context.projectName || "untitled");
-  result = result.replace(/\$track/g, context.trackName || "");
-  result = result.replace(/\$region/g, context.regionName || "");
-  result = result.replace(
-    /\$date/g,
-    now.toISOString().slice(0, 10) // YYYY-MM-DD
-  );
-  result = result.replace(
-    /\$time/g,
-    now.toTimeString().slice(0, 8).replace(/:/g, "-") // HH-MM-SS
-  );
-  result = result.replace(
-    /\$index/g,
-    context.index !== undefined ? String(context.index).padStart(2, "0") : ""
-  );
-  // Clean up any double underscores or trailing underscores from empty replacements
-  result = result.replace(/_+/g, "_").replace(/^_|_$/g, "");
-  return result;
-}
 
 /**
  * Render/Export Modal Component
@@ -227,7 +203,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         lastRenderDirectory ||
         (projectPath ? projectPath.substring(0, Math.max(projectPath.lastIndexOf("\\"), projectPath.lastIndexOf("/"))) : "");
       const path = await nativeBridge.showRenderSaveDialog(
-        resolveWildcards(options.fileName, { projectName }) || "untitled",
+        resolveRenderWildcards(options.fileName, { projectName }) || "untitled",
         ext,
         initialDir
       );
@@ -252,7 +228,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   };
 
   const getResolvedFileName = (trackName?: string, index?: number) => {
-    return resolveWildcards(options.fileName, { projectName, trackName, index });
+    return resolveRenderWildcards(options.fileName, { projectName, trackName, index });
   };
 
   const getRenderPath = (trackName?: string, index?: number) => {
@@ -261,39 +237,39 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     return joinNativePath(options.directory, `${name}.${ext}`);
   };
 
+  const selectedAudioClipIds = selectedClipIds.filter((clipId) =>
+    tracks.some((track) => track.clips.some((clip) => clip.id === clipId)),
+  );
+
   /** Calculate number of files that will be rendered */
   const getFileCount = () => {
-    if (options.source === "stems") {
-      return tracks.length + 1; // All tracks + master mix
-    }
-    if (options.source === "selected_tracks") {
-      return selectedTrackIds.length || 1;
-    }
-    if (options.source === "razor") {
-      return Math.max(1, razorEdits.length);
-    }
-    // Region-based bounds multiply file count
-    if (options.bounds === "project_regions") {
-      return Math.max(1, regions.length);
-    }
-    if (options.bounds === "selected_regions") {
-      const selRegions = regions.filter((r) => selectedRegionIds.includes(r.id));
-      return Math.max(1, selRegions.length);
-    }
-    return 1;
+    const rangeCount = options.bounds === "project_regions"
+      ? Math.max(1, regions.length)
+      : options.bounds === "selected_regions"
+        ? Math.max(1, regions.filter((r) => selectedRegionIds.includes(r.id)).length)
+        : 1;
+    const primaryCount = countRenderOutputs({
+      source: options.source,
+      trackCount: tracks.length,
+      selectedTrackCount: selectedTrackIds.length,
+      razorEditCount: razorEdits.length,
+      rangeCount,
+    });
+    return primaryCount * (secondaryOutputEnabled ? 2 : 1);
   };
 
   /** Build common render params for a single render call */
   const buildRenderParams = (overrides: { source?: string; startTime?: number; endTime?: number; filePath: string }) => {
+    const resolvedSource = overrides.source ?? options.source;
     const bitDepthOrQuality = isLossyFormat(options.format)
       ? options.format === "mp3" ? options.mp3Bitrate : options.oggQuality
       : options.bitDepth;
     return {
-      source: overrides.source ?? options.source,
+      source: resolvedSource,
       startTime: overrides.startTime ?? options.startTime,
       endTime: overrides.endTime ?? options.endTime,
       filePath: overrides.filePath,
-      format: options.format === "raw" ? "wav" : options.format, // RAW uses wav writer, stripped later
+      format: options.format,
       sampleRate: options.sampleRate,
       bitDepth: bitDepthOrQuality,
       channels: options.channels === "stereo" ? 2 : 1,
@@ -301,6 +277,9 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       addTail: options.addTail,
       tailLength: options.tailLength,
       includeMetronome: false,
+      includedClipIds: resolvedSource === "selected_items" || resolvedSource === "selected_items_master"
+        ? selectedAudioClipIds
+        : [],
     };
   };
 
@@ -308,7 +287,10 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   const doRender = async (overrides: { source?: string; startTime?: number; endTime?: number; filePath: string }) => {
     const params = buildRenderParams(overrides);
     let success: boolean;
-    if (options.dither) {
+    const shouldDither = options.dither
+      && !isLossyFormat(options.format)
+      && options.bitDepth !== 32;
+    if (shouldDither) {
       const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
       success = await nativeBridge.renderProjectWithDither({ ...params, ditherType });
     } else {
@@ -320,12 +302,24 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   };
 
   /** Run a secondary render (convert to secondary format) after primary render */
-  const renderSecondary = async (primaryPath: string) => {
-    if (!secondaryOutputEnabled) return;
+  type CompletedRender = {
+    filePath: string;
+    source: string;
+    startTime: number;
+    endTime: number;
+  };
+
+  const renderSecondary = async (primary: CompletedRender) => {
+    if (!secondaryOutputEnabled) return null;
     const ext = secondaryOutputFormat;
-    const secPath = primaryPath.replace(/\.[^.]+$/, `.${ext}`);
+    const secPath = primary.filePath.replace(/\.[^.]+$/, `.${ext}`);
     const secondaryParams = {
-      ...buildRenderParams({ filePath: secPath }),
+      ...buildRenderParams({
+        source: primary.source,
+        startTime: primary.startTime,
+        endTime: primary.endTime,
+        filePath: secPath,
+      }),
       format: secondaryOutputFormat,
       bitDepth: isLossyFormat(secondaryOutputFormat as AudioFormat)
         ? secondaryOutputFormat === "mp3"
@@ -334,7 +328,9 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         : secondaryOutputBitDepth,
     };
     let success: boolean;
-    if (options.dither && !isLossyFormat(secondaryOutputFormat as AudioFormat)) {
+    if (options.dither
+        && !isLossyFormat(secondaryOutputFormat as AudioFormat)
+        && secondaryOutputBitDepth !== 32) {
       const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
       success = await nativeBridge.renderProjectWithDither({ ...secondaryParams, ditherType });
     } else {
@@ -345,6 +341,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         `Primary render completed, but the secondary ${secondaryOutputFormat.toUpperCase()} output failed for "${secPath}".`,
       );
     }
+    return secPath;
   };
 
   /** Add rendered file(s) to project after render */
@@ -396,11 +393,23 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       alert("Invalid render range: end time must be greater than start time.");
       return;
     }
+    if (secondaryOutputEnabled && secondaryOutputFormat === options.format) {
+      alert("Secondary output must use a different format from the primary output.");
+      return;
+    }
 
     setIsRendering(true);
     setRenderProgress(0);
     setRenderStatus("Checking pitch renders...");
     const renderedFiles: string[] = [];
+    const completedRenders: CompletedRender[] = [];
+    const reservedPaths = new Set<string>();
+    const reservePath = (desiredPath: string, suffix: string) =>
+      reserveUniqueRenderPath(desiredPath, suffix, reservedPaths);
+    const recordCompletedRender = (filePath: string, source: string, startTime: number, endTime: number) => {
+      renderedFiles.push(filePath);
+      completedRenders.push({ filePath, source, startTime, endTime });
+    };
 
     try {
       setRenderStatus("Syncing clips...");
@@ -422,19 +431,21 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           // Master mix + each track
           setRenderStatus(`Rendering master mix${range.name ? ` (${range.name})` : ""}...`);
           const masterPath = getRenderPath(undefined, 0);
-          const resolvedMaster = range.name
-            ? joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, index: 0, ...regionCtx })}.${options.format}`)
+          const desiredMaster = range.name
+            ? joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, index: 0, ...regionCtx })}.${options.format}`)
             : masterPath;
+          const resolvedMaster = reservePath(desiredMaster, range.name ? `${range.name}-master-${ri + 1}` : "master");
           await doRender({ source: "master", startTime: range.start, endTime: range.end, filePath: resolvedMaster });
-          renderedFiles.push(resolvedMaster);
+          recordCompletedRender(resolvedMaster, "master", range.start, range.end);
           advanceProgress();
 
           for (let i = 0; i < tracks.length; i++) {
             const track = tracks[i];
             setRenderStatus(`Rendering stem ${i + 1} of ${tracks.length}: ${track.name}${range.name ? ` (${range.name})` : ""}...`);
-            const stemPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
+            const desiredStemPath = joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
+            const stemPath = reservePath(desiredStemPath, `${track.name}-${i + 1}${range.name ? `-${range.name}-${ri + 1}` : ""}`);
             await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: stemPath });
-            renderedFiles.push(stemPath);
+            recordCompletedRender(stemPath, `stem:${track.id}`, range.start, range.end);
             advanceProgress();
           }
         } else if (options.source === "selected_tracks") {
@@ -447,24 +458,27 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           for (let i = 0; i < tracksToRender.length; i++) {
             const track = tracksToRender[i];
             setRenderStatus(`Rendering track ${i + 1} of ${tracksToRender.length}: ${track.name}...`);
-            const trackPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
+            const desiredTrackPath = joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, trackName: track.name, index: i + 1, ...regionCtx })}.${options.format}`);
+            const trackPath = reservePath(desiredTrackPath, `${track.name}-${i + 1}${range.name ? `-${range.name}-${ri + 1}` : ""}`);
             await doRender({ source: `stem:${track.id}`, startTime: range.start, endTime: range.end, filePath: trackPath });
-            renderedFiles.push(trackPath);
+            recordCompletedRender(trackPath, `stem:${track.id}`, range.start, range.end);
             advanceProgress();
           }
         } else if (options.source === "selected_items" || options.source === "selected_items_master") {
           // Render only selected clips — pass as master with clip filtering
-          if (selectedClipIds.length === 0) {
-            alert("No media items selected. Select clips in the timeline first.");
+          if (selectedAudioClipIds.length === 0) {
+            alert("No audio items selected. Select one or more audio clips in the timeline first.");
             setIsRendering(false);
             return;
           }
-          setRenderStatus(`Rendering ${selectedClipIds.length} selected item(s)${range.name ? ` (${range.name})` : ""}...`);
-          // selected_items_master routes through master FX; selected_items renders direct
-          const source = options.source === "selected_items_master" ? "master" : "selected_items";
-          const itemPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
+          setRenderStatus(`Rendering ${selectedAudioClipIds.length} selected audio item(s)${range.name ? ` (${range.name})` : ""}...`);
+          // The backend filters to these selected clip IDs and distinguishes
+          // direct item output from the master-FX route.
+          const source = options.source;
+          const desiredItemPath = joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
+          const itemPath = reservePath(desiredItemPath, range.name ? `${range.name}-${ri + 1}` : "selected-items");
           await doRender({ source, startTime: range.start, endTime: range.end, filePath: itemPath });
-          renderedFiles.push(itemPath);
+          recordCompletedRender(itemPath, source, range.start, range.end);
           advanceProgress();
         } else if (options.source === "razor") {
           // Render each razor edit area as a separate file
@@ -477,17 +491,19 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             const razor = razorEdits[i];
             const track = tracks.find((t) => t.id === razor.trackId);
             setRenderStatus(`Rendering razor area ${i + 1} of ${razorEdits.length}...`);
-            const razorPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, trackName: track?.name, index: i + 1 })}.${options.format}`);
+            const desiredRazorPath = joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, trackName: track?.name, index: i + 1 })}.${options.format}`);
+            const razorPath = reservePath(desiredRazorPath, `${track?.name || "track"}-${i + 1}`);
             await doRender({ source: `stem:${razor.trackId}`, startTime: razor.start, endTime: razor.end, filePath: razorPath });
-            renderedFiles.push(razorPath);
+            recordCompletedRender(razorPath, `stem:${razor.trackId}`, razor.start, razor.end);
             advanceProgress();
           }
         } else {
           // Master mix render
           setRenderStatus(`Rendering master mix${range.name ? ` (${range.name})` : ""}...`);
-          const masterPath = joinNativePath(options.directory, `${resolveWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
+          const desiredMasterPath = joinNativePath(options.directory, `${resolveRenderWildcards(options.fileName, { projectName, ...regionCtx })}.${options.format}`);
+          const masterPath = reservePath(desiredMasterPath, range.name ? `${range.name}-${ri + 1}` : "master");
           await doRender({ source: options.source, startTime: range.start, endTime: range.end, filePath: masterPath });
-          renderedFiles.push(masterPath);
+          recordCompletedRender(masterPath, options.source, range.start, range.end);
           advanceProgress();
         }
       }
@@ -495,8 +511,10 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       // Secondary output pass
       if (secondaryOutputEnabled && renderedFiles.length > 0) {
         setRenderStatus("Rendering secondary output...");
-        for (const fp of renderedFiles) {
-          await renderSecondary(fp);
+        for (const completedRender of completedRenders) {
+          const secondaryPath = await renderSecondary(completedRender);
+          if (secondaryPath) renderedFiles.push(secondaryPath);
+          advanceProgress();
         }
       }
 
@@ -518,7 +536,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       console.error("Render failed:", error);
       const detail = error instanceof Error ? error.message : String(error);
       const completedSummary = renderedFiles.length > 0
-        ? `\n\n${renderedFiles.length} primary file${renderedFiles.length === 1 ? " was" : "s were"} rendered successfully before this later step failed:\n${renderedFiles.join("\n")}`
+        ? `\n\n${renderedFiles.length} output file${renderedFiles.length === 1 ? " was" : "s were"} rendered successfully before this later step failed:\n${renderedFiles.join("\n")}`
         : "";
       alert(`Render did not fully complete: ${detail}${completedSummary}`);
       setIsRendering(false);
@@ -560,8 +578,8 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                 { value: "master", label: "Master mix" },
                 { value: "selected_tracks", label: "Selected tracks (stems)" },
                 { value: "stems", label: "Master mix + all stems" },
-                { value: "selected_items", label: "Selected media items" },
-                { value: "selected_items_master", label: "Selected items via master" },
+                { value: "selected_items", label: "Selected audio items" },
+                { value: "selected_items_master", label: "Selected audio items via master" },
                 { value: "razor", label: "Razor edit areas" },
               ]}
               value={options.source}
@@ -843,6 +861,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                     format: fmt,
                     // Reset bit depth for FLAC if coming from 32-bit
                     bitDepth: fmt === "flac" && options.bitDepth === 32 ? 24 : options.bitDepth,
+                    dither: isLossyFormat(fmt) ? false : options.dither,
                   });
                 }}
                 disabled={isRendering}
@@ -872,12 +891,14 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                         ]
                   }
                   value={options.format === "flac" && options.bitDepth === 32 ? 24 : options.bitDepth}
-                  onChange={(val) =>
+                  onChange={(val) => {
+                    const nextBitDepth = val as BitDepth;
                     setOptions({
                       ...options,
-                      bitDepth: val as BitDepth,
-                    })
-                  }
+                      bitDepth: nextBitDepth,
+                      dither: nextBitDepth === 32 ? false : options.dither,
+                    });
+                  }}
                   disabled={isRendering}
                 />
               </div>
@@ -952,7 +973,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                   onChange={(e) =>
                     setOptions({ ...options, dither: e.target.checked })
                   }
-                  disabled={isRendering || options.bitDepth === 32}
+                  disabled={isRendering || options.bitDepth === 32 || isLossyFormat(options.format)}
                 />
                 {options.dither && (
                   <Select
@@ -1097,10 +1118,28 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
           variant="default"
           size="md"
           onClick={() => {
-            useDAWStore.getState().addToRenderQueue(options);
+            useDAWStore.getState().addToRenderQueue({
+              ...options,
+              projectName,
+              tracks: tracks.map(({ id, name }) => ({ id, name })),
+              selectedTrackIds: [...selectedTrackIds],
+              selectedClipIds: [...selectedAudioClipIds],
+              regions: regions.map((region) => ({ ...region })),
+              selectedRegionIds: [...selectedRegionIds],
+              razorEdits: razorEdits.map(({ trackId, start, end }) => ({ trackId, start, end })),
+              ditherType: useDAWStore.getState().ditherType,
+              secondaryOutputEnabled,
+              secondaryOutputFormat,
+              secondaryOutputBitDepth,
+            });
             onClose();
           }}
-          disabled={isRendering || !options.directory || !options.fileName}
+          disabled={
+            isRendering
+            || !options.directory
+            || !options.fileName
+            || (secondaryOutputEnabled && secondaryOutputFormat === options.format)
+          }
         >
           Add to Queue
         </Button>

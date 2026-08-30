@@ -171,6 +171,17 @@ jobs:
             throw "Windows startup self-test failed."
           }
 
+      - name: Run render and export regression matrix
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-render-export-headless-regression.ps1 `
+            -AppPath $exePath `
+            -OutputRoot $env:RUNNER_TEMP `
+            -Label "ci-release" `
+            -TimeoutSeconds 180 `
+            -SkipBuild
+
       - name: Regress WebView2 preflight from a non-writable install directory
         shell: pwsh
         run: |

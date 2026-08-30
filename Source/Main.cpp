@@ -947,6 +947,24 @@ int runHeadlessAutomatedRegressionSuite(AudioEngine& audioEngine, const juce::Fi
     return wroteReport && overallPass ? 0 : 2;
 }
 
+int runHeadlessRenderExportRegression(AudioEngine& audioEngine,
+                                      const juce::File& outputDirectory,
+                                      const juce::File& reportFile)
+{
+    auto result = audioEngine.runRenderExportRegression(outputDirectory);
+    const bool wroteReport = writeHeadlessResult(reportFile, result);
+    const bool pass = result.isObject()
+        && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
+    juce::Logger::writeToLog(
+        "[renderExportRegression.headless] outputDir="
+        + outputDirectory.getFullPathName()
+        + " report=" + reportFile.getFullPathName()
+        + " wroteReport=" + juce::String(wroteReport ? "true" : "false")
+        + " objectiveGateStatus="
+        + result.getProperty("objectiveGateStatus", {}).toString());
+    return wroteReport && pass ? 0 : 2;
+}
+
 int runHeadlessCleanGuitarRegression(AudioEngine& audioEngine, const juce::File& reportFile)
 {
     auto result = audioEngine.runCleanGuitarPitchBendRegression();
@@ -1069,6 +1087,7 @@ public:
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
         const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
+        const auto renderExportRegressionHeadlessMode = commandLineHasFlag(commandLine, "--render-export-regression-headless");
         const auto startupSelfTestReportPath = getCommandLineOptionValue(commandLine, "--report");
         const auto pitchRegressionHeadlessJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression-headless");
         const auto pitchRegressionJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression");
@@ -1234,6 +1253,25 @@ public:
                 : getWritableStartupLogFile().getSiblingFile("OpenStudio_AutomatedRegression.json");
 
             const auto exitCode = runHeadlessAutomatedRegressionSuite(*audioEngine, reportFile);
+            setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (renderExportRegressionHeadlessMode)
+        {
+            const auto outputDirectory = headlessOutputDirectoryPath.isNotEmpty()
+                ? juce::File(headlessOutputDirectoryPath.trim().unquoted())
+                : getWritableStartupLogFile().getSiblingFile(
+                    "render_export_regression");
+            const auto reportFile = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath.trim().unquoted())
+                : outputDirectory.getChildFile(
+                    "render_export_regression_result.json");
+            const auto exitCode = runHeadlessRenderExportRegression(
+                *audioEngine,
+                outputDirectory,
+                reportFile);
             setApplicationReturnValue(exitCode);
             quit();
             return;

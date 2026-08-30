@@ -2523,7 +2523,11 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
             const int outChannels =
                 playbackOutputChannels;
-            const int channelsToProcess = std::min (outChannels, readerChannels);
+            const bool expandMonoSourceToStereo =
+                readerChannels == 1 && outChannels >= 2;
+            const int channelsToProcess = expandMonoSourceToStereo
+                ? outChannels
+                : std::min (outChannels, readerChannels);
             for (int i = 0; i < outputSamples; ++i)
             {
                 const double filePos = bufferStartPosition + i * ratio;
@@ -2537,13 +2541,13 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
                 const float totalGain = clipGain * fadeGain * envGain;
 
-                for (int ch = 0; ch < channelsToProcess; ++ch)
+                if (expandMonoSourceToStereo)
                 {
                     const float sourceSample =
                         allReadAheadReady
                             ? sampleBufferCubic(
                                 reusableFileBuffer,
-                                ch,
+                                0,
                                 fileSamplesToRead,
                                 filePos)
                             : 0.0f;
@@ -2551,16 +2555,47 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                         streamingContinuity != nullptr
                             ? streamingContinuity
                                 ->processSample(
-                                    ch,
+                                    0,
                                     sourceSample,
                                     allReadAheadReady)
                             : sourceSample;
                     const float mixedSample =
                         continuitySample * totalGain;
-                    playbackMix.addSample(
-                        ch,
-                        outputStart + i,
-                        mixedSample);
+                    for (int ch = 0; ch < channelsToProcess; ++ch)
+                    {
+                        playbackMix.addSample(
+                            ch,
+                            outputStart + i,
+                            mixedSample);
+                    }
+                }
+                else
+                {
+                    for (int ch = 0; ch < channelsToProcess; ++ch)
+                    {
+                        const float sourceSample =
+                            allReadAheadReady
+                                ? sampleBufferCubic(
+                                    reusableFileBuffer,
+                                    ch,
+                                    fileSamplesToRead,
+                                    filePos)
+                                : 0.0f;
+                        const float continuitySample =
+                            streamingContinuity != nullptr
+                                ? streamingContinuity
+                                    ->processSample(
+                                        ch,
+                                        sourceSample,
+                                        allReadAheadReady)
+                                : sourceSample;
+                        const float mixedSample =
+                            continuitySample * totalGain;
+                        playbackMix.addSample(
+                            ch,
+                            outputStart + i,
+                            mixedSample);
+                    }
                 }
                 if (streamingContinuity != nullptr)
                     streamingContinuity->advanceFrame(
