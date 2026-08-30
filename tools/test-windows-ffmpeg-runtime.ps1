@@ -55,10 +55,21 @@ try {
             [Parameter(Mandatory = $true)][string[]]$Arguments,
             [Parameter(Mandatory = $false)][switch]$ExpectFailure
         )
-        $output = & $ffmpeg @Arguments 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
+        # Windows PowerShell 5 promotes a native program's stderr records to
+        # terminating errors when the caller uses Stop. Capture them under
+        # Continue so expected FFmpeg diagnostics can be inspected uniformly
+        # in PowerShell 5 and 7.
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $output = & $ffmpeg @Arguments 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($ExpectFailure) {
             if ($exitCode -eq 0) { throw "FFmpeg unexpectedly succeeded: $($Arguments -join ' ')" }
+            $global:LASTEXITCODE = 0
         } elseif ($exitCode -ne 0) {
             throw "FFmpeg failed with exit code $exitCode.`nCommand: $($Arguments -join ' ')`n$output"
         }
@@ -125,6 +136,7 @@ try {
     Invoke-FFmpeg -Arguments @("-hide_banner", "-loglevel", "error", "-i", $corrupt, "-y", (Join-Path $fixtureDir "corrupt output.wav")) -ExpectFailure | Out-Null
 
     Write-Host "OpenStudio FFmpeg Windows runtime regression passed."
+    $global:LASTEXITCODE = 0
 } finally {
     if ($ownsWorkingDirectory -and (Test-Path -LiteralPath $resolvedWorkingDirectory)) {
         Remove-Item -LiteralPath $resolvedWorkingDirectory -Recurse -Force
