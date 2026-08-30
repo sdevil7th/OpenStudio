@@ -1,0 +1,353 @@
+/* NAMRackCalibration feature-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-product.nam-neural-product[data-view="pedalboard"] > :not(.nam-product-main):not(.nam-save-tone-modal):not(.nam-calibration-drawer):not(.nam-preset-manager):not([data-modal-root="true"]) {
+  display: none;
+}
+
+.nam-product.nam-neural-product[data-design-port-active="true"] > :not(.nam-product-main):not(.nam-save-tone-modal):not(.nam-calibration-drawer):not(.nam-preset-manager):not([data-modal-root="true"]) {
+  display: none;
+}
+.nam-calibration-badge {
+  width: 74px;
+  min-width: 74px;
+  height: 58px;
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  grid-template-rows: 17px 18px;
+  align-content: center;
+  align-items: center;
+  gap: 2px 7px;
+  padding: 6px 9px;
+  color: #c9d0d6;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: linear-gradient(180deg, #262a2d, #151719);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06), 0 4px 10px rgba(0, 0, 0, 0.28);
+}
+
+.nam-calibration-badge svg {
+  grid-row: 1 / 3;
+  color: #d9a85d;
+}
+
+.nam-calibration-badge span,
+.nam-calibration-badge strong {
+  overflow: hidden;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.nam-calibration-badge span {
+  color: #7f8991;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.nam-calibration-badge strong {
+  color: #ecf0f2;
+  font-size: 10px;
+}
+
+.nam-calibration-badge[data-status="complete"] svg,
+.nam-calibration-badge[data-status="override"] svg {
+  color: #6ed7a3;
+}
+
+.nam-calibration-badge[data-status="partial"] svg {
+  color: #f0bd5d;
+}
+
+.nam-calibration-badge[data-status="off"] svg,
+.nam-calibration-badge[data-status="unavailable"] svg {
+  color: #778087;
+}
+
+.nam-calibration-badge[data-open="true"] {
+  border-color: rgba(217, 168, 93, 0.72);
+  box-shadow: 0 0 0 1px rgba(217, 168, 93, 0.18), 0 8px 20px rgba(0, 0, 0, 0.38);
+}
+
+.nam-calibration-drawer {
+  position: absolute;
+  z-index: 500;
+  top: 158px;
+  left: 24px;
+  width: min(720px, calc(100% - 48px));
+  padding: 20px;
+  color: #e7eaec;
+  border: 1px solid rgba(220, 174, 103, 0.34);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.035), transparent 42%),
+    #16191b;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.62), inset 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.nam-product.nam-neural-product[data-design-port-active="true"] > .nam-calibration-drawer {
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: clamp(190px, 24vh, 238px);
+  z-index: 900;
+  width: min(780px, calc(100% - 56px));
+  max-height: calc(100% - clamp(220px, 27vh, 268px));
+  margin: 0;
+  overflow: auto;
+  transform: translateX(-50%);
+  border-color: rgba(224, 161, 73, .48);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.045), transparent 42%),
+    #11151a;
+  box-shadow: 0 32px 100px rgba(0,0,0,.78), 0 0 0 9999px rgba(0,0,0,.52), inset 0 1px rgba(255,255,255,.06);
+}
+
+.nam-calibration-drawer > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.nam-calibration-drawer > header span {
+  color: #ce9c52;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+}
+
+.nam-calibration-drawer > header strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+
+.nam-calibration-drawer > header p {
+  max-width: 540px;
+  margin: 5px 0 0;
+  color: #929aa0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.nam-calibration-drawer > header button {
+  width: 32px;
+  height: 32px;
+  color: #aeb5ba;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  background: #23272a;
+  font-size: 19px;
+}
+
+.nam-calibration-reference {
+  display: grid;
+  grid-template-columns: 180px 120px 1fr;
+  align-items: center;
+  gap: 14px;
+  margin: 16px 0;
+  padding: 13px 15px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #1d2022;
+}
+
+.nam-calibration-reference > label {
+  color: #dfe3e5;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.nam-calibration-reference > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.nam-calibration-reference input,
+.nam-calibration-overrides input {
+  width: 76px;
+  padding: 7px 8px;
+  color: #f0f3f4;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 5px;
+  background: #101214;
+  font: inherit;
+}
+
+.nam-calibration-reference small {
+  color: #7f888e;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.nam-calibration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.nam-calibration-slot {
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #24282a, #1a1d1f);
+}
+
+.nam-calibration-slot > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.nam-calibration-slot > header span,
+.nam-calibration-slot > header strong {
+  display: block;
+}
+.nam-calibration-slot > header small {
+  display: block;
+  margin-top: 3px;
+  color: #8e979d;
+  font-size: 8px;
+  line-height: 1.25;
+}
+
+.nam-calibration-slot > header span {
+  color: #8e979d;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nam-calibration-slot > header strong {
+  margin-top: 3px;
+  color: #d9e0e3;
+  font-size: 12px;
+}
+
+.nam-calibration-slot select {
+  min-width: 118px;
+  padding: 7px 9px;
+  color: #e7eaec;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: #111315;
+  font-size: 10px;
+}
+
+.nam-calibration-slot dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 13px 0 0;
+}
+
+.nam-calibration-slot dl > div {
+  padding: 8px 9px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.nam-calibration-slot dt {
+  color: #747e84;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nam-calibration-slot dd {
+  margin: 3px 0 0;
+  color: #e5e9ea;
+  font-family: "Roboto Mono", "Consolas", monospace;
+  font-size: 11px;
+}
+
+.nam-calibration-overrides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.nam-calibration-overrides label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #929ba0;
+  font-size: 9px;
+  flex-direction: row;
+}
+
+.nam-calibration-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255,255,255,.09);
+}
+
+.nam-calibration-footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #929ba0;
+  font-size: 10px;
+}
+
+.nam-calibration-footer > span i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #72c98b;
+  box-shadow: 0 0 0 3px rgba(114,201,139,.12);
+}
+
+.nam-calibration-footer > button {
+  min-width: 86px;
+  min-height: 34px;
+  border: 1px solid #d89a48;
+  border-radius: 5px;
+  color: #211407;
+  background: linear-gradient(180deg, #efb45e, #c77f30);
+  font-size: 10px;
+  font-weight: 760;
+}
+
+@media (max-width: 760px) {
+  .nam-calibration-drawer {
+    top: 132px;
+    left: 12px;
+    width: calc(100% - 24px);
+    max-height: calc(100% - 150px);
+    overflow: auto;
+  }
+
+  .nam-calibration-reference,
+.nam-calibration-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.nam-product.nam-neural-product[data-view="mixer"] > :not(.nam-product-main):not(.nam-save-tone-modal):not(.nam-calibration-drawer):not(.nam-preset-manager):not([data-modal-root="true"]) {
+  display: none;
+}
+@media (max-height: 699px) {
+
+  .nam-product.nam-neural-product[data-design-port-active="true"] > .nam-calibration-drawer {
+    top: 12px;
+    max-height: calc(100% - 24px);
+  }
+}
+/* One-dimensional Flex ownership helpers. */
+.nam-calibration-overrides label > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}

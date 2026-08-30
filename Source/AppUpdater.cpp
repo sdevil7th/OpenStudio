@@ -102,7 +102,7 @@ juce::String getXmlAttribute(const juce::XmlElement& element, std::initializer_l
 
 juce::String getXmlChildText(const juce::XmlElement& parent, std::initializer_list<const char*> names)
 {
-    forEachXmlChildElement (parent, child)
+    for (auto* child = parent.getFirstChildElement(); child != nullptr; child = child->getNextElement())
     {
         for (const auto* name : names)
         {
@@ -339,7 +339,7 @@ juce::var AppUpdater::performUpdateCheck()
             return makeStatus("error", "The update appcast does not contain a channel.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
 
         juce::XmlElement* item = nullptr;
-        forEachXmlChildElement (*channel, child)
+        for (auto* child = channel->getFirstChildElement(); child != nullptr; child = child->getNextElement())
         {
             if (xmlNameMatches(child->getTagName(), "item"))
             {

@@ -4,9 +4,42 @@ import {
   normalizeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
+import {
+  NAM_INSTRUMENT_PROFILE_OPTIONS,
+  namPreEqBandLabelsForProfile,
+} from "../utils/namInstrumentProfile";
+import { NAM_FULL_MODEL_SIZE } from "../utils/namRackPresetTransactions";
+import {
+  NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS,
+  normalizeNAMEffectsDspVersion,
+  pruneRetiredNAMRackInputRoutingState,
+  sanitizeNAMRackDspState,
+} from "../utils/namPortableState";
 
 // Type definitions for the JUCE backend
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
+
+export function isAllowedExternalBrowserURL(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+
+  const candidate = value.trim();
+  if (
+    !/^https?:\/\//i.test(candidate) ||
+    /[\u0000-\u001f\u007f]/.test(candidate)
+  ) {
+    return false;
+  }
+
+  try {
+    const url = new URL(candidate);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      url.hostname.length > 0
+    );
+  } catch {
+    return false;
+  }
+}
 
 function shouldLogPitchEditorFormant() {
   const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
@@ -49,6 +82,11 @@ export interface BuiltInPluginAddress {
   fxIndex?: number;
 }
 
+export type NAMModelLoadOptions = {
+  /** Explicit new-load quality. Preset/snapshot restore does not use this API. */
+  modelSize?: number;
+};
+
 export interface BuiltInParamDescriptor {
   id: string;
   label: string;
@@ -70,6 +108,60 @@ export interface BuiltInPluginSchema {
   chain: BuiltInPluginChain;
   fxIndex: number;
   parameters: BuiltInParamDescriptor[];
+  modelState?: {
+    pedalModelPath?: string;
+    ampModelPath?: string;
+    cabIRPath?: string;
+    hasPedalModel?: boolean;
+    hasAmpModel?: boolean;
+    hasSlimmableNAMModel?: boolean;
+    pedalModelSize?: number;
+    ampModelSize?: number;
+    pedalModelSlimmable?: boolean;
+    ampModelSlimmable?: boolean;
+    pedalActiveModelSize?: number;
+    ampActiveModelSize?: number;
+    pedalModelSizeBreakpoints?: number[];
+    ampModelSizeBreakpoints?: number[];
+    hasCabIR?: boolean;
+    cabIRState?: "empty" | "configured" | "missing" | string;
+    cabIRActivationMode?: "none" | "prepared" | string;
+    cabRequestedEnabled?: boolean;
+    pedalMetadataCaptureType?: string;
+    ampMetadataCaptureType?: string;
+    pedalMetadataName?: string;
+    pedalMetadataGearMake?: string;
+    pedalMetadataGearModel?: string;
+    ampMetadataName?: string;
+    ampMetadataGearMake?: string;
+    ampMetadataGearModel?: string;
+    pedalDeclaredCaptureType?: string;
+    ampDeclaredCaptureType?: string;
+    pedalCaptureType?: string;
+    ampCaptureType?: string;
+    ampIncludesCab?: boolean;
+    namEffectsDspVersion?: number;
+    inputRoutingAutomatic?: boolean;
+    automaticInputRoutingMode?: number;
+    inputRoutingMode?: number;
+    activeInputRoutingMode?: number;
+    effectiveInputRoutingMode?: number;
+    inputRoutingTransitionPhase?: number;
+    routedInputChannelCount?: number;
+    inputRoutingStereoHostCapable?: boolean;
+    inputRoutingStereoModelCapable?: boolean;
+    inputRoutingRequestHonored?: boolean;
+    inputRoutingReadbackReason?: string;
+    trueStereoDualNAMActive?: boolean;
+    pedalStereoCapable?: boolean;
+    ampStereoCapable?: boolean;
+    pedalDualMonoWarning?: string;
+    ampDualMonoWarning?: string;
+    pedalCalibration?: NAMCalibrationState;
+    ampCalibration?: NAMCalibrationState;
+    lastLoadError?: string;
+  };
+  uiState?: any;
   visualization?: {
     frequencies?: number[];
     responseDb?: number[];
@@ -80,6 +172,10 @@ export interface BuiltInPluginSchema {
     gainReductionDb?: number;
     inputLevelDb?: number;
     outputLevelDb?: number;
+    inputLeftLevelDb?: number;
+    inputRightLevelDb?: number;
+    outputLeftLevelDb?: number;
+    outputRightLevelDb?: number;
     gateOpen?: boolean;
     detectedHz?: number;
     correctedHz?: number;
@@ -90,6 +186,486 @@ export interface BuiltInPluginSchema {
     historyCorrectedMidi?: number[];
     historyConfidence?: number[];
   };
+}
+
+export const NAM_RACK_STEREO_POLY_OCTAVER_LABEL = "Stereo Poly Octaver";
+
+const NAM_RACK_STEREO_POLY_OCTAVER_PRESENTATION = Object.freeze({
+  label: NAM_RACK_STEREO_POLY_OCTAVER_LABEL,
+  captionPrefix: "Polyphonic stereo",
+  hardwareTitle: "POLY OCTAVER",
+  stereoPolyphonic: true,
+});
+
+export function resolveNAMRackOctaverPresentation(_namEffectsDspVersion: unknown) {
+  return NAM_RACK_STEREO_POLY_OCTAVER_PRESENTATION;
+}
+
+export function resolveNAMRackCabinetSpaceActivity(
+  roomEnabled: unknown,
+  doublerEnabled: unknown,
+): { active: boolean; roomActive: boolean; doublerActive: boolean; label: string } {
+  const finiteRoomEnabled = Number(roomEnabled);
+  const finiteDoublerEnabled = Number(doublerEnabled);
+  const roomActive = Number.isFinite(finiteRoomEnabled) && finiteRoomEnabled >= 0.5;
+  const doublerActive = Number.isFinite(finiteDoublerEnabled) && finiteDoublerEnabled >= 0.5;
+  return {
+    active: roomActive || doublerActive,
+    roomActive,
+    doublerActive,
+    label: roomActive && doublerActive
+      ? "Room + Doubler"
+      : roomActive
+        ? "Room"
+        : doublerActive
+          ? "Doubler"
+          : "",
+  };
+}
+
+export function projectNAMRackSchemaForUI(schema: BuiltInPluginSchema): BuiltInPluginSchema {
+  const version = normalizeNAMEffectsDspVersion(schema.modelState?.namEffectsDspVersion);
+  const publicParameters = schema.parameters.filter((parameter) => (
+    parameter.id !== "auditionSource"
+    && parameter.id !== "inputMode"
+    && parameter.id !== "precisionDriveVoice"
+    && !NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS.has(parameter.id)
+  ));
+  if (version === undefined) {
+    return publicParameters.length === schema.parameters.length
+      ? schema
+      : { ...schema, parameters: publicParameters };
+  }
+  const octaverPresentation = resolveNAMRackOctaverPresentation(version);
+  let changed = publicParameters.length !== schema.parameters.length;
+  const parameters = publicParameters
+    .map((parameter) => {
+    if (parameter.id === "instrumentProfile") {
+      const enumOptions = NAM_INSTRUMENT_PROFILE_OPTIONS.map(({ value, label }) => ({ value, label }));
+      const optionsMatch = parameter.enumOptions?.length === enumOptions.length
+        && enumOptions.every((option, index) => (
+          parameter.enumOptions?.[index]?.value === option.value
+          && parameter.enumOptions?.[index]?.label === option.label
+        ));
+      if (!optionsMatch) {
+        changed = true;
+        return { ...parameter, enumOptions };
+      }
+    }
+    if (parameter.id === "octaverEnabled" && parameter.label !== octaverPresentation.label) {
+      changed = true;
+      return { ...parameter, label: octaverPresentation.label };
+    }
+    if (parameter.id === "chaosWeight" && parameter.label !== "Weight (Tight to Thick)") {
+      changed = true;
+      return { ...parameter, label: "Weight (Tight to Thick)" };
+    }
+    if (parameter.id === "chaosGate" && parameter.label !== "Dist Gate") {
+      changed = true;
+      return { ...parameter, label: "Dist Gate" };
+    }
+    return parameter;
+  });
+  return changed ? { ...schema, parameters } : schema;
+}
+
+export interface PluginParameterInfo {
+  index: number;
+  name: string;
+  value: number;
+  text: string;
+  paramId?: string;
+  builtIn?: boolean;
+  min?: number;
+  max?: number;
+  discrete?: boolean;
+  type?: string;
+  unit?: string;
+  enumOptions?: Array<{ value: number; label: string }>;
+}
+
+export interface MasterFXInfo {
+  index: number;
+  name: string;
+  type?: string;
+  pluginPath?: string;
+  bypassed?: boolean;
+  precisionOverride?: "auto" | "float32";
+}
+
+export interface MIDILearnMappingInfo {
+  ccNumber: number;
+  trackId: string;
+  chainType: "input" | "track";
+  pluginIndex: number;
+  paramIndex: number;
+  builtIn?: boolean;
+  paramId?: string;
+}
+
+export interface NAMCalibrationState {
+  mode?: number;
+  referenceDbu?: number;
+  metadataInputLevelDbu?: number;
+  metadataOutputLevelDbu?: number;
+  effectiveInputLevelDbu?: number;
+  effectiveOutputLevelDbu?: number;
+  appliedInputGainDb?: number;
+  appliedOutputGainDb?: number;
+  status?: "off" | "complete" | "partial" | "unavailable" | "override" | string;
+}
+
+export interface NAMCatalogModel {
+  id?: number;
+  model_id?: number;
+  tone_id?: number;
+  toneId?: number;
+  name?: string;
+  title?: string;
+  model_url?: string;
+  modelUrl?: string;
+  architecture_version?: string | number | null;
+  architecture?: string | number | null;
+  size?: string | { name?: string };
+  [key: string]: unknown;
+}
+
+export interface NAMCatalogTone {
+  id?: number;
+  toneId?: number;
+  title?: string;
+  name?: string;
+  description?: string | null;
+  gear?: string | { name?: string };
+  format?: string;
+  platform?: string;
+  license?: string | { name?: string };
+  user?: { username?: string; [key: string]: unknown };
+  creator?: string;
+  downloads_count?: number;
+  favorites_count?: number;
+  a1_models_count?: number;
+  a2_models_count?: number;
+  models?: NAMCatalogModel[];
+  url?: string;
+  source?: string;
+  sortBucket?: string;
+  architecture?: string | number;
+  searchArchitecture?: string | number;
+  [key: string]: unknown;
+}
+
+export interface NAMInstalledModel {
+  modelId?: number;
+  toneId?: number;
+  name?: string;
+  architecture?: string | number | null;
+  modelUrl?: string;
+  sourceUrl?: string;
+  license?: string;
+  creator?: string;
+  gearType?: string;
+  toneTitle?: string;
+  checksum?: string;
+  fileSha256?: string;
+  assetId?: string;
+  localPath: string;
+  fileSizeBytes?: number;
+  installedAt?: string;
+  updatedAt?: string;
+  manifestUpdatedAt?: string;
+  missingSince?: string | null;
+  lastSeenAt?: string;
+  source?: string;
+  sourceProvider?: string;
+  favorite?: boolean;
+  missing?: boolean;
+  reinstalled?: boolean;
+  lastSeenMetadata?: NAMCatalogModel;
+  updateAvailable?: boolean;
+  updateReason?: string;
+  latestModelId?: number;
+  latestToneId?: number;
+  latestModelUrl?: string;
+  latestMetadata?: NAMCatalogModel;
+  latestMatchExact?: boolean;
+  catalogSeenAt?: string;
+  preview?: boolean;
+  saveMetadata?: Record<string, unknown>;
+  rackState?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface NAMPreviewRecord extends NAMInstalledModel {
+  preview: true;
+}
+
+export interface NAMToneSaveMetadata {
+  toneName: string;
+  creator?: string;
+  songName?: string;
+  artistReference?: string;
+  genreStyle?: string;
+  tags?: string[];
+  notes?: string;
+  sourceUrl?: string;
+  license?: string;
+  favorite?: boolean;
+  [key: string]: unknown;
+}
+
+export type NAMProjectAssetSlot = "pedal" | "amp" | "cab";
+
+export interface NAMProjectAssetTarget {
+  trackId: string;
+  trackName?: string;
+  chain: BuiltInPluginChain;
+  fxIndex: number;
+  pluginName?: string;
+  slot: NAMProjectAssetSlot;
+  path: string;
+  compareSlot?: "A" | "B";
+  compareSnapshot?: boolean;
+  modelId?: number;
+  toneId?: number;
+  modelUrl?: string;
+  sourceUrl?: string;
+  license?: string;
+  creator?: string;
+  gearType?: string;
+  toneTitle?: string;
+  architecture?: string | number | null;
+  assetId?: string;
+  checksum?: string;
+  fileSizeBytes?: number;
+  originalFileName?: string;
+  relinkCandidatePath?: string;
+  lastSeenMetadata?: NAMCatalogModel;
+  [key: string]: unknown;
+}
+
+export interface MissingMediaEntry {
+  path: string;
+  clipIds?: string[];
+  kind?: "media" | "nam";
+  namTargets?: NAMProjectAssetTarget[];
+}
+
+export interface NAMCatalogPayload {
+  success?: boolean;
+  error?: string;
+  statusCode?: number;
+  schemaVersion?: number;
+  generatedAt?: string;
+  tones?: NAMCatalogTone[];
+  data?: NAMCatalogTone[];
+  page?: number;
+  page_size?: number;
+  pageSize?: number;
+  total?: number;
+  total_pages?: number;
+  totalPages?: number;
+  has_more?: boolean;
+  hasMore?: boolean;
+  next_page?: number | null;
+  nextPage?: number | null;
+  source?: string;
+  errors?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface NAMCatalogRefreshOptions {
+  query?: string;
+  gears?: string;
+  architecture?: string;
+  page_size?: number;
+  pageSize?: number;
+  pages?: number;
+  max_model_fetches?: number;
+  maxModelFetches?: number;
+  min_interval?: number;
+  minInterval?: number;
+}
+
+export interface NAMCatalogRefreshResult {
+  success: boolean;
+  error?: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  durationMs?: number;
+  output?: string;
+  rootPath?: string;
+  catalogJsonPath?: string;
+  toneRows?: number;
+  generatedAt?: string;
+  catalog?: NAMCatalogPayload;
+  [key: string]: unknown;
+}
+
+export interface NAMLibraryPayload {
+  schemaVersion?: number;
+  installed?: NAMInstalledModel[];
+  [key: string]: unknown;
+}
+
+export interface NAMLibraryInfo {
+  rootPath: string;
+  libraryPath: string;
+  catalogJsonPath: string;
+  manifestPath: string;
+}
+
+export interface NAMInstallResult {
+  success: boolean;
+  error?: string;
+  record?: NAMInstalledModel;
+}
+
+export interface NAMInstallOptions {
+  mode?: "preview" | "library";
+  [key: string]: unknown;
+}
+
+export interface NAMLibraryActionResult {
+  success: boolean;
+  error?: string;
+  record?: NAMInstalledModel;
+  removed?: number;
+  deletedFile?: boolean;
+  deleteSkipped?: boolean;
+  deleteFailed?: boolean;
+  cleaned?: number;
+  [key: string]: unknown;
+}
+
+export interface NAMAssetInspectionResult {
+  success: boolean;
+  exists: boolean;
+  error?: string;
+  path?: string;
+  fileName?: string;
+  extension?: string;
+  checksum?: string;
+  assetId?: string;
+  fileSizeBytes?: number;
+}
+
+export interface NAMAssetSearchResult {
+  success: boolean;
+  error?: string;
+  foundPath?: string;
+  matchReason?: "checksum" | "filename-and-size" | "filename" | string;
+  checkedFiles?: number;
+  truncated?: boolean;
+  ambiguous?: boolean;
+}
+
+export interface TONE3000NAMSearchOptions {
+  query?: string;
+  page?: number;
+  page_size?: number;
+  pageSize?: number;
+  sort?: "best-match" | "newest" | "oldest" | "trending" | "downloads-all-time" | string;
+  gears?: string;
+  format?: "nam" | "ir" | string;
+  platform?: "nam" | string;
+  architecture?: "all" | "a1" | "a2" | "1" | "2" | "custom" | string;
+  includeModels?: boolean;
+  model_page_size?: number;
+  modelPageSize?: number;
+  [key: string]: unknown;
+}
+
+export interface TONE3000ToneDetailResult {
+  success: boolean;
+  error?: string;
+  statusCode?: number;
+  tone?: NAMCatalogTone;
+  models?: NAMCatalogModel[];
+  errors?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthRequestResult {
+  success: boolean;
+  error?: string;
+  authUrl?: string;
+  state?: string;
+  redirectUri?: string;
+  clientId?: string;
+  statusCode?: number;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthFlowOptions {
+  clientId?: string;
+  redirectUri?: string;
+  prompt?: string;
+  toneId?: string;
+  loginHint?: string;
+  timeoutMs?: number;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthFlowResult {
+  success: boolean;
+  status: "opened_browser" | "connected" | "failed" | "canceled" | string;
+  error?: string;
+  authUrl?: string;
+  toneId?: string;
+  clientId?: string;
+  defaultRedirectUri?: string;
+  configuredClientId?: boolean;
+  fallbackRequired?: boolean;
+  expiresAtMs?: number;
+  hasRefreshToken?: boolean;
+  authenticated?: boolean;
+  statusCode?: number;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthStatus {
+  success: boolean;
+  authenticated: boolean;
+  expired?: boolean;
+  expiresAtMs?: number;
+  clientId?: string;
+  hasRefreshToken?: boolean;
+  configuredClientId?: boolean;
+  defaultRedirectUri?: string;
+  authFlowActive?: boolean;
+  integrationState?: "authenticated" | "expired" | "configured_unauthenticated" | "client_id_required" | string;
+  authenticatedQAReady?: boolean;
+  authenticatedQANote?: string;
+  oauthRedirectUri?: string;
+  oauthProvider?: string;
+  secureTokenStorage?: string;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthResult {
+  success: boolean;
+  error?: string;
+  clientId?: string;
+  expiresAtMs?: number;
+  hasRefreshToken?: boolean;
+  statusCode?: number;
+  authenticated?: boolean;
+  oauthError?: string;
+  [key: string]: unknown;
+}
+
+export interface TONE3000AuthenticatedQAResult {
+  success: boolean;
+  status: "pass" | "fail" | "not_run" | string;
+  provider?: string;
+  checkedAt?: string;
+  authenticatedQAReady?: boolean;
+  integrationState?: string;
+  statusCode?: number;
+  returnedToneCount?: number;
+  error?: string;
 }
 
 // Pitch Corrector graphical mode types
@@ -675,8 +1251,25 @@ export interface WindowBounds {
   height: number;
 }
 
+export type SecondaryWindowLifecycleState =
+  | "idle"
+  | "creating"
+  | "readyHidden"
+  | "visible"
+  | "closing"
+  | "retired";
+
 export interface MixerWindowState {
   isOpen: boolean;
+  state?: SecondaryWindowLifecycleState;
+  sessionId?: string;
+}
+
+export interface SecondaryWindowReadyEvent {
+  role: "mixer" | "midiEditor" | "pluginEditor";
+  sessionId?: string;
+  detail?: string;
+  startupState?: string;
 }
 
 export interface MixerUISnapshotEnvelope<T = any> {
@@ -942,6 +1535,16 @@ export interface AudioDeviceConfig {
   outputDevice: string;
   sampleRate: number;
   bufferSize: number;
+  numInputChannels?: number;
+  numOutputChannels?: number;
+  numActiveInputChannels?: number;
+  numActiveOutputChannels?: number;
+  inputChannelNames?: string[];
+  outputChannelNames?: string[];
+  activeInputChannelIndices?: number[];
+  activeOutputChannelIndices?: number[];
+  channelActivationPolicy?: string;
+  forcesAllDeviceChannels?: boolean;
   [key: string]: unknown;
 }
 
@@ -954,6 +1557,17 @@ export interface AudioDeviceSetupResponse {
   bufferSizes?: number[];
   inputChannelNames?: string[];
   outputChannelNames?: string[];
+  [key: string]: unknown;
+}
+
+export interface AudioDeviceControlPanelResult {
+  success: boolean;
+  opened: boolean;
+  restartRequested: boolean;
+  deviceName?: string;
+  error?: string;
+  sampleRate?: number;
+  bufferSize?: number;
   [key: string]: unknown;
 }
 
@@ -1046,6 +1660,62 @@ export interface AudioDebugTrackSnapshot {
   inputMonitoring?: boolean;
 }
 
+export interface PluginScanFailure {
+  format: string;
+  path: string;
+  reason: string;
+}
+
+export interface PluginScanFormatResult {
+  format: string;
+  candidateCount: number;
+  pluginCount: number;
+  failedCount: number;
+  skippedCount: number;
+  paths: string[];
+  skipped: PluginScanFailure[];
+}
+
+export interface PluginScanReport {
+  success: boolean;
+  error?: string;
+  completionId?: string;
+  forceRescan: boolean;
+  pluginCount: number;
+  candidateCount: number;
+  failedCount: number;
+  skippedCount: number;
+  paths: string[];
+  failures: PluginScanFailure[];
+  skipped: PluginScanFailure[];
+  formats: PluginScanFormatResult[];
+  debugLogPath: string;
+}
+
+export interface PluginScanConfiguration {
+  customPaths: string[];
+  effectivePaths: Array<{
+    format: string;
+    path: string;
+    exists: boolean;
+    custom: boolean;
+  }>;
+  supportedFormats: string[];
+  blacklistedPlugins: string[];
+  unsupportedFormats?: string[];
+  contentLibraryNote?: string;
+}
+
+export type NAMTunerState =
+  | "Idle"
+  | "Acquiring"
+  | "Tracking"
+  | "Holding"
+  | "idle"
+  | "acquiring"
+  | "tracking"
+  | "holding";
+
 export interface AudioDebugSnapshot {
   transportPlaying: boolean;
   transportRecording: boolean;
@@ -1054,9 +1724,62 @@ export interface AudioDebugSnapshot {
   blockSize: number;
   playbackClipCount: number;
   activeOutputChannels: number;
+  cpuUsage?: number;
+  lastCallbackCounter?: number;
   lastAudioCallbackProcessMs?: number;
   maxAudioCallbackProcessMs?: number;
+  audioCallbackSessionMaxProcessMs?: number;
+  audioCallbackWindowKind?: string;
+  audioCallbackWindowSeconds?: number;
+  audioCallbackWindowCoverageSeconds?: number;
+  audioCallbackWindowIncludesCurrentPartialBucket?: boolean;
+  audioCallbackWindowCallbackCount?: number;
+  audioCallbackWindowDeadlineMissCount?: number;
+  audioCallbackRecentDeadlineMissCount?: number;
+  audioCallbackWindowDeadlineMissRatePercent?: number;
+  audioCallbackWindowP95Ms?: number;
+  audioCallbackWindowP99Ms?: number;
+  audioCallbackWindowP99_9Ms?: number;
+  audioCallbackWindowMaxMs?: number;
+  audioCallbackWindowBudgetMs?: number;
+  audioCallbackWindowP95BudgetPercent?: number;
+  audioCallbackWindowP99BudgetPercent?: number;
+  audioCallbackWindowP99_9BudgetPercent?: number;
+  audioCallbackWindowMaxBudgetPercent?: number;
+  audioCallbackWindowHistogramBinWidthMs?: number;
+  audioCallbackWindowHistogramTrackedMaxMs?: number;
+  audioCallbackWindowHistogramOverflowCount?: number;
+  audioCallbackStageTelemetryMode?: string;
+  audioCallbackStageSampleIntervalCallbacks?: number;
+  audioCallbackStageSamplingDutyPercent?: number;
+  audioCallbackStageTimings?: Array<{
+    name: string;
+    definition: string;
+    sampleCount: number;
+    p95Ms: number;
+    p99Ms: number;
+    p99_9Ms: number;
+    maxMs: number;
+    histogramOverflowCount: number;
+  }>;
   audioCallbackDeadlineMissCount?: number;
+  lifetimeAudioCallbackDeadlineMissCount?: number;
+  oversizedAudioCallbackCount?: number;
+  audioCallbackArrivalGapCount?: number;
+  lastAudioCallbackArrivalGapCounter?: number;
+  lastAudioCallbackArrivalGapMs?: number;
+  maxAudioCallbackArrivalGapMs?: number;
+  audioDeviceStartCount?: number;
+  audioDeviceStopCount?: number;
+  audioDeviceErrorCount?: number;
+  lastAudioDeviceStartWallTimeMs?: number;
+  lastAudioDeviceStopWallTimeMs?: number;
+  lastAudioDeviceErrorWallTimeMs?: number;
+  lastAudioCallbackDeadlineMissCounter?: number;
+  audioCallbackDeadlineMissBurstCount?: number;
+  lastAudioCallbackDeadlineMissProcessMs?: number;
+  lastAudioCallbackDeadlineMissWhileRecording?: boolean;
+  audioDeviceXRunCount?: number;
   audioCallbackTrackBufferResizeCount?: number;
   audioCallbackPitchScrubBufferResizeCount?: number;
   audioCallbackSidechainBufferResizeCount?: number;
@@ -1067,14 +1790,63 @@ export interface AudioDebugSnapshot {
   midiMappedParameterUpdateCount?: number;
   spectrumFftPublishCount?: number;
   spectrumFftLockMissCount?: number;
+  masterSpectrumAnalyzerActive?: boolean;
+  masterSpectrumAnalyzerMode?: string;
+  signalChainDiagnosticPeakSampleIntervalCallbacks?: number;
+  signalChainDiagnosticPeaksPreserveLastSample?: boolean;
+  windowsAudioCallbackMMCSSRequested?: boolean;
+  windowsAudioCallbackMMCSSActive?: boolean;
+  windowsAudioCallbackMMCSSPriorityApplied?: boolean;
+  windowsAudioCallbackMMCSSTaskIndex?: number;
+  windowsAudioCallbackMMCSSError?: number;
+  windowsAudioCallbackThreadId?: number;
   postTrackPlaybackPeak: number;
   postMonitoringInputPeak: number;
   postMasterFxPeak: number;
   postMonitoringFxPeak: number;
   finalOutputPeak: number;
+  tunerFrequencyHz?: number;
+  tunerMidiNote?: number;
+  tunerNoteName?: string;
+  tunerCents?: number;
+  tunerConfidence?: number;
+  tunerInputLevelDb?: number;
+  tunerSignalPresent?: boolean;
+  tunerPitchLocked?: boolean;
+  tunerUpdateCounter?: number;
+  tunerState?: NAMTunerState;
+  tunerInstantaneousFrequencyHz?: number;
+  tunerAverageFrequencyHz?: number;
+  tunerAverageCents?: number;
+  tunerPitchAgeMs?: number;
+  tunerPitchVarianceCents?: number;
+  tunerPitchUpdateCounter?: number;
+  tunerAnalysisFrameCounter?: number;
+  tunerDroppedFifoSamples?: number;
+  tunerSelectedInputChannel?: number;
+  tunerTrackId?: string;
+  tunerUsesGlobalInput?: boolean;
+  tunerInputStartChannel?: number;
+  tunerInputChannelCount?: number;
   lastRecordingClipCountReturned: number;
   playbackTracks: AudioDebugTrackSnapshot[];
   [key: string]: unknown;
+}
+
+export interface TrackRoutingInfo {
+  phaseInverted: boolean;
+  stereoWidth: number;
+  masterSendEnabled: boolean;
+  outputStartChannel: number;
+  outputChannelCount: number;
+  playbackOffsetMs: number;
+  trackChannelCount: number;
+  midiOutputDevice: string;
+  inputStartChannel: number;
+  inputChannelCount: number;
+  inputMonitoring: boolean;
+  recordArmed: boolean;
+  trackType: "audio" | "midi" | "instrument" | string;
 }
 
 export interface GuardrailsReport {
@@ -1211,7 +1983,10 @@ declare global {
           newPosition: number,
         ) => Promise<boolean>;
         getAudioDeviceSetup?: () => Promise<AudioDeviceSetupResponse>;
+        openAudioDeviceControlPanel?: () => Promise<AudioDeviceControlPanelResult>;
         setAudioDeviceSetup?: (config: any) => Promise<boolean>;
+        getNAMRackOversamplingFactor?: () => Promise<2 | 4 | 8>;
+        setNAMRackOversamplingFactor?: (factor: 2 | 4 | 8) => Promise<boolean>;
 
         // Track Control (Phase 1)
         setTrackRecordArm?: (
@@ -1301,10 +2076,15 @@ declare global {
           trackId: string,
           samplesPerPixel: number,
           numPixels: number,
+          startSample?: number,
         ) => Promise<WaveformPeak[]>;
 
         // FX Management (Phase 3)
-        scanForPlugins?: () => Promise<boolean>;
+        scanForPlugins?: (forceRescan?: boolean) => Promise<PluginScanReport>;
+        getPluginScanConfiguration?: () => Promise<PluginScanConfiguration>;
+        addPluginScanPath?: (path: string) => Promise<boolean>;
+        removePluginScanPath?: (path: string) => Promise<boolean>;
+        retryBlacklistedPlugin?: (path: string) => Promise<boolean>;
         getAvailablePlugins?: () => Promise<any[]>;
         addTrackInputFX?: (
           trackId: string,
@@ -1333,6 +2113,7 @@ declare global {
         addMasterFX?: (pluginPath: string) => Promise<boolean>;
         getMasterFX?: () => Promise<any[]>;
         removeMasterFX?: (fxIndex: number) => Promise<boolean>;
+        reorderMasterFX?: (fromIndex: number, toIndex: number) => Promise<boolean>;
         openMasterFXEditor?: (fxIndex: number) => Promise<boolean>;
         setMasterVolume?: (volume: number) => Promise<boolean>;
         setMasterPan?: (pan: number) => Promise<boolean>;
@@ -1354,6 +2135,11 @@ declare global {
           startSample: number,
           numPixels: number,
         ) => Promise<WaveformPeak[]>;
+        getAudioPeakAmplitude?: (
+          filePath: string,
+          offsetSeconds: number,
+          durationSeconds: number,
+        ) => Promise<number>;
         refreshWaveformPeaks?: (filePath: string) => Promise<boolean>;
 
         // Playback clip management
@@ -1374,6 +2160,10 @@ declare global {
         removePlaybackClip?: (
           trackId: string,
           filePath: string,
+        ) => Promise<boolean>;
+        removePlaybackClipById?: (
+          trackId: string,
+          clipId: string,
         ) => Promise<boolean>;
         clearPlaybackClips?: () => Promise<boolean>;
 
@@ -1459,12 +2249,28 @@ declare global {
           fxIndex: number,
           isInputFX: boolean,
           presetName: string,
+          chainType?: BuiltInPluginChain,
         ) => Promise<boolean>;
         loadBuiltInFXPreset?: (
           trackId: string,
           fxIndex: number,
           isInputFX: boolean,
           presetName: string,
+          chainType?: BuiltInPluginChain,
+        ) => Promise<boolean>;
+        getBuiltInFXPresetData?: (
+          pluginName: string,
+          presetName: string,
+        ) => Promise<string>;
+        saveBuiltInFXPresetData?: (
+          pluginName: string,
+          presetName: string,
+          base64Data: string,
+        ) => Promise<boolean>;
+        copyBuiltInFXPreset?: (
+          pluginName: string,
+          sourcePresetName: string,
+          targetPresetName: string,
         ) => Promise<boolean>;
         deleteBuiltInFXPreset?: (
           pluginName: string,
@@ -1542,6 +2348,8 @@ declare global {
 
         // MIDI
         getAudioDebugSnapshot?: () => Promise<AudioDebugSnapshot>;
+        getRealtimeAudioTelemetry?: () => Promise<AudioDebugSnapshot>;
+        setNAMTunerActive?: (trackId: string, active: boolean, subscriberId: string) => Promise<boolean>;
         sendMidiNote?: (
           trackId: string,
           note: number,
@@ -1591,6 +2399,7 @@ declare global {
           size?: number,
         ) => Promise<any>;
         openExternalURL?: (url: string) => Promise<boolean>;
+        revealLocalPath?: (path: string) => Promise<boolean>;
 
         // Media Import (F10)
         importMediaFile?: (filePath: string) => Promise<MediaFileInfo>;
@@ -1666,11 +2475,7 @@ declare global {
         getTrackChannelCount?: (trackId: string) => Promise<number>;
         setTrackMIDIOutput?: (trackId: string, deviceName: string) => Promise<boolean>;
         getTrackMIDIOutput?: (trackId: string) => Promise<string>;
-        getTrackRoutingInfo?: (trackId: string) => Promise<{
-          phaseInverted: boolean; stereoWidth: number; masterSendEnabled: boolean;
-          outputStartChannel: number; outputChannelCount: number; playbackOffsetMs: number;
-          trackChannelCount: number; midiOutputDevice: string;
-        }>;
+        getTrackRoutingInfo?: (trackId: string) => Promise<TrackRoutingInfo | null>;
 
         // Phase 12: Media & File Management
         browseDirectory?: (path: string) => Promise<Array<{
@@ -1748,9 +2553,33 @@ declare global {
         addMasterBuiltInFX?: (effectName: string) => Promise<boolean>;
         getAvailableBuiltInFX?: () => Promise<Array<{ name: string; category: string; isInstrument?: boolean; instrumentMode?: number }>>;
         getBuiltInPluginSchema?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<BuiltInPluginSchema>;
+        getNAMRackDiagnostics?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<Record<string, unknown> | null>;
         getBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<any>;
         setBuiltInPluginParam?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, value: number) => Promise<boolean>;
         setBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, stateJSON: string) => Promise<boolean>;
+        getNAMLibraryInfo?: () => Promise<NAMLibraryInfo>;
+        inspectNAMAsset?: (filePath: string) => Promise<NAMAssetInspectionResult>;
+        findNAMAssetInDirectory?: (directoryPath: string, expectedFileName: string, checksum?: string, fileSizeBytes?: number, slot?: NAMProjectAssetSlot) => Promise<NAMAssetSearchResult>;
+        getNAMCatalog?: () => Promise<NAMCatalogPayload>;
+        refreshNAMCatalog?: (options?: NAMCatalogRefreshOptions | string) => Promise<NAMCatalogRefreshResult>;
+        searchTONE3000NAM?: (options: TONE3000NAMSearchOptions | string) => Promise<NAMCatalogPayload>;
+        runTONE3000AuthenticatedQA?: () => Promise<TONE3000AuthenticatedQAResult>;
+        getTONE3000ToneDetail?: (toneId: number, architecture?: string) => Promise<TONE3000ToneDetailResult>;
+        getNAMLibrary?: () => Promise<NAMLibraryPayload>;
+        installNAMModel?: (model: NAMCatalogModel | string, options?: NAMInstallOptions | string) => Promise<NAMInstallResult>;
+        commitNAMPreviewTone?: (record: NAMInstalledModel | string, metadata?: NAMToneSaveMetadata | string, rackState?: Record<string, unknown> | string) => Promise<NAMLibraryActionResult>;
+        discardNAMPreview?: (record: NAMInstalledModel | string, rackAddress?: BuiltInPluginAddress | string) => Promise<NAMLibraryActionResult>;
+        cleanupNAMPreviews?: (maxAgeHours?: number) => Promise<NAMLibraryActionResult>;
+        setNAMModelFavorite?: (modelId: number, localPath: string, favorite: boolean) => Promise<NAMLibraryActionResult>;
+        removeNAMModel?: (modelId: number, localPath: string, deleteLocalFile?: boolean) => Promise<NAMLibraryActionResult>;
+        loadNAMModelIntoRack?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, slot: "pedal" | "amp" | "cab", localPath: string) => Promise<boolean>;
+        startTONE3000AuthFlow?: (options?: TONE3000AuthFlowOptions | string) => Promise<TONE3000AuthFlowResult>;
+        cancelTONE3000AuthFlow?: () => Promise<TONE3000AuthFlowResult>;
+        createTONE3000AuthRequest?: (clientId: string, redirectUri: string, prompt?: string, toneId?: string, loginHint?: string) => Promise<TONE3000AuthRequestResult>;
+        exchangeTONE3000OAuthCode?: (code: string, state?: string, clientId?: string, redirectUri?: string) => Promise<TONE3000AuthResult>;
+        refreshTONE3000Auth?: (clientId?: string) => Promise<TONE3000AuthResult>;
+        getTONE3000AuthStatus?: () => Promise<TONE3000AuthStatus>;
+        clearTONE3000Auth?: () => Promise<TONE3000AuthStatus>;
 
         // Phase 4.4: Sidechain Routing
         setSidechainSource?: (destTrackId: string, pluginIndex: number, sourceTrackId: string) => Promise<boolean>;
@@ -1777,17 +2606,23 @@ declare global {
         setPanLaw?: (law: string) => Promise<boolean>;
         getPanLaw?: () => Promise<string>;
         setTrackDCOffset?: (trackId: string, enabled: boolean) => Promise<boolean>;
+        getTrackDCOffset?: (trackId: string) => Promise<boolean>;
 
         // Sprint 19: Plugin Management
-        getPluginParameters?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<Array<{ index: number; name: string; value: number; text: string }>>;
+        getPluginParameters?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<PluginParameterInfo[]>;
         setPluginParameter?: (trackId: string, fxIndex: number, isInputFX: boolean, paramIndex: number, value: number) => Promise<boolean>;
         getPluginPresets?: (trackId: string, fxIndex: number, isInputFX: boolean) => Promise<string[]>;
         loadPluginPreset?: (trackId: string, fxIndex: number, isInputFX: boolean, presetName: string) => Promise<boolean>;
         savePluginPreset?: (trackId: string, fxIndex: number, isInputFX: boolean, presetName: string) => Promise<boolean>;
 
         // Sprint 19: MIDI Learn (plugin params)
-        startPluginMIDILearn?: (trackId: string, pluginIndex: number, paramIndex: number) => Promise<boolean>;
+        startMIDILearnForPlugin?: (trackId: string, pluginIndex: number, paramIndex: number, isInputFX?: boolean) => Promise<boolean>;
+        startPluginMIDILearn?: (trackId: string, pluginIndex: number, paramIndex: number, isInputFX?: boolean) => Promise<boolean>;
+        startBuiltInMIDILearn?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string) => Promise<boolean>;
+        stopMIDILearn?: () => Promise<boolean>;
         cancelPluginMIDILearn?: () => Promise<boolean>;
+        getMIDILearnMappings?: () => Promise<MIDILearnMappingInfo[]>;
+        setMIDILearnMappings?: (mappings: MIDILearnMappingInfo[]) => Promise<boolean>;
 
         // Sprint 19: MIDI Import/Export
         importMIDIFile?: (filePath: string) => Promise<MIDIImportResult | any>;
@@ -1808,6 +2643,7 @@ declare global {
 
         // Channel Strip EQ (Phase 19.18)
         setChannelStripEQEnabled?: (trackId: string, enabled: boolean) => Promise<boolean>;
+        getChannelStripEQEnabled?: (trackId: string) => Promise<boolean>;
         setChannelStripEQParam?: (trackId: string, paramIndex: number, value: number) => Promise<boolean>;
         getChannelStripEQParam?: (trackId: string, paramIndex: number) => Promise<number>;
 
@@ -1843,6 +2679,7 @@ declare global {
         clearClipPitchPreview?: (clipId: string) => Promise<boolean>;
         clearClipRenderedPreviewSegments?: (clipId: string) => Promise<boolean>;
         clearAllPitchPreviewRoutes?: (clipId?: string) => Promise<boolean>;
+        cancelPitchCorrectionRequests?: (clipId: string, authoritativeFilePath?: string) => Promise<boolean>;
         clearPitchPreviewRoutesForCorrectedSources?: () => Promise<number>;
 
         // Source Separation (Phase 8 + Phase 10)
@@ -1908,6 +2745,8 @@ declare global {
         getMidiEditorWindowState?: (sessionId?: string) => Promise<MixerWindowState>;
         publishMidiEditorUISnapshot?: (sessionId: string, snapshot: any) => Promise<boolean>;
         getMidiEditorUISnapshot?: (sessionId?: string) => Promise<any>;
+        openBuiltInPluginEditorWindow?: (sessionId: string, bounds?: Partial<WindowBounds>) => Promise<boolean>;
+        closeBuiltInPluginEditorWindow?: (sessionId?: string, reason?: string) => Promise<boolean>;
         publishAppCommand?: (payload: any) => Promise<boolean>;
         reportFrontendStartupState?: (state: string, detail?: string) => Promise<boolean>;
         getStartupDiagnostics?: () => Promise<any>;
@@ -1934,10 +2773,976 @@ export interface StretchResult {
 class NativeBridge {
   private isNative: boolean;
   private eventListeners: Map<string, Set<(data: any) => void>> = new Map();
+  private lastPluginCatalogCompletionId = "";
+  private pluginCatalogChangeDispatchQueued = false;
+  private devTone3000Refreshed = false;
+  private devBuiltInParamValues: Map<string, Record<string, number>> = new Map();
+  private devBuiltInPluginStates: Map<string, Record<string, any>> = new Map();
+  private devNAMReadbackFailurePending = new Set<string>();
+  private devNAMReadbackFailureConsumed = new Set<string>();
+  private mockNAMRackOversamplingFactor: 2 | 4 | 8 = 4;
 
   private getBackend() {
     return typeof window !== "undefined" ? window.__JUCE__?.backend : undefined;
   }
+
+  private announcePluginCatalogChanged(completionId?: string) {
+    const normalizedCompletionId = completionId?.trim() ?? "";
+    if (
+      normalizedCompletionId &&
+      normalizedCompletionId === this.lastPluginCatalogCompletionId
+    ) {
+      return;
+    }
+
+    if (normalizedCompletionId) {
+      this.lastPluginCatalogCompletionId = normalizedCompletionId;
+    }
+    if (this.pluginCatalogChangeDispatchQueued) return;
+
+    this.pluginCatalogChangeDispatchQueued = true;
+    queueMicrotask(() => {
+      this.pluginCatalogChangeDispatchQueued = false;
+      window.dispatchEvent(
+        new CustomEvent("openstudio:plugin-catalog-changed"),
+      );
+    });
+  }
+
+  private devBuiltInAddressKey(address: BuiltInPluginAddress) {
+    return `${address.trackId || ""}|${address.chain}|${address.fxIndex ?? -1}`;
+  }
+
+  private isPlainDevStateObject(value: unknown): value is Record<string, any> {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  private cloneDevBuiltInState<T>(value: T): T {
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.cloneDevBuiltInState(entry)) as T;
+    }
+    if (this.isPlainDevStateObject(value)) {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, this.cloneDevBuiltInState(entry)]),
+      ) as T;
+    }
+    return value;
+  }
+
+  private sanitizeDevNAMRackState<T>(value: T): T {
+    const sanitized = pruneRetiredNAMRackInputRoutingState(value);
+    if (!this.isPlainDevStateObject(sanitized)
+        || !this.isPlainDevStateObject(sanitized.dspState)) {
+      return sanitized;
+    }
+    const dspState = sanitizeNAMRackDspState(sanitized.dspState);
+    return {
+      ...sanitized,
+      dspState: {
+        ...dspState,
+        namEffectsDspVersion: dspState.namEffectsDspVersion ?? 19,
+      },
+    } as T;
+  }
+
+  private mergeDevBuiltInState<T>(base: T, patch: unknown): T {
+    if (!this.isPlainDevStateObject(base) || !this.isPlainDevStateObject(patch)) {
+      return this.cloneDevBuiltInState(patch) as T;
+    }
+    const merged: Record<string, any> = this.cloneDevBuiltInState(base);
+    for (const [key, value] of Object.entries(patch)) {
+      merged[key] = this.isPlainDevStateObject(value) && this.isPlainDevStateObject(merged[key])
+        ? this.mergeDevBuiltInState(merged[key], value)
+        : this.cloneDevBuiltInState(value);
+    }
+    return merged as T;
+  }
+
+  private normalizeDevNAMCaptureType(value: unknown) {
+    const normalized = String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (["amp", "pedal", "pedal_amp", "amp_cab", "amp_pedal_cab", "preamp", "studio"].includes(normalized)) {
+      return normalized;
+    }
+    if (normalized === "full_rig" || normalized === "fullrig" || normalized === "rig") return "full_rig";
+    return "unknown";
+  }
+
+  private devNAMCaptureIncludesCab(captureType: string) {
+    return captureType === "amp_cab"
+      || captureType === "amp_pedal_cab"
+      || captureType === "full_rig";
+  }
+
+  private normalizeDevBuiltInModelState(
+    state: Record<string, any>,
+    previousModelState: Record<string, any> = {},
+  ) {
+    const normalized = this.cloneDevBuiltInState(state);
+    const pedalPathPublished = Object.prototype.hasOwnProperty.call(state, "pedalModelPath")
+      || state.clearPedalModel === true;
+    const ampPathPublished = Object.prototype.hasOwnProperty.call(state, "ampModelPath")
+      || state.clearAmpModel === true;
+    const normalizePath = (value: unknown) => String(value ?? "")
+      .trim()
+      .replace(/\\/g, "/")
+      .toLowerCase();
+    const nextAmpPath = state.clearAmpModel === true ? "" : normalizePath(state.ampModelPath);
+    const ampPathChanged = ampPathPublished
+      && nextAmpPath !== normalizePath(previousModelState.ampModelPath);
+    let resourcePathChanged = false;
+    const normalizeSlot = (
+      pathKey: "pedalModelPath" | "ampModelPath" | "cabIRPath",
+      hasKey: "hasPedalModel" | "hasAmpModel" | "hasCabIR",
+      clearKey: "clearPedalModel" | "clearAmpModel" | "clearCabIR",
+    ) => {
+      if (normalized[clearKey] === true) normalized[pathKey] = "";
+      if (Object.prototype.hasOwnProperty.call(normalized, pathKey) || normalized[clearKey] === true) {
+        resourcePathChanged = true;
+        normalized[hasKey] = Boolean(String(normalized[pathKey] ?? "").trim());
+      }
+      delete normalized[clearKey];
+    };
+    normalizeSlot("pedalModelPath", "hasPedalModel", "clearPedalModel");
+    normalizeSlot("ampModelPath", "hasAmpModel", "clearAmpModel");
+    normalizeSlot("cabIRPath", "hasCabIR", "clearCabIR");
+    const normalizeModelSizeSlot = (prefix: "pedal" | "amp") => {
+      const requestedKey = `${prefix}ModelSize`;
+      if (!Object.prototype.hasOwnProperty.call(state, requestedKey)) return;
+      const requestedValue = Number(state[requestedKey]);
+      if (!Number.isFinite(requestedValue)) {
+        delete normalized[requestedKey];
+        return;
+      }
+      const requestedSize = Math.max(0, Math.min(1, requestedValue));
+      normalized[requestedKey] = requestedSize;
+      const slimmableKey = `${prefix}ModelSlimmable`;
+      const activeKey = `${prefix}ActiveModelSize`;
+      if (Boolean(normalized[slimmableKey] ?? previousModelState[slimmableKey])) {
+        normalized[activeKey] = requestedSize;
+      }
+    };
+    normalizeModelSizeSlot("pedal");
+    normalizeModelSizeSlot("amp");
+    const normalizeCaptureSlot = (
+      prefix: "pedal" | "amp",
+      pathPublished: boolean,
+      pathPresent: boolean,
+    ) => {
+      const metadataKey = `${prefix}MetadataCaptureType`;
+      const declaredKey = `${prefix}DeclaredCaptureType`;
+      const effectiveKey = `${prefix}CaptureType`;
+      const metadataSpecified = Object.prototype.hasOwnProperty.call(state, metadataKey);
+      const declaredSpecified = Object.prototype.hasOwnProperty.call(state, declaredKey);
+      if (!pathPublished && !metadataSpecified && !declaredSpecified) return;
+
+      const metadataType = pathPublished
+        ? metadataSpecified
+          ? this.normalizeDevNAMCaptureType(state[metadataKey])
+          : "unknown"
+        : this.normalizeDevNAMCaptureType(
+            metadataSpecified ? state[metadataKey] : previousModelState[metadataKey],
+          );
+      const declaredType = pathPublished
+        ? declaredSpecified
+          ? this.normalizeDevNAMCaptureType(state[declaredKey])
+          : "unknown"
+        : this.normalizeDevNAMCaptureType(
+            declaredSpecified ? state[declaredKey] : previousModelState[declaredKey],
+          );
+      const effectiveType = !pathPresent
+        ? "unknown"
+        : metadataType !== "unknown"
+          ? metadataType
+          : declaredType;
+      normalized[metadataKey] = pathPresent ? metadataType : "unknown";
+      normalized[declaredKey] = pathPresent ? declaredType : "unknown";
+      normalized[effectiveKey] = effectiveType;
+      if (prefix === "amp") {
+        normalized.ampIncludesCab = this.devNAMCaptureIncludesCab(effectiveType);
+      }
+    };
+    normalizeCaptureSlot(
+      "pedal",
+      pedalPathPublished,
+      Boolean(String(normalized.pedalModelPath ?? previousModelState.pedalModelPath ?? "").trim()),
+    );
+    normalizeCaptureSlot(
+      "amp",
+      ampPathPublished || ampPathChanged,
+      Boolean(String(normalized.ampModelPath ?? previousModelState.ampModelPath ?? "").trim()),
+    );
+    if (Object.prototype.hasOwnProperty.call(normalized, "cabIRPath")) {
+      normalized.cabIRState = normalized.hasCabIR ? "configured" : "empty";
+      normalized.cabIRActivationMode = normalized.hasCabIR ? "prepared" : "none";
+    }
+    if (resourcePathChanged) normalized.lastLoadError = "";
+    return normalized;
+  }
+
+  private persistDevBuiltInState(address: BuiltInPluginAddress, patch: Record<string, any>) {
+    const key = this.devBuiltInAddressKey(address);
+    const devNAMMock = this.shouldUseDevNAMMock();
+    const normalizedPatch = devNAMMock
+      ? this.sanitizeDevNAMRackState(this.cloneDevBuiltInState(patch))
+      : this.cloneDevBuiltInState(patch);
+    const storedCurrent = this.devBuiltInPluginStates.get(key) ?? {};
+    const current = devNAMMock
+      ? this.sanitizeDevNAMRackState(storedCurrent)
+      : storedCurrent;
+    if (this.isPlainDevStateObject(normalizedPatch.modelState)) {
+      const scenario = this.getDevNAMMockScenario();
+      const defaultAmpModelPath =
+        scenario === "empty-rack" ? ""
+          : scenario === "full-rig" ? "OpenStudio/NAM/library/Studio Full Rig A2.nam"
+            : scenario === "missing-amp" || scenario === "missing-amp-failure"
+              ? "D:/Archived Sessions/Night Drive/Missing Modern Lead A2.nam"
+              : "OpenStudio/NAM/library/Clean Twin-style A2.nam";
+      const defaultAmpModelSlimmable = scenario !== "empty-rack"
+        && scenario !== "missing-amp"
+        && scenario !== "missing-amp-failure";
+      const storedModelState = this.isPlainDevStateObject(current.modelState)
+        ? current.modelState
+        : {};
+      normalizedPatch.modelState = this.normalizeDevBuiltInModelState(
+        normalizedPatch.modelState,
+        {
+          ampModelPath: defaultAmpModelPath,
+          pedalModelSize: NAM_FULL_MODEL_SIZE,
+          ampModelSize: NAM_FULL_MODEL_SIZE,
+          pedalModelSlimmable: false,
+          ampModelSlimmable: defaultAmpModelSlimmable,
+          ...storedModelState,
+        },
+      );
+    }
+    const next = this.mergeDevBuiltInState(current, normalizedPatch);
+    const modelPatch = this.isPlainDevStateObject(normalizedPatch.modelState)
+      ? normalizedPatch.modelState
+      : {};
+    const valuesPatch = this.isPlainDevStateObject(normalizedPatch.values)
+      ? normalizedPatch.values
+      : {};
+    const nextModelState = this.isPlainDevStateObject(next.modelState)
+      ? next.modelState
+      : {};
+    const nextValues = this.isPlainDevStateObject(next.values)
+      ? next.values
+      : {};
+    const isNAMState = this.shouldUseDevNAMMock()
+      || [
+        "pedalModelPath",
+        "ampModelPath",
+        "pedalModelSize",
+        "ampModelSize",
+        "cabIRPath",
+        "cabRequestedEnabled",
+        "ampIncludesCab",
+        "pedalMetadataCaptureType",
+        "ampMetadataCaptureType",
+        "pedalDeclaredCaptureType",
+        "ampDeclaredCaptureType",
+        "pedalCaptureType",
+        "ampCaptureType",
+      ]
+        .some((property) => Object.prototype.hasOwnProperty.call(nextModelState, property));
+    const hasExplicitCabRequest = Object.prototype.hasOwnProperty.call(modelPatch, "cabRequestedEnabled");
+    const hasExplicitCabValue = Object.prototype.hasOwnProperty.call(valuesPatch, "cabEnabled");
+    const hasStoredCabIntent = typeof nextModelState.cabRequestedEnabled === "boolean"
+      || Object.prototype.hasOwnProperty.call(nextValues, "cabEnabled");
+    if (isNAMState && (hasExplicitCabRequest || hasExplicitCabValue || hasStoredCabIntent)) {
+      const requestedCabEnabled = hasExplicitCabRequest
+        ? Boolean(modelPatch.cabRequestedEnabled)
+        : hasExplicitCabValue
+          ? Number(valuesPatch.cabEnabled ?? 0) >= 0.5
+          : typeof nextModelState.cabRequestedEnabled === "boolean"
+            ? nextModelState.cabRequestedEnabled
+            : Number(nextValues.cabEnabled ?? 0) >= 0.5;
+      const ampIncludesCab = typeof nextModelState.ampIncludesCab === "boolean"
+        ? nextModelState.ampIncludesCab
+        : this.getDevNAMMockScenario() === "full-rig";
+      next.modelState = {
+        ...nextModelState,
+        cabRequestedEnabled: requestedCabEnabled,
+      };
+      next.values = {
+        ...nextValues,
+        cabEnabled: ampIncludesCab ? 0 : requestedCabEnabled ? 1 : 0,
+      };
+    }
+    const persistedNext = devNAMMock
+      ? this.sanitizeDevNAMRackState(next)
+      : next;
+    this.devBuiltInPluginStates.set(key, persistedNext);
+
+    if (this.isPlainDevStateObject(persistedNext.values)) {
+      const numericValues = Object.fromEntries(
+        Object.entries(persistedNext.values).filter((entry): entry is [string, number] => (
+          entry[0] !== "inputMode"
+          && typeof entry[1] === "number"
+          && Number.isFinite(entry[1])
+        )),
+      );
+      this.devBuiltInParamValues.set(key, numericValues);
+    }
+    return persistedNext;
+  }
+
+  private applyDevBuiltInParamValues(address: BuiltInPluginAddress, schema: BuiltInPluginSchema) {
+    const addressKey = this.devBuiltInAddressKey(address);
+    const rawValues = this.devBuiltInParamValues.get(addressKey);
+    const rawStoredState = this.devBuiltInPluginStates.get(addressKey);
+    const values = this.shouldUseDevNAMMock()
+      ? this.sanitizeDevNAMRackState(rawValues)
+      : rawValues;
+    const storedState = this.shouldUseDevNAMMock()
+      ? this.sanitizeDevNAMRackState(rawStoredState)
+      : rawStoredState;
+    if ((!values || Object.keys(values).length === 0) && !storedState) return schema;
+    const mergedState = this.mergeDevBuiltInState({
+      modelState: schema.modelState ?? {},
+      dspState: {} as Record<string, unknown>,
+      uiState: schema.uiState ?? {},
+      visualization: schema.visualization ?? {},
+    }, storedState ?? {});
+    const storedDspState = this.isPlainDevStateObject(mergedState.dspState)
+      ? mergedState.dspState
+      : {};
+    const storedEffectsVersion = normalizeNAMEffectsDspVersion(
+      storedDspState.namEffectsDspVersion,
+    );
+    const mergedModelState = this.isPlainDevStateObject(mergedState.modelState)
+      ? mergedState.modelState
+      : {};
+    return {
+      ...schema,
+      modelState: storedEffectsVersion === undefined
+        ? mergedModelState
+        : { ...mergedModelState, namEffectsDspVersion: storedEffectsVersion },
+      uiState: mergedState.uiState,
+      visualization: mergedState.visualization,
+      parameters: schema.parameters.map((param) => {
+        const nextValue = values?.[param.id];
+        return typeof nextValue === "number" && Number.isFinite(nextValue)
+          ? { ...param, value: nextValue }
+          : param;
+      }),
+    };
+  }
+
+  private isDevNAMRackSession() {
+    if (typeof window === "undefined") return false;
+    const searchParams = new URLSearchParams(window.location.search);
+    const sessionParam = searchParams.get("sessionId") ?? "";
+    return (
+      searchParams.get("mockPlugin") === "nam" ||
+      decodeURIComponent(sessionParam).toLowerCase().includes("nam rack")
+    );
+  }
+
+  private shouldUseDevNAMMock() {
+    return !this.isNative && this.isDevNAMRackSession();
+  }
+
+  private getDevNAMMockScenario() {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("mockNAMScenario") ?? "";
+  }
+
+  private getDevNAMMockLoadDelayMs() {
+    if (typeof window === "undefined") return 0;
+    const value = Number(new URLSearchParams(window.location.search).get("mockNAMLoadDelayMs") ?? 0);
+    return Number.isFinite(value) ? Math.max(0, Math.min(5000, value)) : 0;
+  }
+
+  private getDevNAMMockStateDelayMs() {
+    if (typeof window === "undefined") return 0;
+    const value = Number(new URLSearchParams(window.location.search).get("mockNAMStateDelayMs") ?? 0);
+    return Number.isFinite(value) ? Math.max(0, Math.min(5000, value)) : 0;
+  }
+
+  private getDevNAMMockDownloadDelayMs() {
+    if (typeof window === "undefined") return 0;
+    const value = Number(new URLSearchParams(window.location.search).get("mockNAMDownloadDelayMs") ?? 0);
+    return Number.isFinite(value) ? Math.max(0, Math.min(10000, value)) : 0;
+  }
+
+  private getDevNAMMockPrepareDelayMs() {
+    if (typeof window === "undefined") return 0;
+    const value = Number(new URLSearchParams(window.location.search).get("mockNAMPrepareDelayMs") ?? 0);
+    return Number.isFinite(value) ? Math.max(0, Math.min(5000, value)) : 0;
+  }
+
+  private shouldFailDevNAMReadbackOnce() {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("mockNAMReadbackFailOnce") === "1";
+  }
+
+  private getDevNAMCatalogTones(): NAMCatalogTone[] {
+    const seedTones: NAMCatalogTone[] = [
+      {
+        id: 53101,
+        title: "Crisp Twin Clean A2",
+        description: "Bright clean capture voiced for single-coil guitars, light compression, and a wide cabinet image.",
+        gear: "full-rig",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 18420,
+        favorites_count: 936,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending clean",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53101",
+        character: ["clean", "bright", "single coil", "studio"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310102,
+          model_id: 5310102,
+          tone_id: 53101,
+          name: "Crisp Twin Clean A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/crisp-twin-clean-a2.nam",
+          size: "16 MB",
+          character: ["clean", "bright"],
+          inputCalibrationDb: -12,
+          normalization: { mode: "A2 calibrated", targetLufs: -18, peakDb: -1 },
+        }],
+      },
+      {
+        id: 53102,
+        title: "Jazz Chorus Glass",
+        description: "Stereo clean platform with polished chorus character and a tight low end for neck and middle pickup sounds.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 12780,
+        favorites_count: 642,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending clean",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53102",
+        character: ["clean", "chorus", "bright"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310202,
+          model_id: 5310202,
+          tone_id: 53102,
+          name: "JC Glass A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/jc-glass-a2.nam",
+          size: "14 MB",
+        }],
+      },
+      {
+        id: 53103,
+        title: "Edge Clean Breakup",
+        description: "Touch-sensitive edge-of-breakup amp capture for strummed chords, country lines, and blues rhythm parts.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 9320,
+        favorites_count: 481,
+        a1_models_count: 1,
+        sortBucket: "latest newest downloads-all-time trending",
+        architecture: 1,
+        url: "https://www.tone3000.com/tones/53103",
+        character: ["clean", "crunch", "dynamic"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310301,
+          model_id: 5310301,
+          tone_id: 53103,
+          name: "Edge Clean A1",
+          architecture_version: 1,
+          model_url: "https://example.invalid/openstudio/nam/edge-clean-a1.nam",
+          size: "11 MB",
+        }],
+      },
+      {
+        id: 53104,
+        title: "Studio Boost Pedal",
+        description: "Transparent pedal capture intended before clean and crunch amp models.",
+        gear: "pedal",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 6120,
+        favorites_count: 314,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending pedals",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53104",
+        character: ["boost", "clean"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310402,
+          model_id: 5310402,
+          tone_id: 53104,
+          name: "Studio Boost A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/studio-boost-a2.nam",
+          size: "9 MB",
+        }],
+      },
+      {
+        id: 53105,
+        title: "Glass Drive 808",
+        description: "Low-noise drive pedal NAM capture with mid push for pre-amp tightening.",
+        gear: "pedal drive",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 5900,
+        favorites_count: 288,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending pedals drive",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53105",
+        character: ["drive", "overdrive", "tight"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310502,
+          model_id: 5310502,
+          tone_id: 53105,
+          name: "Glass Drive 808 A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/glass-drive-808-a2.nam",
+          size: "9 MB",
+          gear_type: "drive",
+        }],
+      },
+      {
+        id: 53106,
+        title: "Velvet Fuzz Box",
+        description: "Rounded fuzz pedal capture for sustain, octave-like bloom, and pushed leads.",
+        gear: "pedal fuzz",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 5480,
+        favorites_count: 271,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending pedals fuzz",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53106",
+        character: ["fuzz", "sustain"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310602,
+          model_id: 5310602,
+          tone_id: 53106,
+          name: "Velvet Fuzz Box A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/velvet-fuzz-box-a2.nam",
+          size: "10 MB",
+          gear_type: "fuzz",
+        }],
+      },
+      {
+        id: 53107,
+        title: "Modern Distortion Pedal",
+        description: "High-gain distortion pedal NAM capture for aggressive pre-amp rhythm tones.",
+        gear: "pedal distortion",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 5120,
+        favorites_count: 244,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending pedals distortion",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53107",
+        character: ["distortion", "high gain"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310702,
+          model_id: 5310702,
+          tone_id: 53107,
+          name: "Modern Distortion Pedal A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/modern-distortion-pedal-a2.nam",
+          size: "10 MB",
+          gear_type: "distortion",
+        }],
+      },
+      {
+        id: 53108,
+        title: "Open Overdrive",
+        description: "Open, amp-like overdrive NAM capture for stacking into clean and edge amps.",
+        gear: "pedal overdrive",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 4880,
+        favorites_count: 236,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending pedals overdrive",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53108",
+        character: ["overdrive", "drive", "open"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310802,
+          model_id: 5310802,
+          tone_id: 53108,
+          name: "Open Overdrive A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/open-overdrive-a2.nam",
+          size: "9 MB",
+          gear_type: "overdrive",
+        }],
+      },
+      {
+        id: 53109,
+        title: "Ribbon 2x12 Cabinet IR",
+        description: "Cabinet impulse response with ribbon mic warmth for the Cab/IR module.",
+        gear: "cabinet-ir",
+        platform: "ir",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 4380,
+        favorites_count: 214,
+        sortBucket: "latest newest trending ir cabinet cab",
+        architecture: 0,
+        url: "https://www.tone3000.com/tones/53109",
+        character: ["cabinet", "ir", "ribbon"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5310901,
+          model_id: 5310901,
+          tone_id: 53109,
+          name: "Ribbon 2x12 Cabinet IR",
+          architecture_version: 0,
+          model_url: "https://example.invalid/openstudio/ir/ribbon-2x12-cab.wav",
+          size: "2 MB",
+          gear_type: "cabinet-ir",
+        }],
+      },
+      {
+        id: 53110,
+        title: "Warehouse Verb Space IR",
+        description: "Large room convolution source material; not a cabinet IR target.",
+        gear: "space-ir",
+        platform: "ir",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 3180,
+        favorites_count: 188,
+        sortBucket: "latest newest trending ir space reverb room convolution",
+        architecture: 0,
+        url: "https://www.tone3000.com/tones/53110",
+        character: ["space", "reverb ir", "convolution"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5311001,
+          model_id: 5311001,
+          tone_id: 53110,
+          name: "Warehouse Verb Space IR",
+          architecture_version: 0,
+          model_url: "https://example.invalid/openstudio/ir/warehouse-verb-space.wav",
+          size: "3 MB",
+          gear_type: "space-ir",
+        }],
+      },
+    ];
+
+    const rackRailTones: NAMCatalogTone[] = [
+      {
+        id: 67139,
+        title: "Headbangers Ball Amp Pack IR/RAW",
+        description: "Deterministic multi-capture QA pack with matched RAW amp-only and cab-embedded variants.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "OpenStudio QA",
+        user: { username: "openstudio-qa" },
+        downloads_count: 4980,
+        favorites_count: 301,
+        a2_models_count: 4,
+        sortBucket: "trending high gain modern metal pack raw ir",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/67139",
+        character: ["metal", "high gain", "raw", "full rig"],
+        instrument: ["guitar"],
+        models: [
+          {
+            id: 6713901,
+            model_id: 6713901,
+            tone_id: 67139,
+            name: "Headbangers Ball 01 RAW",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-01-raw.nam",
+            size: "17 MB",
+          },
+          {
+            id: 6713902,
+            model_id: 6713902,
+            tone_id: 67139,
+            name: "Headbangers Ball 01 IR",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-01-ir.nam",
+            size: "19 MB",
+          },
+          {
+            id: 6713903,
+            model_id: 6713903,
+            tone_id: 67139,
+            name: "Headbangers Ball 02 RAW",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-02-raw.nam",
+            size: "17 MB",
+          },
+          {
+            id: 6713904,
+            model_id: 6713904,
+            tone_id: 67139,
+            name: "Headbangers Ball 02 IR",
+            architecture_version: 2,
+            model_url: "https://example.invalid/openstudio/nam/headbangers-ball-02-ir.nam",
+            size: "19 MB",
+          },
+        ],
+      },
+      {
+        id: 53204,
+        title: "Ambient Glow",
+        description: "Wide clean-to-glow full rig with soft highs and a polished studio cabinet image.",
+        gear: "full-rig",
+        platform: "nam",
+        license: "Free",
+        creator: "ToneDev",
+        user: { username: "ToneDev" },
+        downloads_count: 2300,
+        favorites_count: 123,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending ambient clean",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53204",
+        character: ["ambient", "clean", "wide"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5320402,
+          model_id: 5320402,
+          tone_id: 53204,
+          name: "Ambient Glow A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/ambient-glow-a2.nam",
+          size: "15 MB",
+          inputCalibrationDb: -12,
+          normalization: { mode: "A2 calibrated", targetLufs: -18, peakDb: -1 },
+        }],
+      },
+      {
+        id: 53203,
+        title: "Classic Crunch",
+        description: "Classic mid-gain amp capture with firm lows and pick-responsive upper mids.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "Scott M.",
+        user: { username: "Scott M." },
+        downloads_count: 3600,
+        favorites_count: 210,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending crunch rock",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53203",
+        character: ["rock", "crunch", "classic"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5320302,
+          model_id: 5320302,
+          tone_id: 53203,
+          name: "Classic Crunch A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/classic-crunch-a2.nam",
+          size: "18 MB",
+          inputCalibrationDb: -12,
+          normalization: { mode: "A2 calibrated", targetLufs: -18, peakDb: -1 },
+        }],
+      },
+      {
+        id: 53202,
+        title: "High Gain Modern",
+        description: "Tight modern high-gain capture for fast rhythm parts and saturated leads.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "Alex R.",
+        user: { username: "Alex R." },
+        downloads_count: 5100,
+        favorites_count: 342,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending high gain modern metal",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53202",
+        character: ["metal", "modern", "high gain"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5320202,
+          model_id: 5320202,
+          tone_id: 53202,
+          name: "High Gain Modern A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/high-gain-modern-a2.nam",
+          size: "17 MB",
+        }],
+      },
+      {
+        id: 53201,
+        title: "Blues Breaker",
+        description: "Blues combo-style breakup with rounded highs and a touch-sensitive feel.",
+        gear: "amp",
+        platform: "nam",
+        license: "Free",
+        creator: "VintageRig",
+        user: { username: "VintageRig" },
+        downloads_count: 2000,
+        favorites_count: 95,
+        a2_models_count: 1,
+        sortBucket: "latest newest trending blues vintage",
+        architecture: 2,
+        url: "https://www.tone3000.com/tones/53201",
+        character: ["blues", "vintage", "edge"],
+        instrument: ["guitar"],
+        models: [{
+          id: 5320102,
+          model_id: 5320102,
+          tone_id: 53201,
+          name: "Blues Breaker A2",
+          architecture_version: 2,
+          model_url: "https://example.invalid/openstudio/nam/blues-breaker-a2.nam",
+          size: "13 MB",
+        }],
+      },
+    ];
+
+    const generatedTones: NAMCatalogTone[] = Array.from({ length: 64 }, (_, index) => {
+      const ordinal = index + 1;
+      const toneId = 52000 - index;
+      const modelId = 5200000 - index;
+      const isFullRig = ordinal % 3 === 0;
+      const arch = ordinal % 5 === 0 ? 1 : 2;
+      const title = `${isFullRig ? "Studio Rig" : "Amp Capture"} ${String(ordinal).padStart(2, "0")}`;
+      return {
+        id: toneId,
+        title,
+        description: `${isFullRig ? "Full rig" : "Amp"} mock catalog entry for pagination and sort regression coverage.`,
+        gear: isFullRig ? "full-rig" : "amp",
+        platform: "nam",
+        license: "Free",
+        creator: ordinal % 2 === 0 ? "OpenStudio QA" : "ToneNet Mock",
+        user: { username: ordinal % 2 === 0 ? "openstudio-qa" : "tonenet-mock" },
+        downloads_count: Math.max(250, 1800 - ordinal * 17),
+        favorites_count: Math.max(12, 90 - ordinal),
+        sortBucket: "latest newest trending mock pagination",
+        architecture: arch,
+        a1_models_count: arch === 1 ? 1 : 0,
+        a2_models_count: arch === 2 ? 1 : 0,
+        url: `https://www.tone3000.com/tones/${toneId}`,
+        character: isFullRig ? ["studio", "full rig"] : ["amp", "utility"],
+        instrument: ["guitar"],
+        models: [{
+          id: modelId,
+          model_id: modelId,
+          tone_id: toneId,
+          name: `${title} A${arch}`,
+          architecture_version: arch,
+          model_url: `https://example.invalid/openstudio/nam/${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-a${arch}.nam`,
+          size: `${10 + (ordinal % 9)} MB`,
+        }],
+      };
+    });
+
+    return [...seedTones, ...rackRailTones, ...generatedTones];
+  }
+
+  private makeDevNAMInstalledRecord(model: NAMCatalogModel | string): NAMInstalledModel {
+    if (typeof model === "string") {
+      const name = model.split(/[\\/]/).pop() || "NAM model";
+      return {
+        name,
+        toneTitle: name,
+        localPath: model,
+        fileSizeBytes: 7_500_000,
+        sourceProvider: "tone3000",
+        source: "dev-mock",
+        installedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        manifestUpdatedAt: new Date().toISOString(),
+      };
+    }
+
+    const modelId = Number(model.model_id ?? model.id ?? 0);
+    const toneId = Number(model.tone_id ?? model.toneId ?? 0);
+    const modelName = String(model.name ?? model.title ?? "Auditioned NAM model");
+    const toneTitle = String(model.toneTitle ?? model.tone_title ?? modelName);
+    const architecture = model.architecture_version ?? model.architecture ?? 2;
+    const modelUrl = String(model.model_url ?? model.modelUrl ?? "");
+    const extensionMatch = modelUrl.match(/\.(wav|aiff|aif|flac|nam)(?:[?#].*)?$/i);
+    const localExtension = extensionMatch ? extensionMatch[1].toLowerCase() : "nam";
+    return {
+      modelId,
+      toneId,
+      name: modelName,
+      toneTitle,
+      architecture,
+      modelUrl,
+      sourceUrl: toneId ? `https://www.tone3000.com/tones/${toneId}` : "",
+      license: String(model.license ?? model.license_name ?? "Free"),
+      creator: String(model.creator ?? model.creator_name ?? "OpenStudio QA"),
+      gearType: String(model.gearType ?? model.gear_type ?? model.gear ?? "amp"),
+      localPath: `OpenStudio/NAM/library/dev-preview/${modelName.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "nam-model"}.${localExtension}`,
+      fileSizeBytes: 8_800_000 + modelId,
+      sourceProvider: "tone3000",
+      source: "dev-mock",
+      installedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      manifestUpdatedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      lastSeenMetadata: model,
+    };
+  }
+
+  private getDevNAMInstalledRecords(): NAMInstalledModel[] {
+    const models = this.getDevNAMCatalogTones().flatMap((tone) => tone.models ?? []);
+    const ready = models[0] ? this.makeDevNAMInstalledRecord(models[0]) : null;
+    const update = models[1] ? {
+      ...this.makeDevNAMInstalledRecord(models[1]),
+      updateAvailable: true,
+      updateReason: "Newer A2 capture metadata available",
+      updatedAt: new Date(Date.now() - 86400000).toISOString(),
+      latestModelId: Number(models[1].model_id ?? models[1].id ?? 0) + 1000,
+      latestToneId: Number(models[1].tone_id ?? models[1].toneId ?? 0),
+      latestModelUrl: String(models[1].model_url ?? models[1].modelUrl ?? ""),
+      latestMetadata: { ...models[1], id: Number(models[1].id ?? 0) + 1000, model_id: Number(models[1].model_id ?? 0) + 1000 },
+    } : null;
+    const missing = models[2] ? {
+      ...this.makeDevNAMInstalledRecord(models[2]),
+      missing: true,
+      missingSince: new Date(Date.now() - 2 * 86400000).toISOString(),
+      localPath: "OpenStudio/NAM/library/missing/edge-clean-a1.nam",
+    } : null;
+
+    return [ready, update, missing].filter((record): record is NAMInstalledModel => Boolean(record));
+  }
+
 
   constructor() {
     const juce = typeof window !== "undefined" ? window.__JUCE__ : undefined;
@@ -1948,6 +3753,10 @@ class NativeBridge {
       // Debugging: Alert the available keys to see what we are working with
       const backend = juce?.backend;
       if (backend) {
+        backend.addEventListener?.("pluginCatalogChanged", (data: any) => {
+          this.announcePluginCatalogChanged(data?.completionId);
+        });
+
         const keys = Object.keys(backend);
         console.log("NativeBridge: Backend keys:", keys);
         console.log("NativeBridge: Functions available:", {
@@ -2077,7 +3886,8 @@ class NativeBridge {
   // Set callback for meter update events from C++
   onMeterUpdate(
     callback: (data: {
-      trackLevels: number[];
+      trackLevels: Record<string, number>;
+      midiInputLevels?: Record<string, number>;
       trackClipping?: Record<string, boolean>;
       masterLevel: number;
       masterClipping?: boolean;
@@ -2127,21 +3937,9 @@ class NativeBridge {
   }
 
   async getAudioDeviceSetup(): Promise<AudioDeviceSetupResponse> {
-    console.log(
-      "[NativeBridge] getAudioDeviceSetup called, isNative:",
-      this.isNative,
-    );
-    console.log(
-      "[NativeBridge] window.__JUCE__?.backend.getAudioDeviceSetup exists:",
-      typeof window.__JUCE__?.backend.getAudioDeviceSetup,
-    );
-
     if (this.isNative && window.__JUCE__?.backend.getAudioDeviceSetup) {
       try {
-        console.log("[NativeBridge] Calling backend.getAudioDeviceSetup()...");
-        const result = await window.__JUCE__.backend.getAudioDeviceSetup();
-        console.log("[NativeBridge] Got result:", result);
-        return result;
+        return await window.__JUCE__.backend.getAudioDeviceSetup();
       } catch (error) {
         console.error(
           "[NativeBridge] Error calling getAudioDeviceSetup:",
@@ -2150,7 +3948,6 @@ class NativeBridge {
         throw error;
       }
     } else {
-      console.log("[NativeBridge] Using mock data");
       // Mock Data
       return {
         current: {
@@ -2164,9 +3961,22 @@ class NativeBridge {
         inputs: ["Mock In", "Mic 1"],
         outputs: ["Mock Out", "Speakers"],
         sampleRates: [44100, 48000],
-        bufferSizes: [256, 512, 1024],
+        bufferSizes: [8, 16, 32, 64, 128, 256, 512, 1024],
       };
     }
+  }
+
+  async openAudioDeviceControlPanel(): Promise<AudioDeviceControlPanelResult> {
+    if (this.isNative && window.__JUCE__?.backend.openAudioDeviceControlPanel) {
+      return await window.__JUCE__.backend.openAudioDeviceControlPanel();
+    }
+
+    return {
+      success: false,
+      opened: false,
+      restartRequested: false,
+      error: "The native audio-driver control panel is available in the desktop app only.",
+    };
   }
 
   async setAudioDeviceSetup(config: any): Promise<boolean> {
@@ -2195,17 +4005,16 @@ class NativeBridge {
     trackId: string,
     enabled: boolean,
   ): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.setTrackInputMonitoring) {
-      return await window.__JUCE__.backend.setTrackInputMonitoring(
-        trackId,
-        enabled,
-      );
-    } else {
-      console.log(
-        `[NativeBridge] Mock setTrackInputMonitoring: track ${trackId}, enabled: ${enabled}`,
-      );
-      return true;
+    if (this.isNative) {
+      const setInputMonitoring = window.__JUCE__?.backend.setTrackInputMonitoring;
+      if (!setInputMonitoring) return false;
+      return await setInputMonitoring.call(window.__JUCE__?.backend, trackId, enabled);
     }
+
+    console.log(
+      `[NativeBridge] Mock setTrackInputMonitoring: track ${trackId}, enabled: ${enabled}`,
+    );
+    return true;
   }
 
   async setTrackInputChannels(
@@ -2274,7 +4083,6 @@ class NativeBridge {
   // Transport Control (Phase 2)
   async setTransportPlaying(playing: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPlaying) {
-      console.log("[audio.transport] NativeBridge.setTransportPlaying", { playing });
       return await window.__JUCE__.backend.setTransportPlaying(playing);
     } else {
       console.log(`[NativeBridge] Mock setTransportPlaying: ${playing}`);
@@ -2284,7 +4092,6 @@ class NativeBridge {
 
   async setTransportRecording(recording: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportRecording) {
-      console.log("[audio.record] NativeBridge.setTransportRecording", { recording });
       return await window.__JUCE__.backend.setTransportRecording(recording);
     } else {
       console.log(`[NativeBridge] Mock setTransportRecording: ${recording}`);
@@ -2344,7 +4151,6 @@ class NativeBridge {
 
   async setTransportPosition(seconds: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPosition) {
-      console.log("[audio.transport] NativeBridge.setTransportPosition", { seconds });
       return await window.__JUCE__.backend.setTransportPosition(seconds);
     } else {
       console.log(`[NativeBridge] Mock setTransportPosition: ${seconds}s`);
@@ -2490,12 +4296,14 @@ class NativeBridge {
     trackId: string,
     samplesPerPixel: number,
     numPixels: number,
+    startSample = 0,
   ): Promise<WaveformPeak[]> {
     if (this.isNative && window.__JUCE__?.backend.getRecordingPeaks) {
       const flat = await window.__JUCE__.backend.getRecordingPeaks(
         trackId,
         samplesPerPixel,
         numPixels,
+        startSample,
       );
       return parseFlatPeaks(flat as unknown as number[]);
     } else {
@@ -2520,41 +4328,243 @@ class NativeBridge {
       const snapshot = await window.__JUCE__.backend.getAudioDebugSnapshot();
       return snapshot;
     }
+    const mockParams = typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search)
+      : null;
+    const mockNumber = (name: string, fallback: number) => {
+      const rawValue = mockParams?.get(name);
+      if (rawValue === null || rawValue === undefined || rawValue.trim() === "") return fallback;
+      const value = Number(rawValue);
+      return Number.isFinite(value) && value >= 0 ? value : fallback;
+    };
+    const mockDeadlineMisses = Math.trunc(mockNumber("mockAudioDeadlineMisses", 0));
+    const mockDeadlineCluster = Math.trunc(mockNumber(
+      "mockAudioDeadlineCluster",
+      mockDeadlineMisses > 0 ? 1 : 0,
+    ));
+    const mockDeadlineAgeCallbacks = Math.trunc(mockNumber("mockAudioDeadlineAgeCallbacks", 0));
+    const mockDeadlineProcessMs = mockNumber("mockAudioDeadlineProcessMs", 0);
+    const mockAudioDeviceXRuns = Math.trunc(mockNumber("mockAudioDeviceXRuns", 0));
+    const mockLastCallbackCounter = 10000;
+    const mockRecording = mockParams?.get("mockAudioRecording") === "1";
     const fallbackSnapshot = {
-      transportPlaying: false,
-      transportRecording: false,
+      transportPlaying: mockRecording,
+      transportRecording: mockRecording,
       transportPosition: 0,
-      sampleRate: 44100,
-      blockSize: 512,
+      sampleRate: 48000,
+      blockSize: 128,
       playbackClipCount: 0,
       activeOutputChannels: 0,
-      lastAudioCallbackProcessMs: 0,
-      maxAudioCallbackProcessMs: 0,
-      audioCallbackDeadlineMissCount: 0,
+      lastCallbackCounter: mockLastCallbackCounter,
+      lastAudioCallbackProcessMs: 0.64,
+      maxAudioCallbackProcessMs: Math.max(0.82, mockDeadlineProcessMs),
+      audioCallbackDeadlineMissCount: mockDeadlineMisses,
+      lastAudioCallbackDeadlineMissCounter: mockDeadlineMisses > 0
+        ? Math.max(1, mockLastCallbackCounter - mockDeadlineAgeCallbacks)
+        : 0,
+      audioCallbackDeadlineMissBurstCount: mockDeadlineCluster,
+      lastAudioCallbackDeadlineMissProcessMs: mockDeadlineProcessMs,
+      lastAudioCallbackDeadlineMissWhileRecording: mockRecording,
+      audioDeviceXRunCount: mockAudioDeviceXRuns,
       audioCallbackTrackBufferResizeCount: 0,
       audioCallbackPitchScrubBufferResizeCount: 0,
       audioCallbackSidechainBufferResizeCount: 0,
       spectrumFftPublishCount: 0,
       spectrumFftLockMissCount: 0,
       postTrackPlaybackPeak: 0,
-      postMonitoringInputPeak: 0,
+      postMonitoringInputPeak: 0.17,
       postMasterFxPeak: 0,
       postMonitoringFxPeak: 0,
       finalOutputPeak: 0,
+      tunerFrequencyHz: 329.2,
+      tunerMidiNote: 64,
+      tunerNoteName: "E4",
+      tunerCents: -2.2,
+      tunerConfidence: 0.86,
+      tunerInputLevelDb: -21.4,
+      tunerSignalPresent: true,
+      tunerPitchLocked: true,
+      tunerUpdateCounter: 42,
+      tunerState: "Tracking" as const,
+      tunerInstantaneousFrequencyHz: 329.2,
+      tunerAverageFrequencyHz: 329.2,
+      tunerAverageCents: -2.2,
+      tunerPitchAgeMs: 14,
+      tunerPitchVarianceCents: 0.8,
+      tunerPitchUpdateCounter: 42,
+      tunerAnalysisFrameCounter: 58,
+      tunerDroppedFifoSamples: 0,
+      tunerSelectedInputChannel: 0,
+      tunerInputStartChannel: 0,
+      tunerInputChannelCount: 1,
       lastRecordingClipCountReturned: 0,
       playbackTracks: [],
     };
     return fallbackSnapshot;
   }
 
-  // FX Management (Phase 3)
-  async scanForPlugins(): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.scanForPlugins) {
-      return await window.__JUCE__.backend.scanForPlugins();
-    } else {
-      console.log("[NativeBridge] Mock scanForPlugins");
-      return true;
+  async getNAMRackOversamplingFactor(): Promise<2 | 4 | 8> {
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.getNAMRackOversamplingFactor) throw new Error("The native host does not support NAM Rack oversampling controls.");
+      const factor = Number(await backend.getNAMRackOversamplingFactor());
+      return factor === 2 || factor === 8 ? factor : 4;
     }
+    return this.mockNAMRackOversamplingFactor;
+  }
+
+  async setNAMRackOversamplingFactor(
+    factor: 2 | 4 | 8,
+  ): Promise<boolean> {
+    if (factor !== 2 && factor !== 4 && factor !== 8) return false;
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.setNAMRackOversamplingFactor) return false;
+      return await backend.setNAMRackOversamplingFactor(factor);
+    }
+    this.mockNAMRackOversamplingFactor = factor;
+    return true;
+  }
+
+  async getRealtimeAudioTelemetry(): Promise<AudioDebugSnapshot> {
+    if (this.isNative && window.__JUCE__?.backend.getRealtimeAudioTelemetry) {
+      return await window.__JUCE__.backend.getRealtimeAudioTelemetry();
+    }
+
+    // Keep frontend-only development and mixed-version packaged assets useful
+    // while the lightweight native endpoint is unavailable.
+    return await this.getAudioDebugSnapshot();
+  }
+
+  async setNAMTunerActive(
+    trackId: string,
+    active: boolean,
+    subscriberId: string,
+  ): Promise<boolean> {
+    const normalizedTrackId = trackId.trim();
+    const normalizedSubscriberId = subscriberId.trim();
+    if (!normalizedSubscriberId) return false;
+    if (this.isNative) {
+      const backend = window.__JUCE__?.backend;
+      if (!backend?.setNAMTunerActive) return false;
+      return await backend.setNAMTunerActive(
+        normalizedTrackId,
+        active,
+        normalizedSubscriberId,
+      );
+    }
+    console.log(
+      "[NativeBridge] Mock setNAMTunerActive:",
+      normalizedTrackId,
+      active,
+      normalizedSubscriberId,
+    );
+    return true;
+  }
+
+  // FX Management (Phase 3)
+  async scanForPlugins(forceRescan = false): Promise<PluginScanReport> {
+    let report: PluginScanReport;
+    if (this.isNative && window.__JUCE__?.backend.scanForPlugins) {
+      const rawReport = await window.__JUCE__.backend.scanForPlugins(forceRescan);
+      report = {
+        ...rawReport,
+        forceRescan: Boolean(rawReport.forceRescan ?? forceRescan),
+        skippedCount: Number(
+          rawReport.skippedCount ?? rawReport.skipped?.length ?? 0,
+        ),
+        skipped: Array.isArray(rawReport.skipped) ? rawReport.skipped : [],
+        formats: (rawReport.formats ?? []).map((format) => ({
+          ...format,
+          skippedCount: Number(
+            format.skippedCount ?? format.skipped?.length ?? 0,
+          ),
+          skipped: Array.isArray(format.skipped) ? format.skipped : [],
+        })),
+      };
+    } else {
+      console.log("[NativeBridge] Mock scanForPlugins", { forceRescan });
+      report = {
+        success: true,
+        forceRescan,
+        pluginCount: 2,
+        candidateCount: 2,
+        failedCount: 0,
+        skippedCount: 0,
+        paths: ["/mock/VST3"],
+        failures: [],
+        skipped: [],
+        formats: [
+          {
+            format: "VST3",
+            candidateCount: 2,
+            pluginCount: 2,
+            failedCount: 0,
+            skippedCount: 0,
+            paths: ["/mock/VST3"],
+            skipped: [],
+          },
+        ],
+        debugLogPath: "",
+      };
+    }
+
+    this.announcePluginCatalogChanged(report.completionId);
+    return report;
+  }
+
+  async getPluginScanConfiguration(): Promise<PluginScanConfiguration> {
+    if (this.isNative && window.__JUCE__?.backend.getPluginScanConfiguration) {
+      const configuration =
+        await window.__JUCE__.backend.getPluginScanConfiguration();
+      return {
+        ...configuration,
+        blacklistedPlugins: Array.isArray(configuration.blacklistedPlugins)
+          ? configuration.blacklistedPlugins
+          : [],
+      };
+    }
+    return {
+      customPaths: [],
+      effectivePaths: [
+        { format: "VST3", path: "/mock/VST3", exists: true, custom: false },
+      ],
+      supportedFormats: ["VST3", "LV2", "CLAP"],
+      blacklistedPlugins: [],
+      unsupportedFormats: ["VST2", "AAX", "32-bit plug-ins", "standalone applications"],
+      contentLibraryNote:
+        "Kontakt and Reaktor libraries are opened inside their host plug-in and are not scanned as separate plug-ins.",
+    };
+  }
+
+  async addPluginScanPath(path: string): Promise<boolean> {
+    const normalized = path.trim();
+    if (!normalized) return false;
+    if (this.isNative && window.__JUCE__?.backend.addPluginScanPath) {
+      return await window.__JUCE__.backend.addPluginScanPath(normalized);
+    }
+    console.log("[NativeBridge] Mock addPluginScanPath:", normalized);
+    return true;
+  }
+
+  async removePluginScanPath(path: string): Promise<boolean> {
+    const normalized = path.trim();
+    if (!normalized) return false;
+    if (this.isNative && window.__JUCE__?.backend.removePluginScanPath) {
+      return await window.__JUCE__.backend.removePluginScanPath(normalized);
+    }
+    console.log("[NativeBridge] Mock removePluginScanPath:", normalized);
+    return true;
+  }
+
+  async retryBlacklistedPlugin(path: string): Promise<boolean> {
+    const normalized = path.trim();
+    if (!normalized) return false;
+    if (this.isNative && window.__JUCE__?.backend.retryBlacklistedPlugin) {
+      return await window.__JUCE__.backend.retryBlacklistedPlugin(normalized);
+    }
+    console.log("[NativeBridge] Mock retryBlacklistedPlugin:", normalized);
+    return true;
   }
 
   async getAvailablePlugins(): Promise<any[]> {
@@ -2779,9 +4789,33 @@ class NativeBridge {
   // Built-in FX Presets
   async getBuiltInFXPresets(
     pluginName: string,
-  ): Promise<{ name: string; path: string }[]> {
+  ): Promise<{ name: string; path: string; metadataPath?: string; metadata?: any; instrumentProfile?: "guitar" | "bass" }[]> {
     if (this.isNative && window.__JUCE__?.backend.getBuiltInFXPresets) {
       return await window.__JUCE__.backend.getBuiltInFXPresets(pluginName);
+    }
+    if (pluginName === "OpenStudio NAM Rack" && this.shouldUseDevNAMMock()) {
+      return [
+        {
+          name: "Tele Clean Saved",
+          path: "OpenStudio/NAM/presets/Tele Clean Saved.ospreset",
+          metadataPath: "OpenStudio/NAM/presets/Tele Clean Saved.ospreset.metadata.json",
+          metadata: {
+            kind: "openstudio.namRackPresetMetadata",
+            metadata: { folder: "Studio", tags: ["tele", "clean"], notes: "Bright edge-clean preset kept for single-coil auditioning.", lastUsed: Date.now() - 3600000, updatedAt: Date.now() - 300000 },
+          },
+          instrumentProfile: "guitar",
+        },
+        {
+          name: "JC Chorus Wide",
+          path: "OpenStudio/NAM/presets/JC Chorus Wide.ospreset",
+          metadataPath: "OpenStudio/NAM/presets/JC Chorus Wide.ospreset.metadata.json",
+          metadata: {
+            kind: "openstudio.namRackPresetMetadata",
+            metadata: { favorite: true, folder: "Clean", tags: ["chorus", "wide"], notes: "Wide chorus clean for DI guitar and glassy A2 captures.", lastUsed: Date.now() - 120000, updatedAt: Date.now() - 240000 },
+          },
+          instrumentProfile: "guitar",
+        },
+      ];
     }
     return [];
   }
@@ -2791,6 +4825,7 @@ class NativeBridge {
     fxIndex: number,
     isInputFX: boolean,
     presetName: string,
+    chainType: BuiltInPluginChain = isInputFX ? "input" : "track",
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.saveBuiltInFXPreset) {
       return await window.__JUCE__.backend.saveBuiltInFXPreset(
@@ -2798,6 +4833,7 @@ class NativeBridge {
         fxIndex,
         isInputFX,
         presetName,
+        chainType,
       );
     }
     console.log(
@@ -2811,6 +4847,7 @@ class NativeBridge {
     fxIndex: number,
     isInputFX: boolean,
     presetName: string,
+    chainType: BuiltInPluginChain = isInputFX ? "input" : "track",
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.loadBuiltInFXPreset) {
       return await window.__JUCE__.backend.loadBuiltInFXPreset(
@@ -2818,6 +4855,7 @@ class NativeBridge {
         fxIndex,
         isInputFX,
         presetName,
+        chainType,
       );
     }
     console.log(
@@ -2838,6 +4876,47 @@ class NativeBridge {
     }
     console.log(
       `[NativeBridge] Mock deleteBuiltInFXPreset: ${presetName}`,
+    );
+    return true;
+  }
+
+  async getBuiltInFXPresetData(
+    pluginName: string,
+    presetName: string,
+  ): Promise<string> {
+    if (this.isNative && window.__JUCE__?.backend.getBuiltInFXPresetData) {
+      return await window.__JUCE__.backend.getBuiltInFXPresetData(pluginName, presetName);
+    }
+    console.log(`[NativeBridge] Mock getBuiltInFXPresetData: ${presetName}`);
+    return this.shouldUseDevNAMMock() ? btoa(`mock:${pluginName}:${presetName}`) : "";
+  }
+
+  async saveBuiltInFXPresetData(
+    pluginName: string,
+    presetName: string,
+    base64Data: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.saveBuiltInFXPresetData) {
+      return await window.__JUCE__.backend.saveBuiltInFXPresetData(pluginName, presetName, base64Data);
+    }
+    console.log(`[NativeBridge] Mock saveBuiltInFXPresetData: ${presetName}`);
+    return this.shouldUseDevNAMMock() && Boolean(base64Data);
+  }
+
+  async copyBuiltInFXPreset(
+    pluginName: string,
+    sourcePresetName: string,
+    targetPresetName: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.copyBuiltInFXPreset) {
+      return await window.__JUCE__.backend.copyBuiltInFXPreset(
+        pluginName,
+        sourcePresetName,
+        targetPresetName,
+      );
+    }
+    console.log(
+      `[NativeBridge] Mock copyBuiltInFXPreset: ${sourcePresetName} -> ${targetPresetName}`,
     );
     return true;
   }
@@ -2936,7 +5015,7 @@ class NativeBridge {
     }
   }
 
-  async getMasterFX(): Promise<{ index: number; name: string; pluginPath?: string; bypassed?: boolean; precisionOverride?: "auto" | "float32" }[]> {
+  async getMasterFX(): Promise<MasterFXInfo[]> {
     if (this.isNative && window.__JUCE__?.backend.getMasterFX) {
       return await window.__JUCE__.backend.getMasterFX();
     }
@@ -2948,6 +5027,16 @@ class NativeBridge {
       return await window.__JUCE__.backend.removeMasterFX(fxIndex);
     }
     return false;
+  }
+
+  async reorderMasterFX(fromIndex: number, toIndex: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.reorderMasterFX) {
+      return await window.__JUCE__.backend.reorderMasterFX(fromIndex, toIndex);
+    }
+    console.log(
+      `[NativeBridge] Mock reorderMasterFX: from ${fromIndex} to ${toIndex}`,
+    );
+    return true;
   }
 
   async openMasterFXEditor(fxIndex: number): Promise<boolean> {
@@ -3072,6 +5161,35 @@ class NativeBridge {
     }
   }
 
+  /**
+   * Return the exact sample peak across every channel in a trimmed source
+   * range. Invalid/unreadable ranges return null; an exact zero is retained so
+   * callers can distinguish a silent range from an analysis failure.
+   */
+  async getAudioPeakAmplitude(
+    filePath: string,
+    offsetSeconds: number,
+    durationSeconds: number,
+  ): Promise<number | null> {
+    if (typeof filePath !== "string"
+      || filePath.trim().length === 0
+      || !Number.isFinite(offsetSeconds)
+      || offsetSeconds < 0
+      || !Number.isFinite(durationSeconds)
+      || durationSeconds <= 0) {
+      return null;
+    }
+    if (!this.isNative || !window.__JUCE__?.backend.getAudioPeakAmplitude) {
+      return null;
+    }
+    const peak = Number(await window.__JUCE__.backend.getAudioPeakAmplitude(
+      filePath,
+      offsetSeconds,
+      durationSeconds,
+    ));
+    return Number.isFinite(peak) && peak >= 0 ? peak : null;
+  }
+
   async refreshWaveformPeaks(filePath: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.refreshWaveformPeaks) {
       return await window.__JUCE__.backend.refreshWaveformPeaks(filePath);
@@ -3116,7 +5234,7 @@ class NativeBridge {
         pitchCorrectionSourceOffset,
       );
     }
-    return false;
+    return !this.isNative;
   }
 
   async removePlaybackClip(
@@ -3132,12 +5250,27 @@ class NativeBridge {
     return false;
   }
 
+  async removePlaybackClipById(
+    trackId: string,
+    clipId: string,
+  ): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.removePlaybackClipById) {
+      return await window.__JUCE__.backend.removePlaybackClipById(
+        trackId,
+        clipId,
+      );
+    }
+    // Frontend-only development has no playback engine to mutate; treat the
+    // mock no-op as successful so strict native result checking remains usable.
+    return !this.isNative;
+  }
+
   async clearPlaybackClips(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.clearPlaybackClips) {
       console.log("[audio.playback] NativeBridge.clearPlaybackClips");
       return await window.__JUCE__.backend.clearPlaybackClips();
     }
-    return false;
+    return !this.isNative;
   }
 
   /** Batch-add multiple playback clips in parallel using Promise.all().
@@ -3175,7 +5308,7 @@ class NativeBridge {
       return await window.__JUCE__.backend.addPlaybackClipsBatch(JSON.stringify(clips));
     }
     // Fallback: individual calls (for dev mode or if backend doesn't support batch)
-    await Promise.all(
+    const results = await Promise.all(
       clips.map((clip) =>
         this.addPlaybackClip(
           clip.trackId,
@@ -3192,7 +5325,7 @@ class NativeBridge {
         ),
       ),
     );
-    return true;
+    return results.every((result) => result === true);
   }
 
   // Automation (Phase 1.1)
@@ -3476,15 +5609,25 @@ class NativeBridge {
   }
 
   async openExternalURL(url: string): Promise<boolean> {
+    if (!isAllowedExternalBrowserURL(url)) return false;
+
+    const safeURL = url.trim();
     if (this.isNative && window.__JUCE__?.backend.openExternalURL) {
-      return await window.__JUCE__.backend.openExternalURL(url);
+      return await window.__JUCE__.backend.openExternalURL(safeURL);
     }
 
     if (typeof window !== "undefined" && typeof window.open === "function") {
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(safeURL, "_blank", "noopener,noreferrer");
       return true;
     }
 
+    return false;
+  }
+
+  async revealLocalPath(path: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.revealLocalPath) {
+      return await window.__JUCE__.backend.revealLocalPath(path);
+    }
     return false;
   }
 
@@ -4294,18 +6437,17 @@ class NativeBridge {
     return "";
   }
 
-  async getTrackRoutingInfo(trackId: string): Promise<{
-    phaseInverted: boolean; stereoWidth: number; masterSendEnabled: boolean;
-    outputStartChannel: number; outputChannelCount: number; playbackOffsetMs: number;
-    trackChannelCount: number; midiOutputDevice: string;
-  }> {
+  async getTrackRoutingInfo(trackId: string): Promise<TrackRoutingInfo | null> {
     if (this.isNative && window.__JUCE__?.backend.getTrackRoutingInfo) {
-      return await window.__JUCE__.backend.getTrackRoutingInfo(trackId);
+      const routing = await window.__JUCE__.backend.getTrackRoutingInfo(trackId);
+      return routing && typeof routing === "object" ? routing : null;
     }
     return {
       phaseInverted: false, stereoWidth: 100, masterSendEnabled: true,
       outputStartChannel: 0, outputChannelCount: 2, playbackOffsetMs: 0,
       trackChannelCount: 2, midiOutputDevice: "",
+      inputStartChannel: 0, inputChannelCount: 1, inputMonitoring: true,
+      recordArmed: false, trackType: "audio",
     };
   }
 
@@ -4614,10 +6756,12 @@ class NativeBridge {
       { name: "OpenStudio Basic Synth", category: "Built-in Instrument", isInstrument: true, instrumentMode: 0 },
       { name: "OpenStudio Piano", category: "Built-in Instrument", isInstrument: true, instrumentMode: 1 },
       { name: "OpenStudio Drums", category: "Built-in Instrument", isInstrument: true, instrumentMode: 2 },
+      { name: "OpenStudio Clean Guitar", category: "Built-in Instrument", isInstrument: true, instrumentMode: 3 },
       { name: "OpenStudio EQ", category: "Built-in" },
       { name: "OpenStudio Compressor", category: "Built-in" },
       { name: "OpenStudio Gate", category: "Built-in" },
       { name: "OpenStudio Limiter", category: "Built-in" },
+      { name: "OpenStudio NAM Rack", category: "Built-in" },
       { name: "OpenStudio Delay", category: "Built-in" },
       { name: "OpenStudio Reverb", category: "Built-in" },
       { name: "OpenStudio Chorus", category: "Built-in" },
@@ -4630,7 +6774,348 @@ class NativeBridge {
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     if (this.isNative && window.__JUCE__?.backend.getBuiltInPluginSchema) {
-      return await window.__JUCE__.backend.getBuiltInPluginSchema(trackId, address.chain, fxIndex);
+      const schema = await window.__JUCE__.backend.getBuiltInPluginSchema(trackId, address.chain, fxIndex);
+      return projectNAMRackSchemaForUI(schema);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const enumOptionsById: Record<string, Array<{ value: number; label: string }>> = {
+        instrumentProfile: NAM_INSTRUMENT_PROFILE_OPTIONS.map(({ value, label }) => ({ value, label })),
+        pedalCalibrationMode: [{ value: 0, label: "Off" }, { value: 1, label: "Model" }, { value: 2, label: "Override" }],
+        ampCalibrationMode: [{ value: 0, label: "Off" }, { value: 1, label: "Model" }, { value: 2, label: "Override" }],
+        chorusCharacter: [{ value: 0, label: "Clean" }, { value: 1, label: "Ensemble" }],
+        modulatorMode: [{ value: 0, label: "Chorus" }, { value: 1, label: "Flanger" }],
+        modulatorPedalMode: [{ value: 0, label: "Pedal" }, { value: 1, label: "Auto" }],
+        delayMode: [
+          { value: 0, label: "Digital" },
+          { value: 1, label: "Tape" },
+          { value: 2, label: "Analog" },
+          { value: 3, label: "Multi" },
+          { value: 4, label: "Dual" },
+        ],
+        reverbVoice: [{ value: 0, label: "Studio" }, { value: 1, label: "Plate" }, { value: 2, label: "Hall" }, { value: 3, label: "Room" }],
+        chaosMode: [{ value: 0, label: "Heavy" }, { value: 1, label: "Extreme" }, { value: 2, label: "Crunch" }],
+        compressorSidechainHPF: [{ value: 0, label: "Off" }, { value: 1, label: "80 Hz" }, { value: 2, label: "240 Hz" }],
+      };
+      const param = (
+        id: string,
+        label: string,
+        value: number,
+        min: number,
+        max: number,
+        unit = "",
+        graphRole = "controls",
+        type: BuiltInParamDescriptor["type"] = "continuous",
+        automatable = type !== "meter",
+      ): BuiltInParamDescriptor => ({
+        id,
+        label,
+        type,
+        value,
+        min,
+        max,
+        defaultValue: value,
+        unit,
+        automatable,
+        graphRole,
+        enumOptions: type === "enum" ? enumOptionsById[id] : undefined,
+      });
+      const schema: BuiltInPluginSchema = {
+        schemaVersion: 1,
+        name: "OpenStudio NAM Rack",
+        category: "Built-in",
+        chain: address.chain,
+        fxIndex,
+        parameters: [
+          param("inputTrimDb", "Input", 0, -24, 24, "dB", "global"),
+          param("instrumentProfile", "Instrument", 0, 0, 1, "", "global", "enum", false),
+          param("calibrationReferenceDbu", "Interface Reference", 12, -20, 30, "dBu", "calibration", "continuous", false),
+          param("pedalCalibrationMode", "Pedal Calibration", 1, 0, 2, "", "calibration", "enum"),
+          param("pedalOverrideInputLevelDbu", "Pedal Override In", 12, -20, 30, "dBu", "calibration"),
+          param("pedalOverrideOutputLevelDbu", "Pedal Override Out", 12, -20, 30, "dBu", "calibration"),
+          param("ampCalibrationMode", "Amp Calibration", 1, 0, 2, "", "calibration", "enum"),
+          param("ampOverrideInputLevelDbu", "Amp Override In", 12, -20, 30, "dBu", "calibration"),
+          param("ampOverrideOutputLevelDbu", "Amp Override Out", 12, -20, 30, "dBu", "calibration"),
+          param("gateThresholdDb", "Gate", -78, -100, 0, "dB", "gate"),
+          param("gateReleaseMs", "Gate Rel", 80, 20, 500, "ms", "gate"),
+          param("compressorEnabled", "Compressor", 0, 0, 1, "", "dynamics", "toggle"),
+          param("compressorAttackMs", "Attack", 21.9, 0.1, 50, "ms", "dynamics"),
+          param("compressorReleaseMs", "Release", 149.1, 50, 1000, "ms", "dynamics"),
+          param("compressorToneDb", "Tone", 0, -6, 6, "dB", "dynamics"),
+          param("compressorIntensity", "Intensity", 0, 0, 1, "", "dynamics", "toggle"),
+          param("compressorSidechainHPF", "HPF", 1, 0, 2, "", "dynamics", "enum"),
+          param("compressorMix", "Mix", 0.65, 0, 1, "", "dynamics"),
+          param("compressorVolumeDb", "Level", 0, -18, 18, "dB", "dynamics"),
+          param("compressorComp", "Comp", 0.35, 0, 1, "", "dynamics"),
+          param("octaverEnabled", "Stereo Poly Octaver", 0, 0, 1, "", "pitch", "toggle"),
+          param("octaverDownMix", "Oct -1", 0.32, 0, 1, "", "pitch"),
+          param("octaverUpMix", "Oct +1", 0.18, 0, 1, "", "pitch"),
+          param("octaverDirectMix", "Direct", 1, 0, 1.25, "", "pitch"),
+          param("preEqEnabled", "PRE EQ", 0, 0, 1, "", "preEq", "toggle"),
+          param("preEq120Db", "120 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq250Db", "250 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq500Db", "500 Hz", 0, -12, 12, "dB", "preEq"),
+          param("preEq1kDb", "1 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq2k5Db", "2.5 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq5kDb", "5 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq8kDb", "8 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEq12kDb", "12 kHz", 0, -12, 12, "dB", "preEq"),
+          param("preEqHPFHz", "PRE HPF", 0, 0, 180, "Hz", "preEq"),
+          param("preEqLPFHz", "PRE LPF", 24000, 3000, 24000, "Hz", "preEq"),
+          param("precisionDriveEnabled", "Precision Drive", 0, 0, 1, "", "drive", "toggle"),
+          param("precisionDriveVolumeDb", "PD Volume", 9, -12, 12, "dB", "drive"),
+          param("precisionDriveBright", "PD Bright", 0.55, 0, 1, "", "drive"),
+          param("precisionDriveAttack", "PD Attack", 0.5, 0, 1, "", "drive"),
+          param("precisionDriveGate", "PD Gate", 0, 0, 1, "", "drive"),
+          param("precisionDriveDrive", "PD Drive", 0.35, 0, 1, "", "drive"),
+          param("chaosEnabled", "Distortion", 0, 0, 1, "", "distortion", "toggle"),
+          param("chaosMode", "Dist Mode", 0, 0, 2, "", "distortion", "enum"),
+          param("chaosDrive", "Dist Drive", 0.62, 0, 1, "", "distortion"),
+          param("chaosWeight", "Weight (Tight to Thick)", 0.5, 0, 1, "", "distortion"),
+          param("chaosTone", "Dist Tone", 0.55, 0, 1, "", "distortion"),
+          param("chaosGate", "Dist Gate", 0.22, 0, 1, "", "distortion"),
+          param("chaosMix", "Dist Mix", 1, 0, 1, "", "distortion"),
+          param("chaosLevelDb", "Dist Level", 0, -12, 12, "dB", "distortion"),
+          param("pedalMix", "Pedal Mix", 1, 0, 1, "", "model"),
+          param("ampEnabled", "Amp Power", 1, 0, 1, "", "model", "toggle"),
+          param("ampGainDb", "Gain", 0, -24, 24, "dB", "model"),
+          param("ampBoost", "Tight Boost", 0, 0, 1, "", "model", "toggle"),
+          param("ampVoice", "Bright Voice", 0, 0, 1, "", "model", "toggle"),
+          param("ampMix", "Capture Mix", 1, 0, 1, "", "model"),
+          param("ampOutputDb", "Post Level", 0, -24, 12, "dB", "model"),
+          param("bassDb", "Bass", 0.6, -12, 12, "dB", "tone"),
+          param("midDb", "Mid", -0.2, -12, 12, "dB", "tone"),
+          param("trebleDb", "Treble", 1.8, -12, 12, "dB", "tone"),
+          param("presenceDb", "Presence", 1.2, -12, 12, "dB", "tone"),
+          param("eqHPFHz", "HPF", 0, 0, 500, "Hz", "graphicEq"),
+          param("eq65Db", "65 Hz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq125Db", "125 Hz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq250Db", "250 Hz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq500Db", "500 Hz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq1kDb", "1 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq2kDb", "2 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq4kDb", "4 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq8kDb", "8 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eq16kDb", "16 kHz", 0, -12, 12, "dB", "graphicEq"),
+          param("eqLPFHz", "LPF", 24000, 3000, 24000, "Hz", "graphicEq"),
+          param("eqLevelDb", "Level", 0, -12, 12, "dB", "graphicEq"),
+          param("eqEnabled", "EQ Power", 0, 0, 1, "", "graphicEq", "toggle"),
+          param("cabEnabled", "Cab/IR", 1, 0, 1, "", "cab", "toggle"),
+          param("cabLevelDb", "Cab Level", -0.5, -24, 12, "dB", "cab"),
+          param("cabHPFHz", "Cab HPF", 80, 20, 500, "Hz", "cab"),
+          param("cabLPFHz", "Cab LPF", 8500, 2500, 14000, "Hz", "cab"),
+          param("cabPhaseInvert", "Phase", 0, 0, 1, "", "cab", "toggle"),
+          param("cabMicPosition", "Tone Edge", 0.5, 0, 1, "", "cab"),
+          param("cabMicDistance", "Tone Damp", 0, 0, 1, "", "cab"),
+          param("cabMicBlend", "Shaper Blend", 0.5, 0, 1, "", "cab"),
+          param("cabRoomSend", "Low Bloom", 0, 0, 1, "", "cab"),
+          param("cabRoomEnabled", "Room", 0, 0, 1, "", "cabinetSpace", "toggle"),
+          param("cabRoomAmount", "Room Amount", 0.22, 0, 1, "", "cabinetSpace"),
+          param("cabRoomWidth", "Room Width", 0.65, 0, 1, "", "cabinetSpace"),
+          param("cabDoublerEnabled", "Doubler", 0, 0, 1, "", "cabinetSpace", "toggle"),
+          param("cabDoublerMix", "Doubler Mix", 0.12, 0, 1, "", "cabinetSpace"),
+          param("cabDoublerDelayMs", "Doubler Delay", 4.5, 3, 20, "ms", "cabinetSpace"),
+          param("cabDoublerSpread", "Doubler Spread", 0.65, 0, 1, "", "cabinetSpace"),
+          param("cabPan", "Cab Pan", 0, -1, 1, "", "cab"),
+          param("chorusMix", "Chorus Mix", 0.3, 0, 1, "", "modulation"),
+          param("chorusRateHz", "Chorus Rate", 0.75, 0.01, 8, "Hz", "modulation"),
+          param("chorusDepth", "Chorus Depth", 0.32, 0, 1, "", "modulation"),
+          param("chorusCharacter", "Character", 1, 0, 1, "", "modulation", "enum"),
+          param("modulatorMode", "Mod Mode", 0, 0, 1, "", "modulation", "enum"),
+          param("modulatorFeedback", "Mod Feedback", 0.1, 0, 1, "", "modulation"),
+          param("modulatorAutoRandom", "Auto Random", 0, 0, 1, "", "modulation"),
+          param("modulatorAutoSpeed", "Auto Speed", 0.35, 0, 1, "", "modulation"),
+          param("modulatorEnabled", "Mod Engage", 0, 0, 1, "", "modulation", "toggle"),
+          param("modulatorPedalMode", "Pedal Mode", 1, 0, 1, "", "modulation", "enum"),
+          param("modulatorPedalPosition", "Pedal Sweep", 0.5, 0, 1, "", "modulation"),
+          param("delayMix", "Delay Mix", 0.22, 0, 1, "", "time"),
+          param("delayTimeMs", "Delay Time", 360, 1, 2000, "ms", "time"),
+          param("delayFeedback", "Delay Fdbk", 0.22, 0, 0.85, "", "time"),
+          param("delayMod", "Delay Mod", 0.18, 0, 1, "", "time"),
+          param("delayDucker", "Ducker", 0.12, 0, 1, "", "time"),
+          param("delayMode", "Delay Mode", 1, 0, 4, "", "time", "enum"),
+          param("delayPingPong", "Ping Pong", 1, 0, 1, "", "time", "toggle"),
+          param("delayTempoSync", "Delay Sync", 0, 0, 1, "", "time", "toggle"),
+          param("delayEnabled", "Delay Engage", 0, 0, 1, "", "time", "toggle"),
+          param("reverbEnabled", "Reverb Engage", 0, 0, 1, "", "space", "toggle"),
+          param("reverbVoice", "Reverb Voice", 0, 0, 3, "", "space", "enum"),
+          param("reverbMix", "Reverb Mix", 0.28, 0, 1, "", "space"),
+          param("reverbDecaySec", "Decay", 2.2, 0.2, 12, "s", "space"),
+          param("reverbPreDelayMs", "Pre Delay", 18, 0, 500, "ms", "space"),
+          param("reverbLowCutHz", "Low Cut", 120, 20, 500, "Hz", "space"),
+          param("reverbTone", "Verb Tone", 0.62, 0, 1, "", "space"),
+          param("reverbShimmer", "Shimmer", 0, 0, 1, "", "space"),
+          param("reverbPad", "Pad", 0, 0, 1, "", "space", "toggle"),
+          param("outputTrimDb", "Output", -0.5, -24, 24, "dB", "output"),
+        ],
+        modelState: {
+          pedalModelPath: "",
+          ampModelPath: "OpenStudio/NAM/library/Clean Twin-style A2.nam",
+          cabIRPath: "OpenStudio/NAM/library/Studio 2x12 Open IR.wav",
+          hasPedalModel: false,
+          hasAmpModel: true,
+          hasSlimmableNAMModel: true,
+          pedalModelSize: NAM_FULL_MODEL_SIZE,
+          ampModelSize: NAM_FULL_MODEL_SIZE,
+          pedalModelSlimmable: false,
+          ampModelSlimmable: true,
+          pedalActiveModelSize: NAM_FULL_MODEL_SIZE,
+          ampActiveModelSize: NAM_FULL_MODEL_SIZE,
+          pedalModelSizeBreakpoints: [],
+          ampModelSizeBreakpoints: [0.5],
+          hasCabIR: true,
+          cabIRState: "configured",
+          cabIRActivationMode: "prepared",
+          cabRequestedEnabled: true,
+          pedalMetadataCaptureType: "unknown",
+          pedalDeclaredCaptureType: "unknown",
+          ampMetadataCaptureType: "amp",
+          ampDeclaredCaptureType: "unknown",
+          ampCaptureType: "amp",
+          ampIncludesCab: false,
+          namEffectsDspVersion: 19,
+          inputRoutingAutomatic: true,
+          automaticInputRoutingMode: 0,
+          inputRoutingMode: 0,
+          activeInputRoutingMode: 0,
+          effectiveInputRoutingMode: 0,
+          inputRoutingTransitionPhase: 0,
+          routedInputChannelCount: 1,
+          inputRoutingStereoHostCapable: false,
+          inputRoutingStereoModelCapable: true,
+          inputRoutingRequestHonored: true,
+          inputRoutingReadbackReason: "source_is_mono",
+          pedalStereoCapable: true,
+          ampStereoCapable: true,
+          pedalDualMonoWarning: "",
+          ampDualMonoWarning: "",
+          pedalCalibration: { mode: 1, referenceDbu: 12, appliedInputGainDb: 0, appliedOutputGainDb: 0, status: "unavailable" },
+          ampCalibration: { mode: 1, referenceDbu: 12, metadataInputLevelDbu: 18.3, metadataOutputLevelDbu: 12.3, effectiveInputLevelDbu: 18.3, effectiveOutputLevelDbu: 12.3, appliedInputGainDb: -6.3, appliedOutputGainDb: 0.3, status: "complete" },
+        },
+        visualization: {
+          gainReductionDb: 0,
+          inputLevelDb: -4.2,
+          outputLevelDb: -3.1,
+          inputLeftLevelDb: -4.2,
+          inputRightLevelDb: -10.8,
+          outputLeftLevelDb: -3.1,
+          outputRightLevelDb: -8.4,
+        },
+        uiState: {
+          namRackSlots: {
+            schemaVersion: 1,
+            order: ["gate", "pedal", "amp", "cab", "eq", "mod", "delay", "reverb"],
+            favorites: ["amp", "cab"],
+            moduleCopies: {
+              amp: {
+                moduleId: "amp",
+                label: "Amp Capture copy",
+                values: {
+                  inputTrimDb: 0,
+                  bassDb: 0.6,
+                  midDb: -0.2,
+                  trebleDb: 1.8,
+                  presenceDb: 1.2,
+                  outputTrimDb: -0.5,
+                },
+                modelState: {
+                  ampModelPath: "OpenStudio/NAM/library/Clean Twin-style A2.nam",
+                  ampModelSize: 0,
+                },
+                capturedAt: 1780718400000,
+              },
+            },
+          },
+        },
+      };
+      const scenario = this.getDevNAMMockScenario();
+      if (scenario === "empty-rack") {
+        schema.modelState = {
+          ...(schema.modelState ?? {}),
+          pedalModelPath: "",
+          ampModelPath: "",
+          cabIRPath: "",
+          hasPedalModel: false,
+          hasAmpModel: false,
+          hasSlimmableNAMModel: false,
+          pedalModelSlimmable: false,
+          ampModelSlimmable: false,
+          pedalModelSizeBreakpoints: [],
+          ampModelSizeBreakpoints: [],
+          hasCabIR: false,
+          cabIRState: "empty",
+          cabIRActivationMode: "none",
+          cabRequestedEnabled: false,
+          pedalMetadataCaptureType: "unknown",
+          pedalDeclaredCaptureType: "unknown",
+          ampMetadataCaptureType: "unknown",
+          ampDeclaredCaptureType: "unknown",
+          ampCaptureType: "unknown",
+          ampIncludesCab: false,
+        };
+        schema.parameters = schema.parameters.map((entry) => (
+          entry.id === "cabEnabled" || entry.id === "pedalMix"
+            ? { ...entry, value: 0 }
+            : entry
+        ));
+      } else if (scenario === "amp-only") {
+        schema.modelState = {
+          ...(schema.modelState ?? {}),
+          cabIRPath: "",
+          hasCabIR: false,
+          cabIRState: "empty",
+          cabIRActivationMode: "none",
+          cabRequestedEnabled: false,
+          ampMetadataCaptureType: "amp",
+          ampDeclaredCaptureType: "unknown",
+          ampCaptureType: "amp",
+          ampIncludesCab: false,
+        };
+        schema.parameters = schema.parameters.map((entry) => (
+          entry.id === "cabEnabled" ? { ...entry, value: 0 } : entry
+        ));
+      } else if (scenario === "full-rig") {
+        schema.modelState = {
+          ...(schema.modelState ?? {}),
+          ampModelPath: "OpenStudio/NAM/library/Studio Full Rig A2.nam",
+          hasAmpModel: true,
+          ampMetadataCaptureType: "full_rig",
+          ampDeclaredCaptureType: "full_rig",
+          ampCaptureType: "full-rig",
+          ampIncludesCab: true,
+          cabRequestedEnabled: true,
+        };
+        schema.parameters = schema.parameters.map((entry) => (
+          entry.id === "cabEnabled" ? { ...entry, value: 0 } : entry
+        ));
+      } else if (scenario === "missing-amp" || scenario === "missing-amp-failure") {
+        schema.modelState = {
+          ...(schema.modelState ?? {}),
+          ampModelPath: "D:/Archived Sessions/Night Drive/Missing Modern Lead A2.nam",
+          hasAmpModel: false,
+          hasSlimmableNAMModel: false,
+          ampModelSlimmable: false,
+          ampModelSizeBreakpoints: [],
+          ampMetadataCaptureType: "unknown",
+          ampDeclaredCaptureType: "unknown",
+          ampCaptureType: "unknown",
+          ampIncludesCab: false,
+          lastLoadError: "NAM model file was not found: D:/Archived Sessions/Night Drive/Missing Modern Lead A2.nam",
+        };
+      }
+      const schemaWithValues = this.applyDevBuiltInParamValues(address, schema);
+      const activeProfile = schemaWithValues.parameters.find(
+        ({ id }) => id === "instrumentProfile",
+      )?.value;
+      const preEqLabels = namPreEqBandLabelsForProfile(activeProfile);
+      schemaWithValues.parameters = schemaWithValues.parameters.map((entry) => (
+        entry.id in preEqLabels
+          ? {
+              ...entry,
+              label: preEqLabels[entry.id as keyof typeof preEqLabels],
+            }
+          : entry
+      ));
+      return projectNAMRackSchemaForUI(schemaWithValues);
     }
     return {
       schemaVersion: 1,
@@ -4642,11 +7127,101 @@ class NativeBridge {
     };
   }
 
+  async getNAMRackDiagnostics(
+    address: BuiltInPluginAddress,
+  ): Promise<Record<string, unknown> | null> {
+    const trackId = address.trackId || "";
+    const fxIndex = address.fxIndex ?? -1;
+    if (this.isNative && window.__JUCE__?.backend.getNAMRackDiagnostics) {
+      const diagnostics = await window.__JUCE__.backend.getNAMRackDiagnostics(
+        trackId,
+        address.chain,
+        fxIndex,
+      );
+      return diagnostics && typeof diagnostics === "object" ? diagnostics : null;
+    }
+
+    const schema = await this.getBuiltInPluginSchema(address);
+    const visualization = schema.visualization as
+      | (NonNullable<BuiltInPluginSchema["visualization"]> & {
+          diagnostics?: Record<string, unknown>;
+        })
+      | undefined;
+    const diagnostics = visualization?.diagnostics;
+    const hasBaseDiagnostics = Boolean(diagnostics && typeof diagnostics === "object");
+    const baseDiagnostics = hasBaseDiagnostics
+      ? diagnostics as Record<string, unknown>
+      : {};
+    if (this.shouldUseDevNAMMock()) {
+      const state = await this.getBuiltInPluginState(address);
+      const values = this.isPlainDevStateObject(state?.values) ? state.values : {};
+      const hpfLastActiveHz = Number(values.eqHPFLastActiveHz);
+      const lpfLastActiveHz = Number(values.eqLPFLastActiveHz);
+      const preHpfLastActiveHz = Number(values.preEqHPFLastActiveHz);
+      const preLpfLastActiveHz = Number(values.preEqLPFLastActiveHz);
+      return {
+        ...baseDiagnostics,
+        ...(Number.isFinite(hpfLastActiveHz)
+          ? { eqHPFLastActiveHz: hpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(lpfLastActiveHz)
+          ? { eqLPFLastActiveHz: lpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(preHpfLastActiveHz)
+          ? { preEqHPFLastActiveHz: preHpfLastActiveHz }
+          : {}),
+        ...(Number.isFinite(preLpfLastActiveHz)
+          ? { preEqLPFLastActiveHz: preLpfLastActiveHz }
+          : {}),
+      };
+    }
+    return hasBaseDiagnostics ? baseDiagnostics : null;
+  }
+
   async getBuiltInPluginState(address: BuiltInPluginAddress): Promise<any> {
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     if (this.isNative && window.__JUCE__?.backend.getBuiltInPluginState) {
       return await window.__JUCE__.backend.getBuiltInPluginState(trackId, address.chain, fxIndex);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const addressKey = this.devBuiltInAddressKey(address);
+      if (this.devNAMReadbackFailurePending.delete(addressKey)) {
+        this.devNAMReadbackFailureConsumed.add(addressKey);
+        throw new Error("Mock NAM post-publication readback failure");
+      }
+      const schema = await this.getBuiltInPluginSchema(address);
+      const baseState = {
+        schemaVersion: schema.schemaVersion,
+        values: {
+          // Private native recall memory: intentionally absent from the public
+          // schema while still present in complete NAM Rack state readback.
+          eqHPFLastActiveHz: 80,
+          eqLPFLastActiveHz: 12000,
+          preEqHPFLastActiveHz: 80,
+          preEqLPFLastActiveHz: 12000,
+          ...Object.fromEntries(schema.parameters.map((param) => [param.id, param.value])),
+        },
+        modelState: schema.modelState ?? {},
+        dspState: {
+          namEffectsDspVersion: normalizeNAMEffectsDspVersion(
+            schema.modelState?.namEffectsDspVersion,
+          ) ?? 17,
+          reverbEngineVersion: 5,
+        },
+        uiState: schema.uiState ?? {},
+        visualization: schema.visualization ?? {},
+      };
+      const storedState = this.sanitizeDevNAMRackState(
+        this.devBuiltInPluginStates.get(this.devBuiltInAddressKey(address)) ?? {},
+      );
+      return this.sanitizeDevNAMRackState(
+        this.mergeDevBuiltInState(baseState, storedState),
+      );
+    }
+    const storedState = this.devBuiltInPluginStates.get(this.devBuiltInAddressKey(address));
+    if (storedState) {
+      return this.mergeDevBuiltInState({ schemaVersion: 1, values: {} }, storedState);
     }
     return { schemaVersion: 1, values: {} };
   }
@@ -4657,8 +7232,42 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.setBuiltInPluginParam) {
       return await window.__JUCE__.backend.setBuiltInPluginParam(trackId, address.chain, fxIndex, paramId, value);
     }
+    if (this.shouldUseDevNAMMock() && paramId === "inputMode") {
+      console.warn("[NativeBridge] Mock rejected retired NAM Rack inputMode write");
+      return false;
+    }
     console.log("[NativeBridge] Mock setBuiltInPluginParam:", address, paramId, value);
+    const key = this.devBuiltInAddressKey(address);
+    const hiddenCutoffPatch: Record<string, number> = {};
+    if (paramId === "eqHPFHz" && Number.isFinite(value) && value >= 20 && value <= 500) {
+      hiddenCutoffPatch.eqHPFLastActiveHz = value;
+    } else if (paramId === "eqLPFHz" && Number.isFinite(value) && value >= 3000 && value <= 20000) {
+      hiddenCutoffPatch.eqLPFLastActiveHz = value;
+    } else if (paramId === "preEqHPFHz" && Number.isFinite(value) && value >= 35 && value <= 180) {
+      hiddenCutoffPatch.preEqHPFLastActiveHz = value;
+    } else if (paramId === "preEqLPFHz" && Number.isFinite(value) && value >= 3000 && value <= 20000) {
+      hiddenCutoffPatch.preEqLPFLastActiveHz = value;
+    }
+    const valuePatch = { [paramId]: value, ...hiddenCutoffPatch };
+    const values = {
+      ...(this.devBuiltInParamValues.get(key) ?? {}),
+      ...valuePatch,
+    };
+    this.devBuiltInParamValues.set(key, values);
+    this.persistDevBuiltInState(address, { values: valuePatch });
     return true;
+  }
+
+  /**
+   * Internal capture-browser preview switch. It intentionally bypasses the
+   * public NAM parameter schema and must never be serialized into a preset,
+   * Compare snapshot, portable tone, or project automation lane.
+   */
+  async setNAMRackInternalAuditionSource(
+    address: BuiltInPluginAddress,
+    enabled: boolean,
+  ): Promise<boolean> {
+    return await this.setBuiltInPluginParam(address, "auditionSource", enabled ? 1 : 0);
   }
 
   async setBuiltInPluginState(address: BuiltInPluginAddress, state: any): Promise<boolean> {
@@ -4669,7 +7278,568 @@ class NativeBridge {
       return await window.__JUCE__.backend.setBuiltInPluginState(trackId, address.chain, fxIndex, stateJSON);
     }
     console.log("[NativeBridge] Mock setBuiltInPluginState:", address, state);
+    let parsedState: unknown = state;
+    if (typeof state === "string") {
+      try {
+        parsedState = JSON.parse(state);
+      } catch (error) {
+        console.warn("[NativeBridge] Mock setBuiltInPluginState received invalid JSON:", error);
+        return false;
+      }
+    }
+    if (!this.isPlainDevStateObject(parsedState)) return false;
+    if (
+      this.shouldUseDevNAMMock()
+      && this.getDevNAMMockScenario() === "missing-amp-failure"
+      && this.isPlainDevStateObject(parsedState.modelState)
+      && Object.prototype.hasOwnProperty.call(parsedState.modelState, "ampModelPath")
+    ) {
+      return false;
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const delayMs = this.isPlainDevStateObject(parsedState.modelState)
+        ? this.getDevNAMMockLoadDelayMs()
+        : this.getDevNAMMockStateDelayMs();
+      if (delayMs > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    this.persistDevBuiltInState(address, parsedState);
+    if (
+      this.shouldUseDevNAMMock()
+      && this.shouldFailDevNAMReadbackOnce()
+      && this.isPlainDevStateObject(parsedState.modelState)
+    ) {
+      const addressKey = this.devBuiltInAddressKey(address);
+      if (!this.devNAMReadbackFailureConsumed.has(addressKey)) {
+        this.devNAMReadbackFailurePending.add(addressKey);
+      }
+    }
     return true;
+  }
+
+  async getNAMLibraryInfo(): Promise<NAMLibraryInfo> {
+    if (this.isNative && window.__JUCE__?.backend.getNAMLibraryInfo) {
+      return await window.__JUCE__.backend.getNAMLibraryInfo();
+    }
+    if (this.shouldUseDevNAMMock()) {
+      return {
+        rootPath: "OpenStudio/NAM",
+        libraryPath: "OpenStudio/NAM/library",
+        catalogJsonPath: "OpenStudio/NAM/catalog.json",
+        manifestPath: "OpenStudio/NAM/library/manifest.json",
+      };
+    }
+    return {
+      rootPath: "",
+      libraryPath: "",
+      catalogJsonPath: "",
+      manifestPath: "",
+    };
+  }
+
+  async inspectNAMAsset(filePath: string): Promise<NAMAssetInspectionResult> {
+    if (this.isNative && window.__JUCE__?.backend.inspectNAMAsset) {
+      return await window.__JUCE__.backend.inspectNAMAsset(filePath);
+    }
+    console.log("[NativeBridge] Mock inspectNAMAsset:", filePath);
+    return {
+      success: false,
+      exists: false,
+      path: filePath,
+      error: "Asset fingerprinting is available in the native app only.",
+    };
+  }
+
+  async findNAMAssetInDirectory(
+    directoryPath: string,
+    expectedFileName: string,
+    checksum = "",
+    fileSizeBytes = 0,
+    slot: NAMProjectAssetSlot = "amp",
+  ): Promise<NAMAssetSearchResult> {
+    if (this.isNative && window.__JUCE__?.backend.findNAMAssetInDirectory) {
+      return await window.__JUCE__.backend.findNAMAssetInDirectory(
+        directoryPath,
+        expectedFileName,
+        checksum,
+        fileSizeBytes,
+        slot,
+      );
+    }
+    console.log("[NativeBridge] Mock findNAMAssetInDirectory:", directoryPath, expectedFileName, checksum, fileSizeBytes, slot);
+    return { success: false, error: "Verified asset search is available in the native app only." };
+  }
+
+  async getNAMCatalog(): Promise<NAMCatalogPayload> {
+    if (this.isNative && window.__JUCE__?.backend.getNAMCatalog) {
+      return await window.__JUCE__.backend.getNAMCatalog();
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const tones = this.getDevNAMCatalogTones();
+      return {
+        success: true,
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        tones,
+      };
+    }
+    return { schemaVersion: 1, tones: [] };
+  }
+
+  async refreshNAMCatalog(options: NAMCatalogRefreshOptions = {}): Promise<NAMCatalogRefreshResult> {
+    if (this.isNative && window.__JUCE__?.backend.refreshNAMCatalog) {
+      return await window.__JUCE__.backend.refreshNAMCatalog(options);
+    }
+    console.log("[NativeBridge] Mock refreshNAMCatalog:", options);
+    return {
+      success: false,
+      error: "NAM catalog refresh is only available in the native app.",
+      catalog: { schemaVersion: 1, tones: [] },
+    };
+  }
+
+  async searchTONE3000NAM(options: TONE3000NAMSearchOptions | string): Promise<NAMCatalogPayload> {
+    if (this.isNative && window.__JUCE__?.backend.searchTONE3000NAM) {
+      return await window.__JUCE__.backend.searchTONE3000NAM(options as any);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      if (this.getDevNAMMockScenario() === "rate-limit") {
+        return {
+          success: false,
+          error: "TONE3000 rate limit reached. Wait before searching again.",
+          statusCode: 429,
+          tones: [],
+        };
+      }
+      const searchOptions: TONE3000NAMSearchOptions = typeof options === "string" ? { query: options } : options;
+      const query = String(searchOptions.query ?? "");
+      const needle = query.trim().toLowerCase();
+      const gearFilter = String(searchOptions.gears ?? "").toLowerCase();
+      const formatFilter = String(searchOptions.format ?? searchOptions.platform ?? "").toLowerCase();
+      const architectureFilter = String(searchOptions.architecture ?? "all").toLowerCase();
+      const includeModels = searchOptions.includeModels !== false;
+      const sort = String(searchOptions.sort ?? "trending");
+      const pageSize = Math.max(1, Math.min(100, Number(searchOptions.page_size ?? searchOptions.pageSize ?? 25) || 25));
+      const page = Math.max(1, Number(searchOptions.page ?? 1) || 1);
+      const matchesGear = (tone: NAMCatalogTone) => {
+        if (!gearFilter) return true;
+        const gear = String(tone.gear ?? "").toLowerCase();
+        if (gearFilter === "amp_full-rig" || gearFilter === "amp_amp-cab") {
+          return gear === "amp" || gear === "full-rig" || gear === "amp-cab";
+        }
+        return gearFilter.split("_").some((entry) => {
+          const requested = entry.trim();
+          if (!requested) return false;
+          if (requested === "amp-cab") return gear === "amp-cab" || gear === "full-rig";
+          return gear.includes(requested);
+        });
+      };
+      const matchesFormat = (tone: NAMCatalogTone) => {
+        if (!formatFilter) return true;
+        return String(tone.format ?? tone.platform ?? "").toLowerCase() === formatFilter;
+      };
+      const matchesArchitecture = (tone: NAMCatalogTone) => {
+        if (!architectureFilter || architectureFilter === "all") return true;
+        const modelArchs = (tone.models ?? []).map((model) => String(model.architecture_version ?? model.architecture ?? tone.architecture ?? "").toLowerCase());
+        const wanted = architectureFilter === "a1" ? ["a1", "1"] : architectureFilter === "a2" ? ["a2", "2"] : [architectureFilter];
+        return modelArchs.some((arch) => wanted.includes(arch));
+      };
+      const tones = this.getDevNAMCatalogTones().filter((tone) => {
+        if (!matchesGear(tone) || !matchesFormat(tone) || !matchesArchitecture(tone)) return false;
+        if (!needle) return true;
+        return [
+          tone.title,
+          tone.name,
+          tone.description,
+          tone.creator,
+          tone.gear,
+          ...(tone.models ?? []).map((model) => model.name ?? model.title ?? ""),
+        ].join(" ").toLowerCase().includes(needle);
+      });
+      const sorted = [...tones].sort((left, right) => {
+        if (sort === "newest") return Number(right.id || 0) - Number(left.id || 0);
+        if (sort === "downloads-all-time") return Number(right.downloads_count || 0) - Number(left.downloads_count || 0);
+        if (sort === "favorites-count") return Number(right.favorites_count || 0) - Number(left.favorites_count || 0);
+        if (sort === "best-match" || sort === "name-az") {
+          return String(left.title || left.name || "").localeCompare(String(right.title || right.name || ""));
+        }
+        const leftScore = Number(left.favorites_count || 0) * 4 + Number(left.downloads_count || 0);
+        const rightScore = Number(right.favorites_count || 0) * 4 + Number(right.downloads_count || 0);
+        return rightScore - leftScore;
+      });
+      const total = sorted.length;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const boundedPage = Math.min(page, totalPages);
+      const pagedTones = sorted.slice((boundedPage - 1) * pageSize, boundedPage * pageSize).map((tone) => {
+        const { models, ...summary } = tone;
+        const requestedArchitecture =
+          architectureFilter === "a2" ? "2"
+            : architectureFilter === "a1" ? "1"
+              : "";
+        const rawArchitecture = String(
+          tone.architecture
+            ?? models?.[0]?.architecture_version
+            ?? models?.[0]?.architecture
+            ?? "",
+        ).trim().toLowerCase();
+        const searchArchitecture =
+          requestedArchitecture
+          || (rawArchitecture === "a2" ? "2"
+            : rawArchitecture === "a1" ? "1"
+              : rawArchitecture);
+        return {
+          ...(includeModels ? tone : summary),
+          searchArchitecture,
+          sortBucket: `${tone.sortBucket ?? ""} ${sort}`.trim(),
+        };
+      });
+      return {
+        success: true,
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        tones: pagedTones,
+        page: boundedPage,
+        page_size: pageSize,
+        pageSize,
+        total,
+        total_pages: totalPages,
+        totalPages,
+        has_more: boundedPage < totalPages,
+        hasMore: boundedPage < totalPages,
+        next_page: boundedPage < totalPages ? boundedPage + 1 : null,
+        nextPage: boundedPage < totalPages ? boundedPage + 1 : null,
+        source: "dev-mock",
+      };
+    }
+    console.log("[NativeBridge] Mock searchTONE3000NAM:", options);
+    return { success: false, error: "Live TONE3000 search is only available in the native app.", tones: [] };
+  }
+
+  async runTONE3000AuthenticatedQA(): Promise<TONE3000AuthenticatedQAResult> {
+    if (this.isNative && window.__JUCE__?.backend.runTONE3000AuthenticatedQA) {
+      return await window.__JUCE__.backend.runTONE3000AuthenticatedQA();
+    }
+    return {
+      success: false,
+      status: "not_run",
+      error: "Authenticated TONE3000 QA is available in the native app only.",
+    };
+  }
+
+  async getTONE3000ToneDetail(toneId: number, architecture = "all"): Promise<TONE3000ToneDetailResult> {
+    if (this.isNative && window.__JUCE__?.backend.getTONE3000ToneDetail) {
+      return await window.__JUCE__.backend.getTONE3000ToneDetail(toneId, architecture);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const wantedArchitecture = String(architecture || "all").toLowerCase();
+      const tone = this.getDevNAMCatalogTones().find((entry) => Number(entry.id ?? entry.toneId ?? 0) === Number(toneId));
+      if (!tone) {
+        return { success: false, statusCode: 404, error: `Mock TONE3000 tone ${toneId} was not found.` };
+      }
+
+      const matchesArchitecture = (model: NAMCatalogModel) => {
+        if (!wantedArchitecture || wantedArchitecture === "all") return true;
+        const modelArchitecture = String(model.architecture_version ?? model.architecture ?? tone.architecture ?? "").toLowerCase();
+        if (wantedArchitecture === "a1") return modelArchitecture === "a1" || modelArchitecture === "1";
+        if (wantedArchitecture === "a2") return modelArchitecture === "a2" || modelArchitecture === "2";
+        return modelArchitecture === wantedArchitecture;
+      };
+      const models = (tone.models ?? []).filter(matchesArchitecture);
+      return {
+        success: true,
+        tone: {
+          ...tone,
+          source: "tone3000-live",
+          models,
+        },
+        models,
+      };
+    }
+    console.log("[NativeBridge] Mock getTONE3000ToneDetail:", toneId, architecture);
+    return { success: false, error: "Live TONE3000 detail is only available in the native app." };
+  }
+
+  async getNAMLibrary(): Promise<NAMLibraryPayload> {
+    if (this.isNative && window.__JUCE__?.backend.getNAMLibrary) {
+      return await window.__JUCE__.backend.getNAMLibrary();
+    }
+    if (this.shouldUseDevNAMMock()) {
+      return {
+        schemaVersion: 1,
+        installed: this.getDevNAMInstalledRecords().map((record, index) => ({
+          ...record,
+          favorite: index === 0,
+        })),
+      };
+    }
+    return { schemaVersion: 1, installed: [] };
+  }
+
+  async installNAMModel(model: NAMCatalogModel | string, options: NAMInstallOptions = {}): Promise<NAMInstallResult> {
+    if (this.isNative && window.__JUCE__?.backend.installNAMModel) {
+      return await window.__JUCE__.backend.installNAMModel(model as any, options);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const downloadDelayMs = this.getDevNAMMockDownloadDelayMs();
+      if (downloadDelayMs > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, downloadDelayMs));
+      const record = this.makeDevNAMInstalledRecord(model);
+      if (options.mode === "preview") {
+        record.preview = true;
+        const fileName = String(record.localPath ?? "").split(/[\\/]/).pop() || "nam-preview.nam";
+        record.localPath = `OpenStudio/NAM/previews/tone-${Number(record.toneId ?? 0)}/${fileName}`;
+      }
+      return { success: true, record };
+    }
+    console.log("[NativeBridge] Mock installNAMModel:", model, options);
+    return { success: false, error: "NAM install is only available in the native app." };
+  }
+
+  async commitNAMPreviewTone(
+    record: NAMInstalledModel | string,
+    metadata: NAMToneSaveMetadata = { toneName: "Saved NAM Tone" },
+    rackState: Record<string, unknown> = {},
+  ): Promise<NAMLibraryActionResult> {
+    if (this.isNative && window.__JUCE__?.backend.commitNAMPreviewTone) {
+      return await window.__JUCE__.backend.commitNAMPreviewTone(record as any, metadata as any, rackState as any);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const parsedRecord = typeof record === "string" ? JSON.parse(record) as NAMInstalledModel : record;
+      const prepareDelayMs = this.getDevNAMMockPrepareDelayMs();
+      if (prepareDelayMs > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, prepareDelayMs));
+      const normalizedPath = String(parsedRecord.localPath ?? "").replace(/\\/g, "/");
+      const previewMarker = "/previews/";
+      const previewIndex = normalizedPath.toLowerCase().indexOf(previewMarker);
+      const fileName = normalizedPath.split("/").pop() || "nam-capture.nam";
+      const durablePath = previewIndex >= 0
+        ? `${normalizedPath.slice(0, previewIndex)}/library/tone-${Number(parsedRecord.toneId ?? 0)}/${fileName}`
+        : normalizedPath;
+      return {
+        success: true,
+        record: {
+          ...parsedRecord,
+          localPath: durablePath,
+          preview: false,
+          saveMetadata: metadata,
+          rackState,
+          favorite: Boolean(metadata.favorite || parsedRecord.favorite),
+        },
+      };
+    }
+    console.log("[NativeBridge] Mock commitNAMPreviewTone:", record, metadata, rackState);
+    return { success: false, error: "NAM preview commit is only available in the native app." };
+  }
+
+  async discardNAMPreview(
+    record: NAMInstalledModel | string,
+    rackAddress?: BuiltInPluginAddress | string,
+  ): Promise<NAMLibraryActionResult> {
+    if (this.isNative && window.__JUCE__?.backend.discardNAMPreview) {
+      if (rackAddress) {
+        return await window.__JUCE__.backend.discardNAMPreview(record as any, rackAddress as any);
+      }
+      return await window.__JUCE__.backend.discardNAMPreview(record as any);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      return { success: true, deletedFile: true };
+    }
+    console.log("[NativeBridge] Mock discardNAMPreview:", record);
+    return { success: false, error: "NAM preview cleanup is only available in the native app." };
+  }
+
+  async cleanupNAMPreviews(maxAgeHours = 24): Promise<NAMLibraryActionResult> {
+    if (this.isNative && window.__JUCE__?.backend.cleanupNAMPreviews) {
+      return await window.__JUCE__.backend.cleanupNAMPreviews(maxAgeHours);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      return { success: true, cleaned: 0 };
+    }
+    console.log("[NativeBridge] Mock cleanupNAMPreviews:", maxAgeHours);
+    return { success: false, error: "NAM preview cleanup is only available in the native app." };
+  }
+
+  async setNAMModelFavorite(modelId: number, localPath: string, favorite: boolean): Promise<NAMLibraryActionResult> {
+    if (this.isNative && window.__JUCE__?.backend.setNAMModelFavorite) {
+      return await window.__JUCE__.backend.setNAMModelFavorite(modelId, localPath, favorite);
+    }
+    console.log("[NativeBridge] Mock setNAMModelFavorite:", modelId, localPath, favorite);
+    return { success: false, error: "NAM library favorites are only available in the native app." };
+  }
+
+  async removeNAMModel(modelId: number, localPath: string, deleteLocalFile = false): Promise<NAMLibraryActionResult> {
+    if (this.isNative && window.__JUCE__?.backend.removeNAMModel) {
+      return await window.__JUCE__.backend.removeNAMModel(modelId, localPath, deleteLocalFile);
+    }
+    console.log("[NativeBridge] Mock removeNAMModel:", modelId, localPath, deleteLocalFile);
+    return { success: false, error: "NAM library removal is only available in the native app." };
+  }
+
+  async loadNAMModelIntoRack(
+    address: BuiltInPluginAddress,
+    slot: "pedal" | "amp" | "cab",
+    localPath: string,
+    options: NAMModelLoadOptions = {},
+  ): Promise<boolean> {
+    const trackId = address.trackId || "";
+    const fxIndex = address.fxIndex ?? -1;
+    const requestedModelSize = slot === "cab"
+      ? undefined
+      : Number.isFinite(options.modelSize)
+        ? Math.max(0, Math.min(1, Number(options.modelSize)))
+        : NAM_FULL_MODEL_SIZE;
+    if (this.isNative && window.__JUCE__?.backend.loadNAMModelIntoRack) {
+      // Native direct-load policy owns the atomic path + Full-quality commit.
+      // `modelSize` remains explicit here for the browser mock and call-site
+      // contract without adding a second state mutation after native success.
+      return await window.__JUCE__.backend.loadNAMModelIntoRack(trackId, address.chain, fxIndex, slot, localPath);
+    }
+    console.log("[NativeBridge] Mock loadNAMModelIntoRack:", address, slot, localPath);
+    if (this.shouldUseDevNAMMock()) {
+      const delayMs = this.getDevNAMMockLoadDelayMs();
+      if (delayMs > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+      const currentState = await this.getBuiltInPluginState(address);
+      const requestedCabEnabled = typeof currentState?.modelState?.cabRequestedEnabled === "boolean"
+        ? currentState.modelState.cabRequestedEnabled
+        : Number(currentState?.values?.cabEnabled ?? 0) >= 0.5;
+      const modelState = slot === "pedal"
+        ? {
+            pedalModelPath: localPath,
+            hasPedalModel: Boolean(localPath),
+            pedalMetadataCaptureType: "pedal",
+            pedalDeclaredCaptureType: "unknown",
+            pedalCaptureType: "pedal",
+            pedalModelSize: requestedModelSize,
+            cabRequestedEnabled: requestedCabEnabled,
+          }
+        : slot === "amp"
+          ? {
+              ampModelPath: localPath,
+              hasAmpModel: Boolean(localPath),
+              ampMetadataCaptureType: "amp",
+              ampDeclaredCaptureType: "unknown",
+              ampCaptureType: "amp",
+              ampIncludesCab: false,
+              ampModelSize: requestedModelSize,
+              cabRequestedEnabled: requestedCabEnabled,
+            }
+          : {
+              cabIRPath: localPath,
+              hasCabIR: Boolean(localPath),
+              cabIRState: localPath ? "configured" : "empty",
+              cabIRActivationMode: localPath ? "prepared" : "none",
+              cabRequestedEnabled: Boolean(localPath),
+            };
+      this.persistDevBuiltInState(address, { modelState });
+    }
+    return true;
+  }
+
+  async startTONE3000AuthFlow(options: TONE3000AuthFlowOptions | string = {}): Promise<TONE3000AuthFlowResult> {
+    if (this.isNative && window.__JUCE__?.backend.startTONE3000AuthFlow) {
+      return await window.__JUCE__.backend.startTONE3000AuthFlow(options as any);
+    }
+    console.log("[NativeBridge] Mock startTONE3000AuthFlow:", options);
+    return { success: false, status: "failed", error: "TONE3000 auth is only available in the native app.", fallbackRequired: true };
+  }
+
+  async cancelTONE3000AuthFlow(): Promise<TONE3000AuthFlowResult> {
+    if (this.isNative && window.__JUCE__?.backend.cancelTONE3000AuthFlow) {
+      return await window.__JUCE__.backend.cancelTONE3000AuthFlow();
+    }
+    console.log("[NativeBridge] Mock cancelTONE3000AuthFlow");
+    return { success: true, status: "canceled" };
+  }
+
+  async createTONE3000AuthRequest(
+    clientId: string,
+    redirectUri: string,
+    prompt = "",
+    toneId = "",
+    loginHint = "",
+  ): Promise<TONE3000AuthRequestResult> {
+    if (this.isNative && window.__JUCE__?.backend.createTONE3000AuthRequest) {
+      return await window.__JUCE__.backend.createTONE3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint);
+    }
+    console.log("[NativeBridge] Mock createTONE3000AuthRequest:", clientId, redirectUri);
+    return { success: false, error: "TONE3000 auth is only available in the native app." };
+  }
+
+  async exchangeTONE3000OAuthCode(
+    code: string,
+    state = "",
+    clientId = "",
+    redirectUri = "",
+  ): Promise<TONE3000AuthResult> {
+    if (this.isNative && window.__JUCE__?.backend.exchangeTONE3000OAuthCode) {
+      return await window.__JUCE__.backend.exchangeTONE3000OAuthCode(code, state, clientId, redirectUri);
+    }
+    console.log("[NativeBridge] Mock exchangeTONE3000OAuthCode");
+    return { success: false, error: "TONE3000 auth is only available in the native app." };
+  }
+
+  async refreshTONE3000Auth(clientId = ""): Promise<TONE3000AuthResult> {
+    if (this.isNative && window.__JUCE__?.backend.refreshTONE3000Auth) {
+      return await window.__JUCE__.backend.refreshTONE3000Auth(clientId);
+    }
+    if (this.shouldUseDevNAMMock()) {
+      this.devTone3000Refreshed = true;
+      return {
+        success: true,
+        authenticated: true,
+        expired: false,
+        expiresAtMs: Date.now() + 3600 * 1000,
+        hasRefreshToken: true,
+        clientId: clientId || "t3k_pub_openstudio_visual_qa",
+      };
+    }
+    console.log("[NativeBridge] Mock refreshTONE3000Auth");
+    return { success: false, error: "TONE3000 auth is only available in the native app." };
+  }
+
+  async getTONE3000AuthStatus(): Promise<TONE3000AuthStatus> {
+    if (this.isNative && window.__JUCE__?.backend.getTONE3000AuthStatus) {
+      return await window.__JUCE__.backend.getTONE3000AuthStatus();
+    }
+    if (this.shouldUseDevNAMMock()) {
+      const scenario = this.getDevNAMMockScenario();
+      if (scenario === "disconnected") {
+        return {
+          success: true,
+          authenticated: false,
+          configuredClientId: true,
+          defaultRedirectUri: "http://127.0.0.1:18762/tone3000/callback",
+        };
+      }
+      if (scenario === "expired" && !this.devTone3000Refreshed) {
+        return {
+          success: true,
+          authenticated: true,
+          expired: true,
+          expiresAtMs: Date.now() - 1000,
+          hasRefreshToken: true,
+          clientId: "t3k_pub_openstudio_visual_qa",
+          configuredClientId: true,
+          defaultRedirectUri: "http://127.0.0.1:18762/tone3000/callback",
+        };
+      }
+      return {
+        success: true,
+        authenticated: true,
+        expired: false,
+        expiresAtMs: Date.now() + 3600 * 1000,
+        hasRefreshToken: true,
+        clientId: "t3k_pub_openstudio_visual_qa",
+        configuredClientId: true,
+        defaultRedirectUri: "http://127.0.0.1:18762/tone3000/callback",
+      };
+    }
+    return { success: true, authenticated: false };
+  }
+
+  async clearTONE3000Auth(): Promise<TONE3000AuthStatus> {
+    if (this.isNative && window.__JUCE__?.backend.clearTONE3000Auth) {
+      return await window.__JUCE__.backend.clearTONE3000Auth();
+    }
+    this.devTone3000Refreshed = false;
+    return { success: true, authenticated: false };
   }
 
   // Phase 4.4: Sidechain Routing
@@ -4964,6 +8134,20 @@ class NativeBridge {
     return null;
   }
 
+  async openBuiltInPluginEditorWindow(sessionId: string, bounds?: Partial<WindowBounds>): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.openBuiltInPluginEditorWindow) {
+      return await window.__JUCE__.backend.openBuiltInPluginEditorWindow(sessionId, bounds);
+    }
+    return false;
+  }
+
+  async closeBuiltInPluginEditorWindow(sessionId?: string, reason = "close"): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.closeBuiltInPluginEditorWindow) {
+      return await window.__JUCE__.backend.closeBuiltInPluginEditorWindow(sessionId, reason);
+    }
+    return false;
+  }
+
   async publishAppCommand(payload: any): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.publishAppCommand) {
       return await window.__JUCE__.backend.publishAppCommand(payload);
@@ -5026,9 +8210,15 @@ class NativeBridge {
     return true;
   }
 
+  async getTrackDCOffset(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.getTrackDCOffset)
+      return await window.__JUCE__.backend.getTrackDCOffset(trackId);
+    return false;
+  }
+
   // ==================== Sprint 19: Plugin Management ====================
 
-  async getPluginParameters(trackId: string, fxIndex: number, isInputFX: boolean): Promise<Array<{ index: number; name: string; value: number; text: string }>> {
+  async getPluginParameters(trackId: string, fxIndex: number, isInputFX: boolean): Promise<PluginParameterInfo[]> {
     if (this.isNative && window.__JUCE__?.backend.getPluginParameters)
       return await window.__JUCE__.backend.getPluginParameters(trackId, fxIndex, isInputFX);
     console.log("[NativeBridge] Mock getPluginParameters:", trackId, fxIndex, isInputFX);
@@ -5065,16 +8255,45 @@ class NativeBridge {
     return true;
   }
 
-  async startPluginMIDILearn(trackId: string, pluginIndex: number, paramIndex: number): Promise<boolean> {
+  async startPluginMIDILearn(trackId: string, pluginIndex: number, paramIndex: number, isInputFX = false): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.startMIDILearnForPlugin)
+      return await window.__JUCE__.backend.startMIDILearnForPlugin(trackId, pluginIndex, paramIndex, isInputFX);
     if (this.isNative && window.__JUCE__?.backend.startPluginMIDILearn)
-      return await window.__JUCE__.backend.startPluginMIDILearn(trackId, pluginIndex, paramIndex);
-    console.log("[NativeBridge] Mock startPluginMIDILearn:", trackId, pluginIndex, paramIndex);
+      return await window.__JUCE__.backend.startPluginMIDILearn(trackId, pluginIndex, paramIndex, isInputFX);
+    console.log("[NativeBridge] Mock startPluginMIDILearn:", trackId, pluginIndex, paramIndex, isInputFX);
+    return true;
+  }
+
+  async startBuiltInMIDILearn(address: BuiltInPluginAddress, paramId: string): Promise<boolean> {
+    const trackId = address.trackId || "";
+    const fxIndex = address.fxIndex ?? -1;
+    if (this.isNative && window.__JUCE__?.backend.startBuiltInMIDILearn) {
+      return await window.__JUCE__.backend.startBuiltInMIDILearn(trackId, address.chain, fxIndex, paramId);
+    }
+    console.log("[NativeBridge] Mock startBuiltInMIDILearn:", address, paramId);
     return true;
   }
 
   async cancelPluginMIDILearn(): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.stopMIDILearn)
+      return await window.__JUCE__.backend.stopMIDILearn();
     if (this.isNative && window.__JUCE__?.backend.cancelPluginMIDILearn)
       return await window.__JUCE__.backend.cancelPluginMIDILearn();
+    return true;
+  }
+
+  async getMIDILearnMappings(): Promise<MIDILearnMappingInfo[]> {
+    if (this.isNative && window.__JUCE__?.backend.getMIDILearnMappings) {
+      return coerceNativeArray(await window.__JUCE__.backend.getMIDILearnMappings()) as MIDILearnMappingInfo[];
+    }
+    return [];
+  }
+
+  async setMIDILearnMappings(mappings: MIDILearnMappingInfo[]): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setMIDILearnMappings) {
+      return await window.__JUCE__.backend.setMIDILearnMappings(mappings);
+    }
+    console.log("[NativeBridge] Mock setMIDILearnMappings:", mappings);
     return true;
   }
 
@@ -5214,6 +8433,12 @@ class NativeBridge {
     return true;
   }
 
+  async getChannelStripEQEnabled(trackId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.getChannelStripEQEnabled)
+      return await window.__JUCE__.backend.getChannelStripEQEnabled(trackId);
+    return false;
+  }
+
   async setChannelStripEQParam(trackId: string, paramIndex: number, value: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setChannelStripEQParam)
       return await window.__JUCE__.backend.setChannelStripEQParam(trackId, paramIndex, value);
@@ -5330,6 +8555,12 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.clearAllPitchPreviewRoutes)
       return await window.__JUCE__.backend.clearAllPitchPreviewRoutes(clipId ?? "");
     return false;
+  }
+
+  async cancelPitchCorrectionRequests(clipId: string, authoritativeFilePath?: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.cancelPitchCorrectionRequests)
+      return await window.__JUCE__.backend.cancelPitchCorrectionRequests(clipId, authoritativeFilePath ?? "");
+    return true;
   }
 
   async clearPitchPreviewRoutesForCorrectedSources(): Promise<number> {
@@ -5723,6 +8954,10 @@ class NativeBridge {
   async browseForFile(title: string, filters?: string): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.browseForFile)
       return await window.__JUCE__.backend.browseForFile(title, filters);
+    if (this.shouldUseDevNAMMock() && ["missing-amp", "missing-amp-failure"].includes(this.getDevNAMMockScenario())) {
+      if (filters?.includes("*.nam")) return "OpenStudio/NAM/library/Relinked Modern Lead A2.nam";
+      if (filters?.includes("*.wav")) return "OpenStudio/NAM/library/Relinked Studio 2x12.wav";
+    }
     console.log("[NativeBridge] Mock browseForFile:", title, filters);
     return "";
   }

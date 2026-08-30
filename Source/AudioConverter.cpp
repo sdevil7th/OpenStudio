@@ -87,7 +87,7 @@ juce::String AudioConverter::convertClipToTrackConfig(
     juce::File outputFile = tempDir.getChildFile("converted_" + juce::Uuid().toString() + ".wav");
     
     // Write converted audio
-    std::unique_ptr<juce::FileOutputStream> outputStream(outputFile.createOutputStream());
+    std::unique_ptr<juce::OutputStream> outputStream(outputFile.createOutputStream());
     if (outputStream == nullptr)
     {
         juce::Logger::writeToLog("AudioConverter: Failed to create output stream");
@@ -95,17 +95,18 @@ juce::String AudioConverter::convertClipToTrackConfig(
     }
     
     juce::WavAudioFormat wavFormat;
-    std::unique_ptr<juce::AudioFormatWriter> writer(
-        wavFormat.createWriterFor(outputStream.get(), targetSampleRate, targetChannels, 16, {}, 0)
-    );
+    auto writer = wavFormat.createWriterFor(
+        outputStream,
+        juce::AudioFormatWriterOptions()
+            .withSampleRate(targetSampleRate)
+            .withNumChannels(targetChannels)
+            .withBitsPerSample(16));
     
     if (writer == nullptr)
     {
         juce::Logger::writeToLog("AudioConverter: Failed to create writer");
         return {};
     }
-    
-    outputStream.release(); // Writer takes ownership
     
     writer->writeFromAudioSampleBuffer(finalBuffer, 0, finalBuffer.getNumSamples());
     writer->flush();
@@ -126,7 +127,8 @@ bool AudioConverter::needsConversion(
     if (reader == nullptr)
         return false;
     
-    return reader->numChannels != targetChannels || reader->sampleRate != targetSampleRate;
+    return reader->numChannels != static_cast<unsigned int>(targetChannels)
+        || reader->sampleRate != targetSampleRate;
 }
 
 void AudioConverter::monoToStereo(

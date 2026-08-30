@@ -968,7 +968,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: 0 !important;
+  margin-left: 0;
   min-height: 26px;
   padding: 0 5px;
   border: 1px solid #343a44;

@@ -1,0 +1,3688 @@
+/* NAM Rack approved right-rail redesign */
+.nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 318px);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero-head {
+  gap: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-focus-copy strong {
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.nam-rail-health button {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.78);
+  background: rgba(0, 0, 0, 0.24);
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.nam-rail-health button:hover {
+  border-color: rgba(142, 245, 194, 0.34);
+  color: #d1fae5;
+  background: rgba(69, 179, 107, 0.1);
+}
+
+.nam-rail-section {
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.19);
+}
+
+.nam-rail-section > span {
+  color: #8ef5c2;
+  font-size: 9px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.nam-rail-section article {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 31px;
+  padding: 7px 8px;
+  border: 1px solid rgba(236, 196, 110, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.nam-rail-section article > span {
+  min-width: 52px;
+  color: rgba(226, 232, 240, 0.55);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.nam-rail-section article > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 850;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rail-status article > strong,
+.nam-rail-health article > strong {
+  text-align: left;
+}
+
+.nam-rail-status {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  row-gap: 6px;
+}
+
+.nam-rail-status > span,
+.nam-rail-status article:nth-of-type(5) {
+  grid-column: 1 / -1;
+}
+
+.nam-rail-status article {
+  min-height: 29px;
+  padding: 6px 7px;
+}
+
+.nam-rail-status article > strong {
+  font-size: 10px;
+}
+
+.nam-rail-status article svg {
+  color: #f5c86a;
+}
+
+.nam-rail-order-label {
+  min-height: 29px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  overflow: hidden;
+  border: 1px solid rgba(236, 196, 110, 0.12);
+  border-radius: 6px;
+  color: rgba(248, 250, 252, 0.86);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 10px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-rail-order-label svg {
+  flex: 0 0 auto;
+  color: #f5c86a;
+}
+
+.nam-rail-health article {
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+.nam-rail-health {
+  margin-top: 10px;
+}
+
+.nam-rail-health small {
+  color: rgba(226, 232, 240, 0.54);
+  font-size: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-utility-strip {
+  display: none;
+}
+
+.nam-mini-meter.nam-meter-trim {
+  position: relative;
+  grid-template-columns: auto minmax(150px, 1fr) auto;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.nam-meter-trim i {
+  overflow: visible;
+}
+
+.nam-meter-trim-handle {
+  position: absolute;
+  top: 50%;
+  right: calc(100% - var(--nam-meter-pct));
+  width: 10px;
+  height: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 3px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.25), rgba(255, 255, 255, 0.03)),
+    #111;
+  transform: translate(50%, -50%);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.46);
+}
+
+.nam-meter-trim em:not(.nam-meter-trim-handle) {
+  grid-column: 2;
+  color: #8ef5c2;
+}
+
+.nam-meter-trim small {
+  grid-column: 1 / -1;
+  color: rgba(226, 232, 240, 0.44);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.nam-result-card[data-busy="true"] .nam-card-audition-puck svg {
+  animation: nam-spin 900ms linear infinite;
+}
+
+@keyframes nam-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1180px) {
+  .nam-product-topbar {
+    grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.1fr) minmax(140px, 0.8fr) minmax(150px, 0.9fr);
+  }
+
+  .nam-product-topbar > * {
+    min-width: 0;
+  }
+
+  .nam-view-tabs,
+.nam-top-actions {
+    justify-self: stretch;
+  }
+
+  .nam-view-tabs button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 7px;
+  }
+
+  .nam-top-actions {
+    justify-content: end;
+  }
+
+  .nam-mini-meter.nam-meter-trim {
+    min-width: 0;
+  }
+
+  .nam-chain {
+    grid-template-columns: minmax(112px, 0.42fr) minmax(0, 5fr);
+    gap: 6px;
+  }
+
+  .nam-chain-slots {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(420px, 1fr) auto;
+  }
+
+  .nam-rail-health {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .nam-product-topbar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .nam-brand-block {
+    grid-column: span 1;
+  }
+
+  .nam-view-tabs,
+.nam-top-actions,
+.nam-mini-meter.nam-meter-trim {
+    grid-column: span 1;
+  }
+
+  .nam-chain {
+    grid-template-columns: 1fr;
+  }
+
+  .nam-chain-slots {
+    grid-template-columns: repeat(4, minmax(80px, 1fr));
+  }
+
+  .nam-slot-select {
+    width: 100%;
+  }
+}
+
+/* NAM Rack design-gap implementation pass: compact shell, rack explorer rail, and vertical mode/status rail. */
+.nam-product {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: min(820px, calc(100vh - 108px));
+}
+
+.nam-product-topbar {
+  grid-template-columns:
+    minmax(210px, 0.95fr)
+    minmax(250px, 1.25fr)
+    auto
+    auto
+    auto
+    auto
+    minmax(210px, 0.95fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 7px 8px;
+}
+
+.nam-product-topbar .nam-brand-block {
+  display: none;
+}
+
+.nam-product-topbar .nam-view-tabs {
+  min-height: 34px;
+}
+
+.nam-product-topbar .nam-top-actions {
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.nam-product-topbar .nam-top-actions button {
+  min-width: 30px;
+  height: 32px;
+  padding: 0 8px;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  min-height: 34px;
+  grid-template-columns: auto minmax(92px, 1fr) minmax(48px, auto) minmax(44px, auto);
+  column-gap: 7px;
+  padding: 6px 8px;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim strong,
+.nam-product-topbar .nam-mini-meter.nam-meter-trim em {
+  white-space: nowrap;
+}
+
+.nam-product-topbar .nam-meter-trim em:not(.nam-meter-trim-handle) {
+  grid-column: auto;
+  min-width: 46px;
+  text-align: right;
+}
+
+.nam-product-topbar .nam-meter-trim small {
+  display: none;
+}
+
+.nam-chain {
+  grid-template-columns: minmax(72px, 92px) minmax(0, 1fr);
+  gap: 6px;
+  min-height: 92px;
+  padding: 7px;
+  overflow: hidden;
+}
+
+.nam-chain-meta {
+  min-height: 0;
+  padding: 8px;
+}
+
+.nam-chain-meta strong {
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.nam-chain-meta button {
+  min-height: 23px;
+}
+
+.nam-chain-slots {
+  grid-template-columns: repeat(8, minmax(94px, 1fr));
+  gap: 6px;
+  overflow: hidden;
+}
+
+.nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+  grid-template-columns: minmax(0, 1fr) minmax(350px, 396px) 76px;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  padding: 0;
+  overflow: hidden;
+  border-color: rgba(236, 196, 110, 0.1);
+  background: #050505;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero-head {
+  min-height: 42px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+  background:
+    linear-gradient(90deg, rgba(245, 200, 106, 0.12), transparent 42%),
+    rgba(12, 12, 11, 0.92);
+}
+
+.nam-product[data-view="rack"] .nam-focus-copy strong {
+  font-size: 17px;
+}
+
+.nam-product[data-view="rack"] .nam-focus-copy small {
+  display: none;
+}
+
+.nam-rail-tone-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 1px 0;
+}
+
+.nam-rail-tone-status div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.nam-rail-tone-status span {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.nam-rail-tone-status strong {
+  color: #8ef5c2;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.nam-rail-tone-status[data-connected="false"] strong {
+  color: #f5c86a;
+}
+
+.nam-rail-tone-status em {
+  color: rgba(248, 250, 252, 0.82);
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 850;
+}
+
+@media (max-width: 1280px) {
+  .nam-product-topbar {
+    grid-template-columns: minmax(175px, 0.8fr) minmax(210px, 1fr) auto auto auto minmax(175px, 0.8fr);
+  }
+
+  .nam-product-topbar .nam-view-tabs {
+    display: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 360px) 70px;
+  }
+
+  .nam-chain-slots {
+    grid-template-columns: repeat(8, minmax(82px, 1fr));
+  }
+}
+
+@media (max-width: 1020px) {
+  .nam-product-topbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .nam-product-topbar .nam-top-actions {
+    justify-self: stretch;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) 70px;
+    grid-template-rows: minmax(380px, 1fr) minmax(260px, auto);
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(340px, 1fr) auto auto;
+  }
+}
+
+/* NAM Rack phase 3 hardware-fidelity pass */
+
+.nam-mini-meter.nam-meter-trim {
+  cursor: ns-resize;
+}
+
+.nam-mini-meter.nam-meter-trim:focus-visible,
+.nam-mini-meter.nam-meter-trim:hover {
+  border-color: rgba(142, 245, 194, 0.3);
+  background: rgba(4, 12, 9, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(142, 245, 194, 0.07);
+}
+
+.nam-meter-trim em:not(.nam-meter-trim-handle) {
+  width: fit-content;
+  padding: 2px 7px;
+  border: 1px solid rgba(142, 245, 194, 0.22);
+  border-radius: 999px;
+  color: #8ef5c2;
+  background: rgba(0, 0, 0, 0.46);
+  font-style: normal;
+  font-weight: 900;
+}
+
+.nam-meter-trim-handle {
+  width: 12px;
+  height: 20px;
+  border-color: rgba(255, 255, 255, 0.48);
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.22), transparent 40%),
+    linear-gradient(180deg, #777, #202020);
+}
+
+.nam-meter-trim-handle::after {
+  content: "";
+  position: absolute;
+  inset: 3px 4px;
+  border-left: 1px solid rgba(255, 255, 255, 0.42);
+  border-right: 1px solid rgba(0, 0, 0, 0.45);
+}
+
+@media (max-width: 1020px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) 64px;
+    grid-template-rows: minmax(300px, 1fr) minmax(210px, 0.72fr);
+    gap: 8px;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero-head {
+    min-height: 34px;
+    padding: 6px 8px;
+  }
+
+  .nam-product[data-view="rack"] .nam-focus-actions {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(285px, auto) minmax(230px, auto) auto;
+  }
+
+}
+
+/* NAM Rack phase 5 layout fidelity pass: remove old stage chrome and preserve the right-side explorer longer. */
+.nam-product[data-view="rack"] .nam-stage-hero {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero-head {
+  display: none;
+}
+
+@media (max-width: 1020px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 320px) 58px;
+    grid-template-rows: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-stage-hero-head {
+    display: none;
+  }
+}
+
+/* NAM Rack phase 5 chain-density pass: make the rig lane behave like the approved compact module strip. */
+.nam-chain {
+  grid-template-columns: minmax(76px, 96px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 6px;
+  min-height: 84px;
+  padding: 6px;
+}
+
+.nam-chain-meta {
+  gap: 3px;
+  padding: 7px;
+}
+
+.nam-chain-meta span {
+  font-size: 9px;
+}
+
+.nam-chain-meta strong {
+  font-size: 9px;
+  line-height: 1.15;
+}
+
+.nam-chain-meta button {
+  min-height: 20px;
+  padding-inline: 6px;
+  font-size: 9px;
+}
+
+.nam-chain-slots {
+  grid-template-columns: repeat(8, minmax(82px, 1fr));
+  gap: 5px;
+  overflow: hidden;
+}
+
+.nam-chain-icon {
+  width: 27px;
+  height: 27px;
+}
+
+@media (max-width: 1020px) {
+  .nam-chain {
+    min-height: 78px;
+  }
+
+  .nam-chain-meta {
+    padding: 6px;
+  }
+
+  .nam-chain-slots {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .nam-chain-icon {
+    width: 22px;
+    height: 22px;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-chain {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .nam-chain-meta {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+  }
+
+  .nam-chain-meta strong {
+    display: none;
+  }
+
+  .nam-chain-slots {
+    grid-template-columns: repeat(4, minmax(84px, 1fr));
+  }
+}
+
+/* NAM Rack phase 6 header-meter pass: match the approved bright segmented meter treatment. */
+.nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  min-height: 40px;
+  grid-template-columns: auto minmax(150px, 1fr) minmax(50px, auto) minmax(48px, auto);
+  align-items: center;
+  column-gap: 8px;
+  padding: 6px 8px;
+  border-color: rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.22)),
+    rgba(4, 4, 4, 0.62);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim > span {
+  color: rgba(248, 250, 252, 0.88);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim i {
+  height: 12px;
+  border-color: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+  background:
+    linear-gradient(90deg, rgba(54, 218, 98, 0.2), rgba(238, 208, 78, 0.18) 70%, rgba(229, 62, 62, 0.2)),
+    #030303;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.8);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim i::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: repeating-linear-gradient(90deg, transparent 0 4px, rgba(0, 0, 0, 0.68) 4px 6px);
+  pointer-events: none;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim i::after {
+  z-index: 1;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #2de064 0%, #9dda3f 58%, #ffd84d 76%, #e33838 100%);
+  box-shadow: 0 0 10px rgba(69, 179, 107, 0.26);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim i > b {
+  z-index: 4;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.nam-product-topbar .nam-meter-trim-handle {
+  z-index: 5;
+  width: 11px;
+  height: 24px;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.32), transparent 45%),
+    linear-gradient(180deg, #9b9b9b, #343434 56%, #101010);
+}
+
+.nam-product-topbar .nam-meter-trim em:not(.nam-meter-trim-handle) {
+  min-width: 50px;
+  padding: 2px 6px;
+  color: #8ef5c2;
+  text-align: center;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim strong {
+  min-width: 50px;
+  color: rgba(226, 232, 240, 0.76);
+  font-size: 10px;
+  font-weight: 850;
+  text-align: right;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  grid-template-columns: auto minmax(164px, 1fr) minmax(54px, auto);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim em:not(.nam-meter-trim-handle) {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 8px;
+  z-index: 24;
+  display: none;
+  min-width: 52px;
+  text-align: center;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim:hover em:not(.nam-meter-trim-handle),
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim:focus-visible em:not(.nam-meter-trim-handle) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  grid-template-columns:
+    minmax(292px, 1.05fr)
+    minmax(290px, 1fr)
+    auto
+    auto
+    minmax(142px, auto)
+    minmax(292px, 1.05fr);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-view-tabs {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-header-preset-manager-action {
+  display: none;
+}
+
+@media (max-width: 1020px) {
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    grid-template-columns: auto minmax(120px, 1fr) minmax(44px, auto) minmax(44px, auto);
+  }
+}
+
+/* NAM Rack phase 7 reference-composition pass: tighten shell, chain band, stage footer, and rail widths. */
+.plugin-editor-window-app .nam-product[data-view="rack"] {
+  min-height: calc(100vh - 42px);
+  gap: 6px;
+  padding: 6px;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  min-height: 58px;
+  padding: 8px;
+  border-radius: 5px;
+  grid-template-columns:
+    minmax(318px, 1.08fr)
+    minmax(320px, 1fr)
+    auto
+    auto
+    minmax(140px, auto)
+    minmax(318px, 1.08fr);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button {
+  height: 38px;
+  min-width: 34px;
+}
+
+.nam-product[data-view="rack"] .nam-chain {
+  position: relative;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  height: 98px;
+  min-height: 98px;
+  max-height: 98px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background:
+    linear-gradient(90deg, rgba(245, 200, 106, 0.04), rgba(255, 255, 255, 0.015) 54%, rgba(0, 0, 0, 0.18)),
+    #080808;
+}
+
+.nam-product[data-view="rack"] .nam-chain::before {
+  content: "";
+  position: absolute;
+  left: 34px;
+  right: 10px;
+  top: 50%;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(245, 200, 106, 0.58), rgba(245, 200, 106, 0.1));
+  pointer-events: none;
+}
+
+.nam-product[data-view="rack"] .nam-chain-meta {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.nam-product[data-view="rack"] .nam-chain-meta > * {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-chain-meta::before {
+  content: "";
+  width: 4px;
+  height: 28px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, rgba(226, 232, 240, 0.72) 0 1.4px, transparent 1.6px) 0 0 / 4px 7px;
+  opacity: 0.72;
+}
+
+.nam-product[data-view="rack"] .nam-chain-slots {
+  position: relative;
+  z-index: 1;
+  align-items: center;
+  grid-template-columns: repeat(8, minmax(94px, 1fr));
+  gap: 9px;
+}
+
+.nam-product[data-view="rack"] .nam-chain-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+  grid-template-columns: minmax(0, 1fr) minmax(314px, 340px) 78px;
+  gap: 8px;
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  grid-template-rows: minmax(0, 1fr) 44px;
+  border-radius: 5px;
+}
+
+.nam-chain[data-locked="true"] {
+  border-color: rgba(245, 200, 106, 0.24);
+}
+
+.nam-product[data-view="rack"] .nam-product-main {
+  overflow: visible;
+}
+
+@media (min-width: 1101px) {
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: calc(340px + 78px + 16px);
+  }
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    grid-template-columns:
+      minmax(220px, 0.82fr)
+      minmax(330px, 1.1fr)
+      auto
+      auto
+      minmax(116px, auto)
+      minmax(220px, 0.82fr);
+    gap: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    grid-template-columns: auto minmax(88px, 1fr) minmax(44px, auto);
+    padding-inline: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim strong {
+    display: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-slots {
+    grid-template-columns: repeat(8, minmax(78px, 1fr));
+    gap: 6px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 324px) 70px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: calc(324px + 70px + 16px);
+  }
+
+}
+
+@media (max-width: 1020px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-chain {
+    height: 92px;
+    min-height: 92px;
+    max-height: 92px;
+    padding: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-slots {
+    gap: 5px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-chain {
+    grid-template-columns: 1fr;
+    height: auto;
+    max-height: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-meta {
+    display: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 1fr;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+}
+
+/* NAM Rack phase 7 rail-card pass: compact tone rows with icon action affordances. */
+
+/* NAM Rack phase 13 hardware-scale pass: make faceplate knobs read like amp controls. */
+.nam-rack-knob-scale {
+  display: none;
+}
+
+/* NAM Rack phase 14 faceplate cleanup: keep amp knobs hardware-like, not pill UI. */
+
+/* NAM Rack phase 13 header-chrome pass: keep Tone Library quiet like the approved concept. */
+
+/* NAM Rack phase 13 chain-reference pass: quiet non-selected cards like the approved concept. */
+
+/* NAM Rack iteration 4: compact header/chain pixel pass.
+   Keep the chain cards readable at rest; reveal utility actions as compact hardware chrome. */
+
+/* NAM Rack phase 14 narrow status rail: prevent telemetry clipping at laptop-width harness sizes. */
+@media (max-width: 1020px) and (min-width: 761px) {
+
+  .nam-product[data-view="rack"] .nam-hardware-dial {
+    width: clamp(43px, 6.4vw, 56px);
+    max-width: 90%;
+  }
+
+  .nam-product[data-view="rack"] .nam-hardware-dial-number {
+    font-size: 8px;
+  }
+}
+
+/* NAM Rack phase 15 rail fidelity: match the approved search/filter and sort/list anatomy. */
+
+/* NAM Rack phase 20 rail fidelity: reference-like pager and live-new callouts. */
+
+/* NAM Rack iteration 5: right Tones rail pixel pass.
+   Make Sort by read as label + dropdown, and expose Card/List as a true compact pair. */
+
+/* NAM Rack phase 20 hardware-print pass: make overlay controls read like amp markings. */
+
+/* NAM Rack iteration 1: hardware scene coordinates.
+   The amp/cab stage now behaves like one fixed-design hardware artboard. */
+
+/* NAM Rack iteration 2: amp/cab asset parity treatment.
+   Keep the bitmap assets static, but layer hardware-grade bevel, grille, cloth, and lighting
+   inside the scene art so the stack reads closer to the approved modeler reference. */
+
+/* NAM Rack iteration 3: Neural-style faceplate dials.
+   The large amp controls render as one SVG hardware object anchored in the amp scene,
+   not as separate UI tick labels pasted over the bitmap. */
+
+.nam-product[data-view="rack"] .nam-hardware-dial {
+  position: relative;
+  z-index: 3;
+  display: block;
+  width: clamp(50px, 4.7vw, 74px);
+  max-width: 76%;
+  aspect-ratio: 1;
+  color: rgba(232, 215, 178, 0.92);
+  filter:
+    drop-shadow(0 9px 10px rgba(0, 0, 0, 0.66))
+    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.05));
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-scale-track {
+  fill: rgba(0, 0, 0, 0.07);
+  stroke: rgba(218, 193, 137, 0.16);
+  stroke-width: 0.75;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-shadow {
+  fill: rgba(0, 0, 0, 0.70);
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-bezel {
+  stroke: rgba(218, 193, 137, 0.30);
+  stroke-width: 1;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-tick {
+  stroke: rgba(221, 205, 165, 0.58);
+  stroke-width: 0.85;
+  stroke-linecap: round;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-tick[data-major="true"] {
+  stroke: rgba(242, 225, 182, 0.82);
+  stroke-width: 1.35;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-number {
+  fill: rgba(239, 222, 178, 0.90);
+  font-size: 7.4px;
+  font-weight: 780;
+  line-height: 1;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.86);
+  stroke-width: 1.65px;
+  stroke-linejoin: round;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-pointer {
+  transform: rotate(var(--nam-knob-rotation));
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  transition: transform 120ms ease-out;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-grip {
+  stroke: rgba(255, 255, 255, 0.11);
+  stroke-width: 0.72;
+  stroke-linecap: round;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-cap {
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: 1.3;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-indicator-shadow {
+  stroke: rgba(0, 0, 0, 0.70);
+  stroke-width: 6.8;
+  stroke-linecap: round;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-indicator {
+  stroke: rgba(249, 246, 236, 0.96);
+  stroke-width: 4.4;
+  stroke-linecap: round;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-center {
+  fill: rgba(255, 255, 255, 0.18);
+}
+
+@media (max-width: 1020px) {
+  .nam-product[data-view="rack"] .nam-hardware-dial {
+    width: clamp(43px, 6.8vw, 56px);
+    max-width: 90%;
+  }
+
+  .nam-product[data-view="rack"] .nam-hardware-dial-number {
+    font-size: 7.1px;
+  }
+}
+
+/* NAM Rack iteration 6: far-right mode/status rail and footer parity pass. */
+
+/* NAM Rack iteration 7: strict small-laptop responsive pass. */
+
+@media (max-width: 1400px) and (min-width: 1281px) {
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    grid-template-columns:
+      minmax(260px, 0.9fr)
+      minmax(286px, 0.92fr)
+      minmax(112px, auto)
+      minmax(128px, auto)
+      minmax(104px, auto)
+      minmax(260px, 0.9fr);
+    gap: 6px;
+    padding-inline: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+    gap: 4px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button {
+    min-width: 30px;
+    height: 36px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    width: calc(100vw - 12px);
+    max-width: calc(100vw - 12px);
+    grid-template-columns: minmax(0, calc(100vw - 414px)) 316px 70px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: calc(316px + 70px + 42px);
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-slots {
+    grid-template-columns: repeat(8, minmax(76px, 1fr));
+    gap: 6px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-icon {
+    width: 22px;
+    height: 22px;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .plugin-editor-window-app .nam-product[data-view="rack"] {
+    padding: 5px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar > * {
+    min-width: 0;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+    justify-self: stretch;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 312px) 58px;
+  }
+}
+
+/* NAM Rack iteration 8: final mock-parity tokens for the approved right-rail concept. */
+.nam-product[data-view="rack"] {
+  --nam-ref-accent: #f5ae27;
+  --nam-ref-accent-soft: #f5c86a;
+  --nam-ref-stage-aspect: 1.7778958555;
+  --nam-ref-stage-gap: 8px;
+  --nam-ref-stage-footer-height: 46px;
+  --nam-ref-stage-footer-compact-height: 42px;
+  --nam-ref-explorer-min: 314px;
+  --nam-ref-explorer-max: 340px;
+  --nam-ref-explorer-laptop: 316px;
+  --nam-ref-explorer-compact-min: 280px;
+  --nam-ref-explorer-compact-max: 312px;
+  --nam-ref-mode-rail-desktop: 78px;
+  --nam-ref-mode-rail-laptop: 70px;
+  --nam-ref-mode-rail-compact: 58px;
+  --nam-ref-chain-rail-gutter: 16px;
+  --nam-ref-chain-rail-gutter-laptop: 42px;
+}
+
+.nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+  gap: var(--nam-ref-stage-gap);
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(var(--nam-ref-explorer-min), var(--nam-ref-explorer-max))
+    var(--nam-ref-mode-rail-desktop);
+}
+
+@media (min-width: 1101px) {
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: calc(var(--nam-ref-explorer-max) + var(--nam-ref-mode-rail-desktop) + var(--nam-ref-chain-rail-gutter));
+  }
+}
+
+@media (max-width: 1400px) and (min-width: 1101px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns:
+      minmax(0, calc(100vw - 12px - var(--nam-ref-explorer-laptop) - var(--nam-ref-mode-rail-laptop) - var(--nam-ref-chain-rail-gutter-laptop)))
+      var(--nam-ref-explorer-laptop)
+      var(--nam-ref-mode-rail-laptop);
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: calc(var(--nam-ref-explorer-laptop) + var(--nam-ref-mode-rail-laptop) + var(--nam-ref-chain-rail-gutter-laptop));
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(var(--nam-ref-explorer-compact-min), var(--nam-ref-explorer-compact-max))
+      var(--nam-ref-mode-rail-compact);
+  }
+}
+
+/* NAM Rack iteration 9: visual texture/type polish against the approved mock. */
+.nam-product[data-view="rack"] {
+  --nam-ref-polish-pass: 9;
+  --nam-ref-stage-border-alpha: 0.13;
+  --nam-ref-rail-card-radius: 5px;
+  --nam-ref-rail-card-min-height: 93px;
+  --nam-ref-art-contrast: 1.18;
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  border-color: rgba(236, 196, 110, var(--nam-ref-stage-border-alpha));
+  background:
+    radial-gradient(ellipse at 9% 48%, rgba(166, 93, 31, 0.22), transparent 24%),
+    radial-gradient(ellipse at 91% 44%, rgba(168, 94, 31, 0.20), transparent 25%),
+    linear-gradient(180deg, rgba(8, 8, 8, 0.98), rgba(4, 4, 4, 1));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial {
+  width: clamp(52px, 4.85vw, 76px);
+  color: rgba(236, 219, 180, 0.95);
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial-indicator {
+  stroke-width: 4.8;
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-hardware-dial {
+    width: clamp(52px, 5.4vw, 58px);
+  }
+}
+
+/* NAM Rack iteration 13: hardware dial asset contract.
+   Amp modelers keep the faceplate art stable and render controls as dedicated
+   scalable assets over normalized positions. V3 makes the control read as
+   printed faceplate markings plus a separate rotating physical cap. */
+.nam-product[data-view="rack"] {
+  --nam-ref-hardware-dial-pass: 13;
+  --nam-ref-hardware-dial-grips: 36;
+  --nam-ref-hardware-dial-number-count: 11;
+  --nam-ref-hardware-dial-track-alpha: 0.035;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] {
+  width: clamp(60px, 5.2vw, 84px);
+  color: rgba(235, 218, 179, 0.94);
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-faceplate-wash {
+  fill: rgba(0, 0, 0, 0.10);
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-scale-track {
+  fill: rgba(0, 0, 0, var(--nam-ref-hardware-dial-track-alpha));
+  stroke: rgba(218, 193, 137, 0.13);
+  stroke-width: 0.7;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-tick {
+  stroke: rgba(216, 198, 154, 0.48);
+  stroke-width: 0.58;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-tick[data-major="true"] {
+  stroke: rgba(238, 219, 172, 0.84);
+  stroke-width: 1.04;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-number {
+  fill: rgba(234, 216, 169, 0.88);
+  font-size: 6.6px;
+  font-weight: 760;
+  stroke-width: 1.25px;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-outer-rim {
+  stroke: rgba(241, 229, 198, 0.10);
+  stroke-width: 1;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-bezel {
+  stroke: rgba(245, 232, 195, 0.16);
+  stroke-width: 0.85;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-grip {
+  stroke: rgba(255, 255, 255, 0.085);
+  stroke-width: 0.58;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-cap {
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 1.12;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-cap-highlight {
+  fill: rgba(255, 255, 255, 0.18);
+  mix-blend-mode: screen;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-indicator-shadow {
+  stroke-width: 6.6;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-indicator {
+  stroke-width: 4.35;
+}
+
+.nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] .nam-hardware-dial-indicator-tip {
+  fill: rgba(250, 248, 239, 0.94);
+  stroke: rgba(0, 0, 0, 0.68);
+  stroke-width: 0.75;
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] {
+    width: clamp(48px, 4.8vw, 64px);
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-hardware-dial[data-dial-version="faceplate-svg-v3"] {
+    width: clamp(44px, 5.15vw, 56px);
+  }
+}
+
+/* NAM Rack iteration 11: right-rail thumbnail fidelity.
+   The approved rail reads as a stack of real amp/cab previews, so compact rail
+   art gets a brighter crop while the full Browse library keeps its broader card
+   treatment. */
+.nam-product[data-view="rack"] {
+  --nam-ref-rail-art-pass: 11;
+  --nam-ref-rail-art-brightness: 1.32;
+  --nam-ref-rail-art-width: 76px;
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-rail-art-width: 70px;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-rail-art-width: 64px;
+  }
+}
+
+/* NAM Rack iteration 12: main-stage hardware fill.
+   The approved design lets the amp/cab stack visually own the center stage.
+   Bleeding the fixed artboard past the stage clip removes the old "hardware in a
+   framed preview" feel while keeping the normalized control anchors intact. */
+.nam-product[data-view="rack"] {
+  --nam-ref-stage-fill-pass: 14;
+  --nam-ref-stage-frame-bleed: 36px;
+  --nam-ref-stage-frame-top-offset: -6px;
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 28px;
+    --nam-ref-stage-frame-top-offset: -5px;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 20px;
+    --nam-ref-stage-frame-top-offset: -3px;
+  }
+}
+
+/* NAM Rack visual parity pass 1: concept-bounded amp/cab stage.
+   The approved reference does not crop the hardware art against the stage edge;
+   it gives the static 1672/941 artboard a small left/right gutter and a clear
+   top reveal below the chain lane. */
+.nam-product[data-view="rack"] {
+  --nam-ref-stage-frame-bleed: 72px;
+  --nam-ref-stage-frame-top-offset: 24px;
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 56px;
+    --nam-ref-stage-frame-top-offset: 20px;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 86px;
+    --nam-ref-stage-frame-top-offset: 14px;
+  }
+}
+
+/* NAM Rack visual parity pass 2: hardware texture and lighting.
+   Keep the existing fixed scene anchors, but make the static art read less like
+   a dim bitmap and more like the lit hardware stack in the approved reference. */
+.nam-product[data-view="rack"] {
+  --nam-ref-stage-art-pass: 15;
+  --nam-ref-stage-art-brightness: 0.96;
+  --nam-ref-stage-head-overlay-opacity: 0.68;
+  --nam-ref-stage-cab-overlay-opacity: 0.72;
+}
+
+/* NAM Rack implementation pass: responsive meters, true trim faders, card drag,
+   compact rails, and rack mixer. */
+.plugin-editor-window-app .builtin-plugin-panel[data-kind="nam"] .builtin-window-controls {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+  align-items: stretch;
+  gap: 8px;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  min-width: 0;
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: minmax(48px, auto) minmax(0, 1fr) minmax(56px, auto);
+  grid-template-areas:
+    "label . readout"
+    "level level level"
+    "fader fader trim";
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 4px;
+  cursor: ew-resize;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-label {
+  grid-area: label;
+  font-size: 12px;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-level,
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-fader {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-level {
+  grid-area: level;
+  height: 13px;
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-level::after {
+  width: var(--nam-meter-pct, 0%);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-level > b {
+  left: var(--nam-meter-peak-pct, 0%);
+  right: auto;
+  transform: translateX(-50%);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-fader {
+  grid-area: fader;
+  height: 10px;
+  border-color: rgba(255, 255, 255, 0.11);
+  background:
+    linear-gradient(90deg, rgba(245, 174, 39, 0.52), rgba(142, 245, 194, 0.68), rgba(245, 174, 39, 0.52)),
+    #050505;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.62);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-fader::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-fader::after {
+  display: none;
+}
+
+.nam-product-topbar .nam-meter-trim-handle {
+  top: 50%;
+  left: var(--nam-trim-pct, 50%);
+  right: auto;
+  width: 14px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+}
+
+.nam-product-topbar .nam-mini-meter.nam-meter-trim .nam-meter-readout {
+  grid-area: readout;
+  min-width: 56px;
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.nam-product-topbar .nam-meter-trim-value {
+  grid-area: trim;
+  position: static;
+  display: inline-flex;
+  min-width: 56px;
+  justify-content: flex-end;
+  padding: 0;
+  color: #8ef5c2;
+  background: transparent;
+  font-size: 10.5px;
+}
+
+.nam-chain-drag-overlay {
+  position: absolute;
+  z-index: 6;
+  right: 10px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(220px, 45%);
+  padding: 5px 8px;
+  border: 1px solid rgba(142, 245, 194, 0.32);
+  border-radius: 5px;
+  color: #d1fae5;
+  background: rgba(4, 10, 8, 0.82);
+  font-size: 11px;
+  font-weight: 850;
+  pointer-events: none;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.34);
+}
+
+@media (min-width: 1900px) {
+  .nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+    grid-template-columns:
+      minmax(380px, 1.85fr)
+      minmax(330px, 1fr)
+      minmax(126px, auto)
+      minmax(144px, auto)
+      minmax(116px, auto)
+      minmax(380px, 1.85fr);
+  }
+
+  .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    grid-template-columns: minmax(58px, auto) minmax(240px, 1fr) minmax(68px, auto);
+  }
+}
+
+@media (max-width: 1280px) {
+  .nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+    grid-template-columns:
+      minmax(210px, 1.35fr)
+      minmax(260px, 1fr)
+      minmax(92px, auto)
+      minmax(106px, auto)
+      minmax(94px, auto)
+      minmax(210px, 1.35fr);
+  }
+
+  .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    grid-template-columns: minmax(42px, auto) minmax(108px, 1fr) minmax(48px, auto);
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-top-actions {
+    min-width: 0;
+  }
+}
+
+/* NAM Rack hardware integration pass: keep amp/cab height-safe on wide
+   monitors and place post-cab controls into the stompbox artwork. */
+
+@media (max-width: 1280px) and (min-width: 1101px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 52px;
+    --nam-ref-stage-frame-top-offset: 18px;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 44px;
+    --nam-ref-stage-frame-top-offset: 14px;
+  }
+}
+
+@media (min-width: 1900px) {
+  .nam-product[data-view="rack"] {
+    --nam-ref-stage-frame-bleed: 52px;
+    --nam-ref-stage-frame-top-offset: 20px;
+  }
+}
+
+/* NAM Rack canonical hardware pass: approved shell + physical pedal faceplates. */
+.nam-product {
+  --nam-shell-bg: #060706;
+  --nam-shell-panel: rgba(16, 18, 18, 0.96);
+  --nam-shell-panel-2: rgba(24, 27, 28, 0.94);
+  --nam-shell-line: rgba(243, 202, 123, 0.18);
+  --nam-shell-line-cool: rgba(139, 169, 196, 0.16);
+  --nam-shell-text: #ece6d7;
+  --nam-shell-muted: rgba(236, 230, 215, 0.66);
+  --nam-shell-accent: #f0a925;
+  --nam-shell-accent-2: #7ee7b9;
+  color: var(--nam-shell-text);
+  background:
+    radial-gradient(circle at 31% 18%, rgba(88, 106, 102, 0.16), transparent 28%),
+    linear-gradient(180deg, #111312 0%, #070807 46%, #050605 100%);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(28, 31, 31, 0.98), rgba(11, 12, 12, 0.98)),
+    #111;
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.88), 0 16px 30px rgba(0, 0, 0, 0.34);
+}
+
+.nam-product[data-view="rack"] .nam-chain {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(90deg, transparent, rgba(240, 169, 37, 0.08), transparent),
+    linear-gradient(180deg, rgba(14, 16, 16, 0.98), rgba(7, 8, 8, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.86);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  background:
+    radial-gradient(ellipse at 50% 40%, rgba(255, 255, 255, 0.045), transparent 42%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 88px),
+    linear-gradient(180deg, #111313, #060706 64%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.76),
+    inset 0 34px 80px rgba(255, 255, 255, 0.025),
+    0 24px 60px rgba(0, 0, 0, 0.32);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero-head {
+  min-height: 58px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(23, 25, 25, 0.72), rgba(10, 11, 11, 0.58));
+}
+
+@media (max-width: 760px) {
+  .plugin-editor-window-app .nam-product[data-view="rack"],
+.nam-product[data-view="rack"] {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar > *,
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-panel {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+    grid-column: 1 / -1;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-meter-panel:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-meter-panel:last-child {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+    justify-content: stretch;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    min-height: 0;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    width: 100%;
+    max-width: 100%;
+    margin-right: 0;
+    overflow: hidden;
+    transform: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-slots {
+    display: flex;
+    grid-template-columns: none;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-padding-inline: 8px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    width: 100%;
+    max-width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    margin: 0;
+    overflow: visible;
+    transform: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+    transform: none;
+  }
+
+}
+
+/* NAM Rack visual parity recovery pass: locked shell and physical pedal contract. */
+.nam-product[data-view="rack"] {
+  --nam-parity-bg: #050605;
+  --nam-parity-panel: #101211;
+  --nam-parity-panel-soft: #171918;
+  --nam-parity-edge: rgba(244, 222, 176, 0.16);
+  --nam-parity-edge-cool: rgba(160, 181, 182, 0.12);
+  --nam-parity-text: #efe7d6;
+  --nam-parity-muted: rgba(239, 231, 214, 0.62);
+  --nam-parity-amber: #dda03a;
+  --nam-parity-green: #82e7a8;
+  grid-template-rows: 72px auto 94px auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 48% 28%, rgba(96, 112, 103, 0.13), transparent 34%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 84px),
+    linear-gradient(180deg, #151715 0%, #070807 44%, #030403 100%);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  grid-row: 1;
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  min-height: 72px;
+  height: 72px;
+  gap: 8px;
+  padding: 7px 9px 7px 7px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(43, 45, 42, 0.98), rgba(14, 15, 14, 0.98) 54%, rgba(5, 6, 5, 0.98)),
+    #0d0e0d;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.92),
+    0 14px 26px rgba(0, 0, 0, 0.36);
+}
+
+.nam-product[data-view="rack"] .nam-reference-brand {
+  order: 1;
+  flex: 0 0 160px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 56px;
+  padding: 0 14px 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    radial-gradient(circle at 78% 20%, rgba(221, 160, 58, 0.13), transparent 34%),
+    linear-gradient(180deg, #1e201f, #090a09);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -14px 24px rgba(0, 0, 0, 0.34);
+}
+
+.nam-reference-brand strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(243, 237, 222, 0.92);
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.nam-reference-brand strong b {
+  color: var(--nam-parity-amber);
+  font-size: 22px;
+  font-weight: 950;
+}
+
+.nam-reference-menu {
+  display: grid;
+  gap: 4px;
+  width: 26px;
+}
+
+.nam-reference-menu i {
+  display: block;
+  height: 2px;
+  border-radius: 99px;
+  background: rgba(239, 231, 214, 0.72);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar [data-qa="nam-input-meter-trim"] {
+  order: 5;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+  order: 6;
+  flex: 0 0 154px;
+  display: inline-flex;
+  gap: 5px;
+  height: 42px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar [data-qa="nam-output-meter-trim"] {
+  order: 7;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  flex: 0 0 148px;
+  min-width: 132px;
+  max-width: 154px;
+  height: 56px;
+  overflow: hidden;
+  grid-template-columns: minmax(36px, auto) minmax(0, 1fr) minmax(42px, auto);
+  border-radius: 0;
+  border-color: rgba(129, 231, 168, 0.15);
+  background:
+    linear-gradient(180deg, rgba(16, 22, 18, 0.96), rgba(4, 7, 5, 0.98));
+}
+
+.nam-product[data-view="rack"] .nam-view-tabs {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-chain {
+  grid-row: 3;
+  display: block;
+  min-height: 94px;
+  height: 94px;
+  margin: 0 370px 0 82px;
+  padding: 8px 12px;
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.08), rgba(221, 160, 58, 0.09) 44%, rgba(0, 0, 0, 0.08)),
+    linear-gradient(180deg, rgba(22, 24, 23, 0.98), rgba(6, 7, 6, 0.98));
+}
+
+.nam-product[data-view="rack"] .nam-chain-meta {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-chain-slots {
+  position: relative;
+  display: flex;
+  grid-template-columns: none;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  min-width: 0;
+}
+
+.nam-product[data-view="rack"] .nam-chain-slots::before {
+  content: "";
+  position: absolute;
+  left: 32px;
+  right: 32px;
+  top: 50%;
+  height: 2px;
+  border-radius: 99px;
+  background:
+    linear-gradient(90deg, transparent, rgba(221, 160, 58, 0.54), rgba(129, 231, 168, 0.32), transparent);
+  transform: translateY(-50%);
+}
+
+.nam-product[data-view="rack"] .nam-chain-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+}
+
+.nam-product[data-view="rack"] .nam-product-main {
+  grid-row: 5;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+  display: grid;
+  grid-template-columns:
+    var(--nam-ref-mode-rail-desktop)
+    minmax(0, 1fr)
+    minmax(var(--nam-ref-explorer-min), var(--nam-ref-explorer-max));
+  grid-template-rows: minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 44px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.09);
+  background:
+    radial-gradient(ellipse at 50% 42%, rgba(167, 177, 160, 0.11), transparent 35%),
+    radial-gradient(ellipse at 52% 58%, rgba(0, 0, 0, 0.56), transparent 54%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.024) 0 1px, transparent 1px 74px),
+    linear-gradient(180deg, #171a18 0%, #080908 62%, #050605);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero-head {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-stage-large {
+  align-self: center;
+  justify-self: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.nam-product[data-view="rack"] .nam-rail-section {
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.12));
+}
+
+@media (max-width: 1400px) and (min-width: 1101px) {
+  .nam-product[data-view="rack"] {
+    grid-template-rows: 70px auto 88px auto minmax(0, 1fr);
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    min-height: 70px;
+    height: 70px;
+  }
+
+  .nam-product[data-view="rack"] .nam-reference-brand {
+    flex-basis: 160px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    flex-basis: 150px;
+    min-width: 136px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    height: 88px;
+    min-height: 88px;
+    margin-left: 76px;
+    margin-right: 330px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 70px minmax(0, 1fr) minmax(300px, 326px);
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] {
+    grid-template-rows: auto auto 86px auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 104px;
+    align-content: center;
+  }
+
+  .nam-product[data-view="rack"] .nam-reference-brand {
+    flex: 0 0 150px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    flex: 1 1 178px;
+    max-width: none;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    height: 86px;
+    min-height: 86px;
+    margin: 0 0 0 70px;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: var(--nam-ref-mode-rail-compact) minmax(0, 1fr);
+    grid-template-rows: minmax(390px, 1fr) minmax(230px, auto);
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] {
+    grid-template-rows: auto auto 84px auto minmax(0, 1fr);
+    gap: 6px;
+    padding: 6px;
+    overflow: auto;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .nam-product[data-view="rack"] .nam-reference-brand,
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions,
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .nam-product[data-view="rack"] .nam-reference-brand {
+    grid-column: 1 / -1;
+  }
+
+  .nam-product[data-view="rack"] .nam-reference-brand {
+    grid-column: 1;
+    grid-row: 1;
+    height: 48px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions {
+    grid-column: 2;
+    grid-row: 1;
+    justify-content: flex-end;
+    height: 48px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar [data-qa="nam-input-meter-trim"] {
+    grid-column: 1;
+    grid-row: 4;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar [data-qa="nam-output-meter-trim"] {
+    grid-column: 2;
+    grid-row: 4;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    height: 44px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    height: 74px;
+    min-height: 74px;
+    margin: 0;
+    padding-inline: 7px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain-slots {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    height: auto;
+    overflow: visible;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    grid-column: 1;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    grid-row: 2;
+    grid-template-rows: minmax(0, auto) 42px;
+    min-height: 0;
+  }
+}
+
+
+/* NAM Rack visual parity recovery tightening: remove wrapper chrome and scale real pedal controls. */
+.plugin-editor-window-app .builtin-plugin-panel[data-kind="nam"] .builtin-panel-header {
+  display: none;
+}
+
+.plugin-editor-window-app .nam-product[data-view="rack"] {
+  height: 100vh;
+  min-height: 0;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-header-preset-manager-action {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button {
+  width: 28px;
+  min-width: 28px;
+  height: 34px;
+  padding: 0;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar [data-qa="nam-header-redo"] {
+  display: inline-flex;
+  opacity: 0.42;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  overflow: clip;
+}
+
+/* Three-position global oversampling rail, shared by the Rack utility rail and compact topbar. */
+.nam-oversampling-control {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 4px;
+  width: calc(100% - 8px);
+  min-width: 0;
+  margin: 6px 4px;
+  padding: 6px 5px 7px;
+  border-top: 1px solid rgba(244, 226, 184, 0.12);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.72);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.15));
+  box-sizing: border-box;
+}
+
+.nam-oversampling-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 3px;
+  color: rgba(221, 214, 194, 0.62);
+  font-size: 7px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.nam-oversampling-heading strong {
+  color: #f1c66d;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.nam-oversampling-track {
+  position: relative;
+  display: grid;
+  grid-template-rows: repeat(3, 15px);
+  gap: 1px;
+}
+
+.nam-oversampling-track::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  left: 4px;
+  top: 7px;
+  bottom: 7px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(241, 198, 109, 0.48), rgba(148, 142, 126, 0.3));
+  box-shadow: 0 0 5px rgba(241, 198, 109, 0.08);
+}
+
+.nam-product-topbar .nam-top-actions .nam-oversampling-node {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  height: 15px;
+  min-height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: rgba(210, 205, 191, 0.48);
+  background: transparent;
+  box-shadow: none;
+  font-size: 7px;
+  font-weight: 650;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  flex-direction: row;
+}
+
+.nam-oversampling-node i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgba(213, 207, 191, 0.44);
+  border-radius: 50%;
+  background: #343631;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.8);
+  box-sizing: border-box;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.nam-oversampling-node[data-active="true"] {
+  color: #f7dfaa;
+}
+
+.nam-oversampling-node[data-active="true"] i {
+  border-color: #ffe09a;
+  background: #f2ae2e;
+  box-shadow: 0 0 0 2px rgba(242, 174, 46, 0.16), 0 0 8px rgba(242, 174, 46, 0.72), inset 0 1px 1px rgba(255, 247, 215, 0.72);
+  transform: scale(1.14);
+}
+
+.nam-oversampling-node:hover:not(:disabled) i {
+  border-color: rgba(255, 224, 154, 0.88);
+}
+
+.nam-oversampling-node:focus-visible {
+  outline: 1px solid rgba(242, 174, 46, 0.92);
+  outline-offset: 1px;
+}
+
+.nam-oversampling-control[data-busy="true"] {
+  opacity: 0.58;
+}
+
+.nam-product-topbar .nam-top-actions .nam-oversampling-control[data-compact="true"] {
+  align-self: center;
+  width: 31px;
+  height: 46px;
+  margin: 0 2px;
+  padding: 2px 3px;
+  border: 0;
+  background: transparent;
+}
+
+.nam-oversampling-control[data-compact="true"] .nam-oversampling-heading {
+  justify-content: center;
+}
+
+.nam-oversampling-control[data-compact="true"] .nam-oversampling-heading span,
+.nam-oversampling-control[data-compact="true"] .nam-oversampling-node span {
+  display: none;
+}
+
+.nam-oversampling-control[data-compact="true"] .nam-oversampling-track {
+  justify-items: center;
+  grid-template-rows: repeat(3, 10px);
+  gap: 0;
+}
+
+.nam-oversampling-control[data-compact="true"] .nam-oversampling-track::before {
+  left: 50%;
+  top: 4px;
+  bottom: 4px;
+  transform: translateX(-50%);
+}
+
+.nam-product-topbar .nam-top-actions .nam-oversampling-control[data-compact="true"] .nam-oversampling-node {
+  display: flex;
+  place-items: center;
+  width: 12px;
+  height: 10px;
+  min-height: 10px;
+  flex-direction: row;
+}
+
+@media (max-width: 760px) {
+  .plugin-editor-window-app .nam-product[data-view="rack"] {
+    height: auto;
+    min-height: 100vh;
+  }
+}
+
+/* NAM Rack visual polish pass: keep the approved shell, but prevent the amp,
+   cab, and left diagnostics rail from collapsing or clipping at common laptop sizes. */
+.nam-product[data-view="rack"] .nam-reference-brand {
+  flex-basis: 174px;
+}
+
+.nam-product[data-view="rack"] .nam-reference-brand strong {
+  font-size: 16px;
+}
+
+.nam-product[data-view="rack"] .nam-reference-brand strong b {
+  font-size: 20px;
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-reference-brand {
+    flex-basis: auto;
+  }
+}
+
+/* NAM Rack shell geometry polish: keep controls real, tighten physical proportions. */
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  flex: 0 0 152px;
+  min-width: 152px;
+  max-width: 166px;
+}
+
+@media (max-width: 1400px) and (min-width: 1101px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: 70px minmax(0, 1fr) 316px;
+  }
+
+  .nam-product[data-view="rack"] .nam-chain {
+    margin-right: 324px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    flex: 1 1 178px;
+    min-width: min(178px, 100%);
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 761px) {
+  .nam-product[data-view="rack"] .nam-rack-stage-view,
+.nam-product[data-view="rack"] .nam-rack-stage-view[data-module="amp"] {
+    grid-template-columns: var(--nam-ref-mode-rail-compact) minmax(0, 1fr);
+    grid-template-rows: minmax(280px, calc(100dvh - 410px)) 148px;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .nam-product[data-view="rack"] .nam-stage-hero {
+    min-height: 0;
+  }
+}
+
+.nam-product[data-view="browse"] .nam-browse-hero {
+  grid-template-columns: minmax(220px, 0.42fr) minmax(280px, 1.2fr) minmax(130px, 0.45fr);
+}
+
+.nam-product[data-view="browse"] .nam-browse-hero-copy > strong {
+  font-size: clamp(22px, 2vw, 30px);
+  line-height: 1.04;
+}
+
+@media (max-width: 900px) {
+  .nam-product[data-view="browse"] .nam-browse-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* NAM Rack hardware recovery pass: this is the implementation layer for
+   docs/nam-rack.md. Keep new work in templates
+   and primitives instead of per-parameter x/y anchors. */
+.nam-product {
+  --nam-bg: #0e0f12;
+  --nam-panel: #181a1f;
+  --nam-panel-2: #1f2228;
+  --nam-border: #2a2e34;
+  --nam-text: #f5e6c8;
+  --nam-muted: #a6a9ad;
+  --nam-accent: #e6a32b;
+  --nam-success: #33cc66;
+  --nam-danger: #e24d4d;
+}
+
+.nam-product[data-view="rack"] {
+  color: var(--nam-text);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(230, 163, 43, 0.06), transparent 32%),
+    linear-gradient(180deg, #141613 0%, var(--nam-bg) 100%);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  min-height: 96px;
+  overflow: visible;
+  align-items: stretch;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  flex: 1 1 210px;
+  width: auto;
+  min-width: 192px;
+  max-width: 280px;
+  height: 86px;
+  min-height: 86px;
+  max-height: none;
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(58px, auto);
+  grid-template-areas:
+    "label . readout"
+    "level level level"
+    "fader fader trim"
+    "hint hint hint";
+  column-gap: 8px;
+  row-gap: 5px;
+  padding: 9px 11px 10px;
+  overflow: visible;
+  border-color: rgba(51, 204, 102, 0.2);
+  border-radius: var(--nam-radius-sm, 4px);
+  background:
+    linear-gradient(180deg, rgba(24, 30, 25, 0.98), rgba(6, 8, 7, 0.98));
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-label {
+  grid-area: label;
+  color: var(--nam-text);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-level {
+  grid-area: level;
+  height: 14px;
+  min-height: 14px;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-fader {
+  grid-area: fader;
+  height: 14px;
+  min-height: 14px;
+  overflow: visible;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim-handle {
+  width: 16px;
+  height: 28px;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-readout {
+  grid-area: readout;
+  align-self: center;
+  min-width: 58px;
+  color: var(--nam-text);
+  font-size: 11px;
+  line-height: 1;
+  text-align: right;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim-value {
+  grid-area: trim;
+  align-self: center;
+  min-width: 58px;
+  display: inline-flex;
+  justify-content: flex-end;
+  color: var(--nam-success);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-meter-trim small {
+  grid-area: hint;
+  display: block;
+  overflow: hidden;
+  color: rgba(166, 169, 173, 0.78);
+  font-size: 8.5px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="rack"] .nam-product-topbar {
+    min-height: 126px;
+  }
+
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    flex-basis: 240px;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    min-width: 100%;
+    max-width: 100%;
+    height: 92px;
+    min-height: 92px;
+  }
+}
+
+/* NAM Rack secondary-window hardware recovery pass.
+   This gives Browse, Saved, Mixer, Tuner, Cab/IR, and Save Tone the same rack
+   bay language without adding unsupported controls. */
+.nam-product {
+  --nam-rack-steel: #151716;
+  --nam-rack-steel-2: #222420;
+  --nam-rack-well: #060706;
+  --nam-rack-ink: #030403;
+  --nam-rack-line: rgba(245, 230, 190, 0.13);
+  --nam-rack-line-strong: rgba(230, 163, 43, 0.38);
+  --nam-rack-control: rgba(11, 12, 11, 0.96);
+  --nam-rack-control-hi: rgba(37, 39, 35, 0.98);
+  --nam-rack-green: #33cc66;
+  --nam-rack-amber: #e6a32b;
+  position: relative;
+}
+
+.plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+  display: grid;
+  grid-template-rows: minmax(96px, auto) 88px minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
+  padding: 8px;
+  overflow: hidden;
+  color: var(--nam-text);
+  background:
+    radial-gradient(circle at 36% 0%, rgba(230, 163, 43, 0.07), transparent 30%),
+    radial-gradient(circle at 78% 14%, rgba(51, 204, 102, 0.05), transparent 28%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 92px),
+    linear-gradient(180deg, #141613 0%, #080908 54%, #040504 100%);
+}
+
+.nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+  grid-row: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  min-height: 96px;
+  padding: 8px;
+  overflow: visible;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(42, 44, 40, 0.98), rgba(13, 14, 13, 0.98) 56%, rgba(4, 5, 4, 0.98)),
+    var(--nam-rack-steel);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.9),
+    0 16px 30px rgba(0, 0, 0, 0.35);
+}
+
+.nam-product[data-view="browse"] .nam-reference-brand,
+.nam-product[data-view="mixer"] .nam-reference-brand {
+  flex: 0 0 174px;
+  height: 56px;
+}
+
+.nam-product[data-view="browse"] .nam-product-topbar .nam-mini-meter.nam-meter-trim,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  flex: 1 1 210px;
+  min-width: 190px;
+  max-width: 280px;
+  height: 86px;
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(58px, auto);
+  grid-template-areas:
+    "label . readout"
+    "level level level"
+    "fader fader trim"
+    "hint hint hint";
+  gap: 5px 8px;
+  padding: 9px 11px 10px;
+  overflow: visible;
+  border-radius: 0;
+  border-color: rgba(51, 204, 102, 0.2);
+  background:
+    linear-gradient(180deg, rgba(18, 24, 20, 0.98), rgba(4, 7, 5, 0.98));
+}
+
+.nam-product[data-view="browse"] .nam-meter-label,
+.nam-product[data-view="mixer"] .nam-meter-label {
+  grid-area: label;
+}
+
+.nam-product[data-view="browse"] .nam-meter-readout,
+.nam-product[data-view="mixer"] .nam-meter-readout {
+  grid-area: readout;
+  text-align: right;
+}
+
+.nam-product[data-view="browse"] .nam-meter-level,
+.nam-product[data-view="mixer"] .nam-meter-level {
+  grid-area: level;
+  height: 14px;
+}
+
+.nam-product[data-view="browse"] .nam-meter-fader,
+.nam-product[data-view="mixer"] .nam-meter-fader {
+  grid-area: fader;
+  height: 14px;
+  overflow: visible;
+}
+
+.nam-product[data-view="browse"] .nam-meter-trim-value,
+.nam-product[data-view="mixer"] .nam-meter-trim-value {
+  grid-area: trim;
+  align-self: center;
+  justify-self: end;
+}
+
+.nam-product[data-view="browse"] .nam-meter-trim small,
+.nam-product[data-view="mixer"] .nam-meter-trim small {
+  grid-area: hint;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-product[data-view="browse"] .nam-view-tabs,
+.nam-product[data-view="mixer"] .nam-view-tabs,
+.nam-product[data-view="browse"] .nam-top-actions,
+.nam-product[data-view="mixer"] .nam-top-actions {
+  height: 42px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.nam-product[data-view="browse"] .nam-view-tabs button,
+.nam-product[data-view="mixer"] .nam-view-tabs button,
+.nam-product[data-view="browse"] .nam-top-actions button,
+.nam-product[data-view="mixer"] .nam-top-actions button {
+  border-radius: 0;
+}
+
+.nam-product[data-view="browse"] .nam-chain,
+.nam-product[data-view="mixer"] .nam-chain {
+  grid-row: 2;
+  min-height: 88px;
+  height: 88px;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: hidden;
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(90deg, transparent, rgba(230, 163, 43, 0.09), transparent),
+    linear-gradient(180deg, rgba(22, 24, 22, 0.98), rgba(5, 6, 5, 0.98));
+}
+
+.nam-product[data-view="browse"] .nam-chain-meta,
+.nam-product[data-view="mixer"] .nam-chain-meta {
+  display: none;
+}
+
+.nam-product[data-view="browse"] .nam-chain-slots,
+.nam-product[data-view="mixer"] .nam-chain-slots {
+  display: flex;
+  grid-template-columns: none;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+}
+
+.nam-product[data-view="browse"] .nam-product-main,
+.nam-product[data-view="mixer"] .nam-product-main {
+  grid-row: 3;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.nam-product[data-view="browse"] .nam-browse-hero {
+  border-radius: 0;
+  border-color: rgba(255, 255, 255, 0.09);
+  background:
+    linear-gradient(180deg, rgba(22, 24, 22, 0.94), rgba(7, 8, 7, 0.96));
+}
+
+.nam-product[data-view="browse"] .nam-browse-hero {
+  min-height: 168px;
+  border-color: rgba(230, 163, 43, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -18px 28px rgba(0, 0, 0, 0.38);
+}
+
+.nam-product[data-view="browse"] .nam-toolbar,
+.nam-product[data-view="browse"] .nam-tabs,
+.nam-product[data-view="browse"] .nam-result-card {
+  border-radius: 0;
+}
+
+.nam-product[data-view="browse"] .nam-result-card {
+  background:
+    linear-gradient(180deg, rgba(20, 22, 20, 0.96), rgba(6, 7, 6, 0.98));
+}
+
+.nam-product[data-view="browse"] .nam-result-card {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.nam-product[data-view="browse"] .nam-result-card[data-selected="true"],
+.nam-product[data-view="browse"] .nam-result-card:focus-visible {
+  border-color: rgba(230, 163, 43, 0.72);
+  box-shadow:
+    0 0 0 1px rgba(230, 163, 43, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 1100px) {
+  .plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+    grid-template-rows: minmax(126px, auto) 82px minmax(0, 1fr);
+  }
+
+  .nam-product[data-view="browse"] .nam-chain,
+.nam-product[data-view="mixer"] .nam-chain {
+    height: 82px;
+    min-height: 82px;
+  }
+
+  .nam-product[data-view="browse"] .nam-chain-slots,
+.nam-product[data-view="mixer"] .nam-chain-slots {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+    height: auto;
+    min-height: 100vh;
+    grid-template-rows: auto 76px minmax(0, 1fr);
+    overflow: auto;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+    display: flex;
+    flex-direction: row;
+  }
+
+  .nam-product[data-view="browse"] .nam-reference-brand,
+.nam-product[data-view="browse"] .nam-view-tabs,
+.nam-product[data-view="mixer"] .nam-reference-brand,
+.nam-product[data-view="mixer"] .nam-view-tabs {
+    grid-column: 1 / -1;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-mini-meter.nam-meter-trim,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    min-width: 100%;
+    max-width: 100%;
+  }
+}
+
+/* Secondary-window compact chrome correction. Desktop secondary views should
+   read like rack windows, not two-row web dashboards. */
+@media (min-width: 1401px) {
+  .plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+    grid-template-rows: 72px 78px minmax(0, 1fr);
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+    flex-wrap: nowrap;
+    align-items: center;
+    min-height: 72px;
+    height: 72px;
+    padding: 7px 9px 7px 7px;
+    overflow: hidden;
+  }
+
+  .nam-product[data-view="browse"] .nam-reference-brand,
+.nam-product[data-view="mixer"] .nam-reference-brand {
+    flex-basis: 172px;
+    height: 56px;
+  }
+
+  .nam-product[data-view="browse"] .nam-reference-brand strong,
+.nam-product[data-view="mixer"] .nam-reference-brand strong {
+    font-size: 16px;
+  }
+
+  .nam-product[data-view="browse"] .nam-reference-brand strong b,
+.nam-product[data-view="mixer"] .nam-reference-brand strong b {
+    font-size: 20px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-mini-meter.nam-meter-trim,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+    flex: 0 0 210px;
+    min-width: 210px;
+    max-width: 216px;
+    height: 56px;
+    min-height: 56px;
+    grid-template-columns: minmax(48px, auto) minmax(0, 1fr) minmax(48px, auto);
+    grid-template-areas:
+      "label . readout"
+      "level level level"
+      "fader fader trim";
+    gap: 4px 7px;
+    padding: 7px 9px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-label,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-label {
+    font-size: 10px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-level,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-level {
+    height: 11px;
+    min-height: 11px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-fader,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-fader {
+    height: 10px;
+    min-height: 10px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-trim-handle,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-trim-handle {
+    width: 12px;
+    height: 22px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-readout,
+.nam-product[data-view="browse"] .nam-product-topbar .nam-meter-trim-value,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-readout,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-trim-value {
+    min-width: 48px;
+    font-size: 9.5px;
+  }
+
+  .nam-product[data-view="browse"] .nam-product-topbar .nam-meter-trim small,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-meter-trim small {
+    display: none;
+  }
+
+  .nam-product[data-view="browse"] .nam-view-tabs,
+.nam-product[data-view="mixer"] .nam-view-tabs {
+    display: flex;
+    flex: 0 0 158px;
+    min-width: 158px;
+    overflow: hidden;
+  }
+
+  .nam-product[data-view="browse"] .nam-view-tabs button,
+.nam-product[data-view="mixer"] .nam-view-tabs button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .nam-product[data-view="browse"] .nam-top-actions,
+.nam-product[data-view="mixer"] .nam-top-actions {
+    flex: 0 0 144px;
+    min-width: 144px;
+    gap: 4px;
+    overflow: hidden;
+  }
+
+  .nam-product[data-view="browse"] [data-qa="nam-header-redo"],
+.nam-product[data-view="mixer"] [data-qa="nam-header-redo"] {
+    display: none;
+  }
+
+  .nam-product[data-view="browse"] .nam-top-actions button,
+.nam-product[data-view="mixer"] .nam-top-actions button {
+    width: 24px;
+    min-width: 24px;
+    height: 34px;
+    padding: 0;
+  }
+
+  .nam-product[data-view="browse"] .nam-chain,
+.nam-product[data-view="mixer"] .nam-chain {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    height: 78px;
+    min-height: 78px;
+    padding: 7px 10px;
+  }
+
+  .nam-product[data-view="browse"] .nam-chain-slots,
+.nam-product[data-view="mixer"] .nam-chain-slots {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    justify-content: stretch;
+    align-items: stretch;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+
+  .nam-product[data-view="browse"] .nam-chain-slots::before,
+.nam-product[data-view="mixer"] .nam-chain-slots::before {
+    content: "";
+    position: absolute;
+    left: 26px;
+    right: 26px;
+    top: 50%;
+    height: 2px;
+    border-radius: 999px;
+    background:
+      linear-gradient(90deg, transparent, rgba(230, 163, 43, 0.46), rgba(51, 204, 102, 0.25), transparent);
+    transform: translateY(-50%);
+  }
+}
+
+/* NAM Rack R1 asset-led realism pass.
+   Focused wrapper pedals should read as enlarged stompboxes, not flat panels.
+   Keep this layer template-driven and backend-control-only. */
+.nam-product[data-view="rack"] {
+  --nam-r1-realism-pass: 1;
+}
+
+/* R2 shell/chrome realism pass: make the verified layout read as one rack-room hardware surface. */
+.nam-product[data-view="rack"] {
+  --nam-r2-panel-top: #20221f;
+  --nam-r2-panel-mid: #111311;
+  --nam-r2-panel-low: #050605;
+  --nam-r2-brass: rgba(245, 174, 39, 0.82);
+  --nam-r2-border: rgba(243, 230, 200, 0.13);
+  --nam-r2-hairline: rgba(255, 255, 255, 0.07);
+  background:
+    radial-gradient(ellipse at 50% 20%, rgba(245, 174, 39, 0.08), transparent 35%),
+    radial-gradient(ellipse at 48% 72%, rgba(0, 0, 0, 0.72), transparent 54%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 72px),
+    linear-gradient(180deg, #171916 0%, #080908 56%, #030403 100%);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 82px),
+    linear-gradient(180deg, rgba(48, 50, 46, 0.98), rgba(19, 20, 18, 0.99) 52%, rgba(4, 5, 4, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.92),
+    inset 0 -18px 28px rgba(0, 0, 0, 0.33),
+    0 16px 34px rgba(0, 0, 0, 0.48);
+}
+
+.nam-product[data-view="rack"] .nam-reference-brand,
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions,
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  border: 1px solid rgba(243, 230, 200, 0.12);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 45%),
+    linear-gradient(180deg, rgba(30, 32, 29, 0.98), rgba(6, 7, 6, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.11),
+    inset 0 -14px 22px rgba(0, 0, 0, 0.42),
+    0 8px 16px rgba(0, 0, 0, 0.24);
+}
+
+.nam-product[data-view="rack"] .nam-reference-brand {
+  background:
+    radial-gradient(circle at 76% 18%, rgba(245, 174, 39, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(31, 33, 31, 0.98), rgba(5, 6, 5, 0.99));
+}
+
+.nam-product[data-view="rack"] .nam-reference-menu i {
+  background: rgba(241, 231, 206, 0.86);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.8),
+    0 0 8px rgba(245, 174, 39, 0.12);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button {
+  border-color: rgba(243, 230, 200, 0.15);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.1), transparent 43%),
+    linear-gradient(180deg, rgba(34, 35, 32, 0.98), rgba(7, 8, 7, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -10px 14px rgba(0, 0, 0, 0.44),
+    0 4px 10px rgba(0, 0, 0, 0.35);
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button:hover:not(:disabled),
+.nam-product[data-view="rack"] .nam-product-topbar .nam-top-actions button[data-active="true"] {
+  border-color: rgba(245, 174, 39, 0.58);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(245, 174, 39, 0.23), transparent 45%),
+    linear-gradient(180deg, rgba(52, 44, 28, 0.98), rgba(12, 9, 5, 0.99));
+  color: #f7df9d;
+}
+
+.nam-product[data-view="rack"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  border-color: rgba(84, 212, 123, 0.24);
+  background:
+    linear-gradient(90deg, rgba(84, 212, 123, 0.04) 0 1px, transparent 1px 12px),
+    radial-gradient(circle at 50% 0%, rgba(84, 212, 123, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(12, 22, 15, 0.98), rgba(2, 5, 3, 0.99));
+}
+
+.nam-product[data-view="rack"] .nam-chain {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.16), rgba(245, 174, 39, 0.11) 44%, rgba(0, 0, 0, 0.16)),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 52px),
+    linear-gradient(180deg, rgba(28, 30, 27, 0.98), rgba(6, 7, 6, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -16px 26px rgba(0, 0, 0, 0.48),
+    0 16px 28px rgba(0, 0, 0, 0.36);
+}
+
+.nam-product[data-view="rack"] .nam-chain-slots::before {
+  height: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.58);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 42%),
+    linear-gradient(90deg, transparent, rgba(245, 174, 39, 0.46), rgba(80, 214, 130, 0.28), transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 8px rgba(0, 0, 0, 0.6);
+}
+
+.nam-product[data-view="rack"] .nam-chain-icon {
+  background:
+    radial-gradient(circle at 35% 24%, rgba(255, 255, 255, 0.25), transparent 22%),
+    linear-gradient(180deg, rgba(37, 40, 36, 0.98), rgba(6, 7, 6, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -8px 11px rgba(0, 0, 0, 0.5),
+    0 5px 10px rgba(0, 0, 0, 0.45);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  border-color: rgba(243, 230, 200, 0.1);
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(245, 174, 39, 0.08), transparent 38%),
+    radial-gradient(ellipse at 52% 60%, rgba(0, 0, 0, 0.66), transparent 55%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 74px),
+    linear-gradient(180deg, #191c19 0%, #080908 62%, #040504);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.74),
+    inset 0 -34px 56px rgba(0, 0, 0, 0.42);
+}
+
+.nam-product[data-view="rack"] .nam-rail-section {
+  border-color: rgba(243, 230, 200, 0.1);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.07), transparent 42%),
+    linear-gradient(180deg, rgba(24, 26, 23, 0.98), rgba(5, 6, 5, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -10px 18px rgba(0, 0, 0, 0.38);
+}
+
+@media (max-width: 1100px) {
+  .nam-product[data-view="rack"] .nam-product-topbar,
+.nam-product[data-view="rack"] .nam-chain,
+.nam-product[data-view="rack"] .nam-stage-hero {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -14px 22px rgba(0, 0, 0, 0.36);
+  }
+}
+
+/* R3 amp-stage realism pass: keep the generic face rail, make the rail physically visible. */
+
+/* R4 secondary-window material consistency: rack-mounted Browse, Mixer, Cab, Tuner, Saved, and Save Tone surfaces. */
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+  --nam-r4-metal-line: rgba(243, 230, 200, 0.12);
+  --nam-r4-amber: rgba(245, 174, 39, 0.82);
+  background:
+    radial-gradient(ellipse at 48% 18%, rgba(245, 174, 39, 0.075), transparent 36%),
+    radial-gradient(ellipse at 52% 74%, rgba(0, 0, 0, 0.7), transparent 56%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 72px),
+    linear-gradient(180deg, #171916 0%, #070807 60%, #030403 100%);
+}
+
+.nam-product[data-view="browse"] .nam-product-topbar,
+.nam-product[data-view="mixer"] .nam-product-topbar {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 82px),
+    linear-gradient(180deg, rgba(48, 50, 46, 0.98), rgba(19, 20, 18, 0.99) 52%, rgba(4, 5, 4, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.92),
+    inset 0 -18px 28px rgba(0, 0, 0, 0.33),
+    0 16px 34px rgba(0, 0, 0, 0.48);
+}
+
+.nam-product[data-view="browse"] .nam-reference-brand,
+.nam-product[data-view="mixer"] .nam-reference-brand,
+.nam-product[data-view="browse"] .nam-product-topbar .nam-top-actions,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-top-actions,
+.nam-product[data-view="browse"] .nam-product-topbar .nam-mini-meter.nam-meter-trim,
+.nam-product[data-view="mixer"] .nam-product-topbar .nam-mini-meter.nam-meter-trim {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.08), transparent 45%),
+    linear-gradient(180deg, rgba(30, 32, 29, 0.98), rgba(6, 7, 6, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.11),
+    inset 0 -14px 22px rgba(0, 0, 0, 0.42),
+    0 8px 16px rgba(0, 0, 0, 0.24);
+}
+
+.nam-product[data-view="browse"] .nam-chain,
+.nam-product[data-view="mixer"] .nam-chain {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.16), rgba(245, 174, 39, 0.1) 44%, rgba(0, 0, 0, 0.16)),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 52px),
+    linear-gradient(180deg, rgba(28, 30, 27, 0.98), rgba(6, 7, 6, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -14px 24px rgba(0, 0, 0, 0.48),
+    0 14px 26px rgba(0, 0, 0, 0.34);
+}
+
+.nam-product[data-view="browse"] .nam-detail,
+.nam-product[data-view="browse"] .nam-browse-hero,
+.nam-product[data-view="browse"] .nam-feedback,
+.nam-product[data-view="browse"] .nam-toolbar,
+.nam-product[data-view="browse"] .nam-tabs {
+  border-color: rgba(243, 230, 200, 0.11);
+  background:
+    radial-gradient(circle at 14% 0%, rgba(245, 174, 39, 0.08), transparent 31%),
+    linear-gradient(180deg, rgba(22, 24, 21, 0.96), rgba(5, 6, 5, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    inset 0 -14px 24px rgba(0, 0, 0, 0.34);
+}
+
+.nam-product[data-view="browse"] .nam-browse-hero {
+  border-color: rgba(245, 174, 39, 0.34);
+  background:
+    radial-gradient(circle at 72% 24%, rgba(245, 174, 39, 0.13), transparent 30%),
+    linear-gradient(155deg, rgba(255, 235, 178, 0.05), transparent 28%),
+    linear-gradient(180deg, rgba(25, 25, 21, 0.98), rgba(5, 6, 5, 0.98));
+}
+
+.nam-product[data-view="browse"] input,
+.nam-product[data-view="browse"] select,
+.nam-product[data-view="browse"] .nam-view-actions button,
+.nam-product[data-view="browse"] .nam-tabs button {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    linear-gradient(180deg, rgba(24, 25, 22, 0.96), rgba(4, 5, 4, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.35);
+}
+
+.nam-product[data-view="browse"] .nam-result-card {
+  border-color: rgba(243, 230, 200, 0.12);
+  background:
+    radial-gradient(circle at 16% 0%, rgba(245, 174, 39, 0.09), transparent 32%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.045), transparent 27%),
+    linear-gradient(180deg, rgba(24, 25, 22, 0.98), rgba(5, 6, 5, 0.99));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    0 12px 22px rgba(0, 0, 0, 0.28);
+}
+
+.nam-product[data-view="browse"] .nam-result-card[data-selected="true"],
+.nam-product[data-view="browse"] .nam-result-card:focus-visible,
+.nam-product[data-view="browse"] .nam-result-card:hover {
+  border-color: rgba(245, 174, 39, 0.74);
+  background:
+    radial-gradient(circle at 14% 0%, rgba(245, 174, 39, 0.16), transparent 34%),
+    linear-gradient(155deg, rgba(255, 235, 178, 0.065), transparent 28%),
+    linear-gradient(180deg, rgba(32, 28, 21, 0.98), rgba(7, 5, 3, 0.99));
+  box-shadow:
+    0 0 0 1px rgba(245, 174, 39, 0.24),
+    0 0 18px rgba(245, 174, 39, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.nam-product[data-view="browse"] .nam-card-art,
+.nam-product[data-view="browse"] .nam-browse-hero-media {
+  border-color: rgba(245, 174, 39, 0.24);
+  filter: contrast(1.1) saturate(1.05) brightness(0.96);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 10px 20px rgba(0, 0, 0, 0.36);
+}
+
+@media (max-width: 1100px) {
+
+  .nam-product[data-view="browse"] .nam-result-card {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      inset 0 -10px 16px rgba(0, 0, 0, 0.34);
+  }
+}
+
+/* R5 asset-led texture pass: use the existing NAM bitmap assets as material sources,
+   while keeping code-native knobs, displays, and switches as the only interactive hardware. */
+.nam-product[data-view="rack"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+  --nam-r5-warm-edge: rgba(245, 174, 39, 0.18);
+  --nam-r5-metal-line: rgba(255, 255, 255, 0.045);
+  --nam-r5-dark-line: rgba(0, 0, 0, 0.24);
+}
+
+.nam-product[data-view="rack"] .nam-stage-hero {
+  background:
+    radial-gradient(ellipse at 50% 18%, rgba(245, 174, 39, 0.11), transparent 34%),
+    radial-gradient(ellipse at 49% 70%, rgba(0, 0, 0, 0.74), transparent 58%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 54px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 7px),
+    linear-gradient(180deg, #181b18 0%, #070807 64%, #030403 100%);
+}
+
+.nam-product[data-view="browse"] .nam-card-art,
+.nam-product[data-view="browse"] .nam-browse-hero-media {
+  filter: saturate(1.12) contrast(1.14) brightness(0.92);
+}
+
+.nam-product[data-view="browse"] .nam-result-card {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -16px 24px rgba(0, 0, 0, 0.34),
+    0 14px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* R6 blank hardware skins: generated control-free bitmap materials under code-native controls. */
+.nam-product[data-view="rack"] {
+  --nam-r6-skin-shadow: rgba(0, 0, 0, 0.72);
+  --nam-r6-edge-warm: rgba(245, 174, 39, 0.2);
+  --nam-r6-highlight: rgba(255, 246, 218, 0.18);
+}
+
+/* R11 compact mixer polish: keep the secondary mixer readable as hardware cards
+   instead of a clipped wide console on medium and compact plugin windows. */
+@media (max-width: 1100px) {
+  .nam-product[data-view="mixer"] .nam-product-main {
+    overflow: auto;
+  }
+}
+
+/* R12 secondary diagnostics layout: Browse/Mixer keep the live diagnostic band,
+   but content owns the main row and the diagnostic band owns the final row. */
+.plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+  grid-template-rows: 72px 78px minmax(0, 1fr) auto;
+}
+
+.nam-product[data-view="browse"] .nam-product-main,
+.nam-product[data-view="mixer"] .nam-product-main {
+  grid-row: 3;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 1100px) {
+  .plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+    grid-template-rows: minmax(126px, auto) 82px minmax(0, 1fr) auto;
+  }
+}
+
+/* Neural-parity Design A execution slice.
+   The new shell is intentionally layered over the existing NAM Rack internals so
+   real parameter bindings survive while visual parity moves toward the approved concept. */
+
+/* Neural parity material pass: richer physical skins without changing anchor geometry. */
+
+@media (max-width: 760px) {
+  .plugin-editor-window-app .nam-product[data-view="browse"],
+.plugin-editor-window-app .nam-product[data-view="mixer"],
+.nam-product[data-view="browse"],
+.nam-product[data-view="mixer"] {
+    grid-template-rows: auto 76px minmax(0, 1fr) auto;
+  }
+}
+
+/* NAM Rack visual recovery: scene-graph hardware renderer and Neural-style global strip. */
+
+.nam-scene-skin-image {
+  opacity: 0.98;
+  filter:
+    saturate(0.98)
+    contrast(1.06)
+    drop-shadow(0 26px 28px rgba(20, 25, 34, 0.22));
+}
+
+.nam-scene-skin-image[data-skin-fit="product"] {
+  opacity: 0.99;
+  filter:
+    saturate(0.94)
+    contrast(1.09)
+    brightness(0.96)
+    drop-shadow(0 32px 34px rgba(13, 17, 24, 0.28));
+}
+
+.nam-scene-skin-image[data-skin-fit="exact"] {
+  filter:
+    saturate(0.99)
+    contrast(1.04)
+    drop-shadow(0 30px 30px rgba(21, 25, 34, 0.24));
+}
+
+/* NAM Rack visual recovery iteration 2: Post FX gold-master screen only.
+   This is deliberately scoped to the approved Post FX target so the rest of
+   the prototype sections stay frozen until the gold-master passes review. */
+
+/* NAM Rack visual recovery iteration 20: fixed-ratio hardware viewport.
+   The rendered hardware now scales like one photographed artboard: the SVG
+   viewBox is contained, clipped, and shared by every control anchor. */
+
+/* NAM Rack visual recovery iteration 3: propagate the accepted Post FX chrome
+   and scene-fill assumptions to every Neural section before section-specific
+   artwork fixes. */
+
+/* NAM Rack visual recovery iteration 3b: responsive scene-envelope guards.
+   The scene manifests remain the control source of truth; these rules only
+   keep complete hardware scenes below the global strip and above the footer on
+   laptop and compact plugin sizes. */
+
+/* Screenshot-only visual recovery pass.
+   These rules intentionally replace the earlier harness-led positioning pass:
+   the top chrome gets Neural-like rhythm, and Post FX no longer uses upward
+   transforms that cut hardware off in real screenshots. */
+
+/* Screenshot review pass 2026-06-24:
+   quiet the Neural-style chrome before section artwork work begins. */
+
+/* NAM Rack visual recovery contract 2026-06-24:
+   final deterministic chrome/stage rules for screenshot-only review. */
+
+.nam-scene-panel-title,
+.nam-scene-amp-title,
+.nam-scene-rack-header,
+.nam-scene-expression-title {
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.nam-scene-panel-title {
+  fill: rgba(238, 243, 250, 0.82);
+  font-size: 19px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+
+.nam-scene-amp-title,
+.nam-scene-rack-header,
+.nam-scene-expression-title {
+  fill: rgba(255, 255, 255, 0.76);
+  font-size: 26px;
+  font-weight: 880;
+  letter-spacing: 0.16em;
+}
+
+/* NAM Rack visual recovery iteration 4: Pre FX target stompbox row.
+   This keeps the scene-graph controls live but replaces the skinny cutout feel
+   with one equal-width, hardware-mounted five-pedal composition. */
+
+/* NAM Rack visual recovery iteration 5: remove the remaining pale dead band
+   by anchoring Pre/Post hardware near the top of the stage like the other
+   section compositions. */
+
+/* NAM Rack visual recovery iteration 6: restore the target board's section
+   identity and make the top chrome feel like one physical control strip. */
+
+/* NAM Rack visual recovery iteration 7: use the real footer items instead of
+   old injected utility text so the bar starts with NAM Rack like the target. */
+
+/* NAM Rack visual recovery iteration 8: footer rhythm pass. The previous
+   pass fixed duplicated text; this one restores readable utility weight. */
+
+/* NAM Rack visual recovery iteration 9: Post FX fit guard.
+   The Post row uses two tall pedal artboards plus a rack unit, so it needs its
+   own viewport envelope instead of borrowing the generic large-stage height. */
+
+/* NAM Rack visual recovery iteration 10: shared chrome hierarchy.
+   This pass is intentionally limited to shell chrome so section hardware
+   compositions do not drift after their screenshot approvals. */
+
+/* NAM Rack visual recovery iteration 11: Amp printed hardware legends. */
+
+/* NAM Rack visual recovery iteration 12: EQ graphite rack face. */
+
+/* NAM Rack visual recovery iteration 11: Post FX horizontal copper modulator. */
+
+/* NAM Rack visual recovery iteration 16: tighten the shared shell rhythm.
+   The hardware should begin directly under the global controls, with the
+   footer still clear at both screenshot contract sizes. */
+
+/* NAM Rack visual recovery iteration 17: quieter global controls.
+   Tightens the Input/Gate/Output strip after pass 16 fixed
+   the shell/footer geometry. */
+
+/* NAM Rack visual recovery iteration 18: Pre FX mounted hardware pass.
+   Integrates knobs/displays/footswitches into the stompbox surfaces without
+   changing the section contract or live parameter wiring. */
+
+/* NAM Rack visual recovery iteration 19: stage density contract.
+   The previous passes fixed footer anchoring, but the hardware still floated
+   inside a tall pale stage. This pass makes device envelopes consume the
+   available rack stage first, with the footer kept as the hard lower bound. */
+
+/* NAM Rack visual recovery final cascade guard.
+   This intentionally lives after the older breakpoint patches so no section
+   can reopen overflow or stretch scene controls independently of the artboard. */
+
+/* NAM Rack 95% control parity: visible controls must come from raster assets.
+   Older CSS gradients may still describe inactive legacy selectors, but these
+   emitted raster classes are the only visible knob/footswitch/LED surfaces. */
+.nam-product[data-view="rack"] .nam-scene-control-raster {
+  pointer-events: none;
+  user-select: none;
+}
+
+/* First-class NAM pedalboard and truthful signal-chain surface. */
+
+.nam-rack-design-port .pre-advanced-inserts-note {
+  position: absolute;
+  left: 462px;
+  top: 311px;
+  z-index: 22;
+  width: 250px;
+  min-height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid rgba(226, 164, 80, 0.26);
+  border-radius: 999px;
+  color: rgba(221, 226, 232, 0.72);
+  background: rgba(4, 6, 8, 0.76);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035), 0 5px 16px rgba(0, 0, 0, 0.34);
+  font-size: 7px;
+  letter-spacing: 0.035em;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.nam-rack-design-port .pre-advanced-inserts-note span {
+  color: rgba(226, 164, 80, 0.78);
+  font-weight: 800;
+}
+
+.nam-rack-design-port .pre-advanced-inserts-note strong {
+  color: #e4e8ed;
+  font-size: 8px;
+  font-weight: 850;
+}
+
+.nam-rack-design-port .pre-advanced-inserts-note small {
+  color: rgba(154, 164, 176, 0.7);
+  font-size: 7px;
+}
+
+/* NAM Rack source-flow tone library */
+
+.tone-return-button:hover {
+  border-color: rgba(111, 231, 164, 0.42);
+  color: #ecfff1;
+  background: linear-gradient(180deg, rgba(38, 72, 51, 0.36), rgba(8, 16, 12, 0.96));
+}
+
+/* NAM Rack main hardware asset correction: generated PNGs + bounded rack size.
+   This final contract supersedes older recovery rules that could reopen
+   negative positioning or let 140% overflow the visible stage. */
+
+/* NAM Rack design-port recovery surface.
+   The active main rack visuals are rendered as native React DOM from the
+   generated design-board coordinate model. These overrides intentionally
+   remove the previous React scene chrome from the main rack path so the old
+   layout cannot overlap the design-board composition. */
+
+.nam-rack-design-port,
+.nam-rack-source-flow-design-port {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: block;
+  overflow: hidden;
+  background: #030507;
+}
+
+/* NAM model-level dBu calibration. Kept visually separate from creative trim. */
+
+/* Design-port preset popover. The old rack chrome is hidden in this mode, but
+   preset management remains a first-class overlay from the centered title. */
+
+/* Premium NAM tone-save sheet. This modal lives above the design port, so its
+   final rules intentionally sit after the legacy rack/modal theme layers. */
+
+/* Full-screen advanced surface for supported NAM Rack parameters. The legacy
+   route remains the data source; these final rules make it part of the premium
+   product shell instead of exposing the old pale DAW panel. */
+
+/* Wider desktop strips give the advanced page the legibility of rack hardware
+   instead of a monitoring dashboard. Three controls fit per row without
+   shrinking the knob hit targets; compact layouts return to two columns. */
+
+/* Preserve a usable 700px hardware canvas in unusually short plugin hosts.
+   The design-port stylesheet gives the shell a fixed fallback height; this
+   higher-specificity rule exposes it through one outer vertical scroller. */
+
+/* Contextual entry from a supported physical stage into its focused controls. */
+
+/* Keep paged tone cards inside their grid row. Without this containment the
+   scrollable card grid paints over the pager, making Prev/Next/Load more look
+   present while pointer events are intercepted by a card. */
+
+.nam-product[data-view="browse"] .nam-results {
+  height: 100%;
+  max-height: 100%;
+  overflow: auto;
+}
+
+/* Advanced is a focused device inspector, not a second all-rack dashboard. */
+
+/* Portalled rack tooltips live under document.body so the deliberately clipped
+   hardware artboards cannot crop them. Fixed positioning also keeps them stable
+   while the rack rails or device decks scroll. */
+
+@keyframes nam-rack-tooltip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* One-dimensional Flex ownership helpers. */
+
+.nam-product-topbar .nam-top-actions .nam-oversampling-node > :first-child {
+  flex: 0 0 9px;
+}
+
+.nam-product-topbar .nam-top-actions .nam-oversampling-node > :nth-child(2) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.nam-product[data-view="browse"] .nam-product-topbar > *, .nam-product[data-view="mixer"] .nam-product-topbar > * {
+  min-width: 0;
+  flex: 1 1 0;
+}

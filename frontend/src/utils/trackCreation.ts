@@ -73,9 +73,15 @@ export async function createTrackOfType(
     icon: isAiType ? "ai" : undefined,
   });
 
-  state.selectTrack(trackId);
+  // addTrack is the central structural-lock authority. Do not select a
+  // phantom ID or open an instrument browser when Global Lock rejected it.
+  if (!useDAWStore.getState().tracks.some((track) => track.id === trackId)) {
+    return null;
+  }
+
+  useDAWStore.getState().selectTrack(trackId);
   if (type === "instrument" && options?.openInstrumentBrowser) {
-    state.openPluginBrowser(trackId);
+    useDAWStore.getState().openPluginBrowser(trackId);
   }
 
   return trackId;

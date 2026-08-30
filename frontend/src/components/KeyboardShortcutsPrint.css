@@ -1,0 +1,104 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px;
+  color: #1a1a1a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+h1 {
+  margin-bottom: 4px;
+  font-size: 20px;
+  text-align: center;
+}
+
+.subtitle {
+  margin-bottom: 20px;
+  color: #888;
+  font-size: 11px;
+  text-align: center;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.category {
+  margin-bottom: 8px;
+  break-inside: avoid;
+}
+
+h2 {
+  margin-bottom: 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #ddd;
+  color: #555;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+tr {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+td {
+  padding: 2px 4px;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.action-name {
+  color: #333;
+}
+
+.shortcut {
+  text-align: right;
+  white-space: nowrap;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  color: #333;
+  background: #f0f0f0;
+  font-family: "SF Mono", Consolas, Monaco, monospace;
+  font-size: 10px;
+}
+
+.print-actions {
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.print-button {
+  padding: 6px 20px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f8f8f8;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+@media print {
+  body {
+    padding: 12px;
+  }
+
+  .no-print {
+    display: none;
+  }
+}

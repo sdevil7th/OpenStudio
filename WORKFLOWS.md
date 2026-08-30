@@ -1,4 +1,4 @@
-# Studio13 Development Workflows
+# OpenStudio Development Workflows
 
 ## ✨ NEW: Single Command Development
 
@@ -10,7 +10,7 @@ python build.py dev --run
 1. ✅ Installs npm dependencies
 2. ✅ Builds C++ backend (if needed)
 3. ✅ Starts Vite dev server (background)
-4. ✅ Launches Studio13_v2.exe
+4. ✅ Launches OpenStudio.exe
 5. ✅ Auto-cleanup when you close the app
 
 **No more juggling terminals!**
@@ -27,7 +27,7 @@ Before that handoff:
 - `cmake --build build --config Debug` must have completed after the latest changes.
 - The current frontend must be built/copied so packaged assets are not stale if fallback is ever used.
 - No pre-running Vite/npm/dev server should be required from the user.
-- Any Codex-started Vite/npm/browser harness processes should be stopped first, and port `5173` should not be left occupied by a Codex-started process.
+- Any Codex-started Vite/npm/browser harness processes should be stopped first, and port `5183` should not be left occupied by a Codex-started process.
 
 **Run this to rebuild the backend:**
 
@@ -51,7 +51,7 @@ cd frontend
 npm run dev
 
 # Terminal 2
-./build/Studio13_v2_artefacts/Debug/Studio13.exe
+./build/OpenStudio_artefacts/Debug/OpenStudio.exe
 ```
 
 ---
@@ -60,9 +60,10 @@ npm run dev
 
 ```bash
 python build.py prod
+doppler run -- python build.py dev --run
 ```
 
-**Output:** Single executable at `build/Studio13_v2_artefacts/Release/Studio13.exe`  
+**Output:** Single executable at `build/OpenStudio_artefacts/Release/OpenStudio.exe`
 **No Vite needed!** Assets are embedded.
 
 ---
@@ -82,15 +83,24 @@ git push origin ai-runtime-v0.0.31
 
 ```
 
-## This command needs to be ran on macOS after installation through installer to un-quarantine the app and use it
-## Otherwise the app would be shown as damaged or broken in macOS
+## macOS first launch
+
+The normal first-launch path is:
+
+1. Verify the downloaded DMG against the published SHA-256 checksum.
+2. Drag `OpenStudio.app` to `/Applications` and attempt to open it.
+3. If macOS blocks the unsigned build, use **System Settings > Privacy &
+   Security > Open Anyway** for that app, then confirm the launch.
+
+## If that also doesn't work, then run this command to un-quarantine the app and use it
+## Otherwise the app might be shown as damaged or broken in macOS
 ```bash
 xattr -dr com.apple.quarantine /Applications/OpenStudio.app
 ```
 
 ## Comparison with REAPER
 
-| Feature | Studio13 (Hybrid) | REAPER (Native) |
+| Feature | OpenStudio (Hybrid) | REAPER (Native) |
 |---------|-------------------|-----------------|
 | **Dev Mode** | `python build.py dev --run` | Rebuild for every UI change |
 | **UI Tech** | React + CSS | Win32/Cocoa C++ |

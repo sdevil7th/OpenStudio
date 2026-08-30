@@ -1,0 +1,798 @@
+/* NAMRackPedalboard feature-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-pedalboard-view {
+  --nam-board-amber: #e0a149;
+  --nam-board-amber-bright: #f1ba67;
+  --nam-board-green: #54d887;
+  --nam-board-blue: #67a9ef;
+  --nam-board-line: rgba(208, 218, 229, 0.13);
+  --nam-board-line-strong: rgba(224, 161, 73, 0.44);
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(224, 161, 73, 0.66) rgba(255, 255, 255, 0.045);
+  color: #e9ecef;
+  background:
+    linear-gradient(180deg, rgba(4, 6, 8, 0.82), rgba(4, 5, 7, 0.93)),
+    radial-gradient(circle at 16% 4%, rgba(224, 161, 73, 0.13), transparent 28%),
+    url("../assets/nam/rack-studio-backdrop-v2.webp") center / cover fixed no-repeat,
+    #05070a;
+  font-family: Inter, "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
+}
+
+.nam-pedalboard-view::-webkit-scrollbar,
+.nam-pedalboard-route-group-modules::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.nam-pedalboard-view::-webkit-scrollbar-track,
+.nam-pedalboard-route-group-modules::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.nam-pedalboard-view::-webkit-scrollbar-thumb,
+.nam-pedalboard-route-group-modules::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(224, 161, 73, 0.65);
+  background-clip: padding-box;
+}
+
+.nam-pedalboard-view::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 119px, rgba(255, 255, 255, 0.012) 120px),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.3), transparent 15%, transparent 85%, rgba(0, 0, 0, 0.3));
+}
+
+.nam-pedalboard-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 15px clamp(18px, 2.4vw, 38px);
+  border-bottom: 1px solid rgba(203, 215, 228, 0.15);
+  background:
+    radial-gradient(circle at 18% -80%, rgba(224, 161, 73, 0.19), transparent 36%),
+    linear-gradient(180deg, rgba(15, 18, 22, 0.985), rgba(6, 8, 11, 0.985));
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.045),
+    0 18px 44px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
+}
+
+.nam-pedalboard-header-copy {
+  min-width: 0;
+  display: flex;
+  gap: 3px;
+  flex-direction: column;
+}
+
+.nam-pedalboard-eyebrow,
+.nam-pedalboard-section-kicker {
+  color: var(--nam-board-amber-bright);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.nam-pedalboard-header h2,
+.nam-pedalboard-section-heading h2,
+.nam-pedalboard-route-group h3 {
+  margin: 0;
+  color: #f4f6f8;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.nam-pedalboard-header h2 {
+  font-size: clamp(19px, 1.55vw, 27px);
+}
+
+.nam-pedalboard-header p,
+.nam-pedalboard-section-heading p,
+.nam-pedalboard-route-group-head p,
+.nam-pedalboard-quick-copy p {
+  margin: 0;
+  color: #8f98a4;
+  line-height: 1.45;
+}
+
+.nam-pedalboard-header p {
+  max-width: 720px;
+  font-size: 11px;
+}
+
+.nam-pedalboard-header-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.nam-pedalboard-header-button,
+.nam-pedalboard-action,
+.nam-pedalboard-module-edit,
+.nam-pedalboard-module-power,
+.nam-pedalboard-post-module-order button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid rgba(203, 215, 228, 0.14);
+  border-radius: 5px;
+  color: #adb5bf;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018));
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: border-color 130ms ease, color 130ms ease, background 130ms ease, transform 130ms ease;
+}
+
+.nam-pedalboard-header-button {
+  padding: 0 11px;
+}
+
+.nam-pedalboard-header-button:hover:not(:disabled),
+.nam-pedalboard-action:hover:not(:disabled),
+.nam-pedalboard-module-edit:hover:not(:disabled),
+.nam-pedalboard-module-power:hover:not(:disabled),
+.nam-pedalboard-post-module-order button:hover:not(:disabled) {
+  border-color: rgba(224, 161, 73, 0.48);
+  color: #f1c27b;
+  background: rgba(224, 161, 73, 0.085);
+}
+
+.nam-pedalboard-header-button:active:not(:disabled),
+.nam-pedalboard-action:active:not(:disabled),
+.nam-pedalboard-module-edit:active:not(:disabled),
+.nam-pedalboard-module-power:active:not(:disabled),
+.nam-pedalboard-post-module-order button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.nam-pedalboard-header-button:focus-visible,
+.nam-pedalboard-action:focus-visible,
+.nam-pedalboard-module-edit:focus-visible,
+.nam-pedalboard-module-power:focus-visible,
+.nam-pedalboard-post-module-order button:focus-visible {
+  outline: 2px solid rgba(241, 186, 103, 0.86);
+  outline-offset: 2px;
+}
+
+.nam-pedalboard-header-button:disabled,
+.nam-pedalboard-action:disabled,
+.nam-pedalboard-module-edit:disabled,
+.nam-pedalboard-module-power:disabled,
+.nam-pedalboard-post-module-order button:disabled {
+  cursor: not-allowed;
+  opacity: 0.36;
+}
+
+.nam-pedalboard-header-button[data-active="true"] {
+  border-color: rgba(224, 161, 73, 0.36);
+  color: #f0b760;
+  background: rgba(224, 161, 73, 0.09);
+}
+
+.nam-pedalboard-quick,
+.nam-pedalboard-route {
+  width: min(1500px, calc(100% - clamp(28px, 4vw, 64px)));
+  margin-inline: auto;
+}
+
+.nam-pedalboard-quick {
+  padding-top: clamp(22px, 3vh, 38px);
+}
+
+.nam-pedalboard-route {
+  padding: clamp(24px, 3.3vh, 42px) 0 46px;
+}
+
+.nam-pedalboard-section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 13px;
+}
+
+.nam-pedalboard-section-heading > span {
+  display: grid;
+  gap: 3px;
+}
+
+.nam-pedalboard-section-heading h2 {
+  font-size: clamp(17px, 1.25vw, 22px);
+}
+
+.nam-pedalboard-section-heading > p {
+  max-width: 520px;
+  font-size: 10px;
+  text-align: right;
+}
+
+.nam-pedalboard-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(10px, 1.25vw, 18px);
+}
+
+.nam-pedalboard-quick-card {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  min-height: 230px;
+  display: grid;
+  grid-template-rows: auto minmax(72px, auto) auto auto;
+  align-content: stretch;
+  gap: 12px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid var(--nam-board-line);
+  border-radius: 9px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(255, 255, 255, 0.055), transparent 38%),
+    linear-gradient(150deg, rgba(22, 26, 31, 0.97), rgba(8, 10, 13, 0.985));
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.055),
+    inset 0 -32px 52px rgba(0, 0, 0, 0.34),
+    0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
+.nam-pedalboard-quick-card::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: 12px;
+  right: -5%;
+  width: 44%;
+  height: 90%;
+  opacity: 0.2;
+  filter: grayscale(0.72) brightness(0.72);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  transform: rotate(7deg);
+  transition: opacity 160ms ease, filter 160ms ease, transform 160ms ease;
+}
+
+.nam-pedalboard-quick-card[data-kind="compressor"]::before {
+  background-image: url("../assets/nam/design/bodies/stompbox-body-blue.webp");
+}
+
+.nam-pedalboard-quick-card[data-kind="drive"]::before {
+  background-image: url("../assets/nam/design/bodies/stompbox-body-stone.webp");
+}
+
+.nam-pedalboard-quick-card[data-kind="delay"]::before {
+  right: -10%;
+  width: 58%;
+  background-image: url("../assets/nam/design/bodies/wide-pedal-body-dark-deep.webp");
+}
+
+.nam-pedalboard-quick-card[data-active="true"] {
+  border-color: var(--nam-board-line-strong);
+  background:
+    radial-gradient(circle at 82% 6%, rgba(224, 161, 73, 0.13), transparent 34%),
+    linear-gradient(150deg, rgba(27, 28, 30, 0.985), rgba(9, 10, 12, 0.99));
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.07),
+    0 0 0 1px rgba(224, 161, 73, 0.08),
+    0 22px 48px rgba(0, 0, 0, 0.42),
+    0 0 34px rgba(224, 161, 73, 0.065);
+}
+
+.nam-pedalboard-quick-card[data-active="true"]::before {
+  opacity: 0.38;
+  filter: saturate(0.86) brightness(0.9);
+  transform: rotate(4deg) scale(1.02);
+}
+
+.nam-pedalboard-quick-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.nam-pedalboard-quick-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(224, 161, 73, 0.25);
+  border-radius: 50%;
+  color: var(--nam-board-amber-bright);
+  background: rgba(224, 161, 73, 0.075);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.nam-pedalboard-quick-state {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  color: #7d8793;
+  background: rgba(0, 0, 0, 0.27);
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-pedalboard-quick-state[data-active="true"] {
+  border-color: rgba(84, 216, 135, 0.28);
+  color: #a0edbd;
+  background: rgba(84, 216, 135, 0.065);
+}
+
+.nam-pedalboard-state-light {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #50565e;
+  box-shadow: inset 0 0 2px rgba(0, 0, 0, 0.8);
+}
+
+.nam-pedalboard-quick-state[data-active="true"] .nam-pedalboard-state-light {
+  background: var(--nam-board-green);
+  box-shadow: 0 0 9px rgba(84, 216, 135, 0.78);
+}
+
+.nam-pedalboard-quick-copy {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  max-width: 76%;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.nam-pedalboard-quick-copy h3 {
+  margin: 0;
+  color: #f3f5f7;
+  font-size: clamp(18px, 1.35vw, 23px);
+  font-weight: 640;
+  letter-spacing: -0.025em;
+}
+
+.nam-pedalboard-quick-copy p {
+  font-size: 10px;
+}
+
+.nam-pedalboard-quick-value {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  max-width: 80%;
+  overflow: hidden;
+  color: #c6cdd5;
+  font-size: 10px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-pedalboard-quick-actions {
+  position: relative;
+  z-index: 2;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 7px;
+}
+
+.nam-pedalboard-action {
+  min-height: 35px;
+  padding: 0 10px;
+}
+
+.nam-pedalboard-action[data-tone="primary"] {
+  border-color: rgba(224, 161, 73, 0.42);
+  color: #f0b760;
+  background: linear-gradient(180deg, rgba(224, 161, 73, 0.13), rgba(224, 161, 73, 0.055));
+}
+
+.nam-pedalboard-action[data-tone="quiet"] {
+  color: #9099a4;
+  background: rgba(4, 6, 8, 0.44);
+}
+
+.nam-pedalboard-route-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.nam-pedalboard-route-group {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(176px, 0.16fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 13px;
+  border: 1px solid var(--nam-board-line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(224, 161, 73, 0.035), transparent 28%),
+    linear-gradient(180deg, rgba(17, 20, 24, 0.965), rgba(7, 9, 12, 0.98));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035), 0 13px 28px rgba(0, 0, 0, 0.25);
+}
+
+.nam-pedalboard-route-group-head {
+  min-width: 0;
+  display: flex;
+  align-content: center;
+  gap: 10px;
+  padding: 4px 7px 4px 2px;
+  border-right: 1px solid rgba(255, 255, 255, 0.075);
+  flex-direction: row;
+}
+
+.nam-pedalboard-route-group-head > span:last-child {
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+  flex-direction: row;
+}
+
+.nam-pedalboard-route-index {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(224, 161, 73, 0.28);
+  border-radius: 50%;
+  color: var(--nam-board-amber-bright);
+  background: rgba(224, 161, 73, 0.065);
+  font-size: 9px;
+  font-weight: 740;
+}
+
+.nam-pedalboard-route-group h3 {
+  font-size: 13px;
+}
+
+.nam-pedalboard-route-group-head p {
+  font-size: 9px;
+}
+
+.nam-pedalboard-route-group-modules {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 1px 1px 7px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(224, 161, 73, 0.48) rgba(255, 255, 255, 0.035);
+}
+
+.nam-pedalboard-route-step {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nam-pedalboard-route-arrow {
+  flex: 0 0 auto;
+  color: rgba(224, 161, 73, 0.38);
+}
+
+.nam-pedalboard-route-module,
+.nam-pedalboard-post-module {
+  width: 164px;
+  min-height: 120px;
+  display: grid;
+  align-content: space-between;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid rgba(203, 215, 228, 0.11);
+  border-radius: 6px;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.035), transparent 44%),
+    rgba(5, 7, 9, 0.66);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.nam-pedalboard-route-module[data-active="true"],
+.nam-pedalboard-post-module[data-active="true"] {
+  border-color: rgba(224, 161, 73, 0.34);
+  background:
+    radial-gradient(circle at 80% 0%, rgba(224, 161, 73, 0.09), transparent 42%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.045), transparent 44%),
+    rgba(8, 9, 10, 0.78);
+}
+
+.nam-pedalboard-route-module-main,
+.nam-pedalboard-post-module-topline {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nam-pedalboard-route-module-main {
+  justify-content: flex-start;
+}
+
+.nam-pedalboard-route-module-icon,
+.nam-pedalboard-post-module-icon {
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(203, 215, 228, 0.11);
+  border-radius: 5px;
+  color: #747e89;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+[data-active="true"] > .nam-pedalboard-route-module-main .nam-pedalboard-route-module-icon,
+.nam-pedalboard-post-module[data-active="true"] .nam-pedalboard-post-module-icon {
+  border-color: rgba(224, 161, 73, 0.3);
+  color: var(--nam-board-amber-bright);
+  background: rgba(224, 161, 73, 0.065);
+}
+
+.nam-pedalboard-route-module-copy,
+.nam-pedalboard-post-module-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.nam-pedalboard-route-module-copy strong,
+.nam-pedalboard-post-module-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #dfe3e8;
+  font-size: 11px;
+  font-weight: 660;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-pedalboard-route-module-copy small,
+.nam-pedalboard-post-module-copy small {
+  min-width: 0;
+  overflow: hidden;
+  color: #76808c;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nam-pedalboard-route-module-footer,
+.nam-pedalboard-post-module-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.nam-pedalboard-route-module-footer {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  flex-direction: row;
+}
+
+.nam-pedalboard-route-module-actions {
+  justify-content: flex-end;
+}
+
+.nam-pedalboard-route-module-state,
+.nam-pedalboard-post-module-state {
+  min-width: 0;
+  overflow: hidden;
+  color: #69727d;
+  font-size: 8.5px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.nam-pedalboard-route-module-state[data-active="true"],
+.nam-pedalboard-post-module-state[data-active="true"] {
+  color: #96e9b4;
+}
+
+.nam-pedalboard-route-module-actions,
+.nam-pedalboard-post-module-actions,
+.nam-pedalboard-post-module-order {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nam-pedalboard-module-edit {
+  min-height: 25px;
+  padding: 0 7px;
+  font-size: 9px;
+}
+
+.nam-pedalboard-module-power,
+.nam-pedalboard-post-module-order button {
+  width: 27px;
+  min-width: 27px;
+  min-height: 25px;
+  padding: 0;
+}
+
+.nam-pedalboard-module-power[data-active="true"] {
+  border-color: rgba(84, 216, 135, 0.35);
+  color: #8be6ad;
+  background: rgba(84, 216, 135, 0.075);
+}
+
+.nam-pedalboard-post-module-order {
+  margin-left: auto;
+}
+
+@media (max-width: 1080px) {
+  .nam-pedalboard-header {
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .nam-pedalboard-header-copy p {
+    max-width: 460px;
+  }
+
+  .nam-pedalboard-header-actions {
+    max-width: 440px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .nam-pedalboard-header-button {
+    min-height: 31px;
+    padding-inline: 9px;
+  }
+
+  .nam-pedalboard-quick,
+.nam-pedalboard-route {
+    width: calc(100% - 28px);
+  }
+
+  .nam-pedalboard-quick-card {
+    min-height: 252px;
+    padding: 15px;
+  }
+
+  .nam-pedalboard-quick-copy {
+    max-width: 84%;
+  }
+
+  .nam-pedalboard-action {
+    min-height: 34px;
+    padding-inline: 8px;
+    font-size: 9px;
+  }
+
+  .nam-pedalboard-route-group {
+    grid-template-columns: minmax(154px, 0.18fr) minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px;
+  }
+}
+
+@media (max-width: 760px) {
+  .nam-pedalboard-header {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+  }
+
+  .nam-pedalboard-header-actions {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .nam-pedalboard-header-button {
+    flex: 1 1 128px;
+  }
+
+  .nam-pedalboard-section-heading {
+    display: grid;
+    gap: 6px;
+  }
+
+  .nam-pedalboard-section-heading > p {
+    max-width: none;
+    text-align: left;
+  }
+
+  .nam-pedalboard-quick-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .nam-pedalboard-quick-card {
+    min-height: 218px;
+  }
+
+  .nam-pedalboard-route-group {
+    grid-template-columns: 1fr;
+  }
+
+  .nam-pedalboard-route-group-head {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+    padding-bottom: 9px;
+  }
+}
+
+@media (max-height: 560px) {
+  .nam-pedalboard-header {
+    position: sticky;
+    min-height: 62px;
+    padding-block: 8px;
+  }
+
+  .nam-pedalboard-header h2 {
+    font-size: 18px;
+  }
+
+  .nam-pedalboard-header p {
+    display: none;
+  }
+
+  .nam-pedalboard-quick {
+    padding-top: 16px;
+  }
+
+  .nam-pedalboard-quick-card {
+    min-height: 210px;
+  }
+
+  .nam-pedalboard-route {
+    padding-top: 20px;
+  }
+}
+
+/* One-dimensional Flex ownership helpers. */
+
+.nam-pedalboard-route-group-head > :first-child {
+  flex: 0 0 31px;
+}
+
+.nam-pedalboard-route-group-head > :nth-child(2) {
+  min-width: 0;
+  flex: 1 1 auto;
+}

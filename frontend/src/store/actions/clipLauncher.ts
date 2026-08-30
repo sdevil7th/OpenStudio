@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { nativeBridge } from "../../services/NativeBridge";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
+import { normalizeNAMCaptureType } from "../../utils/namCaptureType";
 
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -150,6 +151,67 @@ export const clipLauncherActions = (set: SetFn, get: GetFn) => ({
         })),
         isModified: true,
       }));
+    },
+    resolveMissingNAMAsset: async (target: any, newPath: string) => {
+      const slotPathKey =
+        target?.slot === "pedal" ? "pedalModelPath" :
+        target?.slot === "cab" ? "cabIRPath" :
+        "ampModelPath";
+      const address = {
+        trackId: target?.trackId || "",
+        chain: target?.chain || "track",
+        fxIndex: Number(target?.fxIndex ?? -1),
+      };
+      const declaredCaptureType = normalizeNAMCaptureType(
+        target?.captureType
+        ?? target?.gearType
+        ?? target?.lastSeenMetadata?.gear_type
+        ?? target?.lastSeenMetadata?.gearType,
+      );
+      const declaredTypeKey =
+        target?.slot === "pedal" ? "pedalDeclaredCaptureType"
+          : target?.slot === "amp" ? "ampDeclaredCaptureType"
+            : "";
+      let ok = false;
+
+      if (target?.compareSnapshot && (target?.compareSlot === "A" || target?.compareSlot === "B")) {
+        const state = await nativeBridge.getBuiltInPluginState(address).catch(() => null);
+        const uiState = { ...(state?.uiState || {}) };
+        const compare = { ...(uiState.namRackCompare || {}) };
+        const snapshots = { ...(compare.snapshots || {}) };
+        const snapshot = { ...(snapshots[target.compareSlot] || {}) };
+        const modelState = { ...(snapshot.modelState || {}) };
+        modelState[slotPathKey] = newPath;
+        if (declaredTypeKey) modelState[declaredTypeKey] = declaredCaptureType;
+        if (target.slot === "pedal") delete modelState.clearPedalModel;
+        if (target.slot === "amp") delete modelState.clearAmpModel;
+        if (target.slot === "cab") delete modelState.clearCabIR;
+        snapshot.modelState = modelState;
+        snapshots[target.compareSlot] = snapshot;
+        compare.snapshots = snapshots;
+        compare.compareSlot = compare.compareSlot || "A";
+        compare.schemaVersion = 1;
+        uiState.namRackCompare = compare;
+        ok = await nativeBridge.setBuiltInPluginState(address, { uiState }).catch(() => false);
+      } else {
+        ok = await nativeBridge.setBuiltInPluginState(
+          address,
+          {
+            modelState: {
+              [slotPathKey]: newPath,
+              ...(declaredTypeKey ? { [declaredTypeKey]: declaredCaptureType } : {}),
+            },
+          },
+        ).catch(() => false);
+      }
+
+      if (ok) {
+        set({ isModified: true });
+        get().showToast(`${target?.slot === "cab" ? "Cab IR" : "NAM model"} relinked`, "success");
+      } else {
+        get().showToast("Could not relink NAM asset", "error");
+      }
+      return Boolean(ok);
     },
     closeMissingMedia: () => set({ showMissingMedia: false, missingMediaFiles: [] }),
 

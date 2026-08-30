@@ -124,9 +124,20 @@ async function reportFrontendStartupStateViaNativeFunction(
   }
 }
 
-async function reportFrontendStartupStateViaResourceProvider(state: string) {
+async function reportFrontendStartupStateViaResourceProvider(
+  state: string,
+  detail: string,
+) {
+  const startupUrl = new URL(
+    `/__openstudio__/startup/${encodeURIComponent(state)}`,
+    window.location.href,
+  );
+  if (detail) {
+    startupUrl.searchParams.set("detail", detail);
+  }
+
   await withTimeout(
-    fetch(`/__openstudio__/startup/${encodeURIComponent(state)}`, {
+    fetch(startupUrl.toString(), {
       method: "GET",
       cache: "no-store",
     }),
@@ -166,39 +177,61 @@ function removeBootOverlay() {
   }
 
   bootOverlay.style.opacity = "0";
+  bootOverlay.style.pointerEvents = "none";
   window.setTimeout(() => {
     bootOverlay.remove();
   }, 160);
 }
 
 async function reportFrontendStartupState(state: string, detail: string) {
+  const attempts: Array<{ label: string; run: () => Promise<void> }> = [];
+
   if (isPackagedResourceProviderOrigin) {
-    try {
-      await reportFrontendStartupStateViaResourceProvider(state);
-      console.debug(`[Startup] Reported ${state} through resource provider`);
-      return;
-    } catch (error) {
-      console.error(
-        "[Startup] Failed to report startup state through resource provider:",
-        error,
+    attempts.push({
+      label: "resource provider",
+      run: () => reportFrontendStartupStateViaResourceProvider(state, detail),
+    });
+  }
+
+  attempts.push({
+    label: "native function",
+    run: () => reportFrontendStartupStateViaNativeFunction(state, detail),
+  });
+
+  const failures: Array<{ label: string; error: unknown }> = [];
+  await new Promise<void>((resolve) => {
+    let pending = attempts.length;
+    let reported = false;
+
+    for (const attempt of attempts) {
+      attempt.run().then(
+        () => {
+          if (!reported) {
+            reported = true;
+            console.debug(`[Startup] Reported ${state} through ${attempt.label}`);
+            resolve();
+          }
+        },
+        (error) => {
+          failures.push({ label: attempt.label, error });
+          pending -= 1;
+
+          if (pending === 0 && !reported) {
+            for (const failure of failures) {
+              console.error(
+                `[Startup] Failed to report startup state through ${failure.label}:`,
+                failure.error,
+              );
+            }
+            console.error(
+              `[Startup] Unable to report startup state '${state}' through any transport.`,
+            );
+            resolve();
+          }
+        },
       );
     }
-  }
-
-  try {
-    await reportFrontendStartupStateViaNativeFunction(state, detail);
-    console.debug(`[Startup] Reported ${state} through native function`);
-    return;
-  } catch (error) {
-    console.error(
-      "[Startup] Failed to report startup state through native function:",
-      error,
-    );
-  }
-
-  console.error(
-    `[Startup] Unable to report startup state '${state}' through any transport.`,
-  );
+  });
 }
 
 function finishStartup(state: "boot-ready" | "boot-failed", detail: string) {
@@ -266,7 +299,7 @@ function StartupReadySentinel() {
       finishStartup("boot-ready", detail);
     };
 
-    if (isSafeStartup || windowRole === "midiEditor" || windowRole === "mixer") {
+    if (isSafeStartup || windowRole === "midiEditor" || windowRole === "mixer" || windowRole === "pluginEditor") {
       reportReady(
         isSafeStartup ? "safe-startup-ui-mounted" : `${windowRole}-root-mounted`,
       );
@@ -338,6 +371,9 @@ async function bootstrap() {
     RootComponent = rootModule.default;
   } else if (windowRole === "midiEditor") {
     const rootModule = await import("./MidiEditorWindowApp.tsx");
+    RootComponent = rootModule.default;
+  } else if (windowRole === "pluginEditor") {
+    const rootModule = await import("./PluginEditorWindowApp.tsx");
     RootComponent = rootModule.default;
   } else {
     const rootModule = await import("./App.tsx");

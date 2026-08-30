@@ -1,0 +1,89 @@
+/* NAMRackDiagnostics component-owned visual and responsive styles. Shared NAM Rack shell rules remain in NAMRackPanel.css. */
+
+.nam-product[data-view="rack"] .nam-rack-input-diagnostics {
+  display: none;
+}
+
+.nam-product[data-view="rack"] .nam-rack-input-diagnostics {
+  grid-row: 4;
+  min-height: 0;
+}
+
+.nam-product[data-view="rack"] .nam-rack-input-diagnostics[data-tone="ok"],
+.nam-product[data-view="rack"] .nam-rack-input-diagnostics:not([data-tone]) {
+  display: none;
+}
+
+.nam-product[data-view="browse"] .nam-rack-input-diagnostics,
+.nam-product[data-view="mixer"] .nam-rack-input-diagnostics {
+  grid-row: 4;
+  grid-template-columns: minmax(180px, 0.62fr) minmax(260px, 1fr) auto auto;
+  min-height: 58px;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 0;
+  border-color: rgba(126, 231, 185, 0.22);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(126, 231, 185, 0.12), transparent 30%),
+    linear-gradient(180deg, rgba(8, 27, 18, 0.96), rgba(3, 10, 7, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 -10px 26px rgba(0, 0, 0, 0.26);
+}
+
+.nam-product[data-view="browse"] .nam-rack-input-copy span,
+.nam-product[data-view="mixer"] .nam-rack-input-copy span {
+  line-height: 1.25;
+}
+
+@media (max-width: 1100px) {
+
+  .nam-product[data-view="browse"] .nam-rack-input-diagnostics,
+.nam-product[data-view="mixer"] .nam-rack-input-diagnostics {
+    grid-template-columns: minmax(0, 0.78fr) minmax(220px, 1fr) auto;
+    gap: 8px;
+    min-height: 68px;
+    padding: 8px 10px;
+  }
+
+  .nam-product[data-view="browse"] .nam-rack-input-actions,
+.nam-product[data-view="mixer"] .nam-rack-input-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .nam-product[data-view="browse"] .nam-rack-auth-pill,
+.nam-product[data-view="mixer"] .nam-rack-auth-pill {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
+.nam-neural-product[data-view="rack"] .nam-rack-input-diagnostics {
+  display: none;
+}
+
+.nam-product.nam-neural-product[data-view="rack"] > .nam-rack-input-diagnostics {
+  grid-row: 1;
+}
+
+@media (max-width: 760px) {
+
+  .nam-product[data-view="browse"] .nam-rack-input-diagnostics,
+.nam-product[data-view="mixer"] .nam-rack-input-diagnostics {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .nam-product[data-view="browse"] .nam-rack-input-copy,
+.nam-product[data-view="mixer"] .nam-rack-input-copy,
+.nam-product[data-view="browse"] .nam-rack-input-actions,
+.nam-product[data-view="mixer"] .nam-rack-input-actions {
+    grid-column: 1 / -1;
+  }
+
+  .nam-product[data-view="browse"] .nam-rack-auth-pill,
+.nam-product[data-view="mixer"] .nam-rack-auth-pill {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}

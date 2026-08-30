@@ -17,6 +17,10 @@ import {
   getTrackYPositions,
   getTrackAtY,
   AUTOMATION_LANE_HEIGHT,
+  MIN_AUTOMATION_LANE_HEIGHT,
+  MAX_AUTOMATION_LANE_HEIGHT,
+  getAutomationLaneHeight,
+  getAutomationLaneOffset,
   BOTTOM_INTERACTION_BUFFER,
   DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT,
   getTimelineRowMetrics,
@@ -40,6 +44,7 @@ import {
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
 import {
   guardModalContextMenu,
+  isEditorWheelOwnedTarget,
   isInsideModalLayer,
   shouldSuppressWorkspaceContextMenu,
 } from "../utils/modalEventGuards";
@@ -64,23 +69,128 @@ import {
   buildTimelineClipHitMap,
   findTimelineClipHit,
 } from "../utils/timelineClipHitTest";
+import { shouldPreserveClipContextSelection } from "../utils/timelineClipContextSelection";
 import { getClipInpaintRange, type AIWorkflowId } from "../data/aiWorkflows";
 import {
   classifyTimelineClipGesture,
   computeSlipOffset,
-  computeTimelineMoveStart,
-  computeTimelineResize,
 } from "../utils/timelineClipGestures";
 import {
-  getTimelineAxisLockedDeltas,
+  resolveTimelineDropTrackIndex,
   type TimelineDragAxisLock,
 } from "../utils/timelineDragAxisLock";
+import {
+  canApplyTimelineHorizontalSnap,
+  clampTimelineClipGroupDelta,
+  isTimelineClipEdgeSnapMode,
+  resolveTimelineClipEdgeSnap,
+  shouldStartTimelineCopyDrag,
+  snapshotTimelineClipGeometry,
+  type TimelineClipEdgeSnapMatch,
+  type TimelineClipSnapShape,
+} from "../utils/timelineClipEdgeSnap";
 import { commandManager } from "../store/commands";
+import { syncTrackCoreToBackend } from "../store/actions/tracks";
+import {
+  createAutomationPointId,
+  getAutomationPointId,
+} from "../store/actions/automation";
+import {
+  moveAutomationPointsWithClips,
+  shouldInvertAutomationFollowForClipDrag,
+  shouldMoveAutomationWithItems,
+  syncAutomationTrackSnapshots,
+  type AutomationClipMove,
+} from "../store/actions/clipEditing";
+import { syncAutomationLaneToBackend } from "../store/actions/storeHelpers";
+import {
+  executeAvailableRegisteredAction,
+  getDisplayEffectiveShortcut,
+  registerScopedActionExecutor,
+} from "../store/actionRegistry";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import {
+  activateShortcutContext,
+  registerShortcutSurface,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
+import { activateAutomationLaneShortcutContext } from "../utils/automationShortcutContext";
+import { getShortcutPlatform } from "../utils/platform";
+import { resolveWheelGesture } from "../utils/wheelGestureResolver";
+import {
+  computeSpectrogramBandGeometry,
+  computeWheelResizedSize,
+  createWheelEditBurstController,
+  DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW,
+  getAccumulatedWheelNudgeDirection,
+  getAccumulatedWheelStepCount,
+  getTimelineHorizontalScrollMax,
+  getTimelineProjectFitView,
+  getTimelineRangeFitView,
+  getTimelineVerticalScaleSubtarget,
+  getTimelineVisibleContentEnd,
+  TIMELINE_SCROLL_PADDING_SECONDS,
+  updateTimelineVerticalScaleView,
+  type TimelineVerticalScaleView,
+  type WheelEditBurstController,
+} from "../utils/contextWheelBehaviors";
+import {
+  createWheelDeltaAccumulator,
+  type WheelDeltaAccumulator,
+} from "../utils/wheelDeltaAccumulator";
+import {
+  getMouseBehaviorProfile,
+  toMouseBehaviorPlatform,
+} from "../utils/mouseBehaviorProfiles";
+import {
+  isTimelineClipCopyAction,
+  resolveMouseModifierAction,
+  type MouseModifierActionFor,
+  type MouseModifierContext,
+  type MouseModifierOverrideMap,
+  type PointerModifierEventLike,
+} from "../utils/mouseModifierResolver";
+import {
+  isTimelineCopyDropNoop,
+  resolveProfiledTimelineClipDrag,
+} from "../utils/profiledTimelineClipDrag";
+import {
+  resolveAutomationPointDrag,
+  type AutomationPointDragAxis,
+} from "../utils/automationPointDrag";
+import {
+  computeMouseModifierTimelineResize,
+  getNextClipFadeShape,
+  getSafeMouseModifierNoop,
+} from "../utils/mouseModifierTimelineBehaviors";
+import {
+  isClipEditLocked,
+  isTimelineClipGestureLocked,
+  runTimelineClipGestureMutation,
+} from "../utils/clipEditLock";
+import {
+  createTimelineGestureUndoCommand,
+  reconcileTimelineTrackTopology,
+} from "../utils/timelineGestureUndo";
 
 // Constants
 const RULER_HEIGHT = 30;
+const TIMELINE_VERTICAL_SCALE_WIDTH = 28;
 const MIN_PIXELS_PER_SECOND = 1;
 const MAX_PIXELS_PER_SECOND = 1000;
+const GRID_CAPABLE_SNAP_TYPES = new Set([
+  "grid",
+  "grid_relative",
+  "grid_cursor",
+  "events_grid_cursor",
+  "shuffle",
+]);
+const CURSOR_CAPABLE_SNAP_TYPES = new Set([
+  "cursor",
+  "grid_cursor",
+  "events_cursor",
+  "events_grid_cursor",
+]);
 const CLIP_COLOR_OPTIONS = [
   { label: "Blue", color: "#4361ee" },
   { label: "Teal", color: "#2dd4bf" },
@@ -121,7 +231,13 @@ interface TimelineProps {
 type WaveformCache = Map<string, WaveformPeak[]>;
 
 // Recording waveform cache (trackId -> peaks + width at fetch time)
-type RecordingWaveformData = { peaks: WaveformPeak[]; widthPixels: number };
+type RecordingWaveformData = {
+  peaks: WaveformPeak[];
+  widthPixels: number;
+  samplesPerPixel: number;
+  sampleRate: number;
+  recordingStartTime: number;
+};
 type RecordingWaveformCache = Map<string, RecordingWaveformData>;
 const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
 const EXTERNAL_MEDIA_EXTENSIONS = new Set([
@@ -171,6 +287,24 @@ const getExternalMediaFileExtension = (file: { extension?: string; name: string 
   if (!raw) return "";
   return raw.startsWith(".") ? raw : `.${raw}`;
 };
+
+const getExternalMediaFileKey = (file: { path?: string; name: string }) =>
+  (file.path || file.name).replace(/\\/g, "/").toLowerCase();
+
+const dedupeExternalMediaFiles = <T extends { path?: string; name: string }>(files: T[]): T[] => {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = getExternalMediaFileKey(file);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const getExternalMediaDropKey = (
+  dragId: string | undefined,
+  files: Array<{ path?: string; name: string }>,
+) => `${dragId || "drop"}:${files.map(getExternalMediaFileKey).join("|")}`;
 
 const getExternalMediaKind = (file: { extension?: string; name: string }): ExternalMediaKind =>
   EXTERNAL_MIDI_EXTENSIONS.has(getExternalMediaFileExtension(file)) ? "midi" : "audio";
@@ -269,16 +403,26 @@ type TimelineDragState = {
   axisLockRequested?: boolean;
   axisLock?: TimelineDragAxisLock | null;
   copyOnDrag?: boolean;
+  snapBypassRequested?: boolean;
+  preserveTimeOnDragRequested?: boolean;
+  mouseBehaviorProfileId?: string;
+  automationFollowInverted?: boolean;
+  resizeAction?: MouseModifierActionFor<"clip_resize">;
   previewStartTime?: number;
   ghostX?: number;
   ghostY?: number;
   isFadeDrag?: boolean;
+  fadeAction?: MouseModifierActionFor<"fade_handle">;
+  originalFadeIn?: number;
+  originalFadeOut?: number;
   multiClipInfo?: Array<{
     clipId: string;
     trackIndex: number;
     originalStartTime: number;
+    duration: number;
     isMidi: boolean;
   }>;
+  snapClipGeometry?: TimelineClipSnapShape[];
 };
 
 function getNewTrackTypeForTimelineClip(isMidi: boolean): "audio" | "midi" {
@@ -304,8 +448,16 @@ type AutomationDrawState = {
   oldTrackWrite: boolean;
   oldLaneRead: boolean;
   oldLaneMode: Track["automationLanes"][number]["mode"];
+  originalIsModified: boolean;
   lastPoint: AutomationPoint;
 };
+
+type TimelineContextWheelEditTarget =
+  | { kind: "automation-lane"; trackId: string; laneId: string }
+  | { kind: "clip-fade"; clipId: string; side: "in" | "out" }
+  | { kind: "clip-volume"; clipId: string }
+  | { kind: "clip-nudge"; clipId: string }
+  | { kind: "track-reorder"; trackId: string };
 
 const createEmptyTimelineDragState = (): TimelineDragState => ({
   type: null,
@@ -321,8 +473,71 @@ const createEmptyTimelineDragState = (): TimelineDragState => ({
   axisLockRequested: false,
   axisLock: null,
   copyOnDrag: false,
+  snapBypassRequested: false,
+  preserveTimeOnDragRequested: false,
+  mouseBehaviorProfileId: "openstudio",
+  automationFollowInverted: false,
+  resizeAction: "resize",
   previewStartTime: 0,
 });
+
+function getTimelineGestureClipIds(gesture: TimelineDragState): string[] {
+  if (gesture.multiClipInfo && gesture.multiClipInfo.length > 0) {
+    return [...new Set(gesture.multiClipInfo.map((clip) => clip.clipId))];
+  }
+  return gesture.clipId ? [gesture.clipId] : [];
+}
+
+function resolveLiveMouseModifierAction<C extends MouseModifierContext>(
+  event: PointerModifierEventLike,
+  context: C,
+): MouseModifierActionFor<C> {
+  const state = useDAWStore.getState();
+  const platform = getShortcutPlatform();
+  const behaviorProfile = getMouseBehaviorProfile(
+    state.mouseBehaviorProfileId,
+    platform,
+  );
+  return resolveMouseModifierAction(event, context, {
+    platform: toMouseBehaviorPlatform(platform),
+    profile: behaviorProfile.modifiers,
+    overrides: state.mouseModifiers as MouseModifierOverrideMap,
+  });
+}
+
+function notifySafeMouseModifierNoop(
+  context: MouseModifierContext,
+  action: MouseModifierActionFor<MouseModifierContext>,
+): boolean {
+  const noOp = getSafeMouseModifierNoop(context, action);
+  if (!noOp) return false;
+  useDAWStore.getState().showToast(noOp.reason, "info");
+  return true;
+}
+
+function isAutomationPointCopyAction(
+  action: MouseModifierActionFor<"automation_point">,
+): boolean {
+  return action === "copy" || action === "copy_constrain_axis";
+}
+
+function cycleTimelineClipFadeShape(
+  clipId: string,
+  side: "in" | "out",
+): boolean {
+  const state = useDAWStore.getState();
+  for (const track of state.tracks) {
+    const clip = track.clips.find((candidate) => candidate.id === clipId);
+    if (!clip) continue;
+    if (side === "in") {
+      state.setClipFadeInShape(clipId, getNextClipFadeShape(clip.fadeInShape));
+    } else {
+      state.setClipFadeOutShape(clipId, getNextClipFadeShape(clip.fadeOutShape));
+    }
+    return true;
+  }
+  return false;
+}
 
 const cloneTimelineGestureTracks = (tracks: Track[]): Track[] =>
   tracks.map((track) => ({
@@ -341,6 +556,10 @@ const cloneTimelineGestureTracks = (tracks: Track[]): Track[] =>
             ccEvents: clip.quantizeBackup.ccEvents?.map((event) => ({ ...event })),
           }
         : clip.quantizeBackup,
+    })),
+    automationLanes: track.automationLanes.map((lane) => ({
+      ...lane,
+      points: lane.points.map((point) => ({ ...point })),
     })),
   }));
 
@@ -366,6 +585,15 @@ const timelineGestureSignature = (tracks: Track[]) =>
         loopOffset: clip.loopOffset,
         muted: !!clip.muted,
       })),
+      automationLanes: track.automationLanes.map((lane) => ({
+        id: lane.id,
+        param: lane.param,
+        points: lane.points.map((point, index) => ({
+          id: getAutomationPointId(point, index),
+          time: point.time,
+          value: point.value,
+        })),
+      })),
     })),
   );
 
@@ -373,7 +601,11 @@ const clampAutomationValue = (value: number) =>
   Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 
 const cloneAutomationPoints = (points: AutomationPoint[] = []) =>
-  points.map((point) => ({ time: point.time, value: point.value }));
+  points.map((point, index) => ({
+    id: getAutomationPointId(point, index),
+    time: point.time,
+    value: point.value,
+  }));
 
 const mergeAutomationDrawPoints = (
   basePoints: AutomationPoint[],
@@ -386,6 +618,7 @@ const mergeAutomationDrawPoints = (
 
   for (const addition of additions) {
     const normalized = {
+      id: addition.id || createAutomationPointId(),
       time: Math.max(0, addition.time),
       value: clampAutomationValue(addition.value),
     };
@@ -408,6 +641,7 @@ const interpolateAutomationDrawSegment = (
   for (let step = 1; step <= steps; step += 1) {
     const t = step / steps;
     points.push({
+      id: createAutomationPointId(),
       time: from.time + (to.time - from.time) * t,
       value: clampAutomationValue(from.value + (to.value - from.value) * t),
     });
@@ -427,6 +661,12 @@ export function Timeline({
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
   const [waveformPreviewCache, setWaveformPreviewCache] = useState<WaveformCache>(new Map());
   const [recordingWaveformCache, setRecordingWaveformCache] = useState<RecordingWaveformCache>(new Map());
+  // Canvas-only per-track view state: these scale-strip gestures do not edit
+  // project/audio data, so they intentionally stay outside command undo.
+  const [waveformScaleViews, setWaveformScaleViews] = useState<Record<
+    string,
+    TimelineVerticalScaleView
+  >>({});
   const waveformCacheRef = useRef(waveformCache);
   waveformCacheRef.current = waveformCache;
   const recordingWaveformCacheRef = useRef(recordingWaveformCache);
@@ -458,6 +698,24 @@ export function Timeline({
     screenY: number;
   } | null>(null);
   const automationDrawRef = useRef<AutomationDrawState | null>(null);
+  const automationPointGestureRef = useRef<{
+    key: string;
+    action: MouseModifierActionFor<"automation_point">;
+    originalX: number;
+    originalY: number;
+    originalTime: number;
+    originalValue: number;
+    axisLock: AutomationPointDragAxis;
+  } | null>(null);
+  const fadeHandleGestureRef = useRef<{
+    key: string;
+    clipId: string;
+    action: MouseModifierActionFor<"fade_handle">;
+    startPointerX: number;
+    originalFadeIn: number;
+    originalFadeOut: number;
+  } | null>(null);
+  const clipVolumeGestureRef = useRef<{ clipId: string } | null>(null);
 
   // Clip context menu state
   const [clipContextMenu, setClipContextMenu] =
@@ -475,7 +733,6 @@ export function Timeline({
   const finalizingTimelineClipGestureRef = useRef(false);
   const timelineGestureUndoRef = useRef<TimelineGestureUndoSnapshot | null>(null);
   const externalMidiDragRef = useRef<{ clipId: string } | null>(null);
-  const suppressShiftGainClickRef = useRef<{ clipId: string; at: number } | null>(null);
 
   const setTimelineDragState = useCallback((
     next: TimelineDragState | ((previous: TimelineDragState) => TimelineDragState),
@@ -512,6 +769,7 @@ export function Timeline({
       clipId: string;
       trackIndex: number;
       originalStartTime: number;
+      duration: number;
       isMidi: boolean;
     }>;
   }>({
@@ -540,6 +798,7 @@ export function Timeline({
     height: number;   // clip height (px)
     color: string;    // clip color
     visible: boolean;
+    guideX?: number;
   } | null>(null);
   const [snapGhostRender, setSnapGhostRender] = useState<typeof snapGhostRef.current>(null);
 
@@ -556,7 +815,11 @@ export function Timeline({
 
   // Reset drag state helper function
   const resetDragState = useCallback(() => {
-    setTimelineDragState(createEmptyTimelineDragState());
+    const emptyState = createEmptyTimelineDragState();
+    // Update the imperative authority immediately. React state may be deferred,
+    // but store subscriptions and async finalizers must see cancellation now.
+    dragStateRef.current = emptyState;
+    setTimelineDragState(emptyState);
     timelineGestureUndoRef.current = null;
     setShowGhostTrack(false);
     // Clear snap ghost preview
@@ -582,6 +845,7 @@ export function Timeline({
   const restoreTimelineGestureUndo = useCallback(() => {
     const before = timelineGestureUndoRef.current;
     if (!before) return;
+    const currentTracks = cloneTimelineGestureTracks(useDAWStore.getState().tracks);
 
     useDAWStore.setState({
       tracks: cloneTimelineGestureTracks(before.tracks),
@@ -589,6 +853,7 @@ export function Timeline({
       selectedClipIds: [...before.selectedClipIds],
       isModified: before.isModified,
     });
+    syncAutomationTrackSnapshots(currentTracks, before.tracks);
   }, []);
 
   const commitTimelineGestureUndo = useCallback((description: string) => {
@@ -608,34 +873,40 @@ export function Timeline({
       return;
     }
 
-    const syncAfterState = () => {
-      const syncResult = useDAWStore.getState().syncClipsWithBackend?.();
-      if (syncResult?.catch) syncResult.catch(() => {});
+    syncAutomationTrackSnapshots(before.tracks, after.tracks);
+    let backendQueue = Promise.resolve();
+    const enqueueBackendReconciliation = (previousTracks: readonly Track[], nextTracks: readonly Track[]) => {
+      const reconcile = () => reconcileTimelineTrackTopology(previousTracks, nextTracks, {
+        addTrack: (track) => syncTrackCoreToBackend(track, { includeAddTrack: true }),
+        syncContent: async () => {
+          syncAutomationTrackSnapshots(previousTracks as Track[], nextTracks as Track[]);
+          await useDAWStore.getState().syncClipsWithBackend?.();
+        },
+        removeTrack: async (track) => {
+          await nativeBridge.removeTrack(track.id).catch(() => false);
+        },
+      });
+      backendQueue = backendQueue
+        .then(reconcile, reconcile)
+        .catch((error) => {
+          console.error("[Timeline] Failed to reconcile timeline gesture backend state", error);
+        });
     };
 
-    commandManager.push({
-      type: "TIMELINE_CLIP_GESTURE",
-      description,
-      timestamp: Date.now(),
-      execute: () => {
+    commandManager.push(createTimelineGestureUndoCommand(description, before, after, {
+      cloneTracks: (snapshotTracks) => cloneTimelineGestureTracks(snapshotTracks as Track[]),
+      applySnapshot: (snapshot) => {
         useDAWStore.setState({
-          tracks: cloneTimelineGestureTracks(after.tracks),
-          selectedClipId: after.selectedClipId,
-          selectedClipIds: [...after.selectedClipIds],
-          isModified: true,
+          tracks: snapshot.tracks as Track[],
+          selectedClipId: snapshot.selectedClipId,
+          selectedClipIds: [...snapshot.selectedClipIds],
+          isModified: snapshot.isModified,
         });
-        syncAfterState();
       },
-      undo: () => {
-        useDAWStore.setState({
-          tracks: cloneTimelineGestureTracks(before.tracks),
-          selectedClipId: before.selectedClipId,
-          selectedClipIds: [...before.selectedClipIds],
-          isModified: true,
-        });
-        syncAfterState();
+      afterApply: (previous, next) => {
+        enqueueBackendReconciliation(previous.tracks, next.tracks);
       },
-    });
+    }));
 
     useDAWStore.setState({
       canUndo: commandManager.canUndo(),
@@ -645,23 +916,80 @@ export function Timeline({
     timelineGestureUndoRef.current = null;
   }, []);
 
+  const isTimelineGestureEditLocked = useCallback((gesture: TimelineDragState) => (
+    isTimelineClipGestureLocked(
+      useDAWStore.getState(),
+      getTimelineGestureClipIds(gesture),
+    )
+  ), []);
+
+  const cancelActiveTimelineClipGesture = useCallback(() => {
+    const activeGesture = dragStateRef.current;
+    const fadeHandle = fadeHandleGestureRef.current;
+    const volumeGesture = clipVolumeGestureRef.current;
+    const slipGesture = slipEditRef.current;
+    const hadTimelineDrag = activeGesture.type !== null;
+
+    // Clear imperative ownership before touching the store. Zustand listeners
+    // run synchronously, so leaving these refs active could re-enter cancel.
+    dragStateRef.current = createEmptyTimelineDragState();
+    fadeHandleGestureRef.current = null;
+    clipVolumeGestureRef.current = null;
+    slipEditRef.current = null;
+
+    if (hadTimelineDrag && !activeGesture.isFadeDrag) {
+      restoreTimelineGestureUndo();
+    } else if (slipGesture) {
+      const originalIsModified = slipGesture.originalIsModified;
+      useDAWStore.setState((state) => ({
+        tracks: state.tracks.map((track) => ({
+          ...track,
+          clips: slipGesture.isMidi
+            ? track.clips
+            : track.clips.map((clip) => clip.id === slipGesture.clipId
+              ? { ...clip, offset: slipGesture.originalOffset }
+              : clip),
+          midiClips: slipGesture.isMidi
+            ? track.midiClips.map((clip) => clip.id === slipGesture.clipId
+              ? { ...clip, offset: slipGesture.originalOffset }
+              : clip)
+            : track.midiClips,
+        })),
+        isModified: originalIsModified ?? state.isModified,
+      }));
+    }
+
+    const fadeClipId = fadeHandle?.clipId
+      ?? (activeGesture.isFadeDrag ? activeGesture.clipId : null);
+    if (fadeClipId) useDAWStore.getState().cancelClipFadeEdit(fadeClipId);
+    if (volumeGesture) {
+      useDAWStore.getState().cancelClipVolumeEdit(volumeGesture.clipId);
+    }
+
+    if (hadTimelineDrag || slipGesture) resetDragState();
+  }, [resetDragState, restoreTimelineGestureUndo]);
+
   const previewResizeTimelineClip = useCallback((
     clipId: string,
     isMidi: boolean,
     nextValues: { startTime: number; duration: number; offset: number },
   ) => {
-    useDAWStore.setState((state) => ({
-      tracks: state.tracks.map((track) => ({
-        ...track,
-        clips: isMidi
-          ? track.clips
-          : track.clips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip),
-        midiClips: isMidi
-          ? track.midiClips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip)
-          : track.midiClips,
+    return runTimelineClipGestureMutation(
+      useDAWStore.getState(),
+      [clipId],
+      () => useDAWStore.setState((state) => ({
+        tracks: state.tracks.map((track) => ({
+          ...track,
+          clips: isMidi
+            ? track.clips
+            : track.clips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip),
+          midiClips: isMidi
+            ? track.midiClips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip)
+            : track.midiClips,
+        })),
+        isModified: true,
       })),
-      isModified: true,
-    }));
+    );
   }, []);
 
   const commitPreviewedResizeTimelineClip = useCallback((
@@ -669,12 +997,13 @@ export function Timeline({
     isMidi: boolean,
     originalValues: { startTime: number; duration: number; offset: number },
   ) => {
+    if (isTimelineClipGestureLocked(useDAWStore.getState(), [clipId])) return false;
     let finalClip: AudioClip | MIDIClip | undefined;
     for (const track of useDAWStore.getState().tracks) {
       finalClip = (isMidi ? track.midiClips : track.clips).find((candidate) => candidate.id === clipId);
       if (finalClip) break;
     }
-    if (!finalClip) return;
+    if (!finalClip) return false;
 
     const finalValues = {
       startTime: finalClip.startTime,
@@ -686,16 +1015,43 @@ export function Timeline({
       Math.abs(finalValues.startTime - originalValues.startTime) > 0.000001 ||
       Math.abs(finalValues.duration - originalValues.duration) > 0.000001 ||
       Math.abs(finalValues.offset - originalValues.offset) > 0.000001;
-    if (!changed) return;
+    if (!changed) return true;
 
-    previewResizeTimelineClip(clipId, isMidi, originalValues);
+    if (!previewResizeTimelineClip(clipId, isMidi, originalValues)) return false;
     useDAWStore.getState().resizeClip(
       clipId,
       finalValues.startTime,
       finalValues.duration,
       finalValues.offset,
     );
+    return true;
   }, [previewResizeTimelineClip]);
+
+  const cancelActiveAutomationEdit = useCallback(() => {
+    const draw = automationDrawRef.current;
+    automationDrawRef.current = null;
+    automationPointGestureRef.current = null;
+    const state = useDAWStore.getState();
+    state.cancelAutomationPointEdit();
+    if (!draw) return;
+    useDAWStore.setState((current) => ({
+      tracks: current.tracks.map((track) => track.id !== draw.trackId
+        ? track
+        : {
+            ...track,
+            automationLanes: track.automationLanes.map((lane) => lane.id === draw.laneId
+              ? { ...lane, points: cloneAutomationPoints(draw.originalPoints) }
+              : lane),
+          }),
+      isModified: draw.originalIsModified,
+    }));
+    const restoredLane = useDAWStore.getState().tracks
+      .find((track) => track.id === draw.trackId)
+      ?.automationLanes.find((lane) => lane.id === draw.laneId);
+    if (restoredLane) syncAutomationLaneToBackend(draw.trackId, restoredLane);
+  }, []);
+
+  const finalizeSlipTimelineGestureRef = useRef<() => boolean>(() => false);
 
   // Global mouseup and blur handlers to prevent stuck drag/marquee state
   useEffect(() => {
@@ -709,7 +1065,32 @@ export function Timeline({
       setMarqueeZoomRect(null);
     };
 
-    const handleGlobalMouseUp = () => {
+    const resetRangeGestures = () => {
+      setTimeSelectionDrag(null);
+      setRazorDrag(null);
+    };
+
+    const handleGlobalMouseUp = (event: MouseEvent) => {
+      const activeFadeHandle = fadeHandleGestureRef.current;
+      if (activeFadeHandle) {
+        // A click that never crosses Konva's drag threshold has no dragend.
+        // Finalize here so its fade snapshot cannot leak into a later gesture.
+        if (isTimelineClipGestureLocked(useDAWStore.getState(), [activeFadeHandle.clipId])) {
+          cancelActiveTimelineClipGesture();
+        } else {
+          fadeHandleGestureRef.current = null;
+          useDAWStore.getState().commitClipFadeEdit(activeFadeHandle.clipId);
+        }
+      }
+      const activeVolumeGesture = clipVolumeGestureRef.current;
+      if (activeVolumeGesture) {
+        if (isTimelineClipGestureLocked(useDAWStore.getState(), [activeVolumeGesture.clipId])) {
+          cancelActiveTimelineClipGesture();
+        } else {
+          clipVolumeGestureRef.current = null;
+          useDAWStore.getState().commitClipVolumeEdit(activeVolumeGesture.clipId);
+        }
+      }
       // Konva's dragend owns clip gesture finalization. Resetting here can
       // clear the drag state before a MIDI clip move/resize has committed.
       if (marqueeRef.current) {
@@ -718,35 +1099,95 @@ export function Timeline({
       if (marqueeZoomRef.current) {
         resetMarqueeZoom();
       }
-      // Slip edits are also finalized by the Stage mouseup handler.
+      if (automationPointGestureRef.current) {
+        automationPointGestureRef.current = null;
+        useDAWStore.getState().cancelAutomationPointEdit();
+      }
+      finalizeSlipTimelineGestureRef.current();
+      resetRangeGestures();
+      const releasedInsideTimeline = event.target instanceof Node
+        && Boolean(containerRef.current?.contains(event.target));
+      if (!releasedInsideTimeline) timelinePointerActionRef.current = null;
     };
 
     const handleWindowBlur = () => {
-      if (dragState.type !== null) {
-        console.log("[Timeline] Window blur - resetting drag state");
-        resetDragState();
-      }
+      cancelActiveTimelineClipGesture();
+      cancelActiveAutomationEdit();
       if (marqueeRef.current) {
         resetMarquee();
       }
       if (marqueeZoomRef.current) {
         resetMarqueeZoom();
       }
-      // Reset slip edit state on window blur
-      if (slipEditRef.current) {
-        slipEditRef.current = null;
-      }
+      resetRangeGestures();
+      timelinePointerActionRef.current = null;
+    };
+
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== "Escape"
+        || (
+          dragStateRef.current.type === null
+          && !fadeHandleGestureRef.current
+          && !clipVolumeGestureRef.current
+          && !slipEditRef.current
+          && !automationPointGestureRef.current
+          && !automationDrawRef.current
+          && !timelinePointerActionRef.current
+          && !marqueeRef.current
+          && !marqueeZoomRef.current
+        )
+      ) return;
+      event.preventDefault();
+      cancelActiveAutomationEdit();
+      cancelActiveTimelineClipGesture();
+      resetMarquee();
+      resetMarqueeZoom();
+      resetRangeGestures();
+      timelinePointerActionRef.current = null;
     };
 
     // Always listen — handlers are cheap no-ops when nothing is active
     window.addEventListener("mouseup", handleGlobalMouseUp);
     window.addEventListener("blur", handleWindowBlur);
+    const handlePointerCancel = () => {
+      cancelActiveAutomationEdit();
+      cancelActiveTimelineClipGesture();
+      resetMarquee();
+      resetMarqueeZoom();
+      resetRangeGestures();
+      timelinePointerActionRef.current = null;
+    };
+    window.addEventListener("pointercancel", handlePointerCancel);
+    window.addEventListener("keydown", handleWindowKeyDown);
 
     return () => {
+      cancelActiveTimelineClipGesture();
+      cancelActiveAutomationEdit();
       window.removeEventListener("mouseup", handleGlobalMouseUp);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("pointercancel", handlePointerCancel);
+      window.removeEventListener("keydown", handleWindowKeyDown);
     };
-  }, [dragState.type, resetDragState]);
+  }, [cancelActiveAutomationEdit, cancelActiveTimelineClipGesture]);
+
+  useEffect(() => useDAWStore.subscribe((state) => {
+    const activeGesture = dragStateRef.current;
+    if (
+      activeGesture.type !== null
+      && isTimelineClipGestureLocked(state, getTimelineGestureClipIds(activeGesture))
+    ) {
+      cancelActiveTimelineClipGesture();
+      return;
+    }
+
+    const activeClipId = fadeHandleGestureRef.current?.clipId
+      ?? clipVolumeGestureRef.current?.clipId
+      ?? slipEditRef.current?.clipId;
+    if (activeClipId && isTimelineClipGestureLocked(state, [activeClipId])) {
+      cancelActiveTimelineClipGesture();
+    }
+  }), [cancelActiveTimelineClipGesture]);
 
   // Time selection drag state
   const [timeSelectionDrag, setTimeSelectionDrag] = useState<{
@@ -773,11 +1214,16 @@ export function Timeline({
     x: number; y: number; width: number; height: number;
   } | null>(null);
   const marqueeJustCompletedRef = useRef(false);
+  const timelinePointerActionRef = useRef<{
+    action: MouseModifierActionFor<"timeline_click">;
+    startTime: number;
+    dragged: boolean;
+  } | null>(null);
 
   // Crosshair cursor position (screen coordinates relative to Stage)
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
 
-  // Slip editing state (Alt+drag on clip adjusts offset instead of position)
+  // Slip editing state (the active mouse profile selects the gesture)
   const slipEditRef = useRef<{
     clipId: string;
     trackId: string;
@@ -787,6 +1233,7 @@ export function Timeline({
     sourceLength: number;
     clipDuration: number;
     maxOffset: number;
+    originalIsModified?: boolean;
   } | null>(null);
 
   // Split tool preview line
@@ -795,10 +1242,18 @@ export function Timeline({
 
   // Ruler interaction state (ref-based to avoid stale closures in global listeners)
   const rulerDragRef = useRef<{
-    type: "handle-pending" | "handle-drag" | "range-create" | "pending"; // pending = mousedown, not yet determined
+    type:
+      | "handle-pending"
+      | "handle-drag"
+      | "loop-create"
+      | "time-select"
+      | "zoom-create"
+      | "pending"; // pending = mousedown, not yet determined
+    action: MouseModifierActionFor<"ruler_click">;
     handle?: "start" | "end";
     startX: number; // pixel X at mousedown (relative to ruler canvas)
     startTime: number; // time at mousedown
+    currentTime?: number;
   } | null>(null);
   // Reactive state just to trigger re-renders when range changes during drag
   const [_rulerDragging, setRulerDragging] = useState(false);
@@ -821,7 +1276,6 @@ export function Timeline({
     setClipVolume,
     beginClipVolumeEdit,
     commitClipVolumeEdit,
-    setClipFades,
     copyClip,
     cutClip,
     pasteClip,
@@ -865,6 +1319,12 @@ export function Timeline({
     addClipGainPoint,
     moveClipGainPoint,
     removeClipGainPoint,
+    mouseBehaviorProfileId,
+    selectedAutomationTarget,
+    envelopesLocked,
+    itemsLocked,
+    keyboardShortcutProfileId,
+    customShortcuts,
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
@@ -883,7 +1343,6 @@ export function Timeline({
       setClipVolume: state.setClipVolume,
       beginClipVolumeEdit: state.beginClipVolumeEdit,
       commitClipVolumeEdit: state.commitClipVolumeEdit,
-      setClipFades: state.setClipFades,
       copyClip: state.copyClip,
       cutClip: state.cutClip,
       pasteClip: state.pasteClip,
@@ -927,7 +1386,17 @@ export function Timeline({
       addClipGainPoint: state.addClipGainPoint,
       moveClipGainPoint: state.moveClipGainPoint,
       removeClipGainPoint: state.removeClipGainPoint,
+      mouseBehaviorProfileId: state.mouseBehaviorProfileId,
+      selectedAutomationTarget: state.selectedAutomationTarget,
+      envelopesLocked: state.globalLocked || state.lockSettings.envelopes,
+      itemsLocked: state.globalLocked || state.lockSettings.items,
+      keyboardShortcutProfileId: state.keyboardShortcutProfileId,
+      customShortcuts: state.customShortcuts,
     }))
+  );
+  const shortcut = useCallback(
+    (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
+    [customShortcuts, keyboardShortcutProfileId],
   );
 
   // Use selectors for transport values - but NOT currentTime (causes 60fps re-renders)
@@ -1073,6 +1542,8 @@ export function Timeline({
     }),
     [tracks, trackYs, trackHeight, pixelsPerSecond, scrollX],
   );
+  const timelineClipHitMapRef = useRef(timelineClipHitMap);
+  timelineClipHitMapRef.current = timelineClipHitMap;
 
   // Refs for ruler drag to avoid stale closures in global listeners
   const projectRangeRef = useRef(projectRange);
@@ -1121,7 +1592,22 @@ export function Timeline({
     return times.filter((time) => Number.isFinite(time) && time >= 0);
   }, [markers, regions, tracks]);
 
-  const snapTimelineTime = useCallback((time: number, originalTime?: number) => {
+  const timelineNonClipSnapEventTimes = useMemo(() => {
+    const times: number[] = [];
+    for (const marker of markers || []) times.push(marker.time);
+    for (const region of regions || []) times.push(region.startTime, region.endTime);
+    return times.filter((time) => Number.isFinite(time) && time >= 0);
+  }, [markers, regions]);
+  const timelineSnapEventTimesRef = useRef(timelineSnapEventTimes);
+  timelineSnapEventTimesRef.current = timelineSnapEventTimes;
+  const timelineNonClipSnapEventTimesRef = useRef(timelineNonClipSnapEventTimes);
+  timelineNonClipSnapEventTimesRef.current = timelineNonClipSnapEventTimes;
+
+  const snapTimelineTime = useCallback((
+    time: number,
+    originalTime?: number,
+    eventTimes: readonly number[] = timelineSnapEventTimesRef.current,
+  ) => {
     const preset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
     return snapTimeByType({
       time,
@@ -1134,9 +1620,9 @@ export function Timeline({
       quantizeGridSize: preset.gridSize,
       pixelsPerSecond: pixelsPerSecondRef.current,
       cursorTime: useDAWStore.getState().transport.currentTime,
-      eventTimes: timelineSnapEventTimes,
+      eventTimes,
     });
-  }, [timelineSnapEventTimes]);
+  }, []);
 
   // Handle container resize using ResizeObserver for accurate detection
   useEffect(() => {
@@ -1400,8 +1886,135 @@ export function Timeline({
   contentHeightRef.current = contentHeight;
   const dimensionsWidthRef = useRef(dimensions.width);
   dimensionsWidthRef.current = dimensions.width;
+  const availableHeightRef = useRef(availableHeight);
+  availableHeightRef.current = availableHeight;
   const setTrackWaveformZoomRef = useRef(setTrackWaveformZoom);
   setTrackWaveformZoomRef.current = setTrackWaveformZoom;
+  const timelineContextWheelEditControllerRef = useRef<
+    WheelEditBurstController<TimelineContextWheelEditTarget> | null
+  >(null);
+  if (timelineContextWheelEditControllerRef.current === null) {
+    timelineContextWheelEditControllerRef.current = createWheelEditBurstController({
+      idleMs: 180,
+      getKey: (target) => {
+        if (target.kind === "automation-lane") {
+          return `${target.kind}:${target.trackId}:${target.laneId}`;
+        }
+        if (target.kind === "track-reorder") {
+          return `${target.kind}:${target.trackId}`;
+        }
+        if (target.kind === "clip-fade") {
+          return `${target.kind}:${target.clipId}:${target.side}`;
+        }
+        return `${target.kind}:${target.clipId}`;
+      },
+      onBegin: (target) => {
+        const state = useDAWStore.getState();
+        if (target.kind === "automation-lane") {
+          state.beginAutomationLaneHeightEdit(target.trackId, target.laneId);
+        } else if (target.kind === "track-reorder") {
+          state.beginTrackReorderEdit(target.trackId);
+        } else if (target.kind === "clip-fade") {
+          state.beginClipFadeEdit(target.clipId);
+        } else if (target.kind === "clip-nudge") {
+          state.beginClipNudgeEdit(target.clipId);
+        } else {
+          state.beginClipVolumeEdit(target.clipId);
+        }
+      },
+      onCommit: (target) => {
+        const state = useDAWStore.getState();
+        if (target.kind === "automation-lane") {
+          state.commitAutomationLaneHeightEdit(target.trackId, target.laneId);
+        } else if (target.kind === "track-reorder") {
+          state.commitTrackReorderEdit(target.trackId);
+        } else if (target.kind === "clip-fade") {
+          state.commitClipFadeEdit(target.clipId);
+        } else if (target.kind === "clip-nudge") {
+          state.commitClipNudgeEdit(target.clipId);
+        } else {
+          state.commitClipVolumeEdit(target.clipId);
+        }
+      },
+    });
+  }
+
+  const createTimelineContextWheelAccumulator = useCallback((quantum: number) => (
+    createWheelDeltaAccumulator({
+      quantum,
+      idleMs: 180,
+      onReset: ({ hadOutput }) => {
+        if (hadOutput) timelineContextWheelEditControllerRef.current?.commit();
+      },
+    })
+  ), []);
+  const timelineDiscreteWheelAccumulatorRef = useRef<WheelDeltaAccumulator | null>(null);
+  if (timelineDiscreteWheelAccumulatorRef.current === null) {
+    timelineDiscreteWheelAccumulatorRef.current = createTimelineContextWheelAccumulator(100);
+  }
+  const timelineSmoothWheelAccumulatorRef = useRef<WheelDeltaAccumulator | null>(null);
+  if (timelineSmoothWheelAccumulatorRef.current === null) {
+    timelineSmoothWheelAccumulatorRef.current = createTimelineContextWheelAccumulator(1);
+  }
+
+  useEffect(() => {
+    if (timelineDiscreteWheelAccumulatorRef.current?.getState().disposed) {
+      timelineDiscreteWheelAccumulatorRef.current = createTimelineContextWheelAccumulator(100);
+    }
+    if (timelineSmoothWheelAccumulatorRef.current?.getState().disposed) {
+      timelineSmoothWheelAccumulatorRef.current = createTimelineContextWheelAccumulator(1);
+    }
+    return () => {
+      timelineDiscreteWheelAccumulatorRef.current?.dispose();
+      timelineSmoothWheelAccumulatorRef.current?.dispose();
+      timelineContextWheelEditControllerRef.current?.dispose();
+    };
+  }, [createTimelineContextWheelAccumulator]);
+
+  const resolveTimelinePointerSplitTime = useCallback((
+    stageX: number,
+    ctrlBypass: boolean,
+  ) => {
+    let splitTime = Math.max(
+      0,
+      (stageX + scrollXRef.current) / Math.max(1, pixelsPerSecondRef.current),
+    );
+    if (isSnapActive(ctrlBypass)) {
+      splitTime = snapTimelineTime(splitTime, splitTime);
+    }
+    return splitTime;
+  }, [isSnapActive, snapTimelineTime]);
+
+  const openTimelineClipContextMenu = useCallback((options: {
+    clientX: number;
+    clientY: number;
+    stageX: number;
+    clipId: string;
+    trackId: string;
+    kind: "audio" | "midi";
+    ctrlBypass: boolean;
+  }) => {
+    const selection = useDAWStore.getState();
+    if (!shouldPreserveClipContextSelection(selection, options.clipId, options.trackId)) {
+      useDAWStore.setState({
+        selectedClipId: options.clipId,
+        selectedClipIds: [options.clipId],
+        selectedTrackId: null,
+        selectedTrackIds: [],
+        lastSelectedTrackId: null,
+      });
+    }
+
+    setBackgroundContextMenu(null);
+    setClipContextMenu({
+      x: options.clientX,
+      y: options.clientY,
+      clipId: options.clipId,
+      trackId: options.trackId,
+      kind: options.kind,
+      time: resolveTimelinePointerSplitTime(options.stageX, options.ctrlBypass),
+    });
+  }, [resolveTimelinePointerSplitTime]);
 
   const getAutomationDrawHit = useCallback((stageY: number) => {
     const absoluteY = stageY + scrollYRef.current;
@@ -1420,6 +2033,8 @@ export function Timeline({
     const lane = visibleLanes[hit.laneIndex];
     if (!lane) return null;
 
+    const laneHeight = getAutomationLaneHeight(lane);
+
     return {
       track,
       lane,
@@ -1427,7 +2042,8 @@ export function Timeline({
       laneIndex: hit.laneIndex,
       laneTop: (trackYsRef.current[hit.trackIndex] ?? 0)
         + trackHeightRef.current
-        + hit.laneIndex * AUTOMATION_LANE_HEIGHT,
+        + getAutomationLaneOffset(visibleLanes, hit.laneIndex),
+      laneHeight,
     };
   }, []);
 
@@ -1435,18 +2051,32 @@ export function Timeline({
     stageX: number,
     stageY: number,
     laneTop: number,
+    laneHeight: number,
   ): AutomationPoint => {
     const time = Math.max(0, (stageX + scrollXRef.current) / Math.max(1, pixelsPerSecondRef.current));
     const absoluteY = stageY + scrollYRef.current;
-    const value = 1 - ((absoluteY - laneTop) / AUTOMATION_LANE_HEIGHT);
-    return { time, value: clampAutomationValue(value) };
+    const value = 1 - ((absoluteY - laneTop) / laneHeight);
+    return { id: createAutomationPointId(), time, value: clampAutomationValue(value) };
   }, []);
 
   const beginAutomationLaneDraw = useCallback((stageX: number, stageY: number) => {
+    if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) return false;
     const hit = getAutomationDrawHit(stageY);
     if (!hit) return false;
 
-    const firstPoint = automationPointFromStagePosition(stageX, stageY, hit.laneTop);
+    activateShortcutContext({ kind: "automation" });
+    useDAWStore.getState().setSelectedAutomationLane({
+      kind: "track",
+      trackId: hit.track.id,
+      laneId: hit.lane.id,
+    });
+
+    const firstPoint = automationPointFromStagePosition(
+      stageX,
+      stageY,
+      hit.laneTop,
+      hit.laneHeight,
+    );
     const originalPoints = cloneAutomationPoints(hit.lane.points);
     const nextPoints = mergeAutomationDrawPoints(
       originalPoints,
@@ -1469,7 +2099,8 @@ export function Timeline({
       oldTrackRead,
       oldTrackWrite: hit.track.automationWriteEnabled === true,
       oldLaneRead,
-      oldLaneMode: hit.lane.mode,
+    oldLaneMode: hit.lane.mode,
+      originalIsModified: useDAWStore.getState().isModified,
       lastPoint: firstPoint,
     };
 
@@ -1480,11 +2111,24 @@ export function Timeline({
   const continueAutomationLaneDraw = useCallback((stageX: number, stageY: number) => {
     const draw = automationDrawRef.current;
     if (!draw) return false;
+    if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) {
+      cancelActiveAutomationEdit();
+      return false;
+    }
 
+    const track = tracksRef.current[draw.trackIndex];
+    const visibleLanes = track?.automationLanes.filter((lane) => lane.visible) ?? [];
+    const lane = visibleLanes[draw.laneIndex];
+    if (!lane) return false;
     const laneTop = (trackYsRef.current[draw.trackIndex] ?? 0)
       + trackHeightRef.current
-      + draw.laneIndex * AUTOMATION_LANE_HEIGHT;
-    const nextPoint = automationPointFromStagePosition(stageX, stageY, laneTop);
+      + getAutomationLaneOffset(visibleLanes, draw.laneIndex);
+    const nextPoint = automationPointFromStagePosition(
+      stageX,
+      stageY,
+      laneTop,
+      getAutomationLaneHeight(lane),
+    );
     const additions = interpolateAutomationDrawSegment(
       draw.lastPoint,
       nextPoint,
@@ -1501,11 +2145,16 @@ export function Timeline({
     draw.lastPoint = nextPoint;
     useDAWStore.getState().setAutomationLanePoints(draw.trackId, draw.laneId, nextPoints);
     return true;
-  }, [automationPointFromStagePosition]);
+  }, [automationPointFromStagePosition, cancelActiveAutomationEdit]);
 
   const finishAutomationLaneDraw = useCallback(() => {
     const draw = automationDrawRef.current;
     if (!draw) return false;
+
+    if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) {
+      cancelActiveAutomationEdit();
+      return false;
+    }
 
     automationDrawRef.current = null;
     const originalSignature = JSON.stringify(draw.originalPoints);
@@ -1530,13 +2179,14 @@ export function Timeline({
   externalMediaPreviewRef.current = externalMediaPreview;
   const externalMediaDragContextRef = useRef<ExternalMediaDragContext | null>(null);
   const requestedExternalPreviewIdsRef = useRef<Set<string>>(new Set());
+  const processedExternalDropKeysRef = useRef<Set<string>>(new Set());
 
   const getSupportedExternalMediaFiles = useCallback((files: ExternalMediaDragEvent["files"] | undefined) => {
     const inputFiles = files ?? [];
-    return inputFiles.filter((file) => {
+    return dedupeExternalMediaFiles(inputFiles.filter((file) => {
       const ext = getExternalMediaFileExtension(file);
       return EXTERNAL_MEDIA_EXTENSIONS.has(ext);
-    });
+    }));
   }, []);
 
   const getFirstSupportedExternalMediaFile = useCallback((event: ExternalMediaDragEvent) => {
@@ -1569,7 +2219,6 @@ export function Timeline({
   const resolveExternalMediaDropTarget = useCallback((
     absoluteY: number,
     mediaKind: ExternalMediaKind,
-    midiTrackCount = 1,
   ): ExternalMediaDropTarget => {
     const currentTracks = tracksRef.current;
     const currentTrackYs = trackYsRef.current;
@@ -1595,8 +2244,7 @@ export function Timeline({
 
     const hitTrack = currentTracks[hit.trackIndex];
     const needsTrackInsertion =
-      !isExternalTrackCompatible(hitTrack, mediaKind) ||
-      (mediaKind === "midi" && midiTrackCount > 1);
+      !isExternalTrackCompatible(hitTrack, mediaKind);
 
     return needsTrackInsertion
       ? { kind: "insertTrack", insertIndex: hit.trackIndex }
@@ -1658,7 +2306,7 @@ export function Timeline({
     const mediaKind = context?.filePath === file.path ? context.mediaKind : getExternalMediaKind(file);
     const midiTracks = context?.filePath === file.path ? getNonEmptyExternalMIDITracks(context.midiTracks) : [];
     const midiTrackCount = mediaKind === "midi" ? Math.max(1, context?.midiTrackCount || midiTracks.length || 1) : undefined;
-    const target = resolveExternalMediaDropTarget(absoluteY, mediaKind, midiTrackCount);
+    const target = resolveExternalMediaDropTarget(absoluteY, mediaKind);
     const firstMidiTrack = midiTracks[0];
 
     if (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost") {
@@ -1832,6 +2480,16 @@ export function Timeline({
         clearDragContext(event?.dragId);
         return;
       }
+      const dropKey = getExternalMediaDropKey(event?.dragId, mediaFiles);
+      if (processedExternalDropKeysRef.current.has(dropKey)) {
+        clearDragContext(event?.dragId);
+        return;
+      }
+      processedExternalDropKeysRef.current.add(dropKey);
+      if (processedExternalDropKeysRef.current.size > 64) {
+        const oldestKey = processedExternalDropKeysRef.current.values().next().value;
+        if (oldestKey) processedExternalDropKeysRef.current.delete(oldestKey);
+      }
 
       console.log("[audio.import] external drop committed", {
         count: mediaFiles.length,
@@ -1851,8 +2509,7 @@ export function Timeline({
           const useExisting =
             index === 0 &&
             targetTrack &&
-            isExternalTrackCompatible(targetTrack, "midi") &&
-            (preview.midiTrackCount ?? 1) <= 1;
+            isExternalTrackCompatible(targetTrack, "midi");
           const insertIndex = preview.target.kind === "insertTrack"
             ? preview.target.insertIndex + index
             : preview.target.kind === "existingTrack"
@@ -2017,35 +2674,65 @@ export function Timeline({
     currentTrackYs = trackYsRef.current,
     currentTrackHeight = trackHeightRef.current,
   ) => {
-    if (currentTracks.length === 0) return 0;
     const hit = getTrackAtY(absoluteY, currentTracks, currentTrackYs, currentTrackHeight);
-    if (hit?.isInClipArea) return hit.trackIndex;
-    if (absoluteY >= contentHeightRef.current) return currentTracks.length;
-    return hit?.trackIndex ?? Math.max(0, currentTracks.length - 1);
-  }, []);
+    return resolveTimelineDropTrackIndex(
+      absoluteY,
+      contentHeightRef.current,
+      currentTracks.length,
+      hit,
+    );
+  }, [cancelActiveAutomationEdit]);
 
-  const previewTimelineGestureFromPointer = useCallback((stageX: number, stageY: number, ctrlBypass: boolean) => {
+  const previewTimelineGestureFromPointer = useCallback((
+    stageX: number,
+    stageY: number,
+    liveModifiers?: PointerModifierEventLike,
+  ) => {
     const gesture = dragStateRef.current;
     if (!gesture.clipId || gesture.type === null || gesture.isFadeDrag) return;
+    if (isTimelineGestureEditLocked(gesture)) {
+      cancelActiveTimelineClipGesture();
+      return;
+    }
     const found = findCurrentTimelineClip(gesture.clipId);
-    if (!found) return;
+    if (!found) {
+      cancelActiveTimelineClipGesture();
+      return;
+    }
 
     const pps = pixelsPerSecondRef.current;
     const rawDeltaX = stageX - gesture.startX;
     const rawDeltaY = stageY - gesture.startY;
     const resizeDeltaTime = rawDeltaX / pps;
     const isMidi = found.kind === "midi";
+    const profiledDrag = resolveProfiledTimelineClipDrag({
+      profileId: gesture.mouseBehaviorProfileId,
+      copyOnDrag: Boolean(gesture.copyOnDrag),
+      snapBypassRequested: Boolean(gesture.snapBypassRequested),
+      preserveTimeRequested: Boolean(gesture.preserveTimeOnDragRequested),
+      axisLockRequested: Boolean(gesture.axisLockRequested),
+      axisLock: gesture.axisLock,
+      rawDeltaX,
+      rawDeltaY,
+      liveModifiers: gesture.type === "move" ? liveModifiers : undefined,
+    });
+    const effectiveSnapBypass = profiledDrag.effectiveSnapBypass;
 
     if (gesture.type === "resize-left" || gesture.type === "resize-right") {
-      const nextValues = computeTimelineResize({
+      const nextValues = computeMouseModifierTimelineResize({
         kind: gesture.type,
+        action: gesture.resizeAction === "fine"
+          || gesture.resizeAction === "symmetric"
+          || gesture.resizeAction === "stretch"
+          ? gesture.resizeAction
+          : "resize",
         isMidi,
         originalStartTime: gesture.originalStartTime,
         originalDuration: gesture.originalDuration,
         originalOffset: gesture.originalOffset,
         deltaTime: resizeDeltaTime,
         sourceLength: found.clip.sourceLength,
-        snapTime: isSnapActive(ctrlBypass)
+        snapTime: isSnapActive(effectiveSnapBypass)
           ? (time) => snapTimelineTime(time, gesture.originalStartTime)
           : undefined,
       });
@@ -2053,29 +2740,119 @@ export function Timeline({
       return;
     }
 
-    const constrainedDrag = getTimelineAxisLockedDeltas(
-      Boolean(gesture.axisLockRequested),
-      gesture.axisLock,
-      rawDeltaX,
-      rawDeltaY,
-    );
-    const deltaTime = constrainedDrag.deltaX / pps;
-    const rawStartTime = Math.max(0, gesture.originalStartTime + deltaTime);
-    const newStartTime = computeTimelineMoveStart(
-      gesture.originalStartTime,
-      deltaTime,
-      isSnapActive(ctrlBypass)
-        ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-        : undefined,
-    );
     const latestTracks = tracksRef.current;
+    const constrainedDrag = profiledDrag;
+    const horizontalSnapBlocked = !canApplyTimelineHorizontalSnap(
+      profiledDrag.axisLockRequested,
+      constrainedDrag.axisLock,
+    );
     const effectiveStageY = gesture.startY + constrainedDrag.deltaY;
     let targetTrackIdx = getTimelineDropTrackIndex(effectiveStageY + scrollYRef.current, latestTracks, trackYsRef.current, trackHeightRef.current);
-    if (gesture.axisLockRequested && constrainedDrag.axisLock !== "y") {
+    if (profiledDrag.axisLockRequested && constrainedDrag.axisLock !== "y") {
       targetTrackIdx = gesture.trackIndex ?? targetTrackIdx;
     }
     const clampedTarget = Math.max(0, targetTrackIdx);
-    const timeDelta = newStartTime - gesture.originalStartTime;
+    const trackDelta = targetTrackIdx - (gesture.trackIndex ?? found.trackIndex);
+    const multi = Boolean(gesture.multiClipInfo && gesture.multiClipInfo.length > 1);
+    const movingClips: TimelineClipSnapShape[] = multi
+      ? gesture.multiClipInfo!.map((info) => ({
+          clipId: info.clipId,
+          trackIndex: info.trackIndex,
+          startTime: info.originalStartTime,
+          duration: info.duration,
+        }))
+      : [{
+          clipId: gesture.clipId,
+          trackIndex: gesture.trackIndex ?? found.trackIndex,
+          startTime: gesture.originalStartTime,
+          duration: gesture.originalDuration,
+        }];
+    const rawTimeDelta = horizontalSnapBlocked
+      ? 0
+      : clampTimelineClipGroupDelta(movingClips, constrainedDrag.deltaX / pps);
+    const rawStartTime = gesture.originalStartTime + rawTimeDelta;
+    let timeDelta = rawTimeDelta;
+    let edgeSnapMatch: TimelineClipEdgeSnapMatch | null = null;
+    const snapActive = isSnapActive(effectiveSnapBypass) && !horizontalSnapBlocked;
+
+    if (snapActive) {
+      const snapMode = snapTypeRef.current;
+      const nonClipEventTimes = timelineNonClipSnapEventTimesRef.current;
+      const hasGenericSnapCandidate = GRID_CAPABLE_SNAP_TYPES.has(snapMode)
+        || CURSOR_CAPABLE_SNAP_TYPES.has(snapMode)
+        || (isTimelineClipEdgeSnapMode(snapMode) && nonClipEventTimes.length > 0);
+      let genericDelta = rawTimeDelta;
+      if (hasGenericSnapCandidate) {
+        const genericStartTime = snapTimelineTime(
+          rawStartTime,
+          gesture.originalStartTime,
+          nonClipEventTimes,
+        );
+        genericDelta = clampTimelineClipGroupDelta(
+          movingClips,
+          rawTimeDelta + genericStartTime - rawStartTime,
+        );
+        timeDelta = genericDelta;
+      }
+
+      if (isTimelineClipEdgeSnapMode(snapMode)) {
+        const visibleTrackIndices: number[] = [];
+        const viewportTop = scrollYRef.current;
+        const viewportBottom = viewportTop + Math.max(0, availableHeightRef.current);
+        const movingDestinationIndices = new Set(
+          movingClips.map((clip) => clip.trackIndex + trackDelta),
+        );
+        const maxTrackIndex = Math.max(
+          latestTracks.length - 1,
+          ...movingDestinationIndices,
+        );
+        for (let index = 0; index <= maxTrackIndex; index += 1) {
+          const rowTop = index < latestTracks.length
+            ? (trackYsRef.current[index] ?? 0)
+            : contentHeightRef.current + (index - latestTracks.length) * trackHeightRef.current;
+          const rowBottom = index + 1 < latestTracks.length
+            ? (trackYsRef.current[index + 1] ?? rowTop + trackHeightRef.current)
+            : rowTop + (index < latestTracks.length
+                ? getEffectiveTrackHeight(latestTracks[index], trackHeightRef.current)
+                : trackHeightRef.current);
+          if (rowBottom >= viewportTop && rowTop <= viewportBottom) {
+            visibleTrackIndices.push(index);
+          }
+        }
+
+        const stationaryClips = gesture.snapClipGeometry
+          ?? snapshotTimelineClipGeometry(latestTracks);
+
+        const edgeResult = resolveTimelineClipEdgeSnap({
+          movingClips,
+          stationaryClips,
+          rawDeltaTime: rawTimeDelta,
+          trackDelta,
+          viewport: {
+            startTime: scrollXRef.current / pps,
+            endTime: (scrollXRef.current + dimensionsWidthRef.current) / pps,
+            visibleTrackIndices,
+          },
+          pixelsPerSecond: pps,
+          excludeMovingClipIds: !gesture.copyOnDrag,
+        });
+        const genericDistancePx = hasGenericSnapCandidate
+          ? Math.abs(genericDelta - rawTimeDelta) * pps
+          : Number.POSITIVE_INFINITY;
+        if (
+          edgeResult.match
+          && edgeResult.match.distancePx < genericDistancePx - 0.000001
+        ) {
+          timeDelta = edgeResult.deltaTime;
+          edgeSnapMatch = edgeResult.match;
+        }
+      }
+    }
+
+    const newStartTime = Math.max(0, gesture.originalStartTime + timeDelta);
+    const targetTrackY = targetTrackIdx >= latestTracks.length
+      ? contentHeightRef.current + (targetTrackIdx - latestTracks.length) * trackHeightRef.current
+      : (trackYsRef.current[Math.max(0, targetTrackIdx)] ?? 0);
 
     if (gesture.copyOnDrag) {
       const targetTrack = latestTracks[Math.max(0, Math.min(targetTrackIdx, latestTracks.length - 1))];
@@ -2084,13 +2861,14 @@ export function Timeline({
         : getTimelineRowMetrics(found.track, trackHeightRef.current);
       snapGhostRef.current = {
         x: newStartTime * pps - scrollXRef.current,
-        y: (targetTrackIdx >= latestTracks.length
-          ? contentHeightRef.current
-          : (trackYsRef.current[Math.max(0, targetTrackIdx)] ?? 0)) + targetMetrics.clipInsetY,
+        y: targetTrackY + targetMetrics.clipInsetY,
         width: found.clip.duration * pps,
         height: targetMetrics.clipHeight,
         color: found.clip.color || found.track.color,
         visible: true,
+        guideX: edgeSnapMatch
+          ? edgeSnapMatch.targetTime * pps - scrollXRef.current
+          : undefined,
       };
       setSnapGhostRender(snapGhostRef.current);
       setShowGhostTrack(targetTrackIdx >= latestTracks.length);
@@ -2109,25 +2887,26 @@ export function Timeline({
       return;
     }
 
-    const multi = gesture.multiClipInfo && gesture.multiClipInfo.length > 1;
-    const trackDelta = targetTrackIdx - (gesture.trackIndex ?? found.trackIndex);
     const needsGhost = multi
       ? Math.max(...gesture.multiClipInfo!.map((info) => info.trackIndex)) + trackDelta >= latestTracks.length
       : targetTrackIdx >= latestTracks.length;
     setShowGhostTrack(needsGhost);
 
-    if (isSnapActive(ctrlBypass) && Math.abs(newStartTime - rawStartTime) > 0.001) {
+    if (snapActive && (edgeSnapMatch || Math.abs(timeDelta - rawTimeDelta) * pps > 0.1)) {
       const targetTrack = latestTracks[Math.max(0, Math.min(targetTrackIdx, latestTracks.length - 1))];
       const targetMetrics = targetTrack
         ? getTimelineRowMetrics(targetTrack, trackHeightRef.current)
         : getTimelineRowMetrics(found.track, trackHeightRef.current);
       snapGhostRef.current = {
         x: newStartTime * pps - scrollXRef.current,
-        y: (trackYsRef.current[Math.max(0, targetTrackIdx)] ?? 0) + targetMetrics.clipInsetY,
+        y: targetTrackY + targetMetrics.clipInsetY,
         width: found.clip.duration * pps,
         height: targetMetrics.clipHeight,
         color: found.clip.color || found.track.color,
         visible: true,
+        guideX: edgeSnapMatch
+          ? edgeSnapMatch.targetTime * pps - scrollXRef.current
+          : undefined,
       };
       setSnapGhostRender(snapGhostRef.current);
     } else if (snapGhostRef.current) {
@@ -2135,24 +2914,50 @@ export function Timeline({
       setSnapGhostRender(null);
     }
 
-    useDAWStore.setState((state) => ({
-      tracks: state.tracks.map((track) => ({
+    useDAWStore.setState((state) => {
+      let nextTracks = state.tracks.map((track) => ({
         ...track,
         clips: track.clips.map((clip) => {
           const info = gesture.multiClipInfo?.find((candidate) => candidate.clipId === clip.id && !candidate.isMidi);
-          if (multi && info) return { ...clip, startTime: Math.max(0, info.originalStartTime + timeDelta) };
+          if (multi && info) return { ...clip, startTime: info.originalStartTime + timeDelta };
           if (!multi && clip.id === gesture.clipId && !isMidi) return { ...clip, startTime: newStartTime };
           return clip;
         }),
         midiClips: track.midiClips.map((clip) => {
           const info = gesture.multiClipInfo?.find((candidate) => candidate.clipId === clip.id && candidate.isMidi);
-          if (multi && info) return { ...clip, startTime: Math.max(0, info.originalStartTime + timeDelta) };
+          if (multi && info) return { ...clip, startTime: info.originalStartTime + timeDelta };
           if (!multi && clip.id === gesture.clipId && isMidi) return { ...clip, startTime: newStartTime };
           return clip;
         }),
-      })),
-      isModified: true,
-    }));
+      }));
+      const followAutomation = shouldMoveAutomationWithItems(
+        state.moveEnvelopesWithItems,
+        Boolean(gesture.automationFollowInverted),
+        Boolean(state.globalLocked || state.lockSettings.envelopes),
+      );
+      const automationSourceTracks = timelineGestureUndoRef.current?.tracks;
+      if (followAutomation && automationSourceTracks) {
+        const infos = multi
+          ? gesture.multiClipInfo!
+          : [{
+              clipId: gesture.clipId!,
+              trackIndex: gesture.trackIndex ?? found.trackIndex,
+              originalStartTime: gesture.originalStartTime,
+              duration: gesture.originalDuration,
+              isMidi,
+            }];
+        const moves: AutomationClipMove[] = infos.map((info) => ({
+          clipId: info.clipId,
+          sourceTrackId: automationSourceTracks[info.trackIndex]?.id || found.track.id,
+          targetTrackId: automationSourceTracks[info.trackIndex]?.id || found.track.id,
+          originalStartTime: info.originalStartTime,
+          newStartTime: info.originalStartTime + timeDelta,
+          duration: info.duration,
+        }));
+        nextTracks = moveAutomationPointsWithClips(nextTracks, moves, automationSourceTracks);
+      }
+      return { tracks: nextTracks, isModified: true };
+    });
 
     if (clampedTarget !== gesture.targetTrackIndex || constrainedDrag.axisLock !== (gesture.axisLock ?? null)) {
       setTimelineDragState((previous) => ({
@@ -2165,13 +2970,21 @@ export function Timeline({
     findCurrentTimelineClip,
     getTimelineDropTrackIndex,
     isSnapActive,
+    isTimelineGestureEditLocked,
+    cancelActiveTimelineClipGesture,
     previewResizeTimelineClip,
     setTimelineDragState,
+    snapTimelineTime,
   ]);
 
   const finalizeSlipTimelineGesture = useCallback(() => {
     const edit = slipEditRef.current;
     if (!edit) return false;
+
+    if (isTimelineClipGestureLocked(useDAWStore.getState(), [edit.clipId])) {
+      cancelActiveTimelineClipGesture();
+      return false;
+    }
 
     const currentClip = useDAWStore.getState().tracks
       .flatMap((track) => (edit.isMidi ? track.midiClips : track.clips) as Array<AudioClip | MIDIClip>)
@@ -2200,7 +3013,8 @@ export function Timeline({
     clearTimelineGestureUndo();
     slipEditRef.current = null;
     return true;
-  }, [clearTimelineGestureUndo, slipEditClip]);
+  }, [cancelActiveTimelineClipGesture, clearTimelineGestureUndo, slipEditClip]);
+  finalizeSlipTimelineGestureRef.current = finalizeSlipTimelineGesture;
 
   const createTimelineGeneratedTrack = useCallback(async (newTrackType: "audio" | "midi") => {
     let trackId = crypto.randomUUID();
@@ -2215,7 +3029,7 @@ export function Timeline({
         name: `${newTrackType === "midi" ? "MIDI" : "Audio"} ${useDAWStore.getState().tracks.length + 1}`,
         type: newTrackType,
       },
-      { backendAlreadyCreated: true },
+      { backendAlreadyCreated: true, recordUndo: false },
     );
     return trackId;
   }, [addTrack]);
@@ -2226,14 +3040,36 @@ export function Timeline({
     const gesture = dragStateRef.current;
     if (!gesture.clipId || gesture.type === null) return false;
 
+    if (isTimelineGestureEditLocked(gesture)) {
+      cancelActiveTimelineClipGesture();
+      return false;
+    }
+
     finalizingTimelineClipGestureRef.current = true;
     try {
+    const ensureGestureIsEditable = () => {
+      const active = dragStateRef.current;
+      if (
+        active.type === null
+        || active.clipId !== gesture.clipId
+        || isTimelineGestureEditLocked(gesture)
+      ) {
+        cancelActiveTimelineClipGesture();
+        return false;
+      }
+      return true;
+    };
     const found = findCurrentTimelineClip(gesture.clipId);
     if (!found) {
       resetDragState();
       return false;
     }
     if (gesture.isFadeDrag) {
+      if (isTimelineGestureEditLocked(gesture)) {
+        cancelActiveTimelineClipGesture();
+        return false;
+      }
+      useDAWStore.getState().commitClipFadeEdit(gesture.clipId);
       clearTimelineGestureUndo();
       resetDragState();
       return true;
@@ -2246,11 +3082,44 @@ export function Timeline({
     const trackDelta = targetIdx - anchorTrackIdx;
 
     if (gesture.type === "resize-left" || gesture.type === "resize-right") {
-      commitPreviewedResizeTimelineClip(gesture.clipId, isMidi, {
+      if (gesture.resizeAction === "stretch") {
+        const finalValues = {
+          startTime: found.clip.startTime,
+          duration: found.clip.duration,
+        };
+        if (!previewResizeTimelineClip(gesture.clipId, isMidi, {
+          startTime: gesture.originalStartTime,
+          duration: gesture.originalDuration,
+          offset: gesture.originalOffset,
+        })) {
+          cancelActiveTimelineClipGesture();
+          return false;
+        }
+        const stretched = await useDAWStore.getState().stretchClip(
+          gesture.clipId,
+          finalValues.startTime,
+          finalValues.duration,
+        );
+        if (!stretched) {
+          restoreTimelineGestureUndo();
+        }
+        if (!ensureGestureIsEditable()) return false;
+        clearTimelineGestureUndo();
+        resetDragState();
+        return true;
+      }
+      if (!commitPreviewedResizeTimelineClip(gesture.clipId, isMidi, {
         startTime: gesture.originalStartTime,
         duration: gesture.originalDuration,
         offset: gesture.originalOffset,
-      });
+      })) {
+        cancelActiveTimelineClipGesture();
+        return false;
+      }
+      if (isTimelineGestureEditLocked(gesture)) {
+        cancelActiveTimelineClipGesture();
+        return false;
+      }
       await syncClipsWithBackend();
       clearTimelineGestureUndo();
       resetDragState();
@@ -2259,8 +3128,14 @@ export function Timeline({
 
     if (gesture.copyOnDrag) {
       const copyStartTime = gesture.previewStartTime ?? gesture.originalStartTime;
-      const copyMovedPixels = Math.abs(copyStartTime - gesture.originalStartTime) * pixelsPerSecondRef.current;
-      if (copyMovedPixels <= 4 && targetIdx === anchorTrackIdx && !showGhostTrack) {
+      if (isTimelineCopyDropNoop({
+        originalStartTime: gesture.originalStartTime,
+        previewStartTime: copyStartTime,
+        pixelsPerSecond: pixelsPerSecondRef.current,
+        anchorTrackIndex: anchorTrackIdx,
+        targetTrackIndex: targetIdx,
+        showGhostTrack,
+      })) {
         clearTimelineGestureUndo();
         resetDragState();
         return true;
@@ -2277,9 +3152,10 @@ export function Timeline({
       if (showGhostTrack || !targetTrackId || !compatible) {
         const newTrackType = getNewTrackTypeForTimelineClip(isMidi);
         targetTrackId = await createTimelineGeneratedTrack(newTrackType);
+        if (!ensureGestureIsEditable()) return false;
       }
 
-      if (targetTrackId) {
+      if (targetTrackId && ensureGestureIsEditable()) {
         duplicateClipToPosition(gesture.clipId, targetTrackId, copyStartTime);
       }
       await syncClipsWithBackend();
@@ -2293,6 +3169,7 @@ export function Timeline({
       const sorted = [...gesture.multiClipInfo!].sort((a, b) => a.trackIndex - b.trackIndex);
       const createdTracks = new Map<number, string>();
       for (const info of sorted) {
+        if (!ensureGestureIsEditable()) return false;
         const desiredTrackIdx = info.trackIndex + trackDelta;
         if (desiredTrackIdx === info.trackIndex) continue;
 
@@ -2313,6 +3190,7 @@ export function Timeline({
           } else {
             const newTrackType = getNewTrackTypeForTimelineClip(info.isMidi);
             const generatedTrackId = await createTimelineGeneratedTrack(newTrackType);
+            if (!ensureGestureIsEditable()) return false;
             createdTracks.set(desiredTrackIdx, generatedTrackId);
             targetTrackId = generatedTrackId;
           }
@@ -2322,24 +3200,86 @@ export function Timeline({
           .flatMap((track) => [...track.clips, ...track.midiClips])
           .find((clip) => clip.id === info.clipId);
         if (currentClip && targetTrackId) {
-          await moveClipToTrack(info.clipId, targetTrackId, currentClip.startTime);
+          await moveClipToTrack(info.clipId, targetTrackId, currentClip.startTime, {
+            recordUndo: false,
+            moveAutomation: false,
+          });
+          if (!ensureGestureIsEditable()) return false;
         }
       }
     } else if (showGhostTrack) {
       const newTrackType = getNewTrackTypeForTimelineClip(isMidi);
       const generatedTrackId = await createTimelineGeneratedTrack(newTrackType);
-      await moveClipToTrack(gesture.clipId, generatedTrackId, found.clip.startTime);
+      if (!ensureGestureIsEditable()) return false;
+      await moveClipToTrack(gesture.clipId, generatedTrackId, found.clip.startTime, {
+        recordUndo: false,
+        moveAutomation: false,
+      });
+      if (!ensureGestureIsEditable()) return false;
     } else if (targetIdx !== found.trackIndex && targetIdx >= 0 && targetIdx < latestTracks.length) {
       const targetTrack = latestTracks[targetIdx];
       const compatible = isMidi
         ? targetTrack.type === "midi" || targetTrack.type === "instrument"
         : targetTrack.type !== "midi" && targetTrack.type !== "instrument";
       if (compatible) {
-        await moveClipToTrack(gesture.clipId, targetTrack.id, found.clip.startTime);
+        await moveClipToTrack(gesture.clipId, targetTrack.id, found.clip.startTime, {
+          recordUndo: false,
+          moveAutomation: false,
+        });
+        if (!ensureGestureIsEditable()) return false;
       }
     }
 
+    if (!ensureGestureIsEditable()) return false;
+
+    const automationSourceTracks = timelineGestureUndoRef.current?.tracks;
+    const automationState = useDAWStore.getState();
+    const followAutomation = shouldMoveAutomationWithItems(
+      automationState.moveEnvelopesWithItems,
+      Boolean(gesture.automationFollowInverted),
+      Boolean(automationState.globalLocked || automationState.lockSettings.envelopes),
+    );
+    if (followAutomation && automationSourceTracks) {
+      const infos = multi
+        ? gesture.multiClipInfo!
+        : [{
+            clipId: gesture.clipId!,
+            trackIndex: gesture.trackIndex ?? found.trackIndex,
+            originalStartTime: gesture.originalStartTime,
+            duration: gesture.originalDuration,
+            isMidi,
+          }];
+      const automationMoves = infos.flatMap((info): AutomationClipMove[] => {
+        const current = useDAWStore.getState().tracks
+          .map((track) => ({
+            track,
+            clip: [...track.clips, ...track.midiClips].find((clip) => clip.id === info.clipId),
+          }))
+          .find((entry) => entry.clip);
+        const sourceTrackId = automationSourceTracks[info.trackIndex]?.id;
+        if (!current?.clip || !sourceTrackId) return [];
+        return [{
+          clipId: info.clipId,
+          sourceTrackId,
+          targetTrackId: current.track.id,
+          originalStartTime: info.originalStartTime,
+          newStartTime: current.clip.startTime,
+          duration: info.duration,
+        }];
+      });
+      useDAWStore.setState((current) => ({
+        tracks: moveAutomationPointsWithClips(
+          current.tracks,
+          automationMoves,
+          automationSourceTracks,
+        ),
+        isModified: true,
+      }));
+    }
+
+    if (!ensureGestureIsEditable()) return false;
     await syncClipsWithBackend();
+    if (!ensureGestureIsEditable()) return false;
     commitTimelineGestureUndo(multi ? "Move timeline clips" : isMidi ? "Move MIDI clip" : "Move timeline clip");
     resetDragState();
     return true;
@@ -2348,13 +3288,17 @@ export function Timeline({
     }
   }, [
     clearTimelineGestureUndo,
+    cancelActiveTimelineClipGesture,
     commitPreviewedResizeTimelineClip,
     commitTimelineGestureUndo,
     createTimelineGeneratedTrack,
     duplicateClipToPosition,
     findCurrentTimelineClip,
+    isTimelineGestureEditLocked,
     moveClipToTrack,
+    previewResizeTimelineClip,
     resetDragState,
+    restoreTimelineGestureUndo,
     showGhostTrack,
     syncClipsWithBackend,
   ]);
@@ -2397,11 +3341,15 @@ export function Timeline({
           }
         }
 
-        previewTimelineGestureFromPointer(point.x, point.y, Boolean(event.ctrlKey || event.metaKey));
+        previewTimelineGestureFromPointer(point.x, point.y, event);
       }
 
       const slipEdit = slipEditRef.current;
       if (slipEdit) {
+        if (isTimelineClipGestureLocked(useDAWStore.getState(), [slipEdit.clipId])) {
+          cancelActiveTimelineClipGesture();
+          return;
+        }
         const deltaTime = (point.x - slipEdit.startX) / pixelsPerSecondRef.current;
         const nextOffset = computeSlipOffset(slipEdit.originalOffset, deltaTime, slipEdit.maxOffset);
         useDAWStore.setState((state) => ({
@@ -2429,6 +3377,10 @@ export function Timeline({
         finalizeSlipTimelineGesture();
       }
       if (dragStateRef.current.type !== null && dragStateRef.current.clipId) {
+        const point = toStagePoint(event);
+        if (point) {
+          previewTimelineGestureFromPointer(point.x, point.y, event);
+        }
         void finalizeTimelineClipGesture();
       }
     };
@@ -2441,6 +3393,7 @@ export function Timeline({
     };
   }, [
     beginExternalMIDIClipFileDrag,
+    cancelActiveTimelineClipGesture,
     findCurrentTimelineClip,
     finalizeSlipTimelineGesture,
     finalizeTimelineClipGesture,
@@ -2452,31 +3405,373 @@ export function Timeline({
     if (!container) return;
 
     const handleWheel = (e: WheelEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+      if (isEditorWheelOwnedTarget(e.target)) return;
+      const rect = container.getBoundingClientRect();
+      const stageX = e.clientX - rect.left;
+      const stageY = e.clientY - rect.top - (showRuler ? RULER_HEIGHT : 0);
+      const mouseY = stageY + scrollYRef.current;
+      const trackHit = getTrackAtY(mouseY, tracksRef.current, trackYsRef.current, trackHeightRef.current);
+      const hoveredTrack = trackHit ? tracksRef.current[trackHit.trackIndex] : undefined;
+      const clipHit = stageY >= 0
+        ? findTimelineClipHit(timelineClipHitMapRef.current, stageX, mouseY)
+        : null;
+      const declaredSubtarget = e.target instanceof Element
+        ? e.target.closest<HTMLElement>("[data-wheel-subtarget]")?.dataset.wheelSubtarget
+        : undefined;
+      let contextualSubtarget: "clip" | "fade_handle" | "event_volume" | undefined;
+      let hoveredTargetId = hoveredTrack?.id;
+
+      if (clipHit) {
+        contextualSubtarget = "clip";
+        hoveredTargetId = clipHit.clipId;
+        if (clipHit.kind === "audio") {
+          const audioClip = clipHit.clip as AudioClip;
+          const relativeX = stageX - clipHit.x;
+          const relativeY = mouseY - clipHit.y;
+          const fadeInHandleX = (audioClip.fadeIn || 0) * pixelsPerSecondRef.current;
+          const fadeOutHandleX = clipHit.width - (audioClip.fadeOut || 0) * pixelsPerSecondRef.current;
+          const selected = useDAWStore.getState().selectedClipIds.includes(clipHit.clipId);
+          if (
+            selected
+            && relativeY >= -5
+            && relativeY <= 15
+            && Math.abs(relativeX - fadeInHandleX) <= 10
+          ) {
+            contextualSubtarget = "fade_handle";
+            hoveredTargetId = `${clipHit.clipId}:in`;
+          } else if (
+            selected
+            && relativeY >= -5
+            && relativeY <= 15
+            && Math.abs(relativeX - fadeOutHandleX) <= 10
+          ) {
+            contextualSubtarget = "fade_handle";
+            hoveredTargetId = `${clipHit.clipId}:out`;
+          } else if (selected) {
+            const volumeNormalized = ((audioClip.volumeDB ?? 0) + 60) / 72;
+            const volumeY = clipHit.height * (1 - volumeNormalized);
+            if (Math.abs(relativeY - volumeY) <= 6) {
+              contextualSubtarget = "event_volume";
+              hoveredTargetId = clipHit.clipId;
+            }
+          }
+        }
+      }
+
+      const verticalScaleSubtarget = hoveredTrack
+        ? getTimelineVerticalScaleSubtarget({
+          stageX,
+          scaleStripWidth: TIMELINE_VERTICAL_SCALE_WIDTH,
+          trackType: hoveredTrack.type,
+          spectralView: hoveredTrack.spectralView,
+        })
+        : undefined;
+      const wheelSubtarget = declaredSubtarget === "ruler"
+        ? "ruler"
+        : trackHit && !trackHit.isInClipArea
+          ? "automation_lane"
+          : verticalScaleSubtarget
+            ? verticalScaleSubtarget
+            : contextualSubtarget
+              ? contextualSubtarget
+              : trackHit
+                ? "track"
+                : "empty";
+      const shortcutPlatform = getShortcutPlatform();
+      const behaviorProfile = getMouseBehaviorProfile(
+        useDAWStore.getState().mouseBehaviorProfileId,
+        shortcutPlatform,
+      );
+      const gesture = resolveWheelGesture(e, {
+        surface: "timeline",
+        subtarget: wheelSubtarget,
+        platform: toMouseBehaviorPlatform(shortcutPlatform),
+        hoveredTargetId,
+      }, behaviorProfile.wheel);
+
+      if (gesture.preventDefault) e.preventDefault();
+      if (gesture.stopPropagation) e.stopPropagation();
+
+      const isDiscreteContextWheel = (
+        gesture.operation === "reorder"
+        && gesture.target === "track-order"
+      ) || (
+        gesture.operation === "nudge"
+        && gesture.target === "clip-position"
+      );
+      const isSmoothContextWheel = gesture.operation === "adjust"
+        && (gesture.target === "fade-value" || gesture.target === "event-volume");
+      if (!isDiscreteContextWheel) timelineDiscreteWheelAccumulatorRef.current?.reset();
+      if (!isSmoothContextWheel) timelineSmoothWheelAccumulatorRef.current?.reset();
+
+      if (gesture.operation === "reorder" && gesture.target === "track-order") {
+        const activeWheelTarget = timelineContextWheelEditControllerRef.current?.getActiveTarget();
+        const trackId = activeWheelTarget?.kind === "track-reorder"
+          ? activeWheelTarget.trackId
+          : hoveredTrack?.id;
+        if (!trackId || !timelineDiscreteWheelAccumulatorRef.current) {
+          timelineDiscreteWheelAccumulatorRef.current?.reset();
+          return;
+        }
+        const direction = getAccumulatedWheelNudgeDirection(
+          timelineDiscreteWheelAccumulatorRef.current,
+          `track-reorder:${trackId}`,
+          gesture.amount,
+        );
+        if (direction === 0) {
+          const pendingTarget = timelineContextWheelEditControllerRef.current?.getActiveTarget();
+          if (pendingTarget?.kind === "track-reorder" && pendingTarget.trackId === trackId) {
+            timelineContextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        const currentTracks = useDAWStore.getState().tracks;
+        const trackIndex = currentTracks.findIndex((track) => track.id === trackId);
+        const targetIndex = trackIndex + direction;
+        if (
+          trackIndex >= 0
+          && targetIndex >= 0
+          && targetIndex < currentTracks.length
+        ) {
+          timelineContextWheelEditControllerRef.current?.touch({
+            kind: "track-reorder",
+            trackId,
+          });
+          if (!useDAWStore.getState().previewTrackReorder(trackId, direction)) {
+            timelineContextWheelEditControllerRef.current?.commit();
+          }
+        }
+        return;
+      }
+
+      if (gesture.operation === "nudge" && gesture.target === "clip-position") {
+        if (!clipHit || !timelineDiscreteWheelAccumulatorRef.current) {
+          timelineDiscreteWheelAccumulatorRef.current?.reset();
+          return;
+        }
+        const direction = getAccumulatedWheelNudgeDirection(
+          timelineDiscreteWheelAccumulatorRef.current,
+          `clip-nudge:${clipHit.clipId}`,
+          gesture.amount,
+        );
+        if (direction === 0) {
+          const pendingTarget = timelineContextWheelEditControllerRef.current?.getActiveTarget();
+          if (pendingTarget?.kind === "clip-nudge" && pendingTarget.clipId === clipHit.clipId) {
+            timelineContextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        const state = useDAWStore.getState();
+        const latestClip = state.tracks
+          .flatMap((track) => [...track.clips, ...track.midiClips])
+          .find((clip) => clip.id === clipHit.clipId);
+        if (!latestClip || latestClip.locked) return;
+        timelineContextWheelEditControllerRef.current?.touch({
+          kind: "clip-nudge",
+          clipId: clipHit.clipId,
+        });
+        if (!state.previewClipNudge(
+          clipHit.clipId,
+          direction < 0 ? "left" : "right",
+          true,
+        )) {
+          timelineContextWheelEditControllerRef.current?.commit();
+        }
+        return;
+      }
+
+      if (gesture.operation === "adjust" && gesture.target === "fade-value") {
+        if (
+          clipHit?.kind !== "audio"
+          || !hoveredTargetId?.includes(":")
+          || !timelineSmoothWheelAccumulatorRef.current
+        ) {
+          timelineSmoothWheelAccumulatorRef.current?.reset();
+          return;
+        }
+        const side = hoveredTargetId.endsWith(":in") ? "in" : "out";
+        const stepCount = getAccumulatedWheelStepCount(
+          timelineSmoothWheelAccumulatorRef.current,
+          `clip-fade:${clipHit.clipId}:${side}`,
+          gesture.amount,
+        );
+        if (stepCount === 0) {
+          const pendingTarget = timelineContextWheelEditControllerRef.current?.getActiveTarget();
+          if (
+            pendingTarget?.kind === "clip-fade"
+            && pendingTarget.clipId === clipHit.clipId
+            && pendingTarget.side === side
+          ) {
+            timelineContextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        if (stepCount !== 0) {
+          const state = useDAWStore.getState();
+          const audioClip = state.tracks
+            .flatMap((track) => track.clips)
+            .find((clip) => clip.id === clipHit.clipId);
+          if (!audioClip) return;
+          const stepSeconds = Math.max(0.01, 1 / Math.max(1, pixelsPerSecondRef.current));
+          const currentFadeIn = audioClip.fadeIn || 0;
+          const currentFadeOut = audioClip.fadeOut || 0;
+          const maxFade = audioClip.duration / 2;
+          const nextFadeIn = side === "in"
+            ? Math.max(0, Math.min(maxFade, currentFadeIn + stepCount * stepSeconds))
+            : currentFadeIn;
+          const nextFadeOut = side === "out"
+            ? Math.max(0, Math.min(maxFade, currentFadeOut + stepCount * stepSeconds))
+            : currentFadeOut;
+          if (nextFadeIn === currentFadeIn && nextFadeOut === currentFadeOut) return;
+          timelineContextWheelEditControllerRef.current?.touch({
+            kind: "clip-fade",
+            clipId: clipHit.clipId,
+            side,
+          });
+          state.previewClipFades(clipHit.clipId, nextFadeIn, nextFadeOut);
+        }
+        return;
+      }
+
+      if (gesture.operation === "adjust" && gesture.target === "event-volume") {
+        if (clipHit?.kind !== "audio" || !timelineSmoothWheelAccumulatorRef.current) {
+          timelineSmoothWheelAccumulatorRef.current?.reset();
+          return;
+        }
+        const stepCount = getAccumulatedWheelStepCount(
+          timelineSmoothWheelAccumulatorRef.current,
+          `clip-volume:${clipHit.clipId}`,
+          gesture.amount,
+        );
+        if (stepCount === 0) {
+          const pendingTarget = timelineContextWheelEditControllerRef.current?.getActiveTarget();
+          if (pendingTarget?.kind === "clip-volume" && pendingTarget.clipId === clipHit.clipId) {
+            timelineContextWheelEditControllerRef.current?.touch(pendingTarget);
+          }
+          return;
+        }
+        if (stepCount !== 0) {
+          const state = useDAWStore.getState();
+          const audioClip = state.tracks
+            .flatMap((track) => track.clips)
+            .find((clip) => clip.id === clipHit.clipId);
+          if (!audioClip) return;
+          const currentVolume = audioClip.volumeDB ?? 0;
+          const nextVolume = Math.max(-60, Math.min(12, currentVolume + stepCount));
+          if (nextVolume === currentVolume) return;
+          timelineContextWheelEditControllerRef.current?.touch({
+            kind: "clip-volume",
+            clipId: clipHit.clipId,
+          });
+          state.setClipVolume(clipHit.clipId, nextVolume);
+        }
+        return;
+      }
+
+      if (gesture.operation === "resize" && gesture.target === "lane-height") {
+        if (trackHit && !trackHit.isInClipArea && hoveredTrack && gesture.amount !== 0) {
+          const visibleLanes = hoveredTrack.automationLanes.filter((lane) => lane.visible);
+          const hitLane = visibleLanes[trackHit.laneIndex];
+          const latestTrack = useDAWStore.getState().tracks.find(
+            (track) => track.id === hoveredTrack.id,
+          );
+          const lane = latestTrack?.automationLanes.find(
+            (candidate) => candidate.id === hitLane?.id,
+          );
+          if (lane) {
+            const currentHeight = getAutomationLaneHeight(lane);
+            const nextHeight = computeWheelResizedSize({
+              currentSize: currentHeight,
+              amount: gesture.amount,
+              minSize: MIN_AUTOMATION_LANE_HEIGHT,
+              maxSize: MAX_AUTOMATION_LANE_HEIGHT,
+            });
+            if (Math.abs(nextHeight - currentHeight) > 0.01) {
+              timelineContextWheelEditControllerRef.current?.touch({
+                kind: "automation-lane",
+                trackId: hoveredTrack.id,
+                laneId: lane.id,
+              });
+              useDAWStore.getState().setAutomationLaneHeight(
+                hoveredTrack.id,
+                lane.id,
+                nextHeight,
+              );
+            }
+          }
+        }
+        return;
+      }
+
+      if (
+        gesture.operation === "pan"
+        && (gesture.target === "waveform-scale" || gesture.target === "spectrogram-scale")
+        && hoveredTrack
+        && gesture.amount !== 0
+      ) {
+        setWaveformScaleViews((previous) => {
+          const current = previous[hoveredTrack.id] ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
+          return {
+            ...previous,
+            [hoveredTrack.id]: updateTimelineVerticalScaleView(current, "pan", gesture.amount),
+          };
+        });
+        return;
+      }
+
+      if (
+        gesture.operation === "adjust"
+        && gesture.target === "spectrogram-db-floor"
+        && hoveredTrack
+        && gesture.amount !== 0
+      ) {
+        setWaveformScaleViews((previous) => {
+          const current = previous[hoveredTrack.id] ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
+          return {
+            ...previous,
+            [hoveredTrack.id]: updateTimelineVerticalScaleView(current, "db-floor", gesture.amount),
+          };
+        });
+        return;
+      }
+
+      if (
+        gesture.operation === "zoom"
+        && gesture.target === "spectrogram-scale"
+        && hoveredTrack?.type === "audio"
+        && hoveredTrack.spectralView
+        && gesture.amount !== 0
+      ) {
+        setWaveformScaleViews((previous) => {
+          const current = previous[hoveredTrack.id] ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
+          return {
+            ...previous,
+            [hoveredTrack.id]: updateTimelineVerticalScaleView(current, "zoom", gesture.amount),
+          };
+        });
+        return;
+      }
+
+      if (
+        gesture.target === "waveform-amplitude"
+        || gesture.target === "waveform-scale"
+      ) {
         // Waveform Vertical Zoom (Ctrl+Shift+Scroll) — per-track
-        e.preventDefault();
-        e.stopPropagation();
-        const rect = container.getBoundingClientRect();
-        const mouseY = e.clientY - rect.top + scrollYRef.current;
-        const trackHit = getTrackAtY(mouseY, tracksRef.current, trackYsRef.current, trackHeightRef.current);
         const trackIdx = trackHit?.trackIndex ?? -1;
         const currentTracks = tracksRef.current;
-        if (trackIdx >= 0 && trackIdx < currentTracks.length) {
+        if (gesture.amount !== 0 && trackIdx >= 0 && trackIdx < currentTracks.length) {
           const track = currentTracks[trackIdx];
           const currentWaveformZoom = track.waveformZoom ?? 1.0;
-          const factor = e.deltaY > 0 ? 0.9 : 1.1;
+          const factor = gesture.amount > 0 ? 0.9 : 1.1;
           const newZoom = Math.max(0.1, Math.min(5.0, currentWaveformZoom * factor));
           setTrackWaveformZoomRef.current(track.id, newZoom);
         }
         return;
       }
-      if (e.ctrlKey || e.metaKey) {
+      if (gesture.operation === "zoom" && gesture.target === "timeline") {
         // Horizontal Zoom — accumulate delta, compute in rAF
-        e.preventDefault();
-        e.stopPropagation();
-        accZoomDeltaRef.current += e.deltaY;
+        accZoomDeltaRef.current += gesture.amount;
         // Capture cursor X relative to container for zoom anchoring
-        const rect = container.getBoundingClientRect();
         zoomCursorXRef.current = e.clientX - rect.left;
 
         // Mark as zooming — suppresses waveform fetches until 200ms idle
@@ -2487,34 +3782,44 @@ export function Timeline({
           forceRender((n) => n + 1); // re-render to fetch waveforms at final zoom
         }, 200);
 
-        scheduleRAF();
-      } else if (e.altKey) {
+        if (gesture.amount !== 0) scheduleRAF();
+      } else if (gesture.operation === "resize" && gesture.target === "track-height") {
         // Vertical Zoom (Track Height)
-        e.preventDefault();
-        e.stopPropagation();
         const curHeight = pendingTrackHeightRef.current ?? trackHeightRef.current;
-        const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        scheduleTrackHeight(curHeight * delta);
-      } else if (e.shiftKey) {
+        if (gesture.amount !== 0) {
+          const factor = gesture.amount > 0 ? 0.9 : 1.1;
+          scheduleTrackHeight(curHeight * factor);
+        }
+      } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
         // Horizontal scroll with Shift + Mouse Wheel
-        e.preventDefault();
-        const scrollSpeed = 2;
         const curScrollX = pendingScrollRef.current?.x ?? scrollXRef.current;
         const curZoom = pendingZoomRef.current ?? pixelsPerSecondRef.current;
-        const maxClipEnd = tracksRef.current.reduce(
-          (max, track) =>
-            Math.max(max, ...track.clips.map((c) => c.startTime + c.duration)),
-          0,
-        );
-        const maxTimelineScroll = Math.max(
-          0,
-          (maxClipEnd + 300) * curZoom - dimensionsWidthRef.current,
+        const state = useDAWStore.getState();
+        const maxTimelineScroll = getTimelineHorizontalScrollMax(
+          tracksRef.current,
+          state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
+          curZoom,
+          dimensionsWidthRef.current,
         );
         const newScrollX = Math.max(
           0,
-          Math.min(maxTimelineScroll, curScrollX + e.deltaY * scrollSpeed),
+          Math.min(maxTimelineScroll, curScrollX + gesture.amount),
         );
         scheduleScroll(newScrollX, scrollYRef.current);
+      } else if (gesture.operation === "scroll") {
+        // Profiles such as Pro Tools and REAPER use modified, reduced-speed
+        // vertical scrolling. Own the workspace scroll so the profile's
+        // normalized multiplier is applied consistently for mouse and trackpad.
+        const workspace = container.closest(".workspace") as HTMLElement | null;
+        if (workspace) {
+          const maxScrollY = Math.max(0, workspace.scrollHeight - workspace.clientHeight);
+          const newScrollY = Math.max(
+            0,
+            Math.min(maxScrollY, workspace.scrollTop + gesture.amount),
+          );
+          workspace.scrollTop = newScrollY;
+          scheduleScroll(scrollXRef.current, newScrollY);
+        }
       }
       // Normal vertical scroll: Let native scroll handle it (no preventDefault)
     };
@@ -2522,7 +3827,7 @@ export function Timeline({
     // Use passive: false to allow preventDefault to work for zoom/horizontal scroll
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [scheduleRAF, scheduleScroll, scheduleTrackHeight]);
+  }, [scheduleRAF, scheduleScroll, scheduleTrackHeight, showRuler]);
 
   // ── Ruler interaction: click = seek, drag = set range, drag handle = adjust range ──
   const RANGE_HANDLE_HIT_PX = 8;
@@ -2533,6 +3838,11 @@ export function Timeline({
     const stage = e.target.getStage();
     const pointerPos = stage.getPointerPosition();
     if (!pointerPos) return;
+    const action = resolveLiveMouseModifierAction(e.evt || {}, "ruler_click");
+    if (action === "none") {
+      rulerDragRef.current = null;
+      return;
+    }
 
     const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
     const quantizePreset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
@@ -2548,7 +3858,7 @@ export function Timeline({
       cursorTime: useDAWStore.getState().transport.currentTime,
       eventTimes: timelineSnapEventTimes,
       snapEnabled: shouldUseSnapRef.current,
-      ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+      ctrlBypass: false,
     });
 
     // Check if clicking near a range handle inside the visible marker zone.
@@ -2557,42 +3867,52 @@ export function Timeline({
     const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
     // Prefer end handle when both overlap (both at 0)
-    if (inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
-      rulerDragRef.current = { type: "handle-pending", handle: "end", startX: pointerPos.x, startTime: clickedTime };
+    if (action === "seek" && inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
+      rulerDragRef.current = { type: "handle-pending", action, handle: "end", startX: pointerPos.x, startTime: clickedTime };
       setRulerDragging(true);
       return;
     }
-    if (inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
-      rulerDragRef.current = { type: "handle-pending", handle: "start", startX: pointerPos.x, startTime: clickedTime };
+    if (action === "seek" && inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
+      rulerDragRef.current = { type: "handle-pending", action, handle: "start", startX: pointerPos.x, startTime: clickedTime };
       setRulerDragging(true);
       return;
     }
 
     // Shift+click: extend current time selection to clicked position
-    if (e.evt?.shiftKey) {
+    if (action === "time_select") {
       const currentSel = useDAWStore.getState().timeSelection;
+      let anchor = useDAWStore.getState().transport.currentTime;
       if (currentSel) {
         // Extend toward whichever end is closer to the click
         const distToStart = Math.abs(clickedTime - currentSel.start);
         const distToEnd = Math.abs(clickedTime - currentSel.end);
-        if (distToStart < distToEnd) {
-          setTimeSelection(Math.min(clickedTime, currentSel.end), currentSel.end);
-        } else {
-          setTimeSelection(currentSel.start, Math.max(clickedTime, currentSel.start));
-        }
+        anchor = distToStart < distToEnd ? currentSel.end : currentSel.start;
       } else {
         // No existing selection — create from playhead to clicked position
-        const playheadTime = useDAWStore.getState().transport.currentTime;
-        setTimeSelection(Math.min(playheadTime, clickedTime), Math.max(playheadTime, clickedTime));
+        anchor = useDAWStore.getState().transport.currentTime;
       }
-      return;
+      setTimeSelection(Math.min(anchor, clickedTime), Math.max(anchor, clickedTime));
+      rulerDragRef.current = {
+        type: "pending",
+        action,
+        startX: pointerPos.x,
+        startTime: anchor,
+        currentTime: clickedTime,
+      };
+    } else {
+      rulerDragRef.current = {
+        type: "pending",
+        action,
+        startX: pointerPos.x,
+        startTime: clickedTime,
+        currentTime: clickedTime,
+      };
     }
 
     // Not on a handle — plain click clears any existing time selection and seeks
-    if (useDAWStore.getState().timeSelection) {
+    if (action === "seek" && useDAWStore.getState().timeSelection) {
       clearTimeSelection();
     }
-    rulerDragRef.current = { type: "pending", startX: pointerPos.x, startTime: clickedTime };
   };
 
   // Double-click on ruler: select region between nearest markers on either side
@@ -2678,9 +3998,10 @@ export function Timeline({
       const range = projectRangeRef.current;
 
       // Apply snap-to-grid if enabled
-      if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
+      if (isSnapActive(false)) {
         time = snapTimelineTime(time, drag.startTime);
       }
+      drag.currentTime = time;
 
       if (drag.type === "handle-pending") {
         if (Math.abs(pointerX - drag.startX) <= DRAG_THRESHOLD_PX) {
@@ -2700,20 +4021,37 @@ export function Timeline({
       } else if (drag.type === "pending") {
         // Check if we've moved enough to start a range-create drag
         if (Math.abs(pointerX - drag.startX) > DRAG_THRESHOLD_PX) {
-          drag.type = "range-create";
+          if (drag.action === "loop_set") drag.type = "loop-create";
+          else if (drag.action === "time_select") drag.type = "time-select";
+          else if (drag.action === "zoom_to") drag.type = "zoom-create";
+          else return;
           // Snap the drag start time too
           let startTime = drag.startTime;
-          if (isSnapActive(Boolean(e.ctrlKey || e.metaKey))) {
+          if (isSnapActive(false)) {
             startTime = snapTimelineTime(startTime, drag.startTime);
             drag.startTime = startTime;
           }
-          setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
+          if (drag.type === "loop-create") {
+            setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
+          } else if (drag.type === "time-select") {
+            setTimeSelection(Math.min(startTime, time), Math.max(startTime, time));
+          } else {
+            setMarqueeZoomRect({
+              x: Math.min(drag.startX, pointerX),
+              width: Math.abs(pointerX - drag.startX),
+            });
+          }
           setRulerDragging(true);
         }
-      } else if (drag.type === "range-create") {
-        // Continuing range-create drag
-        const startTime = drag.startTime;
-        setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
+      } else if (drag.type === "loop-create") {
+        setProjectRange(Math.min(drag.startTime, time), Math.max(drag.startTime, time));
+      } else if (drag.type === "time-select") {
+        setTimeSelection(Math.min(drag.startTime, time), Math.max(drag.startTime, time));
+      } else if (drag.type === "zoom-create") {
+        setMarqueeZoomRect({
+          x: Math.min(drag.startX, pointerX),
+          width: Math.abs(pointerX - drag.startX),
+        });
       }
     };
 
@@ -2721,27 +4059,54 @@ export function Timeline({
       const drag = rulerDragRef.current;
       if (!drag) return;
 
-      if (drag.type === "pending") {
+      if (drag.type === "pending" && drag.action === "seek") {
         // No significant movement — this was a click, so seek
         seekTo(drag.startTime);
+      } else if (drag.type === "pending" && drag.action === "time_select") {
+        const endTime = drag.currentTime ?? drag.startTime;
+        setTimeSelection(
+          Math.min(drag.startTime, endTime),
+          Math.max(drag.startTime, endTime),
+        );
       } else if (drag.type === "handle-pending") {
         if (useDAWStore.getState().timeSelection) {
           clearTimeSelection();
         }
         seekTo(drag.startTime);
+      } else if (drag.type === "loop-create") {
+        const state = useDAWStore.getState();
+        if (!state.transport.loopEnabled) state.toggleLoop();
+      } else if (drag.type === "zoom-create") {
+        const endTime = drag.currentTime ?? drag.startTime;
+        const startTime = Math.min(drag.startTime, endTime);
+        const duration = Math.abs(endTime - drag.startTime);
+        if (duration > 0.01) {
+          const newPixelsPerSecond = dimensionsWidthRef.current / duration;
+          setZoom(newPixelsPerSecond);
+          setScroll(startTime * newPixelsPerSecond, scrollYRef.current);
+        }
+        setMarqueeZoomRect(null);
       }
 
       rulerDragRef.current = null;
       setRulerDragging(false);
     };
 
+    const handleWindowBlur = () => {
+      rulerDragRef.current = null;
+      setRulerDragging(false);
+      setMarqueeZoomRect(null);
+    };
+
     window.addEventListener("mousemove", handleGlobalMouseMove);
     window.addEventListener("mouseup", handleGlobalMouseUp);
+    window.addEventListener("blur", handleWindowBlur);
     return () => {
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
+      window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [clearTimeSelection, seekTo, setProjectRange]);
+  }, [clearTimeSelection, seekTo, setProjectRange, setScroll, setTimeSelection, setZoom]);
 
   // Handle mouse move for time selection / razor edit dragging (on main stage)
   const handleStageMouseMove = (e: KonvaEvent) => {
@@ -2761,14 +4126,21 @@ export function Timeline({
       return;
     }
 
-    // Slip editing: Alt+drag adjusts clip offset in real-time
+    // Slip editing adjusts the clip offset in real time.
     if (slipEditRef.current) {
+      if (isTimelineClipGestureLocked(
+        useDAWStore.getState(),
+        [slipEditRef.current.clipId],
+      )) {
+        cancelActiveTimelineClipGesture();
+        return;
+      }
       const stage = e.target.getStage();
       const pointerPos = stage?.getPointerPosition();
       if (pointerPos) {
         const deltaX = pointerPos.x - slipEditRef.current.startX;
         const deltaTime = deltaX / pixelsPerSecond;
-        // Moving mouse right shifts content left (increases offset), moving left shifts content right (decreases offset)
+        // Moving right moves source content right (decreases offset); moving left increases offset.
         const newOffset = computeSlipOffset(
           slipEditRef.current.originalOffset,
           deltaTime,
@@ -2813,6 +4185,11 @@ export function Timeline({
         const currentTime = (pointerPos.x + scrollX) / pixelsPerSecond;
         const startTime = timeSelectionDrag.startTime;
         const endTime = Math.max(0, currentTime);
+        if (timelinePointerActionRef.current) {
+          timelinePointerActionRef.current.dragged =
+            Math.abs(endTime - timelinePointerActionRef.current.startTime)
+              * pixelsPerSecond > 4;
+        }
 
         setTimeSelection(
           Math.min(startTime, endTime),
@@ -2821,7 +4198,7 @@ export function Timeline({
       }
     }
 
-    // Razor edit dragging (Alt+drag)
+    // Razor edit dragging (the active mouse profile selects the gesture)
     if (razorDrag && razorDrag.active) {
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
@@ -2956,102 +4333,181 @@ export function Timeline({
     }
   };
 
-  // Keyboard shortcuts for clip editing
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+  // Only the last interacted editing surface receives its local shortcuts.
+  const timelineActionExecutorRef = useRef<
+    (actionId: string) => ReturnType<ShortcutSurfaceHandler>
+  >(() => "unmatched");
+  timelineActionExecutorRef.current = (actionId) => {
+    if (actionId === "view.zoomToFit") {
       const state = useDAWStore.getState();
-      const hasClips = state.selectedClipIds.length > 0;
-      const hasModifier = e.ctrlKey || e.metaKey;
-      const key = e.key.toLowerCase();
+      const view = getTimelineProjectFitView(
+        state.tracks,
+        state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
+        dimensionsWidthRef.current,
+        MIN_PIXELS_PER_SECOND,
+        MAX_PIXELS_PER_SECOND,
+      );
+      if (!view) return "claimed_noop";
+      state.setZoom(view.pixelsPerSecond);
+      state.setScroll(view.scrollX, state.scrollY);
+      return "handled";
+    }
+    if (actionId === "view.zoomToSelection") {
+      const state = useDAWStore.getState();
+      const selection = state.timeSelection;
+      const view = selection
+        ? getTimelineRangeFitView(
+            selection.start,
+            selection.end,
+            dimensionsWidthRef.current,
+            MIN_PIXELS_PER_SECOND,
+            MAX_PIXELS_PER_SECOND,
+          )
+        : null;
+      if (!view) return "claimed_noop";
+      state.setZoom(view.pixelsPerSecond);
+      state.setScroll(view.scrollX, state.scrollY);
+      return "handled";
+    }
+    if (actionId !== "clip.splitAtPointer") return "unmatched";
+    const menu = clipContextMenu;
+    if (!menu || !Number.isFinite(menu.time)) return "claimed_noop";
 
-      if (state.showPianoRoll) {
-        const isPianoRollEditShortcut =
-          (hasModifier && ["a", "c", "d", "v", "x"].includes(key))
-          || e.key === "Delete"
-          || e.key === "Backspace";
-        if (isPianoRollEditShortcut) return;
-      }
+    const state = useDAWStore.getState();
+    const track = state.tracks.find((candidate) => candidate.id === menu.trackId);
+    const clip = menu.kind === "midi"
+      ? track?.midiClips.find((candidate) => candidate.id === menu.clipId)
+      : track?.clips.find((candidate) => candidate.id === menu.clipId);
+    if (
+      !clip
+      || menu.time <= clip.startTime + 0.000001
+      || menu.time >= clip.startTime + clip.duration - 0.000001
+    ) return "claimed_noop";
 
-      // Tool switching (bare keys, skip if in input/textarea)
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag !== "INPUT" && tag !== "TEXTAREA") {
-        if ((e.key === "v" || e.key === "V") && !e.ctrlKey && !e.metaKey) {
-          e.preventDefault();
-          state.setToolMode("select");
-          return;
-        }
-        if ((e.key === "b" || e.key === "B") && !e.ctrlKey && !e.metaKey) {
-          e.preventDefault();
-          state.toggleSplitTool();
-          return;
-        }
-        if ((e.key === "x" || e.key === "X") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-          e.preventDefault();
-          state.toggleMuteTool();
-          return;
-        }
-        if ((e.key === "y" || e.key === "Y") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-          e.preventDefault();
-          state.setToolMode("smart");
-          return;
-        }
-        if (e.key === "Escape") {
-          state.setToolMode("select");
-          // Don't return — let Escape also deselect via action registry
-        }
-      }
+    if (menu.kind === "midi") {
+      state.splitMIDIClipAtPosition(menu.clipId, menu.time);
+    } else {
+      state.splitClipAtPosition(menu.clipId, menu.time);
+    }
+    setClipContextMenu(null);
+    return "handled";
+  };
 
-      // Copy: Ctrl+C
-      if (hasModifier && key === "c" && hasClips) {
-        e.preventDefault();
-        state.copySelectedClips();
-      }
-      // Cut: Ctrl+X
-      else if (hasModifier && key === "x" && hasClips) {
-        e.preventDefault();
-        state.cutSelectedClips();
-      }
-      // Paste: Ctrl+V (works even without clips selected — uses clipboard)
-      else if (hasModifier && key === "v") {
-        const { clipboard } = state;
-        if (clipboard.clips.length > 0 || clipboard.clip) {
-          e.preventDefault();
-          state.pasteClips();
-        }
-      }
-      // Duplicate: Ctrl+D
-      else if (hasModifier && key === "d" && hasClips) {
-        e.preventDefault();
-        state.selectedClipIds.forEach((id) => state.duplicateClip(id));
-      }
-      // Group: Ctrl+G
-      else if (hasModifier && !e.shiftKey && key === "g" && hasClips) {
-        e.preventDefault();
-        state.groupSelectedClips();
-      }
-      // Ungroup: Ctrl+Shift+G
-      else if (hasModifier && e.shiftKey && key === "g" && hasClips) {
-        e.preventDefault();
-        state.ungroupSelectedClips();
-      }
-      // Delete: Delete or Backspace
-      else if (e.key === "Delete" || e.key === "Backspace") {
-        // Razor edits take priority
-        if (state.razorEdits.length > 0) {
-          e.preventDefault();
-          state.deleteRazorEditContent();
-        } else if (hasClips) {
-          e.preventDefault();
-          state.selectedClipIds.forEach((id) => state.deleteClip(id));
-        } else if (state.timeSelection) {
-          e.preventDefault();
-          state.deleteWithinTimeSelection();
-        }
-      }
+  const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
+  shortcutHandlerRef.current = (event) => {
+    const state = useDAWStore.getState();
+    const hasClips = state.selectedClipIds.length > 0;
+
+    if (matchesActionShortcut(event, "edit.undo")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.undo");
+    }
+    if (matchesActionShortcut(event, "edit.redo")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.redo");
+    }
+    if (matchesActionShortcut(event, "clip.splitAtPointer")) {
+      if (event.repeat) return "claimed_noop";
+      return timelineActionExecutorRef.current("clip.splitAtPointer");
+    }
+    if (matchesActionShortcut(event, "edit.splitAtSelection")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.splitAtSelection");
+    }
+    if (matchesActionShortcut(event, "edit.reverseClip")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.reverseClip");
+    }
+
+    const toolActions: Array<[string, () => void]> = [
+      ["tools.selectTool", () => state.setToolMode("select")],
+      ["tools.splitTool", () => state.toggleSplitTool()],
+      ["tools.muteTool", () => state.toggleMuteTool()],
+      ["tools.smartTool", () => state.setToolMode("smart")],
+    ];
+    const matchedTool = toolActions.find(([actionId]) => matchesActionShortcut(event, actionId));
+    if (matchedTool) {
+      if (event.repeat) return "claimed_noop";
+      matchedTool[1]();
+      return "handled";
+    }
+
+    if (matchesActionShortcut(event, "edit.deselectAll")) {
+      if (event.repeat) return "claimed_noop";
+      state.setToolMode("select");
+      state.deselectAll();
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.copy")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.copy");
+    }
+    if (matchesActionShortcut(event, "edit.cut")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.cut");
+    }
+    if (matchesActionShortcut(event, "edit.paste")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.paste");
+    }
+    if (matchesActionShortcut(event, "edit.duplicateClips")) {
+      if (event.repeat || !hasClips) return "claimed_noop";
+      return state.duplicateSelectedClips().length > 0 ? "handled" : "claimed_noop";
+    }
+    if (matchesActionShortcut(event, "edit.groupClips")) {
+      if (event.repeat || !hasClips) return "claimed_noop";
+      state.groupSelectedClips();
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.ungroupClips")) {
+      if (event.repeat || !hasClips) return "claimed_noop";
+      state.ungroupSelectedClips();
+      return "handled";
+    }
+    if (matchesActionShortcut(event, "edit.delete")) {
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction("edit.delete");
+    }
+
+    for (const actionId of [
+      "edit.splitAtCursor",
+      "edit.nudgeLeft",
+      "edit.nudgeRight",
+      "edit.nudgeLeftFine",
+      "edit.nudgeRightFine",
+      "edit.insertSilence",
+    ]) {
+      if (!matchesActionShortcut(event, actionId)) continue;
+      if (event.repeat) return "claimed_noop";
+      return executeAvailableRegisteredAction(actionId);
+    }
+
+    return "unmatched";
+  };
+
+  useEffect(() => {
+    const context = { kind: "timeline" } as const;
+    const automationContext = { kind: "automation" } as const;
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      (event) => shortcutHandlerRef.current(event),
+      { kind: "application" },
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => timelineActionExecutorRef.current(actionId),
+      ["clip.splitAtPointer", "view.zoomToFit", "view.zoomToSelection"],
+    );
+    const unregisterAutomationSurface = registerShortcutSurface(
+      automationContext,
+      () => "unmatched",
+      context,
+    );
+    return () => {
+      unregisterAutomationSurface();
+      unregisterActions();
+      unregisterSurface();
     };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   // Auto-Scroll during playback - uses Zustand subscribe to avoid re-renders.
@@ -3181,49 +4637,72 @@ export function Timeline({
     }
 
     let cancelled = false;
+    let inFlight = false;
     const fetchRecordingPeaks = async () => {
+      if (inFlight) return;
+      inFlight = true;
       const currentTime = useDAWStore.getState().transport.currentTime;
       const newCache = new Map(recordingWaveformCacheRef.current);
 
-      for (const rc of recordingClips) {
-        const track = tracks.find((candidate) => candidate.id === rc.trackId);
-        if (track?.type === "midi" || track?.type === "instrument") {
-          newCache.delete(rc.trackId);
-          continue;
-        }
+      try {
+        for (const rc of recordingClips) {
+          const track = tracks.find((candidate) => candidate.id === rc.trackId);
+          if (track?.type === "midi" || track?.type === "instrument") {
+            newCache.delete(rc.trackId);
+            continue;
+          }
 
-        const recordingDuration = currentTime - rc.startTime;
-        if (recordingDuration <= 0) {
-          continue;
-        }
+          const recordingDuration = currentTime - rc.startTime;
+          if (recordingDuration <= 0) {
+            continue;
+          }
 
-        const widthPixels = Math.ceil(recordingDuration * pixelsPerSecond);
-        if (widthPixels < 2) {
-          continue;
-        }
-
-        try {
           const deviceSR = useDAWStore.getState().audioDeviceSetup?.sampleRate || 44100;
-          const samplesPerPixel = Math.max(1, Math.floor((recordingDuration * deviceSR) / widthPixels));
-          const peaks = await nativeBridge.getRecordingPeaks(
+          const samplesPerPixel = Math.max(1, Math.floor(deviceSR / pixelsPerSecond));
+          const existing = newCache.get(rc.trackId);
+          const canAppend = Boolean(
+            existing
+            && existing.samplesPerPixel === samplesPerPixel
+            && existing.sampleRate === deviceSR
+            && existing.recordingStartTime === rc.startTime,
+          );
+          const previousPeaks = canAppend ? existing!.peaks : [];
+          const startSample = previousPeaks.length * samplesPerPixel;
+          const recordedSamples = Math.max(0, Math.floor(recordingDuration * deviceSR));
+          const missingPixels = Math.max(
+            1,
+            Math.ceil(Math.max(0, recordedSamples - startSample) / samplesPerPixel),
+          );
+          const newPeaks = await nativeBridge.getRecordingPeaks(
             rc.trackId,
             samplesPerPixel,
-            widthPixels,
+            missingPixels,
+            startSample,
           );
 
-          if (peaks && peaks.length > 0) {
-            newCache.set(rc.trackId, { peaks, widthPixels });
+          if (newPeaks.length > 0) {
+            const peaks = canAppend ? [...previousPeaks, ...newPeaks] : newPeaks;
+            const widthPixels = peaks.length * samplesPerPixel / deviceSR * pixelsPerSecond;
+            newCache.set(rc.trackId, {
+              peaks,
+              widthPixels,
+              samplesPerPixel,
+              sampleRate: deviceSR,
+              recordingStartTime: rc.startTime,
+            });
           }
-        } catch (e) {
+        }
+      } catch (e) {
+        if (!cancelled) {
           console.error(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:error`, {
-            trackId: rc.trackId,
             error: e,
           });
         }
-      }
-
-      if (!cancelled) {
-        startRecordingWaveformTransition(() => setRecordingWaveformCache(newCache));
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          startRecordingWaveformTransition(() => setRecordingWaveformCache(newCache));
+        }
       }
     };
 
@@ -3598,6 +5077,7 @@ export function Timeline({
     const x = clip.startTime * pixelsPerSecond - scrollX;
     const width = clip.duration * pixelsPerSecond;
     const isSelected = selectedClipIds.includes(clip.id);
+    const clipEditLocked = itemsLocked || Boolean(clip.locked);
     const isCut = clipboard.isCut && clipboard.clip?.id === clip.id; // Check if this clip is cut
 
     // During cross-track drag, visually offset clip to target track position
@@ -3622,6 +5102,8 @@ export function Timeline({
     }
 
     const clipY = visualTrackY + rowMetrics.clipInsetY;
+    const waveformScaleView = waveformScaleViews[trackId]
+      ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
 
     // Skip if clip is outside visible area
     if (x + width < 0 || x > dimensions.width) return null;
@@ -3696,7 +5178,9 @@ export function Timeline({
         const points: number[] = [];
         const channelHeight = waveformHeight / numChannels;
         const channelY = clipY + 5 + ch * channelHeight;
-        const centerY = channelY + channelHeight / 2;
+        const centerY = channelY
+          + channelHeight / 2
+          + waveformScaleView.verticalOffset * (channelHeight / 2 - 2);
         const halfHeight = channelHeight / 2 - 2;
 
         // Draw top half (max values) — only visible peaks
@@ -3784,15 +5268,25 @@ export function Timeline({
       const visibleEnd = Math.min(totalClipPeaks, Math.ceil(dimensions.width - x));
       if (visibleEnd <= visibleStart) return [];
       const BAND_COUNT = 8;
-      const bandH = wfHeight / BAND_COUNT;
+      const bandGeometry = computeSpectrogramBandGeometry({
+        height: wfHeight,
+        bandCount: BAND_COUNT,
+        scale: waveformScaleView.spectrogramScale,
+        verticalOffset: waveformScaleView.verticalOffset,
+      });
       const colWidth = Math.max(1, Math.ceil(4 / peakScale));
       for (let i = visibleStart; i < visibleEnd; i += colWidth) {
         const dataIndex = clipStartPeak + Math.floor(i * peakScale);
         const peak = waveformData[dataIndex];
         if (!peak) continue;
         const amp = Math.min(1, Math.max(0, Math.abs(peak.channels[0]?.max ?? 0)));
+        const floorDb = Math.max(-120, Math.min(-20, waveformScaleView.spectrogramDbFloor));
+        const amplitudeDb = 20 * Math.log10(Math.max(0.000001, amp));
+        const visibleAmplitude = Math.max(0, Math.min(1, (amplitudeDb - floorDb) / -floorDb));
         for (let b = 0; b < BAND_COUNT; b++) {
-          const bandAmp = Math.max(0, amp - b * 0.1) * (1 + b * 0.15);
+          const geometry = bandGeometry[b];
+          if (!geometry || geometry.height <= 0) continue;
+          const bandAmp = Math.max(0, visibleAmplitude - b * 0.1) * (1 + b * 0.15);
           const intensity = Math.min(1, bandAmp);
           if (intensity < 0.02) continue;
           const r = Math.round(intensity * 255);
@@ -3802,9 +5296,9 @@ export function Timeline({
             <Rect
               key={`spec-${clip.id}-${i}-${b}`}
               x={x + i}
-              y={clipY + 5 + (BAND_COUNT - 1 - b) * bandH}
+              y={clipY + 5 + geometry.y}
               width={colWidth}
-              height={bandH}
+              height={geometry.height}
               fill={`rgb(${r},${g},${bv})`}
               opacity={intensity * 0.85}
               listening={false}
@@ -3827,7 +5321,9 @@ export function Timeline({
         const points: number[] = [];
         const channelHeight = waveformHeight / numChannels;
         const channelY = clipY + 5 + ch * channelHeight;
-        const centerY = channelY + channelHeight / 2;
+        const centerY = channelY
+          + channelHeight / 2
+          + waveformScaleView.verticalOffset * (channelHeight / 2 - 2);
         const halfHeight = channelHeight / 2 - 2;
         for (let i = visibleStart; i < visibleEnd; i += 1) {
           const dataIndex = Math.min(previewWaveformData.length - 1, Math.floor((i / Math.max(1, width)) * previewWaveformData.length));
@@ -3867,14 +5363,15 @@ export function Timeline({
         ? (isSpectral ? generateSpectralView() : generateWaveformPoints())
         : generatePreviewWaveformPoints();
 
+    const EDGE_THRESHOLD = 8;
+
     // Clip click — selection is handled in handleMouseDown to support drag
     const handleClipClick = (e: KonvaEvent) => {
-      if (e.evt?.shiftKey && !e.evt?.ctrlKey && !e.evt?.altKey) {
+      if ((e.evt?.button ?? 0) !== 0) return;
+
+      const action = resolveLiveMouseModifierAction(e.evt || {}, "clip_drag");
+      if (action === "constrain" && !clipEditLocked) {
         e.cancelBubble = true;
-        const suppressed = suppressShiftGainClickRef.current;
-        if (suppressed?.clipId === clip.id && Date.now() - suppressed.at < 300) {
-          return;
-        }
         const stage = e.target.getStage();
         const pointerPos = stage.getPointerPosition();
         const timeInClip = (pointerPos.x + scrollX) / pixelsPerSecond - clip.startTime;
@@ -3885,11 +5382,36 @@ export function Timeline({
         }
         clearTimelineGestureUndo();
         resetDragState();
+        return;
+      }
+      if (isTimelineClipCopyAction(action)) {
+        const stage = e.target.getStage();
+        const pointerPos = stage.getPointerPosition();
+        const clickGesture = classifyTimelineClipGesture(
+          pointerPos.x - x,
+          width,
+          EDGE_THRESHOLD,
+        );
+        if (shouldStartTimelineCopyDrag(true, clickGesture, clipEditLocked)) {
+          selectClip(clip.id, { ctrl: true });
+        }
       }
     };
 
     // Handle drag start - only set up if not already set by handleMouseDown (for resize)
-    const handleDragStart = (_e: any) => {
+    const handleDragStart = (e: KonvaEvent) => {
+      const gesture = dragStateRef.current;
+      if (
+        gesture.clipId !== clip.id
+        || gesture.type === null
+        || isTimelineGestureEditLocked(gesture)
+      ) {
+        if (gesture.clipId === clip.id && gesture.type !== null) {
+          cancelActiveTimelineClipGesture();
+        }
+        e.target.stopDrag?.();
+        return;
+      }
       // Don't re-select if already selected (preserves multi-selection during drag)
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
@@ -3907,131 +5429,24 @@ export function Timeline({
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
 
-      // Calculate new time position for anchor clip
-      const rawDeltaX = pointerPos.x - gesture.startX;
-      const rawDeltaY = pointerPos.y - gesture.startY;
-      const constrainedDrag = getTimelineAxisLockedDeltas(
-        Boolean(gesture.axisLockRequested),
-        gesture.axisLock,
-        rawDeltaX,
-        rawDeltaY,
-      );
-      const deltaX = constrainedDrag.deltaX;
-      const deltaTime = deltaX / pixelsPerSecond;
-      const rawStartTime = Math.max(0, gesture.originalStartTime + deltaTime);
-      const newStartTime = computeTimelineMoveStart(
-        gesture.originalStartTime,
-        deltaTime,
-        isSnapActive(Boolean(e.evt?.ctrlKey))
-          ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-          : undefined,
-      );
-
-      // Calculate target track based on Y position
-      const effectivePointerY = gesture.startY + constrainedDrag.deltaY;
-      const targetHit = getTrackAtY(effectivePointerY + scrollY, tracks, trackYs, trackHeight);
-      let targetTrackIdx = targetHit?.trackIndex ?? Math.max(0, tracks.length - 1);
-      if (gesture.axisLockRequested && constrainedDrag.axisLock !== "y") {
-        targetTrackIdx = gesture.trackIndex ?? targetTrackIdx;
-      }
-      const targetTY = trackYs[Math.max(0, targetTrackIdx)] ?? 0;
-
-      // Update snap ghost preview: show semi-transparent rect at snapped position
-      if (isSnapActive(Boolean(e.evt?.ctrlKey)) && Math.abs(newStartTime - rawStartTime) > 0.001) {
-        const ghostScreenX = newStartTime * pixelsPerSecond - scrollX;
-        const targetTrack = tracks[Math.max(0, Math.min(targetTrackIdx, tracks.length - 1))];
-        const targetMetrics = targetTrack
-          ? getTimelineRowMetrics(targetTrack, trackHeight)
-          : rowMetrics;
-        snapGhostRef.current = {
-          x: ghostScreenX,
-          y: targetTY + targetMetrics.clipInsetY,
-          width: clip.duration * pixelsPerSecond,
-          height: targetMetrics.clipHeight,
-          color: clip.color || trackColor,
-          visible: true,
-        };
-        setSnapGhostRender(snapGhostRef.current);
-      } else {
-        if (snapGhostRef.current) {
-          snapGhostRef.current = null;
-          setSnapGhostRender(null);
-        }
-      }
-
-      // Compute actual timeDelta after snap (for multi-clip)
-      const timeDelta = newStartTime - gesture.originalStartTime;
-
-      // Determine if multi-clip drag
-      const multi = gesture.multiClipInfo && gesture.multiClipInfo.length > 1;
-
-      // Check if any clip in selection would go past last track (ghost track needed)
-      const trackDelta = targetTrackIdx - (gesture.trackIndex ?? 0);
-      let needsGhost = false;
-      if (multi) {
-        const maxTrackIdx = Math.max(...gesture.multiClipInfo!.map(m => m.trackIndex));
-        needsGhost = maxTrackIdx + trackDelta >= tracks.length;
-      } else {
-        needsGhost = targetTrackIdx >= tracks.length;
-      }
-
-      if (needsGhost) {
-        setShowGhostTrack(true);
-      } else {
-        setShowGhostTrack(false);
-      }
-
-      // Update time positions for all clips in the selection
-      if (multi) {
-        // Batch update all selected clips in one set() call
-        useDAWStore.setState((state) => ({
-          tracks: state.tracks.map(track => ({
-            ...track,
-            clips: track.clips.map(c => {
-              const info = gesture.multiClipInfo!.find(m => m.clipId === c.id && !m.isMidi);
-              if (info) return { ...c, startTime: Math.max(0, info.originalStartTime + timeDelta) };
-              return c;
-            }),
-            midiClips: track.midiClips.map(mc => {
-              const info = gesture.multiClipInfo!.find(m => m.clipId === mc.id && m.isMidi);
-              if (info) return { ...mc, startTime: Math.max(0, info.originalStartTime + timeDelta) };
-              return mc;
-            }),
-          })),
-        }));
-      } else {
-        // Single clip — use existing moveClipToTrack
-        if (newStartTime !== clip.startTime) {
-          moveClipToTrack(clip.id, tracks[trackIndex].id, newStartTime);
-        }
-      }
-
-      // Store visual target track — actual cross-track move happens on drag end
-      const clampedTarget = Math.max(0, targetTrackIdx);
-      if (clampedTarget !== gesture.targetTrackIndex || constrainedDrag.axisLock !== (gesture.axisLock ?? null)) {
-        setTimelineDragState(prev => ({
-          ...prev,
-          axisLock: constrainedDrag.axisLock,
-          targetTrackIndex: clampedTarget,
-        }));
-      }
+      previewTimelineGestureFromPointer(pointerPos.x, pointerPos.y, e.evt || {});
     };
 
     // Handle drag end
-    const handleDragEnd = async () => {
+    const handleDragEnd = async (e: KonvaEvent) => {
       const gesture = dragStateRef.current;
       // Only handle if this clip was actually being dragged
       if (gesture.clipId !== clip.id) return;
-      if (gesture.axisLockRequested) {
-        suppressShiftGainClickRef.current = { clipId: clip.id, at: Date.now() };
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      if (pointerPos) {
+        previewTimelineGestureFromPointer(pointerPos.x, pointerPos.y, e.evt || {});
       }
       await finalizeTimelineClipGesture();
 
     };
 
     // Mouse handlers for edge resize
-    const EDGE_THRESHOLD = 8;
-
     const handleMouseMove = (e: KonvaEvent) => {
       // In split mode, always show crosshair cursor
       if (toolModeRef.current === "split") {
@@ -4076,15 +5491,17 @@ export function Timeline({
     };
 
     const handleMouseDown = (e: KonvaEvent) => {
+      if ((e.evt?.button ?? 0) !== 0) return;
+
       // Split tool mode: click splits the clip at the clicked position
       if (toolModeRef.current === "split") {
         e.cancelBubble = true;
         const stage = e.target.getStage();
         const pointerPos = stage.getPointerPosition();
-        let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
-        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
-          splitTime = snapTimelineTime(splitTime, splitTime);
-        }
+        const splitTime = resolveTimelinePointerSplitTime(
+          pointerPos.x,
+          Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+        );
         splitClipAtPosition(clip.id, splitTime);
         return;
       }
@@ -4095,66 +5512,114 @@ export function Timeline({
         return;
       }
 
-      const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
-      // Preserve multi-selection: if the clip is already selected in a multi-selection
-      // and no Ctrl modifier, don't call selectClip (which would clear the selection).
-      const currentSelectedIds = useDAWStore.getState().selectedClipIds;
-      const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
-      if (!isAlreadyInMultiSelection || ctrl) {
-        selectClip(clip.id, { ctrl });
-      }
-
-      // Locked clips cannot be moved or resized
-      if (clip.locked) return;
-
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
+      const dragType = classifyTimelineClipGesture(relativeX, width, EDGE_THRESHOLD);
+      const relativeY = pointerPos.y - clipY;
+      const smartFadeType = toolModeRef.current === "smart" && relativeY < 15
+        ? relativeX < 15
+          ? "resize-left"
+          : relativeX > width - 15
+            ? "resize-right"
+            : null
+        : null;
 
-      // Alt+drag on audio clip = slip editing (adjust offset, not position)
-      if (e.evt?.altKey && clip.filePath) {
+      if (smartFadeType) {
+        const fadeAction = resolveLiveMouseModifierAction(e.evt || {}, "fade_handle");
+        if (fadeAction === "none" || notifySafeMouseModifierNoop("fade_handle", fadeAction)) {
+          e.cancelBubble = true;
+          return;
+        }
+
+        const selected = useDAWStore.getState().selectedClipIds;
+        if (!(selected.length > 1 && selected.includes(clip.id))) selectClip(clip.id);
+        if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) return;
+
         e.cancelBubble = true;
+        if (fadeAction === "shape_cycle") {
+          timelineContextWheelEditControllerRef.current?.commit();
+          cycleTimelineClipFadeShape(
+            clip.id,
+            smartFadeType === "resize-left" ? "in" : "out",
+          );
+          return;
+        }
+        timelineContextWheelEditControllerRef.current?.commit();
+        useDAWStore.getState().beginClipFadeEdit(clip.id);
+        setTimelineDragState({
+          type: smartFadeType,
+          clipId: clip.id,
+          trackIndex,
+          targetTrackIndex: trackIndex,
+          startX: pointerPos.x,
+          startY: pointerPos.y,
+          startTime: (pointerPos.x + scrollX) / pixelsPerSecond,
+          originalStartTime: clip.startTime,
+          originalDuration: clip.duration,
+          originalOffset: clip.offset,
+          isFadeDrag: true,
+          fadeAction,
+          originalFadeIn: clip.fadeIn || 0,
+          originalFadeOut: clip.fadeOut || 0,
+        });
+        stage.container().style.cursor = "crosshair";
+        return;
+      }
+
+      const modifierAction = dragType === "move"
+        ? resolveLiveMouseModifierAction(e.evt || {}, "clip_drag")
+        : resolveLiveMouseModifierAction(e.evt || {}, "clip_resize");
+      if (
+        modifierAction === "none"
+        || (dragType !== "move" && notifySafeMouseModifierNoop("clip_resize", modifierAction))
+      ) {
+        e.cancelBubble = true;
+        return;
+      }
+      if (dragType === "move" && modifierAction === "select") {
+        selectClip(clip.id);
+        e.cancelBubble = true;
+        return;
+      }
+
+      const copyOnDrag = dragType === "move"
+        && isTimelineClipCopyAction(modifierAction)
+        && shouldStartTimelineCopyDrag(true, dragType, clipEditLocked);
+      // Preserve multi-selection: if the clip is already selected in a multi-selection
+      // and this is not a copy gesture, don't clear the selection.
+      const currentSelectedIds = useDAWStore.getState().selectedClipIds;
+      const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
+      if (!copyOnDrag && !isAlreadyInMultiSelection) {
+        selectClip(clip.id);
+      }
+
+      // Locked clips cannot be moved or resized
+      if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) return;
+
+      if (dragType === "move" && modifierAction === "slip") {
+        e.cancelBubble = true;
+        if (!clip.filePath) return;
+
+        const state = useDAWStore.getState();
         captureTimelineGestureUndo();
         const sourceLength = clip.sourceLength ?? (clip.offset + clip.duration + 60);
         const maxOffset = Math.max(0, sourceLength - clip.duration);
         slipEditRef.current = {
           clipId: clip.id,
-          trackId: trackId,
+          trackId,
           isMidi: false,
           startX: pointerPos.x,
           originalOffset: clip.offset || 0,
           sourceLength,
           clipDuration: clip.duration,
           maxOffset,
+          originalIsModified: state.isModified,
         };
         stage.container().style.cursor = "grab";
         return;
       }
 
-      // Smart tool: detect fade corner zones
-      if (toolModeRef.current === "smart") {
-        const FADE_CORNER = 15;
-        const clipTopY = clipY;
-        const relativeY = pointerPos.y - clipTopY;
-        if (relativeY < FADE_CORNER && relativeX < FADE_CORNER) {
-          // Top-left corner: fade-in adjustment via drag
-          e.cancelBubble = true;
-          captureTimelineGestureUndo();
-          setTimelineDragState({ type: "resize-left", clipId: clip.id, trackIndex, targetTrackIndex: trackIndex, startX: pointerPos.x, startY: pointerPos.y, startTime: (pointerPos.x + scrollX) / pixelsPerSecond, originalStartTime: clip.startTime, originalDuration: clip.duration, originalOffset: clip.offset, isFadeDrag: true });
-          stage.container().style.cursor = "crosshair";
-          return;
-        }
-        if (relativeY < FADE_CORNER && relativeX > width - FADE_CORNER) {
-          // Top-right corner: fade-out adjustment via drag
-          e.cancelBubble = true;
-          captureTimelineGestureUndo();
-          setTimelineDragState({ type: "resize-right", clipId: clip.id, trackIndex, targetTrackIndex: trackIndex, startX: pointerPos.x, startY: pointerPos.y, startTime: (pointerPos.x + scrollX) / pixelsPerSecond, originalStartTime: clip.startTime, originalDuration: clip.duration, originalOffset: clip.offset, isFadeDrag: true });
-          stage.container().style.cursor = "crosshair";
-          return;
-        }
-      }
-
-      const dragType = classifyTimelineClipGesture(relativeX, width, EDGE_THRESHOLD);
       if (dragType !== "move") {
         stage.container().style.cursor = "ew-resize";
       }
@@ -4162,19 +5627,19 @@ export function Timeline({
       // Build multi-clip info when starting a drag on a multi-selected clip
       let multiClipInfo: typeof dragState.multiClipInfo;
       const latestSelectedIds = useDAWStore.getState().selectedClipIds;
-      if (dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
+      const currentTracks = useDAWStore.getState().tracks;
+      if (!copyOnDrag && dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
         multiClipInfo = [];
-        const currentTracks = useDAWStore.getState().tracks;
         for (let ti = 0; ti < currentTracks.length; ti++) {
           const t = currentTracks[ti];
           for (const c of t.clips) {
-            if (latestSelectedIds.includes(c.id) && !c.locked) {
-              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, isMidi: false });
+            if (latestSelectedIds.includes(c.id) && !isClipEditLocked(useDAWStore.getState(), c)) {
+              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
             }
           }
           for (const mc of t.midiClips) {
-            if (latestSelectedIds.includes(mc.id)) {
-              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, isMidi: true });
+            if (latestSelectedIds.includes(mc.id) && !isClipEditLocked(useDAWStore.getState(), mc)) {
+              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
             }
           }
         }
@@ -4193,9 +5658,24 @@ export function Timeline({
         originalStartTime: clip.startTime,
         originalDuration: clip.duration,
         originalOffset: clip.offset,
-        axisLockRequested: Boolean(e.evt?.shiftKey && dragType === "move"),
+        axisLockRequested: dragType === "move" && modifierAction === "constrain",
         axisLock: null,
+        copyOnDrag,
+        snapBypassRequested: dragType === "move" && modifierAction === "bypass_snap",
+        preserveTimeOnDragRequested: dragType === "move"
+          && modifierAction === "copy_preserve_time",
+        mouseBehaviorProfileId: useDAWStore.getState().mouseBehaviorProfileId,
+        automationFollowInverted: shouldInvertAutomationFollowForClipDrag(
+          mouseBehaviorProfileId,
+          Boolean(e.evt?.shiftKey),
+          dragType === "move",
+        ),
+        resizeAction: dragType === "move"
+          ? undefined
+          : modifierAction as MouseModifierActionFor<"clip_resize">,
+        previewStartTime: clip.startTime,
         multiClipInfo,
+        snapClipGeometry: snapshotTimelineClipGeometry(currentTracks),
       });
     };
 
@@ -4211,30 +5691,40 @@ export function Timeline({
 
       // Smart tool fade drag: adjust fadeIn/fadeOut instead of resizing
       if (gesture.isFadeDrag) {
-        const fadeDelta = Math.max(0, resizeDeltaTime);
+        if (isTimelineGestureEditLocked(gesture)) {
+          cancelActiveTimelineClipGesture();
+          e.target.stopDrag?.();
+          return;
+        }
+        const fineScale = gesture.fadeAction === "fine" ? 0.1 : 1;
+        const originalFadeIn = gesture.originalFadeIn ?? 0;
+        const originalFadeOut = gesture.originalFadeOut ?? 0;
         if (gesture.type === "resize-left") {
-          const newFadeIn = Math.min(fadeDelta, clip.duration * 0.5);
-          useDAWStore.getState().setClipFades(clip.id, newFadeIn, clip.fadeOut || 0);
+          const newFadeIn = Math.min(
+            Math.max(0, originalFadeIn + resizeDeltaTime * fineScale),
+            clip.duration * 0.5,
+          );
+          useDAWStore.getState().previewClipFades(
+            clip.id,
+            newFadeIn,
+            gesture.fadeAction === "symmetric" ? newFadeIn : originalFadeOut,
+          );
         } else if (gesture.type === "resize-right") {
-          const newFadeOut = Math.min(Math.max(0, -resizeDeltaTime), clip.duration * 0.5);
-          useDAWStore.getState().setClipFades(clip.id, clip.fadeIn || 0, newFadeOut);
+          const newFadeOut = Math.min(
+            Math.max(0, originalFadeOut - resizeDeltaTime * fineScale),
+            clip.duration * 0.5,
+          );
+          useDAWStore.getState().previewClipFades(
+            clip.id,
+            gesture.fadeAction === "symmetric" ? newFadeOut : originalFadeIn,
+            newFadeOut,
+          );
         }
         return;
       }
 
       if (gesture.type === "resize-left" || gesture.type === "resize-right") {
-        previewResizeTimelineClip(clip.id, false, computeTimelineResize({
-          kind: gesture.type,
-          isMidi: false,
-          originalStartTime: gesture.originalStartTime,
-          originalDuration: gesture.originalDuration,
-          originalOffset: gesture.originalOffset,
-          deltaTime: resizeDeltaTime,
-          sourceLength: clip.sourceLength,
-          snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-            : undefined,
-        }));
+        previewTimelineGestureFromPointer(pointerPos.x, pointerPos.y, e.evt || {});
       } else {
         handleDragMove(e);
       }
@@ -4243,7 +5733,7 @@ export function Timeline({
     return (
       <Group
         key={clip.id}
-        draggable={!clip.locked}
+        draggable={!clipEditLocked}
         onDragStart={handleDragStart}
         onDragMove={handleDragMoveModified}
         onDragEnd={handleDragEnd}
@@ -4356,8 +5846,12 @@ export function Timeline({
                 fill="#ffd700"
                 stroke="#fff"
                 strokeWidth={0.5}
-                draggable
+                draggable={!clipEditLocked}
                 onDragMove={(e) => {
+                  if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                    e.target.stopDrag?.();
+                    return;
+                  }
                   const node = e.target;
                   const newPx = node.x();
                   const newPy = node.y();
@@ -4495,14 +5989,15 @@ export function Timeline({
             if (shouldSuppressWorkspaceContextMenu(e.evt.target)) return;
             const stage = e.target.getStage();
             const pointerPos = stage?.getPointerPosition();
-            setBackgroundContextMenu(null);
-            setClipContextMenu({
-              x: e.evt.clientX,
-              y: e.evt.clientY,
+            if (!pointerPos) return;
+            openTimelineClipContextMenu({
+              clientX: e.evt.clientX,
+              clientY: e.evt.clientY,
+              stageX: pointerPos.x,
               clipId: clip.id,
               trackId: trackId,
               kind: "audio",
-              time: pointerPos ? Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond) : clip.startTime,
+              ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
             });
           }}
         />
@@ -4529,11 +6024,24 @@ export function Timeline({
             const handleVolumeMouseDown = (e: KonvaEvent) => {
               e.cancelBubble = true; // Prevent clip drag
               e.evt?.stopPropagation?.(); // Also stop native event
+              if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                clipVolumeGestureRef.current = null;
+                return;
+              }
               beginClipVolumeEdit(clip.id); // Capture starting value for undo
+              clipVolumeGestureRef.current = { clipId: clip.id };
             };
 
             const handleVolumeDrag = (e: KonvaEvent) => {
               e.cancelBubble = true; // Prevent bubbling to parent Group
+              if (
+                clipVolumeGestureRef.current?.clipId !== clip.id
+                || isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])
+              ) {
+                cancelActiveTimelineClipGesture();
+                e.target.stopDrag?.();
+                return;
+              }
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
               const relativeY = pointerPos.y - clipY;
@@ -4545,6 +6053,12 @@ export function Timeline({
 
             const handleVolumeDragEnd = (e: KonvaEvent) => {
               e.cancelBubble = true; // Prevent bubbling
+              if (clipVolumeGestureRef.current?.clipId !== clip.id) return;
+              if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                cancelActiveTimelineClipGesture();
+                return;
+              }
+              clipVolumeGestureRef.current = null;
               commitClipVolumeEdit(clip.id); // Create undo command for the full drag
             };
 
@@ -4565,10 +6079,13 @@ export function Timeline({
                   width={width}
                   height={12}
                   fill="transparent"
-                  draggable
+                  draggable={!clipEditLocked}
                   onMouseDown={handleVolumeMouseDown}
                   onDragStart={(e: KonvaEvent) => {
                     e.cancelBubble = true;
+                    if (clipVolumeGestureRef.current?.clipId !== clip.id) {
+                      e.target.stopDrag?.();
+                    }
                   }}
                   onDragMove={handleVolumeDrag}
                   onDragEnd={handleVolumeDragEnd}
@@ -4592,32 +6109,93 @@ export function Timeline({
         {/* Fade handles - draggable triangles at fade positions */}
         {isSelected &&
           (() => {
+            const beginFadeHandleGesture = (
+              side: "in" | "out",
+              e: KonvaEvent,
+            ) => {
+              e.cancelBubble = true;
+              e.evt?.stopPropagation?.();
+              const action = resolveLiveMouseModifierAction(e.evt || {}, "fade_handle");
+              if (action === "none" || notifySafeMouseModifierNoop("fade_handle", action)) {
+                fadeHandleGestureRef.current = null;
+                return;
+              }
+              if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                fadeHandleGestureRef.current = null;
+                return;
+              }
+              if (action === "shape_cycle") {
+                timelineContextWheelEditControllerRef.current?.commit();
+                cycleTimelineClipFadeShape(clip.id, side);
+                fadeHandleGestureRef.current = null;
+                return;
+              }
+              const pointerPos = e.target.getStage()?.getPointerPosition();
+              if (!pointerPos) return;
+              timelineContextWheelEditControllerRef.current?.commit();
+              useDAWStore.getState().beginClipFadeEdit(clip.id);
+              fadeHandleGestureRef.current = {
+                key: `${clip.id}:${side}`,
+                clipId: clip.id,
+                action,
+                startPointerX: pointerPos.x,
+                originalFadeIn: clip.fadeIn || 0,
+                originalFadeOut: clip.fadeOut || 0,
+              };
+            };
+
             const handleFadeInDrag = (e: KonvaEvent) => {
               e.cancelBubble = true; // Prevent parent Group from receiving event
               e.evt?.stopPropagation?.();
+              const gesture = fadeHandleGestureRef.current;
+              if (!gesture || gesture.key !== `${clip.id}:in`) return;
+              if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                cancelActiveTimelineClipGesture();
+                e.target.stopDrag?.();
+                return;
+              }
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
-              // Calculate fade length based on pointer position relative to clip start
-              const relativeX = pointerPos.x - x;
+              const relativeX = gesture.action === "fine"
+                ? gesture.originalFadeIn * pixelsPerSecond
+                  + (pointerPos.x - gesture.startPointerX) * 0.1
+                : pointerPos.x - x;
               const fadeLength = Math.max(
                 0,
                 Math.min(clip.duration / 2, relativeX / pixelsPerSecond),
               );
-              setClipFades(clip.id, fadeLength, clip.fadeOut);
+              useDAWStore.getState().previewClipFades(
+                clip.id,
+                fadeLength,
+                gesture.action === "symmetric" ? fadeLength : gesture.originalFadeOut,
+              );
             };
 
             const handleFadeOutDrag = (e: KonvaEvent) => {
               e.cancelBubble = true; // Prevent parent Group from receiving event
               e.evt?.stopPropagation?.();
+              const gesture = fadeHandleGestureRef.current;
+              if (!gesture || gesture.key !== `${clip.id}:out`) return;
+              if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                cancelActiveTimelineClipGesture();
+                e.target.stopDrag?.();
+                return;
+              }
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
-              // Calculate fade length based on pointer position relative to clip end
-              const relativeX = (x + width) - pointerPos.x;
+              const relativeX = gesture.action === "fine"
+                ? gesture.originalFadeOut * pixelsPerSecond
+                  + (gesture.startPointerX - pointerPos.x) * 0.1
+                : (x + width) - pointerPos.x;
               const fadeLength = Math.max(
                 0,
                 Math.min(clip.duration / 2, relativeX / pixelsPerSecond),
               );
-              setClipFades(clip.id, clip.fadeIn, fadeLength);
+              useDAWStore.getState().previewClipFades(
+                clip.id,
+                gesture.action === "symmetric" ? fadeLength : gesture.originalFadeIn,
+                fadeLength,
+              );
             };
 
             const fadeInWidth = clip.fadeIn * pixelsPerSecond;
@@ -4635,19 +6213,27 @@ export function Timeline({
                   fill="#4cc9f0"
                   stroke="#fff"
                   strokeWidth={1}
-                  draggable
-                  onMouseDown={(e: KonvaEvent) => {
-                    e.cancelBubble = true;
-                    e.evt?.stopPropagation?.();
-                  }}
+                  draggable={!clipEditLocked}
+                  onMouseDown={(e: KonvaEvent) => beginFadeHandleGesture("in", e)}
                   onDragStart={(e: KonvaEvent) => {
                     e.cancelBubble = true;
                     e.evt?.stopPropagation?.();
+                    if (fadeHandleGestureRef.current?.key !== `${clip.id}:in`) {
+                      e.target.stopDrag?.();
+                    }
                   }}
                   onDragMove={handleFadeInDrag}
                   onDragEnd={(e: KonvaEvent) => {
                     e.cancelBubble = true;
                     e.evt?.stopPropagation?.();
+                    if (fadeHandleGestureRef.current?.key === `${clip.id}:in`) {
+                      if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                        cancelActiveTimelineClipGesture();
+                        return;
+                      }
+                      fadeHandleGestureRef.current = null;
+                      useDAWStore.getState().commitClipFadeEdit(clip.id);
+                    }
                   }}
                   dragBoundFunc={(pos: any) => ({
                     x: Math.max(x, Math.min(x + maxFadeWidth, pos.x)),
@@ -4662,19 +6248,27 @@ export function Timeline({
                   fill="#4cc9f0"
                   stroke="#fff"
                   strokeWidth={1}
-                  draggable
-                  onMouseDown={(e: KonvaEvent) => {
-                    e.cancelBubble = true;
-                    e.evt?.stopPropagation?.();
-                  }}
+                  draggable={!clipEditLocked}
+                  onMouseDown={(e: KonvaEvent) => beginFadeHandleGesture("out", e)}
                   onDragStart={(e: KonvaEvent) => {
                     e.cancelBubble = true;
                     e.evt?.stopPropagation?.();
+                    if (fadeHandleGestureRef.current?.key !== `${clip.id}:out`) {
+                      e.target.stopDrag?.();
+                    }
                   }}
                   onDragMove={handleFadeOutDrag}
                   onDragEnd={(e: KonvaEvent) => {
                     e.cancelBubble = true;
                     e.evt?.stopPropagation?.();
+                    if (fadeHandleGestureRef.current?.key === `${clip.id}:out`) {
+                      if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) {
+                        cancelActiveTimelineClipGesture();
+                        return;
+                      }
+                      fadeHandleGestureRef.current = null;
+                      useDAWStore.getState().commitClipFadeEdit(clip.id);
+                    }
                   }}
                   dragBoundFunc={(pos: any) => ({
                     x: Math.max(x + width - maxFadeWidth, Math.min(x + width, pos.x)),
@@ -4802,6 +6396,15 @@ export function Timeline({
       const numChannels = recordingPeaks[0]?.channels?.length || 1;
       const waveforms: React.ReactNode[] = [];
       const waveformHeight = Math.max(8, clipHeight - 10);
+      const pixelsPerPeak = peaksWidth / recordingPeaks.length;
+      const firstVisiblePeak = Math.max(
+        0,
+        Math.floor((-x) / Math.max(pixelsPerPeak, 0.001)) - 1,
+      );
+      const lastVisiblePeak = Math.min(
+        recordingPeaks.length,
+        Math.ceil((dimensions.width - x) / Math.max(pixelsPerPeak, 0.001)) + 1,
+      );
 
       for (let ch = 0; ch < numChannels; ch++) {
         const points: number[] = [];
@@ -4811,7 +6414,7 @@ export function Timeline({
         const halfHeight = channelHeight / 2 - 2;
 
         // Draw top half (max values) - use peaksWidth (width at fetch time), not current width
-        for (let i = 0; i < recordingPeaks.length; i++) {
+        for (let i = firstVisiblePeak; i < lastVisiblePeak; i++) {
           const channelData = recordingPeaks[i].channels[ch];
           if (!channelData) continue;
 
@@ -4821,7 +6424,7 @@ export function Timeline({
         }
 
         // Draw bottom half (min values, reversed)
-        for (let i = recordingPeaks.length - 1; i >= 0; i--) {
+        for (let i = lastVisiblePeak - 1; i >= firstVisiblePeak; i--) {
           const channelData = recordingPeaks[i].channels[ch];
           if (!channelData) continue;
 
@@ -4917,6 +6520,7 @@ export function Timeline({
     const isClipMuted = !!clip.muted;
     const isMuted = isTrackMuted || isClipMuted;
     const isSelected = selectedClipIds.includes(clip.id);
+    const clipEditLocked = itemsLocked || Boolean(clip.locked);
     const isNarrowMidi = width < 60;
     let visualTrackY = trackY;
 
@@ -4990,14 +6594,16 @@ export function Timeline({
     };
 
     const handleMIDIClipMouseDown = (e: KonvaEvent) => {
+      if ((e.evt?.button ?? 0) !== 0) return;
+
       if (toolModeRef.current === "split") {
         e.cancelBubble = true;
         const stage = e.target.getStage();
         const pointerPos = stage.getPointerPosition();
-        let splitTime = (pointerPos.x + scrollX) / pixelsPerSecond;
-        if (isSnapActive(Boolean(e.evt?.ctrlKey))) {
-          splitTime = snapTimelineTime(splitTime, splitTime);
-        }
+        const splitTime = resolveTimelinePointerSplitTime(
+          pointerPos.x,
+          Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+        );
         splitMIDIClipAtPosition(clip.id, splitTime);
         return;
       }
@@ -5011,27 +6617,42 @@ export function Timeline({
       e.cancelBubble = true;
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
-      const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
       const relativeX = pointerPos.x - x;
       const dragType = classifyTimelineClipGesture(relativeX, width, EDGE_THRESHOLD);
+      const modifierAction = dragType === "move"
+        ? resolveLiveMouseModifierAction(e.evt || {}, "clip_drag")
+        : resolveLiveMouseModifierAction(e.evt || {}, "clip_resize");
+      if (
+        modifierAction === "none"
+        || (dragType !== "move" && notifySafeMouseModifierNoop("clip_resize", modifierAction))
+      ) return;
+      if (dragType === "move" && modifierAction === "select") {
+        selectClip(clip.id);
+        return;
+      }
       if (dragType !== "move") {
         stage.container().style.cursor = "ew-resize";
       }
-      const copyOnDrag = Boolean(ctrl && dragType === "move" && !clip.locked);
+      const copyOnDrag = dragType === "move"
+        && isTimelineClipCopyAction(modifierAction)
+        && shouldStartTimelineCopyDrag(true, dragType, clipEditLocked);
       const currentSelectedIds = useDAWStore.getState().selectedClipIds;
       const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
-      if (!copyOnDrag && (!isAlreadyInMultiSelection || ctrl)) {
-        selectClip(clip.id, { ctrl });
+      if (!copyOnDrag && !isAlreadyInMultiSelection) {
+        selectClip(clip.id);
       }
 
-      if (clip.locked) return;
+      if (isTimelineClipGestureLocked(useDAWStore.getState(), [clip.id])) return;
 
-      if (e.evt?.altKey) {
-        e.cancelBubble = true;
+      if (dragType === "move" && modifierAction === "slip") {
+        const state = useDAWStore.getState();
         captureTimelineGestureUndo();
         const sourceLength = Math.max(0.01, clip.sourceLength || clip.loopLength || clip.duration);
         const midiIsLooped = clip.duration > sourceLength + 0.000001;
-        const maxOffset = Math.max(0, midiIsLooped ? sourceLength - 0.000001 : sourceLength - clip.duration);
+        const maxOffset = Math.max(
+          0,
+          midiIsLooped ? sourceLength - 0.000001 : sourceLength - clip.duration,
+        );
         slipEditRef.current = {
           clipId: clip.id,
           trackId,
@@ -5041,6 +6662,7 @@ export function Timeline({
           sourceLength,
           clipDuration: clip.duration,
           maxOffset,
+          originalIsModified: state.isModified,
         };
         stage.container().style.cursor = "grab";
         return;
@@ -5048,19 +6670,19 @@ export function Timeline({
 
       let multiClipInfo: typeof dragState.multiClipInfo;
       const latestSelectedIds = useDAWStore.getState().selectedClipIds;
+      const currentTracks = useDAWStore.getState().tracks;
       if (!copyOnDrag && dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
         multiClipInfo = [];
-        const currentTracks = useDAWStore.getState().tracks;
         for (let ti = 0; ti < currentTracks.length; ti++) {
           const t = currentTracks[ti];
           for (const c of t.clips) {
-            if (latestSelectedIds.includes(c.id) && !c.locked) {
-              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, isMidi: false });
+            if (latestSelectedIds.includes(c.id) && !isClipEditLocked(useDAWStore.getState(), c)) {
+              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
             }
           }
           for (const mc of t.midiClips) {
-            if (latestSelectedIds.includes(mc.id) && !mc.locked) {
-              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, isMidi: true });
+            if (latestSelectedIds.includes(mc.id) && !isClipEditLocked(useDAWStore.getState(), mc)) {
+              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
             }
           }
         }
@@ -5078,25 +6700,41 @@ export function Timeline({
         originalStartTime: clip.startTime,
         originalDuration: clip.duration,
         originalOffset: clip.offset || 0,
-        axisLockRequested: Boolean(e.evt?.shiftKey && dragType === "move"),
+        axisLockRequested: dragType === "move" && modifierAction === "constrain",
         axisLock: null,
         copyOnDrag,
+        snapBypassRequested: dragType === "move" && modifierAction === "bypass_snap",
+        preserveTimeOnDragRequested: dragType === "move"
+          && modifierAction === "copy_preserve_time",
+        mouseBehaviorProfileId: useDAWStore.getState().mouseBehaviorProfileId,
+        automationFollowInverted: shouldInvertAutomationFollowForClipDrag(
+          mouseBehaviorProfileId,
+          Boolean(e.evt?.shiftKey),
+          dragType === "move",
+        ),
+        resizeAction: dragType === "move"
+          ? undefined
+          : modifierAction as MouseModifierActionFor<"clip_resize">,
         previewStartTime: clip.startTime,
         multiClipInfo,
+        snapClipGeometry: snapshotTimelineClipGeometry(currentTracks),
       });
     };
 
     const handleMIDIClipClick = (e: KonvaEvent) => {
+      if ((e.evt?.button ?? 0) !== 0) return;
       if (toolModeRef.current === "split") return; // handled in mousedown
-      const ctrl = e.evt?.ctrlKey || e.evt?.metaKey;
+      const clickAction = resolveLiveMouseModifierAction(e.evt || {}, "clip_drag");
+      if (clickAction === "none") return;
+      const toggleSelection = isTimelineClipCopyAction(clickAction);
       const beforeClick = useDAWStore.getState();
       const preserveDockedSelection = beforeClick.showPianoRoll
-        && !ctrl
+        && !toggleSelection
         && beforeClick.selectedClipIds.length > 1
         && beforeClick.selectedClipIds.includes(clip.id);
 
       if (!preserveDockedSelection) {
-        selectClip(clip.id, { ctrl });
+        selectClip(clip.id, { ctrl: toggleSelection });
       }
 
       const afterClick = useDAWStore.getState();
@@ -5110,7 +6748,19 @@ export function Timeline({
       openPianoRoll(trackId, clip.id);
     };
 
-    const handleMIDIClipDragStart = () => {
+    const handleMIDIClipDragStart = (e: KonvaEvent) => {
+      const gesture = dragStateRef.current;
+      if (
+        gesture.clipId !== clip.id
+        || gesture.type === null
+        || isTimelineGestureEditLocked(gesture)
+      ) {
+        if (gesture.clipId === clip.id && gesture.type !== null) {
+          cancelActiveTimelineClipGesture();
+        }
+        e.target.stopDrag?.();
+        return;
+      }
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
@@ -5122,155 +6772,18 @@ export function Timeline({
 
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
-      const rawDeltaX = pointerPos.x - gesture.startX;
-      const rawDeltaY = pointerPos.y - gesture.startY;
-      const resizeDeltaTime = rawDeltaX / pixelsPerSecond;
 
-      if (gesture.type === "resize-left") {
-        previewResizeTimelineClip(clip.id, true, computeTimelineResize({
-          kind: "resize-left",
-          isMidi: true,
-          originalStartTime: gesture.originalStartTime,
-          originalDuration: gesture.originalDuration,
-          originalOffset: gesture.originalOffset,
-          deltaTime: resizeDeltaTime,
-          snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-            : undefined,
-        }));
-        return;
-      }
-
-      if (gesture.type === "resize-right") {
-        previewResizeTimelineClip(clip.id, true, computeTimelineResize({
-          kind: "resize-right",
-          isMidi: true,
-          originalStartTime: gesture.originalStartTime,
-          originalDuration: gesture.originalDuration,
-          originalOffset: gesture.originalOffset,
-          deltaTime: resizeDeltaTime,
-          sourceLength: clip.sourceLength,
-          snapTime: isSnapActive(Boolean(e.evt?.ctrlKey))
-            ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-            : undefined,
-        }));
-        return;
-      }
-
-      if (gesture.type !== "move") return;
-
-      const constrainedDrag = getTimelineAxisLockedDeltas(
-        Boolean(gesture.axisLockRequested),
-        gesture.axisLock,
-        rawDeltaX,
-        rawDeltaY,
-      );
-      const deltaTime = constrainedDrag.deltaX / pixelsPerSecond;
-      const rawStartTime = Math.max(0, gesture.originalStartTime + deltaTime);
-      const newStartTime = computeTimelineMoveStart(
-        gesture.originalStartTime,
-        deltaTime,
-        isSnapActive(Boolean(e.evt?.ctrlKey))
-          ? (time) => snapTimelineTime(time, gesture.originalStartTime)
-          : undefined,
-      );
-
-      const effectivePointerY = gesture.startY + constrainedDrag.deltaY;
-      let targetTrackIdx = getTimelineDropTrackIndex(effectivePointerY + scrollY, tracks, trackYs, trackHeight);
-      if (gesture.axisLockRequested && constrainedDrag.axisLock !== "y") {
-        targetTrackIdx = gesture.trackIndex ?? targetTrackIdx;
-      }
-      const targetTY = targetTrackIdx >= tracks.length
-        ? contentHeight
-        : trackYs[Math.max(0, targetTrackIdx)] ?? 0;
-      const targetTrack = tracks[Math.max(0, Math.min(targetTrackIdx, tracks.length - 1))];
-      const targetMetrics = targetTrack
-        ? getTimelineRowMetrics(targetTrack, trackHeight)
-        : rowMetrics;
-
-      if (gesture.copyOnDrag) {
-        snapGhostRef.current = {
-          x: newStartTime * pixelsPerSecond - scrollX,
-          y: targetTY + targetMetrics.clipInsetY,
-          width: clip.duration * pixelsPerSecond,
-          height: targetMetrics.clipHeight,
-          color: clip.color || trackColor,
-          visible: true,
-        };
-        setSnapGhostRender(snapGhostRef.current);
-        setShowGhostTrack(targetTrackIdx >= tracks.length);
-        const clampedTarget = Math.max(0, targetTrackIdx);
-        if (
-          clampedTarget !== gesture.targetTrackIndex
-          || constrainedDrag.axisLock !== (gesture.axisLock ?? null)
-          || Math.abs((gesture.previewStartTime ?? gesture.originalStartTime) - newStartTime) > 0.0001
-        ) {
-          setTimelineDragState((prev) => ({
-            ...prev,
-            axisLock: constrainedDrag.axisLock,
-            targetTrackIndex: clampedTarget,
-            previewStartTime: newStartTime,
-          }));
-        }
-        return;
-      }
-
-      if (isSnapActive(Boolean(e.evt?.ctrlKey)) && Math.abs(newStartTime - rawStartTime) > 0.001) {
-        const ghostScreenX = newStartTime * pixelsPerSecond - scrollX;
-        snapGhostRef.current = {
-          x: ghostScreenX,
-          y: targetTY + targetMetrics.clipInsetY,
-          width: clip.duration * pixelsPerSecond,
-          height: targetMetrics.clipHeight,
-          color: clip.color || trackColor,
-          visible: true,
-        };
-        setSnapGhostRender(snapGhostRef.current);
-      } else if (snapGhostRef.current) {
-        snapGhostRef.current = null;
-        setSnapGhostRender(null);
-      }
-
-      const timeDelta = newStartTime - gesture.originalStartTime;
-      const multi = gesture.multiClipInfo && gesture.multiClipInfo.length > 1;
-      const trackDelta = targetTrackIdx - (gesture.trackIndex ?? 0);
-      const needsGhost = multi
-        ? Math.max(...gesture.multiClipInfo!.map((m) => m.trackIndex)) + trackDelta >= tracks.length
-        : targetTrackIdx >= tracks.length;
-      setShowGhostTrack(needsGhost);
-
-      if (multi) {
-        useDAWStore.setState((state) => ({
-          tracks: state.tracks.map((track) => ({
-            ...track,
-            clips: track.clips.map((c) => {
-              const info = gesture.multiClipInfo!.find((m) => m.clipId === c.id && !m.isMidi);
-              return info ? { ...c, startTime: Math.max(0, info.originalStartTime + timeDelta) } : c;
-            }),
-            midiClips: track.midiClips.map((mc) => {
-              const info = gesture.multiClipInfo!.find((m) => m.clipId === mc.id && m.isMidi);
-              return info ? { ...mc, startTime: Math.max(0, info.originalStartTime + timeDelta) } : mc;
-            }),
-          })),
-          isModified: true,
-        }));
-      } else if (newStartTime !== clip.startTime) {
-        void moveClipToTrack(clip.id, tracks[_trackIndex].id, newStartTime);
-      }
-
-      const clampedTarget = Math.max(0, targetTrackIdx);
-      if (clampedTarget !== gesture.targetTrackIndex || constrainedDrag.axisLock !== (gesture.axisLock ?? null)) {
-        setTimelineDragState((prev) => ({
-          ...prev,
-          axisLock: constrainedDrag.axisLock,
-          targetTrackIndex: clampedTarget,
-        }));
-      }
+      previewTimelineGestureFromPointer(pointerPos.x, pointerPos.y, e.evt || {});
     };
 
-    const handleMIDIClipDragEnd = async () => {
+    const handleMIDIClipDragEnd = async (e: KonvaEvent) => {
       const gesture = dragStateRef.current;
       if (gesture.clipId !== clip.id) return;
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      if (pointerPos) {
+        previewTimelineGestureFromPointer(pointerPos.x, pointerPos.y, e.evt || {});
+      }
       await finalizeTimelineClipGesture();
 
     };
@@ -5278,7 +6791,7 @@ export function Timeline({
     return (
       <Group
         key={clip.id}
-        draggable={!clip.locked}
+        draggable={!clipEditLocked}
         onDragStart={handleMIDIClipDragStart}
         onDragMove={handleMIDIClipDragMove}
         onDragEnd={handleMIDIClipDragEnd}
@@ -5383,17 +6896,15 @@ export function Timeline({
             if (shouldSuppressWorkspaceContextMenu(e.evt.target)) return;
             const stage = e.target.getStage();
             const pointerPos = stage?.getPointerPosition();
-            if (!selectedClipIds.includes(clip.id)) {
-              selectClip(clip.id);
-            }
-            setBackgroundContextMenu(null);
-            setClipContextMenu({
-              x: e.evt.clientX,
-              y: e.evt.clientY,
+            if (!pointerPos) return;
+            openTimelineClipContextMenu({
+              clientX: e.evt.clientX,
+              clientY: e.evt.clientY,
+              stageX: pointerPos.x,
               clipId: clip.id,
               trackId,
               kind: "midi",
-              time: pointerPos ? Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond) : clip.startTime,
+              ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
             });
           }}
         />
@@ -5526,8 +7037,10 @@ export function Timeline({
 
     return visibleLanes.map((lane, laneIdx) => {
       const color = getAutomationColor(lane.param);
-      const laneTop = trackY + trackHeight + laneIdx * AUTOMATION_LANE_HEIGHT;
-      const laneH = AUTOMATION_LANE_HEIGHT;
+      const laneTop = trackY
+        + trackHeight
+        + getAutomationLaneOffset(visibleLanes, laneIdx);
+      const laneH = getAutomationLaneHeight(lane);
       const laneBottom = laneTop + laneH;
 
       // Build points in lane-local coordinates
@@ -5618,20 +7131,31 @@ export function Timeline({
           {lane.points.map((point, pi) => {
             const px = point.time * pixelsPerSecond - scrollX;
             const py = laneTop + laneH * (1 - point.value);
+            const pointId = getAutomationPointId(point, pi);
+            const pointTarget = {
+              kind: "track" as const,
+              trackId: track.id,
+              laneId: lane.id,
+              pointId,
+            };
             const isHovered = hoveredAutoPoint !== null
               && hoveredAutoPoint.laneId === lane.id
               && hoveredAutoPoint.pointIndex === pi;
+            const isSelected = selectedAutomationTarget?.kind === "track"
+              && selectedAutomationTarget.trackId === track.id
+              && selectedAutomationTarget.laneId === lane.id
+              && selectedAutomationTarget.pointId === pointId;
             return (
-              <React.Fragment key={`ap-${lane.id}-${pi}`}>
+              <React.Fragment key={`ap-${lane.id}-${pointId}`}>
                 <Circle
                   x={px}
                   y={py}
-                  radius={isHovered ? 6 : 4}
+                  radius={isHovered || isSelected ? 6 : 4}
                   fill={color}
                   stroke="#fff"
-                  strokeWidth={isHovered ? 2 : 1}
+                  strokeWidth={isHovered || isSelected ? 2 : 1}
                   opacity={0.9}
-                  draggable
+                  draggable={!envelopesLocked}
                   onMouseEnter={() => {
                     setHoveredAutoPoint({
                       laneId: lane.id,
@@ -5644,18 +7168,82 @@ export function Timeline({
                     });
                   }}
                   onMouseLeave={() => setHoveredAutoPoint(null)}
+                  onMouseDown={(e: KonvaEvent) => {
+                    e.cancelBubble = true;
+                    e.evt?.stopPropagation?.();
+                    activateShortcutContext({ kind: "automation" });
+                    useDAWStore.getState().setSelectedAutomationPoint(pointTarget);
+                    if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) {
+                      automationPointGestureRef.current = null;
+                      return;
+                    }
+                    const action = resolveLiveMouseModifierAction(
+                      e.evt || {},
+                      "automation_point",
+                    );
+                    const key = `${track.id}:${lane.id}:${pointId}`;
+                    if (action === "delete") {
+                      automationPointGestureRef.current = null;
+                      useDAWStore.getState().deleteSelectedAutomationPoint();
+                      setHoveredAutoPoint(null);
+                      return;
+                    }
+                    if (action === "none") {
+                      automationPointGestureRef.current = null;
+                      return;
+                    }
+                    automationPointGestureRef.current = {
+                      key,
+                      action,
+                      originalX: px,
+                      originalY: py,
+                      originalTime: point.time,
+                      originalValue: point.value,
+                      axisLock: null,
+                    };
+                  }}
+                  onDragStart={(e: KonvaEvent) => {
+                    const gesture = automationPointGestureRef.current;
+                    const state = useDAWStore.getState();
+                    const began = gesture?.key === `${track.id}:${lane.id}:${pointId}`
+                      && (isAutomationPointCopyAction(gesture.action)
+                        ? state.beginAutomationPointCopyEdit(pointTarget)
+                        : state.beginAutomationPointEdit(pointTarget));
+                    if (!began) {
+                      e.target.stopDrag?.();
+                    }
+                  }}
                   onDragMove={(e: KonvaEvent) => {
-                    const newX = e.target.x();
-                    const newY = e.target.y();
-                    const newTime = (newX + scrollX) / pixelsPerSecond;
-                    const newValue = 1 - (newY - laneTop) / laneH;
-                    useDAWStore.getState().moveAutomationPoint(
-                      track.id, lane.id, pi, newTime, Math.max(0, Math.min(1, newValue)),
+                    const gesture = automationPointGestureRef.current;
+                    if (!gesture || gesture.key !== `${track.id}:${lane.id}:${pointId}`) return;
+                    const preview = resolveAutomationPointDrag(gesture, {
+                      rawX: e.target.x(),
+                      rawY: e.target.y(),
+                      scrollX,
+                      pixelsPerSecond,
+                      laneTop,
+                      laneHeight: laneH,
+                      snapEnabled: snapEnabledRef.current,
+                      snapTime: snapTimelineTime,
+                    });
+                    gesture.axisLock = preview.axisLock;
+                    e.target.position({ x: preview.x, y: preview.y });
+                    useDAWStore.getState().previewAutomationPointEdit(
+                      preview.time,
+                      preview.value,
                     );
                     setHoveredAutoPoint(null);
                   }}
+                  onDragEnd={() => {
+                    if (automationPointGestureRef.current?.key === `${track.id}:${lane.id}:${pointId}`) {
+                      automationPointGestureRef.current = null;
+                      useDAWStore.getState().commitAutomationPointEdit();
+                    }
+                  }}
                   onDblClick={() => {
-                    useDAWStore.getState().removeAutomationPoint(track.id, lane.id, pi);
+                    activateShortcutContext({ kind: "automation" });
+                    useDAWStore.getState().setSelectedAutomationPoint(pointTarget);
+                    useDAWStore.getState().deleteSelectedAutomationPoint();
                     setHoveredAutoPoint(null);
                   }}
                 />
@@ -5758,7 +7346,30 @@ export function Timeline({
           return (
             <Group key={`master-auto-${lane.id}`}>
               <Line points={[0, laneTop, dimensions.width, laneTop]} stroke="#333" strokeWidth={0.5} listening={false} />
-              <Rect x={0} y={laneTop} width={dimensions.width} height={laneH} fill={color} opacity={0.04} listening={false} />
+              <Rect
+                x={0}
+                y={laneTop}
+                width={dimensions.width}
+                height={laneH}
+                fill={color}
+                opacity={0.04}
+                onMouseDown={(e: KonvaEvent) => {
+                  e.cancelBubble = true;
+                  activateAutomationLaneShortcutContext({ kind: "master", laneId: lane.id });
+                }}
+                onDblClick={(e: KonvaEvent) => {
+                  e.cancelBubble = true;
+                  activateAutomationLaneShortcutContext({ kind: "master", laneId: lane.id });
+                  if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) return;
+                  const pointer = e.target.getStage()?.getPointerPosition();
+                  if (!pointer) return;
+                  useDAWStore.getState().addMasterAutomationPoint(
+                    lane.id,
+                    (pointer.x + scrollX) / pixelsPerSecond,
+                    Math.max(0, Math.min(1, 1 - (pointer.y - laneTop) / laneH)),
+                  );
+                }}
+              />
               <Text x={4} y={laneTop + 3} text={laneLabel} fontSize={10} fill={color} opacity={0.6} listening={false} />
               {lane.points.length === 0 && (
                 <Line points={[0, defaultLineY, dimensions.width, defaultLineY]} stroke={color} strokeWidth={1} dash={[4, 4]} opacity={0.3} listening={false} />
@@ -5772,20 +7383,29 @@ export function Timeline({
               {lane.points.map((point, pi) => {
                 const px = point.time * pixelsPerSecond - scrollX;
                 const py = laneTop + laneH * (1 - point.value);
+                const pointId = getAutomationPointId(point, pi);
+                const pointTarget = {
+                  kind: "master" as const,
+                  laneId: lane.id,
+                  pointId,
+                };
                 const isHovered = hoveredAutoPoint !== null
                   && hoveredAutoPoint.laneId === lane.id
                   && hoveredAutoPoint.pointIndex === pi;
+                const isSelected = selectedAutomationTarget?.kind === "master"
+                  && selectedAutomationTarget.laneId === lane.id
+                  && selectedAutomationTarget.pointId === pointId;
                 return (
-                  <React.Fragment key={`map-${lane.id}-${pi}`}>
+                  <React.Fragment key={`map-${lane.id}-${pointId}`}>
                     <Circle
                       x={px}
                       y={py}
-                      radius={isHovered ? 6 : 4}
+                      radius={isHovered || isSelected ? 6 : 4}
                       fill={color}
                       stroke="#fff"
-                      strokeWidth={isHovered ? 2 : 1}
+                      strokeWidth={isHovered || isSelected ? 2 : 1}
                       opacity={0.9}
-                      draggable
+                      draggable={!envelopesLocked}
                       onMouseEnter={() => {
                         setHoveredAutoPoint({
                           laneId: lane.id, pointIndex: pi, param: lane.param,
@@ -5793,18 +7413,84 @@ export function Timeline({
                         });
                       }}
                       onMouseLeave={() => setHoveredAutoPoint(null)}
+                      onMouseDown={(e: KonvaEvent) => {
+                        e.cancelBubble = true;
+                        e.evt?.stopPropagation?.();
+                        activateShortcutContext({ kind: "automation" });
+                        useDAWStore.getState().setSelectedAutomationPoint(pointTarget);
+                        if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) {
+                          automationPointGestureRef.current = null;
+                          return;
+                        }
+                        const action = resolveLiveMouseModifierAction(
+                          e.evt || {},
+                          "automation_point",
+                        );
+                        const key = `master:${lane.id}:${pointId}`;
+                        if (action === "delete") {
+                          automationPointGestureRef.current = null;
+                          useDAWStore.getState().deleteSelectedAutomationPoint();
+                          setHoveredAutoPoint(null);
+                          return;
+                        }
+                        if (action === "none") {
+                          automationPointGestureRef.current = null;
+                          return;
+                        }
+                        automationPointGestureRef.current = {
+                          key,
+                          action,
+                          originalX: px,
+                          originalY: py,
+                          originalTime: point.time,
+                          originalValue: point.value,
+                          axisLock: null,
+                        };
+                      }}
+                      onDragStart={(e: KonvaEvent) => {
+                        const gesture = automationPointGestureRef.current;
+                        const state = useDAWStore.getState();
+                        const began = gesture?.key === `master:${lane.id}:${pointId}`
+                          && (isAutomationPointCopyAction(gesture.action)
+                            ? state.beginAutomationPointCopyEdit(pointTarget)
+                            : state.beginAutomationPointEdit(pointTarget));
+                        if (!began) {
+                          e.target.stopDrag?.();
+                        }
+                      }}
                       onDragMove={(e: KonvaEvent) => {
-                        const newX = e.target.x();
-                        const newY = e.target.y();
-                        const newTime = (newX + scrollX) / pixelsPerSecond;
-                        const newValue = 1 - (newY - laneTop) / laneH;
-                        useDAWStore.getState().moveMasterAutomationPoint(
-                          lane.id, pi, newTime, Math.max(0, Math.min(1, newValue)),
+                        const gesture = automationPointGestureRef.current;
+                        if (!gesture || gesture.key !== `master:${lane.id}:${pointId}`) return;
+                        const preview = resolveAutomationPointDrag(gesture, {
+                          rawX: e.target.x(),
+                          rawY: e.target.y(),
+                          scrollX,
+                          pixelsPerSecond,
+                          laneTop,
+                          laneHeight: laneH,
+                          snapEnabled: snapEnabledRef.current,
+                          snapTime: snapTimelineTime,
+                        });
+                        gesture.axisLock = preview.axisLock;
+                        e.target.position({ x: preview.x, y: preview.y });
+                        useDAWStore.getState().previewAutomationPointEdit(
+                          preview.time,
+                          preview.value,
                         );
                         setHoveredAutoPoint(null);
                       }}
+                      onDragEnd={() => {
+                        const gesture = automationPointGestureRef.current;
+                        if (!gesture || gesture.key !== `master:${lane.id}:${pointId}`) return;
+
+                        automationPointGestureRef.current = null;
+                        useDAWStore.getState().commitAutomationPointEdit();
+                      }}
                       onDblClick={() => {
-                        useDAWStore.getState().removeMasterAutomationPoint(lane.id, pi);
+                        automationPointGestureRef.current = null;
+                        activateShortcutContext({ kind: "automation" });
+                        useDAWStore.getState().setSelectedAutomationPoint(pointTarget);
+                        useDAWStore.getState().deleteSelectedAutomationPoint();
                         setHoveredAutoPoint(null);
                       }}
                     />
@@ -6008,29 +7694,15 @@ export function Timeline({
 
   // Calculate total timeline width for scrollbar
   const calculateTotalWidth = useCallback(() => {
-    // Find the end time of the last clip across all tracks
-    let maxClipEnd = 0;
+    const maxClipEnd = getTimelineVisibleContentEnd(
+      tracks,
+      recordingClips.length > 0
+        ? useDAWStore.getState().transport.currentTime
+        : undefined,
+    );
 
-    tracks.forEach((track) => {
-      track.clips.forEach((clip) => {
-        const clipEnd = clip.startTime + clip.duration;
-        if (clipEnd > maxClipEnd) maxClipEnd = clipEnd;
-      });
-      track.midiClips.forEach((clip) => {
-        const clipEnd = clip.startTime + clip.duration;
-        if (clipEnd > maxClipEnd) maxClipEnd = clipEnd;
-      });
-    });
-
-    // Check recording clips - extend timeline to current recording position
-    recordingClips.forEach((_rc) => {
-      const recordingEnd = useDAWStore.getState().transport.currentTime;
-      if (recordingEnd > maxClipEnd) maxClipEnd = recordingEnd;
-    });
-
-    // Timeline length = last clip end + 5 minutes (300 seconds)
-    const extraTime = 300; // 5 minutes
-    return (maxClipEnd + extraTime) * pixelsPerSecond;
+    // Timeline length = last clip end + the shared five-minute editing tail.
+    return (maxClipEnd + TIMELINE_SCROLL_PADDING_SECONDS) * pixelsPerSecond;
   }, [tracks, recordingClips, pixelsPerSecond]);
 
   const totalTimelineWidth = calculateTotalWidth();
@@ -6122,40 +7794,51 @@ export function Timeline({
         : []),
       {
         label: "Cut",
-        shortcut: "Ctrl+X",
+        shortcut: shortcut("edit.cut", "Ctrl+X"),
         onClick: () => cutClip(menu.clipId),
       },
       {
         label: "Copy",
-        shortcut: "Ctrl+C",
+        shortcut: shortcut("edit.copy", "Ctrl+C"),
         onClick: () => copyClip(menu.clipId),
       },
       {
         label: "Paste",
-        shortcut: "Ctrl+V",
+        shortcut: shortcut("edit.paste", "Ctrl+V"),
         disabled: !clipboard.clip,
         onClick: () => pasteClip(menu.trackId, useDAWStore.getState().transport.currentTime),
       },
       { divider: true, label: "" },
       {
         label: clip?.muted ? "Unmute Clip" : "Mute Clip",
-        shortcut: "U",
+        shortcut: shortcut("edit.muteClips", "U"),
         onClick: () => useDAWStore.getState().toggleClipMute(menu.clipId),
       },
       {
-        label: "Split at Cursor",
-        shortcut: "S",
-        onClick: () => {
-          const st = useDAWStore.getState();
-          const splitTime = Number.isFinite(menu.time) ? menu.time : st.transport.currentTime;
-          if (isMidi) st.splitMIDIClipAtPosition(menu.clipId, splitTime);
-          else st.splitClipAtPosition(menu.clipId, splitTime);
-        },
+        label: "Split",
+        submenu: [
+          {
+            label: "Here",
+            onClick: () => {
+              const st = useDAWStore.getState();
+              const splitTime = Number.isFinite(menu.time)
+                ? menu.time
+                : st.transport.currentTime;
+              if (isMidi) st.splitMIDIClipAtPosition(menu.clipId, splitTime);
+              else st.splitClipAtPosition(menu.clipId, splitTime);
+            },
+          },
+          {
+            label: "At Playhead",
+            shortcut: shortcut("edit.splitAtCursor", "S"),
+            onClick: () => useDAWStore.getState().splitClipAtPlayhead(),
+          },
+        ],
       },
       { divider: true, label: "" },
       {
         label: "Duplicate",
-        shortcut: "Ctrl+D",
+        shortcut: shortcut("edit.duplicateClips", "Ctrl+D"),
         onClick: () => duplicateClip(menu.clipId),
       },
       {
@@ -6170,7 +7853,7 @@ export function Timeline({
       },
       {
         label: "Delete",
-        shortcut: "Del",
+        shortcut: shortcut("edit.delete", "Del"),
         onClick: () => deleteClip(menu.clipId),
       },
       { divider: true, label: "" },
@@ -6394,9 +8077,13 @@ export function Timeline({
     <div
       ref={containerRef}
       className="timeline-container relative flex-1 min-w-0 bg-neutral-900 flex flex-col"
+      onPointerDownCapture={() => activateShortcutContext({ kind: "timeline" })}
+      onContextMenuCapture={() => activateShortcutContext({ kind: "timeline" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "timeline" })}
+      data-shortcut-context="timeline"
     >
       {showRuler && (
-        <div className="sticky top-0 z-10 bg-[#0a0a0a]">
+        <div className="sticky top-0 z-10 bg-[#0a0a0a]" data-wheel-subtarget="ruler">
           <Stage
             width={dimensions.width}
             height={RULER_HEIGHT}
@@ -6531,17 +8218,21 @@ export function Timeline({
           finishAutomationLaneDraw();
         }}
         onMouseDown={(e: KonvaEvent) => {
+          if ((e.evt?.button ?? 0) !== 0) return;
           setBackgroundContextMenu(null);
           const targetName = e.target.name?.() || e.target.attrs?.name || "";
           const stage = e.target.getStage();
           const pointerPos = stage?.getPointerPosition();
+          const resolvedTimelineAction = targetName === "timeline-bg"
+            && pointerPos
+            && toolModeRef.current !== "split"
+            ? resolveLiveMouseModifierAction(e.evt || {}, "timeline_click")
+            : null;
           if (
             targetName === "timeline-bg"
             && pointerPos
             && (e.evt?.button ?? 0) === 0
-            && !e.evt?.altKey
-            && !e.evt?.ctrlKey
-            && !e.evt?.metaKey
+            && resolvedTimelineAction === "seek"
             && toolModeRef.current !== "split"
             && beginAutomationLaneDraw(pointerPos.x, pointerPos.y)
           ) {
@@ -6549,58 +8240,100 @@ export function Timeline({
             setMarqueeRect(null);
             return;
           }
-          // Alt+drag on background starts razor edit
-          if (e.evt?.altKey) {
-            if (targetName === "timeline-bg") {
-              if (pointerPos) {
-                const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
-                const trackHitResult = getTrackAtY(pointerPos.y + scrollY, tracks, trackYs, trackHeight);
-                const trackIndex = trackHitResult?.trackIndex ?? -1;
-                if (trackIndex >= 0 && trackIndex < tracks.length) {
-                  clearRazorEdits();
-                  setRazorDrag({ active: true, trackId: tracks[trackIndex].id, startTime: time });
-                }
-              }
-            }
-          }
-          // Marquee zoom: Ctrl+drag on background (not on a clip)
-          else if (targetName === "timeline-bg" && (e.evt?.ctrlKey || e.evt?.metaKey) && toolModeRef.current !== "split") {
-            if (pointerPos) {
-              const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
-              marqueeZoomRef.current = {
-                startX: pointerPos.x,
+          if (
+            targetName !== "timeline-bg"
+            || !pointerPos
+            || toolModeRef.current === "split"
+          ) return;
+
+          const action = resolvedTimelineAction
+            ?? resolveLiveMouseModifierAction(e.evt || {}, "timeline_click");
+          const time = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+          timelinePointerActionRef.current = { action, startTime: time, dragged: false };
+          marqueeRef.current = null;
+          setMarqueeRect(null);
+          marqueeZoomRef.current = null;
+          setMarqueeZoomRect(null);
+          setTimeSelectionDrag(null);
+
+          if (action === "select_range") {
+            setTimeSelection(time, time);
+            setTimeSelectionDrag({ active: true, startTime: time });
+          } else if (action === "extend_selection") {
+            const currentSelection = useDAWStore.getState().timeSelection;
+            const playhead = useDAWStore.getState().transport.currentTime;
+            const anchor = currentSelection
+              ? Math.abs(time - currentSelection.start) < Math.abs(time - currentSelection.end)
+                ? currentSelection.end
+                : currentSelection.start
+              : playhead;
+            setTimeSelection(Math.min(anchor, time), Math.max(anchor, time));
+            setTimeSelectionDrag({ active: true, startTime: anchor });
+          } else if (action === "zoom") {
+            marqueeZoomRef.current = {
+              startX: pointerPos.x,
+              startTime: time,
+              currentX: pointerPos.x,
+              currentTime: time,
+            };
+          } else if (action === "razor") {
+            const trackHitResult = getTrackAtY(
+              pointerPos.y + scrollY,
+              tracks,
+              trackYs,
+              trackHeight,
+            );
+            const trackIndex = trackHitResult?.trackIndex ?? -1;
+            if (trackIndex >= 0 && trackIndex < tracks.length) {
+              clearRazorEdits();
+              setRazorDrag({
+                active: true,
+                trackId: tracks[trackIndex].id,
                 startTime: time,
-                currentX: pointerPos.x,
-                currentTime: time,
-              };
+              });
             }
-          }
-          // Marquee selection: plain click+drag on background (no Alt, no Ctrl, select tool)
-          else if (targetName === "timeline-bg" && toolModeRef.current !== "split") {
-            if (pointerPos) {
-              marqueeRef.current = {
-                startX: pointerPos.x + scrollX,
-                startY: pointerPos.y + scrollY,
-                currentX: pointerPos.x + scrollX,
-                currentY: pointerPos.y + scrollY,
-                ctrlHeld: false,
-              };
-            }
+          } else if (action === "seek") {
+            marqueeRef.current = {
+              startX: pointerPos.x + scrollX,
+              startY: pointerPos.y + scrollY,
+              currentX: pointerPos.x + scrollX,
+              currentY: pointerPos.y + scrollY,
+              ctrlHeld: false,
+            };
           }
         }}
         onClick={(e: KonvaEvent) => {
+          if ((e.evt?.button ?? 0) !== 0) return;
           // Skip deselection if marquee just finished
           if (marqueeJustCompletedRef.current) {
             marqueeJustCompletedRef.current = false;
+            timelinePointerActionRef.current = null;
             return;
           }
           setBackgroundContextMenu(null);
           // Click on background only → deselect all and clear razor edits
           const targetName = e.target.name?.() || e.target.attrs?.name || "";
-          if (targetName === "timeline-bg" && !e.evt?.altKey) {
+          const pointerAction = timelinePointerActionRef.current;
+          timelinePointerActionRef.current = null;
+          if (targetName === "timeline-bg" && pointerAction?.action === "seek") {
             deselectAllTracks();
             selectClip(null);
             if (razorEdits.length > 0) clearRazorEdits();
+            const stage = e.target.getStage();
+            const pointerPos = stage?.getPointerPosition();
+            if (pointerPos) {
+              seekTo(Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond));
+            }
+          } else if (
+            targetName === "timeline-bg"
+            && pointerAction?.action === "select_range"
+            && !pointerAction.dragged
+          ) {
+            const playhead = useDAWStore.getState().transport.currentTime;
+            setTimeSelection(
+              Math.min(playhead, pointerAction.startTime),
+              Math.max(playhead, pointerAction.startTime),
+            );
           }
         }}
         onContextMenu={(e: KonvaEvent) => {
@@ -6618,15 +8351,14 @@ export function Timeline({
             pointerPos.y,
           );
           if (clipHit) {
-            selectClip(clipHit.clipId);
-            setBackgroundContextMenu(null);
-            setClipContextMenu({
-              x: e.evt.clientX,
-              y: e.evt.clientY,
+            openTimelineClipContextMenu({
+              clientX: e.evt.clientX,
+              clientY: e.evt.clientY,
+              stageX: pointerPos.x,
               clipId: clipHit.clipId,
               trackId: clipHit.trackId,
               kind: clipHit.kind,
-              time: Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond),
+              ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
             });
             return;
           }
@@ -6774,6 +8506,20 @@ export function Timeline({
                   width={dimensions.width}
                   height={effH}
                   fill="transparent"
+                  onMouseDown={(e: KonvaEvent) => {
+                    const pointerPos = e.target.getStage()?.getPointerPosition();
+                    if (!pointerPos || !track.showAutomation) return;
+                    const absoluteY = pointerPos.y + scrollY;
+                    const hit = getTrackAtY(absoluteY, tracks, trackYs, trackHeight);
+                    if (!hit || hit.isInClipArea || hit.laneIndex < 0) return;
+                    const lane = track.automationLanes.filter((candidate) => candidate.visible)[hit.laneIndex];
+                    if (!lane) return;
+                    activateAutomationLaneShortcutContext({
+                      kind: "track",
+                      trackId: track.id,
+                      laneId: lane.id,
+                    });
+                  }}
                   onDblClick={(e: KonvaEvent) => {
                     const stage = e.target.getStage();
                     const pointerPos = stage.getPointerPosition();
@@ -6787,9 +8533,18 @@ export function Timeline({
                         const visibleLanes = track.automationLanes.filter((l) => l.visible);
                         const lane = visibleLanes[hit.laneIndex];
                         if (lane) {
-                          const laneTop = trackYs[i] + trackHeight + hit.laneIndex * AUTOMATION_LANE_HEIGHT;
+                          activateAutomationLaneShortcutContext({
+                            kind: "track",
+                            trackId: track.id,
+                            laneId: lane.id,
+                          });
+                          if (useDAWStore.getState().globalLocked || useDAWStore.getState().lockSettings.envelopes) return;
+                          const laneTop = trackYs[i]
+                            + trackHeight
+                            + getAutomationLaneOffset(visibleLanes, hit.laneIndex);
+                          const laneHeight = getAutomationLaneHeight(lane);
                           const localY = absoluteY - laneTop;
-                          const value = 1 - localY / AUTOMATION_LANE_HEIGHT;
+                          const value = 1 - localY / laneHeight;
                           useDAWStore.getState().addAutomationPoint(
                             track.id, lane.id, clickTime, Math.max(0, Math.min(1, value)),
                           );
@@ -6879,6 +8634,53 @@ export function Timeline({
                       track.color,
                     )}
 
+                  {mouseBehaviorProfileId === "audacity" && track.type === "audio" && (() => {
+                    const scaleView = waveformScaleViews[track.id]
+                      ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
+                    return (
+                      <Group listening={false}>
+                        <Rect
+                          x={0}
+                          y={trackY}
+                          width={TIMELINE_VERTICAL_SCALE_WIDTH}
+                          height={trackHeight}
+                          fill="#10141a"
+                          opacity={0.9}
+                          stroke="#4b5563"
+                          strokeWidth={1}
+                        />
+                        <Line
+                          points={[
+                            0,
+                            trackY + trackHeight / 2 + scaleView.verticalOffset * trackHeight * 0.25,
+                            TIMELINE_VERTICAL_SCALE_WIDTH,
+                            trackY + trackHeight / 2 + scaleView.verticalOffset * trackHeight * 0.25,
+                          ]}
+                          stroke="#94a3b8"
+                          strokeWidth={1}
+                        />
+                        <Text
+                          x={2}
+                          y={trackY + 3}
+                          width={TIMELINE_VERTICAL_SCALE_WIDTH - 4}
+                          text={track.spectralView ? `×${scaleView.spectrogramScale.toFixed(1)}` : "+1"}
+                          fontSize={8}
+                          fill="#cbd5e1"
+                          align="center"
+                        />
+                        <Text
+                          x={2}
+                          y={trackY + trackHeight - 11}
+                          width={TIMELINE_VERTICAL_SCALE_WIDTH - 4}
+                          text={track.spectralView ? `${Math.round(scaleView.spectrogramDbFloor)}dB` : "-1"}
+                          fontSize={8}
+                          fill="#cbd5e1"
+                          align="center"
+                        />
+                      </Group>
+                    );
+                  })()}
+
                   {/* Automation Lanes */}
                   {renderAutomationLanes(track, trackY)}
                 </Group>
@@ -6893,6 +8695,20 @@ export function Timeline({
           {renderGhostTrack()}
 
           {/* Snap ghost preview — semi-transparent rect at snapped position during drag */}
+          {snapGhostRender?.visible && snapGhostRender.guideX !== undefined && (
+            <Line
+              points={[
+                snapGhostRender.guideX,
+                scrollY,
+                snapGhostRender.guideX,
+                scrollY + availableHeight,
+              ]}
+              stroke="#4cc9f0"
+              strokeWidth={1}
+              dash={[4, 2]}
+              listening={false}
+            />
+          )}
           {snapGhostRender && snapGhostRender.visible && (
             <Rect
               x={snapGhostRender.x}
@@ -7311,7 +9127,7 @@ export function Timeline({
             ...(clipboard.clips.length > 0
               ? [{
                   label: "Paste at Cursor",
-                  shortcut: "Ctrl+V",
+                  shortcut: shortcut("edit.paste", "Ctrl+V"),
                   onClick: () => {
                     const state = useDAWStore.getState();
                     if (backgroundContextMenu.trackId && state.clipboard.clip) {

@@ -8,7 +8,7 @@ import {
 import { useDAWStore } from "../store/useDAWStore";
 
 afterEach(() => {
-  useDAWStore.setState({ customShortcuts: {} });
+  useDAWStore.setState({ customShortcuts: {}, keyboardShortcutProfileId: "openstudio" });
 });
 
 describe("shortcut registry", () => {
@@ -39,6 +39,47 @@ describe("shortcut registry", () => {
     }));
 
     expect(getEffectiveActionShortcut("view.toggleMixer")).toBe("Ctrl+Shift+M");
+  });
+
+  it("exposes the metronome as a profileable global action", () => {
+    const metronomeAction = getRegisteredAction("transport.metronome");
+    expect(metronomeAction).toMatchObject({
+      name: "Toggle Metronome",
+      shortcut: "K",
+      shortcutScope: "global",
+    });
+  });
+
+  it("exposes pause-in-place for custom and imported profiles", () => {
+    expect(getRegisteredAction("transport.pause")).toMatchObject({
+      name: "Pause in Place",
+      shortcutScope: "global",
+      shortcutWhen: "transport_running",
+    });
+  });
+
+  it("uses the selected profile between custom overrides and registry defaults", () => {
+    expect(getActionShortcut("transport.rewind")).toBe("Home");
+
+    useDAWStore.setState({
+      keyboardShortcutProfileId: "reaper",
+      customShortcuts: {},
+    });
+    expect(getEffectiveActionShortcut("transport.rewind")).toBe("W");
+
+    useDAWStore.setState({ customShortcuts: { "transport.rewind": "Ctrl+Home" } });
+    expect(getEffectiveActionShortcut("transport.rewind")).toBe("Ctrl+Home");
+  });
+
+  it("preserves an intentional profile unbind instead of displaying the factory shortcut", () => {
+    expect(getActionShortcut("tools.splitTool")).toBe("B");
+
+    useDAWStore.setState({
+      keyboardShortcutProfileId: "pro_tools",
+      customShortcuts: {},
+    });
+
+    expect(getEffectiveActionShortcut("tools.splitTool")).toBe("");
   });
 
   it("has no duplicate global shortcut assignments", () => {

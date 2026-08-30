@@ -38,7 +38,7 @@ describe("AI generation store actions", () => {
     vi.spyOn(nativeBridge, "addTrack").mockResolvedValue("track-added");
     vi.spyOn(nativeBridge, "removeTrack").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "addPlaybackClip").mockResolvedValue(true);
-    vi.spyOn(nativeBridge, "removePlaybackClip").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "removePlaybackClipById").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "refreshWaveformPeaks").mockResolvedValue(true);
   });
 

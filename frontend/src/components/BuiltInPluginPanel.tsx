@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, SlidersHorizontal, X } from "lucide-react";
 import {
   BuiltInParamDescriptor,
@@ -8,39 +8,519 @@ import {
 } from "../services/NativeBridge";
 import { ParametricGraph } from "./ParametricGraph";
 import type { GraphAxis, GraphNode, GraphNodeConfig } from "./ParametricGraph";
-import { Button } from "./ui";
+import { NAMRackPanel } from "./NAMRackPanel";
+import { Button, ProfiledRangeInput } from "./ui";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+} from "../utils/shortcutContext";
+import { windowRole } from "../utils/windowEnvironment";
+import {
+  clampNumber as clamp,
+  formatParamValue,
+  isChorusRateParam,
+  isNAMGraphicEqFilterParam,
+  normalizeParam as normalize,
+  normalizeParamValue,
+  paramValueFromRangeInput,
+  rangeInputMax,
+  rangeInputMin,
+  rangeInputStep,
+  rangeInputValue,
+  quantizeParamValue,
+  stepForParam,
+} from "../utils/builtInParamValue";
+
+export { formatParamValue, stepForParam };
 
 interface BuiltInPluginPanelProps {
   address: BuiltInPluginAddress;
   fallbackName: string;
   onClose?: () => void;
   initialSchema?: BuiltInPluginSchema;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-export function formatParamValue(param: BuiltInParamDescriptor) {
-  if (param.type === "toggle") return param.value >= 0.5 ? "On" : "Off";
-  if (param.type === "enum") {
-    return (
-      param.enumOptions?.find((option) => Math.round(option.value) === Math.round(param.value))
-        ?.label ?? String(Math.round(param.value))
-    );
-  }
-  const span = Math.abs(param.max - param.min);
-  const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
-  return `${param.value.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
-}
-
-function normalize(param: BuiltInParamDescriptor) {
-  if (param.max <= param.min) return 0;
-  return clamp((param.value - param.min) / (param.max - param.min), 0, 1);
+  shortcutSessionId?: string;
 }
 
 function getParam(params: BuiltInParamDescriptor[], id: string) {
   return params.find((param) => param.id === id);
+}
+
+function makeFallbackParam(
+  id: string,
+  label: string,
+  value: number,
+  min: number,
+  max: number,
+  defaultValue: number,
+  unit = "",
+  graphRole = "controls",
+  type: BuiltInParamDescriptor["type"] = "continuous",
+  enumOptions?: BuiltInParamDescriptor["enumOptions"],
+): BuiltInParamDescriptor {
+  return {
+    id,
+    label,
+    type,
+    value,
+    min,
+    max,
+    defaultValue,
+    unit,
+    automatable: type !== "meter",
+    graphRole,
+    enumOptions,
+  };
+}
+
+function isNAMPluginName(name: string) {
+  return name.toLowerCase().includes("nam");
+}
+
+export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
+  return {
+    schemaVersion: 1,
+    name: fallbackName || "OpenStudio NAM Rack",
+    category: "NAM",
+    chain: address.chain,
+    fxIndex: address.fxIndex ?? -1,
+    parameters: [
+      makeFallbackParam("inputTrimDb", "Input", 0, -24, 24, 0, "dB", "gain"),
+      {
+        ...makeFallbackParam("instrumentProfile", "Instrument", 0, 0, 1, 0, "", "global", "enum", [
+          { value: 0, label: "Guitar" },
+          { value: 1, label: "Bass" },
+        ]),
+        automatable: false,
+      },
+      makeFallbackParam("gateThresholdDb", "Gate", -80, -100, 0, -80, "dB", "dynamics"),
+      makeFallbackParam("gateReleaseMs", "Gate Rel", 80, 5, 1000, 80, "ms", "dynamics"),
+      makeFallbackParam("compressorEnabled", "Compressor", 0, 0, 1, 0, "", "dynamics", "toggle"),
+      makeFallbackParam("compressorAttackMs", "Attack", 21.9, 0.1, 50, 21.9, "ms", "dynamics"),
+      makeFallbackParam("compressorReleaseMs", "Release", 149.1, 50, 1000, 149.1, "ms", "dynamics"),
+      makeFallbackParam("compressorToneDb", "Tone", 0, -6, 6, 0, "dB", "dynamics"),
+      makeFallbackParam("compressorIntensity", "Intensity", 0, 0, 1, 0, "", "dynamics", "toggle"),
+      makeFallbackParam("compressorSidechainHPF", "HPF", 1, 0, 2, 1, "", "dynamics", "enum", [
+        { value: 0, label: "Off" },
+        { value: 1, label: "80 Hz" },
+        { value: 2, label: "240 Hz" },
+      ]),
+      makeFallbackParam("compressorMix", "Mix", 0.65, 0, 1, 0.65, "", "dynamics"),
+      makeFallbackParam("compressorVolumeDb", "Level", 0, -18, 18, 0, "dB", "dynamics"),
+      makeFallbackParam("compressorComp", "Comp", 0.35, 0, 1, 0.35, "", "dynamics"),
+      makeFallbackParam("preEqEnabled", "PRE EQ", 0, 0, 1, 0, "", "preEq", "toggle"),
+      makeFallbackParam("preEq120Db", "120 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq250Db", "250 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq500Db", "500 Hz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq1kDb", "1 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq2k5Db", "2.5 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq5kDb", "5 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq8kDb", "8 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEq12kDb", "12 kHz", 0, -12, 12, 0, "dB", "preEq"),
+      makeFallbackParam("preEqHPFHz", "PRE HPF", 0, 0, 180, 0, "Hz", "preEq"),
+      makeFallbackParam("preEqLPFHz", "PRE LPF", 24000, 3000, 24000, 24000, "Hz", "preEq"),
+      makeFallbackParam("precisionDriveEnabled", "Precision Drive", 0, 0, 1, 0, "", "drive", "toggle"),
+      makeFallbackParam("precisionDriveVolumeDb", "PD Volume", 9, -12, 12, 9, "dB", "drive"),
+      makeFallbackParam("precisionDriveBright", "PD Bright", 0.55, 0, 1, 0.55, "", "drive"),
+      makeFallbackParam("precisionDriveAttack", "PD Attack", 0.5, 0, 1, 0.5, "", "drive"),
+      makeFallbackParam("precisionDriveGate", "PD Gate", 0, 0, 1, 0, "", "drive"),
+      makeFallbackParam("precisionDriveDrive", "PD Drive", 0.35, 0, 1, 0.35, "", "drive"),
+      makeFallbackParam("pedalMix", "Pedal Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("ampEnabled", "Amp Power", 1, 0, 1, 1, "", "model", "toggle"),
+      makeFallbackParam("ampGainDb", "Gain", 0, -24, 24, 0, "dB", "model"),
+      makeFallbackParam("ampBoost", "Tight Boost", 0, 0, 1, 0, "", "model", "toggle"),
+      makeFallbackParam("ampVoice", "Bright Voice", 0, 0, 1, 0, "", "model", "toggle"),
+      makeFallbackParam("ampMix", "Amp Mix", 1, 0, 1, 1, "", "model"),
+      makeFallbackParam("ampOutputDb", "Post Level", 0, -24, 12, 0, "dB", "model"),
+      makeFallbackParam("bassDb", "Bass", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("midDb", "Mid", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("trebleDb", "Treble", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("presenceDb", "Presence", 0, -12, 12, 0, "dB", "tone"),
+      makeFallbackParam("eqHPFHz", "HPF", 0, 0, 500, 0, "Hz", "graphicEq"),
+      makeFallbackParam("eq65Db", "65 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq125Db", "125 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq250Db", "250 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq500Db", "500 Hz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq1kDb", "1 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq2kDb", "2 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq4kDb", "4 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq8kDb", "8 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eq16kDb", "16 kHz", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eqLPFHz", "LPF", 24000, 3000, 24000, 24000, "Hz", "graphicEq"),
+      makeFallbackParam("eqLevelDb", "Level", 0, -12, 12, 0, "dB", "graphicEq"),
+      makeFallbackParam("eqEnabled", "EQ Power", 0, 0, 1, 0, "", "graphicEq", "toggle"),
+      makeFallbackParam("cabEnabled", "Cab/IR", 0, 0, 1, 0, "", "cab", "toggle"),
+      makeFallbackParam("cabLevelDb", "Cab Level", 0, -24, 12, 0, "dB", "cab"),
+      makeFallbackParam("cabHPFHz", "Cab HPF", 80, 20, 500, 80, "Hz", "cab"),
+      makeFallbackParam("cabLPFHz", "Cab LPF", 8500, 1000, 20000, 8500, "Hz", "cab"),
+      makeFallbackParam("cabPhaseInvert", "Phase", 0, 0, 1, 0, "", "cab", "toggle"),
+      makeFallbackParam("chorusMix", "Chorus", 0, 0, 1, 0, "", "modulation"),
+      makeFallbackParam("chorusRateHz", "Chorus Rate", 0.75, 0.01, 8, 0.75, "Hz", "modulation"),
+      makeFallbackParam("chorusDepth", "Chorus Depth", 0.32, 0, 1, 0.32, "", "modulation"),
+      makeFallbackParam("delayMix", "Delay", 0.22, 0, 1, 0.22, "", "time"),
+      makeFallbackParam("delayTimeMs", "Delay Time", 360, 1, 2000, 360, "ms", "time"),
+      makeFallbackParam("delayFeedback", "Delay Fdbk", 0.22, 0, 0.85, 0.22, "", "time"),
+      makeFallbackParam("delayMod", "Delay Mod", 0.18, 0, 1, 0.18, "", "time"),
+      makeFallbackParam("delayDucker", "Ducker", 0.12, 0, 1, 0.12, "", "time"),
+      makeFallbackParam("delayMode", "Delay Mode", 1, 0, 4, 1, "", "time", "enum", [
+        { value: 0, label: "Digital" },
+        { value: 1, label: "Tape" },
+        { value: 2, label: "Analog" },
+        { value: 3, label: "Multi" },
+        { value: 4, label: "Dual" },
+      ]),
+      makeFallbackParam("delayPingPong", "Ping Pong", 1, 0, 1, 1, "", "time", "toggle"),
+      makeFallbackParam("delayTempoSync", "Delay Sync", 0, 0, 1, 0, "", "time", "toggle"),
+      makeFallbackParam("delayEnabled", "Delay Engage", 0, 0, 1, 0, "", "time", "toggle"),
+      makeFallbackParam("reverbVoice", "Reverb Voice", 0, 0, 3, 0, "", "space", "enum", [
+        { value: 0, label: "Studio" },
+        { value: 1, label: "Plate" },
+        { value: 2, label: "Hall" },
+        { value: 3, label: "Room" },
+      ]),
+      makeFallbackParam("reverbEnabled", "Reverb Engage", 0, 0, 1, 0, "", "space", "toggle"),
+      makeFallbackParam("reverbMix", "Reverb", 0.28, 0, 1, 0.28, "", "space"),
+      makeFallbackParam("reverbDecaySec", "Decay", 2.2, 0.2, 12, 2.2, "s", "space"),
+      makeFallbackParam("reverbPreDelayMs", "Pre Delay", 18, 0, 500, 18, "ms", "space"),
+      makeFallbackParam("reverbLowCutHz", "Low Cut", 120, 20, 500, 120, "Hz", "space"),
+      makeFallbackParam("reverbTone", "Verb Tone", 0.62, 0, 1, 0.62, "", "space"),
+      makeFallbackParam("reverbShimmer", "Shimmer", 0, 0, 1, 0, "", "space"),
+      makeFallbackParam("reverbPad", "Pad", 0, 0, 1, 0, "", "space", "toggle"),
+      makeFallbackParam("outputTrimDb", "Output", 0, -24, 24, 0, "dB", "gain"),
+    ],
+    modelState: {
+      pedalModelPath: "",
+      ampModelPath: "",
+      cabIRPath: "",
+      hasPedalModel: false,
+      hasAmpModel: false,
+      hasSlimmableNAMModel: false,
+      hasCabIR: false,
+      namEffectsDspVersion: 19,
+      lastLoadError: "",
+    },
+    visualization: {
+      gainReductionDb: 0,
+      inputLevelDb: -90,
+      outputLevelDb: -90,
+    },
+  };
+}
+
+function isUsableSchema(schema: BuiltInPluginSchema | null | undefined) {
+  return Boolean(schema && Array.isArray(schema.parameters) && schema.parameters.length > 0);
+}
+
+function valuesClose(param: BuiltInParamDescriptor, value: number) {
+  if (isChorusRateParam(param) || isNAMGraphicEqFilterParam(param)) {
+    return Math.abs(normalize(param) - normalizeParamValue(param, value)) <= 1 / 1000;
+  }
+  return Math.abs(param.value - value) <= Math.max(stepForParam(param), 0.0001) * 0.5;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId = 0;
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  });
+}
+
+export function createSchemaRequestGate() {
+  let latestRequestId = 0;
+  return {
+    begin() {
+      latestRequestId += 1;
+      return latestRequestId;
+    },
+    isLatest(requestId: number) {
+      return requestId === latestRequestId;
+    },
+    invalidate() {
+      latestRequestId += 1;
+    },
+  };
+}
+
+type FailedParamWriteResolution = {
+  matched: boolean;
+  rollbackValue?: number;
+};
+
+/**
+ * Keeps local parameter feedback responsive without treating that optimistic
+ * value as native truth. Native schemas are remembered separately so a failed
+ * write can restore the last value actually observed from the processor.
+ */
+export function createParamWriteReconciler(initialNativeSchema?: BuiltInPluginSchema | null) {
+  let optimisticValues: Record<string, number> = {};
+  let confirmedValues: Record<string, number> = {};
+  let preWriteValues: Record<string, number> = {};
+
+  const rememberNativeSchema = (nextSchema: BuiltInPluginSchema | null | undefined) => {
+    if (!isUsableSchema(nextSchema)) return;
+    const nextConfirmed = { ...confirmedValues };
+    for (const param of nextSchema!.parameters) {
+      if (Number.isFinite(param.value)) nextConfirmed[param.id] = param.value;
+    }
+    confirmedValues = nextConfirmed;
+  };
+
+  const clearOptimisticValue = (paramId: string) => {
+    const { [paramId]: _optimistic, ...remainingOptimistic } = optimisticValues;
+    const { [paramId]: _preWrite, ...remainingPreWrite } = preWriteValues;
+    optimisticValues = remainingOptimistic;
+    preWriteValues = remainingPreWrite;
+  };
+
+  const overlayOptimisticValues = (
+    nextSchema: BuiltInPluginSchema | null | undefined,
+    confirmMatchingValues: boolean,
+  ) => {
+    if (!nextSchema || !isUsableSchema(nextSchema)) return nextSchema ?? null;
+    if (Object.keys(optimisticValues).length === 0) return nextSchema;
+
+    let schemaChanged = false;
+    const parameters = nextSchema.parameters.map((entry) => {
+      const optimisticValue = optimisticValues[entry.id];
+      if (typeof optimisticValue !== "number" || !Number.isFinite(optimisticValue)) return entry;
+      const value = entry.type === "toggle"
+        ? (optimisticValue >= 0.5 ? 1 : 0)
+        : clamp(optimisticValue, entry.min, entry.max);
+
+      if (valuesClose(entry, value)) {
+        // Only a real native response may confirm an optimistic value. A boot
+        // or cached schema can already contain the local value after setState.
+        if (confirmMatchingValues) clearOptimisticValue(entry.id);
+        return entry;
+      }
+
+      schemaChanged = true;
+      return { ...entry, value };
+    });
+
+    return schemaChanged ? { ...nextSchema, parameters } : nextSchema;
+  };
+
+  rememberNativeSchema(initialNativeSchema);
+
+  return {
+    beginOptimisticWrite(paramId: string, value: number, previousDisplayedValue?: number) {
+      if (
+        optimisticValues[paramId] === undefined
+        && typeof previousDisplayedValue === "number"
+        && Number.isFinite(previousDisplayedValue)
+      ) {
+        preWriteValues = { ...preWriteValues, [paramId]: previousDisplayedValue };
+      }
+      optimisticValues = { ...optimisticValues, [paramId]: value };
+    },
+
+    applyToFallbackSchema(nextSchema: BuiltInPluginSchema | null | undefined) {
+      return overlayOptimisticValues(nextSchema, false);
+    },
+
+    acceptNativeSchema(nextSchema: BuiltInPluginSchema | null | undefined) {
+      rememberNativeSchema(nextSchema);
+      return overlayOptimisticValues(nextSchema, true);
+    },
+
+    resolveSuccessfulWrite(paramId: string, value: number) {
+      confirmedValues = { ...confirmedValues, [paramId]: value };
+      if (!Object.is(optimisticValues[paramId], value)) return false;
+      clearOptimisticValue(paramId);
+      return true;
+    },
+
+    resolveFailedWrite(paramId: string, value: number): FailedParamWriteResolution {
+      if (!Object.is(optimisticValues[paramId], value)) return { matched: false };
+      const confirmedValue = confirmedValues[paramId];
+      const preWriteValue = preWriteValues[paramId];
+      clearOptimisticValue(paramId);
+      const rollbackValue = Number.isFinite(confirmedValue) ? confirmedValue : preWriteValue;
+      return Number.isFinite(rollbackValue)
+        ? { matched: true, rollbackValue }
+        : { matched: true };
+    },
+  };
+}
+
+export function shouldReadBackAfterParamWrite(
+  currentSchema: BuiltInPluginSchema | null | undefined,
+  paramId: string,
+) {
+  const type = currentSchema?.parameters.find((param) => param.id === paramId)?.type;
+  return type === "toggle" || type === "enum";
+}
+
+type FrameCoalescedParamWriterOptions = {
+  write: (paramId: string, value: number) => Promise<boolean>;
+  onSuccess?: (paramId: string, value: number) => void;
+  onFailure?: (paramId: string, value: number, error?: unknown) => void;
+  requestFrame?: (callback: FrameRequestCallback) => number;
+  cancelFrame?: (frameId: number) => void;
+};
+
+type PendingParamWrite = {
+  pendingValue?: number;
+  inFlightValue?: number;
+  frameId: number | null;
+};
+
+export function createFrameCoalescedParamWriter({
+  write,
+  onSuccess,
+  onFailure,
+  requestFrame = (callback) => window.requestAnimationFrame(callback),
+  cancelFrame = (frameId) => window.cancelAnimationFrame(frameId),
+}: FrameCoalescedParamWriterOptions) {
+  const writes = new Map<string, PendingParamWrite>();
+  const flushWaiters = new Set<{
+    failureCount: number;
+    resolve: (ok: boolean) => void;
+  }>();
+  let acceptingWrites = true;
+  let terminalFailureCount = 0;
+
+  const entryFor = (paramId: string) => {
+    const existing = writes.get(paramId);
+    if (existing) return existing;
+    const entry: PendingParamWrite = { frameId: null };
+    writes.set(paramId, entry);
+    return entry;
+  };
+
+  const hasOutstandingWrites = () => Array.from(writes.values()).some(
+    (entry) => entry.frameId !== null
+      || entry.pendingValue !== undefined
+      || entry.inFlightValue !== undefined,
+  );
+
+  const resolveFlushWaitersIfIdle = () => {
+    if (hasOutstandingWrites()) return;
+    for (const waiter of flushWaiters) {
+      waiter.resolve(terminalFailureCount === waiter.failureCount);
+    }
+    flushWaiters.clear();
+  };
+
+  const dispatch = async (paramId: string, entry: PendingParamWrite) => {
+    if (entry.inFlightValue !== undefined || entry.pendingValue === undefined) return;
+    const value = entry.pendingValue;
+    entry.pendingValue = undefined;
+    entry.inFlightValue = value;
+
+    let ok = false;
+    let writeError: unknown;
+    try {
+      ok = await write(paramId, value);
+    } catch (error) {
+      writeError = error;
+    }
+
+    entry.inFlightValue = undefined;
+    if (ok) {
+      // Repeated pointer events may have queued the same quantized value while
+      // this write was in flight. The completed write already delivered it.
+      if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) {
+        entry.pendingValue = undefined;
+      }
+      onSuccess?.(paramId, value);
+    } else if (entry.pendingValue === undefined && acceptingWrites) {
+      // Recover only when the failed value is still the trailing value. A newer
+      // pending value should get its chance to reach the processor first.
+      terminalFailureCount += 1;
+      onFailure?.(paramId, value, writeError);
+    }
+
+    if (entry.pendingValue !== undefined) {
+      if (acceptingWrites) schedule(paramId, entry);
+      else void dispatch(paramId, entry);
+    }
+    resolveFlushWaitersIfIdle();
+  };
+
+  const schedule = (paramId: string, entry: PendingParamWrite) => {
+    if (
+      !acceptingWrites
+      || entry.frameId !== null
+      || entry.inFlightValue !== undefined
+      || entry.pendingValue === undefined
+    ) {
+      return;
+    }
+    if (flushWaiters.size > 0) {
+      void dispatch(paramId, entry);
+      return;
+    }
+    entry.frameId = requestFrame(() => {
+      entry.frameId = null;
+      void dispatch(paramId, entry);
+    });
+  };
+
+  const queueValue = (paramId: string, value: number, dispatchNow: boolean) => {
+    if (!acceptingWrites) return;
+    const entry = entryFor(paramId);
+    if (entry.pendingValue !== undefined && Object.is(entry.pendingValue, value)) return;
+    // Do not suppress a value merely because this editor wrote it previously.
+    // Preset recall, A/B compare, project restore, and automation can all change
+    // the native parameter without passing through this writer. Treating the
+    // last successful UI write as authoritative made the first toggle after a
+    // preset recall update only the optimistic UI while leaving the DSP in its
+    // recalled state.
+    entry.pendingValue = value;
+    if (dispatchNow && entry.frameId !== null) {
+      cancelFrame(entry.frameId);
+      entry.frameId = null;
+    }
+    if (dispatchNow) void dispatch(paramId, entry);
+    else schedule(paramId, entry);
+  };
+
+  return {
+    enqueue(paramId: string, value: number) {
+      queueValue(paramId, value, false);
+    },
+    writeImmediately(paramId: string, value: number) {
+      queueValue(paramId, value, true);
+    },
+    flush(): Promise<boolean> {
+      if (!acceptingWrites) return Promise.resolve(false);
+      const failureCount = terminalFailureCount;
+      return new Promise<boolean>((resolve) => {
+        flushWaiters.add({ failureCount, resolve });
+        for (const [paramId, entry] of writes) {
+          if (entry.frameId !== null) {
+            cancelFrame(entry.frameId);
+            entry.frameId = null;
+          }
+          if (entry.pendingValue !== undefined && entry.inFlightValue === undefined) {
+            void dispatch(paramId, entry);
+          }
+        }
+        resolveFlushWaitersIfIdle();
+      });
+    },
+    dispose(flushPending = true) {
+      acceptingWrites = false;
+      for (const [paramId, entry] of writes) {
+        if (entry.frameId !== null) {
+          cancelFrame(entry.frameId);
+          entry.frameId = null;
+        }
+        if (flushPending && entry.pendingValue !== undefined && entry.inFlightValue === undefined) {
+          void dispatch(paramId, entry);
+        } else if (!flushPending) {
+          entry.pendingValue = undefined;
+        }
+      }
+      resolveFlushWaitersIfIdle();
+    },
+  };
 }
 
 type BuiltInPluginKind =
@@ -51,8 +531,10 @@ type BuiltInPluginKind =
   | "modulation"
   | "saturation"
   | "pitch"
+  | "nam"
   | "synth"
   | "piano"
+  | "guitar"
   | "drums"
   | "generic";
 
@@ -65,6 +547,8 @@ export function getPluginKind(schema: BuiltInPluginSchema | null): BuiltInPlugin
   if (label.includes("chorus") || label.includes("flanger") || label.includes("phaser") || label.includes("modulation")) return "modulation";
   if (label.includes("saturat")) return "saturation";
   if (label.includes("pitch")) return "pitch";
+  if (label.includes("nam")) return "nam";
+  if (label.includes("guitar")) return "guitar";
   if (label.includes("piano")) return "piano";
   if (label.includes("drum")) return "drums";
   if (label.includes("synth") || label.includes("sampler")) return "synth";
@@ -79,7 +563,9 @@ export function primaryParamIdsForKind(kind: BuiltInPluginKind, schema: BuiltInP
   if (kind === "modulation") return ["mode", "rate", "depth", "mix", "characterMode"];
   if (kind === "saturation") return ["satType", "drive", "mix", "outputGain", "oversampleMode"];
   if (kind === "pitch") return ["key", "scale", "retuneSpeed", "correctionStrength", "mix"];
+  if (kind === "nam") return ["inputTrimDb", "gateThresholdDb", "cabEnabled", "chorusMix", "delayMix", "reverbMix", "outputTrimDb"];
   if (kind === "piano") return ["model", "tone", "body", "resonance", "outputGain"];
+  if (kind === "guitar") return ["model", "tone", "body", "bendRangeSemitones", "outputGain"];
   if (kind === "drums") return ["kit", "mapPreset", "punch", "ambience", "outputGain"];
   if (kind === "synth") return ["brightness", "detuneCents", "subLevel", "noiseLevel", "outputGain"];
   if (kind === "dynamics" && name.includes("limiter")) return ["threshold", "ceiling", "lookaheadMs", "releaseMs"];
@@ -105,6 +591,7 @@ export function groupLabel(group: string) {
     instrument: "Instrument",
     midi: "MIDI",
     mix: "Mix",
+    model: "Models",
     modulation: "Modulation",
     oscillator: "Oscillators",
     output: "Output",
@@ -130,22 +617,16 @@ export function groupSortWeight(kind: BuiltInPluginKind, group: string) {
     modulation: ["modulation", "feedback", "character", "tone", "width", "mix"],
     saturation: ["drive", "character", "tone", "quality", "mix", "output"],
     pitch: ["scale", "correction", "detection", "formant", "midi", "mix"],
+    nam: ["model", "gain", "dynamics", "cab", "tone", "modulation", "time", "space"],
     synth: ["oscillator", "tone", "envelope", "output"],
     piano: ["character", "tone", "body", "width", "envelope", "output"],
+    guitar: ["character", "tone", "body", "midi", "space", "envelope", "output"],
     drums: ["drums", "character", "space", "width", "output"],
     generic: ["controls", "output"],
   };
   const order = orderByKind[kind] ?? orderByKind.generic;
   const index = order.indexOf(group);
   return index === -1 ? 100 : index;
-}
-
-export function stepForParam(param: BuiltInParamDescriptor) {
-  const span = Math.abs(param.max - param.min);
-  if (param.type === "toggle" || param.type === "enum") return 1;
-  if (param.unit === "Hz" && param.max > 1000) return 1;
-  if (param.unit === "ms" || param.unit === "s" || param.unit === "dB" || param.unit === "st" || param.unit === "ct") return Math.max(span / 500, 0.01);
-  return Math.max(span / 500, 0.001);
 }
 
 export function BuiltInParamControl({
@@ -203,13 +684,15 @@ export function BuiltInParamControl({
           <span className="builtin-control-label">{param.label}</span>
           <span className="builtin-param-value">{formatParamValue(param)}</span>
         </span>
-        <input
-          type="range"
-          min={param.min}
-          max={param.max}
-          step={stepForParam(param)}
-          value={param.value}
-          onChange={(event) => onChange(param, Number(event.currentTarget.value))}
+        <ProfiledRangeInput
+          min={rangeInputMin(param)}
+          max={rangeInputMax(param)}
+          step={rangeInputStep(param)}
+          value={rangeInputValue(param)}
+          onValueChange={(value) => onChange(
+            param,
+            paramValueFromRangeInput(param, value),
+          )}
         />
       </span>
     </label>
@@ -609,47 +1092,192 @@ export function BuiltInPluginPanel({
   fallbackName,
   onClose,
   initialSchema,
+  shortcutSessionId,
 }: BuiltInPluginPanelProps) {
-  const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? null);
+  const bootSchema = useMemo(
+    () => (isNAMPluginName(fallbackName) ? createNAMBootSchema(address, fallbackName) : null),
+    [address, fallbackName],
+  );
+  const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? bootSchema);
   const [loading, setLoading] = useState(false);
+  const paramWriteReconcilerRef = useRef<ReturnType<typeof createParamWriteReconciler> | null>(null);
+  if (!paramWriteReconcilerRef.current) {
+    paramWriteReconcilerRef.current = createParamWriteReconciler(initialSchema);
+  }
+  const schemaRequestGateRef = useRef(createSchemaRequestGate());
+  const schemaRef = useRef(schema);
+  const closeRef = useRef(onClose);
+  schemaRef.current = schema;
+  closeRef.current = onClose;
+  const pluginShortcutSessionId = shortcutSessionId
+    ?? `builtin:${address.chain}:${address.trackId ?? "master"}:${address.fxIndex ?? -1}`;
+
+  useEffect(() => {
+    const context = { kind: "plugin", sessionId: pluginShortcutSessionId } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      () => "unmatched",
+      fallback,
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => {
+        if (actionId !== "fx.close") return "unmatched";
+        if (!closeRef.current) return "claimed_noop";
+        closeRef.current();
+        return "handled";
+      },
+      ["fx.close"],
+    );
+    if (windowRole !== "main") activateShortcutContext(context);
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [pluginShortcutSessionId]);
+
+  const applyOptimisticParamValues = useCallback((nextSchema: BuiltInPluginSchema | null | undefined) => {
+    return paramWriteReconcilerRef.current!.applyToFallbackSchema(nextSchema);
+  }, []);
 
   const loadSchema = useCallback(async (showLoading = true) => {
+    const requestId = schemaRequestGateRef.current.begin();
     if (showLoading) setLoading(true);
     try {
-      const nextSchema = await nativeBridge.getBuiltInPluginSchema(address);
-      setSchema(nextSchema);
+      const nextSchema = await withTimeout(nativeBridge.getBuiltInPluginSchema(address), 2500, "Built-in plugin schema");
+      if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
+
+      const acceptedSchema = isUsableSchema(nextSchema)
+        ? paramWriteReconcilerRef.current!.acceptNativeSchema(nextSchema)
+        : bootSchema
+          ? (isUsableSchema(schemaRef.current)
+              ? applyOptimisticParamValues(schemaRef.current)
+              : applyOptimisticParamValues(bootSchema))
+          : applyOptimisticParamValues(nextSchema);
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
+      return acceptedSchema;
     } catch (error) {
+      if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
       console.error("[BuiltInPluginPanel] Failed to load schema:", error);
-      setSchema({
-        schemaVersion: 1,
-        name: fallbackName,
-        category: "Built-in",
-        chain: address.chain,
-        fxIndex: address.fxIndex ?? -1,
-        parameters: [],
-      });
+      const current = schemaRef.current;
+      const acceptedSchema = isUsableSchema(current)
+        ? applyOptimisticParamValues(current)
+        : applyOptimisticParamValues(bootSchema ?? current ?? {
+          schemaVersion: 1,
+          name: fallbackName,
+          category: "Built-in",
+          chain: address.chain,
+          fxIndex: address.fxIndex ?? -1,
+          parameters: [],
+        });
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
+      return acceptedSchema;
     } finally {
-      if (showLoading) setLoading(false);
+      if (showLoading && schemaRequestGateRef.current.isLatest(requestId)) setLoading(false);
     }
-  }, [address, fallbackName]);
+  }, [address, applyOptimisticParamValues, bootSchema, fallbackName]);
+
+  const loadSchemaRef = useRef(loadSchema);
+  loadSchemaRef.current = loadSchema;
+
+  const applyLocalParamValue = useCallback((paramId: string, value: number) => {
+    const current = schemaRef.current;
+    if (!current) return;
+    const currentParam = current.parameters.find((param) => param.id === paramId);
+    if (!currentParam || Object.is(currentParam.value, value)) return;
+    const nextSchema = {
+      ...current,
+      parameters: current.parameters.map((param) => (
+        param.id === paramId ? { ...param, value } : param
+      )),
+    };
+    schemaRef.current = nextSchema;
+    setSchema(nextSchema);
+  }, []);
+
+  const recoverFailedParamWrite = useCallback((paramId: string, value: number, error?: unknown) => {
+    if (error !== undefined) {
+      console.error("[BuiltInPluginPanel] Failed to set built-in parameter:", error);
+    }
+    const resolution = paramWriteReconcilerRef.current!.resolveFailedWrite(paramId, value);
+    if (!resolution.matched) return;
+    if (resolution.rollbackValue !== undefined) {
+      applyLocalParamValue(paramId, resolution.rollbackValue);
+    }
+    void loadSchemaRef.current(false);
+  }, [applyLocalParamValue]);
+
+  const confirmSuccessfulParamWrite = useCallback((paramId: string, value: number) => {
+    paramWriteReconcilerRef.current!.resolveSuccessfulWrite(paramId, value);
+    // NAM deliberately has no recurring full-schema poll. Discrete controls get
+    // one readback after their acknowledged write so the UI follows automation,
+    // preset recall, or a processor that resolved the requested value differently.
+    if (shouldReadBackAfterParamWrite(schemaRef.current, paramId)) {
+      void loadSchemaRef.current(false);
+    }
+  }, []);
+
+  const writeAddress = useMemo<BuiltInPluginAddress>(
+    () => ({
+      chain: address.chain,
+      trackId: address.trackId,
+      fxIndex: address.fxIndex,
+    }),
+    [address.chain, address.fxIndex, address.trackId],
+  );
+
+  const paramWriter = useMemo(
+    () => createFrameCoalescedParamWriter({
+      write: (paramId, value) => nativeBridge.setBuiltInPluginParam(writeAddress, paramId, value),
+      onSuccess: confirmSuccessfulParamWrite,
+      onFailure: recoverFailedParamWrite,
+    }),
+    [confirmSuccessfulParamWrite, recoverFailedParamWrite, writeAddress],
+  );
 
   useEffect(() => {
     if (initialSchema) {
-      setSchema(initialSchema);
+      schemaRequestGateRef.current.invalidate();
+      const acceptedSchema = paramWriteReconcilerRef.current!.acceptNativeSchema(initialSchema);
+      schemaRef.current = acceptedSchema;
+      setSchema(acceptedSchema);
+      setLoading(false);
       return;
     }
+    if (bootSchema) setSchema((current) => (isUsableSchema(current) ? current : bootSchema));
     void loadSchema();
-  }, [initialSchema, loadSchema]);
+  }, [bootSchema, initialSchema, loadSchema]);
 
   useEffect(() => {
     const pluginKind = `${schema?.category ?? ""} ${schema?.name ?? ""}`.toLowerCase();
-    const needsLiveSchema = pluginKind.includes("eq") || pluginKind.includes("pitch") || pluginKind.includes("dynamics") || pluginKind.includes("compressor") || pluginKind.includes("gate") || pluginKind.includes("limiter");
+    // NAM has a dedicated low-cost diagnostics endpoint. Keep periodic meter
+    // refreshes separate from rebuilding and transferring the complete schema.
+    const needsLiveSchema = pluginKind.includes("eq")
+      || pluginKind.includes("pitch")
+      || pluginKind.includes("dynamics")
+      || pluginKind.includes("compressor")
+      || pluginKind.includes("gate")
+      || pluginKind.includes("limiter");
     if (!needsLiveSchema) return;
+    let refreshInFlight = false;
     const intervalId = window.setInterval(() => {
-      void loadSchema(false);
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      void loadSchema(false).finally(() => {
+        refreshInFlight = false;
+      });
     }, 500);
     return () => window.clearInterval(intervalId);
   }, [loadSchema, schema?.category, schema?.name]);
+
+  useEffect(() => () => {
+    schemaRequestGateRef.current.invalidate();
+  }, []);
+
+  useEffect(() => () => paramWriter.dispose(true), [paramWriter]);
 
   const pluginKind = useMemo(() => getPluginKind(schema), [schema]);
 
@@ -677,86 +1305,124 @@ export function BuiltInPluginPanel({
       .sort(([groupA], [groupB]) => groupSortWeight(pluginKind, groupA) - groupSortWeight(pluginKind, groupB));
   }, [pluginKind, primaryParams, schema]);
 
-  const handleParamChange = async (param: BuiltInParamDescriptor, rawValue: number) => {
-    const value = param.type === "toggle" ? (rawValue >= 0.5 ? 1 : 0) : clamp(rawValue, param.min, param.max);
-    setSchema((current) =>
-      current
-        ? {
-            ...current,
-            parameters: current.parameters.map((entry) =>
-              entry.id === param.id ? { ...entry, value } : entry,
-            ),
-          }
-        : current,
+  const handleParamChange = (param: BuiltInParamDescriptor, rawValue: number) => {
+    const value = param.type === "toggle"
+      ? (rawValue >= 0.5 ? 1 : 0)
+      : quantizeParamValue(param, clamp(rawValue, param.min, param.max));
+    const previousDisplayedValue = schemaRef.current?.parameters.find(
+      (entry) => entry.id === param.id,
+    )?.value ?? param.value;
+    paramWriteReconcilerRef.current!.beginOptimisticWrite(
+      param.id,
+      value,
+      previousDisplayedValue,
     );
-    await nativeBridge.setBuiltInPluginParam(address, param.id, value);
+    applyLocalParamValue(param.id, value);
+
+    if (param.type === "continuous") {
+      paramWriter.enqueue(param.id, value);
+      return;
+    }
+
+    paramWriter.writeImmediately(param.id, value);
   };
 
   const title = schema?.name || fallbackName;
+  const displayTitle = pluginKind === "nam" ? "NAM Rack" : title;
 
   return (
-    <section className="builtin-plugin-panel" data-kind={pluginKind} onClick={(event) => event.stopPropagation()}>
+    <section
+      className="builtin-plugin-panel"
+      data-kind={pluginKind}
+      data-shortcut-context={`plugin:${pluginShortcutSessionId}`}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+      onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+    >
       <div className="builtin-panel-header">
         <div className="builtin-panel-title">
           <Activity size={14} />
-          <span>{title}</span>
+          <span data-qa={pluginKind === "nam" ? "nam-window-title" : undefined}>{displayTitle}</span>
         </div>
-        {onClose && (
-          <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close editor" aria-label={`Close ${title}`}>
-            <X size={14} />
-          </Button>
+        {pluginKind === "nam" ? (
+          <div className="builtin-window-controls" aria-label="Window controls">
+            {onClose && (
+              <button type="button" onClick={onClose} title="Close editor" aria-label={`Close ${displayTitle}`}>
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        ) : (
+          onClose && (
+            <Button variant="ghost" size="icon-sm" onClick={onClose} title="Close editor" aria-label={`Close ${title}`}>
+              <X size={14} />
+            </Button>
+          )
         )}
       </div>
 
-      {schema && schema.parameters.length > 0 && (
-        <BuiltInVisualization
-          schema={schema}
+      {loading && !schema ? (
+        <div className="builtin-empty">Loading</div>
+      ) : pluginKind === "nam" ? (
+        <NAMRackPanel
+          address={address}
+          schema={schema ?? bootSchema ?? createNAMBootSchema(address, fallbackName)}
+          primaryParams={primaryParams}
+          groupedParams={groupedParams}
           onParamChange={(param, value) => {
             void handleParamChange(param, value);
           }}
+          onFlushPendingParamWrites={() => paramWriter.flush()}
+          onRefreshRack={() => loadSchema(false)}
         />
-      )}
-
-      {loading ? (
-        <div className="builtin-empty">Loading</div>
       ) : !schema || schema.parameters.length === 0 ? (
         <div className="builtin-empty">No editable parameters</div>
       ) : (
-        <div className="builtin-param-groups">
-          {primaryParams.length > 0 && (
-            <div className="builtin-macro-strip" aria-label={`${title} primary controls`}>
-              {primaryParams.map((param) => (
-                <BuiltInParamControl
-                  key={param.id}
-                  param={param}
-                  compact
-                  onChange={(nextParam, value) => {
-                    void handleParamChange(nextParam, value);
-                  }}
-                />
-              ))}
-            </div>
+        <>
+          {schema.parameters.length > 0 && (
+            <BuiltInVisualization
+              schema={schema}
+              onParamChange={(param, value) => {
+                void handleParamChange(param, value);
+              }}
+            />
           )}
-          {groupedParams.map(([group, params]) => (
-            <div className="builtin-param-group" key={group}>
-              <div className="builtin-group-title">
-                <SlidersHorizontal size={11} />
-                <span>{groupLabel(group)}</span>
-              </div>
-              <div className="builtin-param-grid">
-                {params.map((param) => (
+          <div className="builtin-param-groups">
+            {primaryParams.length > 0 && (
+              <div className="builtin-macro-strip" aria-label={`${title} primary controls`}>
+                {primaryParams.map((param) => (
                   <BuiltInParamControl
                     key={param.id}
                     param={param}
+                    compact
                     onChange={(nextParam, value) => {
                       void handleParamChange(nextParam, value);
                     }}
                   />
                 ))}
               </div>
-            </div>
-          ))}
-        </div>
+            )}
+            {groupedParams.map(([group, params]) => (
+              <div className="builtin-param-group" key={group}>
+                <div className="builtin-group-title">
+                  <SlidersHorizontal size={11} />
+                  <span>{groupLabel(group)}</span>
+                </div>
+                <div className="builtin-param-grid">
+                  {params.map((param) => (
+                    <BuiltInParamControl
+                      key={param.id}
+                      param={param}
+                      onChange={(nextParam, value) => {
+                        void handleParamChange(nextParam, value);
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </section>
   );

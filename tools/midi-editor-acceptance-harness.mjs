@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:5173";
+const DEFAULT_BASE_URL = "http://127.0.0.1:5183";
 const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
 const DEFAULT_OUT_DIR = `qa/midi-editor/${new Date().toISOString().slice(0, 10)}/implementation`;
 
@@ -62,7 +62,7 @@ function printHelp() {
 
 Options:
   --scenario all|app-shortcuts|app-docked-piano-focus|app-midi-multi-session|app-midi-recording-visibility|midi-fx-controls|midi-fx-placement|midi-project-persistence|midi-export-payload|timeline-basic|timeline-arrange|timeline-actions|timeline-cross-track|timeline-drop-targets|timeline-selection|timeline-keyboard-actions|timeline-snap-undo|timeline-source-context|timeline-backend-payload|piano-basic|piano-inspector|piano-tools|piano-range|piano-multi-item|piano-visual-viewports|piano-responsive-toolbar|piano-source-header|piano-audition-insert|piano-navigation-tools|piano-controller-lane|piano-controller-shapes|piano-velocity-line|piano-cc-direct|piano-note-metadata-lanes|piano-pitchbend-direct|piano-advanced-lanes|piano-lane-management
-  --base http://127.0.0.1:5173
+  --base http://127.0.0.1:5183
   --cdp http://127.0.0.1:9222
   --out qa/midi-editor/YYYY-MM-DD/implementation
   --edge "C:/Path/To/msedge.exe"

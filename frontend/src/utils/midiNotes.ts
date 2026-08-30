@@ -220,6 +220,62 @@ export function parseMIDINotePairs(events: MIDIEvent[] = [], clipId = ""): MIDIN
   return pairs;
 }
 
+export function buildGluedSelectedMIDINotes(
+  clipId: string,
+  events: readonly MIDIEvent[],
+  selectedNoteIds: readonly string[],
+): { events: MIDIEvent[]; selectedNoteIds: string[] } | null {
+  if (selectedNoteIds.length < 2) return null;
+  const selected = new Set(selectedNoteIds);
+  const groups = new Map<string, MIDINotePair[]>();
+  parseMIDINotePairs([...events], clipId).forEach((pair) => {
+    if (!selected.has(pair.id)) return;
+    const key = `${pair.noteNumber}:${pair.channel ?? 1}`;
+    groups.set(key, [...(groups.get(key) || []), pair]);
+  });
+
+  const consumedIndexes = new Set<number>();
+  const additions: MIDIEvent[] = [];
+  const nextIds: string[] = [];
+  groups.forEach((group) => {
+    if (group.length < 2) return;
+    const sortedGroup = [...group].sort((left, right) => left.startTime - right.startTime);
+    sortedGroup.forEach((pair) => {
+      consumedIndexes.add(pair.onIndex);
+      consumedIndexes.add(pair.offIndex);
+    });
+    const first = sortedGroup[0];
+    const last = sortedGroup[sortedGroup.length - 1];
+    const startTime = first.startTime;
+    const endTime = Math.max(...sortedGroup.map((pair) => pair.startTime + pair.duration));
+    const releaseVelocity = last.releaseVelocity
+      ?? last.noteOff.releaseVelocity
+      ?? last.noteOff.velocity
+      ?? 0;
+    additions.push(
+      { ...first.noteOn, timestamp: startTime },
+      {
+        ...last.noteOff,
+        timestamp: endTime,
+        note: first.noteNumber,
+        channel: first.channel ?? 1,
+        velocity: releaseVelocity,
+        releaseVelocity,
+      },
+    );
+    nextIds.push(noteIdFor(clipId, startTime, first.noteNumber));
+  });
+
+  if (additions.length === 0) return null;
+  return {
+    events: sortMIDIEvents([
+      ...events.filter((_event, index) => !consumedIndexes.has(index)),
+      ...additions,
+    ]),
+    selectedNoteIds: nextIds,
+  };
+}
+
 export function rebuildMIDIEventsForNotes(
   events: MIDIEvent[],
   clipId: string,

@@ -13,18 +13,93 @@ import { createDefaultTrack } from "../useDAWStore";
 
 const AUDIO_PLAYBACK_LOG_PREFIX = "[audio.playback]";
 
-// Diff-based sync cache: tracks which clips were last sent to the C++ backend.
-let _lastSyncedClipKeys = new Set<string>();
+type SyncedPlaybackClip = {
+  trackId: string;
+  filePath: string;
+  startTime: number;
+  duration: number;
+  offset: number;
+  volumeDB: number;
+  fadeIn: number;
+  fadeOut: number;
+  clipId: string;
+  pitchCorrectionSourceFilePath?: string;
+  pitchCorrectionSourceOffset?: number;
+};
+
+// Diff-based sync cache: retains the identity needed to remove one logical clip.
+let _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
+let _clipSyncTail: Promise<void> = Promise.resolve();
+let _clipSyncEpoch = 0;
+let _clipSyncRequestedRevision = 0;
+let _clipSyncCompletedRevision = 0;
 
 function makeClipKey(
-  trackId: string, filePath: string, startTime: number, duration: number,
+  trackId: string, clipId: string, filePath: string, startTime: number, duration: number,
   offset: number, volumeDB: number, fadeIn: number, fadeOut: number
 ): string {
-  return `${trackId}|${filePath}|${startTime}|${duration}|${offset}|${volumeDB}|${fadeIn}|${fadeOut}`;
+  return `${trackId}|${clipId}|${filePath}|${startTime}|${duration}|${offset}|${volumeDB}|${fadeIn}|${fadeOut}`;
 }
 
-export function resetSyncCache() {
-  _lastSyncedClipKeys = new Set<string>();
+export function resetSyncCache(): Promise<void> {
+  _clipSyncEpoch += 1;
+  _clipSyncRequestedRevision = 0;
+  _clipSyncCompletedRevision = 0;
+
+  // Reset is a queue barrier: direct backend mutations must await it so no
+  // older sync can publish clips after a project or recording reset.
+  const resetPromise = _clipSyncTail.then(() => {
+    _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
+  });
+  _clipSyncTail = resetPromise.catch(() => {});
+  return resetPromise;
+}
+
+function enqueueClipBackendSync(syncTask: () => Promise<void>): Promise<void> {
+  const requestEpoch = _clipSyncEpoch;
+  const requestRevision = ++_clipSyncRequestedRevision;
+  const syncPromise = _clipSyncTail.then(async () => {
+    // Several edits can request a sync before the queued work begins. The task
+    // reads Zustand only after it owns the queue, so one pass can publish the
+    // newest state and superseded tasks behind it can become no-ops.
+    if (requestEpoch !== _clipSyncEpoch || _clipSyncCompletedRevision >= requestRevision) return;
+    const revisionBeingApplied = _clipSyncRequestedRevision;
+    try {
+      await syncTask();
+    } catch (firstError) {
+      if (requestEpoch !== _clipSyncEpoch) throw firstError;
+
+      // A failed call may have partially mutated native state. Invalidate the
+      // cache and make one bounded full-rebuild attempt unless a newer queued
+      // request is already responsible for recovery.
+      _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
+      if (_clipSyncRequestedRevision > revisionBeingApplied) throw firstError;
+      console.warn(`${AUDIO_PLAYBACK_LOG_PREFIX} sync failed; retrying one full rebuild`, firstError);
+      try {
+        await syncTask();
+      } catch (retryError) {
+        if (requestEpoch === _clipSyncEpoch) {
+          _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
+        }
+        throw retryError;
+      }
+    }
+
+    if (requestEpoch === _clipSyncEpoch) {
+      _clipSyncCompletedRevision = revisionBeingApplied;
+    }
+  });
+
+  // Keep the queue usable after a rejected bridge call while preserving the
+  // rejection for the caller that requested this particular sync.
+  _clipSyncTail = syncPromise.catch(() => {});
+  return syncPromise;
+}
+
+function requireClipBridgeSuccess(result: boolean, operation: string) {
+  if (result !== true) {
+    throw new Error(`${AUDIO_PLAYBACK_LOG_PREFIX} ${operation} returned false`);
+  }
 }
 
 function clampInsertIndex(index, trackCount) {
@@ -93,6 +168,80 @@ function normalizeMIDIImportTrack(rawTrack, index, fallbackName) {
     ccEvents,
     duration: Math.max(0.25, maxTime || 4),
     isEmpty: events.length === 0 && ccEvents.length === 0,
+  };
+}
+
+function makeMIDIEventKey(event) {
+  const channel = event.channel ?? "";
+  if (event.type === "noteOn" || event.type === "noteOff") {
+    return [
+      event.type,
+      event.timestamp,
+      event.note,
+      event.velocity ?? 0,
+      channel,
+    ].join("|");
+  }
+  if (event.type === "pitchBend") {
+    return [
+      event.type,
+      event.timestamp,
+      event.value ?? 8192,
+      channel,
+    ].join("|");
+  }
+  return JSON.stringify(event);
+}
+
+function makeMIDICCEventKey(event) {
+  return [
+    event.time,
+    event.cc,
+    event.value,
+    event.channel ?? "",
+  ].join("|");
+}
+
+function dedupeByKey(items, getKey) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = getKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sortMIDIEvents(a, b) {
+  return a.timestamp - b.timestamp
+    || (a.note ?? 0) - (b.note ?? 0)
+    || String(a.type).localeCompare(String(b.type))
+    || (a.channel ?? 0) - (b.channel ?? 0);
+}
+
+function sortMIDICCEvents(a, b) {
+  return a.time - b.time
+    || a.cc - b.cc
+    || (a.channel ?? 0) - (b.channel ?? 0)
+    || a.value - b.value;
+}
+
+function mergeMIDIImportTracks(normalizedTracks, baseName) {
+  const events = [];
+  const ccEvents = [];
+  let duration = 0;
+
+  for (const track of normalizedTracks) {
+    duration = Math.max(duration, Number(track.duration) || 0);
+    events.push(...(track.events || []).map((event) => ({ ...event })));
+    ccEvents.push(...(track.ccEvents || []).map((event) => ({ ...event })));
+  }
+
+  return {
+    name: baseName,
+    events: dedupeByKey(events, makeMIDIEventKey).sort(sortMIDIEvents),
+    ccEvents: dedupeByKey(ccEvents, makeMIDICCEventKey).sort(sortMIDICCEvents),
+    duration: Math.max(0.25, duration || 4),
   };
 }
 
@@ -197,7 +346,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
             .flatMap((track) => track.clips.map((clip) => ({ trackId: track.id, clip })))
             .find((entry) => entry.clip.id === clipId);
           if (current) {
-            nativeBridge.removePlaybackClip(current.trackId, current.clip.filePath).catch(() => false);
+            nativeBridge.removePlaybackClipById(current.trackId, current.clip.id).catch(() => false);
           }
           if (createdTrack) {
             nativeBridge.removeTrack(createdTrack.id).catch(() => false);
@@ -295,12 +444,12 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         throw new Error(importResult.error || "No supported MIDI events found in file: " + sourcePath);
       }
 
+      const mergedSource = mergeMIDIImportTracks(normalizedTracks, baseName);
       const existingTrack = request.targetTrackId
         ? get().tracks.find((track) => track.id === request.targetTrackId)
         : null;
       const canUseExistingTrack =
         existingTrack &&
-        normalizedTracks.length === 1 &&
         (existingTrack.type === "midi" || existingTrack.type === "instrument");
       const initialTracks = get().tracks;
       const targetTrackIndex = existingTrack
@@ -315,59 +464,35 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       const importedClipIds = [];
       const createdTracks = [];
       const importedEntries = [];
+      const targetTrackId = canUseExistingTrack ? existingTrack.id : crypto.randomUUID();
+      const clipId = crypto.randomUUID();
+      const color = canUseExistingTrack
+        ? existingTrack.color || "#4361ee"
+        : `hsl(${(insertIndex * 60) % 360}, 60%, 50%)`;
 
-      if (canUseExistingTrack) {
-        const source = normalizedTracks[0];
-        const clipId = crypto.randomUUID();
-        importedClipIds.push(clipId);
-        touchedTrackIds.push(existingTrack.id);
-        importedEntries.push({
-          trackId: existingTrack.id,
-          clip: {
-            id: clipId,
-            name: baseName,
-            startTime,
-            duration: source.duration,
-            offset: 0,
-            sourceStart: 0,
-            sourceLength: source.duration,
-            loopEnabled: true,
-            loopOffset: 0,
-            loopLength: source.duration,
-            events: source.events,
-            ccEvents: source.ccEvents,
-            color: existingTrack.color || "#4361ee",
-          },
-        });
-      } else {
-        normalizedTracks.forEach((source, index) => {
-          const trackId = crypto.randomUUID();
-          const clipId = crypto.randomUUID();
-          const color = `hsl(${((insertIndex + index) * 60) % 360}, 60%, 50%)`;
-          const track = createDefaultTrack(trackId, source.name || `${baseName} ${index + 1}`, color, "midi", initialTracks);
-          createdTracks.push(track);
-          touchedTrackIds.push(trackId);
-          importedClipIds.push(clipId);
-          importedEntries.push({
-            trackId,
-            clip: {
-              id: clipId,
-              name: source.name || baseName,
-              startTime,
-              duration: source.duration,
-              offset: 0,
-              sourceStart: 0,
-              sourceLength: source.duration,
-              loopEnabled: true,
-              loopOffset: 0,
-              loopLength: source.duration,
-              events: source.events,
-              ccEvents: source.ccEvents,
-              color,
-            },
-          });
-        });
+      if (!canUseExistingTrack) {
+        createdTracks.push(createDefaultTrack(targetTrackId, baseName, color, "midi", initialTracks));
       }
+      touchedTrackIds.push(targetTrackId);
+      importedClipIds.push(clipId);
+      importedEntries.push({
+        trackId: targetTrackId,
+        clip: {
+          id: clipId,
+          name: baseName,
+          startTime,
+          duration: mergedSource.duration,
+          offset: 0,
+          sourceStart: 0,
+          sourceLength: mergedSource.duration,
+          loopEnabled: true,
+          loopOffset: 0,
+          loopLength: mergedSource.duration,
+          events: mergedSource.events,
+          ccEvents: mergedSource.ccEvents,
+          color,
+        },
+      });
 
       const syncAfterCreate = () => {
         const createdTrackIds = createdTracks.map((track) => track.id);
@@ -446,7 +571,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
-    syncClipsWithBackend: async () => {
+    syncClipsWithBackend: () => enqueueClipBackendSync(async () => {
       const syncStart = performance.now();
       const { tracks } = get();
       const totalTrackClips = tracks.reduce((sum, track) => sum + track.clips.length, 0);
@@ -461,7 +586,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       });
 
       // Build current clip set with keys
-      const currentClips = new Map<string, { trackId: string; filePath: string; startTime: number; duration: number; offset: number; volumeDB: number; fadeIn: number; fadeOut: number; clipId: string; pitchCorrectionSourceFilePath?: string; pitchCorrectionSourceOffset?: number }>();
+      const currentClips = new Map<string, SyncedPlaybackClip>();
       for (const track of tracks) {
         for (const clip of track.clips) {
           if (clip.filePath && !clip.muted) {
@@ -469,7 +594,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
             const volumeDB = clip.volumeDB || 0;
             const fadeIn = clip.fadeIn || 0;
             const fadeOut = clip.fadeOut || 0;
-            const key = makeClipKey(track.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut);
+            const key = makeClipKey(track.id, clip.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut);
             currentClips.set(key, {
               trackId: track.id,
               filePath: clip.filePath,
@@ -491,19 +616,19 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
 
       // Diff: find clips to remove (in old set but not in new)
       const toRemove: string[] = [];
-      for (const key of _lastSyncedClipKeys) {
+      for (const key of _lastSyncedClips.keys()) {
         if (!currentKeys.has(key)) toRemove.push(key);
       }
 
       // Diff: find clips to add (in new set but not in old)
       const toAdd: string[] = [];
       for (const key of currentKeys) {
-        if (!_lastSyncedClipKeys.has(key)) toAdd.push(key);
+        if (!_lastSyncedClips.has(key)) toAdd.push(key);
       }
 
       // If more than 60% changed, just do a full clear+rebuild (cheaper than many removes)
       const t1 = performance.now();
-      const totalOld = _lastSyncedClipKeys.size;
+      const totalOld = _lastSyncedClips.size;
       const fullRebuild = totalOld === 0 || toRemove.length > totalOld * 0.6;
       console.log(`${AUDIO_PLAYBACK_LOG_PREFIX} syncClipsWithBackend:diff`, {
         cachedKeys: totalOld,
@@ -527,30 +652,43 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       }
       if (fullRebuild) {
         // Full rebuild — clear first, then batch-add all clips in parallel
-        await nativeBridge.clearPlaybackClips();
+        requireClipBridgeSuccess(
+          await nativeBridge.clearPlaybackClips(),
+          "clearPlaybackClips",
+        );
         const allClips = Array.from(currentClips.values());
         if (allClips.length > 0) {
-          await nativeBridge.addPlaybackClipsBatch(allClips);
+          requireClipBridgeSuccess(
+            await nativeBridge.addPlaybackClipsBatch(allClips),
+            "addPlaybackClipsBatch",
+          );
         }
       } else {
         // Incremental: batch remove old in parallel, then batch add new in parallel
         if (toRemove.length > 0) {
-          await Promise.all(
+          const removalResults = await Promise.all(
             toRemove.map((key) => {
-              const parts = key.split("|");
-              return nativeBridge.removePlaybackClip(parts[0], parts[1]);
+              const clip = _lastSyncedClips.get(key)!;
+              return nativeBridge.removePlaybackClipById(clip.trackId, clip.clipId);
             }),
+          );
+          requireClipBridgeSuccess(
+            removalResults.every((result) => result === true),
+            "removePlaybackClipById",
           );
         }
         if (toAdd.length > 0) {
           const clipsToAdd = toAdd.map((key) => currentClips.get(key)!);
-          await nativeBridge.addPlaybackClipsBatch(clipsToAdd);
+          requireClipBridgeSuccess(
+            await nativeBridge.addPlaybackClipsBatch(clipsToAdd),
+            "addPlaybackClipsBatch",
+          );
         }
       }
       const t2 = performance.now();
 
       // Update cache
-      _lastSyncedClipKeys = currentKeys;
+      _lastSyncedClips = new Map(currentClips);
 
       // Collect all fire-and-forget sync promises to run in parallel
       const syncPromises: Promise<any>[] = [];
@@ -600,7 +738,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         totalMs: Number((t3 - syncStart).toFixed(1)),
       });
       console.log(`[DAW] syncClipsWithBackend: clips=${(t2 - t1).toFixed(0)}ms, aux=${(t3 - t2).toFixed(0)}ms, total=${(t3 - syncStart).toFixed(0)}ms (added: ${toAdd.length}, removed: ${toRemove.length}, auxCalls: ${syncPromises.length})`);
-    },
+    }),
 
     importMedia: async (filePath, trackId, startTime) => {
       try {

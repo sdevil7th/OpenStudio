@@ -13,7 +13,33 @@ import urllib.error
 vite_process = None
 cpp_process = None
 
-VITE_DEV_URL = "http://127.0.0.1:5173"
+VITE_DEV_HOST = "127.0.0.1"
+VITE_DEV_PORT = 5183
+VITE_DEV_URL = f"http://{VITE_DEV_HOST}:{VITE_DEV_PORT}"
+TONE3000_CLIENT_ID_ENV_NAMES = (
+    "TONE3000_PUBLISHABLE_KEY",
+    "OPENSTUDIO_TONE3000_CLIENT_ID_VALUE",
+    "OPENSTUDIO_TONE3000_CLIENT_ID",
+)
+
+
+def get_first_env_value(names):
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return name, value
+    return "", ""
+
+
+def mask_command_for_log(command):
+    if isinstance(command, (list, tuple)):
+        command = subprocess.list2cmdline([str(part) for part in command])
+    else:
+        command = str(command)
+    _, tone3000_client_id = get_first_env_value(TONE3000_CLIENT_ID_ENV_NAMES)
+    if tone3000_client_id:
+        command = command.replace(tone3000_client_id, "<tone3000_publishable_key>")
+    return command
 
 def kill_process_tree(pid):
     """Kill a process and all its child processes (Windows: taskkill /T)"""
@@ -67,12 +93,15 @@ def cleanup():
 # Register cleanup handler
 atexit.register(cleanup)
 
-def run_command(command, cwd=None, shell=True):
-    print(f"Running: {command}")
+def run_command(command, cwd=None, shell=None):
+    if shell is None:
+        shell = isinstance(command, str)
+    print(f"Running: {mask_command_for_log(command)}")
     try:
         subprocess.check_call(command, cwd=cwd, shell=shell)
-    except subprocess.CalledProcessError as e:
-        print(f"Error running command: {command}")
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"Error running command: {mask_command_for_log(command)}")
+        print(error)
         sys.exit(1)
 
 def get_npm_executable():
@@ -141,16 +170,20 @@ def build_backend(mode="debug"):
 
     # Configure CMake. On single-config generators (Linux/macOS Make/Ninja)
     # CMAKE_BUILD_TYPE must be set at configure time, not just at build time.
-    cmd = f"cmake -B \"{build_dir}\""
+    cmd = ["cmake", "-B", build_dir]
     if platform.system() != "Windows":
-        cmd += f" -DCMAKE_BUILD_TYPE={config_type}"
-    if mode == "debug":
-        cmd += " -DJUCE_DEBUG=ON"
+        cmd.append(f"-DCMAKE_BUILD_TYPE={config_type}")
+    tone3000_env_name, tone3000_client_id = get_first_env_value(TONE3000_CLIENT_ID_ENV_NAMES)
+    if tone3000_client_id:
+        print(f"Using TONE3000 publishable client_id from ${tone3000_env_name}.")
+        cmd.append(f"-DOPENSTUDIO_TONE3000_CLIENT_ID_VALUE={tone3000_client_id}")
+    else:
+        print("No TONE3000 publishable client_id env var found; keeping the existing CMake cache value if one is set.")
 
-    run_command(cmd)
+    run_command(cmd, shell=False)
 
     # Build
-    run_command(f"cmake --build \"{build_dir}\" --config {config_type}")
+    run_command(["cmake", "--build", build_dir, "--config", config_type], shell=False)
 
 def start_vite_server():
     """Start Vite dev server in background"""
@@ -158,7 +191,17 @@ def start_vite_server():
     frontend_dir = os.path.join(os.getcwd(), "frontend")
     print("\n--- Starting Vite Dev Server ---")
     vite_process = subprocess.Popen(
-        [get_npm_executable(), "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
+        [
+            get_npm_executable(),
+            "run",
+            "dev",
+            "--",
+            "--host",
+            VITE_DEV_HOST,
+            "--port",
+            str(VITE_DEV_PORT),
+            "--strictPort",
+        ],
         cwd=frontend_dir,
         shell=False
     )

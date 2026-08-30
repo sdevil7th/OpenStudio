@@ -1,4 +1,4 @@
-import { forwardRef } from 'react';
+import { forwardRef, useId } from 'react';
 import classNames from 'classnames';
 import { ChevronDown } from 'lucide-react';
 import {
@@ -72,6 +72,7 @@ export const NativeSelect = forwardRef<HTMLSelectElement, NativeSelectProps>(
     },
     ref
   ) => {
+    const selectId = useId();
     // Normalize options to {value, label, disabled?} format
     const normalizedOptions: NativeSelectOption[] = options.map((opt) => {
       if (typeof opt === 'string' || typeof opt === 'number') {
@@ -122,13 +123,14 @@ export const NativeSelect = forwardRef<HTMLSelectElement, NativeSelectProps>(
     return (
       <WrapperComponent className={wrapperClasses}>
         {label && (
-          <label className="block text-sm font-medium text-neutral-400 mb-1">
+          <label htmlFor={selectId} className="block text-sm font-medium text-neutral-400 mb-1">
             {label}
           </label>
         )}
 
         <span className={controlClasses}>
           <select
+            id={selectId}
             ref={ref}
             value={loading ? '' : (value !== undefined ? String(value) : '')}
             onChange={handleChange}

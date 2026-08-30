@@ -39,7 +39,11 @@ describe("AI feature installer contract", () => {
     expect(modalSource).toContain("STABLE_AUDIO_MODEL_URL");
     expect(modalSource).toContain("Open Hugging Face Model Page");
     expect(modalSource).toContain("Proceed with Setup");
-    expect(modalSource).toContain("Use Downloads Folder");
+    expect(modalSource).toContain("STABLE_AUDIO_FOLDER_EXAMPLE");
+    expect(modalSource).toContain("nativeBridge.browseForFolder");
+    expect(modalSource).not.toContain("C:\\\\Users\\\\");
+    expect(modalSource).not.toContain("srvds");
+    expect(modalSource).not.toContain("Use Downloads Folder");
     expect(modalSource).toContain("Cancel Setup");
     expect(modalSource).toContain("stableAudioSelectedFolder");
     expect(modalSource).toContain("modelId: STABLE_AUDIO_3_MODEL_ID");

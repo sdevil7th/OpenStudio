@@ -1,0 +1,153 @@
+/* NAM Rack Design Port footer controls and status presentation. */
+.footer {
+  position: absolute;
+  left: 1.35%;
+  right: 1.35%;
+  bottom: 0;
+  height: var(--native-footer-height, 56px);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: clamp(9px, 1.1vw, 22px);
+  padding: 0 clamp(12px, 1.2vw, 28px);
+  color: white;
+  background: #020407;
+  font-size: clamp(10px, .62vw, 16px);
+  font-weight: 850;
+}
+.footer b { font-size: clamp(15px, .9vw, 22px); }
+.footer i { width: 1px; height: 45%; background: rgba(255,255,255,.32); }
+.footer em { margin-left: auto; display: flex; gap: 6px; font-style: normal; }
+.footer em span {
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+.nam-rack-design-port .footer {
+  position: relative;
+  inset: auto;
+  grid-row: 4;
+  z-index: 40;
+  width: auto;
+  height: auto;
+  display: grid;
+  grid-template-columns: auto auto auto 1px auto 1px auto auto 1px minmax(0,1fr) auto;
+  align-items: center;
+  gap: clamp(8px, .8vw, 16px);
+  padding: 0 clamp(15px, 1.45vw, 28px);
+  border-top: 1px solid rgba(255,255,255,.08);
+  color: #858c96;
+  background: #07090c;
+  font-size: 10px;
+  font-weight: 680;
+}
+.nam-rack-design-port .footer > b {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #d9dce0;
+  font-size: 10px;
+  font-weight: 780;
+}
+.nam-rack-design-port .footer > b svg { width: 12px; height: 12px; color: var(--premium-accent); }
+.nam-rack-design-port .footer > i {
+  width: 1px;
+  height: 15px;
+  background: rgba(255,255,255,.1);
+}
+.nam-rack-design-port .footer button {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #8d949e;
+  background: transparent;
+  font-size: 9px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.nam-rack-design-port .footer button:hover,
+.nam-rack-design-port .footer button[data-active="true"] {
+  color: #f1d1a0;
+  border-color: rgba(224,161,73,.22);
+  background: rgba(224,161,73,.07);
+}
+.nam-rack-design-port .footer button:disabled { cursor: default; opacity: .45; }
+.nam-rack-design-port .footer button svg { width: 12px; height: 12px; }
+.nam-rack-design-port .footer-control-spacer { min-width: 1px; }
+.nam-rack-design-port .footer-midi {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nam-rack-design-port .footer-midi > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #3e4650;
+}
+.nam-rack-design-port .footer strong { color: #d6d9dd; font-size: inherit; }
+.nam-rack-design-port .footer-runtime {
+  min-width: 0;
+  display: flex;
+  gap: 13px;
+}
+.nam-rack-design-port .footer-runtime strong[data-alert="true"] { color: #ef8d7f; }
+.nam-rack-design-port .footer > em {
+  margin: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 3px;
+  font-style: normal;
+}
+@media (max-width: 1030px) {
+  .nam-rack-design-port .footer-runtime strong:nth-child(2),
+.nam-rack-design-port .footer-runtime strong:nth-child(3) { display: none; }
+}
+@media (max-width: 780px) {
+  .nam-rack-design-port .footer { grid-template-columns: auto auto auto 1px auto auto minmax(0,1fr) auto; gap: 6px; padding: 0 9px; }
+  .nam-rack-design-port .footer > i:nth-of-type(n+2),
+.nam-rack-design-port .footer-midi,
+.nam-rack-design-port .footer-runtime { display: none; }
+}
+.nam-rack-design-port .footer {
+  display: flex;
+  gap: clamp(8px, .85vw, 14px);
+  padding: 0 clamp(18px, 1.7vw, 28px);
+  background: linear-gradient(180deg, #0a0c0f, #05070a);
+  font-size: 10px;
+  font-weight: 560;
+}
+.nam-rack-design-port .footer > b { display: none; }
+.nam-rack-design-port .footer button { min-height: 29px; padding: 0 8px; font-size: 9px; font-weight: 600; }
+.nam-rack-design-port .footer button svg { width: 14px; height: 14px; }
+.nam-rack-design-port .footer-runtime { margin-left: auto; gap: 15px; color: #858b94; }
+.nam-rack-design-port .footer-runtime strong { color: #aeb3ba; font-weight: 600; }
+.nam-rack-design-port .footer-runtime strong:nth-child(n+3) { display: none; }
+.nam-rack-design-port .footer > em { flex: none; margin-left: 4px; }
+
+@media (max-width: 1400px) {
+  .nam-rack-design-port .footer { padding-inline: 18px; }
+}
+/* Calibration belongs to the left-hand session group beside tempo/signature. */
+.nam-rack-design-port .footer > .premium-calibration-launch {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  margin: 0;
+  display: inline-flex;
+  grid-template-columns: none;
+  gap: 5px;
+  transform: none;
+}
+.nam-rack-design-port .footer > .premium-calibration-launch > strong {
+  display: none;
+}

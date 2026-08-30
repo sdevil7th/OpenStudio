@@ -5,6 +5,16 @@ import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
+import {
+  registerScopedActionExecutor,
+  type ScopedActionExecutor,
+} from "../store/actionRegistry";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import { useModalShortcutScope } from "../utils/modalShortcutScope";
+import {
+  activateShortcutContext,
+  shouldPreserveEditableShortcut,
+} from "../utils/shortcutContext";
 
 interface NativeScript {
   name: string;
@@ -12,6 +22,16 @@ interface NativeScript {
   description: string;
   isStock: boolean;
 }
+
+const SCRIPT_EDITOR_ACTION_IDS = [
+  "script.runCurrent",
+  "script.saveCurrent",
+  "script.clearConsole",
+  "script.refreshFiles",
+  "script.openFolder",
+  "script.showEditorTab",
+  "script.showFilesTab",
+] as const;
 
 export function ScriptEditor() {
   const { showScriptEditor, scriptConsoleOutput, userScripts } = useDAWStore(useShallow((s) => ({
@@ -28,6 +48,12 @@ export function ScriptEditor() {
   const [nativeScripts, setNativeScripts] = useState<NativeScript[]>([]);
   const [activeTab, setActiveTab] = useState<"editor" | "files">("editor");
   const consoleEndRef = useRef<HTMLDivElement>(null);
+  const actionExecutorRef = useRef<ScopedActionExecutor>(() => "unmatched");
+
+  useModalShortcutScope(
+    showScriptEditor,
+    () => useDAWStore.getState().toggleScriptEditor(),
+  );
 
   useEffect(() => {
     consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -95,6 +121,48 @@ export function ScriptEditor() {
     }
   };
 
+  actionExecutorRef.current = (actionId) => {
+    if (actionId === "script.runCurrent") {
+      if (isRunning) return "claimed_noop";
+      void handleRun();
+      return "handled";
+    }
+    if (actionId === "script.saveCurrent") {
+      handleSave();
+      return "handled";
+    }
+    if (actionId === "script.clearConsole") {
+      useDAWStore.getState().clearScriptConsole();
+      return "handled";
+    }
+    if (actionId === "script.refreshFiles") {
+      void loadNativeScripts();
+      return "handled";
+    }
+    if (actionId === "script.openFolder") {
+      void handleOpenScriptsFolder();
+      return "handled";
+    }
+    if (actionId === "script.showEditorTab") {
+      setActiveTab("editor");
+      return "handled";
+    }
+    if (actionId === "script.showFilesTab") {
+      setActiveTab("files");
+      return "handled";
+    }
+    return "unmatched";
+  };
+
+  useEffect(() => {
+    if (!showScriptEditor) return undefined;
+    return registerScopedActionExecutor(
+      { kind: "modal" },
+      (actionId) => actionExecutorRef.current(actionId),
+      SCRIPT_EDITOR_ACTION_IDS,
+    );
+  }, [showScriptEditor]);
+
   if (!showScriptEditor) return null;
 
   return (
@@ -102,6 +170,8 @@ export function ScriptEditor() {
       className="fixed inset-8 z-[10000] bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl flex flex-col overflow-hidden"
       data-modal-root="true"
       onContextMenu={guardModalContextMenu}
+      onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
+      onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
     >
       {/* Header */}
       <div className="h-7 bg-neutral-800 border-b border-neutral-700 flex items-center justify-between px-3 shrink-0">
@@ -247,10 +317,20 @@ export function ScriptEditor() {
               spellCheck={false}
               placeholder="Write your Lua script here..."
               onKeyDown={(e) => {
-                // Ctrl+Enter to run
-                if (e.ctrlKey && e.key === "Enter") {
+                // Text controls retain native editing ownership in the global
+                // dispatcher, so route this editor-owned chord locally through
+                // the same profile/custom-binding resolver.
+                const matchedActionId = SCRIPT_EDITOR_ACTION_IDS.find((actionId) => (
+                  matchesActionShortcut(e.nativeEvent, actionId)
+                ));
+                if (
+                  matchedActionId
+                  && !shouldPreserveEditableShortcut(e.nativeEvent, true)
+                ) {
                   e.preventDefault();
-                  handleRun();
+                  e.stopPropagation();
+                  actionExecutorRef.current(matchedActionId);
+                  return;
                 }
                 // Tab inserts 2 spaces
                 if (e.key === "Tab") {

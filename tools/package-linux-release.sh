@@ -23,6 +23,8 @@ BINARY="$ROOT_DIR/$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio"
 APPDIR="$ROOT_DIR/dist/linux/OpenStudio.AppDir"
 OUT_DIR="$ROOT_DIR/dist/linux"
 TOOLS_DIR="$ROOT_DIR/tools"
+LINUXDEPLOY_VERSION="1-alpha-20251107-1"
+LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
 
 echo "=== OpenStudio Linux AppImage packaging ==="
 echo "Version   : $VERSION"
@@ -65,11 +67,19 @@ fi
 
 # ── Download linuxdeploy if needed ─────────────────────────────────────────────
 LINUXDEPLOY="$TOOLS_DIR/linuxdeploy-x86_64.AppImage"
+if [ -f "$LINUXDEPLOY" ] && ! echo "$LINUXDEPLOY_SHA256  $LINUXDEPLOY" | sha256sum --check --strict --status; then
+    echo "Existing linuxdeploy checksum does not match the pinned release; replacing it."
+    rm -f -- "$LINUXDEPLOY"
+fi
+
 if [ ! -f "$LINUXDEPLOY" ]; then
     echo "Downloading linuxdeploy..."
+    LINUXDEPLOY_TEMP="$LINUXDEPLOY.download"
     wget -q --show-progress \
-        -O "$LINUXDEPLOY" \
-        "https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-x86_64.AppImage"
+        -O "$LINUXDEPLOY_TEMP" \
+        "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_VERSION/linuxdeploy-x86_64.AppImage"
+    echo "$LINUXDEPLOY_SHA256  $LINUXDEPLOY_TEMP" | sha256sum --check --strict
+    mv -f -- "$LINUXDEPLOY_TEMP" "$LINUXDEPLOY"
     chmod +x "$LINUXDEPLOY"
 fi
 

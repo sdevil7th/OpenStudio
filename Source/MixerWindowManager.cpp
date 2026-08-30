@@ -17,16 +17,22 @@ juce::Rectangle<int> sanitiseWindowBounds(const juce::Rectangle<int>& requested,
 
     if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
     {
-        const auto area = display->userArea;
+        const auto area = display->userBounds.getSmallestIntegerContainer();
         if (bounds.getWidth() > area.getWidth())
             bounds.setWidth(area.getWidth());
         if (bounds.getHeight() > area.getHeight())
             bounds.setHeight(area.getHeight());
-        if (!area.contains(bounds))
+        if (! area.contains(bounds))
             bounds = bounds.withPosition(area.getX() + 40, area.getY() + 40);
     }
 
     return bounds;
+}
+
+juce::String describeBounds(const juce::Rectangle<int>& bounds)
+{
+    return juce::String(bounds.getX()) + "," + juce::String(bounds.getY())
+        + " " + juce::String(bounds.getWidth()) + "x" + juce::String(bounds.getHeight());
 }
 }
 
@@ -50,9 +56,32 @@ public:
         owner.close();
     }
 
+    MainComponent* getHostedComponent() const
+    {
+        return dynamic_cast<MainComponent*>(getContentComponent());
+    }
+
+    void requestHostedBrowserFocus()
+    {
+        if (auto* component = getHostedComponent())
+            component->requestEmbeddedBrowserFocus();
+    }
+
+    void activeWindowStatusChanged() override
+    {
+        juce::DocumentWindow::activeWindowStatusChanged();
+
+        if (isActiveWindow())
+            requestHostedBrowserFocus();
+    }
+
 private:
     MixerWindowManager& owner;
 };
+
+int MixerWindowManager::globalCloseDepth = 0;
+int MixerWindowManager::globalCreateDepth = 0;
+juce::Array<MixerWindowManager*> MixerWindowManager::managersWithPendingRequests;
 
 MixerWindowManager::MixerWindowManager(ComponentFactory componentFactoryIn,
                                        ClosedCallback closedCallbackIn,
@@ -71,97 +100,212 @@ MixerWindowManager::MixerWindowManager(ComponentFactory componentFactoryIn,
 
 MixerWindowManager::~MixerWindowManager()
 {
-    close();
+    stopTimer();
+    managersWithPendingRequests.removeFirstMatchingValue(this);
+    pendingRequest = {};
+
+    if (mixerWindow != nullptr)
+    {
+        juce::Logger::writeToLog("Secondary window destroyed during manager shutdown: "
+                                 + windowTitle + " state=" + getStateDescription());
+        if (auto* hosted = mixerWindow->getHostedComponent())
+            hosted->prepareForSecondaryWindowClose();
+        mixerWindow->setVisible(false);
+        mixerWindow = nullptr;
+    }
+
+    if (closingWindow != nullptr)
+    {
+        juce::Logger::writeToLog("Secondary closing window destroyed during manager shutdown: "
+                                 + windowTitle + " state=" + getStateDescription());
+        if (auto* hosted = closingWindow->getHostedComponent())
+            hosted->prepareForSecondaryWindowClose();
+        closingWindow->setVisible(false);
+        closingWindow = nullptr;
+    }
+
+    releaseGlobalCloseSlot();
+    state = WindowState::idle;
 }
 
 bool MixerWindowManager::open(const juce::Rectangle<int>& bounds)
 {
+    if (! ensureMessageThread("open"))
+        return false;
+
     const auto targetBounds = sanitiseWindowBounds(bounds, defaultBounds, minWidth, minHeight);
+
+    if (state == WindowState::closing
+        || state == WindowState::retired
+        || (mixerWindow == nullptr && isGlobalLifecycleBusy()))
+    {
+        queuePendingRequest(PendingRequest::Type::open, targetBounds);
+        return true;
+    }
 
     if (mixerWindow != nullptr)
     {
         mixerWindow->setBounds(targetBounds);
         mixerWindow->setVisible(true);
         mixerWindow->toFront(true);
+        mixerWindow->requestHostedBrowserFocus();
+        setState(WindowState::visible, "open existing bounds=" + describeBounds(targetBounds));
+        scheduleStartupNudge();
         return true;
     }
 
-    if (!componentFactory)
-        return false;
-
-    auto content = componentFactory();
-    if (content == nullptr)
-        return false;
-
-    mixerWindow = std::make_unique<MixerWindow>(*this, std::move(content));
-    mixerWindow->setBounds(targetBounds);
-    mixerWindow->setVisible(true);
-    mixerWindow->toFront(true);
-
-    juce::Component::SafePointer<juce::DocumentWindow> safeWindow(mixerWindow.get());
-    juce::Timer::callAfterDelay(600, [safeWindow]()
-    {
-        if (safeWindow != nullptr)
-        {
-            const auto boundsNow = safeWindow->getBounds();
-            safeWindow->setBounds(boundsNow.withWidth(boundsNow.getWidth() + 1));
-            safeWindow->setBounds(boundsNow);
-        }
-    });
-
-    return true;
+    setState(WindowState::creating, "open requested bounds=" + describeBounds(targetBounds));
+    return createWindow(targetBounds, true);
 }
 
 bool MixerWindowManager::prewarm(const juce::Rectangle<int>& bounds)
 {
+    if (! ensureMessageThread("prewarm"))
+        return false;
+
     const auto targetBounds = sanitiseWindowBounds(bounds, defaultBounds, minWidth, minHeight);
+
+    if (state == WindowState::closing
+        || state == WindowState::retired
+        || (mixerWindow == nullptr && isGlobalLifecycleBusy()))
+    {
+        queuePendingRequest(PendingRequest::Type::prewarm, targetBounds);
+        return true;
+    }
 
     if (mixerWindow != nullptr)
     {
         mixerWindow->setBounds(targetBounds);
         mixerWindow->setVisible(false);
+        setState(WindowState::readyHidden, "prewarm existing bounds=" + describeBounds(targetBounds));
         return true;
     }
 
-    if (!componentFactory)
-        return false;
-
-    auto content = componentFactory();
-    if (content == nullptr)
-        return false;
-
-    mixerWindow = std::make_unique<MixerWindow>(*this, std::move(content));
-    mixerWindow->setBounds(targetBounds);
-    mixerWindow->setVisible(false);
-    return true;
+    setState(WindowState::creating, "prewarm requested bounds=" + describeBounds(targetBounds));
+    return createWindow(targetBounds, false);
 }
 
 bool MixerWindowManager::close()
 {
-    if (mixerWindow == nullptr)
+    if (! ensureMessageThread("close"))
         return false;
 
-    handleWindowClosed();
+    if (state == WindowState::closing || state == WindowState::retired)
+    {
+        juce::Logger::writeToLog("Secondary window close ignored because close is already in progress: "
+                                 + windowTitle + " state=" + getStateDescription());
+        return true;
+    }
+
+    if (mixerWindow == nullptr)
+    {
+        if (pendingRequest.type != PendingRequest::Type::none)
+        {
+            juce::Logger::writeToLog("Secondary window close cancelled pending request before creation: "
+                                     + windowTitle + " state=" + getStateDescription());
+            pendingRequest = {};
+            managersWithPendingRequests.removeFirstMatchingValue(this);
+            return true;
+        }
+
+        juce::Logger::writeToLog("Secondary window close ignored because no active window exists: "
+                                 + windowTitle + " state=" + getStateDescription());
+        return state == WindowState::idle;
+    }
+
+    juce::Logger::writeToLog("Secondary window close requested: " + windowTitle
+                             + " state=" + getStateDescription());
+
+    if (auto* hosted = mixerWindow->getHostedComponent())
+    {
+        if (! hosted->hasFrontendStartupReachedTerminalState())
+        {
+            closePendingUntilStartupSettles = true;
+            closeStartedMs = juce::Time::currentTimeMillis();
+            setState(WindowState::closing,
+                     "close pending until frontend startup settles startupState=" + hosted->getFrontendStartupStateDescription());
+
+            if (! countedGlobalClose)
+            {
+                countedGlobalClose = true;
+                ++globalCloseDepth;
+                juce::Logger::writeToLog("Secondary window global close depth: "
+                                         + juce::String(globalCloseDepth)
+                                         + " after pending close " + windowTitle);
+            }
+
+            startTimer(closeReadinessPollMs);
+            return true;
+        }
+    }
+
+    beginClose(true);
     return true;
 }
 
 bool MixerWindowManager::focus()
 {
-    if (mixerWindow == nullptr)
+    if (! ensureMessageThread("focus"))
         return false;
+
+    if (state == WindowState::closing || state == WindowState::retired)
+    {
+        queuePendingRequest(PendingRequest::Type::focus);
+        return true;
+    }
+
+    if (mixerWindow == nullptr
+        && (isGlobalLifecycleBusy() || pendingRequest.type != PendingRequest::Type::none))
+    {
+        queuePendingRequest(PendingRequest::Type::focus);
+        return true;
+    }
+
+    if (mixerWindow == nullptr)
+    {
+        juce::Logger::writeToLog("Secondary window focus ignored because no active window exists: "
+                                 + windowTitle + " state=" + getStateDescription());
+        return false;
+    }
 
     mixerWindow->setVisible(true);
     mixerWindow->toFront(true);
+    mixerWindow->requestHostedBrowserFocus();
+    setState(WindowState::visible, "focus");
+    scheduleStartupNudge();
     return true;
 }
 
 bool MixerWindowManager::hide()
 {
-    if (mixerWindow == nullptr)
+    if (! ensureMessageThread("hide"))
         return false;
+
+    if (state == WindowState::closing || state == WindowState::retired)
+        return true;
+
+    if (state == WindowState::readyHidden)
+        return true;
+
+    if (mixerWindow == nullptr)
+    {
+        if (pendingRequest.type != PendingRequest::Type::none)
+        {
+            juce::Logger::writeToLog("Secondary window hide cancelled pending request before creation: "
+                                     + windowTitle + " state=" + getStateDescription());
+            pendingRequest = {};
+            managersWithPendingRequests.removeFirstMatchingValue(this);
+            return true;
+        }
+
+        juce::Logger::writeToLog("Secondary window hide ignored because no active window exists: "
+                                 + windowTitle + " state=" + getStateDescription());
+        return state == WindowState::idle;
+    }
 
     const auto bounds = mixerWindow->getBounds();
     mixerWindow->setVisible(false);
+    setState(WindowState::readyHidden, "hide bounds=" + describeBounds(bounds));
 
     if (closedCallback)
         closedCallback(bounds);
@@ -171,18 +315,353 @@ bool MixerWindowManager::hide()
 
 bool MixerWindowManager::isOpen() const
 {
-    return mixerWindow != nullptr && mixerWindow->isVisible();
+    return mixerWindow != nullptr && mixerWindow->isVisible() && state == WindowState::visible;
 }
 
-void MixerWindowManager::handleWindowClosed()
+bool MixerWindowManager::isFrontendReady() const
+{
+    if (mixerWindow != nullptr)
+        if (auto* hosted = mixerWindow->getHostedComponent())
+            return hosted->hasFrontendStartupSucceeded();
+
+    return false;
+}
+
+juce::String MixerWindowManager::getFrontendStartupStateDescription() const
+{
+    if (mixerWindow != nullptr)
+        if (auto* hosted = mixerWindow->getHostedComponent())
+            return hosted->getFrontendStartupStateDescription();
+
+    if (closingWindow != nullptr)
+        if (auto* hosted = closingWindow->getHostedComponent())
+            return hosted->getFrontendStartupStateDescription();
+
+    return "not-created";
+}
+
+juce::String MixerWindowManager::getStateDescription() const
+{
+    return stateToString(state);
+}
+
+const char* MixerWindowManager::stateToString(WindowState stateIn) noexcept
+{
+    switch (stateIn)
+    {
+        case WindowState::idle: return "idle";
+        case WindowState::creating: return "creating";
+        case WindowState::readyHidden: return "readyHidden";
+        case WindowState::visible: return "visible";
+        case WindowState::closing: return "closing";
+        case WindowState::retired: return "retired";
+    }
+
+    return "unknown";
+}
+
+bool MixerWindowManager::isGlobalCloseInProgress() noexcept
+{
+    return globalCloseDepth > 0;
+}
+
+bool MixerWindowManager::isGlobalCreateInProgress() noexcept
+{
+    return globalCreateDepth > 0;
+}
+
+bool MixerWindowManager::isGlobalLifecycleBusy() noexcept
+{
+    return isGlobalCloseInProgress() || isGlobalCreateInProgress();
+}
+
+void MixerWindowManager::addPendingManager(MixerWindowManager& manager)
+{
+    if (! managersWithPendingRequests.contains(&manager))
+        managersWithPendingRequests.add(&manager);
+}
+
+void MixerWindowManager::drainGlobalPendingRequests()
+{
+    if (isGlobalLifecycleBusy() || managersWithPendingRequests.isEmpty())
+        return;
+
+    while (! isGlobalLifecycleBusy() && ! managersWithPendingRequests.isEmpty())
+    {
+        auto* manager = managersWithPendingRequests.getFirst();
+        managersWithPendingRequests.remove(0);
+
+        if (manager != nullptr)
+            manager->runPendingRequest();
+    }
+}
+
+void MixerWindowManager::beginGlobalCreateSlot(const juce::String& title)
+{
+    ++globalCreateDepth;
+    juce::Logger::writeToLog("Secondary window global create depth: "
+                             + juce::String(globalCreateDepth)
+                             + " after creating " + title);
+
+    juce::Timer::callAfterDelay(createSettleDelayMs, [title]()
+    {
+        releaseGlobalCreateSlot(title);
+    });
+}
+
+void MixerWindowManager::releaseGlobalCreateSlot(const juce::String& title)
+{
+    globalCreateDepth = juce::jmax(0, globalCreateDepth - 1);
+    juce::Logger::writeToLog("Secondary window global create depth: "
+                             + juce::String(globalCreateDepth)
+                             + " after settling " + title);
+    drainGlobalPendingRequests();
+}
+
+bool MixerWindowManager::ensureMessageThread(const char* action) const
+{
+    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+        return true;
+
+    juce::Logger::writeToLog("Secondary window " + juce::String(action)
+                             + " rejected off message thread: " + windowTitle);
+    jassertfalse;
+    return false;
+}
+
+bool MixerWindowManager::createWindow(const juce::Rectangle<int>& targetBounds, bool visible)
+{
+    if (! componentFactory)
+    {
+        setState(WindowState::idle, "component factory missing");
+        return false;
+    }
+
+    beginGlobalCreateSlot(windowTitle);
+    auto content = componentFactory();
+    if (content == nullptr)
+    {
+        releaseGlobalCreateSlot(windowTitle);
+        setState(WindowState::idle, "component factory returned null");
+        return false;
+    }
+
+    mixerWindow = std::make_unique<MixerWindow>(*this, std::move(content));
+    mixerWindow->setBounds(targetBounds);
+    mixerWindow->setVisible(visible);
+
+    if (visible)
+    {
+        mixerWindow->toFront(true);
+        mixerWindow->requestHostedBrowserFocus();
+    }
+
+    setState(visible ? WindowState::visible : WindowState::readyHidden,
+             juce::String(visible ? "created visible bounds=" : "created hidden bounds=") + describeBounds(targetBounds));
+
+    if (visible)
+        scheduleStartupNudge();
+
+    return true;
+}
+
+void MixerWindowManager::scheduleStartupNudge()
+{
+    if (mixerWindow == nullptr)
+        return;
+
+    juce::Component::SafePointer<juce::DocumentWindow> safeWindow(mixerWindow.get());
+    juce::Timer::callAfterDelay(startupNudgeDelayMs, [safeWindow]()
+    {
+        if (safeWindow != nullptr)
+        {
+            const auto boundsNow = safeWindow->getBounds();
+            safeWindow->setBounds(boundsNow.withWidth(boundsNow.getWidth() + 1));
+            safeWindow->setBounds(boundsNow);
+        }
+    });
+}
+
+void MixerWindowManager::beginClose(bool notifyClosed)
 {
     if (mixerWindow == nullptr)
         return;
 
     const auto bounds = mixerWindow->getBounds();
-    mixerWindow->setVisible(false);
-    mixerWindow = nullptr;
+    setState(WindowState::closing, "close begin bounds=" + describeBounds(bounds));
 
-    if (closedCallback)
+    if (! countedGlobalClose)
+    {
+        countedGlobalClose = true;
+        ++globalCloseDepth;
+        juce::Logger::writeToLog("Secondary window global close depth: "
+                                 + juce::String(globalCloseDepth)
+                                 + " after closing " + windowTitle);
+    }
+
+    if (closeStartedMs == 0)
+        closeStartedMs = juce::Time::currentTimeMillis();
+
+    // JUCE 9.0.1 removes a destroyed WebView2 from its construction queue and
+    // disconnects WKWebView delegates during teardown.  Retire the native window
+    // first, then destroy it after the cross-window settle period so user-driven
+    // close/reopen bursts remain ordered without retaining one browser forever for
+    // every MIDI clip or built-in plug-in session.
+    mixerWindow->setVisible(false);
+    closingWindow = std::move(mixerWindow);
+    setState(WindowState::retired, "close retired bounds=" + describeBounds(bounds));
+
+    if (notifyClosed && closedCallback)
         closedCallback(bounds);
+
+    closePendingUntilStartupSettles = false;
+    startTimer(closeDestroyDelayMs);
+}
+
+void MixerWindowManager::finishClose()
+{
+    if (closingWindow != nullptr)
+    {
+        if (auto* hosted = closingWindow->getHostedComponent())
+        {
+            const auto elapsedMs = juce::Time::currentTimeMillis() - closeStartedMs;
+            if (! hosted->hasFrontendStartupReachedTerminalState() && elapsedMs < closeStartupMaxWaitMs)
+            {
+                juce::Logger::writeToLog("Secondary retired window destruction delayed until frontend startup settles: "
+                                         + windowTitle
+                                         + " startupState=" + hosted->getFrontendStartupStateDescription()
+                                         + " elapsedMs=" + juce::String(elapsedMs));
+                startTimer(closeReadinessPollMs);
+                return;
+            }
+
+            hosted->prepareForSecondaryWindowClose();
+        }
+
+        juce::Logger::writeToLog("Secondary retired window destroyed: " + windowTitle);
+        closingWindow->setVisible(false);
+        closingWindow = nullptr;
+    }
+
+    closeStartedMs = 0;
+    stopTimer();
+    setState(WindowState::idle, "close complete");
+    releaseGlobalCloseSlot();
+    drainGlobalPendingRequests();
+}
+
+void MixerWindowManager::releaseGlobalCloseSlot()
+{
+    if (! countedGlobalClose)
+        return;
+
+    countedGlobalClose = false;
+    globalCloseDepth = juce::jmax(0, globalCloseDepth - 1);
+    juce::Logger::writeToLog("Secondary window global close depth: "
+                             + juce::String(globalCloseDepth)
+                             + " after destroying " + windowTitle);
+}
+
+void MixerWindowManager::setState(WindowState nextState, const juce::String& reason)
+{
+    if (state == nextState && reason.isEmpty())
+        return;
+
+    juce::Logger::writeToLog("Secondary window state: " + windowTitle
+                             + " " + juce::String(stateToString(state))
+                             + " -> " + juce::String(stateToString(nextState))
+                             + (reason.isNotEmpty() ? " (" + reason + ")" : juce::String()));
+    state = nextState;
+}
+
+void MixerWindowManager::queuePendingRequest(PendingRequest::Type type, const juce::Rectangle<int>& bounds)
+{
+    if (type == PendingRequest::Type::focus)
+    {
+        if (pendingRequest.type == PendingRequest::Type::prewarm)
+        {
+            pendingRequest.type = PendingRequest::Type::open;
+            addPendingManager(*this);
+            juce::Logger::writeToLog("Secondary window pending prewarm upgraded to open: " + windowTitle
+                                     + (pendingRequest.bounds.isEmpty() ? juce::String() : " bounds=" + describeBounds(pendingRequest.bounds)));
+            return;
+        }
+
+        if (pendingRequest.type == PendingRequest::Type::open)
+        {
+            addPendingManager(*this);
+            return;
+        }
+    }
+
+    pendingRequest.type = type;
+    pendingRequest.bounds = bounds;
+    addPendingManager(*this);
+
+    juce::String typeName = "none";
+    if (type == PendingRequest::Type::open)
+        typeName = "open";
+    else if (type == PendingRequest::Type::prewarm)
+        typeName = "prewarm";
+    else if (type == PendingRequest::Type::focus)
+        typeName = "focus";
+
+    juce::Logger::writeToLog("Secondary window request queued: " + windowTitle
+                             + " request=" + typeName
+                             + " state=" + getStateDescription()
+                             + (bounds.isEmpty() ? juce::String() : " bounds=" + describeBounds(bounds)));
+}
+
+void MixerWindowManager::runPendingRequest()
+{
+    const auto pending = pendingRequest;
+    pendingRequest = {};
+
+    if (pending.type == PendingRequest::Type::none)
+        return;
+
+    juce::Logger::writeToLog("Secondary window running queued request: " + windowTitle
+                             + " state=" + getStateDescription());
+
+    if (pending.type == PendingRequest::Type::open)
+        open(pending.bounds);
+    else if (pending.type == PendingRequest::Type::prewarm)
+        prewarm(pending.bounds);
+    else if (pending.type == PendingRequest::Type::focus)
+        focus();
+}
+
+void MixerWindowManager::timerCallback()
+{
+    if (closePendingUntilStartupSettles)
+    {
+        if (mixerWindow == nullptr)
+        {
+            closePendingUntilStartupSettles = false;
+            finishClose();
+            return;
+        }
+
+        const auto elapsedMs = juce::Time::currentTimeMillis() - closeStartedMs;
+        if (auto* hosted = mixerWindow->getHostedComponent())
+        {
+            if (! hosted->hasFrontendStartupReachedTerminalState() && elapsedMs < closeStartupMaxWaitMs)
+            {
+                juce::Logger::writeToLog("Secondary window close waiting for frontend startup to settle: "
+                                         + windowTitle
+                                         + " startupState=" + hosted->getFrontendStartupStateDescription()
+                                         + " elapsedMs=" + juce::String(elapsedMs));
+                startTimer(closeReadinessPollMs);
+                return;
+            }
+        }
+
+        juce::Logger::writeToLog("Secondary window pending close now entering teardown: " + windowTitle
+                                 + " elapsedMs=" + juce::String(elapsedMs));
+        closePendingUntilStartupSettles = false;
+        beginClose(true);
+        return;
+    }
+
+    finishClose();
 }

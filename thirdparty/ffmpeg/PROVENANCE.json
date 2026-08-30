@@ -1,0 +1,18 @@
+{
+  "name": "FFmpeg Windows essentials build",
+  "binary": "tools/ffmpeg.exe",
+  "binaryVersion": "8.0.1-essentials_build-www.gyan.dev",
+  "binarySha256": "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d",
+  "binarySizeBytes": 99264000,
+  "provider": "Gyan Doshi",
+  "providerBuildsPage": "https://www.gyan.dev/ffmpeg/builds/",
+  "providerBinaryArchive": "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip",
+  "providerBinaryArchiveSha256": "e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673",
+  "upstreamRepository": "https://github.com/FFmpeg/FFmpeg",
+  "upstreamVersion": "n8.0.1",
+  "upstreamSourceArchive": "https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz",
+  "upstreamSourceArchiveSha256": "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41",
+  "license": "GPL-3.0-or-later",
+  "configuration": "--enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-fontconfig --enable-iconv --enable-gnutls --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-zlib --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-sdl2 --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxvid --enable-libaom --enable-libopenjpeg --enable-libvpx --enable-mediafoundation --enable-libass --enable-freetype --enable-fribidi --enable-harfbuzz --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi --enable-openal --enable-libgme --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libtheora --enable-libvo-amrwbenc --enable-libgsm --enable-libopencore-amrnb --enable-libopus --enable-libspeex --enable-libvorbis --enable-librubberband",
+  "correspondingSourceNote": "The FFmpeg core archive is pinned above. Because this is a static GPL build with third-party libraries, a public distributor must also make the complete corresponding source for the exact linked build available under the applicable licenses."
+}

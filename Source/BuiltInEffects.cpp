@@ -49,6 +49,228 @@ static void sanitizeBuiltInBuffer(juce::AudioBuffer<float>& buffer, float limit)
     }
 }
 
+static void clearNonFiniteBuiltInBuffer(juce::AudioBuffer<float>& buffer) noexcept
+{
+    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    {
+        auto* samples = buffer.getWritePointer(ch);
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            if (! std::isfinite(samples[sample]))
+                samples[sample] = 0.0f;
+        }
+    }
+}
+
+static float boundProcessedWetSample(float value,
+                                     float limit = 2.5f) noexcept
+{
+    return std::isfinite(value)
+        ? juce::jlimit(-limit, limit, value)
+        : 0.0f;
+}
+
+namespace
+{
+constexpr size_t kRealtimeFilterLutSize = 513;
+
+float safeFilterMaximum(double sampleRate, float nominalMinimum, float nominalMaximum)
+{
+    return juce::jmax(nominalMinimum,
+                      juce::jmin(nominalMaximum,
+                                 static_cast<float>(sampleRate * 0.475)));
+}
+
+void prepareRealtimeFilterLut(std::vector<S13IIRCoefficientSet>& lut,
+                              double sampleRate,
+                              float nominalMinimum,
+                              float nominalMaximum,
+                              bool highPass)
+{
+    const float safeMinimum = juce::jmax(1.0f, nominalMinimum);
+    const float safeMaximum = safeFilterMaximum(sampleRate, safeMinimum, nominalMaximum);
+    const double logMinimum = std::log(static_cast<double>(safeMinimum));
+    const double logRange = std::log(static_cast<double>(safeMaximum)) - logMinimum;
+    lut.resize(kRealtimeFilterLutSize);
+
+    for (size_t index = 0; index < lut.size(); ++index)
+    {
+        const double proportion = static_cast<double>(index)
+            / static_cast<double>(lut.size() - 1);
+        const float frequency = static_cast<float>(std::exp(logMinimum + proportion * logRange));
+        const auto coefficients = highPass
+            ? juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequency)
+            : juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, frequency);
+        const auto& source = coefficients->coefficients;
+        jassert(source.size() == lut[index].size());
+        for (size_t coefficient = 0; coefficient < lut[index].size(); ++coefficient)
+            lut[index][coefficient] = source[static_cast<int>(coefficient)];
+    }
+}
+
+const S13IIRCoefficientSet& lookupRealtimeFilterLut(
+    const std::vector<S13IIRCoefficientSet>& lut,
+    double sampleRate,
+    float frequency,
+    float nominalMinimum,
+    float nominalMaximum) noexcept
+{
+    jassert(! lut.empty());
+    const float safeMinimum = juce::jmax(1.0f, nominalMinimum);
+    const float safeMaximum = safeFilterMaximum(sampleRate, safeMinimum, nominalMaximum);
+    const double logMinimum = std::log(static_cast<double>(safeMinimum));
+    const double logRange = std::log(static_cast<double>(safeMaximum)) - logMinimum;
+    const double position = logRange > 0.0
+        ? (std::log(static_cast<double>(juce::jlimit(safeMinimum, safeMaximum, frequency))) - logMinimum)
+            / logRange
+        : 0.0;
+    const auto index = static_cast<size_t>(juce::jlimit(
+        0,
+        static_cast<int>(lut.size() - 1),
+        static_cast<int>(std::lround(position * static_cast<double>(lut.size() - 1)))));
+    return lut[index];
+}
+
+void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
+                                     const S13IIRCoefficientSet& coefficients) noexcept
+{
+    jassert(filter.coefficients != nullptr);
+    if (filter.coefficients == nullptr)
+        return;
+
+    auto& destination = filter.coefficients->coefficients;
+    jassert(destination.size() == coefficients.size());
+    if (destination.size() != coefficients.size())
+        return;
+
+    for (size_t coefficient = 0; coefficient < coefficients.size(); ++coefficient)
+        destination.set(static_cast<int>(coefficient), coefficients[coefficient]);
+}
+
+void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& left,
+                                     juce::dsp::IIR::Filter<float>& right,
+                                     const S13IIRCoefficientSet& coefficients) noexcept
+{
+    writeRealtimeFilterCoefficients(left, coefficients);
+    if (right.coefficients != left.coefficients)
+        writeRealtimeFilterCoefficients(right, coefficients);
+}
+
+bool advanceRealtimeFilterCoefficients(
+    juce::dsp::IIR::Filter<float>& filter,
+    const S13IIRCoefficientSet& target,
+    float smoothingProportion) noexcept
+{
+    if (filter.coefficients == nullptr)
+        return false;
+
+    auto& coefficients = filter.coefficients->coefficients;
+    jassert(coefficients.size() == static_cast<int>(target.size()));
+    if (coefficients.size() != static_cast<int>(target.size()))
+        return false;
+
+    constexpr float settleThreshold = 1.0e-6f;
+    bool stillSmoothing = false;
+    for (size_t index = 0; index < target.size(); ++index)
+    {
+        const int coefficientIndex = static_cast<int>(index);
+        const float current = coefficients[coefficientIndex];
+        const float difference = target[index] - current;
+        if (std::abs(difference) <= settleThreshold)
+        {
+            coefficients.set(coefficientIndex, target[index]);
+            continue;
+        }
+
+        const float next = current + difference * smoothingProportion;
+        const bool settled =
+            std::abs(target[index] - next) <= settleThreshold;
+        coefficients.set(
+            coefficientIndex,
+            settled ? target[index] : next);
+        stillSmoothing = stillSmoothing || ! settled;
+    }
+    return stillSmoothing;
+}
+
+bool advanceRealtimeFilterCoefficients(
+    juce::dsp::IIR::Filter<float>& left,
+    juce::dsp::IIR::Filter<float>& right,
+    const S13IIRCoefficientSet& target,
+    float smoothingProportion) noexcept
+{
+    const bool leftSmoothing =
+        advanceRealtimeFilterCoefficients(
+            left, target, smoothingProportion);
+    if (right.coefficients == left.coefficients)
+        return leftSmoothing;
+
+    return advanceRealtimeFilterCoefficients(
+               right, target, smoothingProportion)
+        || leftSmoothing;
+}
+
+constexpr S13IIRCoefficientSet kIdentityBiquad {
+    1.0f, 0.0f, 0.0f, 0.0f, 0.0f
+};
+
+S13IIRCoefficientSet normaliseBiquad(
+    const std::array<float, 6>& coefficients) noexcept
+{
+    const float inverseA0 = std::abs(coefficients[3]) > 1.0e-12f
+        ? 1.0f / coefficients[3]
+        : 0.0f;
+    return {
+        coefficients[0] * inverseA0,
+        coefficients[1] * inverseA0,
+        coefficients[2] * inverseA0,
+        coefficients[4] * inverseA0,
+        coefficients[5] * inverseA0
+    };
+}
+
+S13IIRCoefficientSet normaliseFirstOrderAsBiquad(
+    const std::array<float, 4>& coefficients) noexcept
+{
+    const float inverseA0 = std::abs(coefficients[2]) > 1.0e-12f
+        ? 1.0f / coefficients[2]
+        : 0.0f;
+    return {
+        coefficients[0] * inverseA0,
+        coefficients[1] * inverseA0,
+        0.0f,
+        coefficients[3] * inverseA0,
+        0.0f
+    };
+}
+
+double getFixedBiquadMagnitude(const S13IIRCoefficientSet& coefficients,
+                              double frequency,
+                              double sampleRate) noexcept
+{
+    if (sampleRate <= 0.0)
+        return 1.0;
+
+    const double angle = -juce::MathConstants<double>::twoPi
+        * juce::jlimit(0.0, sampleRate * 0.499, frequency)
+        / sampleRate;
+    const std::complex<double> z1(std::cos(angle), std::sin(angle));
+    const auto z2 = z1 * z1;
+    const std::complex<double> numerator =
+        static_cast<double>(coefficients[0])
+        + static_cast<double>(coefficients[1]) * z1
+        + static_cast<double>(coefficients[2]) * z2;
+    const std::complex<double> denominator =
+        1.0
+        + static_cast<double>(coefficients[3]) * z1
+        + static_cast<double>(coefficients[4]) * z2;
+    const double denominatorMagnitude = std::abs(denominator);
+    return denominatorMagnitude > 1.0e-15
+        ? std::abs(numerator) / denominatorMagnitude
+        : 1.0;
+}
+}
+
 //==============================================================================
 //  S13EQ -- 8-band parametric EQ
 //==============================================================================
@@ -96,19 +318,39 @@ int S13EQ::getNumStagesForSlope(FilterSlope slope) const
 void S13EQ::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
+    publishedSampleRate.store(sampleRate, std::memory_order_release);
     juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 2u };
 
     juce::dsp::ProcessSpec monoSpec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 1u };
     for (int b = 0; b < numBands; ++b)
     {
         for (int s = 0; s < maxStagesPerBand; ++s)
+        {
+            // Keep every runtime state at biquad order so coefficient morphing
+            // never resizes JUCE's coefficient vector on the callback.
+            *bandFilters[b][s].state =
+                juce::dsp::IIR::Coefficients<float>(
+                    1.0f, 0.0f, 0.0f,
+                    1.0f, 0.0f, 0.0f);
             bandFilters[b][s].prepare(spec);
+            targetBandCoefficients[static_cast<size_t>(b)]
+                                  [static_cast<size_t>(s)] =
+                kIdentityBiquad;
+        }
         for (int ch = 0; ch < 2; ++ch)
-        dynamicDetectorFilters[b][ch].prepare(monoSpec);
+        {
+            *dynamicDetectorFilters[b][ch].coefficients =
+                juce::dsp::IIR::Coefficients<float>(
+                    1.0f, 0.0f, 0.0f,
+                    1.0f, 0.0f, 0.0f);
+            dynamicDetectorFilters[b][ch].prepare(monoSpec);
+        }
         dynamicEnvelope[static_cast<size_t>(b)] = 0.0f;
         dynamicGainDB[static_cast<size_t>(b)].store(0.0f, std::memory_order_relaxed);
         cachedBandStates[static_cast<size_t>(b)].valid = false;
         cachedDynamicDetectorStates[static_cast<size_t>(b)].valid = false;
+        activeStages[b] = 0;
+        targetStages[b] = 0;
     }
 
     oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
@@ -116,15 +358,132 @@ void S13EQ::prepareToPlay(double sampleRate, int samplesPerBlock)
     oversampler->initProcessing(static_cast<size_t>(samplesPerBlock));
     msScratch.setSize(1, samplesPerBlock, false, false, true);
     msScratch.clear();
-    lastProcessingMode = 0;
+    dryScratch.setSize(2, samplesPerBlock, false, false, true);
+    dryScratch.clear();
 
-    fftWritePos = 0;
-    fftBlockCounter = 0;
-    updateFilters();
+    const float initialPower =
+        powerEnabled.load(std::memory_order_acquire) ? 1.0f : 0.0f;
+    smoothedPowerMix.reset(sampleRate, 0.015);
+    smoothedPowerMix.setCurrentAndTargetValue(initialPower);
+    smoothedModeMix.reset(sampleRate, 0.005);
+    smoothedModeMix.setCurrentAndTargetValue(1.0f);
+    smoothedOutputGain.reset(sampleRate, 0.020);
+    smoothedOutputGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(-18.0f, 18.0f,
+                         outputGain.load(std::memory_order_relaxed))));
+    activeProcessingMode = juce::jlimit(
+        0, 2,
+        static_cast<int>(std::round(
+            stereoMode.load(std::memory_order_relaxed))));
+    pendingProcessingMode = activeProcessingMode;
+    modeTransitionPending = false;
+    wetPathHasState = initialPower > 0.0f;
+
+    // Coefficient interpolation is a click-prevention bound, not a second
+    // dynamics envelope. A fixed 20 ms morph made fast dynamic-EQ attack
+    // settings meaningless. Three milliseconds keeps topology moves click-safe
+    // at very small host blocks while remaining short relative to the detector
+    // ballistics exposed by the channel-strip surface.
+    coefficientMorphProportion = 1.0f - std::exp(
+        -static_cast<float>(coefficientMorphChunkSize)
+        / static_cast<float>(juce::jmax(1.0, sampleRate) * 0.003));
+    cachedAuditionIndex = -2;
+    filtersPrepared = true;
+    filtersNeedSmoothing = false;
+    updateFilters(true);
+    smoothedAutoGainDB = 0.0f;
+    cachedAutoGainTargetDB = 0.0f;
+    autoGainProbeWeightedSum = 0.0f;
+    autoGainProbeWeightTotal = 0.0f;
+    autoGainProbeIndex = 0;
+    autoGainProbeSamplesUntilAdvance = 0;
+
+    spectrumDemandSamplesRemaining.store(0, std::memory_order_release);
+    spectrumCaptureSlot = -1;
+    spectrumCaptureWritePos = 0;
+    spectrumCaptureGeneration = 0;
+    for (auto& slot : spectrumCaptureSlots)
+    {
+        slot.generation.store(0, std::memory_order_relaxed);
+        slot.state.store(0, std::memory_order_release);
+    }
+}
+
+static float butterworthCascadeStageQ(int stageIndex,
+                                      int stageCount) noexcept
+{
+    // For an even-order Butterworth response (order = 2 * stageCount), each
+    // biquad needs its own conjugate-pole Q. Repeating Q=0.707 sections makes
+    // 24/48 dB cuts droop at the labelled cutoff and is not a Butterworth
+    // cascade. Order the sections from low to high Q for stable headroom.
+    const int safeStageCount = juce::jmax(1, stageCount);
+    const int safeStageIndex = juce::jlimit(
+        0, safeStageCount - 1, stageIndex);
+    const float angle =
+        juce::MathConstants<float>::pi
+        * static_cast<float>(2 * safeStageIndex + 1)
+        / static_cast<float>(4 * safeStageCount);
+    return 1.0f / (2.0f * std::cos(angle));
+}
+
+void S13EQ::reset()
+{
+    resetWetPathState();
+    if (oversampler)
+        oversampler->reset();
+    msScratch.clear();
+    dryScratch.clear();
+    smoothedAutoGainDB = 0.0f;
+    cachedAutoGainTargetDB = 0.0f;
+    autoGainProbeWeightedSum = 0.0f;
+    autoGainProbeWeightTotal = 0.0f;
+    autoGainProbeIndex = 0;
+    autoGainProbeSamplesUntilAdvance = 0;
+    gainReductionDB.store(0.0f, std::memory_order_relaxed);
+
+    const float currentPower =
+        powerEnabled.load(std::memory_order_acquire) ? 1.0f : 0.0f;
+    smoothedPowerMix.setCurrentAndTargetValue(currentPower);
+    smoothedModeMix.setCurrentAndTargetValue(1.0f);
+    smoothedOutputGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(-18.0f, 18.0f,
+                         outputGain.load(std::memory_order_relaxed))));
+    activeProcessingMode = juce::jlimit(
+        0, 2,
+        static_cast<int>(std::round(
+            stereoMode.load(std::memory_order_relaxed))));
+    pendingProcessingMode = activeProcessingMode;
+    modeTransitionPending = false;
+    wetPathHasState = currentPower > 0.0f;
+
+    spectrumDemandSamplesRemaining.store(0, std::memory_order_release);
+    spectrumCaptureSlot = -1;
+    spectrumCaptureWritePos = 0;
+    for (auto& slot : spectrumCaptureSlots)
+    {
+        int expected = 1;
+        if (!slot.state.compare_exchange_strong(
+                expected, 0,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            expected = 2;
+            slot.state.compare_exchange_strong(
+                expected, 0,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+    }
 }
 
 void S13EQ::releaseResources()
 {
+    filtersPrepared = false;
+    spectrumDemandSamplesRemaining.store(0, std::memory_order_release);
+    spectrumCaptureSlot = -1;
+    spectrumCaptureWritePos = 0;
     for (int b = 0; b < numBands; ++b)
     {
         for (int s = 0; s < maxStagesPerBand; ++s)
@@ -135,79 +494,234 @@ void S13EQ::releaseResources()
         dynamicGainDB[static_cast<size_t>(b)].store(0.0f, std::memory_order_relaxed);
         cachedBandStates[static_cast<size_t>(b)].valid = false;
         cachedDynamicDetectorStates[static_cast<size_t>(b)].valid = false;
+        activeStages[b] = 0;
+        targetStages[b] = 0;
     }
+    cachedAuditionIndex = -2;
+    filtersNeedSmoothing = false;
     smoothedAutoGainDB = 0.0f;
+    cachedAutoGainTargetDB = 0.0f;
+    autoGainProbeWeightedSum = 0.0f;
+    autoGainProbeWeightTotal = 0.0f;
+    autoGainProbeIndex = 0;
+    autoGainProbeSamplesUntilAdvance = 0;
     msScratch.setSize(0, 0);
-    lastProcessingMode = 0;
+    dryScratch.setSize(0, 0);
+    activeProcessingMode = 0;
+    pendingProcessingMode = 0;
+    modeTransitionPending = false;
+    wetPathHasState = false;
+    for (auto& slot : spectrumCaptureSlots)
+    {
+        int expected = 1;
+        if (!slot.state.compare_exchange_strong(
+                expected, 0,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            expected = 2;
+            slot.state.compare_exchange_strong(
+                expected, 0,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+    }
 }
 
-void S13EQ::updateBand(int b)
+int S13EQ::buildBandTargets(
+    int b,
+    bool shouldProcess,
+    std::array<S13IIRCoefficientSet, maxStagesPerBand>& targets) const noexcept
 {
-    const double sr = cachedSampleRate;
-    if (sr <= 0.0) return;
+    targets.fill(kIdentityBiquad);
+    if (!shouldProcess)
+        return 0;
+
+    const double sr =
+        publishedSampleRate.load(std::memory_order_acquire);
+    if (sr <= 0.0)
+        return 0;
 
     const float nyquist = static_cast<float>(sr * 0.5) - 1.0f;
-    const auto type = static_cast<FilterType>(static_cast<int>(bands[b].type.load()));
-    const auto slope = static_cast<FilterSlope>(static_cast<int>(bands[b].slope.load()));
-    const float freq = juce::jlimit(20.0f, nyquist, bands[b].freq.load());
+    const auto type = static_cast<FilterType>(
+        juce::jlimit(0, static_cast<int>(FilterType::BandPass),
+                     static_cast<int>(std::round(
+                         bands[b].type.load(std::memory_order_relaxed)))));
+    const auto slope = static_cast<FilterSlope>(
+        juce::jlimit(0, static_cast<int>(FilterSlope::dB48),
+                     static_cast<int>(std::round(
+                         bands[b].slope.load(std::memory_order_relaxed)))));
+    const float freq = juce::jlimit(
+        20.0f, nyquist,
+        bands[b].freq.load(std::memory_order_relaxed));
     const float baseGainDB = bands[b].gain.load(std::memory_order_relaxed);
     const float dynamicDB = dynamicGainDB[static_cast<size_t>(b)].load(std::memory_order_relaxed);
     const float gainDB = juce::jlimit(-30.0f, 30.0f, baseGainDB + dynamicDB);
-    const float q = juce::jlimit(0.1f, 30.0f, bands[b].q.load());
+    const float q = juce::jlimit(
+        0.1f, 30.0f,
+        bands[b].q.load(std::memory_order_relaxed));
     const float gainFactor = juce::Decibels::decibelsToGain(gainDB);
-
-    int numStages = 1;
+    using ArrayCoefficients =
+        juce::dsp::IIR::ArrayCoefficients<float>;
 
     switch (type)
     {
         case FilterType::Bell:
-            numStages = 1;
-            *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, gainFactor);
-            break;
+            targets[0] = normaliseBiquad(
+                ArrayCoefficients::makePeakFilter(
+                    sr, freq, q, gainFactor));
+            return 1;
 
         case FilterType::LowShelf:
-            numStages = 1;
-            *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeLowShelf(sr, freq, q, gainFactor);
-            break;
+        {
+            const int numStages = getNumStagesForSlope(slope);
+            const float perStageGain = std::pow(
+                gainFactor,
+                1.0f / static_cast<float>(juce::jmax(1, numStages)));
+            // A single Q=0.5 section is the gentle 6 dB/oct option. The
+            // remaining choices retain the user's shelf-Q and cascade
+            // gain-distributed sections, so 24/48 dB selections no longer
+            // produce the exact same curve as 12 dB.
+            const float stageQ = slope == FilterSlope::dB6
+                ? 0.5f
+                : q;
+            for (int s = 0; s < numStages; ++s)
+            {
+                targets[static_cast<size_t>(s)] = normaliseBiquad(
+                    ArrayCoefficients::makeLowShelf(
+                        sr, freq, stageQ, perStageGain));
+            }
+            return numStages;
+        }
 
         case FilterType::HighShelf:
-            numStages = 1;
-            *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeHighShelf(sr, freq, q, gainFactor);
-            break;
+        {
+            const int numStages = getNumStagesForSlope(slope);
+            const float perStageGain = std::pow(
+                gainFactor,
+                1.0f / static_cast<float>(juce::jmax(1, numStages)));
+            const float stageQ = slope == FilterSlope::dB6
+                ? 0.5f
+                : q;
+            for (int s = 0; s < numStages; ++s)
+            {
+                targets[static_cast<size_t>(s)] = normaliseBiquad(
+                    ArrayCoefficients::makeHighShelf(
+                        sr, freq, stageQ, perStageGain));
+            }
+            return numStages;
+        }
 
         case FilterType::LowCut:
-            numStages = getNumStagesForSlope(slope);
+        {
+            const int numStages = getNumStagesForSlope(slope);
             if (slope == FilterSlope::dB6)
-                *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeFirstOrderHighPass(sr, freq);
+            {
+                targets[0] = normaliseFirstOrderAsBiquad(
+                    ArrayCoefficients::makeFirstOrderHighPass(
+                        sr, freq));
+            }
             else
+            {
                 for (int s = 0; s < numStages; ++s)
-                    *bandFilters[b][s].state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, freq, 0.707f);
-            break;
+                {
+                    targets[static_cast<size_t>(s)] = normaliseBiquad(
+                        ArrayCoefficients::makeHighPass(
+                            sr,
+                            freq,
+                            butterworthCascadeStageQ(s, numStages)));
+                }
+            }
+            return numStages;
+        }
 
         case FilterType::HighCut:
-            numStages = getNumStagesForSlope(slope);
+        {
+            const int numStages = getNumStagesForSlope(slope);
             if (slope == FilterSlope::dB6)
-                *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeFirstOrderLowPass(sr, freq);
+            {
+                targets[0] = normaliseFirstOrderAsBiquad(
+                    ArrayCoefficients::makeFirstOrderLowPass(
+                        sr, freq));
+            }
             else
+            {
                 for (int s = 0; s < numStages; ++s)
-                    *bandFilters[b][s].state = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, freq, 0.707f);
-            break;
+                {
+                    targets[static_cast<size_t>(s)] = normaliseBiquad(
+                        ArrayCoefficients::makeLowPass(
+                            sr,
+                            freq,
+                            butterworthCascadeStageQ(s, numStages)));
+                }
+            }
+            return numStages;
+        }
 
         case FilterType::Notch:
-            numStages = 1;
-            *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeNotch(sr, freq, q);
-            break;
+            targets[0] = normaliseBiquad(
+                ArrayCoefficients::makeNotch(sr, freq, q));
+            return 1;
 
         case FilterType::BandPass:
-            numStages = 1;
-            *bandFilters[b][0].state = *juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, freq, q);
-            break;
+            targets[0] = normaliseBiquad(
+                ArrayCoefficients::makeBandPass(sr, freq, q));
+            return 1;
     }
-    activeStages[b] = numStages;
+
+    return 0;
 }
 
-void S13EQ::updateFilters()
+void S13EQ::updateBand(int b, int auditionIndex, bool forceImmediate)
 {
+    const bool shouldProcess = auditionIndex >= 0
+        ? b == auditionIndex
+        : bands[b].enabled.load(std::memory_order_relaxed) >= 0.5f;
+    auto& targets =
+        targetBandCoefficients[static_cast<size_t>(b)];
+    targetStages[b] = buildBandTargets(b, shouldProcess, targets);
+    activeStages[b] = juce::jmax(
+        activeStages[b], targetStages[b]);
+
+    if (!forceImmediate)
+    {
+        filtersNeedSmoothing = true;
+        return;
+    }
+
+    for (int stage = 0; stage < maxStagesPerBand; ++stage)
+    {
+        const auto& target =
+            targets[static_cast<size_t>(stage)];
+        auto& coefficientVector =
+            bandFilters[b][stage].state->coefficients;
+        jassert(coefficientVector.size()
+                == static_cast<int>(target.size()));
+        for (size_t coefficient = 0;
+             coefficient < target.size();
+             ++coefficient)
+        {
+            coefficientVector.set(
+                static_cast<int>(coefficient),
+                target[coefficient]);
+        }
+        bandFilters[b][stage].reset();
+    }
+    activeStages[b] = targetStages[b];
+}
+
+void S13EQ::updateFilters(bool forceImmediate)
+{
+    if (!filtersPrepared)
+        return;
+
+    const int auditionIndex = juce::jlimit(
+        -1, numBands - 1,
+        static_cast<int>(std::round(
+            auditionBand.load(std::memory_order_relaxed))) - 1);
+    const bool auditionChanged =
+        auditionIndex != cachedAuditionIndex;
+
     for (int b = 0; b < numBands; ++b)
     {
         auto& cached = cachedBandStates[static_cast<size_t>(b)];
@@ -220,7 +734,9 @@ void S13EQ::updateFilters()
         const float q = bands[b].q.load(std::memory_order_relaxed);
         const int slope = static_cast<int>(bands[b].slope.load(std::memory_order_relaxed));
 
-        const bool changed = !cached.valid
+        const bool changed = forceImmediate
+                          || auditionChanged
+                          || !cached.valid
                           || cached.enabled != enabled
                           || cached.type != type
                           || cached.slope != slope
@@ -230,7 +746,7 @@ void S13EQ::updateFilters()
         if (!changed)
             continue;
 
-        updateBand(b);
+        updateBand(b, auditionIndex, forceImmediate);
         cached.valid = true;
         cached.enabled = enabled;
         cached.type = type;
@@ -239,12 +755,19 @@ void S13EQ::updateFilters()
         cached.q = q;
         cached.slope = slope;
     }
+    cachedAuditionIndex = auditionIndex;
+    if (forceImmediate)
+        filtersNeedSmoothing = false;
 }
 
-void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer)
+void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer,
+                               int detectorChannels)
 {
     const int numSamples = buffer.getNumSamples();
-    const int numChannels = juce::jmin(2, buffer.getNumChannels());
+    const int numChannels = juce::jlimit(
+        0,
+        juce::jmin(2, buffer.getNumChannels()),
+        detectorChannels);
     const double sr = cachedSampleRate > 0.0 ? cachedSampleRate : 44100.0;
 
     if (numSamples <= 0 || numChannels <= 0)
@@ -272,9 +795,15 @@ void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer)
                                   || std::abs(detectorCache.q - q) > 0.001f;
         if (detectorChanged)
         {
-            auto detectorCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, freq, q);
+            const auto detectorCoefficients = normaliseBiquad(
+                juce::dsp::IIR::ArrayCoefficients<float>::makeBandPass(
+                    sr, freq, q));
             for (int ch = 0; ch < 2; ++ch)
-                dynamicDetectorFilters[b][ch].coefficients = detectorCoeffs;
+            {
+                writeRealtimeFilterCoefficients(
+                    dynamicDetectorFilters[b][ch],
+                    detectorCoefficients);
+            }
             detectorCache.valid = true;
             detectorCache.freq = freq;
             detectorCache.q = q;
@@ -309,15 +838,90 @@ void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer)
     }
 }
 
-float S13EQ::estimateAutoGainCompensationDB() const
+bool S13EQ::advanceStageCoefficients(int bandIndex,
+                                     int stageIndex) noexcept
+{
+    auto& coefficientVector =
+        bandFilters[bandIndex][stageIndex].state->coefficients;
+    const auto& target =
+        targetBandCoefficients[static_cast<size_t>(bandIndex)]
+                              [static_cast<size_t>(stageIndex)];
+    jassert(coefficientVector.size()
+            == static_cast<int>(target.size()));
+    if (coefficientVector.size()
+        != static_cast<int>(target.size()))
+        return false;
+
+    constexpr float settleThreshold = 1.0e-6f;
+    bool stillSmoothing = false;
+    for (size_t coefficient = 0;
+         coefficient < target.size();
+         ++coefficient)
+    {
+        const int coefficientIndex =
+            static_cast<int>(coefficient);
+        const float current =
+            coefficientVector[coefficientIndex];
+        const float difference =
+            target[coefficient] - current;
+        if (std::abs(difference) <= settleThreshold)
+        {
+            coefficientVector.set(
+                coefficientIndex,
+                target[coefficient]);
+            continue;
+        }
+
+        const float next = current
+            + difference * coefficientMorphProportion;
+        coefficientVector.set(
+            coefficientIndex,
+            std::abs(target[coefficient] - next)
+                    <= settleThreshold
+                ? target[coefficient]
+                : next);
+        stillSmoothing = stillSmoothing
+            || std::abs(target[coefficient] - next)
+                > settleThreshold;
+    }
+    return stillSmoothing;
+}
+
+void S13EQ::resetWetPathState() noexcept
+{
+    for (int band = 0; band < numBands; ++band)
+    {
+        for (int stage = 0;
+             stage < maxStagesPerBand;
+             ++stage)
+        {
+            bandFilters[band][stage].reset();
+        }
+        for (int channel = 0; channel < 2; ++channel)
+            dynamicDetectorFilters[band][channel].reset();
+        dynamicEnvelope[static_cast<size_t>(band)] = 0.0f;
+        dynamicGainDB[static_cast<size_t>(band)].store(
+            0.0f, std::memory_order_relaxed);
+        cachedBandStates[static_cast<size_t>(band)].valid = false;
+    }
+}
+
+void S13EQ::advanceAutoGainEstimateProbe() noexcept
 {
     static constexpr int probeCount = 16;
-    const std::array<double, probeCount> probeFrequencies {
+    static constexpr std::array<double, probeCount> probeFrequencies {
         31.5, 45.0, 63.0, 90.0, 125.0, 180.0, 250.0, 355.0,
         500.0, 710.0, 1000.0, 1400.0, 2000.0, 4000.0, 8000.0, 16000.0
     };
 
-    std::array<float, probeCount> responseDB {};
+    const int probeIndex =
+        juce::jlimit(
+            0,
+            probeCount - 1,
+            autoGainProbeIndex);
+    const double probeFrequency =
+        probeFrequencies[static_cast<size_t>(probeIndex)];
+    float responseDB = 0.0f;
     const int auditionIndex = juce::jlimit(-1, numBands - 1,
                                            static_cast<int>(std::round(auditionBand.load(std::memory_order_relaxed))) - 1);
     for (int b = 0; b < numBands; ++b)
@@ -329,66 +933,144 @@ float S13EQ::estimateAutoGainCompensationDB() const
 
         for (int stage = 0; stage < activeStages[b]; ++stage)
         {
-            auto coeffs = bandFilters[b][stage].state;
-            if (coeffs == nullptr)
+            const auto& coefficientVector =
+                bandFilters[b][stage].state->coefficients;
+            if (coefficientVector.size()
+                != static_cast<int>(S13IIRCoefficientSet {}.size()))
                 continue;
 
-            std::array<double, probeCount> magnitudes {};
-            coeffs->getMagnitudeForFrequencyArray(probeFrequencies.data(),
-                                                   magnitudes.data(),
-                                                   probeFrequencies.size(),
-                                                   cachedSampleRate);
-            for (int i = 0; i < probeCount; ++i)
-                responseDB[static_cast<size_t>(i)] += juce::Decibels::gainToDecibels(static_cast<float>(magnitudes[static_cast<size_t>(i)]), -48.0f);
+            S13IIRCoefficientSet currentCoefficients {};
+            for (size_t coefficient = 0;
+                 coefficient < currentCoefficients.size();
+                 ++coefficient)
+            {
+                currentCoefficients[coefficient] =
+                    coefficientVector[
+                        static_cast<int>(coefficient)];
+            }
+            const float magnitude = static_cast<float>(
+                getFixedBiquadMagnitude(
+                    currentCoefficients,
+                    probeFrequency,
+                    cachedSampleRate));
+            responseDB +=
+                juce::Decibels::gainToDecibels(
+                    magnitude, -48.0f);
         }
     }
 
-    float weightedSum = 0.0f;
-    float weightTotal = 0.0f;
-    for (int i = 0; i < probeCount; ++i)
+    const float frequency =
+        static_cast<float>(probeFrequency);
+    const float presenceWeight =
+        frequency >= 125.0f && frequency <= 8000.0f
+            ? 1.0f
+            : 0.45f;
+    autoGainProbeWeightedSum +=
+        responseDB * presenceWeight;
+    autoGainProbeWeightTotal += presenceWeight;
+    ++autoGainProbeIndex;
+
+    if (autoGainProbeIndex >= probeCount)
     {
-        const float frequency = static_cast<float>(probeFrequencies[static_cast<size_t>(i)]);
-        const float presenceWeight = frequency >= 125.0f && frequency <= 8000.0f ? 1.0f : 0.45f;
-        weightedSum += responseDB[static_cast<size_t>(i)] * presenceWeight;
-        weightTotal += presenceWeight;
+        cachedAutoGainTargetDB =
+            autoGainProbeWeightTotal > 0.0f
+                ? juce::jlimit(
+                      -9.0f,
+                      9.0f,
+                      -autoGainProbeWeightedSum
+                          / autoGainProbeWeightTotal)
+                : 0.0f;
+        autoGainProbeWeightedSum = 0.0f;
+        autoGainProbeWeightTotal = 0.0f;
+        autoGainProbeIndex = 0;
     }
-
-    if (weightTotal <= 0.0f)
-        return 0.0f;
-
-    return juce::jlimit(-9.0f, 9.0f, -weightedSum / weightTotal);
 }
 
 void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
-    updateDynamicBands(buffer);
-    updateFilters();
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
-    const int requestedMode = juce::jlimit(0, 2, static_cast<int>(std::round(stereoMode.load(std::memory_order_relaxed))));
-    const bool useMidSideMode = requestedMode > 0
-                             && numChannels >= 2
-                             && msScratch.getNumSamples() >= numSamples;
-    if (requestedMode != lastProcessingMode)
-    {
-        for (int b = 0; b < numBands; ++b)
-            for (int s = 0; s < maxStagesPerBand; ++s)
-                bandFilters[b][s].reset();
-        lastProcessingMode = requestedMode;
-    }
+    if (numSamples <= 0 || numChannels <= 0)
+        return;
 
-    // Capture pre-EQ samples for spectrum
+    const bool spectrumRequested =
+        isSpectrumCaptureRequested(numSamples);
+    const float requestedPower =
+        powerEnabled.load(std::memory_order_acquire)
+            ? 1.0f
+            : 0.0f;
+    smoothedPowerMix.setTargetValue(requestedPower);
+
+    const int requestedMode = juce::jlimit(
+        0, 2,
+        static_cast<int>(std::round(
+            stereoMode.load(std::memory_order_relaxed))));
+    const bool powerIsFullyDry =
+        requestedPower <= 0.0f
+        && !smoothedPowerMix.isSmoothing()
+        && smoothedPowerMix.getCurrentValue() <= 1.0e-6f;
+    if (requestedMode != pendingProcessingMode)
     {
-        const float* readPtr = buffer.getReadPointer(0);
-        for (int i = 0; i < numSamples; ++i)
+        pendingProcessingMode = requestedMode;
+        if (powerIsFullyDry)
         {
-            preEQBuffer[static_cast<size_t>(fftWritePos)] = readPtr[i];
-            fftWritePos = (fftWritePos + 1) % fftSize;
+            activeProcessingMode = requestedMode;
+            modeTransitionPending = false;
+            smoothedModeMix.setCurrentAndTargetValue(1.0f);
+            if (wetPathHasState)
+            {
+                resetWetPathState();
+                wetPathHasState = false;
+            }
+        }
+        else
+        {
+            modeTransitionPending = true;
+            smoothedModeMix.setTargetValue(0.0f);
         }
     }
+
+    const bool scratchIsReady =
+        dryScratch.getNumChannels() >= numChannels
+        && dryScratch.getNumSamples() >= numSamples;
+    jassert(scratchIsReady);
+    if (!scratchIsReady)
+    {
+        // prepareToPlay() must size this buffer. Returning the unchanged dry
+        // signal is safer than allocating or making a hard transition here.
+        return;
+    }
+
+    if (powerIsFullyDry)
+    {
+        if (spectrumRequested)
+            captureSpectrumBlock(buffer, buffer);
+        return;
+    }
+
+    const bool needsDryCopy =
+        spectrumRequested
+        || smoothedPowerMix.isSmoothing()
+        || smoothedPowerMix.getCurrentValue() < 1.0f - 1.0e-6f
+        || smoothedModeMix.isSmoothing()
+        || smoothedModeMix.getCurrentValue() < 1.0f - 1.0e-6f;
+    if (needsDryCopy)
+    {
+        for (int channel = 0; channel < numChannels; ++channel)
+        {
+            dryScratch.copyFrom(
+                channel, 0,
+                buffer, channel, 0,
+                numSamples);
+        }
+    }
+
+    const bool useMidSideMode = activeProcessingMode > 0
+                             && numChannels >= 2
+                             && msScratch.getNumSamples() >= numSamples;
 
     if (useMidSideMode)
     {
@@ -399,7 +1081,7 @@ void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mid
         {
             const float mid = (left[i] + right[i]) * 0.5f;
             const float side = (left[i] - right[i]) * 0.5f;
-            if (requestedMode == 1)
+            if (activeProcessingMode == 1)
             {
                 left[i] = mid;
                 scratch[i] = side;
@@ -412,44 +1094,153 @@ void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mid
         }
     }
 
+    wetPathHasState = true;
+    // Dynamic bands must listen to the same signal that their filters process.
+    // In Mid/Side mode channel 0 now contains the selected component, while
+    // channel 1 still contains the original right channel until reconstruction;
+    // detecting both would let Mid energy trigger a Side band (and vice versa).
+    updateDynamicBands(buffer, useMidSideMode ? 1 : numChannels);
+    updateFilters();
+
     // Process each enabled band
     juce::dsp::AudioBlock<float> block(buffer);
     auto processingBlock = useMidSideMode ? block.getSingleChannelBlock(0) : block;
-    juce::dsp::ProcessContextReplacing<float> context(processingBlock);
-    const int auditionIndex = juce::jlimit(-1, numBands - 1,
-                                           static_cast<int>(std::round(auditionBand.load(std::memory_order_relaxed))) - 1);
-
+    std::array<std::array<bool, maxStagesPerBand>, numBands>
+        stageStillSmoothing {};
+    bool anyStageStillSmoothing = false;
     for (int b = 0; b < numBands; ++b)
     {
-        if (auditionIndex >= 0 && b != auditionIndex)
-            continue;
-        if (auditionIndex < 0 && bands[b].enabled.load() < 0.5f)
-            continue;
         for (int s = 0; s < activeStages[b]; ++s)
-            bandFilters[b][s].process(context);
+        {
+            bool thisStageStillSmoothing = false;
+            for (int offset = 0;
+                 offset < numSamples;
+                 offset += coefficientMorphChunkSize)
+            {
+                const int chunkSize = juce::jmin(
+                    coefficientMorphChunkSize,
+                    numSamples - offset);
+                if (filtersNeedSmoothing)
+                {
+                    thisStageStillSmoothing =
+                        advanceStageCoefficients(b, s)
+                        || thisStageStillSmoothing;
+                }
+
+                auto chunk = processingBlock.getSubBlock(
+                    static_cast<size_t>(offset),
+                    static_cast<size_t>(chunkSize));
+                juce::dsp::ProcessContextReplacing<float>
+                    context(chunk);
+                bandFilters[b][s].process(context);
+            }
+            stageStillSmoothing[static_cast<size_t>(b)]
+                               [static_cast<size_t>(s)] =
+                thisStageStillSmoothing;
+            anyStageStillSmoothing =
+                anyStageStillSmoothing
+                || thisStageStillSmoothing;
+        }
+    }
+
+    if (filtersNeedSmoothing)
+    {
+        filtersNeedSmoothing = anyStageStillSmoothing;
+        for (int b = 0; b < numBands; ++b)
+        {
+            while (activeStages[b] > targetStages[b])
+            {
+                const int trailingStage =
+                    activeStages[b] - 1;
+                if (stageStillSmoothing[
+                        static_cast<size_t>(b)]
+                        [static_cast<size_t>(trailingStage)])
+                    break;
+                bandFilters[b][trailingStage].reset();
+                --activeStages[b];
+            }
+        }
     }
 
     // Output gain
-    float outGainDB = juce::jlimit(-12.0f, 12.0f, outputGain.load());
+    float outGainDB = juce::jlimit(
+        -12.0f, 12.0f,
+        outputGain.load(std::memory_order_relaxed));
     if (autoGain.load(std::memory_order_relaxed) >= 0.5f)
     {
-        const float targetAutoGainDB = estimateAutoGainCompensationDB();
-        smoothedAutoGainDB += (targetAutoGainDB - smoothedAutoGainDB) * 0.08f;
+        // Magnitude probing is control-rate analysis, not audio-rate DSP. At a
+        // 16-sample callback the old implementation could run the complete
+        // multi-band/multi-frequency estimate roughly 3,000 times per second.
+        // Advance at most one frequency probe in a callback, distributing a
+        // 50 Hz estimate over 16 bounded slices instead of creating a periodic
+        // CPU burst that can consume a tiny ASIO deadline.
+        autoGainProbeSamplesUntilAdvance -= numSamples;
+        if (autoGainProbeSamplesUntilAdvance <= 0)
+        {
+            advanceAutoGainEstimateProbe();
+            autoGainProbeSamplesUntilAdvance =
+                juce::jmax(
+                    1,
+                    juce::roundToInt(
+                        juce::jmax(1.0, cachedSampleRate)
+                        / (50.0 * 16.0)));
+        }
+        const float autoGainSmoothingAmount =
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                static_cast<float>(numSamples)
+                    / static_cast<float>(
+                        juce::jmax(
+                            1.0,
+                            cachedSampleRate * 0.080)));
+        smoothedAutoGainDB +=
+            (cachedAutoGainTargetDB - smoothedAutoGainDB)
+            * autoGainSmoothingAmount;
         outGainDB += smoothedAutoGainDB;
     }
     else
     {
-        smoothedAutoGainDB *= 0.92f;
+        cachedAutoGainTargetDB = 0.0f;
+        autoGainProbeWeightedSum = 0.0f;
+        autoGainProbeWeightTotal = 0.0f;
+        autoGainProbeIndex = 0;
+        autoGainProbeSamplesUntilAdvance = 0;
+        const float autoGainReleaseAmount =
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                static_cast<float>(numSamples)
+                    / static_cast<float>(
+                        juce::jmax(
+                            1.0,
+                            cachedSampleRate * 0.080)));
+        smoothedAutoGainDB +=
+            (0.0f - smoothedAutoGainDB)
+            * autoGainReleaseAmount;
         outGainDB += smoothedAutoGainDB;
     }
     outGainDB = juce::jlimit(-18.0f, 18.0f, outGainDB);
-    if (std::abs(outGainDB) > 0.01f)
+    smoothedOutputGain.setTargetValue(
+        juce::Decibels::decibelsToGain(outGainDB));
+    if (smoothedOutputGain.isSmoothing()
+        || std::abs(
+            smoothedOutputGain.getCurrentValue() - 1.0f)
+            > 1.0e-6f)
     {
-        const float outGain = juce::Decibels::decibelsToGain(outGainDB);
-        if (useMidSideMode)
-            buffer.applyGain(0, 0, numSamples, outGain);
-        else
-            buffer.applyGain(outGain);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const float gain =
+                smoothedOutputGain.getNextValue();
+            const int channelsToApply =
+                useMidSideMode ? 1 : numChannels;
+            for (int channel = 0;
+                 channel < channelsToApply;
+                 ++channel)
+            {
+                buffer.getWritePointer(channel)[sample] *= gain;
+            }
+        }
     }
 
     if (useMidSideMode)
@@ -461,35 +1252,180 @@ void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mid
         {
             const float target = left[i];
             const float stored = scratch[i];
-            const float mid = requestedMode == 1 ? target : stored;
-            const float side = requestedMode == 1 ? stored : target;
+            const float mid =
+                activeProcessingMode == 1
+                    ? target
+                    : stored;
+            const float side =
+                activeProcessingMode == 1
+                    ? stored
+                    : target;
             left[i] = mid + side;
             right[i] = mid - side;
         }
     }
     sanitizeBuiltInBuffer(buffer, 2.5f);
 
-    // Capture post-EQ samples
+    if (needsDryCopy)
     {
-        const float* readPtr = buffer.getReadPointer(0);
-        int writePos = (fftWritePos - numSamples + fftSize) % fftSize;
-        for (int i = 0; i < numSamples; ++i)
+        for (int sample = 0; sample < numSamples; ++sample)
         {
-            postEQBuffer[static_cast<size_t>(writePos)] = readPtr[i];
-            writePos = (writePos + 1) % fftSize;
+            const float wetMix =
+                smoothedPowerMix.getNextValue()
+                * smoothedModeMix.getNextValue();
+            const float dryMix = 1.0f - wetMix;
+            for (int channel = 0;
+                 channel < numChannels;
+                 ++channel)
+            {
+                auto* wet =
+                    buffer.getWritePointer(channel);
+                const auto* dry =
+                    dryScratch.getReadPointer(channel);
+                wet[sample] =
+                    dry[sample] * dryMix
+                    + wet[sample] * wetMix;
+            }
         }
     }
 
-    // Periodic spectrum update
-    if (++fftBlockCounter >= fftUpdateInterval)
+    if (spectrumRequested)
+        captureSpectrumBlock(dryScratch, buffer);
+
+    const bool powerReachedDry =
+        requestedPower <= 0.0f
+        && !smoothedPowerMix.isSmoothing()
+        && smoothedPowerMix.getCurrentValue() <= 1.0e-6f;
+    if (powerReachedDry)
     {
-        fftBlockCounter = 0;
-        SpectrumData newData;
-        computeSpectrum(preEQBuffer, newData.preEQ);
-        computeSpectrum(postEQBuffer, newData.postEQ);
-        newData.ready = true;
-        const std::lock_guard<std::mutex> lock(spectrumMutex);
-        spectrumOutput = newData;
+        if (modeTransitionPending)
+        {
+            activeProcessingMode = pendingProcessingMode;
+            modeTransitionPending = false;
+            smoothedModeMix.setCurrentAndTargetValue(1.0f);
+        }
+        if (wetPathHasState)
+        {
+            resetWetPathState();
+            wetPathHasState = false;
+        }
+    }
+    else if (modeTransitionPending
+             && !smoothedModeMix.isSmoothing()
+             && smoothedModeMix.getCurrentValue() <= 1.0e-6f)
+    {
+        resetWetPathState();
+        activeProcessingMode = pendingProcessingMode;
+        modeTransitionPending = false;
+        smoothedModeMix.setTargetValue(1.0f);
+    }
+}
+
+bool S13EQ::isSpectrumCaptureRequested(
+    int numSamples) noexcept
+{
+    int remaining =
+        spectrumDemandSamplesRemaining.load(
+            std::memory_order_acquire);
+    while (remaining > 0)
+    {
+        const int next = juce::jmax(
+            0, remaining - numSamples);
+        if (spectrumDemandSamplesRemaining
+                .compare_exchange_weak(
+                    remaining, next,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+            return true;
+    }
+
+    if (spectrumCaptureSlot >= 0)
+    {
+        spectrumCaptureSlots[
+            static_cast<size_t>(spectrumCaptureSlot)]
+            .state.store(0, std::memory_order_release);
+        spectrumCaptureSlot = -1;
+        spectrumCaptureWritePos = 0;
+    }
+    return false;
+}
+
+int S13EQ::claimSpectrumCaptureSlot() noexcept
+{
+    for (const int claimableState : { 0, 2 })
+    {
+        for (size_t slotIndex = 0;
+             slotIndex < spectrumCaptureSlots.size();
+             ++slotIndex)
+        {
+            int expected = claimableState;
+            if (spectrumCaptureSlots[slotIndex].state
+                    .compare_exchange_strong(
+                        expected, 1,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire))
+            {
+                return static_cast<int>(slotIndex);
+            }
+        }
+    }
+    return -1;
+}
+
+void S13EQ::captureSpectrumBlock(
+    const juce::AudioBuffer<float>& preEQ,
+    const juce::AudioBuffer<float>& postEQ) noexcept
+{
+    const int numSamples = juce::jmin(
+        preEQ.getNumSamples(),
+        postEQ.getNumSamples());
+    if (numSamples <= 0
+        || preEQ.getNumChannels() <= 0
+        || postEQ.getNumChannels() <= 0)
+        return;
+
+    const auto* preSamples = preEQ.getReadPointer(0);
+    const auto* postSamples = postEQ.getReadPointer(0);
+    int sourceOffset = 0;
+    while (sourceOffset < numSamples)
+    {
+        if (spectrumCaptureSlot < 0)
+        {
+            spectrumCaptureSlot =
+                claimSpectrumCaptureSlot();
+            spectrumCaptureWritePos = 0;
+            if (spectrumCaptureSlot < 0)
+                return;
+        }
+
+        auto& slot = spectrumCaptureSlots[
+            static_cast<size_t>(spectrumCaptureSlot)];
+        const int copyCount = juce::jmin(
+            numSamples - sourceOffset,
+            fftSize - spectrumCaptureWritePos);
+        juce::FloatVectorOperations::copy(
+            slot.preEQ.data()
+                + spectrumCaptureWritePos,
+            preSamples + sourceOffset,
+            copyCount);
+        juce::FloatVectorOperations::copy(
+            slot.postEQ.data()
+                + spectrumCaptureWritePos,
+            postSamples + sourceOffset,
+            copyCount);
+        sourceOffset += copyCount;
+        spectrumCaptureWritePos += copyCount;
+
+        if (spectrumCaptureWritePos >= fftSize)
+        {
+            slot.generation.store(
+                ++spectrumCaptureGeneration,
+                std::memory_order_relaxed);
+            slot.state.store(
+                2, std::memory_order_release);
+            spectrumCaptureSlot = -1;
+            spectrumCaptureWritePos = 0;
+        }
     }
 }
 
@@ -507,10 +1443,60 @@ void S13EQ::computeSpectrum(const std::array<float, fftSize>& input, std::array<
     }
 }
 
-S13EQ::SpectrumData S13EQ::getSpectrumData() const
+S13EQ::SpectrumData S13EQ::getSpectrumData()
 {
-    const std::lock_guard<std::mutex> lock(spectrumMutex);
-    return spectrumOutput;
+    const double sampleRate =
+        publishedSampleRate.load(std::memory_order_acquire);
+    const int demandSamples = juce::jlimit(
+        1,
+        std::numeric_limits<int>::max(),
+        static_cast<int>(std::round(
+            juce::jmax(44100.0, sampleRate) * 1.0)));
+    spectrumDemandSamplesRemaining.store(
+        demandSamples, std::memory_order_release);
+
+    const std::lock_guard<std::mutex> consumerLock(
+        spectrumConsumerMutex);
+    int newestSlot = -1;
+    juce::uint64 newestGeneration = 0;
+    for (size_t slotIndex = 0;
+         slotIndex < spectrumCaptureSlots.size();
+         ++slotIndex)
+    {
+        const auto& slot =
+            spectrumCaptureSlots[slotIndex];
+        if (slot.state.load(std::memory_order_acquire)
+            != 2)
+            continue;
+        const auto generation =
+            slot.generation.load(std::memory_order_relaxed);
+        if (newestSlot < 0
+            || generation > newestGeneration)
+        {
+            newestSlot = static_cast<int>(slotIndex);
+            newestGeneration = generation;
+        }
+    }
+
+    if (newestSlot >= 0)
+    {
+        auto& slot = spectrumCaptureSlots[
+            static_cast<size_t>(newestSlot)];
+        int expected = 2;
+        if (slot.state.compare_exchange_strong(
+                expected, 3,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+        {
+            SpectrumData newOutput;
+            computeSpectrum(slot.preEQ, newOutput.preEQ);
+            computeSpectrum(slot.postEQ, newOutput.postEQ);
+            newOutput.ready = true;
+            slot.state.store(0, std::memory_order_release);
+            lastSpectrumOutput = newOutput;
+        }
+    }
+    return lastSpectrumOutput;
 }
 
 std::vector<float> S13EQ::getMagnitudeResponse(const std::vector<float>& frequencies) const
@@ -521,20 +1507,37 @@ std::vector<float> S13EQ::getMagnitudeResponse(const std::vector<float>& frequen
     for (int b = 0; b < numBands; ++b)
     {
         if (auditionIndex >= 0 && b != auditionIndex) continue;
-        if (auditionIndex < 0 && bands[b].enabled.load() < 0.5f) continue;
-        for (int s = 0; s < activeStages[b]; ++s)
+        if (auditionIndex < 0
+            && bands[b].enabled.load(
+                std::memory_order_relaxed) < 0.5f)
+            continue;
+
+        std::array<S13IIRCoefficientSet,
+                   maxStagesPerBand> targets {};
+        const int stages =
+            buildBandTargets(b, true, targets);
+        const double sampleRate =
+            publishedSampleRate.load(
+                std::memory_order_acquire);
+        for (int s = 0; s < stages; ++s)
         {
-            auto coeffs = bandFilters[b][s].state;
-            if (coeffs == nullptr) continue;
-            std::vector<double> mags(frequencies.size());
-            std::vector<double> freqsDouble(frequencies.begin(), frequencies.end());
-            coeffs->getMagnitudeForFrequencyArray(freqsDouble.data(), mags.data(),
-                                                   freqsDouble.size(), cachedSampleRate);
             for (size_t i = 0; i < frequencies.size(); ++i)
-                response[i] += juce::Decibels::gainToDecibels(static_cast<float>(mags[i]));
+            {
+                response[i] +=
+                    juce::Decibels::gainToDecibels(
+                        static_cast<float>(
+                            getFixedBiquadMagnitude(
+                                targets[
+                                    static_cast<size_t>(s)],
+                                frequencies[i],
+                                sampleRate)),
+                        -100.0f);
+            }
         }
     }
-    float outGainDB = juce::jlimit(-12.0f, 12.0f, outputGain.load());
+    const float outGainDB = juce::jlimit(
+        -12.0f, 12.0f,
+        outputGain.load(std::memory_order_relaxed));
     for (auto& r : response) r += outGainDB;
     return response;
 }
@@ -596,7 +1599,8 @@ void S13EQ::setStateInformation(const void* data, int sizeInBytes)
         bands[i].dynamicAttack.store(static_cast<float>(state.getProperty(p + "dynamicAttack", 10.0f)));
         bands[i].dynamicRelease.store(static_cast<float>(state.getProperty(p + "dynamicRelease", 150.0f)));
     }
-    updateFilters();
+    // Parameter atomics are consumed and coefficient targets are rebuilt by
+    // processBlock(). Do not mutate callback-owned caches/filter state here.
 }
 
 //==============================================================================
@@ -605,27 +1609,65 @@ void S13EQ::setStateInformation(const void* data, int sizeInBytes)
 
 S13Compressor::S13Compressor() {}
 
-float S13Compressor::computeGain(float inputDB) const
+float S13Compressor::computeGain(float inputDB,
+                                 float thresholdDB,
+                                 float compressionSlope,
+                                 float kneeDB) noexcept
 {
-    const float threshDB = juce::jlimit(-60.0f, 0.0f, threshold.load());
-    const float ratioVal = juce::jmax(1.0f, juce::jlimit(1.0f, 20.0f, ratio.load()));
-    const float kneeDB = juce::jlimit(0.0f, 24.0f, knee.load());
-
-    if (kneeDB > 0.0f)
+    if (kneeDB > 0.0001f)
     {
         const float halfKnee = kneeDB * 0.5f;
-        if (inputDB < threshDB - halfKnee)
+        if (inputDB < thresholdDB - halfKnee)
             return inputDB;
-        else if (inputDB > threshDB + halfKnee)
-            return threshDB + (inputDB - threshDB) / ratioVal;
-        else
-        {
-            float x = inputDB - threshDB + halfKnee;
-            return inputDB + ((1.0f / ratioVal) - 1.0f) * x * x / (2.0f * kneeDB);
-        }
+        if (inputDB > thresholdDB + halfKnee)
+            return inputDB
+                - compressionSlope * (inputDB - thresholdDB);
+
+        const float x = inputDB - thresholdDB + halfKnee;
+        return inputDB
+            - compressionSlope * x * x / (2.0f * kneeDB);
     }
-    if (inputDB <= threshDB) return inputDB;
-    return threshDB + (inputDB - threshDB) / ratioVal;
+
+    if (inputDB <= thresholdDB)
+        return inputDB;
+    return inputDB
+        - compressionSlope * (inputDB - thresholdDB);
+}
+
+static float compressorSlopeFromRatio(float ratio) noexcept
+{
+    const float clampedRatio =
+        juce::jlimit(1.0f, 20.0f, ratio);
+    return 1.0f - 1.0f / clampedRatio;
+}
+
+static void initialiseCompressorSmoother(
+    juce::SmoothedValue<
+        float,
+        juce::ValueSmoothingTypes::Linear>& smoother,
+    double sampleRate,
+    float value) noexcept
+{
+    constexpr double smoothingSeconds = 0.020;
+    smoother.reset(sampleRate, smoothingSeconds);
+    smoother.setCurrentAndTargetValue(value);
+}
+
+static void resetCompressorSmoother(
+    juce::SmoothedValue<
+        float,
+        juce::ValueSmoothingTypes::Linear>& smoother,
+    float value) noexcept
+{
+    smoother.setCurrentAndTargetValue(value);
+}
+
+static float sanitiseCompressorSidechainHPF(float frequency) noexcept
+{
+    if (! std::isfinite(frequency))
+        return 20.0f;
+
+    return frequency;
 }
 
 void S13Compressor::getStyleBallistics(float& atkMs, float& relMs) const
@@ -651,21 +1693,89 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
     rmsEnvelopeLevel = 0.0f;
     currentGainLin = 1.0f;
 
-    smoothedMakeup.reset(sampleRate, 0.02);
-    smoothedMakeup.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(makeupGain.load()));
+    initialiseCompressorSmoother(
+        smoothedMakeup,
+        sampleRate,
+        juce::Decibels::decibelsToGain(
+            makeupGain.load(std::memory_order_relaxed)));
+    initialiseCompressorSmoother(
+        smoothedMix,
+        sampleRate,
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
+    initialiseCompressorSmoother(
+        smoothedThresholdDb,
+        sampleRate,
+        juce::jlimit(
+            -60.0f, 0.0f,
+            threshold.load(std::memory_order_relaxed)));
+    initialiseCompressorSmoother(
+        smoothedCompressionSlope,
+        sampleRate,
+        compressorSlopeFromRatio(
+            ratio.load(std::memory_order_relaxed)));
+    initialiseCompressorSmoother(
+        smoothedKneeDb,
+        sampleRate,
+        juce::jlimit(
+            0.0f, 24.0f,
+            knee.load(std::memory_order_relaxed)));
 
-    lastSCHPFFreq = juce::jlimit(20.0f, 500.0f, sidechainHPF.load());
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
+    lastSCHPFFreq = juce::jlimit(20.0f, 500.0f, requestedSCHPF);
     auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastSCHPFFreq);
     scHPF_L.coefficients = hpfCoeffs;
     scHPF_R.coefficients = hpfCoeffs;
+    prepareRealtimeFilterLut(scHPFCoefficientLut, sampleRate, 20.0f, 500.0f, true);
+    targetSCHPFCoefficients =
+        lookupRealtimeFilterLut(
+            scHPFCoefficientLut,
+            sampleRate,
+            lastSCHPFFreq,
+            20.0f,
+            500.0f);
+    writeRealtimeFilterCoefficients(
+        scHPF_L,
+        scHPF_R,
+        targetSCHPFCoefficients);
+    scHPFCoefficientSmoothingProportion =
+        1.0f
+        - std::exp(
+            -1.0f
+            / static_cast<float>(
+                juce::jmax(1.0, sampleRate * 0.020)));
+    scHPFCoefficientsSmoothing = false;
     scHPF_L.reset();
     scHPF_R.reset();
+    smoothedSidechainHPFWet.reset(sampleRate, 0.005);
+    smoothedSidechainHPFWet.setCurrentAndTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
 
     juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 1 };
     lookaheadDelayL.prepare(spec);
     lookaheadDelayR.prepare(spec);
     lookaheadDelayL.reset();
     lookaheadDelayR.reset();
+    smoothedLookaheadMorph.reset(sampleRate, 0.020);
+    smoothedLookaheadMorph.setCurrentAndTargetValue(0.0f);
+    activeLookaheadSamples =
+        juce::jlimit(
+            0.0f,
+            static_cast<float>(
+                lookaheadDelayL.getMaximumDelayInSamples()),
+            juce::jlimit(
+                0.0f,
+                20.0f,
+                lookaheadMs.load(std::memory_order_relaxed))
+                * 0.001f
+                * static_cast<float>(sampleRate));
+    targetLookaheadSamples = activeLookaheadSamples;
+    pendingLookaheadSamples = activeLookaheadSamples;
+    lookaheadMorphActive = false;
 
     oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
         2, 1, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false);
@@ -674,9 +1784,86 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void S13Compressor::releaseResources()
 {
+    reset();
+}
+
+void S13Compressor::reset()
+{
     envelopeLevel = 0.0f;
     rmsEnvelopeLevel = 0.0f;
     currentGainLin = 1.0f;
+    resetCompressorSmoother(
+        smoothedMakeup,
+        juce::Decibels::decibelsToGain(
+            makeupGain.load(std::memory_order_relaxed)));
+    resetCompressorSmoother(
+        smoothedMix,
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
+    resetCompressorSmoother(
+        smoothedThresholdDb,
+        juce::jlimit(
+            -60.0f, 0.0f,
+            threshold.load(std::memory_order_relaxed)));
+    resetCompressorSmoother(
+        smoothedCompressionSlope,
+        compressorSlopeFromRatio(
+            ratio.load(std::memory_order_relaxed)));
+    resetCompressorSmoother(
+        smoothedKneeDb,
+        juce::jlimit(
+            0.0f, 24.0f,
+            knee.load(std::memory_order_relaxed)));
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
+    lastSCHPFFreq = juce::jlimit(
+        20.0f, 500.0f,
+        requestedSCHPF);
+    if (! scHPFCoefficientLut.empty())
+    {
+        targetSCHPFCoefficients =
+            lookupRealtimeFilterLut(
+                scHPFCoefficientLut,
+                cachedSampleRate,
+                lastSCHPFFreq,
+                20.0f,
+                500.0f);
+        writeRealtimeFilterCoefficients(
+            scHPF_L,
+            scHPF_R,
+            targetSCHPFCoefficients);
+    }
+    scHPFCoefficientsSmoothing = false;
+    scHPF_L.reset();
+    scHPF_R.reset();
+    smoothedSidechainHPFWet.setCurrentAndTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
+    lookaheadDelayL.reset();
+    lookaheadDelayR.reset();
+    activeLookaheadSamples =
+        juce::jlimit(
+            0.0f,
+            static_cast<float>(
+                lookaheadDelayL.getMaximumDelayInSamples()),
+            juce::jlimit(
+                0.0f,
+                20.0f,
+                lookaheadMs.load(std::memory_order_relaxed))
+                * 0.001f
+                * static_cast<float>(
+                    juce::jmax(1.0, cachedSampleRate)));
+    targetLookaheadSamples = activeLookaheadSamples;
+    pendingLookaheadSamples = activeLookaheadSamples;
+    lookaheadMorphActive = false;
+    smoothedLookaheadMorph.setCurrentAndTargetValue(0.0f);
+    if (oversampler)
+        oversampler->reset();
+    gainReductionDB.store(0.0f, std::memory_order_relaxed);
+    inputLevelDB.store(-100.0f, std::memory_order_relaxed);
+    outputLevelDB.store(-100.0f, std::memory_order_relaxed);
 }
 
 void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -688,15 +1875,31 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const int numChannels = buffer.getNumChannels();
     if (numChannels < 1 || numSamples == 0) return;
 
-    // Update sidechain HPF
-    const float scFreq = juce::jlimit(20.0f, 500.0f, sidechainHPF.load());
-    if (std::abs(scFreq - lastSCHPFFreq) > 1.0f)
+    // Keep the filter warm even while bypassed, then dezipper detector-path
+    // changes by crossfading between the dry and high-passed signals.
+    const float requestedSCHPF =
+        sanitiseCompressorSidechainHPF(
+            sidechainHPF.load(std::memory_order_relaxed));
+    const bool sidechainHPFEnabled = requestedSCHPF > 0.0f;
+    const float scFreq = juce::jlimit(20.0f, 500.0f, requestedSCHPF);
+    if (sidechainHPFEnabled
+        && std::abs(scFreq - lastSCHPFFreq) > 1.0f)
     {
         lastSCHPFFreq = scFreq;
-        auto coeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(cachedSampleRate, scFreq);
-        scHPF_L.coefficients = coeffs;
-        scHPF_R.coefficients = coeffs;
+        if (! scHPFCoefficientLut.empty())
+        {
+            targetSCHPFCoefficients =
+                lookupRealtimeFilterLut(
+                    scHPFCoefficientLut,
+                    cachedSampleRate,
+                    scFreq,
+                    20.0f,
+                    500.0f);
+            scHPFCoefficientsSmoothing = true;
+        }
     }
+    smoothedSidechainHPFWet.setTargetValue(
+        sidechainHPFEnabled ? 1.0f : 0.0f);
 
     float atkMs, relMs;
     getStyleBallistics(atkMs, relMs);
@@ -710,12 +1913,46 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     const int detector = juce::jlimit(0, 2, static_cast<int>(std::round(detectorMode.load(std::memory_order_relaxed))));
     const float link = juce::jlimit(0.0f, 1.0f, stereoLink.load(std::memory_order_relaxed));
 
-    const float mixWet = juce::jlimit(0.0f, 1.0f, mix.load());
-    const float mixDry = 1.0f - mixWet;
+    smoothedMix.setTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
+    smoothedThresholdDb.setTargetValue(
+        juce::jlimit(
+            -60.0f, 0.0f,
+            threshold.load(std::memory_order_relaxed)));
+    smoothedCompressionSlope.setTargetValue(
+        compressorSlopeFromRatio(
+            ratio.load(std::memory_order_relaxed)));
+    smoothedKneeDb.setTargetValue(
+        juce::jlimit(
+            0.0f, 24.0f,
+            knee.load(std::memory_order_relaxed)));
 
-    const float laSamples = juce::jlimit(0.0f, 20.0f, lookaheadMs.load()) * 0.001f * srf;
-    lookaheadDelayL.setDelay(laSamples);
-    lookaheadDelayR.setDelay(laSamples);
+    pendingLookaheadSamples =
+        juce::jlimit(
+            0.0f,
+            static_cast<float>(
+                lookaheadDelayL.getMaximumDelayInSamples()),
+            juce::jlimit(
+                0.0f,
+                20.0f,
+                lookaheadMs.load(std::memory_order_relaxed))
+                * 0.001f
+                * srf);
+    if (! lookaheadMorphActive
+        && std::abs(
+               pendingLookaheadSamples
+               - activeLookaheadSamples)
+            > 0.01f)
+    {
+        targetLookaheadSamples =
+            pendingLookaheadSamples;
+        smoothedLookaheadMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedLookaheadMorph.setTargetValue(1.0f);
+        lookaheadMorphActive = true;
+    }
 
     float inputPeak = 0.0f;
     for (int ch = 0; ch < numChannels; ++ch)
@@ -728,11 +1965,30 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
 
     for (int i = 0; i < numSamples; ++i)
     {
+        if (scHPFCoefficientsSmoothing)
+        {
+            scHPFCoefficientsSmoothing =
+                advanceRealtimeFilterCoefficients(
+                    scHPF_L,
+                    scHPF_R,
+                    targetSCHPFCoefficients,
+                    scHPFCoefficientSmoothingProportion);
+        }
+
         const float dryL = dataL[i];
         const float dryR = dataR ? dataR[i] : dryL;
 
-        float scL = scHPF_L.processSample(dryL);
-        float scR = dataR ? scHPF_R.processSample(dryR) : scL;
+        const float filteredSCL = scHPF_L.processSample(dryL);
+        const float filteredSCR = dataR
+            ? scHPF_R.processSample(dryR)
+            : filteredSCL;
+        const float sidechainHPFWet =
+            smoothedSidechainHPFWet.getNextValue();
+        const float scL =
+            dryL + (filteredSCL - dryL) * sidechainHPFWet;
+        const float scR = dataR
+            ? dryR + (filteredSCR - dryR) * sidechainHPFWet
+            : scL;
         const float linkedPeak = juce::jmax(std::abs(scL), std::abs(scR));
         const float averagePeak = (std::abs(scL) + std::abs(scR)) * 0.5f;
         const float peakLevel = averagePeak + (linkedPeak - averagePeak) * link;
@@ -748,23 +2004,100 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         else
             envelopeLevel = releaseCoeff * envelopeLevel + (1.0f - releaseCoeff) * scLevel;
 
+        const float thresholdForSample =
+            smoothedThresholdDb.getNextValue();
+        const float compressionSlopeForSample =
+            smoothedCompressionSlope.getNextValue();
+        const float kneeForSample =
+            smoothedKneeDb.getNextValue();
         float envDB = juce::Decibels::gainToDecibels(envelopeLevel, -100.0f);
-        float targetDB = computeGain(envDB);
+        float targetDB = computeGain(
+            envDB,
+            thresholdForSample,
+            compressionSlopeForSample,
+            kneeForSample);
         float gr = targetDB - envDB;
         float gainLin = juce::Decibels::decibelsToGain(gr);
         peakGR = juce::jmin(peakGR, gr);
 
-        float delayedL = lookaheadDelayL.popSample(0);
-        float delayedR = dataR ? lookaheadDelayR.popSample(0) : delayedL;
+        // JUCE's DelayLine expects the current input to be pushed before it is
+        // popped. Popping first makes a zero-sample delay wrap around the whole
+        // ring buffer, which turned the NAM rack's parallel compressor into an
+        // unintended ~46 ms echo at 44.1 kHz.
         lookaheadDelayL.pushSample(0, dryL);
         if (dataR) lookaheadDelayR.pushSample(0, dryR);
+        const float activeDelayedL =
+            lookaheadDelayL.popSample(
+                0,
+                activeLookaheadSamples,
+                ! lookaheadMorphActive);
+        float delayedL = activeDelayedL;
+        float delayedR = 0.0f;
+        if (lookaheadMorphActive)
+        {
+            const float morph =
+                smoothedLookaheadMorph.getNextValue();
+            const float targetDelayedL =
+                lookaheadDelayL.popSample(
+                    0,
+                    targetLookaheadSamples,
+                    true);
+            delayedL =
+                activeDelayedL
+                + (targetDelayedL - activeDelayedL)
+                    * morph;
+            if (dataR)
+            {
+                const float activeDelayedR =
+                    lookaheadDelayR.popSample(
+                        0,
+                        activeLookaheadSamples,
+                        false);
+                const float targetDelayedR =
+                    lookaheadDelayR.popSample(
+                        0,
+                        targetLookaheadSamples,
+                        true);
+                delayedR =
+                    activeDelayedR
+                    + (targetDelayedR - activeDelayedR)
+                        * morph;
+            }
+        }
+        else if (dataR)
+        {
+            delayedR =
+                lookaheadDelayR.popSample(
+                    0,
+                    activeLookaheadSamples,
+                    true);
+        }
+        else
+        {
+            delayedR = delayedL;
+        }
 
-        float mkLin = smoothedMakeup.getNextValue();
-        float wetL = delayedL * gainLin * mkLin;
-        float wetR = delayedR * gainLin * mkLin;
+        const float mkLin = smoothedMakeup.getNextValue();
+        const float mixWet = smoothedMix.getNextValue();
+        const float mixDry = 1.0f - mixWet;
+        const float wetL =
+            boundProcessedWetSample(
+                delayedL * gainLin * mkLin);
+        const float wetR =
+            boundProcessedWetSample(
+                delayedR * gainLin * mkLin);
 
         dataL[i] = dryL * mixDry + wetL * mixWet;
         if (dataR) dataR[i] = dryR * mixDry + wetR * mixWet;
+    }
+    if (lookaheadMorphActive
+        && ! smoothedLookaheadMorph.isSmoothing())
+    {
+        activeLookaheadSamples =
+            targetLookaheadSamples;
+        lookaheadMorphActive = false;
+        smoothedLookaheadMorph
+            .setCurrentAndTargetValue(0.0f);
     }
 
     const float targetMakeupDB = autoMakeup.load(std::memory_order_relaxed) >= 0.5f
@@ -772,7 +2105,7 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
         : juce::jlimit(0.0f, 36.0f, makeupGain.load(std::memory_order_relaxed));
     smoothedMakeup.setTargetValue(juce::Decibels::decibelsToGain(targetMakeupDB));
     gainReductionDB.store(peakGR);
-    sanitizeBuiltInBuffer(buffer, 2.5f);
+    clearNonFiniteBuiltInBuffer(buffer);
 
     float outputPeak = 0.0f;
     for (int ch = 0; ch < numChannels; ++ch)
@@ -831,36 +2164,81 @@ S13Gate::S13Gate() {}
 void S13Gate::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
-    envelopeLevel = 0.0f;
-    rmsEnvelopeLevel = 0.0f;
-    holdCounter = 0;
-    currentGain = 0.0f;
     lastSidechainHPF = -1.0f;
     lastSidechainLPF = -1.0f;
 
-    auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, 20.0f);
+    auto hpfCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeHighPass(
+            sampleRate,
+            juce::jlimit(
+                20.0f, 2000.0f,
+                sidechainHPF.load(std::memory_order_relaxed)));
     scHPF_L.coefficients = hpfCoeffs;  scHPF_R.coefficients = hpfCoeffs;
-    scHPF_L.reset(); scHPF_R.reset();
 
-    auto lpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, 20000.0f);
+    auto lpfCoeffs =
+        juce::dsp::IIR::Coefficients<float>::makeLowPass(
+            sampleRate,
+            juce::jlimit(
+                200.0f, 20000.0f,
+                sidechainLPF.load(std::memory_order_relaxed)));
     scLPF_L.coefficients = lpfCoeffs;  scLPF_R.coefficients = lpfCoeffs;
-    scLPF_L.reset(); scLPF_R.reset();
+    prepareRealtimeFilterLut(
+        scHPFCoefficientLut,
+        sampleRate,
+        20.0f,
+        2000.0f,
+        true);
+    prepareRealtimeFilterLut(
+        scLPFCoefficientLut,
+        sampleRate,
+        200.0f,
+        20000.0f,
+        false);
+    sidechainCoefficientSmoothingProportion =
+        1.0f
+        - std::exp(
+            -1.0f
+            / static_cast<float>(
+                juce::jmax(1.0, sampleRate * 0.020)));
+    smoothedMix.reset(sampleRate, 0.020);
+    smoothedMix.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
 
     oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
         2, 1, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false);
     oversampler->initProcessing(static_cast<size_t>(samplesPerBlock));
-    updateCoefficients();
+    reset();
 }
 
 void S13Gate::releaseResources()
+{
+    reset();
+}
+
+void S13Gate::reset()
 {
     envelopeLevel = 0.0f;
     rmsEnvelopeLevel = 0.0f;
     holdCounter = 0;
     currentGain = 0.0f;
+    gateOpen.store(false, std::memory_order_relaxed);
+    updateCoefficients(true);
+    scHPF_L.reset();
+    scHPF_R.reset();
+    scLPF_L.reset();
+    scLPF_R.reset();
+    smoothedMix.setCurrentAndTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
+    if (oversampler)
+        oversampler->reset();
+    gainReductionDB.store(0.0f, std::memory_order_relaxed);
 }
 
-void S13Gate::updateCoefficients()
+void S13Gate::updateCoefficients(bool forceImmediate)
 {
     const double sr = cachedSampleRate;
     if (sr <= 0.0) return;
@@ -876,19 +2254,63 @@ void S13Gate::updateCoefficients()
     rangeGain = juce::Decibels::decibelsToGain(juce::jlimit(-80.0f, 0.0f, range.load()));
 
     float hpfFreq = juce::jlimit(20.0f, 2000.0f, sidechainHPF.load());
-    if (lastSidechainHPF < 0.0f || std::abs(hpfFreq - lastSidechainHPF) > 1.0f)
+    if (forceImmediate
+        || lastSidechainHPF < 0.0f
+        || std::abs(hpfFreq - lastSidechainHPF) > 1.0f)
     {
         lastSidechainHPF = hpfFreq;
-        scHPF_L.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, hpfFreq);
-        scHPF_R.coefficients = scHPF_L.coefficients;
+        if (! scHPFCoefficientLut.empty())
+        {
+            targetHPFCoefficients =
+                lookupRealtimeFilterLut(
+                    scHPFCoefficientLut,
+                    sr,
+                    hpfFreq,
+                    20.0f,
+                    2000.0f);
+            if (forceImmediate)
+            {
+                writeRealtimeFilterCoefficients(
+                    scHPF_L,
+                    scHPF_R,
+                    targetHPFCoefficients);
+                hpfCoefficientsSmoothing = false;
+            }
+            else
+            {
+                hpfCoefficientsSmoothing = true;
+            }
+        }
     }
 
     float lpfFreq = juce::jlimit(200.0f, 20000.0f, sidechainLPF.load());
-    if (lastSidechainLPF < 0.0f || std::abs(lpfFreq - lastSidechainLPF) > 8.0f)
+    if (forceImmediate
+        || lastSidechainLPF < 0.0f
+        || std::abs(lpfFreq - lastSidechainLPF) > 8.0f)
     {
         lastSidechainLPF = lpfFreq;
-        scLPF_L.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, lpfFreq);
-        scLPF_R.coefficients = scLPF_L.coefficients;
+        if (! scLPFCoefficientLut.empty())
+        {
+            targetLPFCoefficients =
+                lookupRealtimeFilterLut(
+                    scLPFCoefficientLut,
+                    sr,
+                    lpfFreq,
+                    200.0f,
+                    20000.0f);
+            if (forceImmediate)
+            {
+                writeRealtimeFilterCoefficients(
+                    scLPF_L,
+                    scLPF_R,
+                    targetLPFCoefficients);
+                lpfCoefficientsSmoothing = false;
+            }
+            else
+            {
+                lpfCoefficientsSmoothing = true;
+            }
+        }
     }
 }
 
@@ -896,12 +2318,16 @@ void S13Gate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
-    updateCoefficients();
+    updateCoefficients(false);
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
-    const float mixWet = juce::jlimit(0.0f, 1.0f, mix.load());
-    const float mixDry = 1.0f - mixWet;
+    if (numSamples <= 0 || numChannels <= 0)
+        return;
+    smoothedMix.setTargetValue(
+        juce::jlimit(
+            0.0f, 1.0f,
+            mix.load(std::memory_order_relaxed)));
 
     const float envAttack  = 0.9995f;
     const float envRelease = 0.9999f;
@@ -911,6 +2337,25 @@ void S13Gate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
 
     for (int i = 0; i < numSamples; ++i)
     {
+        if (hpfCoefficientsSmoothing)
+        {
+            hpfCoefficientsSmoothing =
+                advanceRealtimeFilterCoefficients(
+                    scHPF_L,
+                    scHPF_R,
+                    targetHPFCoefficients,
+                    sidechainCoefficientSmoothingProportion);
+        }
+        if (lpfCoefficientsSmoothing)
+        {
+            lpfCoefficientsSmoothing =
+                advanceRealtimeFilterCoefficients(
+                    scLPF_L,
+                    scLPF_R,
+                    targetLPFCoefficients,
+                    sidechainCoefficientSmoothingProportion);
+        }
+
         float peakLevel = 0.0f;
         float rmsSum = 0.0f;
         for (int ch = 0; ch < numChannels; ++ch)
@@ -953,13 +2398,21 @@ void S13Gate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
 
         peakGR = juce::jmin(peakGR, juce::Decibels::gainToDecibels(currentGain, -100.0f));
 
+        const float mixWet = smoothedMix.getNextValue();
+        const float mixDry = 1.0f - mixWet;
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            float d = buffer.getSample(ch, i);
-            buffer.setSample(ch, i, d * mixDry + d * currentGain * mixWet);
+            const float dry = buffer.getSample(ch, i);
+            const float wet =
+                boundProcessedWetSample(
+                    dry * currentGain);
+            buffer.setSample(
+                ch,
+                i,
+                dry * mixDry + wet * mixWet);
         }
     }
-    sanitizeBuiltInBuffer(buffer, 2.5f);
+    clearNonFiniteBuiltInBuffer(buffer);
     gainReductionDB.store(peakGR);
 }
 
@@ -995,7 +2448,8 @@ void S13Gate::setStateInformation(const void* data, int sizeInBytes)
     sidechainLPF.store(static_cast<float>(state.getProperty("sidechainLPF", 20000.0f)));
     mix.store(static_cast<float>(state.getProperty("mix", 1.0f)));
     detectorMode.store(static_cast<float>(state.getProperty("detectorMode", 0.0f)));
-    updateCoefficients();
+    // Runtime coefficients are owned by processBlock(). Publishing atomics
+    // here avoids racing a live callback while a project state is restored.
 }
 
 //==============================================================================
@@ -1013,31 +2467,77 @@ void S13Limiter::prepareToPlay(double sampleRate, int samplesPerBlock)
     limiter.setThreshold(threshold.load());
     limiter.setRelease(juce::jmax(10.0f, releaseMs.load()));
 
+    smoothedThresholdGain.reset(sampleRate, 0.02);
+    smoothedThresholdGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -20.0f, 0.0f,
+                threshold.load(std::memory_order_relaxed))));
     smoothedCeiling.reset(sampleRate, 0.02);
-    smoothedCeiling.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(ceiling.load()));
+    smoothedCeiling.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -3.0f, 0.0f,
+                ceiling.load(std::memory_order_relaxed))));
+    smoothedLookaheadMorph.reset(sampleRate, 0.02);
+    smoothedLookaheadMorph.setCurrentAndTargetValue(0.0f);
 
     const int maxLookaheadSamples = static_cast<int>(std::ceil(sampleRate * 0.02)) + juce::jmax(samplesPerBlock, 1) + 8;
     lookaheadBuffer.setSize(2, juce::jmax(16, maxLookaheadSamples), false, false, true);
-    truePeakScratch.setSize(2, juce::jmax(1, samplesPerBlock), false, false, true);
-    lookaheadBuffer.clear();
-    truePeakScratch.clear();
-    lookaheadWriteIndex = 0;
-    gainEnvelope = 1.0f;
-    previousDetectorSample.fill(0.0f);
 
     oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
         2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, false);
     oversampler->initProcessing(static_cast<size_t>(samplesPerBlock));
+    reset();
 }
 
 void S13Limiter::releaseResources()
 {
+    reset();
+}
+
+void S13Limiter::reset()
+{
     limiter.reset();
     lookaheadBuffer.clear();
-    truePeakScratch.clear();
     lookaheadWriteIndex = 0;
+    const int ringSize = lookaheadBuffer.getNumSamples();
+    const int maximumDelay =
+        ringSize > 1 ? ringSize - 1 : 0;
+    activeLookaheadSamples =
+        juce::jlimit(
+            0,
+            maximumDelay,
+            static_cast<int>(
+                std::round(
+                    juce::jlimit(
+                        0.0f, 20.0f,
+                        lookaheadMs.load(
+                            std::memory_order_relaxed))
+                    * 0.001f
+                    * static_cast<float>(
+                        juce::jmax(
+                            1.0,
+                            cachedSampleRate)))));
+    targetLookaheadSamples = activeLookaheadSamples;
+    pendingLookaheadSamples = activeLookaheadSamples;
+    lookaheadMorphActive = false;
+    smoothedLookaheadMorph.setCurrentAndTargetValue(0.0f);
+    smoothedThresholdGain.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -20.0f, 0.0f,
+                threshold.load(std::memory_order_relaxed))));
+    smoothedCeiling.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -3.0f, 0.0f,
+                ceiling.load(std::memory_order_relaxed))));
     gainEnvelope = 1.0f;
     previousDetectorSample.fill(0.0f);
+    if (oversampler)
+        oversampler->reset();
+    gainReductionDB.store(0.0f, std::memory_order_relaxed);
 }
 
 void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -1053,17 +2553,30 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
     float inputPeak = 0.0f;
     for (int ch = 0; ch < numChannels; ++ch)
         inputPeak = juce::jmax(inputPeak, buffer.getMagnitude(ch, 0, numSamples));
-    float truePeakScale = 1.0f;
-    if (oversampler != nullptr
-        && numChannels <= truePeakScratch.getNumChannels()
-        && numSamples <= truePeakScratch.getNumSamples())
-    {
-        truePeakScratch.clear();
-        for (int ch = 0; ch < numChannels; ++ch)
-            truePeakScratch.copyFrom(ch, 0, buffer, ch, 0, numSamples);
 
-        juce::dsp::AudioBlock<float> scratchBlock(truePeakScratch);
-        auto blockToScan = scratchBlock.getSubBlock(0, static_cast<size_t>(numSamples));
+    const float targetThresholdGain =
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -20.0f, 0.0f,
+                threshold.load(std::memory_order_relaxed)));
+    const float targetCeiling =
+        juce::Decibels::decibelsToGain(
+            juce::jlimit(
+                -3.0f, 0.0f,
+                ceiling.load(std::memory_order_relaxed)));
+    smoothedThresholdGain.setTargetValue(
+        targetThresholdGain);
+    smoothedCeiling.setTargetValue(targetCeiling);
+
+    float truePeakScale = 1.0f;
+    if (oversampler != nullptr)
+    {
+        const juce::dsp::AudioBlock<const float>
+            inputBlock(buffer);
+        const auto blockToScan =
+            inputBlock.getSubBlock(
+                0,
+                static_cast<size_t>(numSamples));
         auto oversampledBlock = oversampler->processSamplesUp(blockToScan);
         float oversampledPeak = 0.0f;
         for (size_t ch = 0; ch < oversampledBlock.getNumChannels(); ++ch)
@@ -1072,21 +2585,39 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
             for (size_t sample = 0; sample < oversampledBlock.getNumSamples(); ++sample)
                 oversampledPeak = juce::jmax(oversampledPeak, std::abs(channelData[sample]));
         }
-        oversampler->processSamplesDown(blockToScan);
+        // This oversampler is detector-only. Downsampling its internal buffer
+        // cannot affect the already-measured peak or the next upsampling
+        // state, so omitting the unused down path preserves detection while
+        // removing roughly half of the former true-peak filter work.
         if (inputPeak > 1.0e-6f && oversampledPeak > inputPeak)
             truePeakScale = juce::jlimit(1.0f, 3.0f, oversampledPeak / inputPeak);
     }
 
     const float srf = static_cast<float>(juce::jmax(1.0, cachedSampleRate));
-    const float thresholdGain = juce::Decibels::decibelsToGain(juce::jlimit(-20.0f, 0.0f, threshold.load(std::memory_order_relaxed)));
-    const float ceilingDB = juce::jlimit(-3.0f, 0.0f, ceiling.load(std::memory_order_relaxed));
-    const float targetCeiling = juce::Decibels::decibelsToGain(ceilingDB);
-    const float limitGain = juce::jmin(thresholdGain, targetCeiling);
     const float releaseCoeff = std::exp(-1.0f / (juce::jlimit(10.0f, 500.0f, releaseMs.load(std::memory_order_relaxed)) * 0.001f * srf));
     const int ringSize = lookaheadBuffer.getNumSamples();
-    const int delaySamples = juce::jlimit(0, ringSize > 1 ? ringSize - 1 : 0,
-                                         static_cast<int>(std::round(juce::jlimit(0.0f, 20.0f, lookaheadMs.load(std::memory_order_relaxed)) * 0.001f * srf)));
-    smoothedCeiling.setTargetValue(targetCeiling);
+    pendingLookaheadSamples =
+        juce::jlimit(
+            0,
+            ringSize > 1 ? ringSize - 1 : 0,
+            static_cast<int>(
+                std::round(
+                    juce::jlimit(
+                        0.0f, 20.0f,
+                        lookaheadMs.load(
+                            std::memory_order_relaxed))
+                    * 0.001f * srf)));
+    if (! lookaheadMorphActive
+        && pendingLookaheadSamples
+            != activeLookaheadSamples)
+    {
+        targetLookaheadSamples =
+            pendingLookaheadSamples;
+        smoothedLookaheadMorph
+            .setCurrentAndTargetValue(0.0f);
+        smoothedLookaheadMorph.setTargetValue(1.0f);
+        lookaheadMorphActive = true;
+    }
 
     float peakGain = 1.0f;
     for (int i = 0; i < numSamples; ++i)
@@ -1103,8 +2634,21 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         }
         detectorPeak *= truePeakScale;
 
-        const float targetGain = detectorPeak > limitGain && detectorPeak > 1.0e-8f
-            ? juce::jlimit(0.0f, 1.0f, limitGain / detectorPeak)
+        const float thresholdForSample =
+            smoothedThresholdGain.getNextValue();
+        const float ceilingForSample =
+            smoothedCeiling.getNextValue();
+        const float limitGainForSample =
+            juce::jmin(
+                thresholdForSample,
+                ceilingForSample);
+        const float targetGain =
+            detectorPeak > limitGainForSample
+                    && detectorPeak > 1.0e-8f
+            ? juce::jlimit(
+                  0.0f,
+                  1.0f,
+                  limitGainForSample / detectorPeak)
             : 1.0f;
 
         if (targetGain < gainEnvelope)
@@ -1116,17 +2660,45 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         for (int ch = 0; ch < numChannels; ++ch)
             lookaheadBuffer.setSample(ch, lookaheadWriteIndex, buffer.getSample(ch, i));
 
-        int readIndex = lookaheadWriteIndex - delaySamples;
-        if (readIndex < 0)
-            readIndex += ringSize;
-
-        const float ceilingForSample = smoothedCeiling.getNextValue();
+        int activeReadIndex =
+            lookaheadWriteIndex
+            - activeLookaheadSamples;
+        if (activeReadIndex < 0)
+            activeReadIndex += ringSize;
+        int targetReadIndex =
+            lookaheadWriteIndex
+            - targetLookaheadSamples;
+        if (targetReadIndex < 0)
+            targetReadIndex += ringSize;
+        const float lookaheadMorph =
+            lookaheadMorphActive
+                ? smoothedLookaheadMorph.getNextValue()
+                : 0.0f;
         const float ceilingScale = gainEnvelope < 0.9999f
-            ? ceilingForSample / juce::jmax(1.0e-6f, limitGain)
+            ? ceilingForSample
+                / juce::jmax(
+                    1.0e-6f,
+                    limitGainForSample)
             : 1.0f;
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            float limited = lookaheadBuffer.getSample(ch, readIndex) * gainEnvelope * ceilingScale;
+            const float activeTap =
+                lookaheadBuffer.getSample(
+                    ch,
+                    activeReadIndex);
+            const float delayed =
+                lookaheadMorphActive
+                    ? activeTap
+                        + (lookaheadBuffer.getSample(
+                               ch,
+                               targetReadIndex)
+                           - activeTap)
+                            * lookaheadMorph
+                    : activeTap;
+            float limited =
+                delayed
+                * gainEnvelope
+                * ceilingScale;
             const float absLimited = std::abs(limited);
             const float kneeStart = ceilingForSample * 0.98f;
             if (absLimited > kneeStart)
@@ -1141,6 +2713,15 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
         }
 
         lookaheadWriteIndex = (lookaheadWriteIndex + 1) % ringSize;
+    }
+    if (lookaheadMorphActive
+        && ! smoothedLookaheadMorph.isSmoothing())
+    {
+        activeLookaheadSamples =
+            targetLookaheadSamples;
+        lookaheadMorphActive = false;
+        smoothedLookaheadMorph
+            .setCurrentAndTargetValue(0.0f);
     }
 
     // GR metering

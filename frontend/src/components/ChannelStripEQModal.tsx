@@ -3,7 +3,7 @@ import classNames from "classnames";
 import { Power } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
-import { Modal } from "./ui";
+import { Modal, ProfiledRangeInput } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
 
 // ── EQ Band Definitions ─────────────────────────────────────────────
@@ -75,24 +75,41 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
   useEffect(() => {
     if (!isOpen || !trackId || trackId === prevTrackIdRef.current) return;
     prevTrackIdRef.current = trackId;
+    let cancelled = false;
 
     (async () => {
-      const bands: EQBandState[] = [];
-      for (let i = 0; i < 6; i++) {
+      const parameterReads = Array.from({ length: EQ_BANDS.length * 4 }, (_, index) =>
+        nativeBridge.getChannelStripEQParam(trackId, index),
+      );
+      const [enabledState, phaseState, dcState, parameterValues] = await Promise.all([
+        nativeBridge.getChannelStripEQEnabled(trackId),
+        nativeBridge.getTrackPhaseInvert(trackId),
+        nativeBridge.getTrackDCOffset(trackId),
+        Promise.all(parameterReads),
+      ]);
+      if (cancelled) return;
+      setEqEnabled(enabledState);
+      setPhaseInverted(phaseState);
+      setDcOffsetEnabled(dcState);
+      const bands = EQ_BANDS.map((definition, i): EQBandState => {
         const base = i * 4;
-        const freq = await nativeBridge.getChannelStripEQParam(trackId, base);
-        const gain = await nativeBridge.getChannelStripEQParam(trackId, base + 1);
-        const q = await nativeBridge.getChannelStripEQParam(trackId, base + 2);
-        const enabled = await nativeBridge.getChannelStripEQParam(trackId, base + 3);
-        bands.push({
-          freq: freq > 0 ? freq : EQ_BANDS[i].defaultFreq,
+        const freq = parameterValues[base];
+        const gain = parameterValues[base + 1];
+        const q = parameterValues[base + 2];
+        const enabled = parameterValues[base + 3];
+        return {
+          freq: freq > 0 ? freq : definition.defaultFreq,
           gain,
-          q: q > 0 ? q : EQ_BANDS[i].defaultQ,
+          q: q > 0 ? q : definition.defaultQ,
           enabled: enabled > 0.5,
-        });
-      }
+        };
+      });
       setEqBands(bands);
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, trackId]);
 
   // Reset state when modal closes
@@ -129,8 +146,11 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
   );
 
   const handlePhaseInvert = useCallback(() => {
-    setPhaseInverted((p) => !p);
-  }, []);
+    if (!trackId) return;
+    const next = !phaseInverted;
+    setPhaseInverted(next);
+    nativeBridge.setTrackPhaseInvert(trackId, next);
+  }, [phaseInverted, trackId]);
 
   const handleDcOffsetToggle = useCallback(() => {
     if (!trackId) return;
@@ -235,14 +255,13 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
                     <span>Freq</span>
                     <span className="font-mono">{formatHz(band.freq)} Hz</span>
                   </div>
-                  <input
-                    type="range"
+                  <ProfiledRangeInput
                     min={0}
                     max={1}
                     step={0.001}
                     value={linFreq}
-                    onChange={(e) => {
-                      const hz = linToLogFreq(Number(e.target.value), def.freqRange[0], def.freqRange[1]);
+                    onValueChange={(value) => {
+                      const hz = linToLogFreq(value, def.freqRange[0], def.freqRange[1]);
                       handleEqBandParam(i, 0, hz);
                     }}
                     className="w-full h-1.5 accent-daw-accent cursor-pointer"
@@ -261,13 +280,12 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
                         {band.gain >= 0 ? "+" : ""}{band.gain.toFixed(1)} dB
                       </span>
                     </div>
-                    <input
-                      type="range"
+                    <ProfiledRangeInput
                       min={-18}
                       max={18}
                       step={0.1}
                       value={band.gain}
-                      onChange={(e) => handleEqBandParam(i, 1, Number(e.target.value))}
+                      onValueChange={(value) => handleEqBandParam(i, 1, value)}
                       className="w-full h-1.5 accent-daw-accent cursor-pointer"
                     />
                   </div>
@@ -280,13 +298,12 @@ export function ChannelStripEQModal({ isOpen, onClose }: ChannelStripEQModalProp
                       <span>Q</span>
                       <span className="font-mono">{band.q.toFixed(2)}</span>
                     </div>
-                    <input
-                      type="range"
+                    <ProfiledRangeInput
                       min={0.1}
                       max={10}
                       step={0.01}
                       value={band.q}
-                      onChange={(e) => handleEqBandParam(i, 2, Number(e.target.value))}
+                      onValueChange={(value) => handleEqBandParam(i, 2, value)}
                       className="w-full h-1.5 accent-daw-accent cursor-pointer"
                     />
                   </div>

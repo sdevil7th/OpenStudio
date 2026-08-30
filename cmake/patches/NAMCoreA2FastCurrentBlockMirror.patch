@@ -1,0 +1,42 @@
+diff --git a/NAM/wavenet/a2_fast.cpp b/NAM/wavenet/a2_fast.cpp
+index 67093c8..8127a7c 100644
+--- a/NAM/wavenet/a2_fast.cpp
++++ b/NAM/wavenet/a2_fast.cpp
+@@ -337,7 +337,6 @@ template <int Channels>
+ void A2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
+ {
+   #if NAM_A2_RING_MODE == 1
+-  const int mbs = GetMaxBufferSize();
+   float* const hist = L.history.data();
+   const float* const src = _layer_in.data();
+   const int wp = L.write_pos;
+@@ -349,7 +348,9 @@ void A2FastModel<Channels>::_ring_write(Layer& L, int num_frames)
+                 static_cast<size_t>(num_frames - first) * Channels * sizeof(float));
+   }
++  // A contiguous read can cross the ring end by at most this block's length.
+   std::memcpy(
+-    hist + static_cast<size_t>(L.pow2_size) * Channels, hist, static_cast<size_t>(mbs) * Channels * sizeof(float));
++    hist + static_cast<size_t>(L.pow2_size) * Channels, hist,
++    static_cast<size_t>(num_frames) * Channels * sizeof(float));
+   L.write_pos = (wp + num_frames) & L.pow2_mask;
+   #else
+   if (L.write_pos + num_frames > L.history_cols)
+@@ -369,7 +369,6 @@ template <int Channels>
+ void A2FastModel<Channels>::_head_ring_write(int num_frames)
+ {
+   #if NAM_A2_RING_MODE == 1
+-  const int mbs = GetMaxBufferSize();
+   float* const hist = _head_history.data();
+   const float* const src = _head_sum.data();
+   const int wp = _head_write_pos;
+@@ -381,7 +380,9 @@ void A2FastModel<Channels>::_head_ring_write(int num_frames)
+                 static_cast<size_t>(num_frames - first) * Channels * sizeof(float));
+   }
++  // A contiguous read can cross the ring end by at most this block's length.
+   std::memcpy(
+-    hist + static_cast<size_t>(_head_pow2_size) * Channels, hist, static_cast<size_t>(mbs) * Channels * sizeof(float));
++    hist + static_cast<size_t>(_head_pow2_size) * Channels, hist,
++    static_cast<size_t>(num_frames) * Channels * sizeof(float));
+   _head_write_pos = (wp + num_frames) & _head_pow2_mask;
+   #else
+   const int keep = kHeadKernelSize - 1;

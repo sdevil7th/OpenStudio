@@ -1,8 +1,47 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Produce one macOS application that can run natively on both Apple Silicon and
+# Intel.  Setting these before project() ensures that compiler checks and every
+# source-built dependency use the same deployment contract.  Callers can still
+# override either cache value explicitly for a developer-only single-arch build.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+            "Oldest macOS version supported by OpenStudio")
+    endif()
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING
+            "macOS architectures built into OpenStudio")
+    endif()
+endif()
+
+if(POLICY CMP0184)
+    cmake_policy(SET CMP0184 NEW)
+endif()
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+# YSFX enables the generic ASM language on Windows even though it has no ASM
+# sources. CMake 4.1+ otherwise rejects MSVC's driver during that declaration.
+if(POLICY CMP0194)
+    cmake_policy(SET CMP0194 OLD)
+    set(CMAKE_POLICY_DEFAULT_CMP0194 OLD)
+endif()
+
 set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled into OpenStudio")
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
+
+# Visual Studio's Debug CRT defaults to checked STL iterators. Their
+# construction/destruction is serialized by a process-wide lock, so unrelated
+# UI/background container work can priority-invert a 16-sample ASIO callback.
+# This must be directory-wide (including source-built dependencies) because
+# mixing iterator debug levels across linked C++ targets is ABI-incompatible.
+if(MSVC)
+    add_compile_definitions(
+        $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+    )
+endif()
 
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
@@ -49,23 +88,48 @@ if(WIN32)
     endif()
 endif()
 
-# Check if JUCE folder exists, otherwise fetch it (or use CPM if preferred, but standard FetchContent is fine)
-# For this setup, we'll fetch JUCE 8.0.0
+# Check if JUCE folder exists, otherwise fetch it (or use CPM if preferred, but standard FetchContent is fine).
+# JUCE is intentionally pinned to one repository-wide release.  Dependency
+# upgrades must change this tag directly and pass the complete platform matrix;
+# a cache override is deliberately not exposed because it allows local and CI
+# builds to silently use different framework versions.
 include(FetchContent)
 FetchContent_Declare(
     juce
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        8.0.0
+    GIT_TAG        9.0.1
     GIT_SHALLOW    TRUE
+    PATCH_COMMAND
+        "${CMAKE_COMMAND}"
+        "-DJUCE_SOURCE_DIR=<SOURCE_DIR>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
 )
 FetchContent_MakeAvailable(juce)
+if(MSVC)
+    # JUCE's VST3 wrapper has two benign C4458 warnings in vendor code.
+    set_source_files_properties(
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+        PROPERTIES COMPILE_OPTIONS "/wd4458"
+    )
+
+    # MSVC /O2 and /Ox can break WRL callback dispatch in JUCE's WebView2
+    # resource-provider path, leaving Release builds on about:blank even though
+    # the controller was created successfully.  Restrict /O1 to JUCE's GUI-extra
+    # translation unit so audio/DSP code keeps the normal Release optimisation.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_gui_extra/juce_gui_extra.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/O1>
+    )
+endif()
 
 # Fetch YSFX — open-source JSFX runtime (Apache 2.0)
 FetchContent_Declare(
     ysfx
     GIT_REPOSITORY https://github.com/jpcima/ysfx.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
+    GIT_TAG        8077347ccf4115567aed81400281dca57acbb0cc
+    GIT_SUBMODULES thirdparty/dr_libs
+    GIT_SUBMODULES_RECURSE FALSE
 )
 set(YSFX_PLUGIN OFF CACHE BOOL "" FORCE)
 set(YSFX_TOOLS OFF CACHE BOOL "" FORCE)
@@ -94,11 +158,16 @@ if (_ysfx_is_valid)
 else()
     FetchContent_MakeAvailable(ysfx)
 endif()
+if(MSVC AND TARGET ysfx-private)
+    # Third-party YSFX currently emits C4297 from its public noexcept C API.
+    target_compile_options(ysfx-private PRIVATE /W0)
+endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)
 FetchContent_Declare(
     lua
     URL "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+    URL_HASH SHA256=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
 )
 FetchContent_MakeAvailable(lua)
 
@@ -110,6 +179,80 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(clap)
+
+# NeuralAmpModelerCore v0.5.4 -- native NAM/A1/A2 DSP loader.
+# The upstream project primarily builds tools, so OpenStudio wraps the NAM source
+# files in a local static library and links that into the native rack processor.
+FetchContent_Declare(
+    neural_amp_modeler_core
+    GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
+    GIT_TAG        v0.5.4
+    GIT_SHALLOW    TRUE
+    GIT_SUBMODULES Dependencies/eigen
+    # Keep OpenStudio's verified v0.5.4 real-time fixes reproducible:
+    # active-column WaveNet clearing, a lock-free SlimmableWavenet pending
+    # fast path, allocation-free ConvNet processing after Reset(), and an A2
+    # tail mirror whose work scales with the current callback rather than the
+    # prepared maximum block size.
+    PATCH_COMMAND
+        "${CMAKE_COMMAND}"
+        "-DNAM_SOURCE_DIR=<SOURCE_DIR>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyNAMCorePatches.cmake"
+)
+FetchContent_GetProperties(neural_amp_modeler_core)
+if(NOT neural_amp_modeler_core_POPULATED)
+    if(POLICY CMP0169)
+        cmake_policy(PUSH)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+    FetchContent_Populate(neural_amp_modeler_core)
+    if(POLICY CMP0169)
+        cmake_policy(POP)
+    endif()
+endif()
+
+file(GLOB OPENSTUDIO_NAMCORE_SOURCES CONFIGURE_DEPENDS
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*.cpp"
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*/*.cpp"
+)
+add_library(openstudio_namcore STATIC ${OPENSTUDIO_NAMCORE_SOURCES})
+if(MSVC)
+    # This target is intentionally optimized in Debug and cannot use /RTC1.
+    set_property(TARGET openstudio_namcore PROPERTY MSVC_RUNTIME_CHECKS "")
+endif()
+target_include_directories(openstudio_namcore SYSTEM PUBLIC
+    "${neural_amp_modeler_core_SOURCE_DIR}"
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM"
+    "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/eigen"
+    "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/nlohmann"
+)
+target_compile_features(openstudio_namcore PRIVATE cxx_std_20)
+target_compile_definitions(openstudio_namcore PUBLIC
+    NAM_SAMPLE_FLOAT
+    NAM_ENABLE_A2_FAST
+    # Upstream's supported small-matrix kernels avoid generic Eigen dispatch
+    # overhead for the tiny channel counts used by realtime NAM WaveNets. The
+    # NeuralAmpModelerCore CI builds this path as well.
+    NAM_USE_INLINE_GEMM
+    NAM_DEFAULT_MAX_BUFFER_SIZE=8192
+)
+target_compile_definitions(openstudio_namcore PRIVATE
+    $<$<CONFIG:Debug>:NDEBUG>
+)
+if(MSVC)
+    target_compile_options(openstudio_namcore PRIVATE
+        /W0
+        $<$<CONFIG:Debug>:/O2>
+        $<$<CONFIG:Debug>:/Ob2>
+        $<$<CONFIG:Debug>:/Oi>
+        $<$<CONFIG:Debug>:/Ot>
+    )
+else()
+    target_compile_options(openstudio_namcore PRIVATE
+        -w
+        $<$<CONFIG:Debug>:-O3>
+    )
+endif()
 
 
 # Build Lua as a static library (it ships as raw C sources)
@@ -166,10 +309,23 @@ juce_add_gui_app(OpenStudio
     VERSION ${PROJECT_VERSION}
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256x256.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
+    NEEDS_WEB_BROWSER TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
-
+if(MSVC)
+    # Realtime audio translation units below are intentionally optimized
+    # in Debug. CMP0184 controls runtime checks at target scope, so the target
+    # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.
+    set_property(TARGET OpenStudio PROPERTY MSVC_RUNTIME_CHECKS "")
+    # The headless aggregate regression nests the complete NAM DSP suite
+    # inside the host suite. Both deliberately keep sizeable fixed DSP state
+    # on the calling thread, which exceeds Windows' 1 MiB executable default
+    # even though either suite is safe in isolation. Reserve virtual stack
+    # headroom for that supported diagnostic path; pages remain demand-
+    # committed, so normal UI/audio memory use is unchanged.
+    target_link_options(OpenStudio PRIVATE /STACK:8388608)
+endif()
 # Source files
 target_sources(OpenStudio PRIVATE
     Source/Main.cpp
@@ -179,6 +335,10 @@ target_sources(OpenStudio PRIVATE
     Source/AppUpdater.cpp
     Source/CrashDiagnostics.cpp
     Source/AudioEngine.cpp
+    Source/NAMDelayRegression.h
+    Source/NAMDelayRegression.cpp
+    Source/NAMDelayRegressionLifecycle.cpp
+    Source/NAMDelayRegressionRackTail.cpp
     Source/AudioRecorder.cpp
     Source/PlaybackEngine.cpp
     Source/PeakCache.cpp
@@ -204,7 +364,12 @@ target_sources(OpenStudio PRIVATE
     Source/VBAPPanner.cpp
     Source/BuiltInEffects.cpp
     Source/BuiltInEffects2.cpp
+    Source/NAMCabPresentation.h
+    Source/NAMCabPresentation.cpp
+    Source/NAMPolyOctaver.h
+    Source/NAMPolyOctaver.cpp
     Source/S13PluginEditors.cpp
+    Source/TunerPitchTracker.cpp
     Source/PitchDetector.cpp
     Source/PitchMapper.cpp
     Source/S13PitchCorrector.cpp
@@ -219,6 +384,50 @@ target_sources(OpenStudio PRIVATE
     Source/AITrackEngine.cpp
     Source/ARAHostController.cpp
 )
+
+# Keep the complete production audio callback path optimized even in the app's
+# developer build. `build.py dev --run` uses Debug; leaving JUCE's ASIO
+# conversion/convolution modules or the surrounding host/track helpers at /Od
+# creates periodic work spikes that do not represent the shipped DSP.
+set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
+    Source/AudioEngine.cpp
+    Source/AudioRecorder.cpp
+    Source/PlaybackEngine.cpp
+    Source/TrackProcessor.cpp
+    Source/Metronome.cpp
+    Source/MIDIRecorder.cpp
+    Source/AutomationList.cpp
+    Source/TimecodeSync.cpp
+    Source/TriggerEngine.cpp
+    Source/BuiltInEffects.cpp
+    Source/BuiltInEffects2.cpp
+    Source/NAMCabPresentation.cpp
+    Source/NAMPolyOctaver.cpp
+    Source/S13PitchCorrector.cpp
+    Source/TunerPitchTracker.cpp
+    "${juce_SOURCE_DIR}/modules/juce_audio_basics/juce_audio_basics.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_devices/juce_audio_devices.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_formats/juce_audio_formats.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_audio_utils/juce_audio_utils.cpp"
+    "${juce_SOURCE_DIR}/modules/juce_dsp/juce_dsp.cpp"
+)
+if(MSVC)
+    set_property(SOURCE
+        ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:/O2>
+        $<$<CONFIG:Debug>:/Ob2>
+        $<$<CONFIG:Debug>:/Oi>
+        $<$<CONFIG:Debug>:/Ot>
+    )
+else()
+    set_property(SOURCE
+        ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
+        APPEND PROPERTY COMPILE_OPTIONS
+        $<$<CONFIG:Debug>:-O3>
+    )
+endif()
 
 # Include directories — common to all platforms
 target_include_directories(OpenStudio PRIVATE
@@ -274,7 +483,13 @@ target_link_libraries(OpenStudio PRIVATE
     juce::juce_osc
     ysfx
     lua_static
+    openstudio_namcore
 )
+if(WIN32)
+    # AudioEngine registers ASIO callback threads with the Windows Multimedia
+    # Class Scheduler Service's "Pro Audio" task.
+    target_link_libraries(OpenStudio PRIVATE avrt)
+endif()
 
 # ONNX Runtime link (optional)
 if(HAS_ONNXRUNTIME)
@@ -302,6 +517,7 @@ endif()
 
 set(OPENSTUDIO_UPDATE_APPCAST_URL_VALUE "${_OPENSTUDIO_DEFAULT_APPCAST_URL}" CACHE STRING "Updater appcast URL compiled into OpenStudio")
 set(OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE "https://openstudio.org.in/releases/ai-runtime/stable/latest.json" CACHE STRING "AI runtime manifest URL compiled into OpenStudio")
+set(OPENSTUDIO_TONE3000_CLIENT_ID_VALUE "" CACHE STRING "TONE3000 publishable OAuth client_id compiled into OpenStudio")
 
 # Common definitions (all platforms)
 target_compile_definitions(OpenStudio PRIVATE
@@ -316,6 +532,7 @@ target_compile_definitions(OpenStudio PRIVATE
     OPENSTUDIO_RELEASES_PAGE_URL="${OPENSTUDIO_RELEASES_PAGE_URL_VALUE}"
     OPENSTUDIO_UPDATE_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}"
     OPENSTUDIO_AI_RUNTIME_MANIFEST_URL="${OPENSTUDIO_AI_RUNTIME_MANIFEST_URL_VALUE}"
+    OPENSTUDIO_TONE3000_CLIENT_ID="${OPENSTUDIO_TONE3000_CLIENT_ID_VALUE}"
     OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=$<IF:$<BOOL:${OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK}>,1,0>
 )
 
@@ -361,6 +578,7 @@ if(WIN32)
     FetchContent_Declare(
         webview2
         URL "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1901.177"
+        URL_HASH SHA256=464360d5eedcae0e95b0a3fe13c74b496bc9b542980ff8ecebd9ff7ea37ca39e
     )
     FetchContent_MakeAvailable(webview2)
 
@@ -373,6 +591,7 @@ if(WIN32)
             "${webview2_SOURCE_DIR}/build/native/x64/WebView2LoaderStatic.lib"
             dbghelp
             dwmapi
+            crypt32
         )
     endif()
 endif()
@@ -457,9 +676,15 @@ endif()
 
 function(openstudio_copy_runtime_file source destination_relative_path copy_comment)
     if(EXISTS "${source}")
+        get_filename_component(destination_directory "${destination_relative_path}" DIRECTORY)
+        set(runtime_destination_directory "${OPENSTUDIO_RUNTIME_ASSET_ROOT}")
+        if(NOT destination_directory STREQUAL "")
+            set(runtime_destination_directory
+                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_directory}")
+        endif()
         add_custom_command(TARGET OpenStudio POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${OPENSTUDIO_RUNTIME_ASSET_ROOT}"
+                "${runtime_destination_directory}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${source}"
                 "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/${destination_relative_path}"
@@ -499,16 +724,219 @@ function(openstudio_remove_runtime_file destination_relative_path remove_comment
     )
 endfunction()
 
+# Verify text notices after normalizing line endings so the same pinned source
+# is accepted on Windows, macOS, and Linux checkouts. The original upstream
+# file is still copied byte-for-byte into the runtime bundle.
+function(openstudio_require_and_copy_notice source expected_normalized_sha256 destination_relative_path description)
+    if(NOT EXISTS "${source}")
+        message(FATAL_ERROR "Required ${description} is missing: ${source}")
+    endif()
+
+    file(READ "${source}" notice_contents)
+    string(REPLACE "\r\n" "\n" notice_contents "${notice_contents}")
+    string(REPLACE "\r" "\n" notice_contents "${notice_contents}")
+    string(SHA256 notice_actual_sha256 "${notice_contents}")
+    if(NOT "${notice_actual_sha256}" STREQUAL "${expected_normalized_sha256}")
+        message(FATAL_ERROR
+            "${description} checksum mismatch. Expected ${expected_normalized_sha256}, "
+            "received ${notice_actual_sha256}.")
+    endif()
+
+    openstudio_copy_runtime_file(
+        "${source}"
+        "${destination_relative_path}"
+        "Copying ${description} to output directory"
+    )
+endfunction()
+
+# Give bundle validation a display-server-independent version source. Launching
+# the JUCE GUI binary just to query its version can initialise a platform GUI
+# backend on headless Linux runners, so the release contract uses this manifest
+# generated from the exact CMake version compiled into the target.
+set(OPENSTUDIO_VERSION_MANIFEST
+    "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.version")
+file(WRITE "${OPENSTUDIO_VERSION_MANIFEST}" "${OPENSTUDIO_APP_VERSION}\n")
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_VERSION_MANIFEST}"
+    "OpenStudio.version"
+    "Copying OpenStudio version manifest to output directory"
+)
+
+# Ship the application license and third-party notices with every binary
+# bundle. On macOS these land in Contents/Resources; on Windows and Linux they
+# sit beside the executable and are consequently included by the packagers.
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+    "LICENSE"
+    "Copying OpenStudio license to output directory"
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_LICENSES.md"
+    "THIRD_PARTY_LICENSES.md"
+    "Copying third-party notices to output directory"
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/THIRD_PARTY_NOTICES.txt"
+    "licenses/Frontend-THIRD_PARTY_NOTICES.txt"
+    "Copying frontend dependency notices to output directory"
+)
+
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/LICENSE"
+    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    "licenses/YSFX-LICENSE.txt"
+    "YSFX Apache-2.0 license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/WDL/LICENSE.txt"
+    "aeb30b800c5b402a52e4a8960601bc56a74bed26ff6356f459f88d902998f4f4"
+    "licenses/WDL-LICENSE.txt"
+    "WDL zlib-style license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/dr_libs/LICENSE"
+    "dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15"
+    "licenses/dr_libs-LICENSE.txt"
+    "dr_libs dual license"
+)
+openstudio_require_and_copy_notice(
+    "${ysfx_SOURCE_DIR}/thirdparty/stb/LICENSE"
+    "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+    "licenses/stb-LICENSE.txt"
+    "stb dual license"
+)
+openstudio_require_and_copy_notice(
+    "${clap_SOURCE_DIR}/LICENSE"
+    "ced49f9ef950277afdb56199369ea6e8165ebfdbfbb37ebfe1827e0de892088d"
+    "licenses/CLAP-LICENSE.txt"
+    "CLAP SDK MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/signalsmith/LICENSE.txt"
+    "7154ecf162d91232235c9ba4619d95b30c7f1f904a39e0f22eaf914e208cb69b"
+    "licenses/Signalsmith-Stretch-LICENSE.txt"
+    "Signalsmith Stretch MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/signalsmith/signalsmith-linear/LICENSE.txt"
+    "072b5e9eb5b22880bdf6256324654cf3ce53dba828edb911921121e1be09d9c3"
+    "licenses/Signalsmith-Linear-LICENSE.txt"
+    "Signalsmith Linear MIT license"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/NOTICE.txt"
+    "c2cb0f6d2e7142c4eaa437c658e2fef1aa6d304b9eb75e5de8a9be09f317cdd3"
+    "licenses/ARA-NOTICE.txt"
+    "ARA SDK notice"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/ARA_API/LICENSE.txt"
+    "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    "licenses/ARA-API-LICENSE.txt"
+    "ARA API Apache-2.0 license"
+)
+openstudio_require_and_copy_notice(
+    "${ARA_SDK_ROOT}/ARA_Library/LICENSE.txt"
+    "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    "licenses/ARA-Library-LICENSE.txt"
+    "ARA Library Apache-2.0 license"
+)
+
+# These files are pinned to Spotify Basic Pitch v0.4.0. Verify their contents
+# before packaging so an HTTP/API error page can never be shipped as a notice.
+set(OPENSTUDIO_BASIC_PITCH_LICENSE
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/basic-pitch/LICENSE")
+set(OPENSTUDIO_BASIC_PITCH_NOTICE
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/basic-pitch/NOTICE")
+set(OPENSTUDIO_BASIC_PITCH_LICENSE_SHA256
+    "929c910bae2152fa87199a5d0660e09263419b7eee6d4b301d05ee2aaf211c37")
+set(OPENSTUDIO_BASIC_PITCH_NOTICE_SHA256
+    "b810e55c0e3b520fabb45fc2ccc74880187bf84e309971968541cc812dcde905")
+foreach(basic_pitch_legal_file IN ITEMS LICENSE NOTICE)
+    set(basic_pitch_legal_path "${OPENSTUDIO_BASIC_PITCH_${basic_pitch_legal_file}}")
+    if(NOT EXISTS "${basic_pitch_legal_path}")
+        message(FATAL_ERROR "Required Basic Pitch ${basic_pitch_legal_file} is missing: ${basic_pitch_legal_path}")
+    endif()
+    file(SHA256 "${basic_pitch_legal_path}" basic_pitch_legal_actual_sha256)
+    if(NOT "${basic_pitch_legal_actual_sha256}" STREQUAL
+           "${OPENSTUDIO_BASIC_PITCH_${basic_pitch_legal_file}_SHA256}")
+        message(FATAL_ERROR
+            "Basic Pitch ${basic_pitch_legal_file} checksum mismatch. Refusing to package an unverified legal file.")
+    endif()
+endforeach()
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_BASIC_PITCH_LICENSE}"
+    "licenses/BasicPitch-LICENSE.txt"
+    "Copying Basic Pitch license to output directory"
+)
+openstudio_copy_runtime_file(
+    "${OPENSTUDIO_BASIC_PITCH_NOTICE}"
+    "licenses/BasicPitch-NOTICE.txt"
+    "Copying Basic Pitch notice to output directory"
+)
+openstudio_copy_runtime_file(
+    "${neural_amp_modeler_core_SOURCE_DIR}/LICENSE"
+    "licenses/NeuralAmpModelerCore-LICENSE.txt"
+    "Copying NeuralAmpModelerCore license to output directory"
+)
+foreach(eigen_notice IN ITEMS COPYING.MPL2 COPYING.BSD COPYING.APACHE COPYING.MINPACK COPYING.README)
+    openstudio_copy_runtime_file(
+        "${neural_amp_modeler_core_SOURCE_DIR}/Dependencies/eigen/${eigen_notice}"
+        "licenses/Eigen-${eigen_notice}.txt"
+        "Copying Eigen ${eigen_notice} notice to output directory"
+    )
+endforeach()
+
 if(WIN32)
     set(FFMPEG_EXE "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg.exe")
+    set(OPENSTUDIO_FFMPEG_WINDOWS_SHA256
+        "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d")
+    set(OPENSTUDIO_FFMPEG_GPLV3
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/COPYING.GPLv3")
+    set(OPENSTUDIO_FFMPEG_PROVENANCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ffmpeg/PROVENANCE.json")
+    set(OPENSTUDIO_FFMPEG_GPLV3_SHA256
+        "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903")
+    set(OPENSTUDIO_FFMPEG_PROVENANCE_SHA256
+        "30fc0edca9acc1d7a3253a81afe485a44f1de3c4b86542a18f644c1f71f312d4")
     if(EXISTS "${FFMPEG_EXE}")
+        file(SHA256 "${FFMPEG_EXE}" ffmpeg_actual_sha256)
+        if(NOT "${ffmpeg_actual_sha256}" STREQUAL "${OPENSTUDIO_FFMPEG_WINDOWS_SHA256}")
+            message(FATAL_ERROR
+                "Bundled tools/ffmpeg.exe checksum mismatch. Refusing to package an unverified FFmpeg build.")
+        endif()
+        foreach(ffmpeg_legal_file IN ITEMS GPLV3 PROVENANCE)
+            set(ffmpeg_legal_path "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}}")
+            if(NOT EXISTS "${ffmpeg_legal_path}")
+                message(FATAL_ERROR
+                    "Bundled FFmpeg requires ${ffmpeg_legal_path}, but that legal/provenance file is missing.")
+            endif()
+            file(SHA256 "${ffmpeg_legal_path}" ffmpeg_legal_actual_sha256)
+            if(NOT "${ffmpeg_legal_actual_sha256}" STREQUAL
+                   "${OPENSTUDIO_FFMPEG_${ffmpeg_legal_file}_SHA256}")
+                message(FATAL_ERROR
+                    "Bundled FFmpeg ${ffmpeg_legal_file} checksum mismatch. Refusing to package an unverified legal/provenance file.")
+            endif()
+        endforeach()
         openstudio_copy_runtime_file(
             "${FFMPEG_EXE}"
             "ffmpeg.exe"
             "Copying bundled ffmpeg.exe to output directory"
         )
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_FFMPEG_GPLV3}"
+            "licenses/FFmpeg-COPYING.GPLv3.txt"
+            "Copying FFmpeg GPLv3 license to output directory"
+        )
+        openstudio_copy_runtime_file(
+            "${OPENSTUDIO_FFMPEG_PROVENANCE}"
+            "licenses/FFmpeg-PROVENANCE.json"
+            "Copying FFmpeg provenance to output directory"
+        )
     else()
-        message(WARNING "tools/ffmpeg.exe not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
+        message(FATAL_ERROR
+            "Required bundled tools/ffmpeg.exe is missing. Run: "
+            "powershell -ExecutionPolicy Bypass -File tools/setup-ffmpeg.ps1")
     endif()
 
     set(OPENSTUDIO_WINDOWS_PREREQS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/windows-prereqs")
@@ -520,16 +948,6 @@ if(WIN32)
         )
     else()
         message(WARNING "thirdparty/windows-prereqs not found. Run: powershell -ExecutionPolicy Bypass -File tools/setup-windows-prereqs.ps1")
-    endif()
-elseif(APPLE OR UNIX)
-    # On macOS/Linux, look for ffmpeg in the tools directory (no .exe extension)
-    set(FFMPEG_BIN "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
-    if(EXISTS "${FFMPEG_BIN}")
-        openstudio_copy_runtime_file(
-            "${FFMPEG_BIN}"
-            "ffmpeg"
-            "Copying bundled ffmpeg to output directory"
-        )
     endif()
 endif()
 
@@ -580,21 +998,52 @@ elseif(HAS_ONNXRUNTIME AND UNIX AND NOT APPLE)
     endif()
 endif()
 
+if(HAS_ONNXRUNTIME)
+    foreach(onnxruntime_notice IN ITEMS LICENSE ThirdPartyNotices.txt)
+        set(onnxruntime_notice_path "${ONNXRUNTIME_ROOT}/${onnxruntime_notice}")
+        if(NOT EXISTS "${onnxruntime_notice_path}")
+            message(FATAL_ERROR
+                "ONNX Runtime is enabled but ${onnxruntime_notice_path} is missing. "
+                "Reinstall the pinned runtime so its redistribution notices are complete.")
+        endif()
+        openstudio_copy_runtime_file(
+            "${onnxruntime_notice_path}"
+            "licenses/ONNXRuntime-${onnxruntime_notice}"
+            "Copying ONNX Runtime ${onnxruntime_notice} to output directory"
+        )
+    endforeach()
+endif()
+
 # Copy required core ML model(s) to output directory
 set(OPENSTUDIO_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources/models")
+set(OPENSTUDIO_BASIC_PITCH_MODEL "${OPENSTUDIO_MODELS_DIR}/basic_pitch_nmp.onnx")
+set(OPENSTUDIO_BASIC_PITCH_SHA256
+    "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec")
+if(NOT EXISTS "${OPENSTUDIO_BASIC_PITCH_MODEL}")
+    message(FATAL_ERROR
+        "The required bundled Basic Pitch model is missing: ${OPENSTUDIO_BASIC_PITCH_MODEL}")
+endif()
+file(SHA256 "${OPENSTUDIO_BASIC_PITCH_MODEL}" OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256)
+if(NOT "${OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256}" STREQUAL "${OPENSTUDIO_BASIC_PITCH_SHA256}")
+    message(FATAL_ERROR
+        "Basic Pitch model checksum mismatch. Expected ${OPENSTUDIO_BASIC_PITCH_SHA256}, "
+        "received ${OPENSTUDIO_BASIC_PITCH_ACTUAL_SHA256}.")
+endif()
 set(OPENSTUDIO_CORE_MODEL_FILES
     "basic_pitch_nmp.onnx"
+    "basic_pitch_nmp.provenance.json"
 )
 
 foreach(OPENSTUDIO_CORE_MODEL_FILE IN LISTS OPENSTUDIO_CORE_MODEL_FILES)
     set(OPENSTUDIO_CORE_MODEL_PATH "${OPENSTUDIO_MODELS_DIR}/${OPENSTUDIO_CORE_MODEL_FILE}")
-    if(EXISTS "${OPENSTUDIO_CORE_MODEL_PATH}")
-        openstudio_copy_runtime_file(
-            "${OPENSTUDIO_CORE_MODEL_PATH}"
-            "models/${OPENSTUDIO_CORE_MODEL_FILE}"
-            "Copying core ML model ${OPENSTUDIO_CORE_MODEL_FILE} to output directory"
-        )
+    if(NOT EXISTS "${OPENSTUDIO_CORE_MODEL_PATH}")
+        message(FATAL_ERROR "Required core ML asset is missing: ${OPENSTUDIO_CORE_MODEL_PATH}")
     endif()
+    openstudio_copy_runtime_file(
+        "${OPENSTUDIO_CORE_MODEL_PATH}"
+        "models/${OPENSTUDIO_CORE_MODEL_FILE}"
+        "Copying core ML model ${OPENSTUDIO_CORE_MODEL_FILE} to output directory"
+    )
 endforeach()
 
 # Copy stem separator Python script to output directory
@@ -731,9 +1180,9 @@ endif()
 # juce_add_binary_data(FrontendAssets
 #     SOURCES
 #         frontend/dist/index.html
-#         # Add other assets here or point to a directory if JUCE 8 supports it better now,
+#         # Add other assets here or point to a directory if JUCE supports it better now,
 #         # but typically we list files or use a helper to glob.
 #         # For now, placeholder.
 # )
 # Ensure binary data is linked (generated by juce_add_binary_data)
-# target_link_libraries(Studio13_v2 PRIVATE Studio13_rc_lib)
+# target_link_libraries(OpenStudio PRIVATE OpenStudio_rc_lib)

@@ -26,24 +26,30 @@ export const meteringActions = (set: SetFn, get: GetFn) => ({
     levels: Record<string, number>,
     masterLevel: number,
     clippingStates: Record<string, boolean>,
-    masterClipping: boolean
+    masterClipping: boolean,
+    midiInputLevels: Record<string, number> = {},
   ) => {
     set((state: any) => {
       let anyChanged = false;
       let newMeter = state.meterLevels;
       let newPeak = state.peakLevels;
       let newClipping = state.clippingStates;
+      let newMidiInput = state.midiInputLevels ?? {};
 
       for (const track of state.tracks) {
         const level = levels[track.id];
         const clipping = clippingStates[track.id] ?? false;
+        const midiInput = midiInputLevels[track.id];
         const levelChanged = level !== undefined && level !== newMeter[track.id];
         const clippingChanged = clipping !== (state.clippingStates[track.id] ?? false);
-        if (!levelChanged && !clippingChanged) continue;
+        const midiInputChanged =
+          midiInput !== undefined && midiInput !== (state.midiInputLevels?.[track.id] ?? 0);
+        if (!levelChanged && !clippingChanged && !midiInputChanged) continue;
         if (!anyChanged) {
           newMeter = { ...state.meterLevels };
           newPeak = { ...state.peakLevels };
           newClipping = { ...state.clippingStates };
+          newMidiInput = { ...(state.midiInputLevels ?? {}) };
           anyChanged = true;
         }
         if (level !== undefined) {
@@ -51,6 +57,9 @@ export const meteringActions = (set: SetFn, get: GetFn) => ({
           newPeak[track.id] = Math.max(newPeak[track.id] ?? 0, level);
         }
         newClipping[track.id] = clipping;
+        if (midiInput !== undefined) {
+          newMidiInput[track.id] = Math.max(0, Math.min(1, midiInput));
+        }
       }
 
       if (
@@ -61,6 +70,7 @@ export const meteringActions = (set: SetFn, get: GetFn) => ({
           newMeter = { ...state.meterLevels };
           newPeak = { ...state.peakLevels };
           newClipping = { ...state.clippingStates };
+          newMidiInput = { ...(state.midiInputLevels ?? {}) };
           anyChanged = true;
         }
         newMeter["master"] = masterLevel;
@@ -74,6 +84,7 @@ export const meteringActions = (set: SetFn, get: GetFn) => ({
         meterLevels: newMeter,
         peakLevels: newPeak,
         clippingStates: newClipping,
+        midiInputLevels: newMidiInput,
         masterLevel,
       };
     });

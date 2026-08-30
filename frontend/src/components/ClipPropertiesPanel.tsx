@@ -1,4 +1,5 @@
 import { X, Lock, Unlock } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button, Input, Slider } from "./ui";
@@ -9,19 +10,96 @@ function formatTime(seconds: number): string {
   return `${m}:${s.padStart(6, "0")}`;
 }
 
+interface ClipNameFieldProps {
+  clipId: string;
+  value: string;
+}
+
+function ClipNameField({ clipId, value }: ClipNameFieldProps) {
+  const { setClipName } = useDAWStore(useShallow((state) => ({
+    setClipName: state.setClipName,
+  })));
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(draft);
+  const valueRef = useRef(value);
+  const editingRef = useRef(false);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (editingRef.current) return;
+    draftRef.current = value;
+    setDraft(value);
+  }, [value]);
+  useEffect(() => () => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    const nextName = draftRef.current;
+    if (nextName !== valueRef.current) {
+      useDAWStore.getState().setClipName(clipId, nextName);
+    }
+  }, [clipId]);
+
+  const beginEdit = useCallback(() => {
+    editingRef.current = true;
+  }, []);
+  const commitEdit = useCallback(() => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    const nextName = draftRef.current;
+    if (nextName !== valueRef.current) setClipName(clipId, nextName);
+  }, [clipId, setClipName]);
+  const cancelEdit = useCallback(() => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    draftRef.current = valueRef.current;
+    setDraft(valueRef.current);
+  }, []);
+
+  return (
+    <Input
+      value={draft}
+      onFocus={beginEdit}
+      onChange={(event) => {
+        draftRef.current = event.target.value;
+        setDraft(event.target.value);
+      }}
+      onBlur={commitEdit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitEdit();
+          event.currentTarget.blur();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          cancelEdit();
+          event.currentTarget.blur();
+        }
+      }}
+      className="mt-0.5"
+      aria-label="Clip name"
+    />
+  );
+}
+
 /**
  * ClipPropertiesPanel - Shows and edits properties of the selected clip
  * Opens with F2 or from View menu
  */
 export function ClipPropertiesPanel() {
   const {
-    selectedClipId, tracks, setClipVolume, setClipFades,
+    selectedClipId, tracks,
+    beginClipVolumeEdit, setClipVolume, commitClipVolumeEdit,
+    beginClipFadeEdit, previewClipFades, commitClipFadeEdit,
     toggleClipMute, toggleClipLock, toggleClipProperties,
   } = useDAWStore(useShallow((s) => ({
     selectedClipId: s.selectedClipId,
     tracks: s.tracks,
+    beginClipVolumeEdit: s.beginClipVolumeEdit,
     setClipVolume: s.setClipVolume,
-    setClipFades: s.setClipFades,
+    commitClipVolumeEdit: s.commitClipVolumeEdit,
+    beginClipFadeEdit: s.beginClipFadeEdit,
+    previewClipFades: s.previewClipFades,
+    commitClipFadeEdit: s.commitClipFadeEdit,
     toggleClipMute: s.toggleClipMute,
     toggleClipLock: s.toggleClipLock,
     toggleClipProperties: s.toggleClipProperties,
@@ -38,6 +116,39 @@ export function ClipPropertiesPanel() {
       break;
     }
   }
+
+  const clipId = clip?.id;
+  const getLatestClip = useCallback(() => {
+    if (!clipId) return undefined;
+    return useDAWStore.getState().tracks
+      .flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === clipId);
+  }, [clipId]);
+  const beginVolumeEdit = useCallback(() => {
+    if (clipId) beginClipVolumeEdit(clipId);
+  }, [beginClipVolumeEdit, clipId]);
+  const changeVolume = useCallback((volumeDB: number) => {
+    if (clipId) setClipVolume(clipId, volumeDB);
+  }, [clipId, setClipVolume]);
+  const commitVolumeEdit = useCallback(() => {
+    if (clipId) commitClipVolumeEdit(clipId);
+  }, [clipId, commitClipVolumeEdit]);
+  const beginFadeEdit = useCallback(() => {
+    if (clipId) beginClipFadeEdit(clipId);
+  }, [beginClipFadeEdit, clipId]);
+  const changeFadeIn = useCallback((fadeIn: number) => {
+    if (!clipId) return;
+    const latestClip = getLatestClip();
+    if (latestClip) previewClipFades(clipId, fadeIn, latestClip.fadeOut);
+  }, [clipId, getLatestClip, previewClipFades]);
+  const changeFadeOut = useCallback((fadeOut: number) => {
+    if (!clipId) return;
+    const latestClip = getLatestClip();
+    if (latestClip) previewClipFades(clipId, latestClip.fadeIn, fadeOut);
+  }, [clipId, getLatestClip, previewClipFades]);
+  const commitFadeEdit = useCallback(() => {
+    if (clipId) commitClipFadeEdit(clipId);
+  }, [clipId, commitClipFadeEdit]);
 
   return (
     <div className="flex flex-col w-72 bg-daw-panel border border-daw-border rounded shadow-lg text-sm text-daw-text">
@@ -60,22 +171,7 @@ export function ClipPropertiesPanel() {
           {/* Name */}
           <div>
             <label className="text-xs text-daw-text-muted">Name</label>
-            <Input
-              value={clip.name}
-              onChange={(e) => {
-                const newName = e.target.value;
-                useDAWStore.setState((s) => ({
-                  tracks: s.tracks.map((t) => ({
-                    ...t,
-                    clips: t.clips.map((c) =>
-                      c.id === clip!.id ? { ...c, name: newName } : c,
-                    ),
-                  })),
-                  isModified: true,
-                }));
-              }}
-              className="mt-0.5"
-            />
+            <ClipNameField clipId={clip.id} value={clip.name} />
           </div>
 
           {/* File Path */}
@@ -126,7 +222,10 @@ export function ClipPropertiesPanel() {
               max={12}
               step={0.1}
               value={clip.volumeDB}
-              onChange={(v) => setClipVolume(clip!.id, v)}
+              defaultValue={0}
+              onBeginEdit={beginVolumeEdit}
+              onChange={changeVolume}
+              onCommitEdit={commitVolumeEdit}
               className="mt-1"
             />
           </div>
@@ -142,7 +241,10 @@ export function ClipPropertiesPanel() {
                 max={Math.min(clip.duration / 2, 5)}
                 step={0.001}
                 value={clip.fadeIn}
-                onChange={(v) => setClipFades(clip!.id, v, clip!.fadeOut)}
+                defaultValue={0}
+                onBeginEdit={beginFadeEdit}
+                onChange={changeFadeIn}
+                onCommitEdit={commitFadeEdit}
                 className="mt-1"
               />
             </div>
@@ -155,7 +257,10 @@ export function ClipPropertiesPanel() {
                 max={Math.min(clip.duration / 2, 5)}
                 step={0.001}
                 value={clip.fadeOut}
-                onChange={(v) => setClipFades(clip!.id, clip!.fadeIn, v)}
+                defaultValue={0}
+                onBeginEdit={beginFadeEdit}
+                onChange={changeFadeOut}
+                onCommitEdit={commitFadeEdit}
                 className="mt-1"
               />
             </div>

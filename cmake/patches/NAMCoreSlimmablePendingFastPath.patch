@@ -1,0 +1,115 @@
+diff --git a/NAM/wavenet/slimmable.cpp b/NAM/wavenet/slimmable.cpp
+index 7112105..fe38781 100644
+--- a/NAM/wavenet/slimmable.cpp
++++ b/NAM/wavenet/slimmable.cpp
+@@ -306,44 +306,59 @@ bool is_full_size(const std::vector<wavenet::LayerArrayParams>& params, const st
+ 
+ } // anonymous namespace
+ 
++static_assert(std::atomic<bool>::is_always_lock_free,
++              "SlimmableWavenet requires a lock-free pending-model publication hint");
++
+ #if NAM_HAS_ATOMIC_SHARED_PTR
+ void SlimmableWavenet::_pending_clear_release()
+ {
++  _pending_available.store(false, std::memory_order_release);
+   _pending_staged.store({}, std::memory_order_release);
+ }
+ 
+ std::shared_ptr<SlimmableWavenet::StagedSlimModel> SlimmableWavenet::_pending_load_acquire() const
+ {
++  if (!_pending_available.load(std::memory_order_acquire))
++    return {};
+   return _pending_staged.load(std::memory_order_acquire);
+ }
+ 
+ void SlimmableWavenet::_pending_store_release(std::shared_ptr<StagedSlimModel> p)
+ {
+   _pending_staged.store(std::move(p), std::memory_order_release);
++  _pending_available.store(true, std::memory_order_release);
+ }
+ 
+ std::shared_ptr<SlimmableWavenet::StagedSlimModel> SlimmableWavenet::_pending_exchange_take_acq_rel()
+ {
++  if (!_pending_available.exchange(false, std::memory_order_acq_rel))
++    return {};
+   return _pending_staged.exchange({}, std::memory_order_acq_rel);
+ }
+ #else
+ void SlimmableWavenet::_pending_clear_release()
+ {
++  _pending_available.store(false, std::memory_order_release);
+   std::atomic_store_explicit(&_pending_staged, std::shared_ptr<StagedSlimModel>{}, std::memory_order_release);
+ }
+ 
+ std::shared_ptr<SlimmableWavenet::StagedSlimModel> SlimmableWavenet::_pending_load_acquire() const
+ {
++  if (!_pending_available.load(std::memory_order_acquire))
++    return {};
+   return std::atomic_load_explicit(&_pending_staged, std::memory_order_acquire);
+ }
+ 
+ void SlimmableWavenet::_pending_store_release(std::shared_ptr<StagedSlimModel> p)
+ {
+   std::atomic_store_explicit(&_pending_staged, std::move(p), std::memory_order_release);
++  _pending_available.store(true, std::memory_order_release);
+ }
+ 
+ std::shared_ptr<SlimmableWavenet::StagedSlimModel> SlimmableWavenet::_pending_exchange_take_acq_rel()
+ {
++  if (!_pending_available.exchange(false, std::memory_order_acq_rel))
++    return {};
+   return std::atomic_exchange_explicit(&_pending_staged, std::shared_ptr<StagedSlimModel>{}, std::memory_order_acq_rel);
+ }
+ #endif
+@@ -488,10 +503,15 @@ void SlimmableWavenet::_stage_rebuild_model(const std::vector<int>& target_chann
+ 
+ void SlimmableWavenet::process(NAM_SAMPLE** input, NAM_SAMPLE** output, const int num_frames)
+ {
+-  if (auto pack = _pending_exchange_take_acq_rel())
++  // MSVC implements atomic<shared_ptr> with an internal lock. Keep that operation
++  // entirely off the steady-state audio path; it runs only when a staged model exists.
++  if (_pending_available.load(std::memory_order_acquire))
+   {
+-    _active_model = std::move(pack->model);
+-    _current_channels = std::move(pack->channels);
++    if (auto pack = _pending_exchange_take_acq_rel())
++    {
++      _active_model = std::move(pack->model);
++      _current_channels = std::move(pack->channels);
++    }
+   }
+   if (_active_model)
+     _active_model->process(input, output, num_frames);
+diff --git a/NAM/wavenet/slimmable.h b/NAM/wavenet/slimmable.h
+index 12c0268..740e83e 100644
+--- a/NAM/wavenet/slimmable.h
++++ b/NAM/wavenet/slimmable.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <atomic>
+ #include <memory>
+ #include <vector>
+ 
+@@ -15,10 +16,6 @@
+   #define NAM_HAS_ATOMIC_SHARED_PTR 0
+ #endif
+ 
+-#if NAM_HAS_ATOMIC_SHARED_PTR
+-  #include <atomic>
+-#endif
+-
+ #include "../dsp.h"
+ #include "json.hpp"
+ #include "../model_config.h"
+@@ -88,6 +85,9 @@ private:
+   /// Staged model; synchronized via deprecated std::atomic_* overloads for shared_ptr only.
+   std::shared_ptr<StagedSlimModel> _pending_staged;
+ #endif
++  /// Lock-free publication hint. The audio thread reads this first so steady-state
++  /// processing never enters the potentially locked atomic<shared_ptr> implementation.
++  std::atomic<bool> _pending_available{false};
+ 
+   std::vector<int> _current_channels;
+   int _current_buffer_size = 0;

@@ -27,15 +27,27 @@ import {
   Star,
   ExternalLink,
 } from "lucide-react";
-import { nativeBridge } from "../services/NativeBridge";
+import {
+  nativeBridge,
+  type BuiltInPluginAddress,
+  type PluginParameterInfo,
+  type PluginScanReport,
+} from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
 import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
-import { pluginAutomationParamId } from "../store/automationParams";
+import { registerScopedActionExecutor } from "../store/actionRegistry";
+import { builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
 import { useShallow } from "zustand/react/shallow";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
-import { Button, Input, Select } from "./ui";
+import {
+  activateShortcutContext,
+  getActiveShortcutContext,
+  registerShortcutSurface,
+  type ShortcutSurfaceHandler,
+} from "../utils/shortcutContext";
+import { Button, Input, ProfiledRangeInput, Select } from "./ui";
 import {
   EQGraph,
   CompressorGraph,
@@ -82,11 +94,22 @@ interface S13FXSlider {
   enumNames?: string[];
 }
 
-interface PluginParam {
-  index: number;
-  name: string;
-  value: number;
-  text: string;
+type PluginParam = PluginParameterInfo;
+
+function formatPluginParameterValue(param: PluginParam, normalizedValue: number): string {
+  if (!param.builtIn) return `${Math.round(normalizedValue * 100)}%`;
+  const minimum = Number(param.min ?? 0);
+  const maximum = Number(param.max ?? 1);
+  let rawValue = minimum + normalizedValue * (maximum - minimum);
+  if (param.discrete) rawValue = Math.round(rawValue);
+  if (param.type === "toggle") return rawValue >= 0.5 ? "On" : "Off";
+  if (param.type === "enum") {
+    return param.enumOptions?.find((option) => Math.round(option.value) === Math.round(rawValue))?.label
+      ?? String(Math.round(rawValue));
+  }
+  const span = Math.abs(maximum - minimum);
+  const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
+  return `${rawValue.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
 }
 
 interface Plugin {
@@ -94,11 +117,27 @@ interface Plugin {
   manufacturer: string;
   category: string;
   fileOrIdentifier: string;
+  identifier?: string;
   isInstrument: boolean;
   hasARA?: boolean;
   snapshot?: string;
   pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin";
   instrumentMode?: number;
+}
+
+function getPluginCategoryTokens(category: string): string[] {
+  const categories = new Map<string, string>();
+  for (const rawToken of category.split("|")) {
+    const token = rawToken.trim();
+    if (token) categories.set(token.toLowerCase(), token);
+  }
+  return Array.from(categories.values());
+}
+
+function getPluginReference(plugin: Plugin): string {
+  return plugin.pluginType === "s13fx" || plugin.pluginType === "builtin"
+    ? plugin.fileOrIdentifier
+    : plugin.identifier || plugin.fileOrIdentifier;
 }
 
 // Map VST3 category substrings to Lucide icons and colors
@@ -138,7 +177,8 @@ function getPluginDisplayName(
 ) {
   if (!pluginPath) return "Instrument";
   const knownPlugin = plugins.find(
-    (plugin) => plugin.fileOrIdentifier === pluginPath,
+    (plugin) =>
+      plugin.fileOrIdentifier === pluginPath || plugin.identifier === pluginPath,
   );
   if (knownPlugin) return knownPlugin.name;
 
@@ -155,7 +195,11 @@ export function FXChainPanel({
   const {
     updateTrack,
     addTrackFXWithUndo,
+    addTrackBuiltInFXWithUndo,
+    reorderTrackFXWithUndo,
     removeTrackFXWithUndo,
+    removeMasterFXWithUndo,
+    toggleFXSlotBypassWithUndo,
     loadInstrumentWithUndo,
     removeInstrumentWithUndo,
     clearTrackSamplerSampleWithUndo,
@@ -175,7 +219,11 @@ export function FXChainPanel({
     useShallow((s) => ({
       updateTrack: s.updateTrack,
       addTrackFXWithUndo: s.addTrackFXWithUndo,
+      addTrackBuiltInFXWithUndo: s.addTrackBuiltInFXWithUndo,
+      reorderTrackFXWithUndo: s.reorderTrackFXWithUndo,
       removeTrackFXWithUndo: s.removeTrackFXWithUndo,
+      removeMasterFXWithUndo: s.removeMasterFXWithUndo,
+      toggleFXSlotBypassWithUndo: s.toggleFXSlotBypassWithUndo,
       loadInstrumentWithUndo: s.loadInstrumentWithUndo,
       removeInstrumentWithUndo: s.removeInstrumentWithUndo,
       clearTrackSamplerSampleWithUndo: s.clearTrackSamplerSampleWithUndo,
@@ -196,6 +244,8 @@ export function FXChainPanel({
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [selectedFxIndex, setSelectedFxIndex] = useState<number | null>(null);
+  const availablePluginSearchRef = useRef<HTMLInputElement>(null);
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [bypassedFx, setBypassedFx] = useState<Set<number>>(new Set());
   const [expandedS13FX, setExpandedS13FX] = useState<number | null>(null);
@@ -204,9 +254,6 @@ export function FXChainPanel({
   const [expandedPitchCorrector, setExpandedPitchCorrector] = useState<
     number | null
   >(null);
-  const [expandedBuiltInFX, setExpandedBuiltInFX] = useState<number | null>(
-    null,
-  );
   const [expandedFallbackInstrument, setExpandedFallbackInstrument] =
     useState(false);
   const [showPresetMenu, setShowPresetMenu] = useState(false);
@@ -214,6 +261,14 @@ export function FXChainPanel({
   const [precisionUpdatingFx, setPrecisionUpdatingFx] = useState<number | null>(
     null,
   );
+
+  useEffect(() => {
+    setSelectedFxIndex((current) => (
+      current !== null && fxSlots.some((fx) => fx.index === current)
+        ? current
+        : null
+    ));
+  }, [fxSlots]);
 
   // Plugin parameter list state (per-slot)
   const [expandedParamsFx, setExpandedParamsFx] = useState<number | null>(null);
@@ -231,19 +286,27 @@ export function FXChainPanel({
   // MIDI Learn state
   const [midiLearnActive, setMidiLearnActive] = useState<{
     fxIndex: number;
-    paramIndex: number;
+    paramKey: string;
   } | null>(null);
   const midiLearnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleStartMIDILearn = useCallback(
-    async (fxIndex: number, paramIndex: number) => {
+    async (fxIndex: number, param: PluginParam) => {
       // Cancel any existing learn session
       if (midiLearnActive) {
         await nativeBridge.cancelPluginMIDILearn();
         if (midiLearnTimerRef.current) clearTimeout(midiLearnTimerRef.current);
       }
-      setMidiLearnActive({ fxIndex, paramIndex });
-      await nativeBridge.startPluginMIDILearn(trackId, fxIndex, paramIndex);
+      const paramKey = param.builtIn && param.paramId ? `builtin:${param.paramId}` : `plugin:${param.index}`;
+      setMidiLearnActive({ fxIndex, paramKey });
+      if (param.builtIn && param.paramId) {
+        await nativeBridge.startBuiltInMIDILearn(
+          { trackId, chain: chainType === "input" ? "input" : "track", fxIndex },
+          param.paramId,
+        );
+      } else {
+        await nativeBridge.startPluginMIDILearn(trackId, fxIndex, param.index, chainType === "input");
+      }
       // Auto-cancel after 10 seconds
       midiLearnTimerRef.current = setTimeout(async () => {
         await nativeBridge.cancelPluginMIDILearn();
@@ -251,7 +314,7 @@ export function FXChainPanel({
         midiLearnTimerRef.current = null;
       }, 10000);
     },
-    [midiLearnActive, trackId],
+    [chainType, midiLearnActive, trackId],
   );
 
   const handleCancelMIDILearn = useCallback(async () => {
@@ -324,6 +387,9 @@ export function FXChainPanel({
   // Plugin browser state
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(false);
+  const [pluginScanReport, setPluginScanReport] =
+    useState<PluginScanReport | null>(null);
+  const [pluginScanError, setPluginScanError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const currentTrack = tracks.find((track) => track.id === trackId);
@@ -334,9 +400,11 @@ export function FXChainPanel({
     name === "OpenStudio Piano" ||
     name === "OpenStudio Drums" ||
     name === "OpenStudio Basic Synth" ||
+    name === "OpenStudio Clean Guitar" ||
     name === "Studio13 Piano" ||
     name === "Studio13 Drums" ||
-    name === "Studio13 Basic Synth";
+    name === "Studio13 Basic Synth" ||
+    name === "Studio13 Clean Guitar";
 
   const hasBuiltInInstrumentFX =
     chainType === "track" &&
@@ -480,6 +548,23 @@ export function FXChainPanel({
   }, [chainType, loadAvailablePlugins, loadPlugins, trackId]);
 
   useEffect(() => {
+    const handleCatalogChanged = () => {
+      void loadAvailablePlugins();
+    };
+
+    window.addEventListener(
+      "openstudio:plugin-catalog-changed",
+      handleCatalogChanged,
+    );
+    return () => {
+      window.removeEventListener(
+        "openstudio:plugin-catalog-changed",
+        handleCatalogChanged,
+      );
+    };
+  }, [loadAvailablePlugins]);
+
+  useEffect(() => {
     return subscribeToFXChainChanged((detail) => {
       if (detail.trackId !== trackId || detail.chainType !== chainType) {
         return;
@@ -489,20 +574,43 @@ export function FXChainPanel({
     });
   }, [chainType, loadPlugins, trackId]);
 
-  const handleScan = async () => {
+  const handleScan = async (forceRescan: boolean) => {
     setPluginsLoading(true);
+    setPluginScanError("");
     try {
-      await nativeBridge.scanForPlugins();
+      setPluginScanReport(await nativeBridge.scanForPlugins(forceRescan));
       await loadAvailablePlugins();
     } catch (e) {
       console.error("[FXChain] Failed to scan:", e);
+      setPluginScanError(
+        "Scan did not complete; the previous plug-in catalog was preserved.",
+      );
     } finally {
       setPluginsLoading(false);
     }
   };
 
+  const handleAddPluginScanFolder = async () => {
+    setPluginScanError("");
+    try {
+      const folder = (
+        await nativeBridge.browseForFolder("Choose a plug-in scan folder")
+      ).trim();
+      if (!folder) return;
+      if (!(await nativeBridge.addPluginScanPath(folder))) {
+        setPluginScanError("That plug-in folder could not be added.");
+        return;
+      }
+      await handleScan(false);
+    } catch (error) {
+      console.error("[FXChain] Failed to add plug-in scan folder:", error);
+      setPluginScanError("That plug-in folder could not be added.");
+    }
+  };
+
   const handleAddPlugin = async (plugin: Plugin) => {
-    setAddingPlugin(plugin.fileOrIdentifier);
+    const pluginReference = getPluginReference(plugin);
+    setAddingPlugin(pluginReference);
     try {
       let success = false;
       const expectedLength =
@@ -517,11 +625,10 @@ export function FXChainPanel({
         if (chainType === "master") {
           success = await nativeBridge.addMasterBuiltInFX(plugin.name);
         } else {
-          const isInputFX = chainType === "input";
-          success = await nativeBridge.addTrackBuiltInFX(
+          success = await addTrackBuiltInFXWithUndo(
             trackId,
             plugin.name,
-            isInputFX,
+            chainType,
           );
           if (success && plugin.isInstrument && chainType === "track") {
             updateTrack(trackId, {
@@ -547,25 +654,25 @@ export function FXChainPanel({
           );
         }
       } else if (chainType === "master") {
-        success = await nativeBridge.addMasterFX(plugin.fileOrIdentifier);
+        success = await nativeBridge.addMasterFX(pluginReference);
       } else if (plugin.isInstrument && chainType === "track" && trackId) {
         // Instrument plugins (VSTi) must be loaded via loadInstrument so the
         // track is set to Instrument type and receives MIDI for synthesis.
         success = await loadInstrumentWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginReference,
         );
         if (success) {
           notifyInstrumentChanged({
             trackId,
-            instrumentPlugin: plugin.fileOrIdentifier,
+            instrumentPlugin: pluginReference,
           });
           await nativeBridge.openInstrumentEditor(trackId);
         }
       } else if (chainType === "input" || chainType === "track") {
         success = await addTrackFXWithUndo(
           trackId,
-          plugin.fileOrIdentifier,
+          pluginReference,
           chainType,
         );
       }
@@ -577,6 +684,7 @@ export function FXChainPanel({
           chainType,
           trackId,
           fileOrIdentifier: plugin.fileOrIdentifier,
+          identifier: plugin.identifier,
         });
         let updatedFx: FXSlot[] = [];
         if (chainType === "master") {
@@ -686,7 +794,7 @@ export function FXChainPanel({
         if (plugin.pluginType === "builtin" && updatedFx.length > 0) {
           const lastFx = updatedFx[updatedFx.length - 1];
           if (lastFx) {
-            setExpandedBuiltInFX(lastFx.index);
+            await handleOpenBuiltInEditor(lastFx);
             setExpandedPitchCorrector(null);
           }
         }
@@ -726,6 +834,40 @@ export function FXChainPanel({
     }
   };
 
+  async function handleOpenBuiltInEditor(fx: FXSlot) {
+    const title = fx.name || "OpenStudio Plugin";
+    const address: BuiltInPluginAddress = {
+      trackId,
+      chain: chainType,
+      fxIndex: fx.index,
+    };
+    const isNAMRack = title.toLowerCase().includes("nam rack");
+    const sessionId = JSON.stringify({
+      address,
+      title,
+      fallbackName: title,
+    });
+
+    try {
+      const opened = await nativeBridge.openBuiltInPluginEditorWindow(
+        sessionId,
+        {
+          x: isNAMRack ? 140 : 220,
+          y: isNAMRack ? 70 : 130,
+          width: isNAMRack ? 1320 : 980,
+          height: isNAMRack ? 860 : 720,
+        },
+      );
+      if (!opened) {
+        console.error(
+          `[FXChain] Failed to open built-in editor window for ${title}`,
+        );
+      }
+    } catch (e) {
+      console.error("[FXChain] Failed to open built-in editor window:", e);
+    }
+  }
+
   const handleRemoveInstrument = async () => {
     try {
       if (currentTrack?.samplerSamplePath && !currentTrack.instrumentPlugin) {
@@ -743,8 +885,7 @@ export function FXChainPanel({
     try {
       let success = false;
       if (chainType === "master") {
-        await nativeBridge.removeMasterFX(fxIndex);
-        success = true;
+        success = await removeMasterFXWithUndo(fxIndex);
       } else if (chainType === "input" || chainType === "track") {
         success = await removeTrackFXWithUndo(trackId, fxIndex, chainType);
       }
@@ -752,9 +893,6 @@ export function FXChainPanel({
       if (success) {
         console.log(`[FXChain] Removed ${chainType} FX ${fxIndex}`);
         await loadPlugins();
-        if (chainType === "master") {
-          notifyFXChainChanged({ trackId, chainType });
-        }
       }
     } catch (e) {
       console.error("[FXChain] Failed to remove plugin:", e);
@@ -762,37 +900,147 @@ export function FXChainPanel({
   };
 
   const handleToggleBypass = async (fxIndex: number) => {
-    const isBypassed = bypassedFx.has(fxIndex);
-    const newBypassed = !isBypassed;
     try {
-      let success = false;
-      if (chainType === "master") {
-        success = await nativeBridge.bypassMasterFX(fxIndex, newBypassed);
-      } else if (chainType === "input") {
-        success = await nativeBridge.bypassTrackInputFX(
-          trackId,
-          fxIndex,
-          newBypassed,
-        );
-      } else {
-        success = await nativeBridge.bypassTrackFX(
-          trackId,
-          fxIndex,
-          newBypassed,
-        );
-      }
+      const success = await toggleFXSlotBypassWithUndo(trackId, fxIndex, chainType);
       if (success) {
-        setBypassedFx((prev) => {
-          const next = new Set(prev);
-          if (newBypassed) next.add(fxIndex);
-          else next.delete(fxIndex);
-          return next;
-        });
+        await loadPlugins();
       }
     } catch (e) {
       console.error("[FXChain] Failed to toggle bypass:", e);
     }
   };
+
+  const fxShortcutSessionId = `fx-chain:${chainType}:${trackId}`;
+  const fxActionExecutorRef = useRef<
+    (actionId: string) => ReturnType<ShortcutSurfaceHandler>
+  >(() => "unmatched");
+  fxActionExecutorRef.current = (actionId) => {
+    if (actionId === "fx.close") {
+      onClose();
+      return "handled";
+    }
+    if (actionId === "track.openSelectedFxChain") {
+      return chainType === "track" && useDAWStore.getState().selectedTrackId === trackId
+        ? "handled"
+        : "claimed_noop";
+    }
+    if (actionId === "fx.add") {
+      const searchInput = availablePluginSearchRef.current;
+      if (!searchInput) return "claimed_noop";
+      searchInput.scrollIntoView({ block: "nearest", inline: "nearest" });
+      searchInput.focus();
+      searchInput.select();
+      return "handled";
+    }
+    if (actionId === "fx.openInstrumentEditor") {
+      if (chainType !== "track") return "claimed_noop";
+      if (hasLoadedInstrument) void handleOpenInstrumentEditor();
+      else if (hasFallbackInstrument) setExpandedFallbackInstrument((expanded) => !expanded);
+      else return "claimed_noop";
+      return "handled";
+    }
+    if (actionId === "fx.removeInstrument") {
+      if (chainType !== "track" || (!hasLoadedInstrument && !hasFallbackInstrument)) {
+        return "claimed_noop";
+      }
+      void handleRemoveInstrument();
+      return "handled";
+    }
+    if (
+      actionId !== "fx.removeSelected"
+      && actionId !== "fx.toggleSelectedBypass"
+      && actionId !== "fx.openSelectedEditor"
+      && actionId !== "fx.toggleSelectedAB"
+      && actionId !== "fx.reloadSelectedScript"
+      && actionId !== "fx.toggleSelectedParameters"
+      && actionId !== "fx.toggleSelectedPresets"
+    ) return "unmatched";
+
+    const selectedFx = selectedFxIndex === null
+      ? undefined
+      : fxSlots.find((fx) => fx.index === selectedFxIndex);
+    if (!selectedFx) return "claimed_noop";
+
+    if (actionId === "fx.removeSelected") {
+      void handleRemove(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedBypass") {
+      void handleToggleBypass(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedAB") {
+      if (selectedFx.type === "s13fx") return "claimed_noop";
+      togglePluginAB(trackId, selectedFx.index, chainType === "input");
+      return "handled";
+    }
+    if (actionId === "fx.reloadSelectedScript") {
+      if (selectedFx.type !== "s13fx") return "claimed_noop";
+      void handleReloadS13FX(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedParameters") {
+      if (selectedFx.type === "s13fx" || selectedFx.type === "builtin") return "claimed_noop";
+      void handleToggleParams(selectedFx.index);
+      return "handled";
+    }
+    if (actionId === "fx.toggleSelectedPresets") {
+      if (selectedFx.type === "s13fx") return "claimed_noop";
+      void handleTogglePluginPresets(selectedFx.index);
+      return "handled";
+    }
+
+    if (selectedFx.type === "builtin") {
+      void handleOpenBuiltInEditor(selectedFx);
+    } else {
+      void handleOpenEditor(selectedFx.index);
+    }
+    return "handled";
+  };
+
+  useEffect(() => {
+    const context = { kind: "plugin", sessionId: fxShortcutSessionId } as const;
+    const fallback = getActiveShortcutContext();
+    const unregisterSurface = registerShortcutSurface(
+      context,
+      () => "unmatched",
+      fallback,
+    );
+    const unregisterActions = registerScopedActionExecutor(
+      context,
+      (actionId) => fxActionExecutorRef.current(actionId),
+      [
+        "fx.close",
+        "fx.add",
+        ...(chainType === "track" ? ["track.openSelectedFxChain"] : []),
+        ...(chainType === "track" && (hasLoadedInstrument || hasFallbackInstrument)
+          ? ["fx.openInstrumentEditor", "fx.removeInstrument"]
+          : []),
+        ...(selectedFxIndex !== null ? [
+          "fx.removeSelected",
+          "fx.toggleSelectedBypass",
+          "fx.openSelectedEditor",
+          ...(fxSlots.find((slot) => slot.index === selectedFxIndex)?.type !== "s13fx"
+            ? ["fx.toggleSelectedAB", "fx.toggleSelectedPresets"]
+            : ["fx.reloadSelectedScript"]),
+          ...(["s13fx", "builtin"].includes(
+            fxSlots.find((slot) => slot.index === selectedFxIndex)?.type ?? "",
+          ) ? [] : ["fx.toggleSelectedParameters"]),
+        ] : []),
+      ],
+    );
+    return () => {
+      unregisterActions();
+      unregisterSurface();
+    };
+  }, [
+    chainType,
+    fxShortcutSessionId,
+    fxSlots,
+    hasFallbackInstrument,
+    hasLoadedInstrument,
+    selectedFxIndex,
+  ]);
 
   const handleSetPrecisionOverride = useCallback(
     async (fxIndex: number, mode: "auto" | "float32") => {
@@ -850,17 +1098,12 @@ export function FXChainPanel({
       if (chainType === "master") {
         // Master FX reorder not yet supported
         success = false;
-      } else if (chainType === "input") {
-        success = await nativeBridge.reorderTrackInputFX(
-          trackId,
-          draggedIndex,
-          dropIndex,
-        );
       } else {
-        success = await nativeBridge.reorderTrackFX(
+        success = await reorderTrackFXWithUndo(
           trackId,
           draggedIndex,
           dropIndex,
+          chainType,
         );
       }
 
@@ -970,11 +1213,9 @@ export function FXChainPanel({
 
   const handleAutomateParam = (fxIndex: number, param: PluginParam) => {
     if (chainType === "master") return; // Master automation not supported
-    const automationParam = pluginAutomationParamId(
-      chainType === "input",
-      fxIndex,
-      param.index,
-    );
+    const automationParam = param.builtIn && param.paramId
+      ? builtInAutomationParamId(chainType === "input", fxIndex, param.paramId)
+      : pluginAutomationParamId(chainType === "input", fxIndex, param.index);
     addAutomationLane(
       trackId,
       automationParam,
@@ -984,30 +1225,34 @@ export function FXChainPanel({
 
   const handlePluginParamChange = async (
     fxIndex: number,
-    paramIndex: number,
+    changedParam: PluginParam,
     value: number,
   ) => {
     const isInputFX = chainType === "input";
-    const automationParam = pluginAutomationParamId(
-      isInputFX,
-      fxIndex,
-      paramIndex,
-    );
+    const automationParam = changedParam.builtIn && changedParam.paramId
+      ? builtInAutomationParamId(isInputFX, fxIndex, changedParam.paramId)
+      : pluginAutomationParamId(isInputFX, fxIndex, changedParam.index);
     setAutomationWriteValue(trackId, automationParam, value);
     setPluginParams((params) =>
       params.map((param) =>
-        param.index === paramIndex
-          ? { ...param, value, text: `${Math.round(value * 100)}%` }
+        param.index === changedParam.index && param.paramId === changedParam.paramId
+          ? { ...param, value, text: formatPluginParameterValue(changedParam, value) }
           : param,
       ),
     );
-    await nativeBridge.setPluginParameter(
-      trackId,
-      fxIndex,
-      isInputFX,
-      paramIndex,
-      value,
-    );
+    if (changedParam.builtIn && changedParam.paramId) {
+      const minimum = Number(changedParam.min ?? 0);
+      const maximum = Number(changedParam.max ?? 1);
+      let rawValue = minimum + value * (maximum - minimum);
+      if (changedParam.discrete) rawValue = Math.round(rawValue);
+      await nativeBridge.setBuiltInPluginParam(
+        { trackId, chain: isInputFX ? "input" : "track", fxIndex },
+        changedParam.paramId,
+        rawValue,
+      );
+    } else {
+      await nativeBridge.setPluginParameter(trackId, fxIndex, isInputFX, changedParam.index, value);
+    }
   };
 
   // ---- Plugin Presets handlers ----
@@ -1077,9 +1322,20 @@ export function FXChainPanel({
     }
   };
 
+  const categoryByIdentity = new Map<string, string>();
+  for (const plugin of plugins) {
+    for (const category of getPluginCategoryTokens(plugin.category)) {
+      const identity = category.toLowerCase();
+      if (!categoryByIdentity.has(identity)) {
+        categoryByIdentity.set(identity, category);
+      }
+    }
+  }
   const categories = [
     "All",
-    ...Array.from(new Set(plugins.map((p) => p.category))),
+    ...Array.from(categoryByIdentity.values()).sort((a, b) =>
+      a.localeCompare(b),
+    ),
   ];
   const filteredPlugins = plugins.filter((p) => {
     if (p.isInstrument && chainType !== "track") return false;
@@ -1089,7 +1345,11 @@ export function FXChainPanel({
       p.manufacturer.toLowerCase().includes(term) ||
       p.category.toLowerCase().includes(term);
     const matchesCategory =
-      categoryFilter === "All" || p.category === categoryFilter;
+      categoryFilter === "All" ||
+      getPluginCategoryTokens(p.category).some(
+        (category) =>
+          category.toLowerCase() === categoryFilter.toLowerCase(),
+      );
     return matchesSearch && matchesCategory;
   });
 
@@ -1106,6 +1366,9 @@ export function FXChainPanel({
         className="fx-chain-panel-two-column"
         onClick={(e) => e.stopPropagation()}
         onContextMenu={guardModalContextMenu}
+        onPointerDownCapture={() => activateShortcutContext({ kind: "plugin", sessionId: fxShortcutSessionId })}
+        onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: fxShortcutSessionId })}
+        data-shortcut-context={`plugin:${fxShortcutSessionId}`}
       >
         <div className="fx-chain-header">
           <h3>
@@ -1319,6 +1582,7 @@ export function FXChainPanel({
                           }}
                           fallbackName={fallbackInstrumentDisplayName}
                           onClose={() => setExpandedFallbackInstrument(false)}
+                          shortcutSessionId={fxShortcutSessionId}
                         />
                       )}
                     </div>
@@ -1392,28 +1656,20 @@ export function FXChainPanel({
                     return (
                       <div key={fx.index}>
                         <div
-                          className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
+                          className={`fx-slot-item ${draggedIndex === index ? "dragging" : ""} ${selectedFxIndex === fx.index ? "ring-1 ring-cyan-500/70" : ""} ${isS13FX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
                           draggable
+                          tabIndex={0}
+                          data-selected={selectedFxIndex === fx.index ? "true" : undefined}
+                          onPointerDown={() => setSelectedFxIndex(fx.index)}
+                          onFocus={() => setSelectedFxIndex(fx.index)}
                           onDragStart={() => handleDragStart(index)}
                           onDragOver={handleDragOver}
                           onDrop={(e) => handleDrop(e, index)}
                           onClick={() => {
                             if (isS13FX) handleToggleS13FXSliders(fx.index);
                             else if (isBuiltIn) {
-                              setExpandedBuiltInFX(
-                                expandedBuiltInFX === fx.index
-                                  ? null
-                                  : fx.index,
-                              );
-                              if (fx.name.includes("Pitch Correct")) {
-                                setExpandedPitchCorrector(
-                                  expandedPitchCorrector === fx.index
-                                    ? null
-                                    : fx.index,
-                                );
-                              } else {
-                                setExpandedPitchCorrector(null);
-                              }
+                              void handleOpenBuiltInEditor(fx);
+                              setExpandedPitchCorrector(null);
                             } else handleOpenEditor(fx.index);
                           }}
                         >
@@ -1469,7 +1725,7 @@ export function FXChainPanel({
                                 isS13FX
                                   ? "Click to show sliders"
                                   : isBuiltIn
-                                    ? "Click to edit built-in plugin"
+                                    ? "Click to open editor window"
                                     : "Click to open editor"
                               }
                             >
@@ -1505,6 +1761,21 @@ export function FXChainPanel({
                                 <RefreshCw size={12} />
                               </Button>
                             </>
+                          )}
+                          {isBuiltIn && (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleOpenBuiltInEditor(fx);
+                              }}
+                              title="Open editor window"
+                              aria-label={`Open editor window for ${fx.name}`}
+                              className="fx-remove-btn"
+                            >
+                              <ExternalLink size={12} />
+                            </Button>
                           )}
                           {/* A/B Comparison Toggle */}
                           {!isS13FX &&
@@ -1645,19 +1916,6 @@ export function FXChainPanel({
                             </div>
                           )}
 
-                        {/* React built-in editor panel */}
-                        {isBuiltIn && expandedBuiltInFX === fx.index && (
-                          <BuiltInPluginPanel
-                            address={{
-                              trackId,
-                              chain: chainType,
-                              fxIndex: fx.index,
-                            }}
-                            fallbackName={fx.name}
-                            onClose={() => setExpandedBuiltInFX(null)}
-                          />
-                        )}
-
                         {/* Plugin Parameter Automation List */}
                         {!isS13FX && expandedParamsFx === fx.index && (
                           <div className="bg-neutral-900 border border-neutral-700 border-t-0 rounded-b p-2">
@@ -1677,7 +1935,12 @@ export function FXChainPanel({
                                 {pluginParams.map((param) => {
                                   const isLearning =
                                     midiLearnActive?.fxIndex === fx.index &&
-                                    midiLearnActive?.paramIndex === param.index;
+                                    midiLearnActive?.paramKey === (param.builtIn && param.paramId
+                                      ? `builtin:${param.paramId}`
+                                      : `plugin:${param.index}`);
+                                  const automationParamId = param.builtIn && param.paramId
+                                    ? builtInAutomationParamId(chainType === "input", fx.index, param.paramId)
+                                    : pluginAutomationParamId(chainType === "input", fx.index, param.index);
                                   return (
                                     <div
                                       key={param.index}
@@ -1695,72 +1958,39 @@ export function FXChainPanel({
                                       >
                                         {param.text}
                                       </span>
-                                      <input
-                                        type="range"
+                                      <ProfiledRangeInput
                                         min={0}
                                         max={1}
                                         step={0.001}
                                         value={param.value}
                                         className="w-20 h-1 accent-cyan-500"
-                                        onPointerDown={() => {
+                                        onBeginEdit={() => {
                                           if (chainType !== "master") {
                                             beginAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
-                                        onPointerUp={() => {
+                                        onCommitEdit={() => {
                                           if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
+                                              automationParamId,
                                             );
                                           }
                                         }}
-                                        onPointerCancel={() => {
-                                          if (chainType !== "master") {
-                                            endAutomationParamTouch(
-                                              trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
-                                            );
-                                          }
-                                        }}
-                                        onBlur={() => {
-                                          if (chainType !== "master") {
-                                            endAutomationParamTouch(
-                                              trackId,
-                                              pluginAutomationParamId(
-                                                chainType === "input",
-                                                fx.index,
-                                                param.index,
-                                              ),
-                                            );
-                                          }
-                                        }}
-                                        onChange={(event) => {
+                                        onValueChange={(value) => {
                                           void handlePluginParamChange(
                                             fx.index,
-                                            param.index,
-                                            Number(event.currentTarget.value),
+                                            param,
+                                            value,
                                           );
                                         }}
                                         title={`Set ${param.name}`}
                                       />
                                       {/* MIDI Learn button */}
-                                      {isLearning ? (
+                                      {chainType !== "master" && (isLearning ? (
                                         <button
                                           className="text-[9px] px-1.5 py-0.5 rounded bg-amber-700/40 text-amber-300 hover:bg-amber-700/70 transition-colors shrink-0 animate-pulse"
                                           onClick={() =>
@@ -1776,7 +2006,7 @@ export function FXChainPanel({
                                           onClick={() =>
                                             handleStartMIDILearn(
                                               fx.index,
-                                              param.index,
+                                              param,
                                             )
                                           }
                                           title={`MIDI Learn: assign a CC to "${param.name}"`}
@@ -1787,7 +2017,7 @@ export function FXChainPanel({
                                           />
                                           Learn
                                         </button>
-                                      )}
+                                      ))}
                                       {chainType !== "master" && (
                                         <button
                                           className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"
@@ -1962,16 +2192,15 @@ export function FXChainPanel({
                                           ))}
                                         </select>
                                       ) : (
-                                        <input
-                                          type="range"
+                                        <ProfiledRangeInput
                                           min={slider.min}
                                           max={slider.max}
                                           step={slider.inc || 0.001}
                                           value={slider.value}
-                                          onChange={(e) =>
+                                          onValueChange={(value) =>
                                             handleS13FXSliderChange(
                                               slider.index,
-                                              Number(e.target.value),
+                                              value,
                                             )
                                           }
                                           className="flex-1 accent-lime-500"
@@ -2027,6 +2256,7 @@ export function FXChainPanel({
             {/* Search and Filter */}
             <div className="flex gap-2 p-2 bg-neutral-800 items-center">
               <Input
+                ref={availablePluginSearchRef}
                 type="text"
                 variant="default"
                 size="lg"
@@ -2048,15 +2278,51 @@ export function FXChainPanel({
                 aria-label="Filter plugins by category"
               />
               <Button
+                variant="default"
+                size="md"
+                onClick={() => void handleAddPluginScanFolder()}
+                disabled={pluginsLoading}
+                aria-label="Add a plug-in scan folder"
+                title="Add a vendor or custom VST3, CLAP, or LV2 folder and scan it"
+              >
+                <FolderOpen size={14} />
+                Folder
+              </Button>
+              <Button
                 variant="primary"
                 size="md"
-                onClick={handleScan}
+                onClick={() => void handleScan(true)}
                 disabled={pluginsLoading}
-                aria-label="Scan for plugins"
+                aria-label="Deep scan for plugins"
+                title="Inspect every plug-in in every configured location"
               >
-                {pluginsLoading ? "Scanning..." : "Scan"}
+                {pluginsLoading ? "Scanning..." : "Deep Scan"}
               </Button>
             </div>
+
+            {(pluginScanReport || pluginScanError) && (
+              <div
+                className={`px-3 py-1.5 border-b text-[11px] ${
+                  pluginScanError ||
+                  !pluginScanReport?.success ||
+                  (pluginScanReport?.failedCount ?? 0) > 0 ||
+                  (pluginScanReport?.skippedCount ?? 0) > 0
+                    ? "border-amber-800/60 bg-amber-950/30 text-amber-200"
+                    : "border-emerald-800/50 bg-emerald-950/20 text-emerald-200"
+                }`}
+                role={pluginScanError ? "alert" : "status"}
+              >
+                {pluginScanError ||
+                  (!pluginScanReport?.success && pluginScanReport?.error) ||
+                  `Cataloged ${pluginScanReport?.pluginCount ?? 0} plug-in classes from ${pluginScanReport?.candidateCount ?? 0} candidates${
+                    (pluginScanReport?.failedCount ?? 0) > 0
+                      ? `; ${pluginScanReport?.failedCount} could not be loaded. Open the full Plugin Browser for details.`
+                      : (pluginScanReport?.skippedCount ?? 0) > 0
+                        ? `; ${pluginScanReport?.skippedCount} were skipped. Open the full Plugin Browser for details or retry.`
+                      : "."
+                  }`}
+              </div>
+            )}
 
             {/* Plugin List */}
             <div className="flex-1 overflow-y-auto p-2">
@@ -2066,10 +2332,13 @@ export function FXChainPanel({
                 </div>
               ) : filteredPlugins.length === 0 ? (
                 <div className="text-center p-10 text-neutral-400">
-                  No plugins found. Click "Scan" to search your system.
+                  {plugins.length > 0
+                    ? "No plug-ins match the current search or category filter."
+                    : "No plug-ins are cataloged. Click Deep Scan to inspect the configured folders."}
                 </div>
               ) : (
-                filteredPlugins.map((plugin, idx) => {
+                filteredPlugins.map((plugin) => {
+                  const pluginReference = getPluginReference(plugin);
                   const isScript = plugin.pluginType === "s13fx";
                   const isBuiltInPlugin = plugin.pluginType === "builtin";
                   const { Icon, color } = isScript
@@ -2079,7 +2348,7 @@ export function FXChainPanel({
                       : getCategoryIcon(plugin.category);
                   return (
                     <div
-                      key={idx}
+                      key={pluginReference}
                       className={`flex items-center gap-2 p-2 bg-neutral-800 border rounded mb-2 hover:border-blue-500 transition-colors ${
                         isScript
                           ? "border-lime-700/40"
@@ -2136,7 +2405,7 @@ export function FXChainPanel({
                         onClick={() => handleAddPlugin(plugin)}
                         disabled={addingPlugin !== null}
                       >
-                        {addingPlugin === plugin.fileOrIdentifier
+                        {addingPlugin === pluginReference
                           ? "Adding..."
                           : "Add"}
                       </Button>

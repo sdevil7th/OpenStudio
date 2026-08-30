@@ -20,7 +20,25 @@ const INTERACTIVE_SELECTOR = [
   "textarea",
   "a",
   "[role='button']",
+  "[role='checkbox']",
+  "[role='combobox']",
+  "[role='listbox']",
+  "[role='radio']",
+  "[role='scrollbar']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='switch']",
+  "[role='tab']",
   "[data-no-drag]",
+].join(",");
+
+const EDITOR_WHEEL_OWNER_SELECTOR = [
+  MODAL_LAYER_SELECTOR,
+  "[data-modal-panel='true']",
+  INTERACTIVE_SELECTOR,
+  "[contenteditable='true']",
+  "[contenteditable='']",
+  "[data-editor-wheel-owner='true']",
 ].join(",");
 
 const EDITABLE_TEXT_SELECTOR = [
@@ -32,6 +50,25 @@ const EDITABLE_TEXT_SELECTOR = [
 
 function targetElement(target: EventTarget | null): Element | null {
   return target instanceof Element ? target : null;
+}
+
+interface ClosestCapableTarget {
+  closest: (selectors: string) => unknown;
+}
+
+function hasClosest(target: EventTarget | null): target is EventTarget & ClosestCapableTarget {
+  return target !== null
+    && typeof (target as Partial<ClosestCapableTarget>).closest === "function";
+}
+
+/**
+ * Canvas/editor surface wheel handlers must yield to nested native controls,
+ * parameter controls, and modal content. This predicate never prevents or
+ * stops the event; callers return immediately so the child keeps ownership.
+ */
+export function isEditorWheelOwnedTarget(target: EventTarget | null): boolean {
+  return hasClosest(target)
+    && Boolean(target.closest(EDITOR_WHEEL_OWNER_SELECTOR));
 }
 
 export function hasOpenModalLayer(): boolean {

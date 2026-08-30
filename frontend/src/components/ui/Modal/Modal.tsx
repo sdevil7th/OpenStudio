@@ -8,6 +8,11 @@ import {
   guardModalContextMenu,
   guardModalPointerEvent,
 } from '../../../utils/modalEventGuards';
+import {
+  routeModalShortcutEvent,
+  useModalShortcutScope,
+} from '../../../utils/modalShortcutScope';
+import { activateShortcutContext } from '../../../utils/shortcutContext';
 
 /**
  * Modal Component
@@ -69,11 +74,13 @@ export function Modal({
   showCloseButton = true,
   className,
 }: ModalProps) {
-  // Handle close based on user preferences
-  // Note: Headless UI Dialog's onClose is triggered for both escape key and backdrop clicks
-  // We can't distinguish between them, so we use the most restrictive setting
+  useModalShortcutScope(isOpen, onClose, closeOnEscape);
+
+  // Keyboard closure is owned by modal.close below. Headless UI's onClose is
+  // retained only for its outside-click path, so unassigning/rebinding the
+  // action cannot be bypassed by the library's built-in raw-Escape handler.
   const handleClose = () => {
-    if (closeOnEscape || closeOnOverlayClick) {
+    if (closeOnOverlayClick) {
       onClose();
     }
   };
@@ -82,10 +89,22 @@ export function Modal({
     <Transition show={isOpen} as={Fragment}>
       <Dialog
         as="div"
-        className="relative z-[10000]"
+        className="fixed inset-0 z-[10000]"
         data-modal-root="true"
         onClose={handleClose}
         onContextMenu={guardModalContextMenu}
+        onPointerDownCapture={() => activateShortcutContext({ kind: 'modal' })}
+        onFocusCapture={() => activateShortcutContext({ kind: 'modal' })}
+        onKeyDown={(event) => {
+          const routed = routeModalShortcutEvent(event.nativeEvent);
+          if (routed.result !== 'unmatched') event.preventDefault();
+          if (routed.result !== 'unmatched' || routed.suppressedHeadlessEscape) {
+            // Also mark the React synthetic event. Native stopImmediatePropagation
+            // suppresses Headless UI, while this prevents a nested Dialog's key
+            // from continuing through React to an outer modal owner.
+            event.stopPropagation();
+          }
+        }}
         static={!closeOnEscape && !closeOnOverlayClick}
         aria-label={title ? undefined : 'Dialog'}
       >
@@ -124,7 +143,6 @@ export function Modal({
           >
             <DialogPanel
               data-modal-panel="true"
-              onKeyDown={(e) => e.stopPropagation()}
               onContextMenu={guardModalContextMenu}
               onMouseDown={guardModalPointerEvent}
               onMouseMove={guardModalPointerEvent}

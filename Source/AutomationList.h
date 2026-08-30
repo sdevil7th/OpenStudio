@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -46,6 +47,7 @@ public:
     void clear();
 
     int getNumPoints() const { return pointCount.load(std::memory_order_acquire); }
+    bool hasPointValueAtOrAbove(float threshold) const;
 
     void setDefaultValue(float val) { defaultValue.store(val, std::memory_order_relaxed); }
     float getDefaultValue() const { return defaultValue.load(std::memory_order_relaxed); }
@@ -71,7 +73,13 @@ public:
 private:
     using PointList = std::vector<AutomationPoint>;
 
-    std::shared_ptr<const PointList> pointsSnapshot { std::make_shared<const PointList>() };
+    // MSVC's atomic shared_ptr free functions use a process-wide internal
+    // lock. Keep ownership on the control side and publish a raw immutable
+    // pointer to the callback under a reader epoch instead.
+    std::shared_ptr<const PointList> pointsSnapshot;
+    std::atomic<const PointList*> pointsSnapshotForAudio { nullptr };
+    mutable std::atomic<std::uint32_t> pointSnapshotAudioReaders { 0 };
+    std::vector<std::shared_ptr<const PointList>> retiredPointSnapshots;
     mutable juce::CriticalSection writerLock;
     std::atomic<int> pointCount { 0 };
 

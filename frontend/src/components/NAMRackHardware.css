@@ -1,0 +1,1092 @@
+/* NAM Rack Design Port hardware artwork, control primitives, and physical-device surfaces. */
+.module {
+  position: absolute;
+  z-index: 10;
+  pointer-events: auto;
+}
+.module-frame {
+  position: absolute;
+  overflow: visible;
+}
+.stompbox .module-frame,
+.wide-pedal .module-frame {
+  overflow: hidden;
+}
+.module-skin {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  pointer-events: none;
+  user-select: none;
+}
+.module-title {
+  position: absolute;
+  left: 50%;
+  top: 66%;
+  z-index: 6;
+  max-width: 84%;
+  transform: translate(-50%, -50%);
+  color: rgba(248,252,255,.9);
+  font-size: max(9px, .7cqw);
+  font-weight: 950;
+  letter-spacing: 0;
+  text-align: center;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.label {
+  position: absolute;
+  z-index: 8;
+  transform: translate(-50%, -50%);
+  color: rgba(246,250,255,.85);
+  font-size: max(7px, .52cqw);
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.label.dark { color: #273247; }
+.label.center { transform: translateX(-50%); }
+.control-label { font-size: max(7px, .5cqw); }
+.mic-panel .label {
+  color: #172033;
+  font-size: max(7px, .52cqw);
+  font-weight: 950;
+}
+.rack-small {
+  color: rgba(235,239,244,.86);
+  font-size: max(6px, .4cqw);
+}
+.rack-big {
+  color: rgba(235,239,244,.88);
+  font-size: max(8px, .7cqw);
+}
+.asset-control {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 7;
+  width: var(--size);
+  height: auto;
+  transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
+  transform-origin: center;
+  pointer-events: none;
+  user-select: none;
+}
+.asset-control.toggle {
+  /* A real photographed toggle has two discrete orientations. Snap between
+     them without tweening through a knob-like rotation. */
+  transition: filter 130ms ease;
+}
+.asset-control.control-disabled,
+.control-label.control-disabled {
+  filter: grayscale(.82) saturate(.24);
+  opacity: .32;
+}
+.control-hit {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 40;
+  width: var(--hit);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+.control-hit.interactive {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.control-hit.interactive:active { cursor: grabbing; }
+.wide-pedal .post-label {
+  color: rgba(248,252,255,.92);
+  font-size: max(6px, .42cqw);
+  font-weight: 950;
+}
+.stompbox .control-label,
+.stompbox .value-label {
+  font-size: max(5px, .34cqw);
+}
+.stompbox .kicker {
+  font-size: max(4px, .33cqw);
+}
+.stompbox .module-title {
+  font-size: max(7px, .48cqw);
+}
+.wide-pedal .module-title {
+  font-size: max(8px, .58cqw);
+}
+.delay-rack .module-title {
+  font-size: max(5px, .42cqw);
+}
+.delay-rack .post-label,
+.delay-rack .foot-action-label {
+  font-size: max(4px, .36cqw);
+}
+.foot-action-label {
+  z-index: 12;
+  color: rgba(248,252,255,.9);
+  font-size: max(6px, .44cqw);
+  font-weight: 950;
+}
+.asset-button {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 7;
+  width: var(--w);
+  height: var(--h);
+  transform: translate(-50%, -50%);
+}
+.asset-button img { width: 100%; height: 100%; object-fit: contain; }
+.asset-button span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #f5656c;
+  overflow: hidden;
+  font-size: max(5px, .42cqw);
+  font-weight: 950;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.module-display {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 2px;
+  color: #ff6268;
+  background: #030506;
+  font-size: max(8px, .52cqw);
+  font-weight: 950;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.amp-brand {
+  position: absolute;
+  left: 50%;
+  top: 25.8%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  color: rgba(230,234,238,.62);
+  font-size: max(7px, .58cqw);
+  font-weight: 950;
+  text-transform: uppercase;
+}
+.amp-badge {
+  position: absolute;
+  left: 50%;
+  top: 34%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  max-width: 34%;
+  padding: 3px 11px;
+  border: 1px solid rgba(240,240,225,.36);
+  border-radius: 3px;
+  color: #d8dcd5;
+  background: rgba(14,17,18,.82);
+  font-size: max(10px, .82cqw);
+  font-weight: 950;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cab-badge {
+  position: absolute;
+  left: 50%;
+  top: 50.8%;
+  z-index: 5;
+  transform: translate(-50%, -50%);
+  width: auto;
+  min-width: 31%;
+  height: 7%;
+  padding: 0 3.6%;
+  display: grid;
+  place-items: center;
+  color: #cfd3cc;
+  background: rgba(20,22,22,.9);
+  border: 1px solid rgba(245,245,232,.35);
+  border-radius: 2px;
+  font-size: max(5px, .48cqw);
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
+}
+.mic-panel .panel-title { font-size: max(6px, .48cqw); }
+.mic-panel .micro-label,
+.mic-panel .control-label,
+.mic-panel .value-label {
+  font-size: max(5px, .42cqw);
+}
+.mic-panel .asset-button span {
+  font-size: max(4px, .34cqw);
+}
+.mic-panel .mix-fader-label {
+  font-size: max(5px, .4cqw);
+}
+.mic-asset {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 7;
+  height: var(--h);
+  width: auto;
+  transform: translate(-50%, -50%);
+}
+.fader {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 6;
+  width: 4.4%;
+  height: var(--h);
+  transform: translate(-50%, -50%);
+}
+.fader-track {
+  position: absolute;
+  left: 48%;
+  top: 0;
+  width: 15%;
+  height: 100%;
+  border-radius: 999px;
+  background: #050709;
+  border: 1px solid rgba(255,255,255,.12);
+}
+.fader-cap {
+  position: absolute;
+  left: 50%;
+  top: var(--value);
+  width: 146%;
+  transform: translate(-50%, -50%);
+}
+.mix-fader { width: 4.05%; }
+.eq-rack .fader { width: 1.95%; }
+.eq-rack .fader-cap { width: 145%; }
+.eq-rack .eq-scale,
+.eq-rack .eq-band-value,
+.eq-rack .eq-frequency {
+  color: rgba(242,247,253,.9);
+  font-size: max(8px, .6cqw);
+  font-weight: 950;
+}
+.eq-rack .eq-frequency { font-size: max(8px, .58cqw); }
+.eq-rack .eq-level-lane .eq-band-value,
+.eq-rack .eq-level-lane .eq-frequency { color: #e7b85e; }
+.eq-rack .eq-level-lane .fader-track { border-color: rgba(231,184,94,.36); }
+.eq-rack .label.dark { color: rgba(242,247,253,.86); }
+.nam-rack-design-port .module {
+  filter: drop-shadow(0 26px 22px rgba(0,0,0,.5));
+  transition: filter 140ms ease, transform 140ms ease;
+}
+.nam-rack-design-port .module-skin {
+  filter: saturate(.9) contrast(1.04) brightness(.87);
+}
+.nam-rack-design-port .asset-control {
+  filter: drop-shadow(0 4px 4px rgba(0,0,0,.4));
+}
+.nam-rack-design-port .asset-control.knob {
+  /* The source knob artwork's visible gear ring is centered at 47.5586% Y
+     inside its transparent square. Anchor and rotate around that physical
+     center so the knob cannot orbit by a pixel or two while turning. */
+  transform-origin: 50% 47.5586%;
+  transform: translate(-50%, -47.5586%) rotate(var(--rot, 0deg));
+}
+.nam-rack-design-port .control-label,
+.nam-rack-design-port .module-title,
+.nam-rack-design-port .label {
+  text-shadow: 0 1px 1px rgba(0,0,0,.52);
+}
+.nam-rack-design-port .asset-button span,
+.nam-rack-design-port .foot-action-label,
+.nam-rack-design-port .delay-rack .foot-action-label {
+  font-size: max(8px, .55cqw);
+  letter-spacing: .01em;
+}
+.nam-rack-design-port .stompbox .control-label,
+.nam-rack-design-port .stompbox .value-label,
+.nam-rack-design-port .wide-pedal .control-label,
+.nam-rack-design-port .wide-pedal .value-label {
+  font-size: max(8px, .62cqw);
+  font-weight: 780;
+  letter-spacing: .03em;
+}
+.nam-rack-design-port .stompbox .module-title,
+.nam-rack-design-port .wide-pedal .module-title {
+  font-size: max(9px, .76cqw);
+  font-weight: 860;
+  letter-spacing: .04em;
+}
+.nam-rack-design-port .module[data-module="precision-drive"] .module-title {
+  width: 96%;
+  max-width: 96%;
+  font-size: max(8px, .68cqw);
+  letter-spacing: .015em;
+}
+.nam-rack-design-port .module[data-module="precision-drive"] .precision-drive-gate-label {
+  font-size: 7px;
+  font-weight: 680;
+  letter-spacing: .04em;
+}
+.nam-rack-design-port .stompbox .kicker {
+  font-size: max(7px, .5cqw);
+  opacity: .58;
+}
+.nam-rack-design-port .cab-controls-locked .cab-control-deck .asset-control.led {
+  filter: grayscale(.9) saturate(.18);
+  opacity: .28;
+}
+.nam-rack-design-port .cab-controls-locked .cab-room-bay .asset-control.led {
+  filter: none;
+  opacity: 1;
+}
+.nam-rack-design-port .cabinet.cab-mode-empty .module-frame { filter: brightness(.38) saturate(.45); }
+.nam-rack-design-port .cabinet.cab-mode-required .module-frame { filter: brightness(.55) saturate(.62); }
+.nam-rack-design-port .cabinet.cab-mode-embedded .module-frame { filter: brightness(.82) saturate(.78); }
+.nam-rack-design-port .ir-shaper-panel.cab-controls-locked .module-skin {
+  filter: brightness(.68) contrast(1.08) saturate(.42) drop-shadow(0 18px 15px rgba(0,0,0,.55));
+}
+.nam-rack-design-port .amp-brand {
+  color: rgba(255,255,255,.84);
+  font-size: max(17px, 1.65cqw);
+  letter-spacing: -.035em;
+  text-shadow: 0 2px 3px rgba(0,0,0,.65);
+}
+.nam-rack-design-port .amp-badge {
+  max-width: 56%;
+  overflow: hidden;
+  color: #f2d5a7;
+  font-size: max(11px, 1.02cqw);
+  text-overflow: ellipsis;
+  text-shadow: 0 2px 3px rgba(0,0,0,.7);
+  white-space: nowrap;
+}
+.nam-rack-design-port .amp-control-rail[data-disabled="true"] .asset-control.led,
+.nam-rack-design-port .amp-control-rail[data-disabled="true"] .asset-control.washer,
+.nam-rack-design-port .amp-control-rail[data-disabled="true"] .control-label:not(.control-disabled) {
+  filter: grayscale(.82) saturate(.24);
+  opacity: .32;
+}
+.nam-rack-design-port .pedal-nam-control-group[data-disabled="true"] .asset-control.led {
+  filter: grayscale(.82) saturate(.24);
+  opacity: .32;
+}
+.nam-rack-design-port .cab-badge {
+  max-width: 78%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nam-rack-design-port .cab-badge {
+  color: rgba(255,241,219,.9);
+  font-size: max(10px, .82cqw);
+}
+.nam-rack-design-port .mic-panel .panel-title,
+.nam-rack-design-port .mic-panel .control-label,
+.nam-rack-design-port .mic-panel .rack-small {
+  font-size: max(8px, .58cqw);
+}
+.nam-rack-design-port .eq-rack-title {
+  color: #e7eaee;
+  font-size: max(9px, .74cqw);
+}
+.nam-rack-design-port .rack-small,
+.nam-rack-design-port .rack-big {
+  font-size: max(8px, .58cqw);
+}
+.nam-rack-design-port .eq-rack .fader { width: 2.6%; }
+.nam-rack-design-port .module { filter: drop-shadow(0 25px 22px rgba(0,0,0,.67)); }
+.nam-rack-design-port .module-skin { filter: saturate(.98) contrast(1.025) brightness(1.025); }
+.nam-rack-design-port .control-label,
+.nam-rack-design-port .module-title,
+.nam-rack-design-port .label { text-shadow: 0 1px 1px rgba(0,0,0,.34); }
+.nam-rack-design-port .stompbox .control-label,
+.nam-rack-design-port .stompbox .value-label {
+  font-size: 9.25px;
+  color: rgba(237,235,229,.84);
+  font-weight: 620;
+  letter-spacing: .018em;
+}
+.nam-rack-design-port .wide-pedal .control-label,
+.nam-rack-design-port .wide-pedal .value-label {
+  font-size: 9.5px;
+  color: rgba(237,235,229,.82);
+  font-weight: 610;
+  letter-spacing: .012em;
+}
+.nam-rack-design-port .stompbox .module-title {
+  font-size: 10.5px;
+  color: rgba(244,242,235,.9);
+  font-weight: 680;
+  letter-spacing: .025em;
+}
+.nam-rack-design-port .wide-pedal .module-title {
+  font-size: 11.5px;
+  color: rgba(244,242,235,.88);
+  font-weight: 680;
+  letter-spacing: .025em;
+}
+.nam-rack-design-port .module[data-module="precision-drive"] .module-title {
+  font-size: 9.5px;
+}
+.nam-rack-design-port .stompbox .kicker {
+  font-size: 7.5px;
+}
+.nam-rack-design-port .asset-button span,
+.nam-rack-design-port .foot-action-label,
+.nam-rack-design-port .delay-rack .foot-action-label {
+  font-size: 8.5px;
+  color: rgba(226,224,218,.84);
+  font-weight: 590;
+}
+.nam-rack-design-port .asset-button.hot span { color: #e6ad5b; }
+.nam-rack-design-port .module[data-module="compressor"] .control-label {
+  width: 27%;
+  max-width: 27%;
+  overflow: visible;
+  font-size: 7.6px;
+  text-align: center;
+  white-space: nowrap;
+}
+.nam-rack-design-port .asset-control.enum-position-rotary {
+  z-index: 8;
+  filter: saturate(1.08) brightness(1.04) contrast(1.08) drop-shadow(0 1px 1px rgba(0,0,0,.72));
+  transition: transform 170ms cubic-bezier(.2, .92, .28, 1.12), filter 150ms ease;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout {
+  position: absolute;
+  z-index: 8;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  align-items: center;
+  box-sizing: border-box;
+  color: rgba(237,235,229,.78);
+  font-size: 7px;
+  font-weight: 720;
+  letter-spacing: .025em;
+  line-height: 1;
+  text-align: center;
+  text-shadow: none;
+  pointer-events: none;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-hpf-readout strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: stretch;
+  min-width: 0;
+  min-height: 9px;
+  padding: 1px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 1px;
+  color: #efbd72;
+  background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));
+  box-shadow: none;
+  filter: none;
+  font-size: 7px;
+  font-weight: 780;
+  letter-spacing: 0;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-intensity-readout {
+  grid-template-rows: 1fr;
+}
+.nam-rack-design-port .module[data-module="compressor"] .compressor-intensity-readout strong {
+  align-self: stretch;
+  font-size: 8px;
+  line-height: 1;
+}
+.nam-rack-design-port .module[data-module="distortion"] .control-label {
+  width: 27%;
+  max-width: 27%;
+  overflow: visible;
+  text-align: center;
+}
+.nam-rack-design-port .module[data-module="distortion"] .distortion-mode-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.14);
+  color: #e6ad5b;
+  background:
+    linear-gradient(180deg, rgba(1,2,2,.99), rgba(5,7,7,.98));
+  box-shadow: none;
+  filter: none;
+  font-size: 8.35px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .055em;
+  line-height: 1;
+  text-align: center;
+  text-shadow: none;
+  white-space: nowrap;
+}
+.nam-rack-design-port .module-display {
+  color: #e6ad5b;
+  font-weight: 650;
+}
+.nam-rack-design-port .stompbox .module-display,
+.nam-rack-design-port .wide-pedal .module-display {
+  box-shadow: none;
+  filter: none;
+}
+.nam-rack-design-port .mic-panel .panel-title,
+.nam-rack-design-port .mic-panel .control-label,
+.nam-rack-design-port .mic-panel .rack-small,
+.nam-rack-design-port .eq-rack .eq-scale,
+.nam-rack-design-port .eq-rack .eq-band-value,
+.nam-rack-design-port .eq-rack .eq-frequency,
+.nam-rack-design-port .eq-rack .rack-big,
+.nam-rack-design-port .eq-rack .rack-small {
+  font-size: max(9px, .61cqw);
+  font-weight: 580;
+  letter-spacing: .015em;
+  text-shadow: 0 1px 1px rgba(0,0,0,.45);
+}
+.nam-rack-design-port .eq-rack .fader { width: 2.5%; }
+.nam-rack-design-port .eq-rack .fader-cap { width: 152%; }
+.nam-rack-design-port .eq-rack-title {
+  color: rgba(235,239,244,.9);
+  font-size: max(10px, .75cqw);
+  font-weight: 680;
+  letter-spacing: .09em;
+}
+.nam-rack-design-port .mic-panel .module-skin {
+  filter: brightness(.3) contrast(1.22) saturate(.45) sepia(.22) drop-shadow(0 20px 16px rgba(0,0,0,.5));
+}
+.nam-rack-design-port .mic-panel .module-frame::before {
+  content: "";
+  position: absolute;
+  inset: 2.4% 1.7%;
+  z-index: 2;
+  pointer-events: none;
+  border: 1px solid rgba(248,218,171,.14);
+  border-radius: 4.5%;
+  background:
+    linear-gradient(128deg, rgba(255,255,255,.065), transparent 22%, rgba(0,0,0,.11) 58%, rgba(224,161,73,.045)),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.012) 0 1px, transparent 1px 4px);
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.08),
+    inset 0 -20px 34px rgba(0,0,0,.2),
+    0 7px 14px rgba(0,0,0,.32);
+}
+.nam-rack-design-port .mic-panel .label,
+.nam-rack-design-port .mic-panel .panel-title,
+.nam-rack-design-port .mic-panel .control-label,
+.nam-rack-design-port .mic-panel .rack-small { color: rgba(241,235,222,.88); text-shadow: 0 1px 2px #000; }
+.nam-rack-design-port .ir-shaper-panel .module-skin {
+  filter: brightness(.9) contrast(1.08) saturate(.72) drop-shadow(0 18px 15px rgba(0,0,0,.55));
+}
+.nam-rack-design-port .ir-shaper-panel.cab-mode-empty.cab-controls-locked .module-skin {
+  filter: brightness(.68) contrast(1.08) saturate(.42) drop-shadow(0 18px 15px rgba(0,0,0,.55));
+}
+.nam-rack-design-port .ir-shaper-panel.cab-mode-required.cab-controls-locked .module-skin {
+  filter: brightness(.75) contrast(1.08) saturate(.48) drop-shadow(0 18px 15px rgba(0,0,0,.55));
+}
+.nam-rack-design-port .ir-shaper-panel.cab-mode-embedded.cab-controls-locked .module-skin {
+  filter: brightness(.81) contrast(1.08) saturate(.55) drop-shadow(0 18px 15px rgba(0,0,0,.55));
+}
+.nam-rack-design-port .ir-shaper-panel .control-label {
+  color: rgba(237,232,222,.86);
+  font-size: max(8px, .55cqw);
+  font-weight: 620;
+  letter-spacing: .055em;
+  text-shadow: 0 1px 2px rgba(0,0,0,.9);
+}
+.nam-rack-design-port .cab-room-console .module-frame {
+  overflow: hidden;
+  border-radius: 2.4%;
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob {
+  filter: drop-shadow(0 5px 5px rgba(0,0,0,.65)) drop-shadow(0 0 1px rgba(106,167,219,.55));
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .asset-control.knob.blue-steel {
+  filter: brightness(.7) saturate(.72) contrast(1.04) drop-shadow(0 5px 5px rgba(0,0,0,.7));
+}
+.nam-rack-design-port .cab-room-console .cab-room-control .control-hit {
+  pointer-events: auto;
+}
+.nam-rack-design-port .amp-brand {
+  top: 25.5%;
+  color: rgba(220,222,224,.74);
+  font-size: max(10px, .88cqw);
+  font-weight: 650;
+  letter-spacing: .09em;
+  text-shadow: 0 1px 2px rgba(0,0,0,.7);
+}
+.nam-rack-design-port .control-hit {
+  border-radius: 999px;
+  outline: none;
+}
+.nam-rack-design-port .control-hit.interactive:focus-visible {
+  outline: 2px solid rgba(244, 183, 91, .96);
+  outline-offset: -2px;
+  box-shadow:
+    0 0 0 2px rgba(6, 8, 10, .82),
+    0 0 0 5px rgba(224, 161, 73, .22),
+    0 0 14px rgba(224, 161, 73, .24);
+}
+.nam-rack-design-port .module .control-hit.interactive:is(
+  [data-param-id="chaosMode"],
+  [data-param-id="compressorSidechainHPF"]
+):focus-visible {
+  outline: 1px solid rgba(239, 186, 104, .76);
+  outline-offset: -1px;
+  box-shadow: 0 0 0 1px rgba(6, 8, 10, .72);
+}
+.nam-rack-design-port .module .control-hit.interactive.pointer-focused:is(
+  [data-param-id="chaosMode"],
+  [data-param-id="compressorSidechainHPF"]
+):focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.nam-rack-design-port .control-hit.disabled-feedback {
+  cursor: help;
+}
+.nam-rack-design-port .control-hit.disabled-feedback:focus-visible {
+  outline: 1px solid rgba(210, 169, 105, .8);
+  outline-offset: -1px;
+  box-shadow: 0 0 0 3px rgba(224, 161, 73, .14);
+}
+.nam-rack-design-port .asset-control.led {
+  opacity: 1;
+  transition: opacity 130ms ease, filter 130ms ease;
+}
+.nam-rack-design-port .asset-control.led.off {
+  opacity: .62;
+  filter:
+    grayscale(.72)
+    saturate(.3)
+    brightness(.5)
+    contrast(1.12)
+    drop-shadow(0 2px 2px rgba(0,0,0,.5));
+}
+.nam-rack-design-port .asset-control.led.on {
+  opacity: 1;
+  filter:
+    saturate(1.12)
+    brightness(1.14)
+    contrast(1.05)
+    drop-shadow(0 0 3px rgba(255,181,72,.88))
+    drop-shadow(0 0 8px rgba(232,151,43,.48));
+}
+.nam-rack-design-port .foot-action-label,
+.nam-rack-design-port .delay-rack .foot-action-label {
+  font-size: 7px;
+  font-weight: 620;
+  letter-spacing: .045em;
+}
+.nam-rack-design-port .module[data-module="modulator"] .mod-header-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.12);
+  color: #efbd72;
+  background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));
+  box-shadow: none;
+  filter: none;
+  font-size: 7.5px;
+  font-weight: 780;
+  letter-spacing: .035em;
+  line-height: 1;
+  text-shadow: none;
+}
+.nam-rack-design-port .module[data-module="modulator"] .mod-character-display {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.12);
+  color: #efbd72;
+  background: linear-gradient(180deg, rgba(2,4,5,.99), rgba(8,11,13,.99));
+  box-shadow: none;
+  filter: none;
+  font-size: 7.5px;
+  font-weight: 780;
+  letter-spacing: .035em;
+  line-height: 1;
+  text-shadow: none;
+}
+.nam-rack-design-port .wide-pedal .post-label {
+  /* Preserve full-size physical hardware by taking the required breathing
+     room from typography, not from the LED or footswitch photographs. */
+  font-size: 7px;
+  font-weight: 720;
+  letter-spacing: .025em;
+  line-height: 1;
+}
+.nam-rack-design-port .nam-rack-artboard[data-effects-disabled="true"] .module {
+  filter: grayscale(.82) saturate(.24) brightness(.64);
+  opacity: .52;
+  transition: filter 150ms ease, opacity 150ms ease;
+}
+.nam-rack-design-port .nam-rack-artboard[data-effects-disabled="true"] .module .control-hit {
+  pointer-events: none;
+}
+.nam-rack-design-port .amp-brand small {
+  display: inline-block;
+  margin-left: 8px;
+  color: rgba(205, 170, 118, .78);
+  font-size: .72em;
+  font-weight: 620;
+  letter-spacing: .12em;
+}
+
+/* Approved NAM Rack V3 hardware surfaces. These rules intentionally live at
+   the end of the active hardware sheet so older rollback-board styling cannot
+   distort the production Amp or two-tier post-cab EQ geometry. */
+.nam-rack-design-port .amp-head-v3 .module-skin,
+.nam-rack-design-port .eq-rack-v3 .module-skin {
+  filter: none;
+}
+
+.nam-rack-design-port .eq-rack-v3 .eq-v3-header-title,
+.nam-rack-design-port .eq-rack-v3 .eq-v3-header-subtitle,
+.nam-rack-design-port .eq-rack-v3 .eq-v3-status {
+  position: absolute;
+  z-index: 8;
+  line-height: 1;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0,0,0,.92);
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-header-title {
+  color: #d9d7d1;
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: .17em;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-header-subtitle {
+  color: #9d8556;
+  font-size: 4px;
+  font-weight: 760;
+  letter-spacing: .17em;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-status {
+  transform: translateX(-100%);
+  color: #8d8980;
+  font-size: 4px;
+  font-weight: 760;
+  letter-spacing: .12em;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-divider {
+  position: absolute;
+  left: 5.6%;
+  right: 5.6%;
+  z-index: 4;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(212,183,123,.2) 9%, rgba(212,183,123,.2) 91%, transparent);
+  pointer-events: none;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader {
+  width: var(--fader-hit-width) !important;
+  height: var(--h);
+  border-radius: 4px;
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader:active { cursor: grabbing; }
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader:focus-visible {
+  outline: 1px solid rgba(240,190,78,.92);
+  outline-offset: 4px;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader .fader-track {
+  left: 50%;
+  top: 50%;
+  width: var(--fader-track-width);
+  height: var(--fader-track-height);
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(0,0,0,.82);
+  border-radius: 3px;
+  background: linear-gradient(90deg, #07080a, #171a1e 46%, #050607 53%, #111317);
+  box-shadow: inset 1px 0 rgba(255,255,255,.08), 0 1px 2px #000;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader .fader-track::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  width: 7px;
+  height: 1px;
+  background: rgba(216,165,75,.32);
+  box-shadow: 0 -16px rgba(255,255,255,.11), 0 16px rgba(255,255,255,.11);
+  pointer-events: none;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-fader .fader-cap {
+  left: 50%;
+  top: var(--value);
+  width: var(--fader-cap-size) !important;
+  height: var(--fader-cap-size);
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,.72));
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-frequency {
+  color: #c9c6bf;
+  font-size: 6px !important;
+  font-weight: 760 !important;
+  letter-spacing: .04em !important;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-utility-label {
+  color: #bebaaf;
+  font-size: 6px;
+  font-weight: 760;
+  letter-spacing: .07em;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph {
+  position: absolute;
+  z-index: 8;
+  width: 36px;
+  height: 14px;
+  transform: translateX(-50%);
+  color: #d3ad60;
+  filter: drop-shadow(0 1px rgba(0,0,0,.7));
+  pointer-events: none;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph::before,
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph::after {
+  content: "";
+  position: absolute;
+  height: 1.4px;
+  border-radius: 999px;
+  background: currentColor;
+  transform-origin: center;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph-hpf::before {
+  left: 30%;
+  right: 2%;
+  top: 20%;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph-hpf::after {
+  left: 2%;
+  top: 54%;
+  width: 34%;
+  transform: rotate(-42deg);
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph-lpf::before {
+  left: 2%;
+  right: 30%;
+  top: 20%;
+}
+.nam-rack-design-port .eq-rack-v3 .eq-v3-filter-glyph-lpf::after {
+  right: 2%;
+  top: 54%;
+  width: 34%;
+  transform: rotate(42deg);
+}
+.nam-rack-design-port .eq-rack-v3 .eq-filter-knob {
+  filter: brightness(.78) saturate(.72) drop-shadow(0 3px 3px rgba(0,0,0,.62));
+}
+
+.nam-rack-design-port .amp-head-v3 .amp-capture-nameplate {
+  left: 50%;
+  top: 34.927536%;
+  width: 39.444444%;
+  height: 29.275362%;
+  min-height: 0;
+  grid-template-rows: auto auto auto auto;
+  align-content: center;
+  justify-items: center;
+  gap: 0;
+  padding: 7px 12px 6px;
+  border: 0;
+  border-radius: 2px;
+  color: #ddd9d1;
+  background: transparent;
+  box-shadow: none;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-nameplate:focus-within {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(228,169,83,.5);
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-brand {
+  color: #e2ded6;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-brand small {
+  margin-left: 5px;
+  color: #b8985c;
+  font-size: 5px;
+  font-weight: 760;
+  letter-spacing: .12em;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-state {
+  gap: 4px;
+  margin-top: 6px;
+  color: #c6a764;
+  font-size: 5px;
+  letter-spacing: .1em;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-model {
+  width: 245px;
+  margin-top: 3px;
+  color: #f2eee7;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: .012em;
+  line-height: 1;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-actions {
+  gap: 5px;
+  margin-top: 7px;
+}
+.nam-rack-design-port .amp-head-v3 .amp-capture-actions button {
+  min-width: 54px;
+  height: 19px;
+  padding: 0 7px;
+  color: #bdb8ae;
+  border-color: rgba(255,255,255,.17);
+  border-radius: 1px;
+  background: rgba(0,0,0,.2);
+  box-shadow: none;
+  font-size: 4.8px;
+  letter-spacing: .08em;
+}
+.nam-rack-design-port .amp-head-v3 .amp-wrapper-legend {
+  color: rgba(209,178,111,.64);
+  font-size: 4.4px;
+  font-weight: 730;
+  letter-spacing: .15em;
+}
+.nam-rack-design-port .amp-head-v3 .amp-rail-label {
+  max-width: 11%;
+  color: #ddd8cd;
+  font-size: 5.7px !important;
+  font-weight: 760;
+  letter-spacing: .08em;
+  text-shadow: 0 1px 2px rgba(0,0,0,.9);
+}
+
+/* V4 Amp and Graphic EQ production surfaces. The bitmap contains every
+   stationary faceplate detail; the DOM contains only interactive hardware.
+   Source-pixel manifests in namRackFaceplateGeometry.ts own all centres and
+   travel endpoints, so these rules must never add visual offsets. */
+.nam-rack-design-port .amp-head-v4 .module-skin,
+.nam-rack-design-port .eq-rack-v4 .module-skin {
+  filter: none;
+}
+
+.nam-rack-design-port .amp-head-v4 .asset-control.knob,
+.nam-rack-design-port .eq-rack-v4 .asset-control.knob {
+  transform-origin: 50% 50%;
+  transform: translate(-50%, -50%) rotate(var(--rot, 0deg));
+}
+.nam-rack-design-port .amp-head-v4 .knob-position-indicator,
+.nam-rack-design-port .eq-rack-v4 .knob-position-indicator {
+  display: none;
+}
+
+.nam-rack-design-port .amp-head-v4 .amp-capture-nameplate {
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: center;
+  justify-items: center;
+  gap: 1px;
+  padding: 5px 10px 4px;
+  border: 0;
+  border-radius: 2px;
+  color: #ddd9d1;
+  background: transparent;
+  box-shadow: none;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-nameplate:focus-within {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(228,169,83,.42);
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-brand {
+  display: none;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-state {
+  gap: 3px;
+  margin: 0;
+  color: #c6a764;
+  font-size: 5px;
+  letter-spacing: .09em;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-state i {
+  width: 3px;
+  height: 3px;
+  flex-basis: 3px;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-model {
+  width: min(100%, 180px);
+  margin: 1px 0 0;
+  color: #f2eee7;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: .012em;
+  line-height: 1;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-actions {
+  gap: 4px;
+  margin: 2px 0 0;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-actions button {
+  min-width: 47px;
+  height: 17px;
+  gap: 3px;
+  padding: 0 5px;
+  color: #bbb6ad;
+  border-color: rgba(255,255,255,.15);
+  border-radius: 1px;
+  background: rgba(0,0,0,.18);
+  box-shadow: none;
+  font-size: 4.8px;
+  letter-spacing: .07em;
+}
+.nam-rack-design-port .amp-head-v4 .amp-capture-actions button svg {
+  width: 7px;
+  height: 7px;
+}
+
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader {
+  width: var(--fader-hit-width) !important;
+  height: var(--h);
+  border-radius: 3px;
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+}
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader:active {
+  cursor: grabbing;
+}
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader:focus-visible {
+  outline: 1px solid rgba(231,177,78,.92);
+  outline-offset: 2px;
+}
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader .fader-track {
+  left: 50%;
+  top: var(--fader-track-top);
+  width: var(--fader-track-width);
+  height: var(--fader-track-height);
+  transform: translateX(-50%);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader .fader-track::after {
+  display: none;
+}
+.nam-rack-design-port .eq-rack-v4 .eq-v4-fader .fader-cap {
+  left: 50%;
+  top: var(--value);
+  width: var(--fader-cap-size) !important;
+  height: auto;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.72));
+}
+.nam-rack-design-port .eq-rack-v4 .eq-filter-knob {
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,.58));
+}

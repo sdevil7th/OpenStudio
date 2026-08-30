@@ -44,3 +44,22 @@ export function getTimelineAxisLockedDeltas(
     ? { axisLock, deltaX, deltaY: 0 }
     : { axisLock, deltaX: 0, deltaY };
 }
+
+export interface TimelineDropTrackHit {
+  trackIndex: number;
+  isInClipArea: boolean;
+}
+
+/** Resolve a vertical clip drop while keeping above-timeline drags on track 0. */
+export function resolveTimelineDropTrackIndex(
+  absoluteY: number,
+  contentHeight: number,
+  trackCount: number,
+  hit: TimelineDropTrackHit | null,
+): number {
+  if (trackCount <= 0) return 0;
+  if (absoluteY < 0) return 0;
+  if (hit?.isInClipArea) return hit.trackIndex;
+  if (absoluteY >= contentHeight) return trackCount;
+  return hit?.trackIndex ?? Math.max(0, trackCount - 1);
+}

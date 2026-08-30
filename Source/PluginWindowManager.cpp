@@ -36,6 +36,51 @@ std::optional<PluginWindowManager::PluginEditorTarget::Scope> stringToScope(cons
     return std::nullopt;
 }
 
+juce::String functionKeyForDom(int keyCode)
+{
+    if (keyCode == juce::KeyPress::F1Key) return "F1";
+    if (keyCode == juce::KeyPress::F2Key) return "F2";
+    if (keyCode == juce::KeyPress::F3Key) return "F3";
+    if (keyCode == juce::KeyPress::F4Key) return "F4";
+    if (keyCode == juce::KeyPress::F5Key) return "F5";
+    if (keyCode == juce::KeyPress::F6Key) return "F6";
+    if (keyCode == juce::KeyPress::F7Key) return "F7";
+    if (keyCode == juce::KeyPress::F8Key) return "F8";
+    if (keyCode == juce::KeyPress::F9Key) return "F9";
+    if (keyCode == juce::KeyPress::F10Key) return "F10";
+    if (keyCode == juce::KeyPress::F11Key) return "F11";
+    if (keyCode == juce::KeyPress::F12Key) return "F12";
+    return {};
+}
+
+juce::String numberPadKeyForDom(int keyCode, bool code)
+{
+    const auto digit = [keyCode, code](int candidate, const char* value, const char* domCode)
+    {
+        return keyCode == candidate ? juce::String(code ? domCode : value) : juce::String();
+    };
+
+    if (auto value = digit(juce::KeyPress::numberPad0, "0", "Numpad0"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad1, "1", "Numpad1"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad2, "2", "Numpad2"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad3, "3", "Numpad3"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad4, "4", "Numpad4"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad5, "5", "Numpad5"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad6, "6", "Numpad6"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad7, "7", "Numpad7"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad8, "8", "Numpad8"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPad9, "9", "Numpad9"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadAdd, "+", "NumpadAdd"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadSubtract, "-", "NumpadSubtract"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadMultiply, "*", "NumpadMultiply"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadDivide, "/", "NumpadDivide"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadSeparator, ",", "NumpadComma"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadDecimalPoint, ".", "NumpadDecimal"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadEquals, "=", "NumpadEqual"); value.isNotEmpty()) return value;
+    if (auto value = digit(juce::KeyPress::numberPadDelete, "Delete", "NumpadDecimal"); value.isNotEmpty()) return value;
+    return {};
+}
+
 juce::String normaliseKeyForDom(const juce::KeyPress& key)
 {
     const auto keyCode = key.getKeyCode();
@@ -53,15 +98,21 @@ juce::String normaliseKeyForDom(const juce::KeyPress& key)
 
     if (keyCode == juce::KeyPress::spaceKey) return " ";
     if (keyCode == juce::KeyPress::returnKey) return "Enter";
+    if (keyCode == juce::KeyPress::tabKey) return "Tab";
     if (keyCode == juce::KeyPress::escapeKey) return "Escape";
-    if (keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey) return "Delete";
+    if (keyCode == juce::KeyPress::deleteKey) return "Delete";
+    if (keyCode == juce::KeyPress::backspaceKey) return "Backspace";
     if (keyCode == juce::KeyPress::leftKey) return "ArrowLeft";
     if (keyCode == juce::KeyPress::rightKey) return "ArrowRight";
     if (keyCode == juce::KeyPress::upKey) return "ArrowUp";
     if (keyCode == juce::KeyPress::downKey) return "ArrowDown";
     if (keyCode == juce::KeyPress::insertKey) return "Insert";
-    if (keyCode == juce::KeyPress::F1Key) return "F1";
-    if (keyCode == juce::KeyPress::F2Key) return "F2";
+    if (keyCode == juce::KeyPress::pageUpKey) return "PageUp";
+    if (keyCode == juce::KeyPress::pageDownKey) return "PageDown";
+    if (keyCode == juce::KeyPress::homeKey) return "Home";
+    if (keyCode == juce::KeyPress::endKey) return "End";
+    if (const auto functionKey = functionKeyForDom(keyCode); functionKey.isNotEmpty()) return functionKey;
+    if (const auto numberPadKey = numberPadKeyForDom(keyCode, false); numberPadKey.isNotEmpty()) return numberPadKey;
     if (keyCode == ',') return ",";
 
     if (const auto textChar = key.getTextCharacter(); textChar != 0)
@@ -85,15 +136,21 @@ juce::String normaliseCodeForDom(const juce::KeyPress& key)
 
     if (keyCode == juce::KeyPress::spaceKey) return "Space";
     if (keyCode == juce::KeyPress::returnKey) return "Enter";
+    if (keyCode == juce::KeyPress::tabKey) return "Tab";
     if (keyCode == juce::KeyPress::escapeKey) return "Escape";
-    if (keyCode == juce::KeyPress::deleteKey || keyCode == juce::KeyPress::backspaceKey) return "Delete";
+    if (keyCode == juce::KeyPress::deleteKey) return "Delete";
+    if (keyCode == juce::KeyPress::backspaceKey) return "Backspace";
     if (keyCode == juce::KeyPress::leftKey) return "ArrowLeft";
     if (keyCode == juce::KeyPress::rightKey) return "ArrowRight";
     if (keyCode == juce::KeyPress::upKey) return "ArrowUp";
     if (keyCode == juce::KeyPress::downKey) return "ArrowDown";
     if (keyCode == juce::KeyPress::insertKey) return "Insert";
-    if (keyCode == juce::KeyPress::F1Key) return "F1";
-    if (keyCode == juce::KeyPress::F2Key) return "F2";
+    if (keyCode == juce::KeyPress::pageUpKey) return "PageUp";
+    if (keyCode == juce::KeyPress::pageDownKey) return "PageDown";
+    if (keyCode == juce::KeyPress::homeKey) return "Home";
+    if (keyCode == juce::KeyPress::endKey) return "End";
+    if (const auto functionKey = functionKeyForDom(keyCode); functionKey.isNotEmpty()) return functionKey;
+    if (const auto numberPadKey = numberPadKeyForDom(keyCode, true); numberPadKey.isNotEmpty()) return numberPadKey;
     if (keyCode == ',') return "Comma";
 
     return {};
@@ -106,10 +163,15 @@ juce::var keyPressToVar(const juce::KeyPress& key)
 
     obj->setProperty("key", normaliseKeyForDom(key));
     obj->setProperty("code", normaliseCodeForDom(key));
-    obj->setProperty("ctrlKey", modifiers.isCtrlDown() || modifiers.isCommandDown());
+   #if JUCE_MAC
+    obj->setProperty("ctrlKey", modifiers.isCtrlDown());
+    obj->setProperty("metaKey", modifiers.isCommandDown());
+   #else
+    obj->setProperty("ctrlKey", modifiers.isCtrlDown());
+    obj->setProperty("metaKey", false);
+   #endif
     obj->setProperty("shiftKey", modifiers.isShiftDown());
     obj->setProperty("altKey", modifiers.isAltDown());
-    obj->setProperty("metaKey", modifiers.isCommandDown() && !modifiers.isCtrlDown());
     obj->setProperty("repeat", false);
     obj->setProperty("source", "pluginWindow");
     return juce::var(obj);
@@ -178,7 +240,7 @@ PluginWindowManager::PluginWindow::PluginWindow(PluginWindowManager& ownerIn,
     setUsingNativeTitleBar(true);
     setResizable(true, false);
 
-    if (auto* editor = processor.createEditor())
+    if (auto* editor = processor.createEditorAndMakeActive())
     {
         setContentOwned(editor, true);
 
@@ -461,7 +523,8 @@ bool PluginWindowManager::shouldSuppressDuplicateForward(const juce::KeyPress& k
 void PluginWindowManager::positionWindow(PluginWindow& window) const
 {
     auto bounds = window.getBounds();
-    auto displayArea = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userArea;
+    auto displayArea = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds
+                           .getSmallestIntegerContainer();
 
     if (mainWindowComponent != nullptr)
     {
@@ -470,7 +533,7 @@ void PluginWindowManager::positionWindow(PluginWindow& window) const
             : mainWindowComponent->getScreenBounds();
 
         if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(ownerBounds))
-            displayArea = display->userArea;
+            displayArea = display->userBounds.getSmallestIntegerContainer();
     }
 
     bounds.setSize(juce::jmin(bounds.getWidth(), displayArea.getWidth() - 16),

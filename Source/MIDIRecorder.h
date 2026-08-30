@@ -51,7 +51,7 @@ public:
     /// Uses ScopedTryLock — drops events if lock is held (start/stop).
     void recordEvent(const juce::String& trackId, double timeInSeconds, const juce::MidiMessage& message);
 
-    /// Set recording start time (called from audio thread on first block).
+    /// Set recording start time from the control/message thread.
     void setRecordingStartTime(const juce::String& trackId, double timeInSeconds);
 
     /// Check if a track is recording (audio-thread safe).
@@ -70,6 +70,12 @@ public:
     /// Stop all recordings, export to .mid files, return completed clips.
     /// Call on message thread.
     std::vector<CompletedMIDIRecording> stopAllRecordings(const juce::File& outputFolder, double tempo);
+    std::vector<CompletedMIDIRecording> rolloverRecordings(
+        const std::vector<juce::String>& trackIds,
+        double sampleRate,
+        double newStartTime,
+        const juce::File& outputFolder,
+        double tempo);
 
     /// Get live MIDI preview snapshots for actively recording tracks.
     /// Uses ScopedTryLock to avoid stalling the MIDI callback.
@@ -99,6 +105,10 @@ private:
     };
 
     std::map<juce::String, ActiveMIDIRecording> activeRecordings;
+    std::vector<CompletedMIDIRecording> finalizeDetachedRecordings(
+        std::map<juce::String, ActiveMIDIRecording>& recordings,
+        const juce::File& outputFolder,
+        double tempo);
     mutable juce::CriticalSection recLock;  // Protects activeRecordings map
     std::atomic<uint64_t> nextPreviewGeneration { 1 };
 

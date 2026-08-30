@@ -66,19 +66,19 @@ juce::String AudioAnalyzer::reverseAudioFile(const juce::String& filePath)
         outputFile.deleteFile();
 
     juce::WavAudioFormat wavFormat;
-    auto outputStream = std::make_unique<juce::FileOutputStream>(outputFile);
-    if (outputStream->failedToOpen())
+    std::unique_ptr<juce::OutputStream> outputStream = std::make_unique<juce::FileOutputStream>(outputFile);
+    if (static_cast<juce::FileOutputStream&>(*outputStream).failedToOpen())
         return {};
 
-    std::unique_ptr<juce::AudioFormatWriter> writer(
-        wavFormat.createWriterFor(
-            outputStream.get(), sr, numChannels,
-            24, {}, 0));
+    auto writer = wavFormat.createWriterFor(
+        outputStream,
+        juce::AudioFormatWriterOptions()
+            .withSampleRate(sr)
+            .withNumChannels(numChannels)
+            .withBitsPerSample(24));
 
     if (!writer)
         return {};
-
-    outputStream.release(); // Writer takes ownership
 
     writer->writeFromAudioSampleBuffer(reversedBuffer, 0, (int)numSamples);
     writer.reset(); // Flush and close

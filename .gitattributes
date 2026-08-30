@@ -1,0 +1,10 @@
+# Unified-diff context lines contain one required leading space. Treat those
+# syntax markers as valid instead of reporting them as trailing whitespace.
+*.patch text eol=lf whitespace=-blank-at-eol
+*.onnx binary
+thirdparty/basic-pitch/LICENSE text eol=lf
+thirdparty/basic-pitch/NOTICE text eol=lf
+thirdparty/ffmpeg/COPYING.GPLv3 text eol=lf
+thirdparty/ffmpeg/PROVENANCE.json text eol=lf
+thirdparty/signalsmith/LICENSE.txt text eol=lf
+thirdparty/signalsmith/signalsmith-linear/LICENSE.txt text eol=lf

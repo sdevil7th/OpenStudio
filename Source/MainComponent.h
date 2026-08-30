@@ -3,7 +3,11 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "AppUpdater.h"
+#include <functional>
+#include <map>
 #include <set>
+#include <utility>
+#include <vector>
 
 //==============================================================================
 /*
@@ -24,7 +28,8 @@ public:
     {
         main,
         mixer,
-        midiEditor
+        midiEditor,
+        pluginEditor
     };
 
     enum class FrontendStartupState
@@ -59,6 +64,8 @@ public:
         std::function<juce::var(const juce::String&)> getMidiEditorWindowState;
         std::function<void(const juce::String&, const juce::var&)> publishMidiEditorUISnapshot;
         std::function<juce::var(const juce::String&)> getMidiEditorUISnapshot;
+        std::function<bool(const juce::String&, const juce::var&)> openPluginEditorWindow;
+        std::function<bool(const juce::String&, const juce::String&)> closePluginEditorWindow;
     };
 
     //==============================================================================
@@ -77,11 +84,22 @@ public:
 
     void timerCallback() override;
     void requestFrontendAppClose();
+    void requestEmbeddedBrowserFocus();
+    void prepareForSecondaryWindowClose();
+    bool hasFrontendStartupSucceeded() const;
+    bool hasFrontendStartupReachedTerminalState() const;
+    juce::String getFrontendStartupStateDescription() const;
 
     static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
     static juce::var buildStartupSelfTestReport();
     static bool writeStartupSelfTestReport(const juce::File& reportFile);
+    static juce::var runNAMCatalogNativeRegression();
+    static int runNAMLibraryManifestWriterRegressionChild(
+        const juce::File& manifestFile,
+        const juce::String& writerId,
+        const juce::File& readyFile,
+        const juce::File& startFile);
 
 #if JUCE_WINDOWS
     void emitExternalMediaDropTargetEvent(const juce::String& eventId, const juce::var& payload);
@@ -113,6 +131,40 @@ private:
     juce::var buildStartupDiagnostics() const;
     void initializePitchRegressionJob(const juce::String& pitchRegressionJobPathIn);
     bool completePitchRegressionJob(const juce::var& result);
+    static std::string makeNAMModelMutationKey(const juce::String& trackId,
+                                               const juce::String& chainType,
+                                               int fxIndex,
+                                               const juce::String& slot);
+    juce::uint64 beginNAMModelMutationRequest(const juce::String& trackId,
+                                              const juce::String& chainType,
+                                              int fxIndex,
+                                              const juce::String& slot);
+    juce::uint64 beginNAMModelMutationRequests(
+        const juce::String& trackId,
+        const juce::String& chainType,
+        int fxIndex,
+        const juce::StringArray& slots,
+        std::vector<std::pair<juce::String, juce::uint64>>& requests);
+    void invalidateNAMModelMutationRequests(const juce::String& trackId,
+                                            const juce::String& chainType,
+                                            int fxIndex,
+                                            const juce::StringArray& slots);
+    bool isNAMModelMutationRequestCurrent(const juce::String& trackId,
+                                          const juce::String& chainType,
+                                          int fxIndex,
+                                          const juce::String& slot,
+                                          juce::uint64 generation);
+    std::shared_ptr<void> acquireNAMModelMutationPublicationLease(
+        const juce::String& trackId,
+        const juce::String& chainType,
+        int fxIndex,
+        const std::vector<std::pair<juce::String, juce::uint64>>& requests,
+        juce::uint64 topologyGeneration);
+    juce::var discardNAMPreviewIfUnused(juce::var recordPayload,
+                                        juce::var rackAddressPayload);
+    void runTone3000NativeTask(
+        std::function<juce::var()> task,
+        juce::WebBrowserComponent::NativeFunctionCompletion completion);
 #if JUCE_WINDOWS
     void installExternalMediaDropTarget();
     bool isWaveformPreviewRequestCancelled(const juce::String& requestId) const;
@@ -128,6 +180,7 @@ private:
     WindowCallbacks windowCallbacks;
     juce::File webuiDir;
     juce::WebBrowserComponent webView;
+    bool embeddedBrowserFocusRequestPending = false;
     juce::Label startupStatusMessage;
     juce::Label fallbackMessage;
     juce::TextButton startupRetryButton { "Retry" };
@@ -153,6 +206,36 @@ private:
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
+    juce::ThreadPool clipPeakAnalysisPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
+    juce::ThreadPool pluginScanPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
+    std::atomic<bool> tone3000NativeCompletionsEnabled { true };
+    std::shared_ptr<std::atomic<bool>> tone3000TaskCancellation {
+        std::make_shared<std::atomic<bool>>(false)
+    };
+    juce::ThreadPool tone3000BridgePool {
+        4,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
+    std::atomic<bool> pluginScanRunning { false };
+    // Keeps this window's jobs alive and sequenced. A process-wide gate in
+    // MainComponent.cpp serialises NAM mutations across every editor window.
+    // Model/IR parsing and prewarming can be CPU- and memory-intensive. Keep
+    // this single mutation worker below the audio callback's scheduling class
+    // so a model load cannot steal a 16-sample deadline.
+    juce::ThreadPool builtInStateMutationPool {
+        1,
+        juce::Thread::osDefaultStackSize,
+        juce::Thread::Priority::low
+    };
     juce::CriticalSection pitchCorrectionJobLock;
     juce::String activePreviewRequestGroup;
     juce::String activeNoteRenderRequestGroup;
@@ -167,9 +250,12 @@ private:
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
     bool attemptedPackagedFrontendFallbackAfterLocalTimeout = false;
+    bool secondaryWindowClosing = false;
     StartupRepairAction startupRepairAction = StartupRepairAction::none;
     juce::String lastAiToolsStatusDigest;
     double lastAiToolsStatusEmitMs = 0.0;
+    double lastAiToolsStatusPollMs = 0.0;
+    bool lastAiToolsInstallInProgress = false;
     juce::File pitchRegressionJobFile;
     juce::var pitchRegressionJob;
     bool pitchRegressionJobConsumed = false;

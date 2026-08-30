@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -10,6 +10,7 @@ import {
 } from "../utils/snapToGrid";
 // automationToBackend moved to store/actions/automation.ts
 import { logBridgeError } from "../utils/bridgeErrorHandler";
+import { isClipEditLocked } from "../utils/clipEditLock";
 import { uiStateActions } from "./actions/uiState";
 import { meteringActions } from "./actions/metering";
 import { transportActions } from "./actions/transport";
@@ -30,6 +31,33 @@ import { screensetActions } from "./actions/screensets";
 import { macroActions } from "./actions/macros";
 import { renderQueueActions } from "./actions/renderQueue";
 import { quantizeActions } from "./actions/quantize";
+import { timeSelectionEditingActions } from "./actions/timeSelectionEditing";
+import {
+  isKeyboardShortcutProfileId,
+  type KeyboardShortcutProfileId,
+} from "../utils/shortcutProfiles";
+import {
+  CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION,
+  CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY,
+  LEGACY_CUSTOM_SHORTCUTS_STORAGE_KEY,
+  MAX_CUSTOM_KEYBOARD_PROFILES,
+  createCustomKeyboardProfileId,
+  exportCustomKeyboardProfile,
+  getCustomShortcutTargetBindings,
+  migrateLegacyCustomShortcuts,
+  normalizeCustomProfileName,
+  normalizeCustomShortcutMap,
+  parseImportedCustomKeyboardProfile,
+  parsePersistedCustomKeyboardProfiles,
+  removeCustomShortcutTarget,
+  setCustomShortcutTargetBindings,
+  type CustomKeyboardProfileImportResult,
+  type CustomKeyboardShortcutProfile,
+  type CustomShortcutMap,
+  type CustomShortcutTarget,
+  type PersistedCustomKeyboardProfiles,
+} from "../utils/customShortcutProfiles";
+import { loadStoredMouseModifierOverrides } from "../utils/mouseModifierPersistence";
 import {
   DEFAULT_AI_MUSIC_MODEL_ID,
   STABLE_AUDIO_3_MODEL_ID,
@@ -56,6 +84,22 @@ export interface InstallAiToolsOptions {
 // Module-level helpers moved to store/actions/: _editSnapshots → tracks.ts,
 // syncAutomationLaneToBackend → automation.ts, syncTempoMarkersToBackend → markers.ts,
 // _linkingInProgress + getLinkedTrackIds → tracks.ts, projectJsonReplacer → project.ts
+
+interface AITrackParamsEditSnapshot {
+  trackId: string;
+  trackName: string;
+  previousParams: Record<string, unknown>;
+}
+
+let activeAITrackParamsEdit: AITrackParamsEditSnapshot | null = null;
+
+function areAITrackParamsEqual(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  return [...keys].every((key) => Object.is(left[key], right[key]));
+}
 
 // Group colors for visual linking brackets/tints
 export const TRACK_GROUP_COLORS = [
@@ -365,6 +409,7 @@ export interface MIDIClip {
     ccEvents?: MIDICCEvent[];
   };
   color: string;
+  groupId?: string; // Timeline item group shared with audio or MIDI clips
   muted?: boolean;
   locked?: boolean;
 }
@@ -445,12 +490,16 @@ export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
 export type AutomationModeType = "off" | "read" | "write" | "touch" | "latch";
 export type AutomationWriteBehavior = "touch" | "latch" | "overwrite";
 export const AUTOMATION_LANE_HEIGHT = 60; // px per visible automation lane
+export const MIN_AUTOMATION_LANE_HEIGHT = 24;
+export const MAX_AUTOMATION_LANE_HEIGHT = 240;
 export const DEFAULT_HORIZONTAL_SCROLLBAR_HEIGHT = 16;
 export const BOTTOM_INTERACTION_BUFFER = 32;
 export const TRACK_CLIP_VERTICAL_PADDING = 5;
 export const MASTER_TRACK_HEADER_BASE_HEIGHT = 38;
 
 export interface AutomationPoint {
+  /** Stable frontend identity; legacy project points are assigned one on load/use. */
+  id?: string;
   time: number; // Position in seconds
   value: number; // 0.0 to 1.0 normalized value
 }
@@ -463,22 +512,72 @@ export interface AutomationLane {
   mode: AutomationModeType;
   armed: boolean;
   readEnabled: boolean;
+  /** Per-lane editor height. Omitted lanes use AUTOMATION_LANE_HEIGHT. */
+  height?: number;
 }
 
 export interface AutomationSuspendSnapshot {
   showAutomation: boolean;
+  automationReadEnabled?: boolean;
+  automationWriteEnabled?: boolean;
+  automationEnabled?: boolean;
   lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType; readEnabled?: boolean }>;
 }
 
+/** Runtime editor ownership for a track or master automation lane/point. */
+export type AutomationSelectionTarget =
+  | {
+      kind: "track";
+      trackId: string;
+      laneId: string;
+      pointId: string | null;
+    }
+  | {
+      kind: "master";
+      laneId: string;
+      pointId: string | null;
+    };
+
+export type AutomationLaneSelectionTarget =
+  | { kind: "track"; trackId: string; laneId: string }
+  | { kind: "master"; laneId: string };
+
 // ===== Automation Layout Helpers =====
+
+export function getAutomationLaneHeight(
+  lane: Pick<AutomationLane, "height">,
+): number {
+  const height = Number.isFinite(lane.height)
+    ? lane.height as number
+    : AUTOMATION_LANE_HEIGHT;
+  return Math.max(
+    MIN_AUTOMATION_LANE_HEIGHT,
+    Math.min(MAX_AUTOMATION_LANE_HEIGHT, height),
+  );
+}
+
+export function getAutomationLaneOffset(
+  lanes: readonly Pick<AutomationLane, "height">[],
+  laneIndex: number,
+): number {
+  let offset = 0;
+  for (let index = 0; index < Math.max(0, laneIndex); index += 1) {
+    const lane = lanes[index];
+    if (lane) offset += getAutomationLaneHeight(lane);
+  }
+  return offset;
+}
 
 export function getEffectiveTrackHeight(
   track: Pick<Track, "showAutomation" | "automationLanes">,
   baseTrackHeight: number,
 ): number {
   if (!track.showAutomation) return baseTrackHeight;
-  const visibleLaneCount = track.automationLanes.filter((l) => l.visible).length;
-  return baseTrackHeight + visibleLaneCount * AUTOMATION_LANE_HEIGHT;
+  const visibleLanes = track.automationLanes.filter((l) => l.visible);
+  return baseTrackHeight + visibleLanes.reduce(
+    (height, lane) => height + getAutomationLaneHeight(lane),
+    0,
+  );
 }
 
 function getTrackHeaderControlWidth(track: Pick<Track, "type">): number {
@@ -601,11 +700,14 @@ export function getTrackAtY(
   // In automation lane area
   const laneY = localY - baseTrackHeight;
   const visibleLanes = tracks[trackIndex].automationLanes.filter((l) => l.visible);
-  const laneIndex = Math.min(
-    Math.floor(laneY / AUTOMATION_LANE_HEIGHT),
-    visibleLanes.length - 1,
-  );
-  return { trackIndex, isInClipArea: false, laneIndex };
+  let laneTop = 0;
+  for (let laneIndex = 0; laneIndex < visibleLanes.length; laneIndex += 1) {
+    laneTop += getAutomationLaneHeight(visibleLanes[laneIndex]);
+    if (laneY < laneTop) {
+      return { trackIndex, isInClipArea: false, laneIndex };
+    }
+  }
+  return null;
 }
 
 export interface AudioClip {
@@ -656,6 +758,8 @@ export interface AddGeneratedSourceAudioOptions {
 
 export interface AddTrackOptions {
   backendAlreadyCreated?: boolean;
+  /** Internal compound edits can own track insertion in their parent command. */
+  recordUndo?: boolean;
 }
 
 export interface TempoMarker {
@@ -738,6 +842,10 @@ export interface Track {
   frozen: boolean;
   freezeFilePath?: string;
   frozenOriginalClips?: AudioClip[]; // Saved clips before freeze (for unfreeze restore)
+  frozenOriginalMIDIClips?: MIDIClip[];
+  frozenOriginalFxBypassed?: boolean;
+  frozenInputFXBypassSnapshot?: boolean[];
+  frozenTrackFXBypassSnapshot?: boolean[];
 
   // Comping / Takes
   takes: AudioClip[][]; // Array of take lanes (each lane is an array of clips)
@@ -764,7 +872,7 @@ export interface Track {
   midiOutputDevice: string;
 
   // Visual
-  icon?: string; // Track icon ID (microphone, guitar, drums, keys, bus, master, midi, folder, piano)
+  icon?: string; // Track icon ID (microphone, guitar, bass-guitar, drums, keys, bus, master, midi, folder, piano)
   notes?: string; // Free-form track notes/comments
   waveformZoom?: number; // Waveform vertical zoom factor (0.1 to 5.0, default 1.0)
   spectralView?: boolean; // Show spectrogram instead of waveform
@@ -868,6 +976,250 @@ export interface AudioDeviceSetup {
   numActiveOutputChannels?: number;
   inputChannelNames?: string[];
   outputChannelNames?: string[];
+  activeInputChannelIndices?: number[];
+  activeOutputChannelIndices?: number[];
+  channelActivationPolicy?: string;
+  forcesAllDeviceChannels?: boolean;
+}
+
+const INPUT_PROFILE_SETTINGS_KEY = "openstudio.inputProfiles.v1";
+
+interface PersistedInputProfileSettings {
+  schemaVersion: 1;
+  keyboardProfileId: KeyboardShortcutProfileId;
+  mouseProfileId: KeyboardShortcutProfileId;
+  onboardingSeen: boolean;
+}
+
+const DEFAULT_INPUT_PROFILE_SETTINGS: PersistedInputProfileSettings = {
+  schemaVersion: 1,
+  keyboardProfileId: "openstudio",
+  mouseProfileId: "openstudio",
+  onboardingSeen: false,
+};
+
+function getStoredInputProfileSettings(): PersistedInputProfileSettings {
+  const stored = getStoredJSON<Partial<PersistedInputProfileSettings>>(
+    INPUT_PROFILE_SETTINGS_KEY,
+    DEFAULT_INPUT_PROFILE_SETTINGS,
+  );
+  return {
+    schemaVersion: 1,
+    keyboardProfileId: isKeyboardShortcutProfileId(stored.keyboardProfileId)
+      ? stored.keyboardProfileId
+      : "openstudio",
+    mouseProfileId: isKeyboardShortcutProfileId(stored.mouseProfileId)
+      ? stored.mouseProfileId
+      : "openstudio",
+    onboardingSeen: stored.onboardingSeen === true,
+  };
+}
+
+function persistInputProfileSettings(settings: Omit<PersistedInputProfileSettings, "schemaVersion">): boolean {
+  try {
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    storage.setItem(INPUT_PROFILE_SETTINGS_KEY, JSON.stringify({
+      schemaVersion: 1,
+      ...settings,
+    } satisfies PersistedInputProfileSettings));
+    return true;
+  } catch {
+    // Storage can be unavailable in private/embedded browser contexts.
+    return false;
+  }
+}
+
+const initialInputProfileSettings = getStoredInputProfileSettings();
+const initialMouseModifierOverrides = loadStoredMouseModifierOverrides();
+
+function persistCustomKeyboardProfiles(
+  profiles: readonly CustomKeyboardShortcutProfile[],
+  activeProfileId: string | null,
+): boolean {
+  const payload = {
+    schemaVersion: CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION,
+    activeProfileId,
+    profiles,
+  } satisfies PersistedCustomKeyboardProfiles;
+  if (!parsePersistedCustomKeyboardProfiles(payload)) return false;
+  try {
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    storage.setItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, JSON.stringify(payload));
+    return true;
+  } catch {
+    // Storage can be unavailable in private/embedded browser contexts.
+    return false;
+  }
+}
+
+function restoreStoredValue(storage: Storage, key: string, value: string | null): void {
+  if (value === null) storage.removeItem(key);
+  else storage.setItem(key, value);
+}
+
+/**
+ * Custom-profile activation spans two local-storage records: the profile
+ * collection owns the active overlay, while the input settings own its base
+ * keyboard profile. Snapshot both records and roll both back if either write
+ * fails so the next launch cannot observe a half-committed selection.
+ */
+function persistInputAndCustomKeyboardProfiles(
+  settings: Omit<PersistedInputProfileSettings, "schemaVersion">,
+  profiles: readonly CustomKeyboardShortcutProfile[],
+  activeProfileId: string | null,
+): boolean {
+  const inputPayload = JSON.stringify({
+    schemaVersion: 1,
+    ...settings,
+  } satisfies PersistedInputProfileSettings);
+  const customPayload = {
+    schemaVersion: CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION,
+    activeProfileId,
+    profiles,
+  } satisfies PersistedCustomKeyboardProfiles;
+  if (!parsePersistedCustomKeyboardProfiles(customPayload)) return false;
+
+  try {
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    const previousInput = storage.getItem(INPUT_PROFILE_SETTINGS_KEY);
+    const previousCustom = storage.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY);
+    try {
+      storage.setItem(INPUT_PROFILE_SETTINGS_KEY, inputPayload);
+      storage.setItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, JSON.stringify(customPayload));
+      return true;
+    } catch {
+      // localStorage has no multi-key transaction. Best-effort restoration is
+      // safe here because both snapshots were captured before either write.
+      try {
+        restoreStoredValue(storage, CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY, previousCustom);
+      } catch {
+        // A hostile/unavailable Storage implementation may reject rollback too.
+      }
+      try {
+        restoreStoredValue(storage, INPUT_PROFILE_SETTINGS_KEY, previousInput);
+      } catch {
+        // See note above; frontend state still remains unchanged.
+      }
+      return false;
+    }
+  } catch {
+    // Storage can be unavailable in private/embedded browser contexts.
+    return false;
+  }
+}
+
+function getStoredCustomKeyboardProfiles(): PersistedCustomKeyboardProfiles {
+  try {
+    const storage = getBrowserStorage();
+    const raw = storage?.getItem(CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY);
+    if (raw) {
+      const parsed = parsePersistedCustomKeyboardProfiles(JSON.parse(raw));
+      if (parsed) return parsed;
+    }
+
+    const legacyRaw = storage?.getItem(LEGACY_CUSTOM_SHORTCUTS_STORAGE_KEY);
+    const migrated = migrateLegacyCustomShortcuts(
+      legacyRaw ? JSON.parse(legacyRaw) : {},
+      initialInputProfileSettings.keyboardProfileId,
+    );
+    if (migrated.profiles.length > 0) {
+      persistCustomKeyboardProfiles(migrated.profiles, migrated.activeProfileId);
+    }
+    return migrated;
+  } catch {
+    return {
+      schemaVersion: CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION,
+      activeProfileId: null,
+      profiles: [],
+    };
+  }
+}
+
+const initialCustomKeyboardProfiles = getStoredCustomKeyboardProfiles();
+const initialActiveCustomKeyboardProfile = initialCustomKeyboardProfiles.profiles.find(
+  (profile) => profile.id === initialCustomKeyboardProfiles.activeProfileId,
+);
+
+interface CustomKeyboardProfileStateSlice {
+  customShortcuts: CustomShortcutMap;
+  customKeyboardProfiles: readonly CustomKeyboardShortcutProfile[];
+  activeCustomKeyboardProfileId: string | null;
+  keyboardShortcutProfileId: KeyboardShortcutProfileId;
+}
+
+function uniqueCustomKeyboardProfileName(
+  profiles: readonly CustomKeyboardShortcutProfile[],
+  requested: string,
+  excludedId?: string,
+): string {
+  const base = normalizeCustomProfileName(requested);
+  const occupied = new Set(
+    profiles
+      .filter((profile) => profile.id !== excludedId)
+      .map((profile) => profile.name.toLocaleLowerCase()),
+  );
+  if (!occupied.has(base.toLocaleLowerCase())) return base;
+  let suffix = 2;
+  while (true) {
+    const suffixText = ` ${suffix}`;
+    const candidate = `${base.slice(0, 64 - suffixText.length).trimEnd()}${suffixText}`;
+    if (!occupied.has(candidate.toLocaleLowerCase())) return candidate;
+    suffix += 1;
+  }
+}
+
+function commitActiveCustomShortcutBindings(
+  state: CustomKeyboardProfileStateSlice,
+  bindings: CustomShortcutMap,
+): Pick<
+  CustomKeyboardProfileStateSlice,
+  "customShortcuts" | "customKeyboardProfiles" | "activeCustomKeyboardProfileId"
+> | null {
+  const normalizedBindings = normalizeCustomShortcutMap(bindings);
+  if (!normalizedBindings) {
+    return {
+      customShortcuts: state.customShortcuts,
+      customKeyboardProfiles: state.customKeyboardProfiles,
+      activeCustomKeyboardProfileId: state.activeCustomKeyboardProfileId,
+    };
+  }
+  const timestamp = Date.now();
+  let activeProfileId = state.activeCustomKeyboardProfileId;
+  let profiles = [...state.customKeyboardProfiles];
+  const activeIndex = profiles.findIndex((profile) => profile.id === activeProfileId);
+  if (activeIndex >= 0) {
+    profiles[activeIndex] = {
+      ...profiles[activeIndex],
+      bindings: normalizedBindings,
+      updatedAt: timestamp,
+    };
+  } else {
+    if (profiles.length >= MAX_CUSTOM_KEYBOARD_PROFILES) {
+      return {
+        customShortcuts: state.customShortcuts,
+        customKeyboardProfiles: state.customKeyboardProfiles,
+        activeCustomKeyboardProfileId: state.activeCustomKeyboardProfileId,
+      };
+    }
+    activeProfileId = createCustomKeyboardProfileId();
+    profiles.push({
+      id: activeProfileId,
+      name: uniqueCustomKeyboardProfileName(profiles, "Custom Shortcuts"),
+      baseProfileId: state.keyboardShortcutProfileId,
+      bindings: normalizedBindings,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+  }
+  if (!persistCustomKeyboardProfiles(profiles, activeProfileId)) return null;
+  return {
+    customShortcuts: normalizedBindings,
+    customKeyboardProfiles: profiles,
+    activeCustomKeyboardProfileId: activeProfileId,
+  };
 }
 
 // Render Queue Job
@@ -936,6 +1288,7 @@ export interface MixerSnapshot {
 
 export interface ProjectTemplate {
   name: string;
+  automationCurveVersion?: number;
   tracks: Track[];
   masterVolume: number;
   masterPan: number;
@@ -980,6 +1333,10 @@ interface DAWState {
     clip: AudioClip | MIDIClip | null;
     clips: Array<{ clip: AudioClip | MIDIClip; trackId: string }>; // Multi-clip with track info
     isCut: boolean;
+    /** Immediate-cut clipboard: source items were already removed by the cut command. */
+    sourceRemoved?: boolean;
+    /** Immutable automation source used by Automation Follows Events on paste. */
+    automationTracks?: Array<Pick<Track, "id" | "automationLanes">>;
   };
   midiNoteClipboard: {
     notes: MIDINoteClipboardItem[];
@@ -1008,11 +1365,13 @@ interface DAWState {
   masterAutomationEnabled: boolean;
   suspendedMasterAutomationState: AutomationSuspendSnapshot | null;
   automationWriteBehavior: AutomationWriteBehavior;
+  selectedAutomationTarget: AutomationSelectionTarget | null;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
   // never give tracks a new array reference.  Only ChannelStrip / TrackHeader
   // subscribe to these; Timeline and App are completely unaffected.
   meterLevels: Record<string, number>;
+  midiInputLevels: Record<string, number>;
   peakLevels: Record<string, number>;
   clippingStates: Record<string, boolean>;
   // Automation-interpolated display values — trackId → paramId → display-unit value
@@ -1157,8 +1516,13 @@ interface DAWState {
   autoSaveIntervalMinutes: number; // minutes (default 5)
   autoSaveMaxVersions: number; // max rotating backup versions (default 3)
 
-  // Custom Keyboard Shortcuts (actionId -> shortcut string)
-  customShortcuts: Record<string, string>;
+  // Custom Keyboard Shortcuts (multi-binding and per-platform overrides)
+  customShortcuts: CustomShortcutMap;
+  customKeyboardProfiles: readonly CustomKeyboardShortcutProfile[];
+  activeCustomKeyboardProfileId: string | null;
+  keyboardShortcutProfileId: KeyboardShortcutProfileId;
+  mouseBehaviorProfileId: KeyboardShortcutProfileId;
+  inputProfileOnboardingSeen: boolean;
 
   // Track Templates
   trackTemplates: Array<{ id: string; name: string; trackConfig: Partial<Track> }>;
@@ -1327,7 +1691,7 @@ interface DAWState {
 
   // Missing Media Resolver
   showMissingMedia: boolean;
-  missingMediaFiles: Array<{ path: string; clipIds: string[] }>;
+  missingMediaFiles: MissingMediaEntry[];
 
   // Sprint 17: Visual Improvements
   recentColors: string[];
@@ -1387,7 +1751,7 @@ interface DAWActions {
   showToast: (message: string, type?: "success" | "error" | "info") => void;
 
   // Project Management (F2)
-  newProject: () => Promise<void>;
+  newProject: () => Promise<boolean>;
   saveProject: (saveAs?: boolean) => Promise<boolean>;
   saveNewVersion: () => Promise<boolean>;
   loadProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
@@ -1412,7 +1776,36 @@ interface DAWActions {
 
   // Custom Keyboard Shortcuts
   setCustomShortcut: (actionId: string, shortcut: string) => void;
+  setCustomShortcutBindings: (
+    actionId: string,
+    shortcuts: readonly string[],
+    target?: CustomShortcutTarget,
+  ) => void;
+  addCustomShortcutBinding: (
+    actionId: string,
+    shortcut: string,
+    target?: CustomShortcutTarget,
+  ) => void;
+  removeCustomShortcutBinding: (
+    actionId: string,
+    shortcut: string,
+    target?: CustomShortcutTarget,
+  ) => void;
+  removeCustomShortcut: (actionId: string, target?: CustomShortcutTarget) => void;
   resetCustomShortcuts: () => void;
+  createCustomKeyboardProfile: (name: string, baseProfileId?: KeyboardShortcutProfileId) => string | null;
+  duplicateKeyboardProfile: (name?: string) => string | null;
+  renameCustomKeyboardProfile: (profileId: string, name: string) => boolean;
+  deleteCustomKeyboardProfile: (profileId: string) => boolean;
+  activateCustomKeyboardProfile: (profileId: string | null) => boolean;
+  exportActiveCustomKeyboardProfile: () => string | null;
+  importCustomKeyboardProfile: (
+    serialized: string,
+    knownActionIds?: readonly string[],
+  ) => CustomKeyboardProfileImportResult;
+  setKeyboardShortcutProfile: (profileId: KeyboardShortcutProfileId) => void;
+  setMouseBehaviorProfile: (profileId: KeyboardShortcutProfileId) => void;
+  markInputProfileOnboardingSeen: () => void;
 
   // Track Templates
   saveTrackTemplate: (trackId: string, name: string) => void;
@@ -1424,6 +1817,7 @@ interface DAWActions {
   moveTracksToFolder: (trackIds: string[], folderId: string) => void;
   toggleFolderCollapsed: (folderId: string) => void;
   removeTrackFromFolder: (trackId: string) => void;
+  removeTracksFromFolders: (trackIds: string[]) => void;
   getVisibleTracks: () => Track[];
 
   // VCA Faders
@@ -1436,17 +1830,29 @@ interface DAWActions {
     options?: AddTrackOptions,
   ) => void;
   duplicateTrack: (trackId: string) => Promise<void>;
+  duplicateSelectedTracks: () => Promise<string[]>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
+  setTracksColorWithUndo: (trackIds: string[], color: string) => void;
+  renameTracks: (trackIds: string[], baseName: string) => void;
   setTrackMIDIEffects: (trackId: string, midiEffects: MIDITrackEffect[]) => void;
+  beginTrackReorderEdit: (trackId: string) => void;
+  previewTrackReorder: (trackId: string, direction: -1 | 1) => boolean;
+  commitTrackReorderEdit: (trackId: string) => void;
   reorderTrack: (activeId: string, overId: string) => void;
   reorderMultipleTracks: (trackIds: string[], overId: string) => void;
+  canMoveSelectedTracks: (direction: "up" | "down") => boolean;
+  moveSelectedTracks: (direction: "up" | "down") => boolean;
+  canGroupSelectedTracksIntoFolder: () => boolean;
+  groupSelectedTracksIntoFolder: () => boolean;
   selectTrack: (
     id: string | null,
     modifiers?: { shift?: boolean; ctrl?: boolean },
   ) => void;
   selectAllTracks: () => void;
   deselectAllTracks: () => void;
+  /** Clear every transient selection owned by the main DAW realm. */
+  deselectAll: () => void;
   deleteSelectedTracks: () => Promise<void>;
 
   // Track Notes
@@ -1457,6 +1863,12 @@ interface DAWActions {
     trackId: string,
     params: Record<string, unknown>,
   ) => void;
+  addTracksBatch: (tracks: Array<Partial<Track> & { id: string; name: string }>) => Promise<string[]>;
+  clearSelectedTrackSamplerSamples: () => Promise<boolean>;
+  removeSelectedTrackInstruments: () => Promise<boolean>;
+  toggleSelectedTracksFreeze: (trackIds?: string[]) => Promise<boolean>;
+  beginAITrackParamsEdit: (trackId: string) => boolean;
+  commitAITrackParamsEdit: (trackId: string) => boolean;
   setAITrackGenerationState: (
     trackId: string,
     generationState: AITrackGenerationState,
@@ -1510,6 +1922,13 @@ interface DAWActions {
   toggleTrackArmed: (id: string) => Promise<void>;
   toggleTrackFXBypass: (id: string) => Promise<void>;
   toggleTrackMonitor: (id: string) => Promise<void>;
+  setTrackMonitorTransient: (id: string, enabled: boolean) => Promise<boolean>;
+  toggleSelectedTracksMute: () => boolean;
+  toggleSelectedTracksSolo: () => boolean;
+  toggleSelectedTracksArmed: () => boolean;
+  toggleSelectedTracksFXBypass: () => boolean;
+  toggleSelectedTracksMonitor: () => Promise<boolean>;
+  toggleSelectedTracksPhaseInvert: () => boolean;
   setTrackInput: (
     id: string,
     startChannel: number,
@@ -1525,14 +1944,37 @@ interface DAWActions {
   // Continuous edit begin/commit (for undo/redo of fader drags)
   beginTrackVolumeEdit: (id: string) => void;
   commitTrackVolumeEdit: (id: string) => void;
+  beginTrackVolumeBatchEdit: (trackIds: readonly string[]) => boolean;
+  adjustTrackVolumeBatch: (deltaDB: number) => boolean;
+  commitTrackVolumeBatchEdit: () => boolean;
   beginTrackPanEdit: (id: string) => void;
   commitTrackPanEdit: (id: string) => void;
   beginClipVolumeEdit: (clipId: string) => void;
   commitClipVolumeEdit: (clipId: string) => void;
+  cancelClipVolumeEdit: (clipId: string) => boolean;
 
   // FX undo/redo actions
   addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track") => Promise<boolean>;
+  addTrackBuiltInFXWithUndo: (trackId: string, effectName: string, chainType: "input" | "track") => Promise<boolean>;
+  reorderTrackFXWithUndo: (
+    trackId: string,
+    fromIndex: number,
+    toIndex: number,
+    chainType: "input" | "track",
+  ) => Promise<boolean>;
   removeTrackFXWithUndo: (trackId: string, fxIndex: number, chainType: "input" | "track") => Promise<boolean>;
+  removeMasterFXWithUndo: (fxIndex: number) => Promise<boolean>;
+  setFXSlotBypassedWithUndo: (
+    trackId: string,
+    fxIndex: number,
+    chainType: "input" | "track" | "master",
+    bypassed: boolean,
+  ) => Promise<boolean>;
+  toggleFXSlotBypassWithUndo: (
+    trackId: string,
+    fxIndex: number,
+    chainType: "input" | "track" | "master",
+  ) => Promise<boolean>;
   loadInstrumentWithUndo: (trackId: string, pluginPath: string) => Promise<boolean>;
   setBuiltInInstrumentWithUndo: (trackId: string, instrument: "synth" | "piano" | "drums") => Promise<boolean>;
   removeInstrumentWithUndo: (trackId: string) => Promise<boolean>;
@@ -1582,6 +2024,10 @@ interface DAWActions {
   // Master Controls
   setMasterVolume: (volume: number) => Promise<void>;
   setMasterPan: (pan: number) => Promise<void>;
+  beginMasterVolumeEdit: () => void;
+  commitMasterVolumeEdit: () => void;
+  beginMasterPanEdit: () => void;
+  commitMasterPanEdit: () => void;
   toggleMasterMute: () => void;
   toggleMasterMono: () => void;
   toggleMasterAutomation: () => void;
@@ -1604,6 +2050,7 @@ interface DAWActions {
   addMasterAutomationPoint: (laneId: string, time: number, value: number) => void;
   removeMasterAutomationPoint: (laneId: string, pointIndex: number) => void;
   moveMasterAutomationPoint: (laneId: string, pointIndex: number, time: number, value: number) => void;
+  clearMasterAutomationLane: (laneId: string) => void;
 
   // Metering
   setTrackMeterLevel: (trackId: string, level: number) => void;
@@ -1612,6 +2059,7 @@ interface DAWActions {
     masterLevel: number,
     clippingStates: Record<string, boolean>,
     masterClipping: boolean,
+    midiInputLevels?: Record<string, number>,
   ) => void;
   setMasterLevel: (level: number) => void;
   updateAutomatedValues: () => void;
@@ -1672,6 +2120,7 @@ interface DAWActions {
     clipId: string,
     newTrackId: string,
     newStartTime: number,
+    options?: { recordUndo?: boolean; moveAutomation?: boolean },
   ) => Promise<void>;
   resizeClip: (
     clipId: string,
@@ -1679,16 +2128,30 @@ interface DAWActions {
     newDuration: number,
     newOffset: number,
   ) => void;
+  stretchClip: (
+    clipId: string,
+    newStartTime: number,
+    newDuration: number,
+  ) => Promise<boolean>;
   setMIDIClipSourceWindow: (
     clipId: string,
     patch: Partial<Pick<MIDIClip, "offset" | "sourceLength" | "loopLength" | "loopEnabled" | "loopOffset">>,
     description?: string,
   ) => void;
   toggleClipMute: (clipId: string) => void;
+  setSelectedClipsMuted: (muted: boolean) => boolean;
+  toggleSelectedClipsMuted: () => boolean;
+  toggleSelectedClipsLocked: () => boolean;
+  setClipName: (clipId: string, name: string) => void;
   setClipVolume: (clipId: string, volumeDB: number) => void;
+  beginClipFadeEdit: (clipId: string) => void;
+  previewClipFades: (clipId: string, fadeIn: number, fadeOut: number) => void;
+  commitClipFadeEdit: (clipId: string) => void;
+  cancelClipFadeEdit: (clipId: string) => void;
   setClipFades: (clipId: string, fadeIn: number, fadeOut: number) => void;
   selectAllClips: () => void;
   setSelectedClipIds: (clipIds: string[]) => void;
+  selectAdjacentClip: (direction: "previous" | "next") => boolean;
   copyClip: (clipId: string) => void;
   cutClip: (clipId: string) => void;
   copySelectedClips: () => void;
@@ -1696,10 +2159,15 @@ interface DAWActions {
   copySelectedTimelineClips: () => void;
   pasteSelectedTimelineClips: () => void;
   pasteClip: (targetTrackId: string, targetTime: number) => void;
-  pasteClips: () => void; // Smart paste: selected track or new tracks, at playhead
+  pasteClips: (targetTrackId?: string, targetTime?: number) => void; // Smart or explicit deep paste
+  beginClipNudgeEdit: (clipId: string) => void;
+  previewClipNudge: (clipId: string, direction: "left" | "right", fine?: boolean) => boolean;
+  commitClipNudgeEdit: (clipId: string) => void;
   nudgeClips: (direction: "left" | "right", fine?: boolean) => void;
   deleteClip: (clipId: string) => void;
+  deleteSelectedClips: () => boolean;
   duplicateClip: (clipId: string) => void;
+  duplicateSelectedClips: () => string[];
   duplicateClipToPosition: (
     clipId: string,
     targetTrackId: string,
@@ -1714,9 +2182,9 @@ interface DAWActions {
 
   // Advanced Clip Editing (Phase 4)
   splitAtTimeSelection: () => void;
-  groupSelectedClips: () => void;
-  ungroupSelectedClips: () => void;
-  normalizeSelectedClips: () => void;
+  groupSelectedClips: () => boolean;
+  ungroupSelectedClips: () => boolean;
+  normalizeSelectedClips: () => Promise<boolean>;
 
   // Razor Edits
   addRazorEdit: (trackId: string, start: number, end: number) => void;
@@ -1725,6 +2193,39 @@ interface DAWActions {
 
   // Track Automation (Phase 5)
   setAutomationWriteBehavior: (behavior: AutomationWriteBehavior) => void;
+  setSelectedAutomationTarget: (target: AutomationSelectionTarget | null) => void;
+  setSelectedAutomationLane: (target: AutomationLaneSelectionTarget) => void;
+  setSelectedAutomationPoint: (target: AutomationSelectionTarget) => void;
+  clearSelectedAutomationTarget: () => void;
+  selectAdjacentAutomationPoint: (direction: "next" | "previous") => void;
+  selectAdjacentAutomationLane: (direction: "next" | "previous") => void;
+  deleteSelectedAutomationPoint: () => void;
+  nudgeSelectedAutomationPoint: (axis: "time" | "value", direction: -1 | 1) => void;
+  addAutomationPointAtPlayhead: () => void;
+  clearSelectedAutomationLane: () => void;
+  setSelectedAutomationLaneVisibility: (visible: boolean) => void;
+  setSelectedAutomationLaneRead: (enabled: boolean) => void;
+  setSelectedAutomationLaneWrite: (enabled: boolean) => void;
+  setSelectedAutomationLaneMode: (mode: AutomationModeType) => void;
+  beginAutomationPointEdit: (target: AutomationSelectionTarget) => boolean;
+  beginAutomationPointCopyEdit: (target: AutomationSelectionTarget) => boolean;
+  previewAutomationPointEdit: (time: number, value: number) => boolean;
+  commitAutomationPointEdit: () => boolean;
+  cancelAutomationPointEdit: () => boolean;
+  toggleArrangementAutomationView: () => void;
+  setTracksAutomationRead: (trackIds: readonly string[], enabled: boolean) => void;
+  toggleTracksAutomationRead: (trackIds: readonly string[]) => void;
+  setTracksAutomationWrite: (trackIds: readonly string[], enabled: boolean) => void;
+  toggleTracksAutomationWrite: (trackIds: readonly string[]) => void;
+  setTracksAutomationMode: (trackIds: readonly string[], mode: AutomationModeType) => void;
+  toggleTracksAutomationModes: (
+    trackIds: readonly string[],
+    firstMode: AutomationModeType,
+    secondMode: AutomationModeType,
+  ) => void;
+  setTracksAutomationVisibility: (trackIds: readonly string[], visible: boolean) => void;
+  suspendAutomation: () => void;
+  resumeAutomation: () => void;
   toggleTrackAutomation: (trackId: string) => void;
   setTrackAutomationRead: (trackId: string, enabled: boolean) => void;
   toggleTrackAutomationRead: (trackId: string) => void;
@@ -1905,7 +2406,7 @@ interface DAWActions {
   trackRecentAction: (actionId: string) => void;
 
   // Quantize Clips to Grid
-  quantizeSelectedClips: () => void;
+  quantizeSelectedClips: () => boolean;
 
   // Move Envelope Points with Items
   moveEnvelopesWithItems: boolean;
@@ -1942,13 +2443,19 @@ interface DAWActions {
   // Phase 11: Send/Bus Routing
   addTrackSend: (sourceTrackId: string, destTrackId: string) => Promise<void>;
   removeTrackSend: (sourceTrackId: string, sendIndex: number) => Promise<void>;
+  beginTrackSendLevelEdit: (sourceTrackId: string, sendIndex: number) => void;
   setTrackSendLevel: (sourceTrackId: string, sendIndex: number, level: number) => Promise<void>;
+  commitTrackSendLevelEdit: (sourceTrackId: string, sendIndex: number) => void;
+  beginTrackSendPanEdit: (sourceTrackId: string, sendIndex: number) => void;
   setTrackSendPan: (sourceTrackId: string, sendIndex: number, pan: number) => Promise<void>;
+  commitTrackSendPanEdit: (sourceTrackId: string, sendIndex: number) => void;
   setTrackSendEnabled: (sourceTrackId: string, sendIndex: number, enabled: boolean) => Promise<void>;
   setTrackSendPreFader: (sourceTrackId: string, sendIndex: number, preFader: boolean) => Promise<void>;
   setTrackSendPhaseInvert: (sourceTrackId: string, sendIndex: number, invert: boolean) => Promise<void>;
   setTrackPhaseInvert: (trackId: string, invert: boolean) => Promise<void>;
+  beginTrackStereoWidthEdit: (trackId: string) => void;
   setTrackStereoWidth: (trackId: string, widthPercent: number) => Promise<void>;
+  commitTrackStereoWidthEdit: (trackId: string) => void;
   setTrackMasterSendEnabled: (trackId: string, enabled: boolean) => Promise<void>;
   setTrackOutputChannels: (trackId: string, startChannel: number, numChannels: number) => Promise<void>;
   setTrackPlaybackOffset: (trackId: string, offsetMs: number) => Promise<void>;
@@ -1962,6 +2469,7 @@ interface DAWActions {
   addTrackGroup: (name: string, leadTrackId: string, memberTrackIds: string[], linkedParams: string[]) => void;
   removeTrackGroup: (groupId: string) => void;
   updateTrackGroup: (groupId: string, updates: Partial<{ name: string; leadTrackId: string; memberTrackIds: string[]; linkedParams: string[] }>) => void;
+  unlinkTracksFromGroups: (trackIds: string[]) => void;
 
   // Phase 10: Render Pipeline Expansion
   selectRegion: (id: string, modifiers?: { ctrl?: boolean }) => void;
@@ -1995,7 +2503,7 @@ interface DAWActions {
   closeCrossfadeEditor: () => void;
   addClipTake: (clipId: string, take: AudioClip) => void;
   setActiveClipTake: (clipId: string, takeIndex: number) => void;
-  explodeTakes: (clipId: string) => void;
+  explodeTakes: (clipId: string) => Promise<void>;
   implodeTakes: (clipIds: string[]) => void;
   setClipPlaybackRate: (clipId: string, rate: number) => Promise<void>;
   setClipPitch: (clipId: string, semitones: number) => Promise<void>;
@@ -2071,6 +2579,7 @@ interface DAWActions {
 
   // Missing Media Resolver
   resolveMissingMedia: (originalPath: string, newPath: string) => void;
+  resolveMissingNAMAsset: (target: NAMProjectAssetTarget, newPath: string) => Promise<boolean>;
   closeMissingMedia: () => void;
 
   // Sprint 17: Visual Improvements
@@ -2099,6 +2608,7 @@ interface DAWActions {
   syncMIDITrackToBackend: (trackId: string, options?: { debounce?: boolean }) => Promise<void>;
   previewMIDIClipEvents: (trackId: string, clipId: string, events: MIDIEvent[]) => void;
   commitMIDIClipEvents: (trackId: string, clipId: string, oldEvents: MIDIEvent[], newEvents: MIDIEvent[], description?: string) => void;
+  glueSelectedMIDINotes: (trackId: string, clipId: string, noteIds: string[]) => string[];
   addMIDINote: (trackId: string, clipId: string, startTime: number, noteNumber: number, duration: number, velocity?: number) => string;
   removeMIDINotes: (trackId: string, clipId: string, noteIds: string[]) => string[];
   moveMIDINotes: (trackId: string, clipId: string, noteIds: string[], deltaTime: number, deltaNote: number) => string[];
@@ -2195,6 +2705,9 @@ interface DAWActions {
 
   // Sprint 21: Timeline Interaction
   setTrackWaveformZoom: (trackId: string, zoom: number) => void;
+  beginAutomationLaneHeightEdit: (trackId: string, laneId: string) => void;
+  setAutomationLaneHeight: (trackId: string, laneId: string, height: number) => void;
+  commitAutomationLaneHeightEdit: (trackId: string, laneId: string) => void;
   toggleSpectralView: (trackId: string) => void;
   toggleCrosshair: () => void;
   slipEditClip: (clipId: string, newOffset: number) => void;
@@ -2532,6 +3045,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
     automationWriteBehavior: "touch",
+    selectedAutomationTarget: null,
     projectPath: null,
     isModified: false,
     projectName: "Untitled Project",
@@ -2587,6 +3101,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
 export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   // Metering / automation display — updated at high frequency, meaningless after reload
   "meterLevels",
+  "midiInputLevels",
   "peakLevels",
   "clippingStates",
   "masterLevel",
@@ -2610,6 +3125,7 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "activeMidiEditorSessionId",
   "dockedMidiEditorSessionId",
   "selectedNoteIds",
+  "selectedAutomationTarget",
   "midiEditRange",
   "pianoRollEditCursorTime",
   "activeMidiTool",
@@ -2777,7 +3293,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
     automationWriteBehavior: "touch",
+    selectedAutomationTarget: null,
     meterLevels: {},
+    midiInputLevels: {},
     peakLevels: {},
     clippingStates: {},
     automatedParamValues: {},
@@ -2912,15 +3430,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     autoSaveIntervalMinutes: 5,
     autoSaveMaxVersions: 3,
 
-    // Custom Keyboard Shortcuts (persisted in localStorage)
-    customShortcuts: (() => {
-      try {
-        const stored = localStorage.getItem("s13_customShortcuts");
-        return stored ? JSON.parse(stored) : {};
-      } catch {
-        return {};
-      }
-    })(),
+    // Custom Keyboard Shortcuts (versioned named profiles, persisted in localStorage)
+    customShortcuts: initialActiveCustomKeyboardProfile?.bindings ?? {},
+    customKeyboardProfiles: initialCustomKeyboardProfiles.profiles,
+    activeCustomKeyboardProfileId: initialActiveCustomKeyboardProfile?.id ?? null,
+    keyboardShortcutProfileId: initialActiveCustomKeyboardProfile?.baseProfileId
+      ?? initialInputProfileSettings.keyboardProfileId,
+    mouseBehaviorProfileId: initialInputProfileSettings.mouseProfileId,
+    inputProfileOnboardingSeen: initialInputProfileSettings.onboardingSeen,
 
     trackTemplates: getStoredJSON("s13_trackTemplates", []),
 
@@ -2996,15 +3513,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     theme: "dark",
     customThemeOverrides: {},
     showThemeEditor: false,
-    mouseModifiers: {
-      clip_drag: { none: "move", ctrl: "copy", shift: "constrain", alt: "bypass_snap" },
-      clip_resize: { none: "resize", ctrl: "fine", shift: "symmetric", alt: "stretch" },
-      timeline_click: { none: "seek", ctrl: "select_range", shift: "extend_selection", alt: "zoom" },
-      track_header: { none: "select", ctrl: "toggle_select", shift: "range_select", alt: "solo" },
-      automation_point: { none: "move", ctrl: "fine", shift: "constrain_y", alt: "delete" },
-      fade_handle: { none: "adjust", ctrl: "fine", shift: "symmetric", alt: "shape_cycle" },
-      ruler_click: { none: "seek", ctrl: "loop_set", shift: "time_select", alt: "zoom_to" },
-    },
+    // Sparse persisted user overrides. The selected mouse profile supplies defaults.
+    mouseModifiers: initialMouseModifierOverrides,
     panelPositions: {
       mixer: { dock: "bottom", x: 0, y: 0, width: 0, height: 250, visible: false },
       mediaExplorer: { dock: "left", x: 0, y: 0, width: 260, height: 0, visible: false },
@@ -3361,15 +3871,353 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Custom Keyboard Shortcuts ==========
     setCustomShortcut: (actionId, shortcut) => {
+      let persistenceFailed = false;
       set((s) => {
-        const updated = { ...s.customShortcuts, [actionId]: shortcut };
-        localStorage.setItem("s13_customShortcuts", JSON.stringify(updated));
-        return { customShortcuts: updated };
+        const updated = setCustomShortcutTargetBindings(
+          s.customShortcuts,
+          actionId,
+          "common",
+          shortcut ? [shortcut] : [],
+        );
+        const committed = commitActiveCustomShortcutBindings(s, updated);
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
       });
+      if (persistenceFailed) get().showToast("The custom shortcut could not be saved to local storage.", "error");
+    },
+    setCustomShortcutBindings: (actionId, shortcuts, target = "common") => {
+      let persistenceFailed = false;
+      set((s) => {
+        const updated = setCustomShortcutTargetBindings(
+          s.customShortcuts,
+          actionId,
+          target,
+          shortcuts,
+        );
+        const committed = commitActiveCustomShortcutBindings(s, updated);
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
+      });
+      if (persistenceFailed) get().showToast("The custom shortcut could not be saved to local storage.", "error");
+    },
+    addCustomShortcutBinding: (actionId, shortcut, target = "common") => {
+      let persistenceFailed = false;
+      set((s) => {
+        const current = getCustomShortcutTargetBindings(s.customShortcuts[actionId], target) ?? [];
+        const updated = setCustomShortcutTargetBindings(
+          s.customShortcuts,
+          actionId,
+          target,
+          [...current, shortcut],
+        );
+        const committed = commitActiveCustomShortcutBindings(s, updated);
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
+      });
+      if (persistenceFailed) get().showToast("The custom shortcut could not be saved to local storage.", "error");
+    },
+    removeCustomShortcutBinding: (actionId, shortcut, target = "common") => {
+      let persistenceFailed = false;
+      set((s) => {
+        const current = getCustomShortcutTargetBindings(s.customShortcuts[actionId], target);
+        if (current === undefined) return {};
+        const updated = setCustomShortcutTargetBindings(
+          s.customShortcuts,
+          actionId,
+          target,
+          current.filter((binding) => binding !== shortcut),
+        );
+        const committed = commitActiveCustomShortcutBindings(s, updated);
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
+      });
+      if (persistenceFailed) get().showToast("The custom shortcut could not be saved to local storage.", "error");
+    },
+    removeCustomShortcut: (actionId, target) => {
+      let persistenceFailed = false;
+      set((s) => {
+        const updated = removeCustomShortcutTarget(s.customShortcuts, actionId, target);
+        if (updated === s.customShortcuts) return {};
+        const committed = commitActiveCustomShortcutBindings(s, updated);
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
+      });
+      if (persistenceFailed) get().showToast("The custom shortcut could not be saved to local storage.", "error");
     },
     resetCustomShortcuts: () => {
-      localStorage.removeItem("s13_customShortcuts");
-      set({ customShortcuts: {} });
+      let persistenceFailed = false;
+      set((s) => {
+        const committed = commitActiveCustomShortcutBindings(s, {});
+        if (!committed) persistenceFailed = true;
+        return committed ?? {};
+      });
+      if (persistenceFailed) get().showToast("The custom shortcuts could not be saved to local storage.", "error");
+    },
+    createCustomKeyboardProfile: (name, baseProfileId) => {
+      let id: string | null = null;
+      set((state) => {
+        if (state.customKeyboardProfiles.length >= MAX_CUSTOM_KEYBOARD_PROFILES) return {};
+        const candidateId = createCustomKeyboardProfileId();
+        const timestamp = Date.now();
+        const resolvedBase = isKeyboardShortcutProfileId(baseProfileId)
+          ? baseProfileId
+          : state.keyboardShortcutProfileId;
+        const profile: CustomKeyboardShortcutProfile = {
+          id: candidateId,
+          name: uniqueCustomKeyboardProfileName(state.customKeyboardProfiles, name),
+          baseProfileId: resolvedBase,
+          bindings: {},
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const profiles = [...state.customKeyboardProfiles, profile];
+        if (!persistInputAndCustomKeyboardProfiles({
+          keyboardProfileId: resolvedBase,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        }, profiles, candidateId)) return {};
+        id = candidateId;
+        return {
+          customKeyboardProfiles: profiles,
+          activeCustomKeyboardProfileId: id,
+          customShortcuts: {},
+          keyboardShortcutProfileId: resolvedBase,
+        };
+      });
+      return id;
+    },
+    duplicateKeyboardProfile: (name) => {
+      let id: string | null = null;
+      set((state) => {
+        if (state.customKeyboardProfiles.length >= MAX_CUSTOM_KEYBOARD_PROFILES) return {};
+        const candidateId = createCustomKeyboardProfileId();
+        const source = state.customKeyboardProfiles.find(
+          (profile) => profile.id === state.activeCustomKeyboardProfileId,
+        );
+        const timestamp = Date.now();
+        const sourceName = source?.name
+          ?? `${state.keyboardShortcutProfileId.replace(/_/g, " ")} shortcuts`;
+        const profile: CustomKeyboardShortcutProfile = {
+          id: candidateId,
+          name: uniqueCustomKeyboardProfileName(
+            state.customKeyboardProfiles,
+            name ?? `${sourceName} Copy`,
+          ),
+          baseProfileId: source?.baseProfileId ?? state.keyboardShortcutProfileId,
+          bindings: source
+            ? JSON.parse(JSON.stringify(source.bindings)) as CustomShortcutMap
+            : {},
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        const profiles = [...state.customKeyboardProfiles, profile];
+        if (!persistInputAndCustomKeyboardProfiles({
+          keyboardProfileId: profile.baseProfileId,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        }, profiles, candidateId)) return {};
+        id = candidateId;
+        return {
+          customKeyboardProfiles: profiles,
+          activeCustomKeyboardProfileId: id,
+          customShortcuts: profile.bindings,
+          keyboardShortcutProfileId: profile.baseProfileId,
+        };
+      });
+      return id;
+    },
+    renameCustomKeyboardProfile: (profileId, name) => {
+      let renamed = false;
+      set((state) => {
+        const index = state.customKeyboardProfiles.findIndex((profile) => profile.id === profileId);
+        if (index < 0 || !name.trim()) return {};
+        const profiles = [...state.customKeyboardProfiles];
+        profiles[index] = {
+          ...profiles[index],
+          name: uniqueCustomKeyboardProfileName(profiles, name, profileId),
+          updatedAt: Date.now(),
+        };
+        if (!persistCustomKeyboardProfiles(profiles, state.activeCustomKeyboardProfileId)) return {};
+        renamed = true;
+        return { customKeyboardProfiles: profiles };
+      });
+      return renamed;
+    },
+    deleteCustomKeyboardProfile: (profileId) => {
+      let deleted = false;
+      set((state) => {
+        const removed = state.customKeyboardProfiles.find((profile) => profile.id === profileId);
+        if (!removed) return {};
+        const profiles = state.customKeyboardProfiles.filter((profile) => profile.id !== profileId);
+        const wasActive = state.activeCustomKeyboardProfileId === profileId;
+        const activeProfileId = wasActive ? null : state.activeCustomKeyboardProfileId;
+        const persisted = wasActive
+          ? persistInputAndCustomKeyboardProfiles({
+            keyboardProfileId: removed.baseProfileId,
+            mouseProfileId: state.mouseBehaviorProfileId,
+            onboardingSeen: state.inputProfileOnboardingSeen,
+          }, profiles, activeProfileId)
+          : persistCustomKeyboardProfiles(profiles, activeProfileId);
+        if (!persisted) return {};
+        deleted = true;
+        return {
+          customKeyboardProfiles: profiles,
+          activeCustomKeyboardProfileId: activeProfileId,
+          customShortcuts: wasActive ? {} : state.customShortcuts,
+          keyboardShortcutProfileId: wasActive ? removed.baseProfileId : state.keyboardShortcutProfileId,
+        };
+      });
+      return deleted;
+    },
+    activateCustomKeyboardProfile: (profileId) => {
+      let activated = false;
+      set((state) => {
+        if (profileId === null) {
+          const activeProfile = state.customKeyboardProfiles.find(
+            (candidate) => candidate.id === state.activeCustomKeyboardProfileId,
+          );
+          const baseProfileId = activeProfile?.baseProfileId ?? state.keyboardShortcutProfileId;
+          if (!persistInputAndCustomKeyboardProfiles({
+            keyboardProfileId: baseProfileId,
+            mouseProfileId: state.mouseBehaviorProfileId,
+            onboardingSeen: state.inputProfileOnboardingSeen,
+          }, state.customKeyboardProfiles, null)) return {};
+          activated = true;
+          return {
+            activeCustomKeyboardProfileId: null,
+            customShortcuts: {},
+            keyboardShortcutProfileId: baseProfileId,
+          };
+        }
+        const profile = state.customKeyboardProfiles.find((candidate) => candidate.id === profileId);
+        if (!profile) return {};
+        if (!persistInputAndCustomKeyboardProfiles({
+          keyboardProfileId: profile.baseProfileId,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        }, state.customKeyboardProfiles, profile.id)) return {};
+        activated = true;
+        return {
+          activeCustomKeyboardProfileId: profile.id,
+          customShortcuts: profile.bindings,
+          keyboardShortcutProfileId: profile.baseProfileId,
+        };
+      });
+      return activated;
+    },
+    exportActiveCustomKeyboardProfile: () => {
+      const state = get();
+      const profile = state.customKeyboardProfiles.find(
+        (candidate) => candidate.id === state.activeCustomKeyboardProfileId,
+      );
+      return profile ? exportCustomKeyboardProfile(profile) : null;
+    },
+    importCustomKeyboardProfile: (serialized, knownActionIds) => {
+      const result = parseImportedCustomKeyboardProfile(
+        serialized,
+        knownActionIds ? new Set(knownActionIds) : undefined,
+      );
+      if (!result.success) return result;
+      if (get().customKeyboardProfiles.length >= MAX_CUSTOM_KEYBOARD_PROFILES) {
+        return {
+          success: false,
+          error: `OpenStudio supports up to ${MAX_CUSTOM_KEYBOARD_PROFILES} custom keyboard profiles. Delete one before importing another.`,
+        };
+      }
+      let importedProfile = result.profile;
+      let persistenceFailed = false;
+      set((state) => {
+        importedProfile = {
+          ...importedProfile,
+          name: uniqueCustomKeyboardProfileName(
+            state.customKeyboardProfiles,
+            importedProfile.name,
+          ),
+        };
+        const profiles = [...state.customKeyboardProfiles, importedProfile];
+        if (!persistInputAndCustomKeyboardProfiles({
+          keyboardProfileId: importedProfile.baseProfileId,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        }, profiles, importedProfile.id)) {
+          persistenceFailed = true;
+          return {};
+        }
+        return {
+          customKeyboardProfiles: profiles,
+          activeCustomKeyboardProfileId: importedProfile.id,
+          customShortcuts: importedProfile.bindings,
+          keyboardShortcutProfileId: importedProfile.baseProfileId,
+        };
+      });
+      if (persistenceFailed) {
+        return {
+          success: false,
+          error: "The imported profile could not be saved to local storage.",
+        };
+      }
+      return { success: true, profile: importedProfile };
+    },
+    setKeyboardShortcutProfile: (profileId) => {
+      if (!isKeyboardShortcutProfileId(profileId)) return;
+      let persistenceFailed = false;
+      set((state) => {
+        if (state.keyboardShortcutProfileId === profileId
+          && state.activeCustomKeyboardProfileId === null) return {};
+        if (!persistInputAndCustomKeyboardProfiles({
+          keyboardProfileId: profileId,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        }, state.customKeyboardProfiles, null)) {
+          persistenceFailed = true;
+          return {};
+        }
+        return {
+          keyboardShortcutProfileId: profileId,
+          activeCustomKeyboardProfileId: null,
+          customShortcuts: {},
+        };
+      });
+      if (persistenceFailed) {
+        get().showToast("The keyboard profile could not be saved to local storage.", "error");
+      }
+    },
+    setMouseBehaviorProfile: (profileId) => {
+      if (!isKeyboardShortcutProfileId(profileId)) return;
+      let persistenceFailed = false;
+      set((state) => {
+        if (state.mouseBehaviorProfileId === profileId) return {};
+        if (!persistInputProfileSettings({
+          keyboardProfileId: state.keyboardShortcutProfileId,
+          mouseProfileId: profileId,
+          onboardingSeen: state.inputProfileOnboardingSeen,
+        })) {
+          persistenceFailed = true;
+          return {};
+        }
+        return { mouseBehaviorProfileId: profileId };
+      });
+      if (persistenceFailed) {
+        get().showToast("The mouse profile could not be saved to local storage.", "error");
+      }
+    },
+    markInputProfileOnboardingSeen: () => {
+      let persistenceFailed = false;
+      set((state) => {
+        if (state.inputProfileOnboardingSeen) return {};
+        if (!persistInputProfileSettings({
+          keyboardProfileId: state.keyboardShortcutProfileId,
+          mouseProfileId: state.mouseBehaviorProfileId,
+          onboardingSeen: true,
+        })) {
+          persistenceFailed = true;
+          return {};
+        }
+        return { inputProfileOnboardingSeen: true };
+      });
+      if (persistenceFailed) {
+        get().showToast("Input profile setup could not be saved to local storage.", "error");
+      }
     },
 
     // ========== Track Templates ==========
@@ -3446,6 +4294,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Track Folder Management ==========
     createFolderTrack: (name) => {
+      if (get().globalLocked) return;
       const id = crypto.randomUUID();
       const newTrack = createDefaultTrack(id, name);
       const folderTrack: Track = { ...newTrack, isFolder: true, folderCollapsed: false, icon: "folder" };
@@ -3471,6 +4320,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     moveTracksToFolder: (trackIds, folderId) => {
       const state = get();
+      if (state.globalLocked) return;
       const folder = state.tracks.find((t) => t.id === folderId && t.isFolder);
       if (!folder) return;
       // Capture old parentFolderIds for undo
@@ -3510,17 +4360,28 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const state = get();
       const folder = state.tracks.find((t) => t.id === folderId && t.isFolder);
       if (!folder) return;
-      const newCollapsed = !folder.folderCollapsed;
-
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === folderId ? { ...t, folderCollapsed: newCollapsed } : t,
-        ),
+      const oldCollapsed = Boolean(folder.folderCollapsed);
+      const newCollapsed = !oldCollapsed;
+      const applyCollapsed = (folderCollapsed: boolean) => set((current) => ({
+        tracks: current.tracks.map((track) => track.id === folderId
+          ? { ...track, folderCollapsed }
+          : track),
+        isModified: true,
       }));
+
+      commandManager.execute({
+        type: "TOGGLE_FOLDER_COLLAPSED",
+        description: newCollapsed ? `Collapse folder "${folder.name}"` : `Expand folder "${folder.name}"`,
+        timestamp: Date.now(),
+        execute: () => applyCollapsed(newCollapsed),
+        undo: () => applyCollapsed(oldCollapsed),
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     removeTrackFromFolder: (trackId) => {
       const state = get();
+      if (state.globalLocked) return;
       const track = state.tracks.find((t) => t.id === trackId);
       if (!track || !track.parentFolderId) return;
       const oldFolderId = track.parentFolderId;
@@ -3545,6 +4406,31 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         },
       };
       commandManager.execute(command);
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    removeTracksFromFolders: (trackIds) => {
+      const state = get();
+      if (state.globalLocked) return;
+      const oldParents = new Map<string, string>();
+      for (const trackId of new Set(trackIds)) {
+        const parentFolderId = state.tracks.find((track) => track.id === trackId)?.parentFolderId;
+        if (parentFolderId) oldParents.set(trackId, parentFolderId);
+      }
+      if (oldParents.size === 0) return;
+      const applyParents = (restore: boolean) => set((current) => ({
+        tracks: current.tracks.map((track) => oldParents.has(track.id)
+          ? { ...track, parentFolderId: restore ? oldParents.get(track.id) : undefined }
+          : track),
+        isModified: true,
+      }));
+      commandManager.execute({
+        type: "REMOVE_TRACKS_FROM_FOLDERS",
+        description: oldParents.size === 1 ? "Remove track from folder" : `Remove ${oldParents.size} tracks from folders`,
+        timestamp: Date.now(),
+        execute: () => applyParents(false),
+        undo: () => applyParents(true),
+      });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
@@ -3651,7 +4537,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({ razorEdits: [] });
     },
 
-    deleteRazorEditContent: () => {
+    _legacyDeleteRazorEditContent: () => {
       const state = get();
       if (state.razorEdits.length === 0) return;
 
@@ -3811,7 +4697,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     // ========== Track Freeze (Phase 3.13) ==========
-    freezeTrack: (trackId) => {
+    _legacyFreezeTrack: (trackId: string) => {
       const state = get();
       const track = state.tracks.find((t) => t.id === trackId);
       if (!track || track.frozen) return;
@@ -3839,6 +4725,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             fadeOut: 0,
             sampleRate: result.sampleRate,
           };
+          let hasExecutedOnce = false;
 
           const command: Command = {
             type: "freeze-track",
@@ -3853,6 +4740,31 @@ export const useDAWStore = create<DAWState & DAWActions>()(
                 ),
                 isModified: true,
               }));
+              if (hasExecutedOnce) {
+                nativeBridge.freezeTrack(trackId)
+                  .then((redoResult) => {
+                    if (!redoResult.success || !redoResult.filePath) return;
+                    set((s) => ({
+                      tracks: s.tracks.map((candidate) => candidate.id === trackId && candidate.frozen
+                        ? {
+                            ...candidate,
+                            freezeFilePath: redoResult.filePath,
+                            clips: candidate.clips.map((clip) => clip.id === freezeClip.id
+                              ? {
+                                  ...clip,
+                                  filePath: redoResult.filePath!,
+                                  startTime: redoResult.startTime ?? clip.startTime,
+                                  duration: redoResult.duration ?? clip.duration,
+                                  sampleRate: redoResult.sampleRate ?? clip.sampleRate,
+                                }
+                              : clip),
+                          }
+                        : candidate),
+                    }));
+                  })
+                  .catch(logBridgeError("redo freeze track"));
+              }
+              hasExecutedOnce = true;
             },
             undo: () => {
               set((s) => ({
@@ -3872,7 +4784,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         .catch((err) => console.error("freezeTrack failed:", err));
     },
 
-    unfreezeTrack: (trackId) => {
+    _legacyUnfreezeTrack: (trackId: string) => {
       const state = get();
       const track = state.tracks.find((t) => t.id === trackId);
       if (!track || !track.frozen) return;
@@ -3905,6 +4817,28 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ),
             isModified: true,
           }));
+          nativeBridge.freezeTrack(trackId)
+            .then((redoResult) => {
+              if (!redoResult.success || !redoResult.filePath) return;
+              set((s) => ({
+                tracks: s.tracks.map((candidate) => candidate.id === trackId && candidate.frozen
+                  ? {
+                      ...candidate,
+                      freezeFilePath: redoResult.filePath,
+                      clips: candidate.clips.map((clip) => clip.id === frozenClips[0]?.id
+                        ? {
+                            ...clip,
+                            filePath: redoResult.filePath!,
+                            startTime: redoResult.startTime ?? clip.startTime,
+                            duration: redoResult.duration ?? clip.duration,
+                            sampleRate: redoResult.sampleRate ?? clip.sampleRate,
+                          }
+                        : clip),
+                    }
+                  : candidate),
+              }));
+            })
+            .catch(logBridgeError("undo unfreeze track"));
         },
       };
       commandManager.execute(command);
@@ -4091,258 +5025,6 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         detachedPanels: state.detachedPanels.filter((id) => id !== panelId),
       })),
 
-    // ========== Cut/Copy within Time Selection ==========
-    cutWithinTimeSelection: () => {
-      const state = get();
-      if (!state.timeSelection) return;
-      const { start, end } = state.timeSelection;
-
-      // Collect clips within the time selection
-      const clipsInRange: Array<{ clip: AudioClip; trackId: string }> = [];
-      for (const track of state.tracks) {
-        for (const clip of track.clips) {
-          const clipEnd = clip.startTime + clip.duration;
-          if (clip.startTime < end && clipEnd > start) {
-            const trimStart = Math.max(clip.startTime, start);
-            const trimEnd = Math.min(clipEnd, end);
-            const trimmedClip: AudioClip = {
-              ...clip,
-              id: crypto.randomUUID(),
-              startTime: 0,
-              offset: clip.offset + (trimStart - clip.startTime),
-              duration: trimEnd - trimStart,
-              fadeIn: 0,
-              fadeOut: 0,
-            };
-            clipsInRange.push({ clip: trimmedClip, trackId: track.id });
-          }
-        }
-      }
-
-      if (clipsInRange.length === 0) return;
-
-      // Snapshot for undo
-      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const oldClipboard = state.clipboard;
-
-      // Store in clipboard
-      set({
-        clipboard: { clip: clipsInRange[0]?.clip || null, clips: clipsInRange, isCut: true },
-      });
-
-      // Remove content within the selection
-      set((s) => ({
-        tracks: s.tracks.map((track) => {
-          const newClips: AudioClip[] = [];
-          for (const clip of track.clips) {
-            const clipEnd = clip.startTime + clip.duration;
-            if (clipEnd <= start || clip.startTime >= end) {
-              newClips.push(clip);
-              continue;
-            }
-            if (clip.startTime < start) {
-              newClips.push({ ...clip, id: crypto.randomUUID(), duration: start - clip.startTime, fadeOut: 0 });
-            }
-            if (clipEnd > end) {
-              newClips.push({
-                ...clip,
-                id: crypto.randomUUID(),
-                startTime: end,
-                duration: clipEnd - end,
-                offset: clip.offset + (end - clip.startTime),
-                fadeIn: 0,
-              });
-            }
-          }
-          return { ...track, clips: newClips };
-        }),
-        isModified: true,
-      }));
-
-      const newTracks = get().tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const newClipboard = get().clipboard;
-
-      commandManager.push({
-        type: "CUT_WITHIN_TIME_SELECTION",
-        description: "Cut within time selection",
-        timestamp: Date.now(),
-        execute: () => set({ tracks: newTracks, clipboard: newClipboard, isModified: true }),
-        undo: () => set({ tracks: oldTracks, clipboard: oldClipboard, isModified: true }),
-      });
-      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
-    },
-
-    copyWithinTimeSelection: () => {
-      const state = get();
-      if (!state.timeSelection) return;
-      const { start, end } = state.timeSelection;
-
-      const clipsInRange: Array<{ clip: AudioClip; trackId: string }> = [];
-      for (const track of state.tracks) {
-        for (const clip of track.clips) {
-          const clipEnd = clip.startTime + clip.duration;
-          if (clip.startTime < end && clipEnd > start) {
-            const trimStart = Math.max(clip.startTime, start);
-            const trimEnd = Math.min(clipEnd, end);
-            const trimmedClip: AudioClip = {
-              ...clip,
-              id: crypto.randomUUID(),
-              startTime: 0,
-              offset: clip.offset + (trimStart - clip.startTime),
-              duration: trimEnd - trimStart,
-              fadeIn: 0,
-              fadeOut: 0,
-            };
-            clipsInRange.push({ clip: trimmedClip, trackId: track.id });
-          }
-        }
-      }
-
-      if (clipsInRange.length === 0) return;
-      set({
-        clipboard: { clip: clipsInRange[0]?.clip || null, clips: clipsInRange, isCut: false },
-      });
-    },
-
-    deleteWithinTimeSelection: () => {
-      const state = get();
-      if (!state.timeSelection) return;
-      const { start, end } = state.timeSelection;
-      const selectionDuration = end - start;
-
-      // Snapshot for undo
-      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const oldMarkers = [...state.markers];
-      const oldRegions = [...state.regions];
-      const oldTimeSelection = state.timeSelection;
-
-      set((s) => ({
-        tracks: s.tracks.map((track) => {
-          const newClips: AudioClip[] = [];
-          for (const clip of track.clips) {
-            const clipEnd = clip.startTime + clip.duration;
-            if (clipEnd <= start) {
-              newClips.push(clip);
-              continue;
-            }
-            if (clip.startTime >= end) {
-              newClips.push({ ...clip, startTime: clip.startTime - selectionDuration });
-              continue;
-            }
-            if (clip.startTime < start) {
-              newClips.push({ ...clip, id: crypto.randomUUID(), duration: start - clip.startTime, fadeOut: 0 });
-            }
-            if (clipEnd > end) {
-              newClips.push({
-                ...clip,
-                id: crypto.randomUUID(),
-                startTime: start,
-                duration: clipEnd - end,
-                offset: clip.offset + (end - clip.startTime),
-                fadeIn: 0,
-              });
-            }
-          }
-          return { ...track, clips: newClips };
-        }),
-        markers: s.markers.map((m) => {
-          if (m.time >= end) return { ...m, time: m.time - selectionDuration };
-          if (m.time > start) return { ...m, time: start };
-          return m;
-        }),
-        regions: s.regions.map((r) => {
-          if (r.startTime >= end) return { ...r, startTime: r.startTime - selectionDuration, endTime: r.endTime - selectionDuration };
-          if (r.endTime <= start) return r;
-          return { ...r, endTime: Math.min(r.endTime - selectionDuration, r.startTime < start ? start : r.startTime) };
-        }).filter((r) => r.endTime > r.startTime),
-        timeSelection: null,
-        isModified: true,
-      }));
-
-      const newState = get();
-      const newTracks = newState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const newMarkers = [...newState.markers];
-      const newRegions = [...newState.regions];
-
-      commandManager.push({
-        type: "DELETE_WITHIN_TIME_SELECTION",
-        description: "Delete within time selection (ripple)",
-        timestamp: Date.now(),
-        execute: () => set({ tracks: newTracks, markers: newMarkers, regions: newRegions, timeSelection: null, isModified: true }),
-        undo: () => set({ tracks: oldTracks, markers: oldMarkers, regions: oldRegions, timeSelection: oldTimeSelection, isModified: true }),
-      });
-      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
-    },
-
-    insertSilenceAtTimeSelection: () => {
-      const state = get();
-      if (!state.timeSelection) return;
-      const { start: insertTime, end: selEnd } = state.timeSelection;
-      const insertDuration = selEnd - insertTime;
-      if (insertDuration <= 0) return;
-
-      // Snapshot for undo
-      const oldTracks = state.tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const oldMarkers = [...state.markers];
-      const oldRegions = [...state.regions];
-      const oldTimeSelection = state.timeSelection;
-
-      set((s) => ({
-        tracks: s.tracks.map((track) => {
-          const newClips: AudioClip[] = [];
-          for (const clip of track.clips) {
-            const clipEnd = clip.startTime + clip.duration;
-            if (clipEnd <= insertTime) {
-              newClips.push(clip);
-            } else if (clip.startTime >= insertTime) {
-              newClips.push({ ...clip, startTime: clip.startTime + insertDuration });
-            } else {
-              newClips.push({
-                ...clip,
-                id: crypto.randomUUID(),
-                duration: insertTime - clip.startTime,
-                fadeOut: 0,
-              });
-              newClips.push({
-                ...clip,
-                id: crypto.randomUUID(),
-                startTime: insertTime + insertDuration,
-                duration: clipEnd - insertTime,
-                offset: clip.offset + (insertTime - clip.startTime),
-                fadeIn: 0,
-              });
-            }
-          }
-          return { ...track, clips: newClips };
-        }),
-        markers: s.markers.map((m) =>
-          m.time >= insertTime ? { ...m, time: m.time + insertDuration } : m
-        ),
-        regions: s.regions.map((r) => {
-          if (r.startTime >= insertTime) return { ...r, startTime: r.startTime + insertDuration, endTime: r.endTime + insertDuration };
-          if (r.endTime <= insertTime) return r;
-          return { ...r, endTime: r.endTime + insertDuration };
-        }),
-        timeSelection: null,
-        isModified: true,
-      }));
-
-      // Capture new state for redo
-      const newState = get();
-      const newTracks = newState.tracks.map(t => ({ ...t, clips: [...t.clips] }));
-      const newMarkers = [...newState.markers];
-      const newRegions = [...newState.regions];
-
-      commandManager.push({
-        type: "INSERT_SILENCE",
-        description: "Insert silence",
-        timestamp: Date.now(),
-        execute: () => set({ tracks: newTracks, markers: newMarkers, regions: newRegions, timeSelection: null, isModified: true }),
-        undo: () => set({ tracks: oldTracks, markers: oldMarkers, regions: oldRegions, timeSelection: oldTimeSelection, isModified: true }),
-      });
-      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
-    },
-
     // ========== Record & Edit Modes ==========
     setRecordMode: (mode) => set({ recordMode: mode }),
     setRippleMode: (mode) => set({ rippleMode: mode }),
@@ -4388,8 +5070,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Clip Lock & Color ==========
     toggleClipLock: (clipId) => {
-      const clip = get().tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
-      if (!clip) return;
+      const state = get();
+      const clip = state.tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
+      if (!clip || state.globalLocked || state.lockSettings.items) return;
       const wasLocked = !!clip.locked;
       const isMidi = Array.isArray((clip as MIDIClip).events);
       const midiTrackId = isMidi ? get().tracks.find((t) => t.midiClips.some((c) => c.id === clipId))?.id : null;
@@ -4425,38 +5108,37 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
 
     setClipColor: (clipId, color) => {
-      const clip = get().tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
-      if (!clip) return;
+      const state = get();
+      const clip = state.tracks.flatMap(t => [...t.clips, ...t.midiClips]).find(c => c.id === clipId);
+      if (!clip || isClipEditLocked(state, clip) || clip.color === color) return;
       const oldColor = clip.color;
       const isMidi = Array.isArray((clip as MIDIClip).events);
       const midiTrackId = isMidi ? get().tracks.find((t) => t.midiClips.some((c) => c.id === clipId))?.id : null;
 
-      set((s) => ({
+      const applyColor = (nextColor: string) => {
+        set((s) => ({
         tracks: s.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((c) =>
-            c.id === clipId ? { ...c, color } : c,
+            c.id === clipId ? { ...c, color: nextColor } : c,
           ),
           midiClips: track.midiClips.map((c) =>
-            c.id === clipId ? { ...c, color } : c,
+            c.id === clipId ? { ...c, color: nextColor } : c,
           ),
         })),
         isModified: true,
-      }));
-      if (midiTrackId) void get().syncMIDITrackToBackend(midiTrackId, { debounce: false });
+        }));
+        if (midiTrackId) void get().syncMIDITrackToBackend(midiTrackId, { debounce: false });
+      };
+
+      applyColor(color);
 
       commandManager.push({
         type: "SET_CLIP_COLOR",
         description: "Change clip color",
         timestamp: Date.now(),
-        execute: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, color } : c) })),
-          isModified: true,
-        })),
-        undo: () => set((s) => ({
-          tracks: s.tracks.map((t) => ({ ...t, clips: t.clips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c), midiClips: t.midiClips.map((c) => c.id === clipId ? { ...c, color: oldColor } : c) })),
-          isModified: true,
-        })),
+        execute: () => applyColor(color),
+        undo: () => applyColor(oldColor),
       });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
@@ -4483,6 +5165,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           numActiveOutputChannels: (raw as Record<string, unknown>).numActiveOutputChannels as number ?? undefined,
           inputChannelNames: (raw as Record<string, unknown>).inputChannelNames as string[] | undefined,
           outputChannelNames: (raw as Record<string, unknown>).outputChannelNames as string[] | undefined,
+          activeInputChannelIndices: (raw as Record<string, unknown>).activeInputChannelIndices as number[] | undefined,
+          activeOutputChannelIndices: (raw as Record<string, unknown>).activeOutputChannelIndices as number[] | undefined,
+          channelActivationPolicy: (raw as Record<string, unknown>).channelActivationPolicy as string | undefined,
+          forcesAllDeviceChannels: (raw as Record<string, unknown>).forcesAllDeviceChannels as boolean | undefined,
         } });
       } catch (error) {
         console.error("Failed to refresh audio device setup:", error);
@@ -4639,7 +5325,61 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
+    beginAITrackParamsEdit: (trackId) => {
+      if (activeAITrackParamsEdit?.trackId === trackId) return false;
+      if (activeAITrackParamsEdit) {
+        get().commitAITrackParamsEdit(activeAITrackParamsEdit.trackId);
+      }
+      const track = get().tracks.find((entry) => entry.id === trackId);
+      if (!track || track.type !== "ai") return false;
+      activeAITrackParamsEdit = {
+        trackId,
+        trackName: track.name,
+        previousParams: { ...(track.aiWorkflowParams ?? {}) },
+      };
+      return true;
+    },
+
+    commitAITrackParamsEdit: (trackId) => {
+      const snapshot = activeAITrackParamsEdit;
+      if (!snapshot || snapshot.trackId !== trackId) return false;
+      activeAITrackParamsEdit = null;
+      const track = get().tracks.find((entry) => entry.id === trackId);
+      if (!track || track.type !== "ai") return false;
+      const nextParams = { ...(track.aiWorkflowParams ?? {}) };
+      if (areAITrackParamsEqual(snapshot.previousParams, nextParams)) return false;
+
+      commandManager.push({
+        type: "UPDATE_TRACK",
+        description: `Update AI parameters on "${snapshot.trackName}"`,
+        timestamp: Date.now(),
+        execute: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? { ...entry, aiWorkflowParams: nextParams }
+                : entry,
+            ),
+          }));
+        },
+        undo: () => {
+          set((store) => ({
+            tracks: store.tracks.map((entry) =>
+              entry.id === trackId
+                ? { ...entry, aiWorkflowParams: snapshot.previousParams }
+                : entry,
+            ),
+          }));
+        },
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+      return true;
+    },
+
     setAITrackParams: (trackId, params) => {
+      if (activeAITrackParamsEdit && activeAITrackParamsEdit.trackId !== trackId) {
+        get().commitAITrackParamsEdit(activeAITrackParamsEdit.trackId);
+      }
       const state = get();
       const track = state.tracks.find((entry) => entry.id === trackId);
       if (!track || track.type !== "ai") return;
@@ -4650,14 +5390,17 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         params,
         track.aiMusicModelId,
       );
+      if (areAITrackParamsEqual(previousParams, nextParams)) return;
 
       set((store) => ({
         tracks: store.tracks.map((entry) =>
           entry.id === trackId
             ? { ...entry, aiWorkflowParams: nextParams }
-            : entry,
+          : entry,
         ),
       }));
+
+      if (activeAITrackParamsEdit?.trackId === trackId) return;
 
       commandManager.push({
         type: "UPDATE_TRACK",
@@ -4855,7 +5598,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ),
             isModified: true,
           }));
-          void nativeBridge.removePlaybackClip(trackId, newClip.filePath);
+          void nativeBridge.removePlaybackClipById(trackId, newClip.id);
         },
       });
     },
@@ -4992,7 +5735,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               isModified: true,
             };
           });
-          void nativeBridge.removePlaybackClip(targetTrackId, generatedClip.filePath).catch(logBridgeError("sync"));
+          void nativeBridge.removePlaybackClipById(targetTrackId, generatedClip.id).catch(logBridgeError("sync"));
           if (newTrackId) {
             void nativeBridge.removeTrack(newTrackId).catch(logBridgeError("sync"));
           }
@@ -5002,11 +5745,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Empty Item (silent clip) ==========
     addEmptyClip: (trackId, startTime, duration) => {
+      const state = get();
+      const track = state.tracks.find((candidate) => candidate.id === trackId);
+      if (!track
+          || track.type !== "audio"
+          || track.frozen
+          || isClipEditLocked(state)
+          || !Number.isFinite(startTime)
+          || !Number.isFinite(duration)
+          || duration <= 0.000001) return;
       const clip: AudioClip = {
         id: crypto.randomUUID(),
         filePath: "",
         name: "(empty)",
-        startTime,
+        startTime: Math.max(0, startTime),
         duration,
         offset: 0,
         color: "#555555",
@@ -5014,12 +5766,33 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         fadeIn: 0,
         fadeOut: 0,
       };
-      set((state) => ({
-        tracks: state.tracks.map((t) =>
-          t.id === trackId ? { ...t, clips: [...t.clips, clip] } : t
-        ),
+      const apply = () => set((current) => ({
+        tracks: current.tracks.map((candidate) => candidate.id === trackId
+          ? {
+              ...candidate,
+              clips: candidate.clips.some((entry) => entry.id === clip.id)
+                ? candidate.clips
+                : [...candidate.clips, clip],
+            }
+          : candidate),
         isModified: true,
       }));
+      const undo = () => set((current) => ({
+        tracks: current.tracks.map((candidate) => candidate.id === trackId
+          ? { ...candidate, clips: candidate.clips.filter((entry) => entry.id !== clip.id) }
+          : candidate),
+        selectedClipIds: current.selectedClipIds.filter((clipId) => clipId !== clip.id),
+        selectedClipId: current.selectedClipId === clip.id ? null : current.selectedClipId,
+        isModified: true,
+      }));
+      commandManager.execute({
+        type: "ADD_EMPTY_CLIP",
+        description: "Insert empty item",
+        timestamp: Date.now(),
+        execute: apply,
+        undo,
+      });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     // ========== Lock Settings (granular) ==========
@@ -5072,7 +5845,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     // ========== Bus/Group Creation (kept inline — small) ==========
     // ========== Bus/Group Creation ==========
-    createBusFromSelectedTracks: () => {
+    _legacyCreateBusFromSelectedTracks: () => {
       const state = get();
       const selectedIds = state.selectedTrackIds;
       if (selectedIds.length === 0) {
@@ -5120,6 +5893,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...macroActions(set, get),
     ...renderQueueActions(set, get),
     ...quantizeActions(set, get),
+    ...timeSelectionEditingActions(set, get),
   })),
 );
 

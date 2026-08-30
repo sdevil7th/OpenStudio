@@ -151,11 +151,78 @@ body {
 
 /* App Layout Classes (Restored) */
 .app-container {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+}
+
+.openstudio-startup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(0, 120, 212, 0.11), transparent 36%),
+    linear-gradient(180deg, rgba(12, 14, 17, 0.96), rgba(7, 8, 10, 0.98));
+  color: #e5e7eb;
+  backdrop-filter: blur(10px);
+}
+
+.openstudio-startup-card {
+  min-width: min(360px, calc(100vw - 48px));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: rgba(16, 18, 22, 0.88);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.055),
+    0 24px 70px rgba(0, 0, 0, 0.44);
+}
+
+.openstudio-startup-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(0, 120, 212, 0.24);
+  border-top-color: #4aa3ff;
+  border-radius: 999px;
+  animation: openstudio-startup-spin 840ms linear infinite;
+}
+
+.openstudio-startup-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.openstudio-startup-copy strong {
+  color: #f8fafc;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.openstudio-startup-copy span {
+  overflow: hidden;
+  color: #aab3c2;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes openstudio-startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .workspace {

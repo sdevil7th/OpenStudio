@@ -795,7 +795,7 @@ static int l_renderProject(lua_State* L)
 }
 
 // --- File dialog (returns a temp file path for script I/O) ---
-// JUCE 8 removed synchronous file dialogs; Lua scripts run on message thread
+// Current JUCE APIs use asynchronous file dialogs; Lua scripts run on the message thread.
 // so we can't use async+WaitableEvent without deadlocking. Scripts should use
 // explicit file paths passed as arguments instead.
 static int l_fileDialog(lua_State* L)

@@ -2087,7 +2087,6 @@ S13ReverbEditor::S13ReverbEditor(S13Reverb& p)
     algorithmBox.addItem("Hall", 2);
     algorithmBox.addItem("Plate", 3);
     algorithmBox.addItem("Chamber", 4);
-    algorithmBox.addItem("Shimmer", 5);
     algorithmBox.onChange = [this]() { proc.algorithm = static_cast<float>(algorithmBox.getSelectedId() - 1); };
 
     addAndMakeVisible(freezeBtn);
