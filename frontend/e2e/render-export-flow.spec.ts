@@ -79,6 +79,9 @@ test("selected-item MP3 export preserves selection and bitrate across the UI bri
   await expect(page.getByText("Render to File", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Render 1 file" }).click();
   await expect.poll(() => readRenderCalls(page)).toHaveLength(1);
+  await expect(page.getByText("Render successful: 1 file saved.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Render to File", { exact: true })).toBeHidden();
+  await expect(page.getByText("Render successful: 1 file saved.", { exact: true })).toBeVisible();
   const [call] = await readRenderCalls(page);
   expect(call).toMatchObject({
     source: "selected_items",
@@ -123,6 +126,7 @@ test("stem-by-region exports reserve unique paths and report the complete job co
   await expect(page.getByRole("button", { name: "Render 6 files" })).toBeVisible();
   await page.getByRole("button", { name: "Render 6 files" }).click();
   await expect.poll(() => readRenderCalls(page)).toHaveLength(6);
+  await expect(page.getByText("Render successful: 6 files saved.", { exact: true })).toBeVisible();
 
   const calls = await readRenderCalls(page);
   expect(new Set(calls.map((call) => call.filePath.toLocaleLowerCase())).size).toBe(6);

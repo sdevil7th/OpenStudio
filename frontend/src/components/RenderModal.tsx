@@ -524,6 +524,10 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         await addRenderedToProject(renderedFiles);
       }
 
+      showToast(
+        `Render successful: ${renderedFiles.length} file${renderedFiles.length === 1 ? "" : "s"} saved.`,
+        "success",
+      );
       setRenderProgress(100);
       setRenderStatus("Complete!");
       setTimeout(() => {
