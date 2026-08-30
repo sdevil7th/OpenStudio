@@ -200,7 +200,7 @@ pushd "$build_dir/ffmpeg" >/dev/null
 make -j"$jobs"
 make install
 cp ffbuild/config.mak "$corresponding_dir/build/ffmpeg-config.mak"
-cp ffbuild/config.h "$corresponding_dir/build/ffmpeg-config.h"
+cp config.h "$corresponding_dir/build/ffmpeg-config.h"
 popd >/dev/null
 
 cp "$prefix_dir/bin/ffmpeg.exe" "$runtime_dir/"
