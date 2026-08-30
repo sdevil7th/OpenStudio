@@ -1,0 +1,79 @@
+name: FFmpeg Runtime
+
+on:
+  push:
+    branches:
+      - fix/reproducible-ffmpeg-runtime
+    tags:
+      - "ffmpeg-runtime-v*"
+    paths:
+      - ".github/workflows/ffmpeg-runtime.yml"
+      - "thirdparty/ffmpeg/**"
+      - "tools/build-windows-ffmpeg-runtime.sh"
+      - "tools/test-windows-ffmpeg-runtime.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install deterministic build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential curl pkg-config python3 tar xz-utils zip
+
+      - name: Build runtime and complete corresponding source
+        run: bash ./tools/build-windows-ffmpeg-runtime.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ffmpeg-runtime-build
+          path: dist/ffmpeg-runtime/
+          if-no-files-found: error
+
+  test-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ffmpeg-runtime-build
+          path: dist/ffmpeg-runtime
+
+      - name: Run Windows capability and conversion regression
+        shell: pwsh
+        run: |
+          ./tools/test-windows-ffmpeg-runtime.ps1 `
+            -RuntimeArchive dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-windows-x64.zip
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/ffmpeg-runtime-v')
+    needs: test-windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ffmpeg-runtime-build
+          path: dist/ffmpeg-runtime
+
+      - name: Publish immutable FFmpeg runtime release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "OpenStudio FFmpeg Runtime ${GITHUB_REF_NAME#ffmpeg-runtime-v}" \
+            --notes "Checksum-pinned Windows FFmpeg runtime and its complete corresponding source. Built and tested by .github/workflows/ffmpeg-runtime.yml." \
+            dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-windows-x64.zip \
+            dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip \
+            dist/ffmpeg-runtime/SHA256SUMS.txt
