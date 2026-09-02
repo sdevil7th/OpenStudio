@@ -80,26 +80,32 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 ## FFmpeg
 
 - **Website:** https://ffmpeg.org/
-- **Bundled Windows build:** FFmpeg 8.0.1 essentials build from Gyan Doshi
-- **License for this build:** GPL-3.0-or-later
+- **Bundled Windows runtime:** OpenStudio FFmpeg 8.0.1-openstudio.1
+- **FFmpeg license for this build:** LGPL-2.1-or-later
+- **Enabled external libraries:** LAME 3.100 (LGPL-2.0-or-later), libogg
+  1.3.5 (BSD-3-Clause), and libvorbis 1.3.7 (BSD-3-Clause)
 - **Copyright:** (c) The FFmpeg developers
 - **Usage:** Audio format conversion (MP3, OGG, etc.) via external process
 
-On Windows, FFmpeg is distributed as a standalone executable and is not linked
-into the OpenStudio binary. It is invoked as a child process for lossy format
-encoding and sample rate conversion. The exact binary checksum, build
-configuration, provider, and upstream source archive are recorded in
-`licenses/FFmpeg-PROVENANCE.json`; the applicable GPLv3 text is shipped as
-`licenses/FFmpeg-COPYING.GPLv3.txt`.
+On Windows, FFmpeg is distributed as a standalone executable with its required
+shared libraries and is not linked into the OpenStudio binary. It is invoked as
+a child process for encoding, resampling, time/pitch processing, and media
+extraction. The build disables GPL, non-free, version-3-only, networking, and
+dependency autodetection; only the explicitly pinned libraries above are
+enabled.
+
+The exact runtime archive, complete corresponding-source archive, source
+inputs, build toolchain, configuration, patches, binary files, and SHA-256
+digests are recorded in the packaged `licenses/FFmpeg-PROVENANCE.json`,
+`licenses/FFmpeg-SOURCE-LOCK.json`, and
+`licenses/FFmpeg-RUNTIME-MANIFEST.json`. The applicable FFmpeg, LAME, libogg,
+and libvorbis license texts are shipped beside those manifests. The matching
+complete corresponding-source archive is published as an immutable companion
+asset in the `ffmpeg-runtime-v8.0.1-openstudio.1` GitHub release and is also
+attached to every OpenStudio Windows release that distributes this runtime.
 
 OpenStudio does not redistribute an FFmpeg binary in its macOS or Linux
 packages. Those builds use an optional system `ffmpeg` on `PATH` when present.
-
-The bundled Windows executable is a static GPL build with GPL-enabled and
-third-party libraries. Public binary distribution therefore also requires
-complete corresponding source for the exact linked build under the applicable
-licenses. The FFmpeg core source link alone does not cover every statically
-linked dependency.
 
 ---
 

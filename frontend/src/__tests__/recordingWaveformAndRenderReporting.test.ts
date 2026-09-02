@@ -50,6 +50,6 @@ describe("render result reporting regression guards", () => {
     expect(renderModalSource).toContain(
       "Primary render completed, but the secondary ${secondaryOutputFormat.toUpperCase()} output failed",
     );
-    expect(renderModalSource).toContain("primary file${renderedFiles.length === 1 ? \" was\" : \"s were\"} rendered successfully");
+    expect(renderModalSource).toContain("output file${renderedFiles.length === 1 ? \" was\" : \"s were\"} rendered successfully");
   });
 });

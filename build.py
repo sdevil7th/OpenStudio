@@ -162,6 +162,13 @@ def get_cpp_exe_path(config="Debug"):
 
 def build_backend(mode="debug"):
     print("--- Building Backend ---")
+    if platform.system() == "Windows":
+        run_command([
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", os.path.join(os.getcwd(), "tools", "setup-ffmpeg.ps1"),
+        ], shell=False)
     build_dir = os.path.join(os.getcwd(), "build")
     if not os.path.exists(build_dir):
         os.makedirs(build_dir)

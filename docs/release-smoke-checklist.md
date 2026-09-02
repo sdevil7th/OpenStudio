@@ -33,11 +33,14 @@ release-candidate platform.
 - Confirm the installer shows which step it is on while copying files, installing VC++, installing WebView2, and validating shell startup.
 - Confirm the installed app launches without a frontend dev server running.
 - Confirm the installed app does not show a full black window.
-- Confirm `webui`, `effects`, `scripts`, `models`, and the checksum-pinned
-  `ffmpeg.exe` are present in the installed app directory.
-- Confirm `licenses/FFmpeg-COPYING.GPLv3.txt` and
-  `licenses/FFmpeg-PROVENANCE.json` are present, and confirm the matching
-  complete corresponding-source distribution is available before publication.
+- Confirm `webui`, `effects`, `scripts`, `models`, and every executable/DLL in
+  the checksum-pinned FFmpeg runtime manifest are present in the installed app
+  directory.
+- Confirm `licenses/FFmpeg-PROVENANCE.json`,
+  `licenses/FFmpeg-RUNTIME-MANIFEST.json`,
+  `licenses/FFmpeg-SOURCE-LOCK.json`, and the FFmpeg/LAME/libogg/libvorbis
+  license texts are present. Confirm the immutable matching complete
+  corresponding-source asset is available before publication.
 - Confirm the checksum-validated YSFX/WDL, dr_libs, stb, CLAP, Signalsmith,
   ARA, and Basic Pitch notices are present under `licenses/`. Also confirm the
   notices copied from the pinned NAMCore/Eigen source and, when enabled, the

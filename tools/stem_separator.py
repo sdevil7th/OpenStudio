@@ -167,17 +167,17 @@ def main():
 
     # Ensure bundled ffmpeg is on PATH (audio-separator requires it)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Dev build: tools/ is next to stem_separator.py
-    if os.path.isfile(os.path.join(script_dir, "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")):
-        os.environ["PATH"] = script_dir + os.pathsep + os.environ.get("PATH", "")
-    # Installed build: scripts/ dir, ffmpeg next to it or in parent
-    else:
-        parent_dir = os.path.dirname(script_dir)
-        for candidate in [parent_dir, os.path.join(parent_dir, "tools")]:
-            ffname = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-            if os.path.isfile(os.path.join(candidate, ffname)):
-                os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
-                break
+    parent_dir = os.path.dirname(script_dir)
+    ffname = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    candidates = [
+        os.path.join(script_dir, "ffmpeg-runtime"),
+        parent_dir,
+        os.path.join(parent_dir, "tools", "ffmpeg-runtime"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, ffname)):
+            os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
+            break
 
     emit("loading", 0.0)
 

@@ -287,23 +287,67 @@ if ($EnforceLeanBundle) {
 
 if ($Platform -eq "windows") {
     $ffmpegPath = Join-Path $runtimeRoot "ffmpeg.exe"
-    $ffmpegLicensePath = Join-Path $runtimeRoot "licenses/FFmpeg-COPYING.GPLv3.txt"
     $ffmpegProvenancePath = Join-Path $runtimeRoot "licenses/FFmpeg-PROVENANCE.json"
+    $ffmpegManifestPath = Join-Path $runtimeRoot "licenses/FFmpeg-RUNTIME-MANIFEST.json"
+    $ffmpegSourceLockPath = Join-Path $runtimeRoot "licenses/FFmpeg-SOURCE-LOCK.json"
+    $ffmpegRuntimeLockPath = Join-Path $repoRoot "thirdparty/ffmpeg/runtime-lock.json"
     Assert-Exists -Path $ffmpegPath -Description "bundled ffmpeg executable"
-    Assert-Exists -Path $ffmpegLicensePath -Description "FFmpeg GPLv3 license"
     Assert-Exists -Path $ffmpegProvenancePath -Description "FFmpeg provenance manifest"
+    Assert-Exists -Path $ffmpegManifestPath -Description "FFmpeg runtime manifest"
+    Assert-Exists -Path $ffmpegSourceLockPath -Description "FFmpeg source lock"
+    Assert-Exists -Path $ffmpegRuntimeLockPath -Description "repository FFmpeg runtime lock"
 
-    $ffmpegHashes = @{
-        $ffmpegPath = "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d"
-        $ffmpegLicensePath = "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
-        $ffmpegProvenancePath = "30fc0edca9acc1d7a3253a81afe485a44f1de3c4b86542a18f644c1f71f312d4"
+    $runtimeLock = Get-Content -LiteralPath $ffmpegRuntimeLockPath -Raw | ConvertFrom-Json
+    $provenanceHash = (Get-FileHash -LiteralPath $ffmpegProvenancePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $runtimeLockHash = (Get-FileHash -LiteralPath $ffmpegRuntimeLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($provenanceHash -ne $runtimeLockHash) {
+        throw "Packaged FFmpeg provenance does not match thirdparty/ffmpeg/runtime-lock.json."
     }
-    foreach ($path in $ffmpegHashes.Keys) {
+
+    $manifestHash = (Get-FileHash -LiteralPath $ffmpegManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($manifestHash -ne ([string]$runtimeLock.runtimeManifestSha256).ToLowerInvariant()) {
+        throw "Packaged FFmpeg runtime manifest checksum mismatch."
+    }
+    $sourceLockHash = (Get-FileHash -LiteralPath $ffmpegSourceLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceLockHash -ne ([string]$runtimeLock.sourceLockSha256).ToLowerInvariant()) {
+        throw "Packaged FFmpeg source lock checksum mismatch."
+    }
+
+    $manifest = Get-Content -LiteralPath $ffmpegManifestPath -Raw | ConvertFrom-Json
+    if ($manifest.runtimeVersion -ne $runtimeLock.runtimeVersion -or $manifest.target -ne $runtimeLock.target) {
+        throw "Packaged FFmpeg runtime identity does not match the repository lock."
+    }
+    if ($manifest.license -ne "LGPL-2.1-or-later" -or
+        $manifest.gplComponentsEnabled -ne $false -or
+        $manifest.nonFreeComponentsEnabled -ne $false) {
+        throw "Packaged FFmpeg runtime has an unapproved license configuration."
+    }
+
+    foreach ($file in $manifest.files) {
+        $relativePath = ([string]$file.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $path = Join-Path $runtimeRoot $relativePath
+        Assert-Exists -Path $path -Description "FFmpeg runtime file '$($file.path)'"
         $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $ffmpegHashes[$path]) {
-            throw "Bundled FFmpeg checksum mismatch for '$path'."
+        if ($actualHash -ne ([string]$file.sha256).ToLowerInvariant()) {
+            throw "Bundled FFmpeg checksum mismatch for '$($file.path)'."
+        }
+        if ((Get-Item -LiteralPath $path).Length -ne [long]$file.size) {
+            throw "Bundled FFmpeg file size mismatch for '$($file.path)'."
         }
     }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $ffmpegVersionOutput = & $ffmpegPath -hide_banner -version 2>&1 | Out-String
+        $ffmpegExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($ffmpegExitCode -ne 0 -or $ffmpegVersionOutput -notmatch 'ffmpeg version 8\.0\.1') {
+        throw "Packaged FFmpeg runtime did not start successfully.`n$ffmpegVersionOutput"
+    }
+    $global:LASTEXITCODE = 0
 
     $windowsPrerequisiteEntries = @(
         @{ Source = "thirdparty/windows-prereqs/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Target = "prereqs/windows/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Description = "WebView2 standalone installer" },
