@@ -1518,8 +1518,8 @@ bool StemSeparator::applyDiffusersSetupProgress (const juce::String& line, AiToo
     if (stage.isEmpty()) return false;
     status.stepLabel = stage;
     status.message = stage;
-    status.bytesDownloaded = juce::jmax<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesDownloaded")));
-    status.bytesTotal = juce::jmax<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesTotal")));
+    status.bytesDownloaded = std::max<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesDownloaded")));
+    status.bytesTotal = std::max<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesTotal")));
     status.progress = status.bytesTotal > 0
         ? juce::jlimit(0.0f, 1.0f, static_cast<float>(status.bytesDownloaded) / static_cast<float>(status.bytesTotal)) : 0.0f;
     status.downloadHint = status.bytesTotal > 0
