@@ -1084,6 +1084,7 @@ StemSeparator::AiToolsStatus StemSeparator::buildAiToolsStatus (const juce::File
         status.stepCount = 0;
         status.bytesDownloaded = 0;
         status.bytesTotal = 0;
+        status.bytesCached = 0;
         status.downloadHint.clear();
         status.isLargeDownload = false;
         status.error.clear();
@@ -1520,10 +1521,11 @@ bool StemSeparator::applyDiffusersSetupProgress (const juce::String& line, AiToo
     status.message = stage;
     status.bytesDownloaded = std::max<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesDownloaded")));
     status.bytesTotal = std::max<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesTotal")));
+    status.bytesCached = std::max<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesCached")));
     status.progress = status.bytesTotal > 0
         ? juce::jlimit(0.0f, 1.0f, static_cast<float>(status.bytesDownloaded) / static_cast<float>(status.bytesTotal)) : 0.0f;
     status.downloadHint = status.bytesTotal > 0
-        ? "Model files include resumed data. The total may grow as more files are discovered."
+        ? "After the download, OpenStudio will prepare and check the model before marking it ready."
         : juce::String();
     return true;
 }
@@ -1813,6 +1815,8 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
     obj->setProperty("elapsedMs", static_cast<double>(status.elapsedMs));
     obj->setProperty("bytesDownloaded", static_cast<double>(status.bytesDownloaded));
     obj->setProperty("bytesTotal", static_cast<double>(status.bytesTotal));
+    obj->setProperty("bytesCached", static_cast<double>(status.bytesCached));
+    obj->setProperty("setupProgressVersion", 1);
     obj->setProperty("available", status.available);
     obj->setProperty("installerAvailable", status.installerAvailable);
     obj->setProperty("pythonDetected", status.pythonDetected);
@@ -2196,6 +2200,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     status.progress = 0.0f;
                     status.bytesDownloaded = 0;
                     status.bytesTotal = 0;
+                    status.bytesCached = 0;
                     status.installInProgress = true;
                     status.message = label;
                     status.stepLabel = label;
@@ -2797,6 +2802,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.elapsedMs = 0;
                 status.bytesDownloaded = 0;
                 status.bytesTotal = 0;
+                status.bytesCached = 0;
                 status.downloadHint.clear();
                 status.isLargeDownload = false;
                 status.activityLines.clear();
@@ -2860,6 +2866,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.stepCount = 0;
                 status.bytesDownloaded = 0;
                 status.bytesTotal = 0;
+                status.bytesCached = 0;
                 status.downloadHint.clear();
                 status.isLargeDownload = false;
                 status.activityLines.clear();
@@ -3557,6 +3564,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             lastAiToolsStatus.elapsedMs = 0;
             lastAiToolsStatus.bytesDownloaded = 0;
             lastAiToolsStatus.bytesTotal = 0;
+            lastAiToolsStatus.bytesCached = 0;
             lastAiToolsStatus.isLargeDownload = false;
             lastAiToolsStatus.available = false;
             lastAiToolsStatus.installInProgress = true;

@@ -26,13 +26,13 @@ HUB_MODELS = {
 }
 
 
-def report_progress(stage: str, completed: int = 0, total: int = 0):
+def report_progress(stage: str, completed: int = 0, total: int = 0, cached: int = 0):
     print("OPENSTUDIO_SETUP_PROGRESS " + json.dumps({
-        "stage": stage, "bytesDownloaded": completed, "bytesTotal": total,
+        "stage": stage, "bytesDownloaded": completed, "bytesTotal": total, "bytesCached": cached,
     }), flush=True)
 
 
-def hub_progress_class():
+def hub_progress_class(total_bytes: int = 0, cached_bytes: int = 0):
     from huggingface_hub.utils import tqdm
     from tqdm.auto import tqdm as base_tqdm
 
@@ -46,13 +46,14 @@ def hub_progress_class():
             base_tqdm.__init__(self, *args, **kwargs)
 
         def display(self, *args, **kwargs):
-            # Hub aggregates files (including resumed bytes) into this bar.
-            # Its total can grow as file metadata arrives; never use file count
-            # or the separate network-transfer bar as the model byte total.
+            # Hub aggregates newly reconstructed files, including partial
+            # resumes. Add complete cached files to the fixed preflight total.
             now = time.monotonic()
             if self.setup_name == "huggingface_hub.snapshot_download" and now - self.last_report >= 0.5:
                 self.last_report = now
-                report_progress("Downloading model files", int(self.n), int(self.total or 0))
+                total = total_bytes or int(self.total or 0)
+                completed = min(total, cached_bytes + int(self.n)) if total else 0
+                report_progress("Downloading model files", completed, total, cached_bytes)
 
     return SetupProgress
 
@@ -71,10 +72,17 @@ def download(model_id: str, destination: Path, cache: Path, *, check_access: boo
     if check_access:
         print("Hugging Face model access verified.", flush=True)
         return
+    report_progress("Checking download size and cached files")
+    plan = snapshot_download(repo, revision=revision, allow_patterns=patterns,
+                             cache_dir=str(cache / "hub"), dry_run=True)
+    if not plan:
+        raise RuntimeError("Hugging Face returned no files for the selected model.")
+    total_bytes = sum(item.file_size for item in plan)
+    cached_bytes = sum(item.file_size for item in plan if not item.will_download)
     print(f"Downloading {repo} from Hugging Face. Completed files are reused on retry.", flush=True)
-    report_progress("Downloading model files")
+    report_progress("Downloading model files", cached_bytes, total_bytes, cached_bytes)
     source = Path(snapshot_download(repo, revision=revision, allow_patterns=patterns,
-                                   cache_dir=str(cache / "hub"), tqdm_class=hub_progress_class()))
+                                   cache_dir=str(cache / "hub"), tqdm_class=hub_progress_class(total_bytes, cached_bytes)))
     # Never give the converter the access token; no credentials are saved by this helper.
     os.environ.pop("HF_TOKEN", None)
     if model_id == STABLE_MODEL:

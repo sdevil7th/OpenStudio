@@ -143,14 +143,14 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("ai_status_fresh_idle_probe_publishes_and_releases_refresh",
               separator.lastAiToolsStatus.state == "ready" && ! separator.statusRefreshInFlight);
         const auto parsed = separator.applyDiffusersSetupProgress(
-            R"(OPENSTUDIO_SETUP_PROGRESS {"stage":"Downloading model files","bytesDownloaded":3221225472,"bytesTotal":12884901888})", probe);
+            R"(OPENSTUDIO_SETUP_PROGRESS {"stage":"Downloading model files","bytesDownloaded":3221225472,"bytesTotal":12884901888,"bytesCached":2147483648})", probe);
         check("ai_hub_progress_preserves_large_byte_counts",
               parsed && probe.bytesDownloaded == 3221225472LL && probe.bytesTotal == 12884901888LL
-              && probe.progress == 0.25f && probe.stepLabel == "Downloading model files");
+              && probe.bytesCached == 2147483648LL && probe.progress == 0.25f && probe.stepLabel == "Downloading model files");
         separator.applyDiffusersSetupProgress(
             R"(OPENSTUDIO_SETUP_PROGRESS {"stage":"Checking model can load","bytesDownloaded":0,"bytesTotal":0})", probe);
         check("ai_hub_validation_clears_previous_transfer_progress",
-              probe.bytesTotal == 0 && probe.progress == 0.0f && probe.downloadHint.isEmpty());
+              probe.bytesTotal == 0 && probe.bytesCached == 0 && probe.progress == 0.0f && probe.downloadHint.isEmpty());
         check("ai_hub_malformed_progress_does_not_erase_current_step",
               ! separator.applyDiffusersSetupProgress("OPENSTUDIO_SETUP_PROGRESS {", probe)
               && probe.stepLabel == "Checking model can load");

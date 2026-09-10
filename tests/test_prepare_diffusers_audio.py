@@ -24,7 +24,10 @@ class HubSetupTests(unittest.TestCase):
         self.source.mkdir()
         self.destination = self.root / "staging"
         self.cache = self.root / "cache"
-        self.hub = types.SimpleNamespace(hf_hub_download=Mock(), snapshot_download=Mock(return_value=str(self.source)))
+        self.plan = [types.SimpleNamespace(file_size=1024, will_download=True),
+                     types.SimpleNamespace(file_size=512, will_download=False)]
+        self.hub = types.SimpleNamespace(hf_hub_download=Mock(), snapshot_download=Mock(
+            side_effect=lambda *args, **kwargs: self.plan if kwargs.get("dry_run") else str(self.source)))
         patcher = patch.dict(sys.modules, {"huggingface_hub": self.hub})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -80,6 +83,20 @@ class HubSetupTests(unittest.TestCase):
         self.hub.snapshot_download.assert_not_called()
         self.assertFalse(self.destination.exists())
 
+    def test_download_preflight_reports_fixed_total_and_reused_bytes(self):
+        with patch.object(setup, "prepare"), patch.object(setup, "report_progress") as report:
+            setup.download(setup.STABLE_MODEL, self.destination, self.cache)
+        self.assertTrue(self.hub.snapshot_download.call_args_list[0].kwargs["dry_run"])
+        report.assert_any_call("Downloading model files", 512, 1536, 512)
+        setup.hub_progress_class.assert_called_once_with(1536, 512)
+
+    def test_empty_download_plan_is_rejected_before_creating_staging(self):
+        self.plan.clear()
+        with self.assertRaisesRegex(RuntimeError, "no files"):
+            setup.download(setup.STABLE_MODEL, self.destination, self.cache)
+        self.assertEqual(self.hub.snapshot_download.call_count, 1)
+        self.assertFalse(self.destination.exists())
+
     def test_existing_destination_is_never_overwritten(self):
         self.destination.mkdir()
         marker = self.destination / "working-model"
@@ -109,13 +126,17 @@ class HubProgressTests(unittest.TestCase):
         modules = {"huggingface_hub.utils": types.SimpleNamespace(tqdm=ProgressBar),
                    "tqdm.auto": types.SimpleNamespace(tqdm=ProgressBar)}
         with patch.dict(sys.modules, modules), patch.object(setup, "report_progress") as report:
-            progress_class = setup.hub_progress_class()
+            progress_class = setup.hub_progress_class(total_bytes=4096, cached_bytes=1024)
             bar = progress_class(name="huggingface_hub.snapshot_download", total=2048, disable=True)
             self.assertFalse(bar.disabled)
             bar.n = 512
             bar.last_report = 0
             bar.display()
-            report.assert_called_with("Downloading model files", 512, 2048)
+            report.assert_called_with("Downloading model files", 1536, 4096, 1024)
+            bar.total = 8192
+            bar.last_report = 0
+            bar.display()
+            report.assert_called_with("Downloading model files", 1536, 4096, 1024)
             count = report.call_count
             progress_class(total=23, disable=True)
             progress_class(name="huggingface_hub.snapshot_download.transfer", total=2048, disable=True)

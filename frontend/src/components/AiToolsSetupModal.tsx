@@ -182,7 +182,7 @@ function getActiveInstallModelId(status: AiToolsStatus): SetupCatalogItemId | nu
   if (status.requestedFeature === "stemSeparation" || requestedModels.includes("stemSeparation")) {
     return "stemSeparation";
   }
-  return status.requestedFeature === "audioGeneration" || requestedModels.includes("audioGeneration")
+  return status.setupProgressVersion && (status.requestedFeature === "audioGeneration" || requestedModels.includes("audioGeneration"))
     ? ACE_STEP_MODEL_ID : null;
 }
 
@@ -362,9 +362,7 @@ export default function AiToolsSetupModal() {
   const displayActivityLines = (aiToolsStatus.activityLines ?? []).map(sanitizeSetupMessage);
   const activeInstallItem = catalog.find((item) => item.installing);
   const hasByteProgress = (aiToolsStatus.bytesTotal ?? 0) > 0;
-  const transferText = hasByteProgress
-    ? `${formatBytes(aiToolsStatus.bytesDownloaded)} / ${formatBytes(aiToolsStatus.bytesTotal)}`
-    : "";
+  const bytesRemaining = Math.max(0, (aiToolsStatus.bytesTotal ?? 0) - (aiToolsStatus.bytesDownloaded ?? 0));
   const progressPercent = Math.round(
     hasByteProgress
       ? Math.max(0, Math.min((aiToolsStatus.bytesDownloaded ?? 0) / Math.max(aiToolsStatus.bytesTotal ?? 1, 1), 1)) * 100
@@ -533,12 +531,31 @@ export default function AiToolsSetupModal() {
         <p role="status" className="min-w-0 break-words text-daw-text-secondary">
           {compactPhaseLabel(aiToolsStatus.stepLabel || aiToolsStatus.state)}
         </p>
-        <span className="shrink-0 tabular-nums text-daw-text">{hasByteProgress ? `${transferText} (${progressPercent}%)` : "In progress"}</span>
+        <span className="shrink-0 tabular-nums text-daw-text">{hasByteProgress ? `${progressPercent}% downloaded` : "In progress"}</span>
       </div>
       <progress aria-label="AI setup progress" max={100} value={hasByteProgress ? progressPercent : undefined}
         className="ai-setup-progress mt-2 block h-2 w-full" />
+      {hasByteProgress ? (
+        <dl className="mt-3 flex flex-wrap gap-x-8 gap-y-2">
+          {[
+            ["Downloaded", formatBytes(aiToolsStatus.bytesDownloaded)],
+            ["Remaining", formatBytes(bytesRemaining)],
+            ["Download size", formatBytes(aiToolsStatus.bytesTotal)],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-xs text-daw-text-muted">{label}</dt>
+              <dd className="mt-0.5 text-sm font-semibold tabular-nums text-daw-text">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {hasByteProgress && (aiToolsStatus.bytesCached ?? 0) > 0 ? (
+        <p className="mt-2 text-xs text-daw-text-muted">Includes {formatBytes(aiToolsStatus.bytesCached)} reused from cache.</p>
+      ) : null}
       <p className="mt-2 text-xs leading-5 text-daw-text-muted">
-        {aiToolsStatus.statusWarning || (aiToolsStatus.downloadHint ? sanitizeSetupMessage(aiToolsStatus.downloadHint) : "Setup is working. You can close this panel and return using the AI button.")}
+        {!aiToolsStatus.setupProgressVersion && !hasByteProgress
+          ? "Restart OpenStudio to enable detailed setup progress. Closing the app interrupts setup; completed cached files can be reused on retry."
+          : aiToolsStatus.statusWarning || (aiToolsStatus.downloadHint ? sanitizeSetupMessage(aiToolsStatus.downloadHint) : "Setup is working. You can close this panel and return using the AI button.")}
       </p>
     </section>
   );

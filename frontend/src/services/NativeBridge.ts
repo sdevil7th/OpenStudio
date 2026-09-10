@@ -1419,6 +1419,8 @@ export interface AiToolsStatus {
   stepCount?: number;
   elapsedMs?: number;
   bytesDownloaded?: number;
+  bytesCached?: number;
+  setupProgressVersion?: number;
   bytesTotal?: number;
   available: boolean;
   installerAvailable: boolean;

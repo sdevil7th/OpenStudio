@@ -31,6 +31,7 @@ public:
         juce::int64 elapsedMs = 0;
         juce::int64 bytesDownloaded = 0;
         juce::int64 bytesTotal = 0;
+        juce::int64 bytesCached = 0;
         bool available = false;
         bool installerAvailable = false;
         bool pythonDetected = false;
