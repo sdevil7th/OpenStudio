@@ -8,16 +8,17 @@ import {
   FolderOpen,
   Info,
   Music2,
+  LoaderCircle,
   RotateCcw,
   Scissors,
   Sparkles,
-  Wrench,
 } from "lucide-react";
 import { useShallow } from "zustand/shallow";
 import { ACE_STEP_MODEL_ID, STABLE_AUDIO_3_MODEL_ID, MINIMAX_MUSIC_3_MODEL_ID, isDiffusersImportModel, type AiMusicModelId } from "../data/aiWorkflows";
 import { nativeBridge, type AiFeatureId, type AiFeatureStatus, type AiToolsStatus } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Checkbox, Modal, ModalContent, ModalFooter, ModalHeader } from "./ui";
+import "./AiToolsSetupModal.css";
 
 const IS_WINDOWS = navigator.platform.startsWith("Win") || navigator.userAgent.includes("Windows");
 
@@ -177,18 +178,17 @@ function defaultSelectedFeatures(status: AiToolsStatus, requestedFeature: AiFeat
 function getActiveInstallModelId(status: AiToolsStatus): SetupCatalogItemId | null {
   const requestedModels = status.requestedFeatures ?? [];
   if (!status.installInProgress && status.state !== "error" && status.state !== "cancelled") return null;
+  if (status.requestedModelId) return status.requestedModelId;
   if (status.requestedFeature === "stemSeparation" || requestedModels.includes("stemSeparation")) {
     return "stemSeparation";
   }
-  if (status.requestedModelId) return status.requestedModelId;
-  return status.musicModels?.[STABLE_AUDIO_3_MODEL_ID]?.runtimeReady === false && status.musicModels?.[STABLE_AUDIO_3_MODEL_ID]?.modelReady
-    ? STABLE_AUDIO_3_MODEL_ID
-    : ACE_STEP_MODEL_ID;
+  return status.requestedFeature === "audioGeneration" || requestedModels.includes("audioGeneration")
+    ? ACE_STEP_MODEL_ID : null;
 }
 
 function buildCatalogState(item: Omit<SetupCatalogItem, "state">): SetupCatalogState {
-  if (item.ready) return "ready";
   if (item.installing) return "installing";
+  if (item.ready) return "ready";
   if (item.failed) return "failed";
   if (!item.compatible) return "blocked";
   return "available";
@@ -360,7 +360,7 @@ export default function AiToolsSetupModal() {
   const selectedItem = catalog.find((item) => item.id === selectedItemId) ?? catalog[0];
   const installLogPath = aiToolsStatus.detailLogPath;
   const displayActivityLines = (aiToolsStatus.activityLines ?? []).map(sanitizeSetupMessage);
-  const progressRatio = Math.max(0, Math.min(aiToolsStatus.progress ?? 0, 1));
+  const activeInstallItem = catalog.find((item) => item.installing);
   const hasByteProgress = (aiToolsStatus.bytesTotal ?? 0) > 0;
   const transferText = hasByteProgress
     ? `${formatBytes(aiToolsStatus.bytesDownloaded)} / ${formatBytes(aiToolsStatus.bytesTotal)}`
@@ -368,7 +368,7 @@ export default function AiToolsSetupModal() {
   const progressPercent = Math.round(
     hasByteProgress
       ? Math.max(0, Math.min((aiToolsStatus.bytesDownloaded ?? 0) / Math.max(aiToolsStatus.bytesTotal ?? 1, 1), 1)) * 100
-      : progressRatio * 100,
+      : 0,
   );
   const message = sanitizeSetupMessage(
     aiToolsStatus.error
@@ -385,10 +385,14 @@ export default function AiToolsSetupModal() {
 
   useEffect(() => {
     if (!showAiToolsSetup) return;
-    const defaults = defaultSelectedFeatures(useDAWStore.getState().aiToolsStatus, aiToolsSetupRequestedFeature);
+    const currentStatus = useDAWStore.getState().aiToolsStatus;
+    const defaults = defaultSelectedFeatures(currentStatus, aiToolsSetupRequestedFeature);
     setSelectedFeatures(defaults);
 
-    if (aiToolsSetupRequestedFeature === "audioGeneration") {
+    const activeItemId = currentStatus.installInProgress ? getActiveInstallModelId(currentStatus) : null;
+    if (activeItemId) {
+      setSelectedItemId(activeItemId);
+    } else if (aiToolsSetupRequestedFeature === "audioGeneration") {
       setSelectedItemId(ACE_STEP_MODEL_ID);
     } else if (aiToolsSetupRequestedFeature === "stemSeparation") {
       setSelectedItemId("stemSeparation");
@@ -517,38 +521,26 @@ export default function AiToolsSetupModal() {
   );
 
   const renderInstallProgress = () => (
-    <div className="rounded border border-cyan-800/50 bg-cyan-950/20 p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-daw-text">{compactPhaseLabel(aiToolsStatus.stepLabel || aiToolsStatus.state)}</p>
-          <p className="mt-1 text-xs leading-5 text-daw-text-secondary">{message}</p>
-          {aiToolsStatus.downloadHint ? (
-            <p className="mt-2 text-xs leading-5 text-cyan-100/80">{sanitizeSetupMessage(aiToolsStatus.downloadHint)}</p>
-          ) : null}
+    <section aria-label="Setup progress" className="shrink-0 border-b border-daw-border bg-daw-accent/5 px-5 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-daw-text">
+          <LoaderCircle size={16} aria-hidden="true" className="shrink-0 animate-spin text-daw-accent motion-reduce:animate-none" />
+          <span className="break-words">Setting up {activeInstallItem?.label ?? "AI Tools"}</span>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
-          <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">{progressPercent}%</span>
-          <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">{formatElapsed(aiToolsStatus.elapsedMs)}</span>
-          {transferText ? (
-            <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">{transferText}</span>
-          ) : null}
-        </div>
+        <span className="text-xs tabular-nums text-daw-text-muted">Elapsed {formatElapsed(aiToolsStatus.elapsedMs)}</span>
       </div>
-      <div className="mt-3 h-2.5 w-full rounded-full bg-neutral-900">
-        <div
-          className="h-2.5 rounded-full bg-daw-accent transition-all duration-200"
-          style={{ width: `${Math.max(4, progressPercent)}%` }}
-        />
+      <div className="mt-3 flex flex-wrap items-end justify-between gap-2 text-xs">
+        <p role="status" className="min-w-0 break-words text-daw-text-secondary">
+          {compactPhaseLabel(aiToolsStatus.stepLabel || aiToolsStatus.state)}
+        </p>
+        <span className="shrink-0 tabular-nums text-daw-text">{hasByteProgress ? `${transferText} (${progressPercent}%)` : "In progress"}</span>
       </div>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Button variant="danger" size="sm" onClick={() => void cancelAiToolsInstall()} icon={<Wrench size={14} />}>
-          Cancel Setup
-        </Button>
-        <Button variant="ghost" size="sm" onClick={() => setDetailsOpen((value) => !value)} icon={<ChevronDown size={14} />}>
-          {detailsOpen ? "Hide details" : "Show details"}
-        </Button>
-      </div>
-    </div>
+      <progress aria-label="AI setup progress" max={100} value={hasByteProgress ? progressPercent : undefined}
+        className="ai-setup-progress mt-2 block h-2 w-full" />
+      <p className="mt-2 text-xs leading-5 text-daw-text-muted">
+        {aiToolsStatus.statusWarning || (aiToolsStatus.downloadHint ? sanitizeSetupMessage(aiToolsStatus.downloadHint) : "Setup is working. You can close this panel and return using the AI button.")}
+      </p>
+    </section>
   );
 
   const renderStableAudioPane = () => (
@@ -692,6 +684,7 @@ export default function AiToolsSetupModal() {
   return (
     <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="xl">
       <ModalHeader title="AI Tools Setup" onClose={closeAiToolsSetup} />
+      {aiToolsStatus.installInProgress ? renderInstallProgress() : null}
       <ModalContent className="p-0">
         <div className="grid min-h-[620px] grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
           <aside className="border-b border-neutral-800 bg-neutral-950/70 p-3 md:border-b-0 md:border-r">
@@ -746,8 +739,17 @@ export default function AiToolsSetupModal() {
               </span>
             </div>
 
-            {aiToolsStatus.installInProgress && selectedItem.installing
-              ? renderInstallProgress()
+            {aiToolsStatus.installInProgress
+              ? <div className="space-y-3 rounded border border-daw-border bg-daw-dark/50 p-4">
+                  <p className="text-sm leading-6 text-daw-text-secondary">
+                    {selectedItem.installing
+                      ? "Setup will download, prepare, and check the model before marking it ready. Keep OpenStudio open while it finishes."
+                      : "Another setup is running. Its progress stays visible above while you browse the available tools."}
+                  </p>
+                  <Button variant="ghost" size="sm" onClick={() => setDetailsOpen((value) => !value)} icon={<ChevronDown size={14} />} aria-expanded={detailsOpen} aria-label={detailsOpen ? "Hide details" : "Show details"}>
+                    {detailsOpen ? "Hide details" : "Show details"}
+                  </Button>
+                </div>
               : selectedItem.ready
                 ? renderReadyPane()
                 : renderInstallPane()}

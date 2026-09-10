@@ -4,12 +4,14 @@ Setup only; inference stays offline. The host publishes staging only after valid
 """
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import gc
 import runpy
 import shutil
 import sys
+import time
 import urllib.request
 
 from diffusers_audio_pipeline import DIFFUSERS_REVISION, DiffusersAudioSession, STABLE_MODEL, MINIMAX_MODEL
@@ -24,6 +26,37 @@ HUB_MODELS = {
 }
 
 
+def report_progress(stage: str, completed: int = 0, total: int = 0):
+    print("OPENSTUDIO_SETUP_PROGRESS " + json.dumps({
+        "stage": stage, "bytesDownloaded": completed, "bytesTotal": total,
+    }), flush=True)
+
+
+def hub_progress_class():
+    from huggingface_hub.utils import tqdm
+    from tqdm.auto import tqdm as base_tqdm
+
+    class SetupProgress(tqdm):
+        def __init__(self, *args, **kwargs):
+            self.setup_name = kwargs.pop("name", "")
+            self.last_report = 0.0
+            # This is app telemetry, not terminal output. Pipe/TTY detection and
+            # HF_HUB_DISABLE_PROGRESS_BARS must not silence setup progress.
+            kwargs["disable"] = False
+            base_tqdm.__init__(self, *args, **kwargs)
+
+        def display(self, *args, **kwargs):
+            # Hub aggregates files (including resumed bytes) into this bar.
+            # Its total can grow as file metadata arrives; never use file count
+            # or the separate network-transfer bar as the model byte total.
+            now = time.monotonic()
+            if self.setup_name == "huggingface_hub.snapshot_download" and now - self.last_report >= 0.5:
+                self.last_report = now
+                report_progress("Downloading model files", int(self.n), int(self.total or 0))
+
+    return SetupProgress
+
+
 def download(model_id: str, destination: Path, cache: Path, *, check_access: bool = False):
     from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -33,18 +66,21 @@ def download(model_id: str, destination: Path, cache: Path, *, check_access: boo
     # Probe a small required file before transferring multi-gigabyte weights.
     # Hub uses the one-run HF_TOKEN or an existing Hugging Face login.
     probe = "model_config.json" if model_id == STABLE_MODEL else "modular_model_index.json"
+    report_progress("Checking Hugging Face access")
     hf_hub_download(repo, probe, revision=revision, cache_dir=str(cache / "hub"))
     if check_access:
         print("Hugging Face model access verified.", flush=True)
         return
     print(f"Downloading {repo} from Hugging Face. Completed files are reused on retry.", flush=True)
+    report_progress("Downloading model files")
     source = Path(snapshot_download(repo, revision=revision, allow_patterns=patterns,
-                                   cache_dir=str(cache / "hub")))
+                                   cache_dir=str(cache / "hub"), tqdm_class=hub_progress_class()))
     # Never give the converter the access token; no credentials are saved by this helper.
     os.environ.pop("HF_TOKEN", None)
     if model_id == STABLE_MODEL:
         prepare(source, destination, cache)
     else:
+        report_progress("Preparing downloaded model files")
         destination.mkdir(parents=True)
         # A Hub snapshot may also contain files cached by a previous version.
         # Copy only our selected components, never legacy duplicate weights.
@@ -55,11 +91,13 @@ def download(model_id: str, destination: Path, cache: Path, *, check_access: boo
                 shutil.copytree(item, destination / name)
             elif item.is_file():
                 shutil.copy2(item, destination / name)
+        report_progress("Checking model can load")
         DiffusersAudioSession(destination, MINIMAX_MODEL)
         print("Downloaded Diffusers snapshot loaded successfully.", flush=True)
 
 
 def prepare(source: Path, destination: Path, cache: Path):
+    report_progress("Converting Stable Audio model")
     source, destination = source.resolve(), destination.resolve()
     if source == destination or source in destination.parents or destination.exists():
         raise ValueError("Conversion requires a new staging directory outside the original snapshot.")
@@ -86,6 +124,7 @@ def prepare(source: Path, destination: Path, cache: Path):
     # The upstream sanity check only warns on failure and keeps all conversion
     # tensors alive. Check after conversion locals have been released. Running
     # in one worker process also makes cancellation leave no orphan converter.
+    report_progress("Checking model can load")
     DiffusersAudioSession(destination, STABLE_MODEL)
     for notice in ("LICENSE.md", "LICENSE_GEMMA.md", "NOTICE"):
         if (source / notice).is_file():

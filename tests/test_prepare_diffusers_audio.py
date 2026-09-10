@@ -1,5 +1,7 @@
 """Setup contracts without downloading weights or requiring an AI runtime."""
 import fnmatch
+import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -26,6 +28,19 @@ class HubSetupTests(unittest.TestCase):
         patcher = patch.dict(sys.modules, {"huggingface_hub": self.hub})
         patcher.start()
         self.addCleanup(patcher.stop)
+        progress_patcher = patch.object(setup, "hub_progress_class", return_value=Mock())
+        progress_patcher.start()
+        self.addCleanup(progress_patcher.stop)
+
+    def test_progress_reports_real_bytes_and_resets_for_validation(self):
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            setup.report_progress("Downloading model files", 512, 2048)
+            setup.report_progress("Checking model can load")
+        events = [json.loads(line.removeprefix("OPENSTUDIO_SETUP_PROGRESS ")) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[0]["bytesDownloaded"], 512)
+        self.assertEqual(events[0]["bytesTotal"], 2048)
+        self.assertEqual(events[1]["bytesTotal"], 0)
 
     def test_stable_download_uses_pinned_distilled_repo_then_converts(self):
         with patch.object(setup, "prepare") as convert, patch.dict(os.environ, {"HF_TOKEN": "test-only"}):
@@ -82,6 +97,29 @@ class HubSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing shard"):
                 setup.download(setup.MINIMAX_MODEL, self.destination, self.cache)
         self.assertTrue(self.source.is_dir())
+
+
+class HubProgressTests(unittest.TestCase):
+    def test_aggregated_byte_callback_works_without_terminal_and_ignores_file_count(self):
+        class ProgressBar:
+            def __init__(self, *, total, disable):
+                self.total, self.n, self.disabled = total, 0, disable
+                self.display()
+
+        modules = {"huggingface_hub.utils": types.SimpleNamespace(tqdm=ProgressBar),
+                   "tqdm.auto": types.SimpleNamespace(tqdm=ProgressBar)}
+        with patch.dict(sys.modules, modules), patch.object(setup, "report_progress") as report:
+            progress_class = setup.hub_progress_class()
+            bar = progress_class(name="huggingface_hub.snapshot_download", total=2048, disable=True)
+            self.assertFalse(bar.disabled)
+            bar.n = 512
+            bar.last_report = 0
+            bar.display()
+            report.assert_called_with("Downloading model files", 512, 2048)
+            count = report.call_count
+            progress_class(total=23, disable=True)
+            progress_class(name="huggingface_hub.snapshot_download.transfer", total=2048, disable=True)
+            self.assertEqual(report.call_count, count)
 
 
 if __name__ == "__main__":

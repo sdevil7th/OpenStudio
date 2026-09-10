@@ -327,6 +327,10 @@ private:
     /** Schedule a background refresh if one is not already running. */
     void scheduleStatusRefresh();
 
+    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision);
+    static bool applyDiffusersSetupProgress (const juce::String& line, AiToolsStatus& status);
+    friend class RuntimeSafetyRegression;
+
     /** Update the cached AI tools status under lock. */
     void updateCachedAiToolsStatus (const std::function<void (AiToolsStatus&)>& updater);
 
@@ -388,6 +392,7 @@ private:
     mutable AiToolsStatus lastAiToolsStatus;
     mutable juce::CriticalSection aiToolsStatusLock;
     mutable bool statusRefreshInFlight = false;
+    juce::uint64 aiToolsStatusRevision = 0;
     mutable bool initialStatusPrepared = false;
     std::atomic<bool> aiToolsInstallWorkInProgress { false };
     std::atomic<bool> aiToolsCancelRequested { false };

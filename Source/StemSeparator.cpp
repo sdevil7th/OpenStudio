@@ -1245,6 +1245,7 @@ void StemSeparator::updateCachedAiToolsStatus (const std::function<void (AiTools
 {
     const juce::ScopedLock lock (aiToolsStatusLock);
     updater (lastAiToolsStatus);
+    ++aiToolsStatusRevision;
 }
 
 StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() const
@@ -1257,7 +1258,7 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
     {
         status.available = false;
 
-        if (status.state.isEmpty() || status.state == "idle")
+        if (status.state.isEmpty() || status.state == "idle" || status.state == "ready")
             status.state = "installing";
 
         if (status.message.isEmpty())
@@ -1347,6 +1348,7 @@ void StemSeparator::scheduleStatusRefresh()
 {
     if (shuttingDown.load()) return;
     bool shouldLaunch = false;
+    juce::uint64 revision = 0;
 
     {
         const juce::ScopedLock lock (aiToolsStatusLock);
@@ -1363,6 +1365,7 @@ void StemSeparator::scheduleStatusRefresh()
         if (! statusRefreshInFlight)
         {
             statusRefreshInFlight = true;
+            revision = aiToolsStatusRevision;
             shouldLaunch = true;
         }
     }
@@ -1370,7 +1373,7 @@ void StemSeparator::scheduleStatusRefresh()
     if (! shouldLaunch)
         return;
 
-    backgroundTasks.addJob ([this]
+    backgroundTasks.addJob ([this, revision]
     {
         const auto previousStatus = getCachedAiToolsStatusSnapshot();
         auto installedPython = findPython();
@@ -1501,13 +1504,42 @@ void StemSeparator::scheduleStatusRefresh()
             refreshedStatus.statusWarningCode.clear();
         }
 
-        {
-            const juce::ScopedLock lock (aiToolsStatusLock);
-            lastAiToolsStatus = refreshedStatus;
-            statusRefreshInFlight = false;
-            initialStatusPrepared = true;
-        }
+        publishStatusRefresh(refreshedStatus, revision);
     });
+}
+
+bool StemSeparator::applyDiffusersSetupProgress (const juce::String& line, AiToolsStatus& status)
+{
+    if (! line.startsWith("OPENSTUDIO_SETUP_PROGRESS ")) return false;
+    const auto progress = juce::JSON::parse(line.fromFirstOccurrenceOf(" ", false, false));
+    auto* obj = progress.getDynamicObject();
+    if (obj == nullptr) return false;
+    const auto stage = obj->getProperty("stage").toString();
+    if (stage.isEmpty()) return false;
+    status.stepLabel = stage;
+    status.message = stage;
+    status.bytesDownloaded = juce::jmax<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesDownloaded")));
+    status.bytesTotal = juce::jmax<juce::int64>(0, static_cast<juce::int64>(obj->getProperty("bytesTotal")));
+    status.progress = status.bytesTotal > 0
+        ? juce::jlimit(0.0f, 1.0f, static_cast<float>(status.bytesDownloaded) / static_cast<float>(status.bytesTotal)) : 0.0f;
+    status.downloadHint = status.bytesTotal > 0
+        ? "Model files include resumed data. The total may grow as more files are discovered."
+        : juce::String();
+    return true;
+}
+
+void StemSeparator::publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision)
+{
+    const juce::ScopedLock lock (aiToolsStatusLock);
+    // A probe may finish after setup starts, completes, or is cancelled. Never
+    // replace that newer session's progress or result with its earlier snapshot.
+    if (revision == aiToolsStatusRevision
+        && ! aiToolsInstallWorkInProgress.load() && ! installWorkerActive.load())
+    {
+        lastAiToolsStatus = status;
+        initialStatusPrepared = true;
+    }
+    statusRefreshInFlight = false;
 }
 
 void StemSeparator::appendAiToolsLogLine (const juce::String& line) const
@@ -1948,6 +1980,11 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
     if (! aiToolsInstallWorkInProgress.load())
         scheduleStatusRefresh();
 
+    {
+        const juce::ScopedLock lock (aiToolsStatusLock);
+        ++aiToolsStatusRevision;
+    }
+
     const auto installOptions = parseInstallOptions(optionsJson, false);
     auto cachedStatus = getCachedAiToolsStatusSnapshot();
     const bool musicGenerationFullyReady = cachedStatus.musicGenerationReady
@@ -2106,30 +2143,14 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             const auto readyMarker = runtimeRoot.getChildFile(".openstudio-diffusers-audio-ready-v1");
             juce::String error;
             bool success = true;
-            auto progressForStableAudioCommand = [] (const juce::String& label)
-            {
-                if (label.containsIgnoreCase("Hugging Face"))
-                    return 0.95f;
-                if (label.containsIgnoreCase("Creating separate"))
-                    return 0.25f;
-                if (label.containsIgnoreCase("Updating Stable Audio"))
-                    return 0.35f;
-                if (label.containsIgnoreCase("runtime dependencies"))
-                    return 0.50f;
-                if (label.containsIgnoreCase("Flash Attention"))
-                    return 0.78f;
-                if (label.containsIgnoreCase("Validating"))
-                    return 0.92f;
-                return 0.40f;
-            };
             auto runCommand = [&] (const juce::StringArray& command,
                                    const juce::String& label,
                                    int timeoutMs, bool downloadCommand = false) -> bool
             {
                 const auto commandStartedAt = juce::Time::getMillisecondCounterHiRes();
-                const auto commandProgress = progressForStableAudioCommand(label);
                 auto lastUiUpdateMs = commandStartedAt;
                 juce::String commandOutput;
+                juce::String pendingOutput;
                 auto addOutputToStatus = [&] (const juce::String& outputChunk)
                 {
                     if (outputChunk.isEmpty())
@@ -2138,16 +2159,24 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     const auto safeOutput = accessToken.isEmpty() ? outputChunk : outputChunk.replace(accessToken, "[redacted]");
                     commandOutput = (commandOutput + safeOutput).getLastCharacters(16384);
                     juce::StringArray lines;
-                    lines.addLines(safeOutput.replace("\r", "\n"));
+                    pendingOutput += safeOutput.replace("\r", "\n");
+                    const auto lastNewline = pendingOutput.lastIndexOfChar('\n');
+                    if (lastNewline >= 0)
+                    {
+                        lines.addLines(pendingOutput.substring(0, lastNewline));
+                        pendingOutput = pendingOutput.substring(lastNewline + 1);
+                    }
+                    pendingOutput = pendingOutput.getLastCharacters(16384);
                     updateCachedAiToolsStatus([&] (AiToolsStatus& status)
                     {
-                        status.progress = commandProgress;
                         status.elapsedMs = static_cast<juce::int64>(juce::Time::getMillisecondCounterHiRes() - commandStartedAt);
                         for (const auto& rawLine : lines)
                         {
                             const auto trimmed = rawLine.trim();
-                            if (trimmed.isNotEmpty())
+                            if (! applyDiffusersSetupProgress(trimmed, status) && trimmed.isNotEmpty())
                                 status.activityLines.add(trimmed.substring(0, 900));
+                            while (status.activityLines.size() > 12)
+                                status.activityLines.remove(0);
                         }
                     });
                 };
@@ -2164,7 +2193,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 updateCachedAiToolsStatus([&] (AiToolsStatus& status)
                 {
                     status.state = "installing";
-                    status.progress = commandProgress;
+                    status.progress = 0.0f;
+                    status.bytesDownloaded = 0;
+                    status.bytesTotal = 0;
                     status.installInProgress = true;
                     status.message = label;
                     status.stepLabel = label;
@@ -2269,13 +2300,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                         updateCachedAiToolsStatus([&] (AiToolsStatus& status)
                         {
                             status.state = "installing";
-                            status.progress = commandProgress;
                             status.installInProgress = true;
-                            status.message = label;
-                            status.stepLabel = label;
                             status.lastPhase = "stable_audio_runtime";
                             status.elapsedMs = static_cast<juce::int64>(nowMs - commandStartedAt);
-                            status.activityLines.add(label + " still running...");
                         });
                     }
 
