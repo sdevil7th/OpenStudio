@@ -131,9 +131,9 @@ test("generation survives a collapsed folder, imports once while hidden, and rem
     return useDAWStore.getState().tracks.find((track: any) => track.id === "ai-ui-test").clips.length;
   });
   await expect.poll(clipCount).toBe(1);
-  await page.keyboard.press("Control+z");
+  await page.keyboard.press("ControlOrMeta+z");
   await expect(header).toHaveCount(0); // Undo the more recent folder expansion first.
-  await page.keyboard.press("Control+z");
+  await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(clipCount).toBe(0);
   expect(await page.evaluate(() => (window as any).__hiddenAI.imports)).toBe(1);
 });
