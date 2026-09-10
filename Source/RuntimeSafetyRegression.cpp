@@ -671,6 +671,22 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         writer.reset();
         check("failed_writer_finalization_status_survives_writer", status->finished.load());
     }
+    {
+        const auto environmentDirectory = directory.getChildFile("owned-environment");
+        environmentDirectory.createDirectory();
+        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto original = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PROCESS_ENV_TEST", "missing");
+        juce::StringPairArray environment;
+        environment.set("OPENSTUDIO_PROCESS_ENV_TEST", "one-child-only");
+        OwnedChildProcess child;
+        const bool started = child.start({ executable.getFullPathName(), "--owned-worker-fixture",
+            environmentDirectory.getFullPathName(), "--owned-worker-environment" }, 3, environment);
+        std::atomic<bool> keepRunning { true };
+        check("child_environment_override_delivered", started && child.waitForProcessToFinish(10000, keepRunning)
+            && child.getExitCode() == 0 && environmentDirectory.getChildFile("environment.txt").loadFileAsString() == "one-child-only");
+        check("child_environment_does_not_change_parent", juce::SystemStats::getEnvironmentVariable(
+            "OPENSTUDIO_PROCESS_ENV_TEST", "missing") == original);
+    }
 #if JUCE_WINDOWS
     for (const bool readRequest : { false, true })
     {

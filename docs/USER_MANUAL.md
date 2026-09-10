@@ -2167,6 +2167,13 @@ Use **AI Tools Setup** when a generation or stem workflow reports that its runti
 - Installation can be cancelled, reset, or retried from the setup modal.
 - Generated audio is imported back into the project as normal clips/tracks.
 
+**Downloading models:** BS-Roformer and ACE-Step download automatically when you install their feature. For Stable Audio 3 Medium or MiniMax Music 3, select the model, review and accept its license, then choose **Download and Set Up**. OpenStudio downloads the required files from Hugging Face into managed storage. Stable Audio is converted automatically to Diffusers format; MiniMax downloads its Diffusers components without the duplicate legacy weights. Allow extra disk space and time for downloads and Stable Audio conversion.
+
+Stable Audio requires access approval on its Hugging Face model page, including acceptance of the Stability AI and Gemma terms. Enter a read token from the approved account in setup, or leave it blank to use an existing Hugging Face login or `HF_TOKEN`. The token entered in the app is used only for that setup and is not saved. The app's license checkbox does not grant access to a gated repository. MiniMax's public download does not require a token.
+
+**Import Local Model** remains available for existing downloads. A failed or cancelled setup leaves the previous installed model in place. Retrying a download reuses completed Hugging Face cache files. Generation uses the installed model locally; it does not upload your audio to Hugging Face.
+
+
 ### 18.2 AI Tracks
 
 AI tracks are used for prompt-driven generation workflows:

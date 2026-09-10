@@ -1472,6 +1472,7 @@ export interface AiToolsStatus {
   musicModels?: Partial<Record<AiMusicModelId, AiMusicModelStatus>>;
   selectedFeatures?: AiFeatureId[];
   requestedFeatures?: AiFeatureId[];
+  requestedModelId?: AiMusicModelId;
   installedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
   hardware?: AiHardwareStatus;
@@ -1537,6 +1538,7 @@ export interface InstallAiToolsOptions {
   requestedFeature?: AiFeatureId;
   modelId?: AiMusicModelId;
   stableAudioModelPath?: string;
+  huggingFaceToken?: string;
   stableAudioLicenseAccepted?: boolean;
 }
 

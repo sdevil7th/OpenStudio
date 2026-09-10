@@ -28,6 +28,7 @@ jobs:
           tests.test_ai_runtime_dependency_pins
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
+          tests.test_prepare_diffusers_audio
 
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})

@@ -1188,6 +1188,12 @@ public:
             // test child waits; it never opens the user's project or audio device.
             const juce::File fixtureDirectory(ownedWorkerFixture);
             if (!fixtureDirectory.isDirectory()) { setApplicationReturnValue(2); quit(); return; }
+            if (commandLineHasFlag(commandLine, "--owned-worker-environment"))
+            {
+                const auto value = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PROCESS_ENV_TEST", "missing");
+                fixtureDirectory.getChildFile("environment.txt").replaceWithText(value);
+                quit(); return;
+            }
             if (commandLineHasFlag(commandLine, "--owned-worker-leaf"))
             {
                 juce::Thread::sleep(30000);

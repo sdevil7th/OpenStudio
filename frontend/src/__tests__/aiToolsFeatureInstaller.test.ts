@@ -35,11 +35,11 @@ describe("AI feature installer contract", () => {
     expect(storeSource).toContain("selectedFeatures: [\"stemSeparation\"]");
   });
 
-  it("exposes strict Stable Audio 3 manual import controls", () => {
+  it("exposes Hub setup with optional local import and model license acknowledgement", () => {
     expect(modalSource).toContain("STABLE_AUDIO_MODEL_URL");
     expect(modalSource).toContain("Open Hugging Face Model Page");
-    expect(modalSource).toContain("Proceed with Setup");
-    expect(modalSource).toContain("STABLE_AUDIO_FOLDER_EXAMPLE");
+    expect(modalSource).toContain("Download and Set Up");
+    expect(modalSource).toContain("Import Local Model");
     expect(modalSource).toContain("nativeBridge.browseForFolder");
     expect(modalSource).not.toContain("C:\\\\Users\\\\");
     expect(modalSource).not.toContain("srvds");
@@ -48,7 +48,7 @@ describe("AI feature installer contract", () => {
     expect(modalSource).toContain("stableAudioSelectedFolder");
     expect(modalSource).toContain("modelId: selectedItem.modelId ?? STABLE_AUDIO_3_MODEL_ID");
     expect(modalSource).toContain("stableAudioLicenseAccepted");
-    expect(modalSource).toContain("model_index.json");
+    expect(modalSource).toContain("Hugging Face read token (optional)");
     expect(bridgeSource).toContain("stableAudioModelPath?: string");
     expect(bridgeSource).toContain("stableAudioLicenseAccepted?: boolean");
     expect(bridgeSource).toContain("modelId?: AiMusicModelId");
@@ -61,7 +61,7 @@ describe("AI feature installer contract", () => {
     expect(stemSeparatorSource).not.toContain("git+https://github.com/Stability-AI/stable-audio-3.git");
     expect(stemSeparatorSource).toContain("complete model weights (including every indexed shard)");
     expect(stemSeparatorSource).toContain("Diffusers audio setup requires accepting");
-    expect(stemSeparatorSource).toContain("stable_audio_model_path_required");
+    expect(stemSeparatorSource).toContain("downloadRequested && ! installOptions.userConfirmedDownload");
     expect(stemSeparatorSource).toContain("stable_audio_model_layout_invalid");
     expect(stemSeparatorSource).toContain("stable_audio_import_requested");
     expect(stemSeparatorSource).toContain("stable_audio_command_started");

@@ -10,7 +10,9 @@ class OwnedChildProcess
 public:
     OwnedChildProcess();
     ~OwnedChildProcess();
-    bool start(const juce::StringArray& arguments, int streamFlags = 3);
+    // Overrides apply only to this child; secrets need not enter argv or the parent environment.
+    bool start(const juce::StringArray& arguments, int streamFlags = 3,
+               const juce::StringPairArray& environmentOverrides = {});
     bool isRunning() const;
     int readProcessOutput(void* destination, int capacity);
     bool kill();

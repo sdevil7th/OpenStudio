@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <thread>
+#include "OwnedChildProcess.h"
 
 /**
  * StemSeparator — Source separation via Python subprocess (BS-RoFormer).
@@ -83,6 +84,7 @@ public:
         juce::StringArray requestedFeatures;
         juce::StringArray installedFeatures;
         juce::String requestedFeature;
+        juce::String requestedModelId;
         juce::var hardware;
         juce::var features;
     };
@@ -257,6 +259,7 @@ private:
         juce::String requestedFeature;
         juce::String modelId;
         juce::String stableAudioModelPath;
+        juce::String huggingFaceToken;
         bool stableAudioLicenseAccepted = false;
     };
 
@@ -359,6 +362,7 @@ private:
 
     std::unique_ptr<juce::ChildProcess> childProcess;
     std::shared_ptr<juce::ChildProcess> installProcess;
+    std::shared_ptr<OwnedChildProcess> diffusersInstallProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
     juce::String installOutputBuffer;
     juce::int64 installLogReadOffset = 0;

@@ -182,7 +182,7 @@ Ratings:
 | Stem separation result import into new tracks/clips | H | H |
 | AI track type and AI track header controls | M | H |
 | ACE-Step text-to-music and lyrics-plus-style generation | H | H |
-| Stable Audio 3 Medium text-to-audio generation with gated local snapshot import and license acknowledgement | H | H |
+| Stable Audio 3 Medium text-to-audio generation with gated Hugging Face setup, optional local import and license acknowledgement | H | H |
 | Source-conditioned variation, inpaint-selection, and continue-clip workflows | H | H |
 | AI generation progress/cancel handling | M | H |
 

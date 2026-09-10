@@ -23,8 +23,6 @@ const IS_WINDOWS = navigator.platform.startsWith("Win") || navigator.userAgent.i
 
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 const STABLE_AUDIO_MODEL_URL = "https://huggingface.co/stabilityai/stable-audio-3-medium";
-const STABLE_AUDIO_FOLDER_EXAMPLE = `Downloads${IS_WINDOWS ? "\\" : "/"}stable_audio_3`;
-const STABLE_AUDIO_REQUIRED_FILES = ["model_index.json", "vae/config.json", "transformer/config.json", "text_encoder/config.json", "scheduler/scheduler_config.json"];
 
 const AI_FEATURES: AiFeatureId[] = ["stemSeparation", "audioGeneration"];
 
@@ -182,6 +180,7 @@ function getActiveInstallModelId(status: AiToolsStatus): SetupCatalogItemId | nu
   if (status.requestedFeature === "stemSeparation" || requestedModels.includes("stemSeparation")) {
     return "stemSeparation";
   }
+  if (status.requestedModelId) return status.requestedModelId;
   return status.musicModels?.[STABLE_AUDIO_3_MODEL_ID]?.runtimeReady === false && status.musicModels?.[STABLE_AUDIO_3_MODEL_ID]?.modelReady
     ? STABLE_AUDIO_3_MODEL_ID
     : ACE_STEP_MODEL_ID;
@@ -253,7 +252,7 @@ function buildSetupCatalog(status: AiToolsStatus): SetupCatalogItem[] {
     failed: failed && activeInstallId === STABLE_AUDIO_3_MODEL_ID,
     compatible: stableCompatible,
     disabledReason: stableStatus?.blockReason || audio.blockReason || "This machine does not meet the GPU/RAM requirement.",
-    primaryAction: "Proceed with Setup",
+    primaryAction: "Download and Set Up",
     featureId: "audioGeneration",
     modelId: STABLE_AUDIO_3_MODEL_ID,
   };
@@ -308,13 +307,14 @@ function getPrimaryUsage(item: SetupCatalogItem) {
   if (item.id === ACE_STEP_MODEL_ID) {
     return "Use AI tracks for Text to Music or Lyrics + Style. Right-click audio clips for Variation, Inpaint Selection, and Continue Clip.";
   }
+  if (item.id === MINIMAX_MUSIC_3_MODEL_ID) return "Select MiniMax Music 3 in an AI track for Lyrics + Style or Structured Song.";
   return "Select Stable Audio 3 in an AI track for Text to Audio, or choose it inside the clip generation modal for source-audio workflows.";
 }
 
 function getSetupRequirement(item: SetupCatalogItem) {
   if (item.id === "stemSeparation") return FEATURE_COPY.stemSeparation.requirements;
   if (item.id === ACE_STEP_MODEL_ID) return FEATURE_COPY.audioGeneration.requirements;
-  return "Requires the manual Hugging Face snapshot import and acceptance of Stability AI and Gemma license notices.";
+  return "Downloads model files from Hugging Face. Accept the selected model license before setup.";
 }
 
 export default function AiToolsSetupModal() {
@@ -346,13 +346,15 @@ export default function AiToolsSetupModal() {
   const [stableAudioSetupError, setStableAudioSetupError] = useState("");
   const [stableAudioSelectedFolder, setStableAudioSelectedFolder] = useState("");
   const [stableAudioSetupBusy, setStableAudioSetupBusy] = useState(false);
+  const [huggingFaceToken, setHuggingFaceToken] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
     setStableAudioLicenseAccepted(false);
+    setHuggingFaceToken("");
     setStableAudioSelectedFolder("");
     setStableAudioSetupError("");
-  }, [selectedItemId]);
+  }, [selectedItemId, showAiToolsSetup]);
 
   const catalog = useMemo(() => buildSetupCatalog(aiToolsStatus), [aiToolsStatus]);
   const selectedItem = catalog.find((item) => item.id === selectedItemId) ?? catalog[0];
@@ -383,26 +385,17 @@ export default function AiToolsSetupModal() {
 
   useEffect(() => {
     if (!showAiToolsSetup) return;
-    const defaults = defaultSelectedFeatures(aiToolsStatus, aiToolsSetupRequestedFeature);
+    const defaults = defaultSelectedFeatures(useDAWStore.getState().aiToolsStatus, aiToolsSetupRequestedFeature);
     setSelectedFeatures(defaults);
 
     if (aiToolsSetupRequestedFeature === "audioGeneration") {
       setSelectedItemId(ACE_STEP_MODEL_ID);
     } else if (aiToolsSetupRequestedFeature === "stemSeparation") {
       setSelectedItemId("stemSeparation");
-    } else if (!catalog.some((item) => item.id === selectedItemId)) {
-      setSelectedItemId(catalog[0]?.id ?? "stemSeparation");
     }
-  }, [
-    showAiToolsSetup,
-    aiToolsSetupRequestedFeature,
-    aiToolsStatus.installInProgress,
-    aiToolsStatus.available,
-    aiToolsStatus.musicGenerationReady,
-    aiToolsStatus.musicGenerationLayoutValid,
-    catalog,
-    selectedItemId,
-  ]);
+    // Choose an initial item only when opening the dialog or changing its request.
+    // Status polling and clicks must not reset the user's model selection.
+  }, [showAiToolsSetup, aiToolsSetupRequestedFeature]);
 
   if (!showAiToolsSetup) return null;
 
@@ -420,19 +413,14 @@ export default function AiToolsSetupModal() {
     await nativeBridge.openExternalURL(PYTHON_DOWNLOAD_URL);
   };
 
-  const runStableAudioSetup = async (folder: string) => {
+  const runStableAudioSetup = async (folder?: string) => {
     setStableAudioSetupError("");
     if (!stableAudioLicenseAccepted) {
-      setStableAudioSetupError("Accept the selected model license notices before importing.");
+      setStableAudioSetupError("Accept the selected model license notices before setup.");
       return;
     }
 
-    if (!folder) {
-      setStableAudioSetupError(`No folder was selected. Choose the Stable Audio snapshot folder, for example ${STABLE_AUDIO_FOLDER_EXAMPLE}.`);
-      return;
-    }
-
-    setStableAudioSelectedFolder(folder);
+    setStableAudioSelectedFolder(folder ?? "");
     setStableAudioSetupBusy(true);
     try {
       const result = await installAiTools({
@@ -441,6 +429,7 @@ export default function AiToolsSetupModal() {
         requestedFeature: "audioGeneration",
         modelId: selectedItem.modelId ?? STABLE_AUDIO_3_MODEL_ID,
         stableAudioModelPath: folder,
+        huggingFaceToken: folder ? undefined : huggingFaceToken.trim() || undefined,
         stableAudioLicenseAccepted,
       });
 
@@ -459,7 +448,7 @@ export default function AiToolsSetupModal() {
     }
   };
 
-  const handleStableAudioSetup = async () => {
+  const handleLocalModelImport = async () => {
     setStableAudioSetupError("");
     let folder = "";
     try {
@@ -468,12 +457,12 @@ export default function AiToolsSetupModal() {
       setStableAudioSetupError(error instanceof Error ? error.message : String(error));
       return;
     }
-    await runStableAudioSetup(folder);
+    if (folder) await runStableAudioSetup(folder);
   };
 
   const handleInstallSelected = async () => {
     if (isDiffusersImportModel(selectedItem.id)) {
-      await handleStableAudioSetup();
+      await runStableAudioSetup();
       return;
     }
 
@@ -565,49 +554,51 @@ export default function AiToolsSetupModal() {
   const renderStableAudioPane = () => (
     <div className="space-y-4">
       <div className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-daw-text-muted">Manual import</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-daw-text-muted">Download from Hugging Face</p>
         <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
-          Import a local snapshot. Existing Stable Audio weights are converted during setup with the official Diffusers converter; the original is retained. MiniMax uses its Modular Diffusers snapshot directly. Conversion needs additional disk space and may take several minutes.
+          {selectedItem.id === STABLE_AUDIO_3_MODEL_ID
+            ? "OpenStudio downloads Stable Audio 3 Medium and prepares it for generation automatically. Setup needs extra disk space for conversion and can take several minutes."
+            : "OpenStudio downloads the MiniMax Music 3 components needed for generation. This is a large download and requires substantial system RAM; CPU offload reduces GPU memory use."}
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={() => void handleOpenStableAudioPage()} icon={<ExternalLink size={14} />}>
-            Open Hugging Face Model Page
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => void handleStableAudioSetup()}
-            disabled={aiToolsStatus.installInProgress || stableAudioSetupBusy}
-            icon={<FolderOpen size={14} />}
-          >
-            Proceed with Setup
-          </Button>
-        </div>
-        <Button variant="ghost" size="sm" onClick={() => void nativeBridge.openExternalURL(
-          selectedItem.id === MINIMAX_MUSIC_3_MODEL_ID
-            ? "https://huggingface.co/docs/diffusers/main/en/api/pipelines/minimax_music3"
-            : "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_audio_3"
-        )}>Diffusers setup and conversion instructions</Button>
+        <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
+          {selectedItem.id === STABLE_AUDIO_3_MODEL_ID
+            ? "First request access on the Hugging Face model page and accept the Stability AI and Gemma terms. Once access is approved, use a read token from the same account below."
+            : "Review the model license on Hugging Face before downloading. A token is optional for public models."}
+        </p>
+        <Button className="mt-3" variant="secondary" size="sm" onClick={() => void handleOpenStableAudioPage()} icon={<ExternalLink size={14} />}>
+          Open Hugging Face Model Page
+        </Button>
+      </div>
+
+      <div className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
+        <label className="block text-sm text-daw-text" htmlFor="ai-hugging-face-token">Hugging Face read token (optional)</label>
+        <input id="ai-hugging-face-token" type="password" autoComplete="off" spellCheck={false}
+          value={huggingFaceToken} onChange={(event) => setHuggingFaceToken(event.target.value)}
+          className="mt-2 w-full rounded border border-neutral-700 bg-daw-dark px-3 py-2 text-sm text-daw-text focus-visible:outline-2 focus-visible:outline-daw-accent"
+          aria-describedby="ai-hugging-face-token-help" />
+        <p id="ai-hugging-face-token-help" className="mt-2 text-xs leading-5 text-daw-text-muted">
+          Used only for this setup, without saving the token. Leave blank to use your existing Hugging Face login or HF_TOKEN environment variable.
+        </p>
+        <Button className="mt-2" variant="ghost" size="sm" onClick={() => void nativeBridge.openExternalURL("https://huggingface.co/settings/tokens")} icon={<ExternalLink size={14} />}>
+          Get a Read Token
+        </Button>
       </div>
 
       <label className="flex items-start gap-3 rounded border border-neutral-800 bg-neutral-950/60 p-3">
-        <Checkbox
-          checked={stableAudioLicenseAccepted}
-          onChange={() => setStableAudioLicenseAccepted((value) => !value)}
-        />
+        <Checkbox checked={stableAudioLicenseAccepted} onChange={() => setStableAudioLicenseAccepted((value) => !value)} />
         <span className="text-xs leading-5 text-daw-text-secondary">
-          I have read and accepted the selected model’s license (including Gemma terms for Stable Audio).
+          {selectedItem.id === STABLE_AUDIO_3_MODEL_ID
+            ? "I have read and accepted the Stability AI and Gemma model licenses."
+            : "I have read and accepted the MiniMax Music 3 model license."}
         </span>
       </label>
 
       <div className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-daw-text-muted">Required snapshot layout</p>
-        <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
-          Stable Audio: model_index.json plus converted components. MiniMax: modular_model_index.json plus language_model, transformer, vocoder and the other downloaded components.
-        </p>
-        <p className="mt-2 text-xs leading-5 text-daw-text-muted">
-          Stable Audio key files: {STABLE_AUDIO_REQUIRED_FILES.join(", ")}. MiniMax needs substantial system RAM; CPU offload reduces GPU use but increases generation time.
-        </p>
+        <p className="text-sm text-daw-text-secondary">Already downloaded this model? You can import a local folder instead.</p>
+        <Button className="mt-2" variant="secondary" size="sm" onClick={() => void handleLocalModelImport()}
+          disabled={aiToolsStatus.installInProgress || stableAudioSetupBusy || !stableAudioLicenseAccepted} icon={<FolderOpen size={14} />}>
+          Import Local Model
+        </Button>
       </div>
 
       {stableAudioSelectedFolder ? (
@@ -805,8 +796,8 @@ export default function AiToolsSetupModal() {
           <Button
             variant="primary"
             onClick={() => void handleInstallSelected()}
-            disabled={!selectedItem.compatible || isReconcilingInstallResult || stableAudioSetupBusy}
-            icon={isDiffusersImportModel(selectedItem.id) ? <FolderOpen size={15} /> : <Download size={15} />}
+            disabled={!selectedItem.compatible || isReconcilingInstallResult || stableAudioSetupBusy || (isDiffusersImportModel(selectedItem.id) && !stableAudioLicenseAccepted)}
+            icon={<Download size={15} />}
           >
             {selectedItem.primaryAction}
           </Button>

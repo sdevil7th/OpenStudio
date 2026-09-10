@@ -1,7 +1,6 @@
-"""Convert an existing local SA3 snapshot with the pinned OFFICIAL converter.
+"""Download supported Hub models or convert an existing local SA3 snapshot.
 
-Setup only; inference uses Diffusers exclusively. Never downloads model weights,
-changes the source folder, or publishes a partial destination.
+Setup only; inference stays offline. The host publishes staging only after validation.
 """
 import argparse
 import hashlib
@@ -9,11 +8,55 @@ import os
 from pathlib import Path
 import gc
 import runpy
+import shutil
+import sys
 import urllib.request
 
-from diffusers_audio_pipeline import DIFFUSERS_REVISION, DiffusersAudioSession, STABLE_MODEL
+from diffusers_audio_pipeline import DIFFUSERS_REVISION, DiffusersAudioSession, STABLE_MODEL, MINIMAX_MODEL
 
 CONVERTER_SHA256 = "ee782fa2dfacc637251d00add7cee93f6c3aafcbed6abf111ff209947d98267f"
+HUB_MODELS = {
+    STABLE_MODEL: ("stabilityai/stable-audio-3-medium", "27b5a21b791b1b033d193a9e1e3ce78493f102f9",
+                   ["model.safetensors", "model_config.json", "t5gemma-b-b-ul2/*", "LICENSE*", "NOTICE"]),
+    MINIMAX_MODEL: ("MiniMaxAI/MiniMax-Music3", "fbdf52fbaaca799592917417eb05f1899f1255ec",
+                    ["modular_model_index.json", "condition_encoder/*", "language_model/*",
+                     "rvq_depth_decoder/*", "scheduler/*", "tokenizer/*", "transformer/*", "vocoder/*", "LICENSE"]),
+}
+
+
+def download(model_id: str, destination: Path, cache: Path, *, check_access: bool = False):
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    repo, revision, patterns = HUB_MODELS[model_id]
+    if destination.exists():
+        raise ValueError("Download requires a new staging directory.")
+    # Probe a small required file before transferring multi-gigabyte weights.
+    # Hub uses the one-run HF_TOKEN or an existing Hugging Face login.
+    probe = "model_config.json" if model_id == STABLE_MODEL else "modular_model_index.json"
+    hf_hub_download(repo, probe, revision=revision, cache_dir=str(cache / "hub"))
+    if check_access:
+        print("Hugging Face model access verified.", flush=True)
+        return
+    print(f"Downloading {repo} from Hugging Face. Completed files are reused on retry.", flush=True)
+    source = Path(snapshot_download(repo, revision=revision, allow_patterns=patterns,
+                                   cache_dir=str(cache / "hub")))
+    # Never give the converter the access token; no credentials are saved by this helper.
+    os.environ.pop("HF_TOKEN", None)
+    if model_id == STABLE_MODEL:
+        prepare(source, destination, cache)
+    else:
+        destination.mkdir(parents=True)
+        # A Hub snapshot may also contain files cached by a previous version.
+        # Copy only our selected components, never legacy duplicate weights.
+        for pattern in patterns:
+            name = pattern.removesuffix("/*")
+            item = source / name
+            if item.is_dir():
+                shutil.copytree(item, destination / name)
+            elif item.is_file():
+                shutil.copy2(item, destination / name)
+        DiffusersAudioSession(destination, MINIMAX_MODEL)
+        print("Downloaded Diffusers snapshot loaded successfully.", flush=True)
 
 
 def prepare(source: Path, destination: Path, cache: Path):
@@ -52,8 +95,28 @@ def prepare(source: Path, destination: Path, cache: Path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--source", type=Path)
+    mode.add_argument("--download-model", choices=HUB_MODELS)
+    parser.add_argument("--check-access", action="store_true")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
     args = parser.parse_args()
-    prepare(args.source, args.destination, args.cache)
+    try:
+        if args.download_model:
+            download(args.download_model, args.destination, args.cache, check_access=args.check_access)
+        else:
+            prepare(args.source, args.destination, args.cache)
+    except Exception as exc:
+        # Do not echo HTTP headers, request URLs or credentials in installer logs.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            message = ("Hugging Face access was denied. Open the model page, accept its terms and wait for access approval, "
+                       "then retry with a read token from that account that permits access to this model.")
+        else:
+            message = str(exc)
+            token = os.environ.get("HF_TOKEN")
+            if token:
+                message = message.replace(token, "[redacted]")
+        print(f"Setup failed: {message}", file=sys.stderr, flush=True)
+        sys.exit(1)

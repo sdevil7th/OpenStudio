@@ -836,6 +836,8 @@ StemSeparator::InstallOptions StemSeparator::parseInstallOptions (const juce::St
     if (parsed.hasProperty("selectedFeatures"))
         options.selectedFeatures = normaliseFeatureArray(parsed["selectedFeatures"]);
 
+    if (parsed.hasProperty("huggingFaceToken"))
+        options.huggingFaceToken = parsed["huggingFaceToken"].toString().trim();
     if (parsed.hasProperty("stableAudioModelPath"))
         options.stableAudioModelPath = parsed["stableAudioModelPath"].toString();
 
@@ -1382,6 +1384,7 @@ void StemSeparator::scheduleStatusRefresh()
         const auto modelInstalled = runtimeCapabilities.runtimeReady && (runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir));
         const auto runtimeInstalled = runtimeCapabilities.baseRuntimeReady || installedPython.existsAsFile();
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
+        refreshedStatus.requestedModelId = previousStatus.requestedModelId;
         refreshedStatus.supportedBackends = runtimeCapabilities.supportedBackends;
         refreshedStatus.selectedBackend = runtimeCapabilities.selectedBackend;
         refreshedStatus.runtimeVersion = runtimeCapabilities.runtimeVersion;
@@ -1831,6 +1834,7 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
     obj->setProperty("requestedFeatures", requestedFeatures);
     obj->setProperty("installedFeatures", installedFeatures);
     obj->setProperty("requestedFeature", status.requestedFeature);
+    obj->setProperty("requestedModelId", status.requestedModelId);
     obj->setProperty("hardware", status.hardware);
     obj->setProperty("features", status.features);
 
@@ -1985,34 +1989,11 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             return juce::var(result.release());
         }
 
-        if (installOptions.stableAudioModelPath.isEmpty())
+        const bool downloadRequested = installOptions.stableAudioModelPath.isEmpty();
+        if (downloadRequested && ! installOptions.userConfirmedDownload)
         {
-            auto status = cachedStatus;
-            status.state = "error";
-            status.progress = 0.0f;
-            status.installInProgress = false;
-            status.message = "Choose the downloaded Diffusers audio model snapshot folder before setup.";
-            status.error = status.message;
-            status.errorCode = "stable_audio_model_path_required";
-            status.lastPhase = "stable_audio_import";
-            status.terminalReason = status.errorCode;
-            status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
-            {
-                const juce::ScopedLock lock(aiToolsStatusLock);
-                lastAiToolsStatus = status;
-                initialStatusPrepared = true;
-            }
-            appendAiToolsLogLine(makeAiLogEvent("host",
-                                                "stable_audio_import",
-                                                "stable_audio_import_rejected",
-                                                stableSessionId,
-                                                [] (juce::DynamicObject& payload)
-                                                {
-                                                    payload.setProperty("reason", "missing_source_path");
-                                                }));
             result->setProperty("started", false);
-            result->setProperty("error", status.error);
-            result->setProperty("status", aiToolsStatusToVar(status));
+            result->setProperty("error", "Confirm the model download before setup starts.");
             return juce::var(result.release());
         }
 
@@ -2027,22 +2008,22 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                     payload.setProperty("reason", "license_not_accepted");
                                                 }));
             result->setProperty("started", false);
-            result->setProperty("error", "Diffusers audio setup requires accepting the selected model license notices before import.");
+            result->setProperty("error", "Diffusers audio setup requires accepting the selected model license notices before setup.");
             result->setProperty("status", aiToolsStatusToVar(cachedStatus));
             return juce::var(result.release());
         }
 
-        const juce::File sourceRoot(installOptions.stableAudioModelPath);
+        const juce::File sourceRoot = downloadRequested ? juce::File() : juce::File(installOptions.stableAudioModelPath);
         const auto managedDestination = getStableAudioModelRoot(importedModelId);
-        if (sourceRoot != managedDestination && managedDestination.isAChildOf(sourceRoot))
+        if (! downloadRequested && sourceRoot != managedDestination && managedDestination.isAChildOf(sourceRoot))
         {
             result->setProperty("started", false);
             result->setProperty("error", "Choose the model snapshot itself, not a parent of OpenStudio's managed model directory.");
             return juce::var(result.release());
         }
-        const bool needsConversion = importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
+        const bool needsConversion = ! downloadRequested && importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
         const auto missingFiles = getMissingStableAudioFiles(sourceRoot, importedModelId);
-        if (! needsConversion && ! missingFiles.isEmpty())
+        if (! downloadRequested && ! needsConversion && ! missingFiles.isEmpty())
         {
             auto status = cachedStatus;
             status.state = "error";
@@ -2084,20 +2065,21 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.state = "installing";
             status.progress = 0.05f;
             status.installInProgress = true;
-            status.message = "Importing Diffusers audio model snapshot...";
-            status.stepLabel = "Importing Diffusers audio model";
+            status.message = downloadRequested ? "Preparing Hugging Face model download..." : "Importing Diffusers audio model snapshot...";
+            status.stepLabel = status.message;
             status.lastPhase = "stable_audio_import";
             status.error.clear();
             status.errorCode.clear();
             status.activityLines.clear();
-            status.activityLines.add("Valid Diffusers audio source: " + sourceRoot.getFullPathName());
-            status.activityLines.add("Copying snapshot into the managed OpenStudio model folder.");
+            status.activityLines.add(downloadRequested ? "Downloading the selected model into OpenStudio managed storage."
+                : "Local Diffusers audio source: " + sourceRoot.getFullPathName());
             status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
             status.installSessionId = stableSessionId;
             status.selectedFeatures.clear();
             status.selectedFeatures.add(kFeatureAudioGeneration);
             status.requestedFeatures = status.selectedFeatures;
             status.requestedFeature = kFeatureAudioGeneration;
+            status.requestedModelId = importedModelId;
         });
 
         appendAiToolsLogLine(makeAiLogEvent("host",
@@ -2112,12 +2094,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                             }));
 
         installWorkerActive.store(true);
-        backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion]()
+        backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion, downloadRequested,
+                                accessToken = installOptions.huggingFaceToken]()
         {
             const InstallWorkerLifetime workerLifetime { installWorkerActive };
-            const juce::File source(sourcePath);
+            const juce::File source = sourcePath.isEmpty() ? juce::File() : juce::File(sourcePath);
             const auto destination = getStableAudioModelRoot(importedModelId);
-            const auto importRoot = source == destination && ! needsConversion ? destination
+            const auto importRoot = ! downloadRequested && source == destination && ! needsConversion ? destination
                 : destination.getSiblingFile(destination.getFileName() + ".import-" + stableSessionId);
             const auto runtimeRoot = getStableAudioRuntimeRoot();
             const auto readyMarker = runtimeRoot.getChildFile(".openstudio-diffusers-audio-ready-v1");
@@ -2125,6 +2108,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             bool success = true;
             auto progressForStableAudioCommand = [] (const juce::String& label)
             {
+                if (label.containsIgnoreCase("Hugging Face"))
+                    return 0.95f;
                 if (label.containsIgnoreCase("Creating separate"))
                     return 0.25f;
                 if (label.containsIgnoreCase("Updating Stable Audio"))
@@ -2139,7 +2124,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             };
             auto runCommand = [&] (const juce::StringArray& command,
                                    const juce::String& label,
-                                   int timeoutMs) -> bool
+                                   int timeoutMs, bool downloadCommand = false) -> bool
             {
                 const auto commandStartedAt = juce::Time::getMillisecondCounterHiRes();
                 const auto commandProgress = progressForStableAudioCommand(label);
@@ -2150,9 +2135,10 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     if (outputChunk.isEmpty())
                         return;
 
-                    commandOutput += outputChunk;
+                    const auto safeOutput = accessToken.isEmpty() ? outputChunk : outputChunk.replace(accessToken, "[redacted]");
+                    commandOutput = (commandOutput + safeOutput).getLastCharacters(16384);
                     juce::StringArray lines;
-                    lines.addLines(outputChunk.replace("\r", "\n"));
+                    lines.addLines(safeOutput.replace("\r", "\n"));
                     updateCachedAiToolsStatus([&] (AiToolsStatus& status)
                     {
                         status.progress = commandProgress;
@@ -2187,7 +2173,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     status.elapsedMs = 0;
                     const auto isLargeStableAudioStep = label.containsIgnoreCase("runtime dependencies")
                         || label.containsIgnoreCase("Flash Attention")
-                        || label.containsIgnoreCase("PyTorch");
+                        || label.containsIgnoreCase("PyTorch")
+                        || label.containsIgnoreCase("Hugging Face");
                     status.downloadHint = isLargeStableAudioStep
                         ? "Diffusers audio dependencies can take several minutes to install. OpenStudio will keep updating this log while pip is running."
                         : juce::String();
@@ -2195,22 +2182,25 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     status.activityLines.add(label);
                 });
 
-                auto process = std::make_shared<juce::ChildProcess>();
+                auto process = std::make_shared<OwnedChildProcess>();
                 auto clearStableCommandProcess = [&]
                 {
                     const juce::ScopedLock lock(aiToolsStatusLock);
-                    if (installProcess == process)
-                        installProcess.reset();
+                    if (diffusersInstallProcess == process)
+                        diffusersInstallProcess.reset();
                 };
                 {
                     const juce::ScopedLock lock(aiToolsStatusLock);
-                    installProcess = process;
+                    diffusersInstallProcess = process;
                     installCommandLine = command.joinIntoString(" ");
                     installSessionId = stableSessionId;
                     installLastObservedPhase = "stable_audio_runtime";
                 }
 
-                if (! process->start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+                juce::StringPairArray environment;
+                if (downloadCommand && accessToken.isNotEmpty()) environment.set("HF_TOKEN", accessToken);
+                environment.set("PYTHONUNBUFFERED", "1");
+                if (! process->start(command, 3, environment))
                 {
                     clearStableCommandProcess();
                     error = label + " could not be started.";
@@ -2228,7 +2218,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
                 for (;;)
                 {
-                    addOutputToStatus(process->readAllProcessOutput());
+                    char outputBytes[4096];
+                    for (int block = 0; block < 16; ++block)
+                    {
+                        const int count = process->readProcessOutput(outputBytes, sizeof(outputBytes));
+                        if (count <= 0) break;
+                        addOutputToStatus(juce::String::fromUTF8(outputBytes, count));
+                    }
 
                     if (! process->isRunning())
                         break;
@@ -2236,7 +2232,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     if (aiToolsCancelRequested.load())
                     {
                         process->kill();
-                        error = "Diffusers audio import was cancelled.";
+                        error = "Diffusers audio setup was cancelled.";
                         appendAiToolsLogLine(makeAiLogEvent("host",
                                                             "stable_audio_runtime",
                                                             "stable_audio_command_cancelled",
@@ -2286,11 +2282,17 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     juce::Thread::sleep(250);
                 }
 
-                addOutputToStatus(process->readAllProcessOutput());
+                char outputBytes[4096];
+                for (int block = 0; block < 16; ++block)
+                {
+                    const int count = process->readProcessOutput(outputBytes, sizeof(outputBytes));
+                    if (count <= 0) break;
+                    addOutputToStatus(juce::String::fromUTF8(outputBytes, count));
+                }
                 if (aiToolsCancelRequested.load())
                 {
                     clearStableCommandProcess();
-                    error = "Diffusers audio import was cancelled.";
+                    error = "Diffusers audio setup was cancelled.";
                     appendAiToolsLogLine(makeAiLogEvent("host",
                                                         "stable_audio_runtime",
                                                         "stable_audio_command_cancelled",
@@ -2309,7 +2311,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 {
                     error = label + " failed.";
                     if (output.isNotEmpty())
-                        error += " " + output.substring(0, 900);
+                        error += " " + output.getLastCharacters(900);
                     appendAiToolsLogLine(makeAiLogEvent("host",
                                                         "stable_audio_runtime",
                                                         "stable_audio_command_failed",
@@ -2318,7 +2320,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                         {
                                                             payload.setProperty("label", label);
                                                             payload.setProperty("exitCode", static_cast<int>(exitCode));
-                                                            payload.setProperty("output", output.substring(0, 900));
+                                                            payload.setProperty("output", output.getLastCharacters(900));
                                                         }));
                     return false;
                 }
@@ -2327,7 +2329,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 {
                     updateCachedAiToolsStatus([&] (AiToolsStatus& status)
                     {
-                        status.activityLines.add(output.substring(0, 900));
+                        status.activityLines.add(output.getLastCharacters(900));
                     });
                 }
                 appendAiToolsLogLine(makeAiLogEvent("host",
@@ -2337,7 +2339,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                     [&] (juce::DynamicObject& payload)
                                                     {
                                                         payload.setProperty("label", label);
-                                                        payload.setProperty("output", output.substring(0, 900));
+                                                        payload.setProperty("output", output.getLastCharacters(900));
                                                     }));
                 return true;
             };
@@ -2345,9 +2347,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             if (aiToolsCancelRequested.load())
             {
                 success = false;
-                error = "Diffusers audio import was cancelled.";
+                error = "Diffusers audio setup was cancelled.";
             }
-            else if (source != destination && ! needsConversion)
+            else if (! downloadRequested && source != destination && ! needsConversion)
             {
                 if (! destination.getParentDirectory().createDirectory())
                 {
@@ -2382,7 +2384,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
-            if (success && ! needsConversion)
+            if (success && ! downloadRequested && ! needsConversion)
             {
                 const auto missingAfterCopy = getMissingStableAudioFiles(importRoot, importedModelId);
                 if (! missingAfterCopy.isEmpty())
@@ -2453,6 +2455,18 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     success = runCommand(command, "Updating Diffusers audio runtime package installer...", 15 * 60 * 1000);
                 }
 
+                if (success && downloadRequested)
+                {
+                    success = runCommand({ runtimePython.getFullPathName(), "-m", "pip", "install",
+                        "huggingface_hub==1.30.0" }, "Installing Hugging Face downloader...", 15 * 60 * 1000);
+                    const auto helper = findInstallerScript().getSiblingFile("prepare_diffusers_audio.py");
+                    if (success)
+                        success = runCommand({ runtimePython.getFullPathName(), helper.getFullPathName(),
+                            "--download-model", importedModelId, "--check-access", "--destination", importRoot.getFullPathName(),
+                            "--cache", runtimeRoot.getChildFile("setup-cache").getFullPathName() },
+                            "Checking Hugging Face model access...", 5 * 60 * 1000, true);
+                }
+
                 if (success)
                 {
                     juce::StringArray command;
@@ -2518,19 +2532,21 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
-            if (success && needsConversion && ! aiToolsCancelRequested.load())
+            if (success && (downloadRequested || needsConversion) && ! aiToolsCancelRequested.load())
             {
                 const auto helper = findInstallerScript().getSiblingFile("prepare_diffusers_audio.py");
                 juce::StringArray command { findStableAudioPython().getFullPathName(), helper.getFullPathName(),
-                    "--source", source.getFullPathName(), "--destination", importRoot.getFullPathName(),
+                    downloadRequested ? "--download-model" : "--source", downloadRequested ? importedModelId : source.getFullPathName(),
+                    "--destination", importRoot.getFullPathName(),
                     "--cache", runtimeRoot.getChildFile("setup-cache").getFullPathName() };
-                success = helper.existsAsFile() && runCommand(command, "Converting existing snapshot with official Diffusers converter...", 60 * 60 * 1000);
-                if (! success && error.isEmpty()) error = "Diffusers conversion helper is missing or conversion failed. Original model retained.";
+                success = helper.existsAsFile() && runCommand(command, downloadRequested ? "Downloading and preparing model from Hugging Face..."
+                    : "Converting existing snapshot with official Diffusers converter...", 12 * 60 * 60 * 1000, downloadRequested);
+                if (! success && error.isEmpty()) error = "Diffusers setup helper is missing or model preparation failed. Previous model retained.";
                 if (success)
                 {
                     const auto missing = getMissingStableAudioFiles(importRoot, importedModelId);
                     success = missing.isEmpty();
-                    if (! success) error = "Converted snapshot is incomplete: " + missing.joinIntoString(", ");
+                    if (! success) error = "Prepared model is incomplete: " + missing.joinIntoString(", ");
                 }
             }
 
@@ -2539,7 +2555,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             if (success && aiToolsCancelRequested.load())
             {
                 success = false;
-                error = "Diffusers audio import was cancelled.";
+                error = "Diffusers audio setup was cancelled.";
             }
             if (success && importRoot != destination)
             {
@@ -2553,6 +2569,12 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
                 if (! success) error = "Could not publish imported model. Previous files were retained.";
             }
+            // Failed staging is disposable; the Hub cache survives for retries.
+            // Never remove a user's import source or the published model here.
+            if (! success && importRoot != destination
+                && importRoot.getParentDirectory() == destination.getParentDirectory()
+                && importRoot.getFileName() == destination.getFileName() + ".import-" + stableSessionId)
+                (void) importRoot.deleteRecursively();
             aiToolsInstallWorkInProgress = false;
             updateCachedAiToolsStatus([&] (AiToolsStatus& status)
             {
@@ -2589,7 +2611,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         });
 
         result->setProperty("started", true);
-        result->setProperty("message", "Diffusers audio import started.");
+        result->setProperty("message", "Diffusers audio setup started.");
         result->setProperty("status", aiToolsStatusToVar(getCachedAiToolsStatusSnapshot()));
         return juce::var(result.release());
     }
@@ -2765,6 +2787,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.selectedFeatures = installFeatures;
                 status.requestedFeatures = requestedFeatures;
                 status.requestedFeature = requestedFeature;
+                status.requestedModelId.clear();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
@@ -2826,6 +2849,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.selectedFeatures = installFeatures;
                 status.requestedFeatures = requestedFeatures;
                 status.requestedFeature = requestedFeature;
+                status.requestedModelId.clear();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
@@ -3266,6 +3290,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                         status.selectedFeatures = installFeatures;
                                                         status.requestedFeatures = requestedFeatures;
                                                         status.requestedFeature = requestedFeature;
+                                                        status.requestedModelId.clear();
                                                         const auto hardware = probeHardwareStatus();
                                                         status.hardware = hardwareStatusToVar(hardware);
                                                         status.features = buildFeatureStatusVar(status, hardware);
@@ -3533,6 +3558,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             lastAiToolsStatus.selectedFeatures = installFeatures;
             lastAiToolsStatus.requestedFeatures = requestedFeatures;
             lastAiToolsStatus.requestedFeature = requestedFeature;
+            lastAiToolsStatus.requestedModelId.clear();
             const auto hardware = probeHardwareStatus();
             lastAiToolsStatus.hardware = hardwareStatusToVar(hardware);
             lastAiToolsStatus.features = buildFeatureStatusVar(lastAiToolsStatus, hardware);
@@ -4233,6 +4259,8 @@ void StemSeparator::cancelAiToolsInstall()
             juce::Logger::writeToLog("StemSeparator: AI tools install cancelled.");
         }
         installProcess.reset();
+        if (diffusersInstallProcess) diffusersInstallProcess->kill();
+        diffusersInstallProcess.reset();
         installOutputBuffer.clear();
         installLogReadOffset = 0;
         installDiagnosticLines.clear();

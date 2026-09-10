@@ -38,7 +38,8 @@ struct OwnedChildProcess::Impl
     }
 };
 
-bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags)
+bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags,
+                              const juce::StringPairArray& environmentOverrides)
 {
     if (arguments.isEmpty() || isRunning()) return false;
     impl.reset(); // A stopped owned job can be explicitly restarted; never replace a live child.
@@ -74,10 +75,32 @@ bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlag
     juce::String command;
     for (const auto& argument : arguments) command += quoteArgument(argument) + " ";
     std::wstring mutableCommand(command.toWideCharPointer());
+    juce::StringPairArray environment(true);
+    auto* inheritedEnvironment = GetEnvironmentStringsW();
+    if (inheritedEnvironment != nullptr)
+    {
+        for (const wchar_t* entry = inheritedEnvironment; *entry != 0; entry += std::wcslen(entry) + 1)
+        {
+            const juce::String value(entry);
+            const int separator = value.indexOf(1, "="); // Preserve Windows '=C:' drive entries.
+            if (separator > 0) environment.set(value.substring(0, separator), value.substring(separator + 1));
+        }
+        FreeEnvironmentStringsW(inheritedEnvironment);
+    }
+    environment.addArray(environmentOverrides);
+    auto keys = environment.getAllKeys();
+    keys.sort(true);
+    std::wstring environmentBlock;
+    for (const auto& key : keys)
+    {
+        environmentBlock += (key + "=" + environment[key]).toWideCharPointer();
+        environmentBlock += L'\0';
+    }
+    environmentBlock += L'\0';
     PROCESS_INFORMATION information {};
     const bool created = updated && CreateProcessW(arguments[0].toWideCharPointer(), mutableCommand.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-        nullptr, nullptr, &startup.StartupInfo, &information) != FALSE;
+        environmentOverrides.size() == 0 ? nullptr : environmentBlock.data(), nullptr, &startup.StartupInfo, &information) != FALSE;
     if (initialized) DeleteProcThreadAttributeList(list);
     closeOwnedHandle(outputWrite); closeOwnedHandle(input);
     if (!created) return false;
@@ -187,7 +210,8 @@ struct OwnedChildProcess::Impl
             while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
 };
-bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags)
+bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags,
+                              const juce::StringPairArray& environmentOverrides)
 {
     if (arguments.isEmpty() || isRunning()) return false;
     impl.reset();
@@ -231,6 +255,21 @@ bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlag
    #else
     auto* environment = environ;
    #endif
+    juce::StringPairArray childEnvironment(false);
+    for (auto** entry = environment; *entry != nullptr; ++entry)
+    {
+        const juce::String value(*entry);
+        const int separator = value.indexOfChar('=');
+        if (separator > 0) childEnvironment.set(value.substring(0, separator), value.substring(separator + 1));
+    }
+    childEnvironment.addArray(environmentOverrides);
+    std::vector<std::string> environmentStorage;
+    for (const auto& key : childEnvironment.getAllKeys())
+        environmentStorage.push_back((key + "=" + childEnvironment[key]).toStdString());
+    std::vector<char*> environmentPointers;
+    for (auto& entry : environmentStorage) environmentPointers.push_back(entry.data());
+    environmentPointers.push_back(nullptr);
+    if (environmentOverrides.size() != 0) environment = environmentPointers.data();
     if (posix_spawnp(&next->pid, argv[0], &resources.actions, &resources.attributes, argv.data(), environment) != 0)
     { next->pid = -1; return false; }
     next->outputRead = resources.pipeEnds[0];

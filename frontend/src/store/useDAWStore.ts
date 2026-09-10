@@ -4,7 +4,7 @@ import { projectNativeQueue } from "../utils/projectNativeQueue";
 import { sourceClipIdentity } from "../utils/sourceClipIdentity";
 import { graphProblem } from "../utils/projectValidation";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type InstallAiToolsOptions, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -76,14 +76,7 @@ import {
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
 
-export interface InstallAiToolsOptions {
-  userConfirmedDownload?: boolean;
-  selectedFeatures?: AiFeatureId[];
-  requestedFeature?: AiFeatureId;
-  modelId?: AiMusicModelId;
-  stableAudioModelPath?: string;
-  stableAudioLicenseAccepted?: boolean;
-}
+export type { InstallAiToolsOptions } from "../services/NativeBridge";
 
 
 // Module-level helpers moved to store/actions/: _editSnapshots → tracks.ts,
@@ -3788,7 +3781,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       );
 
       const pendingMessage = isStableAudioImport
-        ? "Preparing Diffusers audio model import..."
+        ? "Preparing Diffusers audio model setup..."
         : currentStatus.buildRuntimeMode === "downloaded-runtime"
           ? "Checking OpenStudio AI runtime downloads..."
           : "Preparing AI tools installation...";
@@ -3806,6 +3799,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           available: false,
           selectedFeatures,
           requestedFeatures: selectedFeatures,
+          requestedModelId: options.modelId,
           requestedFeature: options.requestedFeature,
           error: undefined,
           statusWarning: undefined,
