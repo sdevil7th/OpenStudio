@@ -318,7 +318,7 @@ jobs:
 
       - name: Build OpenStudio
         shell: bash
-        run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+        run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio --parallel 2
 
       - name: Find app bundle
         shell: bash

@@ -346,6 +346,11 @@ if(WIN32)
     )
 endif()
 if(MSVC)
+    # C++/WinRT requires standard coroutine library support even though the
+    # Store transport uses callbacks. Keep this C++17 translation unit on the
+    # supported ABI instead of the removed experimental coroutine headers.
+    set_property(SOURCE Source/StoreUpdater.cpp APPEND PROPERTY
+        COMPILE_OPTIONS /await:strict)
     # Realtime audio translation units below are intentionally optimized
     # in Debug. CMP0184 controls runtime checks at target scope, so the target
     # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.

@@ -1,6 +1,7 @@
-#include "MicrophoneAccess.h"
-#include <vector>
 #import <AVFoundation/AVFoundation.h>
+#include "MicrophoneAccess.h"
+#include <juce_events/juce_events.h>
+#include <vector>
 
 namespace MicrophoneAccess
 {
