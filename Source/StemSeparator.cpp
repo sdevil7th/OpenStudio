@@ -2022,7 +2022,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             return juce::var(result.release());
         }
         const bool needsConversion = ! downloadRequested && importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
-        const auto missingFiles = getMissingStableAudioFiles(sourceRoot, importedModelId);
+        const auto missingFiles = downloadRequested ? juce::StringArray() : getMissingStableAudioFiles(sourceRoot, importedModelId);
         if (! downloadRequested && ! needsConversion && ! missingFiles.isEmpty())
         {
             auto status = cachedStatus;
