@@ -9292,6 +9292,11 @@ bool AudioEngine::retryBlacklistedPlugin(const juce::String& path)
 
 juce::var AudioEngine::getAvailablePlugins()
 {
+#if JUCE_WINDOWS
+    constexpr bool isolationAvailable = true;
+#else
+    constexpr bool isolationAvailable = false;
+#endif
     auto plugins = pluginManager.getAvailablePlugins();
 
     juce::Array<juce::var> pluginList;
@@ -9306,7 +9311,7 @@ juce::var AudioEngine::getAvailablePlugins()
         pluginObj->setProperty("isInstrument", plugin.isInstrument);
         pluginObj->setProperty("hasARA", plugin.hasARAExtension);
         pluginObj->setProperty("isolatedHosting", pluginManager.usesIsolatedHosting(plugin));
-        pluginObj->setProperty("isolationAvailable", JUCE_WINDOWS != 0);
+        pluginObj->setProperty("isolationAvailable", isolationAvailable);
         pluginObj->setProperty("isolationLatencySamples", 2 * juce::jmax(512, currentBlockSize));
         pluginObj->setProperty("isolationLatencyMs", 2000.0 * juce::jmax(512, currentBlockSize) / juce::jmax(8000.0, currentSampleRate));
         pluginObj->setProperty("pluginFormatName", plugin.pluginFormatName);
@@ -72998,7 +73003,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         bool normalize = false;
         bool addTail = false;
         double tailMs = 0.0;
-        juce::String ditherType;
+        juce::String ditherType {};
         bool expectDualMono = true;
     };
 
