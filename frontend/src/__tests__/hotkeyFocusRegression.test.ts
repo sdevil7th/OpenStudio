@@ -171,7 +171,7 @@ describe("hotkey focus and window regression contract", () => {
     expect(useDAWStore.getState().toggleLoop).not.toHaveBeenCalled();
   });
 
-  it("preserves stopped editable Space but consumes the active Play binding while running", () => {
+  it("preserves editable Space while stopped, playing, and recording", () => {
     const stop = vi.fn().mockResolvedValue(undefined);
     useDAWStore.setState({ stop });
 
@@ -183,16 +183,16 @@ describe("hotkey focus and window regression contract", () => {
     syntheticNow += 1_000;
     setTransportState("playing");
     const playing = dispatchSpace({ editable: true });
-    expect(playing.handled).toBe(true);
-    expect(playing.preventDefault).toHaveBeenCalledOnce();
-    expect(stop).toHaveBeenCalledOnce();
+    expect(playing.handled).toBe(false);
+    expect(playing.preventDefault).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
 
     syntheticNow += 1_000;
     setTransportState("recording");
     const recording = dispatchSpace({ editable: true });
-    expect(recording.handled).toBe(true);
-    expect(recording.preventDefault).toHaveBeenCalledOnce();
-    expect(stop).toHaveBeenCalledTimes(2);
+    expect(recording.handled).toBe(false);
+    expect(recording.preventDefault).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("honors unbound and remapped Play inside an editable field", () => {
@@ -229,25 +229,22 @@ describe("hotkey focus and window regression contract", () => {
       source: "browser",
       targetIsEditable: true,
       preventDefault: runningEditableP,
-    }, "windows", { role: "main" })).toBe(true);
-    expect(runningEditableP).toHaveBeenCalledOnce();
-    expect(stop).toHaveBeenCalledOnce();
+    }, "windows", { role: "main" })).toBe(false);
+    expect(runningEditableP).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it.each(["pluginEditor", "midiEditor", "mixer"])(
-    "forwards an editable-field stop from the detached %s exactly once",
+    "does not forward editable Space from the detached %s during recording",
     (role) => {
       const publish = vi.spyOn(nativeBridge, "publishAppCommand").mockResolvedValue(true);
       setTransportState("recording");
 
       const { handled, preventDefault } = dispatchSpace({ role, editable: true });
 
-      expect(handled).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
-      expect(publish).toHaveBeenCalledOnce();
-      expect(publish).toHaveBeenCalledWith(expect.objectContaining({
-        command: "transport.stop",
-      }));
+      expect(handled).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
     },
   );
 

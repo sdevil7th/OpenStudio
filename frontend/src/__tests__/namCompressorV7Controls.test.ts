@@ -30,13 +30,13 @@ const currentCompressorIds = [
 
 describe("NAM Rack Compressor V7 frontend contract", () => {
   it("keeps one current compressor identity and retires Detail everywhere", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
     const migrated = migrateLegacyNAMRackPresetDspState({
       values: { compressorDetail: 0.55 },
       dspState: { namEffectsDspVersion: 6, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
 
-    expect(migrated.dspState.namEffectsDspVersion).toBe(19);
+    expect(migrated.dspState.namEffectsDspVersion).toBe(20);
     expect(migrated.values.compressorAttackMs).toBeCloseTo(21.9, 6);
     expect(migrated.values.compressorReleaseMs).toBeCloseTo(149.1, 6);
     expect(migrated.values.compressorToneDb).toBe(0);

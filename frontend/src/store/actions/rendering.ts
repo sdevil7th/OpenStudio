@@ -17,6 +17,7 @@ type GetFn = () => any;
  * Extracted from useDAWStore.ts.
  */
 import { nativeBridge } from "../../services/NativeBridge";
+import { graphProblem } from "../../utils/projectValidation";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { prepareForManualRender } from "../../utils/renderPreparation";
@@ -600,7 +601,13 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     },
 
     addTrackSend: async (sourceTrackId, destTrackId) => {
-      await nativeBridge.addTrackSend(sourceTrackId, destTrackId);
+      const state = get();
+      if (!state.tracks.some(track => track.id === sourceTrackId) || !state.tracks.some(track => track.id === destTrackId)) return;
+      const problem = graphProblem(state.tracks.map(track => track.id === sourceTrackId
+        ? { ...track, sends: [...track.sends, { destTrackId }] } : track));
+      if (problem) { state.showToast(problem, "error"); return; }
+      const index = await nativeBridge.addTrackSend(sourceTrackId, destTrackId);
+      if (index < 0) { get().showToast("The audio engine rejected this send", "error"); return; }
       set((s) => ({
         tracks: s.tracks.map((t) =>
           t.id === sourceTrackId

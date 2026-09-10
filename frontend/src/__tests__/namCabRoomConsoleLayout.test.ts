@@ -3,18 +3,20 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   computePremiumStagePlacement,
-  NAM_CAB_ROOM_CONSOLE_LAYOUT,
+  NAM_CABINET_STAGE_LAYOUT,
   NAM_PANEL_ROTARY_VARIANT_PX,
 } from "../components/NAMRackDesignPort";
 
-describe("NAM Rack integrated Cab and Room console", () => {
-  it("fits the approved single IR shaper and Room console at every stage size", () => {
-    const { group, console } = NAM_CAB_ROOM_CONSOLE_LAYOUT;
+describe("NAM Rack physical Cabinet and Room stage", () => {
+  it("fits the cabinet and foreground controller at every stage size", () => {
+    const { group, cabinet, controller } = NAM_CABINET_STAGE_LAYOUT;
 
-    expect(console).toEqual(group);
-    expect(console.h).toBeGreaterThan(390);
-    expect(console.w / console.h).toBeGreaterThan(1.6);
-    expect(console.w / console.h).toBeLessThan(1.7);
+    expect(cabinet.h).toBeGreaterThan(200);
+    expect(cabinet.w / cabinet.h).toBeGreaterThan(1.49);
+    expect(cabinet.w / cabinet.h).toBeLessThan(1.6);
+    expect(controller.w / controller.h).toBeGreaterThan(1.6);
+    expect(controller.x).toBeLessThan(cabinet.x + cabinet.w);
+    expect(controller.x + controller.w).toBe(cabinet.x + group.w);
 
     for (const viewport of [
       { width: 720, height: 410 },
@@ -23,7 +25,7 @@ describe("NAM Rack integrated Cab and Room console", () => {
     ]) {
       for (const size of [80, 100, 140, 180, 220]) {
         const placement = computePremiumStagePlacement(viewport, group, size);
-        for (const box of [console]) {
+        for (const box of [cabinet, controller]) {
           const left = placement.left + box.x * placement.scale;
           const right = left + box.w * placement.scale;
           const top = placement.top + box.y * placement.scale;
@@ -37,26 +39,26 @@ describe("NAM Rack integrated Cab and Room console", () => {
     }
   });
 
-  it("keeps seven evenly separated primary controls above a full-width Room bay", () => {
-    const layout = NAM_CAB_ROOM_CONSOLE_LAYOUT;
+  it("keeps three IR rotaries and three hardware switches evenly separated", () => {
+    const layout = NAM_CABINET_STAGE_LAYOUT;
     const cabRotaryRadius = NAM_PANEL_ROTARY_VARIANT_PX.cabPanel / 2;
-    expect(layout.topKnobXs).toHaveLength(7);
-    expect(NAM_PANEL_ROTARY_VARIANT_PX.cabPanel).toBe(42);
-    expect(layout.topKnobXs[0] / 100 * layout.console.w - cabRotaryRadius).toBeGreaterThan(0);
+    expect(layout.knobXs).toHaveLength(3);
+    expect(layout.switchXs).toHaveLength(3);
+    expect(NAM_PANEL_ROTARY_VARIANT_PX.cabPanel).toBe(32);
+    expect(layout.knobXs[0] / 100 * layout.controller.w - cabRotaryRadius).toBeGreaterThan(0);
     expect(
-      layout.topKnobXs[layout.topKnobXs.length - 1] / 100 * layout.console.w + cabRotaryRadius,
-    ).toBeLessThan(layout.console.w);
-    for (let index = 1; index < layout.topKnobXs.length; index += 1) {
-      expect(layout.topKnobXs[index] - layout.topKnobXs[index - 1]).toBeGreaterThan(12);
+      layout.knobXs[layout.knobXs.length - 1] / 100 * layout.controller.w + cabRotaryRadius,
+    ).toBeLessThan(layout.controller.w);
+    for (let index = 1; index < layout.knobXs.length; index += 1) {
+      expect(layout.knobXs[index] - layout.knobXs[index - 1]).toBeGreaterThan(12);
       expect(
-        (layout.topKnobXs[index] - layout.topKnobXs[index - 1]) / 100 * layout.console.w,
+        (layout.knobXs[index] - layout.knobXs[index - 1]) / 100 * layout.controller.w,
       ).toBeGreaterThan(NAM_PANEL_ROTARY_VARIANT_PX.cabPanel);
     }
-    expect(layout.topKnobY).toBeLessThan(layout.utilityY);
-    expect(layout.utilityY).toBeLessThan(layout.roomBayTop);
+    expect(Math.abs(layout.knobY - layout.switchY)).toBeLessThanOrEqual(4);
   });
 
-  it("binds the approved Room controls independently from the external IR lock", () => {
+  it("keeps Cab literal while exposing the separate Room processor honestly", () => {
     const source = readFileSync(
       new URL("../components/NAMRackDesignPort.tsx", import.meta.url),
       "utf8",
@@ -66,30 +68,33 @@ describe("NAM Rack integrated Cab and Room console", () => {
     const cabStage = source.slice(cabStageStart, cabStageEnd);
 
     expect(cabStage).toContain('className="cab-room-bay"');
-    expect(cabStage).toContain("<CabRoomPowerSwitch />");
-    expect(cabStage).toContain("body={BODIES.cabRoomIntegrated}");
-    expect(cabStage).not.toContain('name="cabinet"');
+    expect(cabStage).toContain("body={BODIES.cab}");
+    expect(cabStage).toContain("body={BODIES.cabController}");
+    expect(cabStage).toContain('name="cabinet"');
     expect(cabStage).toContain('paramId="cabRoomAmount"');
     expect(cabStage).toContain('paramId="cabRoomWidth"');
+    expect(cabStage).toContain("<CabRoomPowerSwitch />");
     expect(cabStage).toContain('paramId="cabPan"');
-    expect(cabStage.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(7);
-    expect(cabStage).toContain("POST-CAB AMBIENCE");
-    expect(cabStage).toContain('roomWaitingForCabSource ? "No cab source"');
-    expect(cabStage).toContain('data-status={roomWaitingForCabSource ? "no-source" : "ready"}');
-    expect(cabStage).toContain("roomEnabled && !cabRoomInputSourceAvailable");
+    expect(cabStage.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(5);
+    expect(cabStage).toContain("Doubler stays in Signal Chain");
+    expect(cabStage).toContain("roomWaitingForCabSource");
     expect(cabStage).toContain("<DesignParamContext.Provider value={cabParamContext}>");
-    expect(cabStage.indexOf('className="cab-room-bay"'))
-      .toBeGreaterThan(cabStage.indexOf("</DesignParamContext.Provider>"));
     expect(cabStage).not.toContain("<Screw");
+    expect(cabStage).not.toContain('paramId="cabHPFHz"');
+    expect(cabStage).not.toContain('paramId="cabLPFHz"');
+    expect(cabStage).not.toContain('paramId="cabMicPosition"');
+    expect(cabStage).not.toContain('paramId="cabMicDistance"');
+    expect(cabStage).not.toContain('paramId="cabMicBlend"');
+    expect(cabStage).not.toContain('paramId="cabRoomSend"');
   });
 
-  it("uses two large Room hero rotaries and keeps their readouts clear of the lower edge", () => {
+  it("does not retain oversized Room rotaries on the Cab faceplate", () => {
     expect(NAM_PANEL_ROTARY_VARIANT_PX.roomHero).toBeGreaterThan(60);
 
     const source = readFileSync(
       new URL("../components/NAMRackDesignPort.tsx", import.meta.url),
       "utf8",
     );
-    expect(source.match(/panelRotaryVariant="roomHero"/g)).toHaveLength(2);
+    expect(source.match(/panelRotaryVariant="roomHero"/g) ?? []).toHaveLength(0);
   });
 });

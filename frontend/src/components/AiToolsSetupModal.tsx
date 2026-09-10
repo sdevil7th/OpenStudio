@@ -14,7 +14,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useShallow } from "zustand/shallow";
-import { ACE_STEP_MODEL_ID, STABLE_AUDIO_3_MODEL_ID, type AiMusicModelId } from "../data/aiWorkflows";
+import { ACE_STEP_MODEL_ID, STABLE_AUDIO_3_MODEL_ID, MINIMAX_MUSIC_3_MODEL_ID, isDiffusersImportModel, type AiMusicModelId } from "../data/aiWorkflows";
 import { nativeBridge, type AiFeatureId, type AiFeatureStatus, type AiToolsStatus } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { Button, Checkbox, Modal, ModalContent, ModalFooter, ModalHeader } from "./ui";
@@ -24,19 +24,8 @@ const IS_WINDOWS = navigator.platform.startsWith("Win") || navigator.userAgent.i
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 const STABLE_AUDIO_MODEL_URL = "https://huggingface.co/stabilityai/stable-audio-3-medium";
 const STABLE_AUDIO_FOLDER_EXAMPLE = `Downloads${IS_WINDOWS ? "\\" : "/"}stable_audio_3`;
-const STABLE_AUDIO_REQUIRED_FILES = [
-  "model.safetensors",
-  "model_config.json",
-  "LICENSE.md",
-  "LICENSE_GEMMA.md",
-  "NOTICE",
-  "t5gemma-b-b-ul2/model.safetensors",
-  "t5gemma-b-b-ul2/config.json",
-  "t5gemma-b-b-ul2/tokenizer.json",
-  "t5gemma-b-b-ul2/tokenizer.model",
-  "t5gemma-b-b-ul2/tokenizer_config.json",
-  "t5gemma-b-b-ul2/special_tokens_map.json",
-];
+const STABLE_AUDIO_REQUIRED_FILES = ["model_index.json", "vae/config.json", "transformer/config.json", "text_encoder/config.json", "scheduler/scheduler_config.json"];
+
 const AI_FEATURES: AiFeatureId[] = ["stemSeparation", "audioGeneration"];
 
 type SetupCatalogItemId = AiFeatureId | AiMusicModelId;
@@ -258,7 +247,7 @@ function buildSetupCatalog(status: AiToolsStatus): SetupCatalogItem[] {
     kind: "model",
     label: "Stable Audio 3 Medium",
     shortLabel: "Stable Audio",
-    description: "Text-to-audio, source variation, inpaint, continuation, and optional LoRA inference.",
+    description: "Diffusers text-to-audio, source variation, selected-range replacement and continuation.",
     ready: stableReady,
     installing: status.installInProgress && activeInstallId === STABLE_AUDIO_3_MODEL_ID,
     failed: failed && activeInstallId === STABLE_AUDIO_3_MODEL_ID,
@@ -269,7 +258,17 @@ function buildSetupCatalog(status: AiToolsStatus): SetupCatalogItem[] {
     modelId: STABLE_AUDIO_3_MODEL_ID,
   };
 
-  return [stemItem, aceItem, stableItem].map((item) => ({ ...item, state: buildCatalogState(item) }));
+  const miniStatus = status.musicModels?.[MINIMAX_MUSIC_3_MODEL_ID];
+  const miniItem: Omit<SetupCatalogItem, "state"> = {
+    ...stableItem, id: MINIMAX_MUSIC_3_MODEL_ID, modelId: MINIMAX_MUSIC_3_MODEL_ID,
+    label: "MiniMax Music 3", shortLabel: "MiniMax",
+    description: "Lyrics and structured songs through Modular Diffusers. No source-audio editing.",
+    ready: Boolean(miniStatus?.ready), compatible: miniStatus?.compatible ?? true,
+    disabledReason: miniStatus?.blockReason ?? "",
+    installing: status.installInProgress && activeInstallId === MINIMAX_MUSIC_3_MODEL_ID,
+    failed: failed && activeInstallId === MINIMAX_MUSIC_3_MODEL_ID,
+  };
+  return [stemItem, aceItem, stableItem, miniItem].map((item) => ({ ...item, state: buildCatalogState(item) }));
 }
 
 function statusDotClass(state: SetupCatalogState) {
@@ -349,6 +348,12 @@ export default function AiToolsSetupModal() {
   const [stableAudioSetupBusy, setStableAudioSetupBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
+  useEffect(() => {
+    setStableAudioLicenseAccepted(false);
+    setStableAudioSelectedFolder("");
+    setStableAudioSetupError("");
+  }, [selectedItemId]);
+
   const catalog = useMemo(() => buildSetupCatalog(aiToolsStatus), [aiToolsStatus]);
   const selectedItem = catalog.find((item) => item.id === selectedItemId) ?? catalog[0];
   const installLogPath = aiToolsStatus.detailLogPath;
@@ -402,7 +407,8 @@ export default function AiToolsSetupModal() {
   if (!showAiToolsSetup) return null;
 
   const handleOpenStableAudioPage = async () => {
-    await nativeBridge.openExternalURL(STABLE_AUDIO_MODEL_URL);
+    await nativeBridge.openExternalURL(selectedItem.id === MINIMAX_MUSIC_3_MODEL_ID
+      ? "https://huggingface.co/MiniMaxAI/MiniMax-Music3" : STABLE_AUDIO_MODEL_URL);
   };
 
   const handleOpenInstallLog = async () => {
@@ -417,7 +423,7 @@ export default function AiToolsSetupModal() {
   const runStableAudioSetup = async (folder: string) => {
     setStableAudioSetupError("");
     if (!stableAudioLicenseAccepted) {
-      setStableAudioSetupError("Accept the Stability AI and Gemma license notices before importing the model.");
+      setStableAudioSetupError("Accept the selected model license notices before importing.");
       return;
     }
 
@@ -433,7 +439,7 @@ export default function AiToolsSetupModal() {
         userConfirmedDownload: true,
         selectedFeatures: ["audioGeneration"],
         requestedFeature: "audioGeneration",
-        modelId: STABLE_AUDIO_3_MODEL_ID,
+        modelId: selectedItem.modelId ?? STABLE_AUDIO_3_MODEL_ID,
         stableAudioModelPath: folder,
         stableAudioLicenseAccepted,
       });
@@ -457,7 +463,7 @@ export default function AiToolsSetupModal() {
     setStableAudioSetupError("");
     let folder = "";
     try {
-      folder = await nativeBridge.browseForFolder("Select Stable Audio 3 Medium snapshot folder");
+      folder = await nativeBridge.browseForFolder("Select local audio model snapshot");
     } catch (error) {
       setStableAudioSetupError(error instanceof Error ? error.message : String(error));
       return;
@@ -466,7 +472,7 @@ export default function AiToolsSetupModal() {
   };
 
   const handleInstallSelected = async () => {
-    if (selectedItem.id === STABLE_AUDIO_3_MODEL_ID) {
+    if (isDiffusersImportModel(selectedItem.id)) {
       await handleStableAudioSetup();
       return;
     }
@@ -561,7 +567,7 @@ export default function AiToolsSetupModal() {
       <div className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-daw-text-muted">Manual import</p>
         <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
-          Download the gated Hugging Face snapshot, keep the folder layout intact, then import it into OpenStudio.
+          Import a local snapshot. Existing Stable Audio weights are converted during setup with the official Diffusers converter; the original is retained. MiniMax uses its Modular Diffusers snapshot directly. Conversion needs additional disk space and may take several minutes.
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button variant="secondary" size="sm" onClick={() => void handleOpenStableAudioPage()} icon={<ExternalLink size={14} />}>
@@ -577,6 +583,11 @@ export default function AiToolsSetupModal() {
             Proceed with Setup
           </Button>
         </div>
+        <Button variant="ghost" size="sm" onClick={() => void nativeBridge.openExternalURL(
+          selectedItem.id === MINIMAX_MUSIC_3_MODEL_ID
+            ? "https://huggingface.co/docs/diffusers/main/en/api/pipelines/minimax_music3"
+            : "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_audio_3"
+        )}>Diffusers setup and conversion instructions</Button>
       </div>
 
       <label className="flex items-start gap-3 rounded border border-neutral-800 bg-neutral-950/60 p-3">
@@ -585,17 +596,17 @@ export default function AiToolsSetupModal() {
           onChange={() => setStableAudioLicenseAccepted((value) => !value)}
         />
         <span className="text-xs leading-5 text-daw-text-secondary">
-          I have accepted the Stability AI and Gemma license notices for Stable Audio 3 Medium.
+          I have read and accepted the selected model’s license (including Gemma terms for Stable Audio).
         </span>
       </label>
 
       <div className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-daw-text-muted">Required snapshot layout</p>
         <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
-          The selected folder must include the root model/config/license files and the `t5gemma-b-b-ul2` tokenizer folder.
+          Stable Audio: model_index.json plus converted components. MiniMax: modular_model_index.json plus language_model, transformer, vocoder and the other downloaded components.
         </p>
         <p className="mt-2 text-xs leading-5 text-daw-text-muted">
-          Key files: {STABLE_AUDIO_REQUIRED_FILES.slice(0, 5).join(", ")} and the T5Gemma tokenizer files.
+          Stable Audio key files: {STABLE_AUDIO_REQUIRED_FILES.join(", ")}. MiniMax needs substantial system RAM; CPU offload reduces GPU use but increases generation time.
         </p>
       </div>
 
@@ -615,7 +626,7 @@ export default function AiToolsSetupModal() {
 
   const renderInstallPane = () => {
     if (!selectedItem.compatible) return renderBlockedPane();
-    if (selectedItem.id === STABLE_AUDIO_3_MODEL_ID) return renderStableAudioPane();
+    if (isDiffusersImportModel(selectedItem.id)) return renderStableAudioPane();
 
     return (
       <div className="space-y-4">
@@ -795,7 +806,7 @@ export default function AiToolsSetupModal() {
             variant="primary"
             onClick={() => void handleInstallSelected()}
             disabled={!selectedItem.compatible || isReconcilingInstallResult || stableAudioSetupBusy}
-            icon={selectedItem.id === STABLE_AUDIO_3_MODEL_ID ? <FolderOpen size={15} /> : <Download size={15} />}
+            icon={isDiffusersImportModel(selectedItem.id) ? <FolderOpen size={15} /> : <Download size={15} />}
           >
             {selectedItem.primaryAction}
           </Button>

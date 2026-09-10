@@ -28,11 +28,11 @@ describe("NAM Rack Reverb V5 voice contract", () => {
       dspState: { namEffectsDspVersion: 8, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
 
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
     expect(CURRENT_NAM_REVERB_ENGINE_VERSION).toBe(5);
     expect(migrated.values.reverbVoice).toBe(0);
     expect(migrated.values.reverbDecaySec).toBe(3.4);
-    expect(migrated.dspState).toEqual({ namEffectsDspVersion: 19, reverbEngineVersion: 5 });
+    expect(migrated.dspState).toEqual({ namEffectsDspVersion: 20, reverbEngineVersion: 5 });
     expect(isCurrentNAMRackPresetState(migrated)).toBe(true);
   });
 

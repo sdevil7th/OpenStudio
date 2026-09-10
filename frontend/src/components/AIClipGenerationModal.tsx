@@ -15,7 +15,7 @@ import {
   normalizeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
-import { nativeBridge, type AIGenerationProgress } from "../services/NativeBridge";
+import { cancelAIClipJob, clipJobOwner, startAIClipJob, useAIClipJob } from "../services/aiClipJobs";
 import { type AudioClip, useDAWStore } from "../store/useDAWStore";
 import {
   Button,
@@ -201,7 +201,6 @@ export default function AIClipGenerationModal() {
     setAIClipGenerationParams,
     setAIClipGenerationRange,
     setAIClipGenerationError,
-    addGeneratedSourceAudioClip,
     openAiToolsSetup,
   } = useDAWStore(
     useShallow((state) => ({
@@ -222,17 +221,16 @@ export default function AIClipGenerationModal() {
       setAIClipGenerationParams: state.setAIClipGenerationParams,
       setAIClipGenerationRange: state.setAIClipGenerationRange,
       setAIClipGenerationError: state.setAIClipGenerationError,
-      addGeneratedSourceAudioClip: state.addGeneratedSourceAudioClip,
       openAiToolsSetup: state.openAiToolsSetup,
     })),
   );
 
-  const [isGenerating, setIsGenerating] = useState(false);
+  const job = useAIClipJob();
+  const owner = clipJobOwner(aiClipGenerationTrackId || "", aiClipGenerationClipId || "");
+  const progress = job.owner === owner ? job.progress : { state: "idle" as const, progress: 0 };
+  const isGenerating = progress.state === "loading" || progress.state === "generating";
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [progress, setProgress] = useState<AIGenerationProgress>({ state: "idle", progress: 0 });
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const completedRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const wasGeneratingRef = useRef(false);
 
@@ -326,15 +324,6 @@ export default function AIClipGenerationModal() {
     workflow.id,
   ]);
 
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  };
-
-  useEffect(() => stopPolling, []);
-
   const paramsBySection = useMemo(() => {
     return SECTION_ORDER.map((section) => ({
       section,
@@ -387,18 +376,12 @@ export default function AIClipGenerationModal() {
   }, [isGenerating]);
 
   const handleCancel = async () => {
-    if (isGenerating) {
-      completedRef.current = true;
-      stopPolling();
-      await nativeBridge.cancelAIGeneration();
-      setIsGenerating(false);
-      setProgress({ state: "idle", progress: 0 });
-      return;
-    }
+    if (isGenerating) { await cancelAIClipJob(owner); return; }
     closeAIClipGeneration();
   };
 
   const handleGenerate = async () => {
+    if (isGenerating) return;
     if (!sourceTrack || !sourceClip || !aiClipGenerationWorkflowId) {
       setAIClipGenerationError("Source clip is no longer available.");
       return;
@@ -416,9 +399,6 @@ export default function AIClipGenerationModal() {
       return;
     }
 
-    completedRef.current = false;
-    setIsGenerating(true);
-    setProgress({ state: "loading", progress: 0.01, phase: "starting" });
     setAIClipGenerationError("");
     scrollStatusIntoView();
 
@@ -434,72 +414,11 @@ export default function AIClipGenerationModal() {
       timeSignature,
     });
 
-    try {
-      const result = await nativeBridge.startAIGeneration(
-        sourceTrack.id,
-        aiClipGenerationModelId,
-        workflow.id,
-        requestParams,
-      );
-
-      if (!result.started) {
-        setIsGenerating(false);
-        setProgress({ state: "error", progress: 0, error: result.error });
-        setAIClipGenerationError(result.error || "Failed to start AI generation.");
-        return;
-      }
-
-      let idleCount = 0;
-      pollRef.current = setInterval(async () => {
-        if (completedRef.current) return;
-        const nextProgress = await nativeBridge.getAIGenerationProgress();
-        if (completedRef.current) return;
-        setProgress(nextProgress);
-
-        if (nextProgress.state === "idle") {
-          idleCount += 1;
-          if (idleCount >= 10) {
-            completedRef.current = true;
-            stopPolling();
-            setIsGenerating(false);
-            setAIClipGenerationError("Generation did not start. Open AI Tools Setup and check the selected model.");
-          }
-          return;
-        }
-        idleCount = 0;
-
-        if (nextProgress.state === "done") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-          if (!nextProgress.outputFile) {
-            setAIClipGenerationError("Generation finished without producing an audio file.");
-            return;
-          }
-          await addGeneratedSourceAudioClip({
-            sourceTrackId: sourceTrack.id,
-            sourceClipId: sourceClip.id,
-            workflowId: workflow.id,
-            filePath: nextProgress.outputFile,
-            extensionDuration,
-          });
-          setTimeout(() => closeAIClipGeneration(), 500);
-        } else if (nextProgress.state === "error") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-          setAIClipGenerationError(nextProgress.error || nextProgress.message || "Generation failed.");
-        } else if (nextProgress.state === "cancelled") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-        }
-      }, 250);
-    } catch (error) {
-      stopPolling();
-      setIsGenerating(false);
-      setAIClipGenerationError(error instanceof Error ? error.message : "Generation failed.");
-    }
+    await startAIClipJob({
+      trackId: sourceTrack.id, clipId: sourceClip.id,
+      modelId: aiClipGenerationModelId, workflowId: workflow.id,
+      params: requestParams, extensionDuration,
+    });
   };
 
   const renderParam = (param: AIWorkflowParam) => {
@@ -713,9 +632,9 @@ export default function AIClipGenerationModal() {
             </div>
           ) : null}
 
-          {aiClipGenerationError ? (
+          {(aiClipGenerationError || progress.error) ? (
             <div className="rounded border border-red-700/40 bg-red-950/30 px-4 py-3 text-sm text-red-200">
-              {aiClipGenerationError}
+              {aiClipGenerationError || progress.error}
             </div>
           ) : null}
 

@@ -93,6 +93,19 @@ export function registerShortcutSurface(
     const wasTopRegistration = index === registrations.length - 1;
     registrations.splice(index, 1);
 
+    // React can remove nested portals out of mount order (for example, an
+    // outer modal disappears while an inner confirmation is still animating).
+    // The next registration originally fell back to this same context key;
+    // splice that link out as well so the eventual last owner restores the
+    // real surface instead of activating a handler-less stale context.
+    const nextRegistration = registrations[index];
+    if (
+      nextRegistration
+      && shortcutContextKey(nextRegistration.fallback) === key
+    ) {
+      nextRegistration.fallback = registration.fallback;
+    }
+
     if (registrations.length === 0) handlers.delete(key);
     if (
       wasTopRegistration
@@ -163,6 +176,7 @@ const EDITABLE_SHORTCUT_TARGET_SELECTOR = [
   "input[type='week']",
   "[contenteditable='true']",
   "[contenteditable='']",
+  "[contenteditable='plaintext-only']",
   "[role='textbox']",
   "[role='searchbox']",
   "[role='combobox']",
@@ -193,9 +207,37 @@ const NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR = [
   "[role='tab']",
 ].join(", ");
 
-export function isEditableShortcutTarget(target: EventTarget | null): boolean {
-  return hasClosest(target)
-    && Boolean(target.closest(EDITABLE_SHORTCUT_TARGET_SELECTOR));
+interface EditableCapableTarget {
+  isContentEditable?: boolean;
+  designMode?: string;
+  ownerDocument?: { designMode?: string } | null;
+}
+
+function targetIsInEditingDocument(target: EventTarget): boolean {
+  const capable = target as EventTarget & EditableCapableTarget;
+  const designMode = capable.ownerDocument?.designMode ?? capable.designMode;
+  return typeof designMode === "string" && designMode.toLowerCase() === "on";
+}
+
+function shortcutTargetCandidates(
+  target: EventTarget | null,
+  composedPath: readonly EventTarget[],
+): readonly EventTarget[] {
+  if (!target) return composedPath;
+  return composedPath.includes(target) ? composedPath : [target, ...composedPath];
+}
+
+export function isEditableShortcutTarget(
+  target: EventTarget | null,
+  composedPath: readonly EventTarget[] = [],
+): boolean {
+  return shortcutTargetCandidates(target, composedPath).some((candidate) => {
+    const capable = candidate as EventTarget & EditableCapableTarget;
+    return capable.isContentEditable === true
+      || targetIsInEditingDocument(candidate)
+      || (hasClosest(candidate)
+        && Boolean(candidate.closest(EDITABLE_SHORTCUT_TARGET_SELECTOR)));
+  });
 }
 
 /**
@@ -204,9 +246,14 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
  * plain letter commands may still reach the DAW while a button or slider owns
  * focus.
  */
-export function isNonTextControlShortcutTarget(target: EventTarget | null): boolean {
-  return hasClosest(target)
-    && Boolean(target.closest(NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR));
+export function isNonTextControlShortcutTarget(
+  target: EventTarget | null,
+  composedPath: readonly EventTarget[] = [],
+): boolean {
+  return shortcutTargetCandidates(target, composedPath).some((candidate) => (
+    hasClosest(candidate)
+    && Boolean(candidate.closest(NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR))
+  ));
 }
 
 function eventUsesAltGraph(event: ShortcutEventLike): boolean {

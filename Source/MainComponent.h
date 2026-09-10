@@ -1,4 +1,8 @@
+#include "ToneSearchRequest.h"
 #pragma once
+#include "ProjectFileStore.h"
+#include "RecoveryJournal.h"
+#include "OwnedBackgroundTasks.h"
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
@@ -65,6 +69,7 @@ public:
         std::function<void(const juce::String&, const juce::var&)> publishMidiEditorUISnapshot;
         std::function<juce::var(const juce::String&)> getMidiEditorUISnapshot;
         std::function<bool(const juce::String&, const juce::var&)> openPluginEditorWindow;
+        std::function<juce::var(const juce::String&)> getPluginEditorWindowState;
         std::function<bool(const juce::String&, const juce::String&)> closePluginEditorWindow;
     };
 
@@ -162,6 +167,7 @@ private:
         juce::uint64 topologyGeneration);
     juce::var discardNAMPreviewIfUnused(juce::var recordPayload,
                                         juce::var rackAddressPayload);
+    std::map<juce::String, std::shared_ptr<ToneSearchRequest>> toneSearchRequests;
     void runTone3000NativeTask(
         std::function<juce::var()> task,
         juce::WebBrowserComponent::NativeFunctionCompletion completion);
@@ -206,6 +212,11 @@ private:
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
+    OwnedBackgroundTasks mediaOperations;
+    // File jobs must finish before the WebView and completion owner disappear.
+    juce::ThreadPool projectFilePool { 1 };
+    ProjectFileStore::RecoverySession projectRecovery;
+    RecoveryJournal workRecovery;
     juce::ThreadPool clipPeakAnalysisPool {
         1,
         juce::Thread::osDefaultStackSize,
@@ -249,6 +260,7 @@ private:
     juce::uint32 frontendStartupNavigationTicks = 0;
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
+    uint64_t lastProcessorFaultGeneration = 0;
     bool attemptedPackagedFrontendFallbackAfterLocalTimeout = false;
     bool secondaryWindowClosing = false;
     StartupRepairAction startupRepairAction = StartupRepairAction::none;

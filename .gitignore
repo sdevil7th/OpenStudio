@@ -3,6 +3,7 @@
 /build-*/
 /out
 /tmp/
+/tmp_*
 /cmake-build-*
 CMakeCache.txt
 CMakeFiles
@@ -177,3 +178,7 @@ yarn-error.log*
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Local cabinet presentation captures
+/tmp_cab_showcase/
+/tmp_cab_showcase_v2/

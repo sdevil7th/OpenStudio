@@ -1,12 +1,19 @@
 #include <JuceHeader.h>
 #include "ApplicationLaunchState.h"
 #include "AudioEngine.h"
+#include "CrashDiagnostics.h"
+#include "RuntimeSafetyRegression.h"
+#include "RecordingRecoveryRegression.h"
+#include "MetronomeRegression.h"
 #include "AppUpdater.h"
+#include "StoreUpdaterRegression.h"
+#include "WindowsPackage.h"
 #include "CLAPPluginFormat.h"
 #include "MainComponent.h"
 #include "MixerWindowManager.h"
 #include "NAMModelSafety.h"
 #include "PluginManager.h"
+#include "IsolatedPlugin.h"
 
 #include "NAM/container.h"
 #include "NAM/convnet.h"
@@ -1060,6 +1067,164 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
+        WindowsPackage::configureWebView();
+        const auto updateTestPath = getCommandLineOptionValue(commandLine, "--store-update-self-test");
+        if (updateTestPath.isNotEmpty())
+        {
+            const auto result = runStoreUpdaterRegression();
+            const auto file = juce::File(updateTestPath);
+            const bool written = file.getParentDirectory().createDirectory()
+                && file.replaceWithText(juce::JSON::toString(result, true));
+            setApplicationReturnValue(written && static_cast<bool>(result["pass"]) ? 0 : 2);
+            quit(); return;
+        }
+        const auto storeQueryPath = getCommandLineOptionValue(commandLine, "--store-update-query-self-test");
+        if (storeQueryPath.isNotEmpty())
+        {
+            // Read-only integration probe: Store dialogs require a real HWND.
+            // Never download or install from a test command-line argument.
+            storeQueryWindow = std::make_unique<juce::DocumentWindow>("OpenStudio Store update check",
+                juce::Colours::darkgrey, 0);
+            storeQueryWindow->setUsingNativeTitleBar(true);
+            storeQueryWindow->centreWithSize(420, 120);
+            storeQueryWindow->setVisible(true);
+            appUpdater.checkForUpdates(true, [this, storeQueryPath](const juce::var& status) {
+                auto* report = new juce::DynamicObject();
+                const auto resultStatus = status["status"].toString();
+                const bool pass = WindowsPackage::isStoreManaged()
+                    && status["updateSource"].toString() == "microsoft-store"
+                    && (resultStatus == "up-to-date" || resultStatus == "update-available");
+                report->setProperty("pass", pass);
+                report->setProperty("status", status);
+                report->setProperty("storeDeliveredUpgrade", "not_asserted");
+                const auto file = juce::File(storeQueryPath);
+                const bool written = file.getParentDirectory().createDirectory()
+                    && file.replaceWithText(juce::JSON::toString(juce::var(report), true));
+                setApplicationReturnValue(pass && written ? 0 : 2);
+                quit();
+            });
+            return;
+        }
+        const auto storeTestPath = getCommandLineOptionValue(commandLine, "--store-package-self-test");
+        if (storeTestPath.isNotEmpty())
+        {
+            juce::DynamicObject::Ptr report = new juce::DynamicObject();
+            const bool packaged = WindowsPackage::isStoreManaged();
+            report->setProperty("storeManaged", packaged);
+            int replies = 0;
+            AppUpdater updater;
+            if (packaged)
+            {
+                const auto reply = [&](const juce::var& result) {
+                    if (result["status"].toString() == "error" && result["updateSource"].toString() == "microsoft-store") ++replies;
+                };
+                updater.downloadUpdate(reply);
+                updater.installDownloadedUpdate(reply);
+            }
+            report->setProperty("rejectedUnpreparedStoreOperations", replies);
+            const auto updateRegression = runStoreUpdaterRegression();
+            report->setProperty("updateRegression", updateRegression);
+            report->setProperty("updateStatus", updater.getLastStatus());
+            report->setProperty("fixedWebView", WindowsPackage::fixedWebViewDirectory().getFullPathName());
+            const auto runtimePresent = WindowsPackage::fixedWebViewDirectory().getChildFile("msedgewebview2.exe").existsAsFile();
+            report->setProperty("runtimePresent", runtimePresent);
+            const auto reportFile = juce::File(storeTestPath);
+            const bool passed = packaged && replies == 2 && runtimePresent && static_cast<bool>(updateRegression["pass"]);
+            report->setProperty("pass", passed);
+            const bool written = reportFile.getParentDirectory().createDirectory()
+                && reportFile.replaceWithText(juce::JSON::toString(juce::var(report.get()), true));
+            setApplicationReturnValue(passed && written ? 0 : 2);
+            quit(); return;
+        }
+        const auto isolatedWorker = getCommandLineOptionValue(commandLine, "--isolated-plugin-worker");
+        if (isolatedWorker.isNotEmpty())
+        {
+            setApplicationReturnValue(runIsolatedPluginWorker(isolatedWorker));
+            quit(); return;
+        }
+        const auto isolationFixture = getCommandLineOptionValue(commandLine, "--isolated-plugin-self-test");
+        if (isolationFixture.isNotEmpty())
+        {
+            setApplicationReturnValue(runIsolatedPluginRegression(juce::File(isolationFixture),
+                commandLineHasFlag(commandLine, "--exercise-isolated-editors")));
+            quit(); return;
+        }
+        const auto isolationCompatibility = getCommandLineOptionValue(commandLine, "--isolated-plugin-compatibility");
+        if (isolationCompatibility.isNotEmpty())
+        {
+            setApplicationReturnValue(runIsolatedPluginCompatibility(
+                juce::File(getCommandLineOptionValue(commandLine, "--plugin-catalog")),
+                getCommandLineOptionValue(commandLine, "--plugin-name"), juce::File(isolationCompatibility)));
+            quit(); return;
+        }
+        const auto recoveryFixture = getCommandLineOptionValue(commandLine, "--recovery-session-fixture");
+        if (recoveryFixture.isNotEmpty())
+        {
+            ProjectFileStore::RecoverySession session { juce::File(recoveryFixture) };
+            const auto saved = session.write(juce::Uuid().toString(), "", "{\"tracks\":[],\"projectName\":\"Interrupted untitled session\"}", 3);
+            if (saved.wasOk() && commandLineHasFlag(commandLine, "--simulate-crash"))
+                OpenStudioCrashDiagnostics::runSelfTest(juce::File(recoveryFixture).getChildFile("crash-evidence"), true);
+            setApplicationReturnValue(saved.wasOk() && session.markClean().wasOk() ? 0 : 2);
+            quit(); return;
+        }
+        const auto recoveryDiscovery = getCommandLineOptionValue(commandLine, "--recovery-discovery-fixture");
+        if (recoveryDiscovery.isNotEmpty())
+        {
+            ProjectFileStore::RecoverySession observer { juce::File(recoveryDiscovery) };
+            const juce::File report(getCommandLineOptionValue(commandLine, "--report"));
+            setApplicationReturnValue(report.replaceWithText(juce::JSON::toString(observer.discover())) ? 0 : 2);
+            quit(); return;
+        }
+        const auto recordingFixture = getCommandLineOptionValue(commandLine, "--recording-recovery-fixture");
+        if (recordingFixture.isNotEmpty())
+        {
+            setApplicationReturnValue(runInterruptedRecordingFixture(juce::File(recordingFixture)));
+            quit(); return;
+        }
+        const auto ownedWorkerFixture = getCommandLineOptionValue(commandLine, "--owned-worker-fixture");
+        if (ownedWorkerFixture.isNotEmpty())
+        {
+            // Device-free process-tree fixture. Only this explicitly launched
+            // test child waits; it never opens the user's project or audio device.
+            const juce::File fixtureDirectory(ownedWorkerFixture);
+            if (!fixtureDirectory.isDirectory()) { setApplicationReturnValue(2); quit(); return; }
+            if (commandLineHasFlag(commandLine, "--owned-worker-leaf"))
+            {
+                juce::Thread::sleep(30000);
+            }
+            else
+            {
+                OwnedChildProcess descendant;
+                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+                if (!descendant.start({ executable.getFullPathName(), "--owned-worker-fixture", ownedWorkerFixture, "--owned-worker-leaf" }))
+                { setApplicationReturnValue(3); quit(); return; }
+                fixtureDirectory.getChildFile("descendant.pid").replaceWithText(juce::String(descendant.getProcessId()));
+                juce::Thread::sleep(30000);
+            }
+            quit(); return;
+        }
+        const auto runtimeTestPath = getCommandLineOptionValue(commandLine, "--runtime-safety-self-test");
+        if (runtimeTestPath.isNotEmpty())
+        {
+            const auto result = RuntimeSafetyRegression::run(juce::File(runtimeTestPath));
+            setApplicationReturnValue(result);
+            if (result == 0 && commandLineHasFlag(commandLine, "--simulate-recovery-crash"))
+                OpenStudioCrashDiagnostics::runSelfTest(juce::File(runtimeTestPath).getChildFile("crash-evidence"), true);
+            quit();
+            return;
+        }
+        const auto diagnosticsTestPath = getCommandLineOptionValue(commandLine, "--crash-diagnostics-self-test");
+        if (diagnosticsTestPath.isNotEmpty())
+        {
+            setApplicationReturnValue(OpenStudioCrashDiagnostics::runSelfTest(
+                juce::File(diagnosticsTestPath), commandLineHasFlag(commandLine, "--simulate-crash"),
+                commandLineHasFlag(commandLine, "--simulate-dump-write-failure"),
+                commandLineHasFlag(commandLine, "--simulate-reporter-unavailable"),
+                commandLineHasFlag(commandLine, "--simulate-hang"),
+                commandLineHasFlag(commandLine, "--simulate-shutdown-hang")));
+            quit();
+            return;
+        }
         if (commandLineHasFlag(
                 commandLine,
                 "--nam-library-manifest-writer-child"))
@@ -1244,7 +1409,25 @@ public:
             ::GetCurrentProcess(),
             ABOVE_NORMAL_PRIORITY_CLASS);
        #endif
+        if (automatedRegressionHeadlessMode
+            && juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_METRONOME_FIXTURES_ONLY", {}).trim() == "1")
+        {
+            const auto result = runMetronomeRegression();
+            const auto report = startupSelfTestReportPath.isNotEmpty()
+                ? juce::File(startupSelfTestReportPath)
+                : getWritableStartupLogFile().getSiblingFile("OpenStudio_MetronomeRegression.json");
+            const bool written = report.getParentDirectory().createDirectory()
+                && report.replaceWithText(juce::JSON::toString(result, true));
+            setApplicationReturnValue(written && static_cast<bool>(result["overallPass"]) ? 0 : 1);
+            quit();
+            return;
+        }
         audioEngine = std::make_unique<AudioEngine>();
+        audioEngine->onFXSlotsRemoved = [this](const juce::String& trackId,
+                                              const juce::String& chain, int firstIndex)
+        {
+            closePluginEditorWindowsForRemovedSlots(trackId, chain, firstIndex);
+        };
 
         if (automatedRegressionHeadlessMode)
         {
@@ -1383,8 +1566,13 @@ public:
 
     void shutdown() override
     {
+        if (audioEngine != nullptr)
+            OpenStudioCrashDiagnostics::beginFinalShutdown();
         juce::Logger::writeToLog("Application Check-out.");
+        appUpdater.shutdown();
 
+        if (audioEngine != nullptr)
+            audioEngine->onFXSlotsRemoved = {};
         pluginEditorWindowManagers.clear();
         midiEditorWindowManagers.clear();
         mixerWindowManager = nullptr;
@@ -1578,6 +1766,15 @@ private:
         callbacks.closePluginEditorWindow = [this](const juce::String& sessionId, const juce::String& reason)
         {
             return closePluginEditorWindow(sessionId, reason);
+        };
+        callbacks.getPluginEditorWindowState = [this](const juce::String& sessionId)
+        {
+            auto* state = new juce::DynamicObject();
+            const auto existing = pluginEditorWindowManagers.find(normalisePluginEditorSessionId(sessionId));
+            const auto* manager = existing != pluginEditorWindowManagers.end() ? existing->second.get() : nullptr;
+            state->setProperty("state", manager ? manager->getStateDescription() : juce::String("idle"));
+            state->setProperty("frontendStartupState", manager ? manager->getFrontendStartupStateDescription() : juce::String("not-started"));
+            return juce::var(state);
         };
         return callbacks;
     }
@@ -1805,6 +2002,29 @@ private:
         return false;
     }
 
+    void closePluginEditorWindowsForRemovedSlots(const juce::String& trackId,
+                                                const juce::String& chain, int firstIndex)
+    {
+        jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+        for (auto& entry : pluginEditorWindowManagers)
+        {
+            const auto session = juce::JSON::parse(entry.first);
+            const auto address = session.getProperty("address", {});
+            if (address.getProperty("chain", {}).toString() != chain)
+                continue;
+            if ((chain == "track" || chain == "input")
+                && address.getProperty("trackId", {}).toString() != trackId)
+                continue;
+            const auto index = address.getProperty("fxIndex", -1);
+            if (!index.isInt() || static_cast<int>(index) < firstIndex)
+                continue;
+            // Use the existing retired/delayed WebView teardown, including
+            // cancellation of an editor queued behind another window's startup.
+            if (entry.second != nullptr)
+                entry.second->close();
+        }
+    }
+
     bool closePluginEditorWindow(const juce::String& sessionId, const juce::String& reason)
     {
         juce::ignoreUnused(reason);
@@ -1951,7 +2171,9 @@ private:
 
         steps->push_back({ "plugin_open", 700, [this, pluginSessionId, pluginBounds]()
         {
-            return openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
+            audioEngine->addTrack("window-lifecycle");
+            return audioEngine->addTrackBuiltInFX("window-lifecycle", "OpenStudio EQ")
+                && openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
         }});
         steps->push_back({ "plugin_frontend_ready", 0, [this, pluginSessionId]()
         {
@@ -1975,9 +2197,88 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        // Exercise the real engine removal paths while a different track's
+        // editor stays open. Include an editor shifted by an earlier removal.
+        for (const auto& chain : juce::StringArray { "track", "input", "master", "monitor" })
+        {
+            const juce::String testTrack("window-lifecycle-removal");
+            const int editorIndex = chain == "track" ? 1 : 0;
+            auto* address = new juce::DynamicObject();
+            address->setProperty("trackId", testTrack);
+            address->setProperty("chain", chain);
+            address->setProperty("fxIndex", editorIndex);
+            auto* session = new juce::DynamicObject();
+            session->setProperty("address", juce::var(address));
+            session->setProperty("title", "Removal " + chain);
+            session->setProperty("fallbackName", chain == "monitor" ? "OpenStudio NAM Rack" : "OpenStudio EQ");
+            const auto removalSession = juce::JSON::toString(juce::var(session), true);
+            steps->push_back({ "plugin_" + chain + "_removal_open", 1600,
+                [this, chain, testTrack, editorIndex, removalSession, pluginBounds]()
+            {
+                if (chain == "track") audioEngine->addTrack(testTrack);
+                for (int index = 0; index <= editorIndex; ++index)
+                {
+                    const bool added = chain == "master"
+                        ? audioEngine->addMasterBuiltInFX("OpenStudio EQ")
+                        : chain == "monitor"
+                            ? audioEngine->addMonitoringFX("OpenStudio NAM Rack")
+                            : audioEngine->addTrackBuiltInFX(testTrack, "OpenStudio EQ", chain == "input");
+                    if (!added) return false;
+                }
+                return openPluginEditorWindow(removalSession, rectangleToVar(pluginBounds));
+            }});
+            steps->push_back({ "plugin_" + chain + "_removal_ready", 0, [this, removalSession]()
+            {
+                const auto found = pluginEditorWindowManagers.find(removalSession);
+                return found != pluginEditorWindowManagers.end() && found->second->isFrontendReady();
+            }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+            steps->push_back({ "plugin_" + chain + "_failed_removal_keeps_editor", 0,
+                [this, chain, testTrack, removalSession]()
+            {
+                bool removed = false;
+                if (chain == "monitor") audioEngine->removeMonitoringFX(9999);
+                else if (chain == "master") removed = audioEngine->removeMasterFX(9999);
+                else removed = chain == "input" ? audioEngine->removeTrackInputFX(testTrack, 9999)
+                                                 : audioEngine->removeTrackFX(testTrack, 9999);
+                return !removed && pluginEditorWindowManagers.at(removalSession)->isOpen();
+            }});
+            steps->push_back({ "plugin_" + chain + "_removal_closes_editor", 2200,
+                [this, chain, testTrack, removalSession, pluginSessionId]()
+            {
+                bool removed = true;
+                if (chain == "monitor") audioEngine->removeMonitoringFX(0);
+                else if (chain == "master") removed = audioEngine->removeMasterFX(0);
+                else removed = chain == "input" ? audioEngine->removeTrackInputFX(testTrack, 0)
+                                                 : audioEngine->removeTrackFX(testTrack, 0);
+                return removed && !pluginEditorWindowManagers.at(removalSession)->isOpen()
+                    && pluginEditorWindowManagers.at(pluginSessionId)->isOpen();
+            }});
+        }
         steps->push_back({ "plugin_final_close", 2200, [this, pluginSessionId]()
         {
-            return closePluginEditorWindow(pluginSessionId, "close");
+            return audioEngine->removeTrackFX("window-lifecycle", 0)
+                && !pluginEditorWindowManagers.at(pluginSessionId)->isOpen();
+        }});
+        steps->push_back({ "plugin_removal_reopen_setup", 1600, [this, pluginSessionId, pluginBounds]()
+        {
+            return audioEngine->addTrackBuiltInFX("window-lifecycle", "OpenStudio EQ")
+                && openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds));
+        }});
+        steps->push_back({ "plugin_removal_reopen_ready", 0, [this, pluginSessionId]()
+        {
+            return pluginEditorWindowManagers.at(pluginSessionId)->isFrontendReady();
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        steps->push_back({ "plugin_track_delete_cancels_queued_reopen", 3000,
+            [this, pluginSessionId, pluginBounds]()
+        {
+            return closePluginEditorWindow(pluginSessionId, "close")
+                && openPluginEditorWindow(pluginSessionId, rectangleToVar(pluginBounds))
+                && audioEngine->removeTrack("window-lifecycle")
+                && !pluginEditorWindowManagers.at(pluginSessionId)->isOpen();
+        }});
+        steps->push_back({ "plugin_removed_editor_stays_closed", 0, [this, pluginSessionId]()
+        {
+            return pluginEditorWindowManagers.at(pluginSessionId)->getStateDescription() == "idle";
         }});
 
         auto stepIndex = std::make_shared<size_t>(0);
@@ -2061,6 +2362,7 @@ private:
 
     std::unique_ptr<AudioEngine> audioEngine;
     AppUpdater appUpdater;
+    std::unique_ptr<juce::DocumentWindow> storeQueryWindow;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<MixerWindowManager> mixerWindowManager;

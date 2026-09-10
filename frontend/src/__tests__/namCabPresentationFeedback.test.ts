@@ -13,6 +13,9 @@ describe("NAM Rack cabinet presentation feedback", () => {
     expect(presentation.mode).toBe("embedded");
     expect(presentation.hasRetainedExternalIR).toBe(true);
     expect(presentation.status).toContain("retained external IR is bypassed");
+    expect(presentation.canBrowseExternalIR).toBe(true);
+    expect(presentation.canLoadLocalIR).toBe(true);
+    expect(presentation.canClearExternalIR).toBe(true);
   });
 
   it("explains that the external stage is bypassed even when no IR is retained", () => {
@@ -22,6 +25,9 @@ describe("NAM Rack cabinet presentation feedback", () => {
       embeddedCabCapture: true,
     });
 
-    expect(presentation.status).toContain("external Cab/IR stage is bypassed");
+    expect(presentation.status).toContain("prepare an external IR");
+    expect(presentation.canBrowseExternalIR).toBe(true);
+    expect(presentation.canLoadLocalIR).toBe(true);
+    expect(presentation.canClearExternalIR).toBe(false);
   });
 });

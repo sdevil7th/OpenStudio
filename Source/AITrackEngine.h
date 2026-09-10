@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include "OwnedChildProcess.h"
 
 struct AIGenerationProgress
 {
@@ -60,16 +61,16 @@ public:
     bool isRunning() const;
 
 private:
+    friend class RuntimeSafetyRegression;
     juce::File getUserDataRoot() const;
     juce::File getUserRuntimeRoot() const;
     juce::File getStableAudioRuntimeRoot() const;
     juce::File getMusicGenerationCheckpointRoot() const;
-    juce::File getStableAudioModelRoot() const;
+    juce::File getStableAudioModelRoot(const juce::String& modelId) const;
     juce::File findPython() const;
     juce::File findStableAudioPython() const;
     juce::File findScript() const;
     juce::File findStableAudioScript() const;
-    void cleanupLegacyWorkerProcesses(const juce::File& python, const juce::File& script) const;
     bool ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId);
     bool sendGenerateRequest(const juce::String& modelId,
                              const juce::String& workflowId,
@@ -94,7 +95,8 @@ private:
                                 const juce::String& failureKind);
     void resetProcessStateLocked();
 
-    std::unique_ptr<juce::ChildProcess> workerProcess_;
+    std::unique_ptr<OwnedChildProcess> workerProcess_;
+    std::atomic<bool> stopRequested_ { false };
     std::thread readerThread_;
     std::thread generationThread_;
     std::atomic<bool> readerShouldExit_ { false };
@@ -106,9 +108,11 @@ private:
     juce::String lastStderrLine_;
     juce::File currentOutputFile_;
     juce::String currentRequestId_;
+    juce::String recoveryJournalId_;
     juce::String expectedScriptVersion_;
     juce::String workerScriptVersion_;
     juce::String workerScriptPath_;
+    juce::String workerModelId_;
     bool generationActive_ = false;
     bool expectedProcessExit_ = false;
     bool cancelRequested_ = false;

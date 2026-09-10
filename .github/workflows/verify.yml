@@ -17,9 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Check first-party product names
+        run: python3 tools/check-product-naming.py
+
       - name: Run Python tooling unit tests
         run: >-
           python3 -m unittest
+          tests.test_release_notes
+          tests.test_store_submission
           tests.test_ai_runtime_dependency_pins
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
@@ -65,6 +70,14 @@ jobs:
       ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Test Windows signing safeguards
+        shell: pwsh
+        run: ./tools/test-windows-signing.ps1
+
+      - name: Test Microsoft Store packaging safeguards
+        shell: pwsh
+        run: ./tools/test-windows-store-package.ps1
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:

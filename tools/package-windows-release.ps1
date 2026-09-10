@@ -21,10 +21,16 @@ param(
     [string]$SignToolPath = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$TimestampUrl = "http://timestamp.digicert.com"
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
+
+    # SignPath signs the payload before packaging and the installer afterwards.
+    [switch]$RequireSignedPayload,
+
+    [string]$NotesFile = ""
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-signing.ps1")
 
 function Resolve-SignToolPath {
     param([string]$ExplicitPath)
@@ -136,6 +142,11 @@ function Assert-AuthenticodeSignature {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($NotesFile)) {
+    $NotesFile = Join-Path $PSScriptRoot ("../docs/releases/" + ($Version -replace '^v', '') + ".md")
+}
+& python (Join-Path $PSScriptRoot 'validate-release-notes.py') --version $Version --notes-file $NotesFile
+if ($LASTEXITCODE -ne 0) { throw 'Release notes failed validation; packaging stopped.' }
 $resolvedSourceDir = if ([System.IO.Path]::IsPathRooted($SourceDir)) {
     (Resolve-Path $SourceDir).Path
 } else {
@@ -154,6 +165,14 @@ $bundleWindowsPrereqsDir = Join-Path $resolvedSourceDir "prereqs/windows"
 
 if (-not (Test-Path (Join-Path $resolvedSourceDir "OpenStudio.exe"))) {
     throw "OpenStudio.exe was not found in '$resolvedSourceDir'. Build the Release target first."
+}
+
+$shouldSign = (-not [string]::IsNullOrWhiteSpace($CertificateFile)) -or (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint))
+if ($RequireSignedPayload -and $shouldSign) {
+    throw "Use either a pre-signed payload or local certificate signing, not both."
+}
+if ($RequireSignedPayload) {
+    Assert-OpenStudioSigningFiles -Directory $resolvedSourceDir -Version $Version -RequireSignature
 }
 
 if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
@@ -181,22 +200,20 @@ if ((-not (Test-Path (Join-Path $bundleWindowsPrereqsDir "MicrosoftEdgeWebView2R
 New-Item -ItemType Directory -Force -Path $resolvedOutputDir | Out-Null
 
 $isccPath = Resolve-InnoSetupCompilerPath
-$appExecutablePath = Join-Path $resolvedSourceDir "OpenStudio.exe"
 $installerPath = Join-Path $resolvedOutputDir "OpenStudio-Setup-x64.exe"
 
-$shouldSign = (-not [string]::IsNullOrWhiteSpace($CertificateFile)) -or (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint))
 if ($shouldSign) {
     $resolvedSignToolPath = Resolve-SignToolPath -ExplicitPath $SignToolPath
-    Invoke-SignFile -FilePath $appExecutablePath `
-        -ResolvedSignToolPath $resolvedSignToolPath `
-        -CertificateFile $CertificateFile `
-        -CertificatePassword $CertificatePassword `
-        -CertificateThumbprint $CertificateThumbprint `
-        -TimestampUrl $TimestampUrl
-
-    Assert-AuthenticodeSignature -FilePath $appExecutablePath
+    foreach ($file in Get-OpenStudioSigningFiles -Directory $resolvedSourceDir) {
+        Invoke-SignFile -FilePath $file `
+            -ResolvedSignToolPath $resolvedSignToolPath `
+            -CertificateFile $CertificateFile `
+            -CertificatePassword $CertificatePassword `
+            -CertificateThumbprint $CertificateThumbprint `
+            -TimestampUrl $TimestampUrl
+        Assert-AuthenticodeSignature -FilePath $file
+    }
 }
-
 & $isccPath `
     "/Qp" `
     "/DMyAppVersion=$Version" `
@@ -217,6 +234,8 @@ if ($shouldSign) {
         -TimestampUrl $TimestampUrl
 
     Assert-AuthenticodeSignature -FilePath $installerPath
+} elseif ($RequireSignedPayload) {
+    Write-Host "Installer contains the verified signed payload; installer signing is still required before publication."
 } else {
     Write-Host "Packaging unsigned Windows installer (zero-cost distribution path)."
 }

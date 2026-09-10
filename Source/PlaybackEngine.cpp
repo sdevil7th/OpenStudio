@@ -621,7 +621,7 @@ PlaybackEngine::PlaybackEngine()
 
 PlaybackEngine::~PlaybackEngine()
 {
-    streamingReadAheadThread.stopThread(2000);
+    streamingReadAheadThread.stopThread(-1); // Final-quit watchdog bounds an unresponsive storage call.
     juce::ScopedLock sl(lock);
     readers.clear();
     streamingContinuityStates.clear();

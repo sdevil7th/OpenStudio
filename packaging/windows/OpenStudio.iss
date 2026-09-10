@@ -29,6 +29,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+SetupLogging=yes
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
@@ -41,6 +42,8 @@ CloseApplications=yes
 RestartApplications=no
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductName={#MyAppName}
+VersionInfoProductTextVersion={#MyAppVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -49,11 +52,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Keep debugging evidence in the matching symbol archive, outside the installer.
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "*.pdb,*.ilk,*.log,*.dmp"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 Root: HKCR; Subkey: ".osproj"; ValueType: string; ValueName: ""; ValueData: "OpenStudio.Project"; Flags: uninsdeletevalue
-Root: HKCR; Subkey: ".s13"; ValueType: string; ValueName: ""; ValueData: "OpenStudio.Project"; Flags: uninsdeletevalue
 Root: HKCR; Subkey: "OpenStudio.Project"; ValueType: string; ValueName: ""; ValueData: "OpenStudio Project"; Flags: uninsdeletekey
 Root: HKCR; Subkey: "OpenStudio.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"; Flags: uninsdeletekey
 Root: HKCR; Subkey: "OpenStudio.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey
@@ -63,18 +66,15 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: CanLaunchInstalledApp
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\OpenStudio"
-Type: filesandordirs; Name: "{userappdata}\OpenStudio"
-Type: filesandordirs; Name: "{localappdata}\Studio13"
-Type: filesandordirs; Name: "{userappdata}\Studio13"
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: CanLaunchInstalledApp
 
 [Code]
 var
   CanLaunchInstalledAppValue: Boolean;
   StartupSelfTestReportPath: string;
+  PrerequisiteRestartRequired: Boolean;
+  PrerequisiteLogDirectory: string;
+  LastPrerequisiteResult: Integer;
 
 procedure SetInstallStatus(const StatusText, DetailText: string);
 begin
@@ -107,64 +107,112 @@ begin
     );
 end;
 
-function RunPrerequisiteInstaller(const FilePath, Parameters, FriendlyName: string): Boolean;
+function VCRuntimeIsSufficient(const InstallerPath: string): Boolean;
 var
-  ResultCode: Integer;
+  RequiredVersion, InstalledVersion: Int64;
+  Installed, Major, Minor, Build, Revision: Cardinal;
+  Root: Integer;
+  RegistryRoot: Integer;
+  Key: string;
 begin
+  Result := False;
+  if not GetPackedVersion(InstallerPath, RequiredVersion) then exit;
+  Key := 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+  for Root := 0 to 1 do
+  begin
+    if Root = 0 then RegistryRoot := HKLM64 else RegistryRoot := HKLM32;
+    if RegQueryDWordValue(RegistryRoot, Key, 'Major', Major) and
+       RegQueryDWordValue(RegistryRoot, Key, 'Minor', Minor) and
+       RegQueryDWordValue(RegistryRoot, Key, 'Bld', Build) and
+       RegQueryDWordValue(RegistryRoot, Key, 'Rbld', Revision) and
+       RegQueryDWordValue(RegistryRoot, Key, 'Installed', Installed) then
+    begin
+      if (Installed = 1) and (Major <= 65535) and (Minor <= 65535) and
+         (Build <= 65535) and (Revision <= 65535) then
+      begin
+        InstalledVersion := PackVersionComponents(Major, Minor, Build, Revision);
+        Result := ComparePackedVersion(InstalledVersion, RequiredVersion) >= 0;
+        Log('VC++ installed=' + VersionToStr(InstalledVersion) + '; required=' + VersionToStr(RequiredVersion));
+        if Result then exit;
+      end;
+    end;
+  end;
+end;
+
+function MachineWebView2Installed(): Boolean;
+var
+  Version: string;
+begin
+  { A machine-wide installation must work for the original user even when UAC
+    credentials belong to another administrator. Do not rely on that admin's HKCU. }
+  Result := RegQueryStringValue(HKLM32,
+    'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version);
+  Result := Result and (Version <> '') and (Version <> '0.0.0.0');
+end;
+
+function RunPrerequisiteInstaller(const FilePath, Parameters, FriendlyName: string): Boolean;
+begin
+  LastPrerequisiteResult := -1;
   if not FileExists(FilePath) then
-  begin
-    MsgBox(
-      FriendlyName + ' installer was not found at:' + #13#10 + FilePath + #13#10#13#10 +
-      'Rebuild the installer with prerequisite staging enabled.',
-      mbCriticalError,
-      MB_OK
-    );
-    Result := False;
-    exit;
-  end;
+    Log(FriendlyName + ' installer missing: ' + FilePath)
+  else if not Exec(FilePath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, LastPrerequisiteResult) then
+    Log('Could not start ' + FriendlyName + ': ' + SysErrorMessage(LastPrerequisiteResult));
+  Log(FriendlyName + ' exit code: ' + IntToStr(LastPrerequisiteResult));
+  SaveStringToFile(PrerequisiteLogDirectory + '\prerequisites.log',
+    GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' ' + FriendlyName +
+    ' exit code=' + IntToStr(LastPrerequisiteResult) + #13#10, True);
+  if (LastPrerequisiteResult = 3010) or (LastPrerequisiteResult = 1641) then
+    PrerequisiteRestartRequired := True;
+  Result := (LastPrerequisiteResult = 0) or (LastPrerequisiteResult = 3010) or (LastPrerequisiteResult = 1641);
+end;
 
-  if not Exec(FilePath, Parameters, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode) then
+function EnsurePrerequisite(const FilePath, Parameters, FriendlyName, ManualURL: string; IsVC: Boolean): Boolean;
+var
+  Installed, Started: Boolean;
+  Choice: Integer;
+begin
+  Result := False;
+  while True do
   begin
-    MsgBox('Failed to start ' + FriendlyName + ' installer.', mbCriticalError, MB_OK);
-    Result := False;
-    exit;
+    if IsVC then Installed := VCRuntimeIsSufficient(FilePath)
+    else Installed := MachineWebView2Installed();
+    if Installed then begin Result := True; exit; end;
+    SetInstallStatus('Installing runtime dependencies...', 'Installing ' + FriendlyName);
+    Started := RunPrerequisiteInstaller(FilePath, Parameters, FriendlyName);
+    if IsVC then Installed := VCRuntimeIsSufficient(FilePath)
+    else Installed := MachineWebView2Installed();
+    { Version-conflict codes are successful only if the required runtime is verified. }
+    if Installed then begin Result := True; exit; end;
+    if Started and ((LastPrerequisiteResult = 3010) or (LastPrerequisiteResult = 1641)) then begin Result := True; exit; end;
+    Choice := MsgBox('OpenStudio could not verify ' + FriendlyName + '.' + #13#10#13#10 +
+      'Installer result: ' + IntToStr(LastPrerequisiteResult) + #13#10 +
+      'Logs: ' + PrerequisiteLogDirectory + #13#10#13#10 +
+      'Check the log, then choose Retry. You can also install the runtime from:' + #13#10 +
+      ManualURL + #13#10#13#10 + 'Setup requests administrator permission automatically. OpenStudio itself does not need administrator access.',
+      mbError, MB_RETRYCANCEL);
+    if Choice <> IDRETRY then exit;
   end;
-
-  Result := ResultCode = 0;
 end;
 
 procedure InstallOrRepairPrerequisites();
 var
-  WebView2InstallerPath: string;
-  VCRedistInstallerPath: string;
+  VCRedistInstallerPath, WebView2InstallerPath: string;
 begin
-  WebView2InstallerPath := ExpandConstant('{app}\prereqs\windows\{#WebView2Bootstrapper}');
+  PrerequisiteLogDirectory := ExpandConstant('{commonappdata}\OpenStudio\InstallerLogs');
+  if not ForceDirectories(PrerequisiteLogDirectory) then PrerequisiteLogDirectory := ExpandConstant('{tmp}');
   VCRedistInstallerPath := ExpandConstant('{app}\prereqs\windows\{#VCRedistInstaller}');
+  WebView2InstallerPath := ExpandConstant('{app}\prereqs\windows\{#WebView2Bootstrapper}');
+  CanLaunchInstalledAppValue := EnsurePrerequisite(VCRedistInstallerPath,
+    '/install /passive /norestart /log "' + PrerequisiteLogDirectory + '\vc-redist.log"',
+    'Microsoft Visual C++ Redistributable', 'https://aka.ms/vs/17/release/vc_redist.x64.exe', True);
+  if CanLaunchInstalledAppValue then
+    CanLaunchInstalledAppValue := EnsurePrerequisite(WebView2InstallerPath, '/silent /install',
+      'Microsoft Edge WebView2 Runtime', 'https://developer.microsoft.com/microsoft-edge/webview2/', False);
+end;
 
-  SetInstallStatus('Installing runtime dependencies...', 'Repairing Microsoft Visual C++ Redistributable');
-  if not RunPrerequisiteInstaller(VCRedistInstallerPath, '/install /passive /norestart', 'Microsoft Visual C++ Redistributable') then
-  begin
-    CanLaunchInstalledAppValue := False;
-    MsgBox(
-      'OpenStudio could not install or repair the Microsoft Visual C++ Redistributable automatically.' + #13#10#13#10 +
-      'Please repair or install it manually, then relaunch OpenStudio.',
-      mbCriticalError,
-      MB_OK
-    );
-    exit;
-  end;
-
-  SetInstallStatus('Installing runtime dependencies...', 'Repairing Microsoft Edge WebView2 Runtime');
-  if not RunPrerequisiteInstaller(WebView2InstallerPath, '/silent /install', 'Microsoft Edge WebView2 Runtime') then
-  begin
-    CanLaunchInstalledAppValue := False;
-    MsgBox(
-      'OpenStudio could not install or repair the Microsoft Edge WebView2 Runtime automatically.' + #13#10#13#10 +
-      'Please install or repair WebView2 Runtime manually, then relaunch OpenStudio.',
-      mbCriticalError,
-      MB_OK
-    );
-  end;
+function NeedRestart(): Boolean;
+begin
+  Result := PrerequisiteRestartRequired;
 end;
 
 function RunStartupSelfTest(): Boolean;
@@ -222,6 +270,7 @@ end;
 procedure InitializeWizard();
 begin
   CanLaunchInstalledAppValue := True;
+  PrerequisiteRestartRequired := False;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -238,13 +287,13 @@ begin
   if CanLaunchInstalledAppValue then
     InstallOrRepairPrerequisites();
 
-  if CanLaunchInstalledAppValue and (not RunStartupSelfTest()) then
+  if CanLaunchInstalledAppValue and (not PrerequisiteRestartRequired) and (not RunStartupSelfTest()) then
     CanLaunchInstalledAppValue := False;
 end;
 
 function CanLaunchInstalledApp(): Boolean;
 begin
-  Result := CanLaunchInstalledAppValue;
+  Result := CanLaunchInstalledAppValue and (not PrerequisiteRestartRequired);
 end;
 
 function InitializeUninstall(): Boolean;

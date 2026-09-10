@@ -172,7 +172,7 @@ private:
     juce::File getMusicGenerationCheckpointRoot() const;
 
     /** Get the managed Stable Audio 3 Medium snapshot root. */
-    juce::File getStableAudioModelRoot() const;
+    juce::File getStableAudioModelRoot(const juce::String& modelId = "stable-audio-3-medium") const;
 
     /** Find the prepared user-runtime Python executable. */
     juce::File findPython() const;
@@ -296,7 +296,7 @@ private:
     bool hasRequiredModel (const juce::File& modelsDir) const;
 
     /** Return missing required files for a Stable Audio 3 Medium snapshot. */
-    juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot) const;
+    juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId = "stable-audio-3-medium") const;
 
     /** Return true if a Stable Audio 3 Medium snapshot contains the required files. */
     bool isStableAudioModelFolderValid (const juce::File& modelRoot) const;
@@ -309,6 +309,7 @@ private:
 
     /** Stop the dedicated background monitor if one is running. */
     void stopInstallMonitor();
+    juce::CriticalSection installMonitorLifecycleLock;
 
     /** Build the current AI tools status object using already-resolved values. */
     AiToolsStatus buildAiToolsStatus (const juce::File& systemPython,
@@ -389,6 +390,9 @@ private:
     std::atomic<bool> aiToolsInstallMonitorStopRequested { false };
     std::atomic<bool> aiToolsInstallMonitorRunning { false };
     std::unique_ptr<std::thread> aiToolsInstallMonitorThread;
+    std::atomic<bool> shuttingDown { false };
+    std::atomic<bool> installWorkerActive { false };
+    juce::ThreadPool backgroundTasks { 2 }; // Joined before members can be destroyed.
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };

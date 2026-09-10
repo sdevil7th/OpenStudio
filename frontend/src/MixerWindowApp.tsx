@@ -1,13 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { MixerPanel } from "./components/MixerPanel";
-import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
+import { nativeBridge } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
-  isEditableShortcutTarget,
-  isNonTextControlShortcutTarget,
-} from "./utils/shortcutContext";
+  browserShortcutWindowIsActive,
+  toGlobalShortcutPayload,
+} from "./utils/domShortcutEvent";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import {
   hydrateMixerUISnapshotFromNative,
@@ -21,6 +21,7 @@ export default function MixerWindowApp() {
     batchUpdateMeterLevels: state.batchUpdateMeterLevels,
   })));
   const [hydrated, setHydrated] = useState(false);
+  const windowFocusedRef = useRef(document.hasFocus());
   useEffect(() => installBrowserZoomWheelGuard(document), []);
 
   useEffect(() => {
@@ -84,34 +85,29 @@ export default function MixerWindowApp() {
   }, [batchUpdateMeterLevels]);
 
   useEffect(() => {
+    const handleWindowFocus = () => {
+      windowFocusedRef.current = true;
+    };
+    const handleWindowBlur = () => {
+      windowFocusedRef.current = false;
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
-      void dispatchGlobalShortcut({
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        repeat: e.repeat,
-        source: "browser",
-        targetIsEditable: isEditableShortcutTarget(e.target),
-        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
-        preventDefault: () => e.preventDefault(),
-        stopPropagation: () => e.stopPropagation(),
-        stopImmediatePropagation: () => e.stopImmediatePropagation(),
-      });
+      if (!browserShortcutWindowIsActive({
+        documentFocused: document.hasFocus(),
+        visibilityState: document.visibilityState,
+        windowFocused: windowFocusedRef.current,
+      })) return;
+      void dispatchGlobalShortcut(toGlobalShortcutPayload(e));
     };
 
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("keydown", handleKeyDown, true);
-    const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
-      (event: NativeGlobalShortcutEvent) => {
-        void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
-      },
-    );
 
     return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("keydown", handleKeyDown, true);
-      unsubscribeNativeShortcuts();
     };
   }, []);
 

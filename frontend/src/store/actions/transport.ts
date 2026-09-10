@@ -458,7 +458,12 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         });
       }
       } catch (error) {
+        if (recordToken !== recordStartToken) return;
         console.error(`${AUDIO_RECORD_LOG_PREFIX} record failed`, error);
+        if (!transport.isPlaying) {
+          await nativeBridge.setTransportPlaying(false).catch(logBridgeError("record:failedStartPlayback"));
+          if (recordToken !== recordStartToken) return;
+        }
         get().showToast?.("Failed to start recording", "error");
         set((state) => ({
           transport: {
@@ -1066,16 +1071,6 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
             loopEnd: timeSelection.end,
           },
         }));
-      }
-    },
-
-    toggleMetronome: async () => {
-      const current = get().metronomeEnabled;
-      set({ metronomeEnabled: !current });
-      await nativeBridge.setMetronomeEnabled(!current);
-      // If enabling, sync current volume to backend
-      if (!current) {
-        await nativeBridge.setMetronomeVolume(get().metronomeVolume);
       }
     },
 

@@ -2,14 +2,14 @@
 # package-linux-release.sh — Build a portable AppImage for OpenStudio on Linux.
 #
 # Usage:
-#   bash tools/package-linux-release.sh [version] [build_dir]
+#   bash tools/package-linux-release.sh [version] [build_dir] [notes_file]
 #
 # Defaults:
 #   version   = 0.0.0
 #   build_dir = build-release-linux
 #
 # Prerequisites:
-#   - Release build already compiled (python build.py prod, or cmake manually)
+#   - Release build already compiled (python build.py prod --version <version>, or cmake manually)
 #   - wget available (for downloading linuxdeploy on first run)
 #
 set -euo pipefail
@@ -18,6 +18,9 @@ VERSION="${1:-0.0.0}"
 BUILD_DIR="${2:-build-release-linux}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+VERSION="${VERSION#v}"
+NOTES_FILE="${3:-docs/releases/$VERSION.md}"
+python3 "$ROOT_DIR/tools/validate-release-notes.py" --version "$VERSION" --notes-file "$NOTES_FILE"
 
 BINARY="$ROOT_DIR/$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio"
 APPDIR="$ROOT_DIR/dist/linux/OpenStudio.AppDir"
@@ -35,7 +38,7 @@ echo "Binary    : $BINARY"
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Release binary not found at $BINARY"
     echo "Run the release build first:"
-    echo "  python build.py prod"
+    echo "  python build.py prod --version $VERSION"
     exit 1
 fi
 

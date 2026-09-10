@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap10 rescap">
+  <Identity Name="SouravDas.OpenStudio" Publisher="CN=40F9D2C5-1757-4552-B213-B0651C58A9F5"
+            Version="@VERSION@" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>OpenStudio</DisplayName>
+    <PublisherDisplayName>Sourav Das</PublisherDisplayName>
+    <Description>Record, edit and mix audio and MIDI with OpenStudio.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Applications>
+    <Application Id="OpenStudio" Executable="OpenStudio.exe"
+                 uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
+      <uap:VisualElements DisplayName="OpenStudio" Description="Record, edit and mix audio and MIDI with OpenStudio."
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" BackgroundColor="transparent" />
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="openstudio.project">
+            <uap:DisplayName>OpenStudio project</uap:DisplayName>
+            <uap:SupportedFileTypes><uap:FileType>.osproj</uap:FileType></uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>

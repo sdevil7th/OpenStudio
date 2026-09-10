@@ -2,10 +2,26 @@ import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import {
   applyVerifiedNAMRackMutation,
+  cabinetSelectionPatch,
   doesNAMRackMutationMatchReadback,
 } from "../utils/namRackMutationReadback";
 
 describe("NAM Rack mutation readback", () => {
+  it("verifies mounted resources and durable Cab intent independently of full-rig bypass", () => {
+    const patch = cabinetSelectionPatch(" C:/IRs/Bass.wav ");
+    expect(patch).toEqual({ modelState: { cabIRPath: "C:/IRs/Bass.wav", cabRequestedEnabled: true } });
+    const mounted = {
+      values: { cabEnabled: 0 },
+      modelState: { cabIRPath: "C:/IRs/Bass.wav", hasCabIR: true, cabRequestedEnabled: true, ampIncludesCab: true },
+    };
+    expect(doesNAMRackMutationMatchReadback(mounted, patch)).toBe(true);
+    expect(doesNAMRackMutationMatchReadback({ ...mounted,
+      modelState: { ...mounted.modelState, hasCabIR: false },
+    }, patch)).toBe(false);
+    expect(doesNAMRackMutationMatchReadback({ ...mounted,
+      modelState: { ...mounted.modelState, cabRequestedEnabled: false },
+    }, patch)).toBe(false);
+  });
   it("verifies scalar updates and normalized resource paths", () => {
     expect(doesNAMRackMutationMatchReadback({
       values: { cabEnabled: 1, ampMix: 0.5 },

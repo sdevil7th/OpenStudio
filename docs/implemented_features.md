@@ -94,8 +94,8 @@ Ratings:
 | NAM Rack A1/A2 pedal, amp, and full-rig capture hosting | H | H |
 | NAM Rack Guitar/Bass voicing, native pedalboard, cabinet IR/Cabinet Space, Graphic EQ, modulation, delay, reverb/shimmer, tuner, calibration, presets, A/B, and project recall | H | H |
 | NAM Rack multi-capture pack selection with per-capture topology, transactional audition/rollback, Use, replace, bypass, unload, and missing-asset recovery | H | H |
-| S13FX / JSFX-style script effects with sliders and reload | H | H |
-| S13FX `@gfx` native editor support | M | H |
+| JSFX / JSFX-style script effects with sliders and reload | H | H |
+| JSFX `@gfx` native editor support | M | H |
 | Lua script execution, script listing/editor, console output, and app-facing API reference | M | H |
 
 ## MIDI / Instruments

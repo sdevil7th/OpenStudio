@@ -132,6 +132,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Release content is required even when build/package work is skipped.
+if ([string]::IsNullOrWhiteSpace($NotesFile)) {
+    $NotesFile = Join-Path $PSScriptRoot ("../docs/releases/" + ($Version -replace '^v', '') + ".md")
+}
+& python (Join-Path $PSScriptRoot "validate-release-notes.py") --version $Version --notes-file $NotesFile
+if ($LASTEXITCODE -ne 0) { throw "Release notes failed validation. Write and review the version-specific notes before continuing." }
+
+
 function Resolve-OutputPath {
     param(
         [string]$RepoRoot,

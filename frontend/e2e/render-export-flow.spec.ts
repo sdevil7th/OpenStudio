@@ -247,12 +247,10 @@ test("region matrix surfaces a native render rejection instead of showing comple
 
   await page.getByRole("button", { name: "Select All" }).click();
   await page.getByText("Directory:", { exact: true }).locator("..").getByRole("textbox").fill("C:\\Exports");
-  let rejectionMessage = "";
-  page.once("dialog", async (dialog) => {
-    rejectionMessage = dialog.message();
-    await dialog.accept();
-  });
   await page.getByRole("button", { name: "Render 1 file" }).click();
-  await expect.poll(() => rejectionMessage).toContain("Audio engine rejected");
+  const rejection = page.getByRole("dialog", { name: "OpenStudio", exact: true });
+  await expect(rejection).toContainText("Audio engine rejected");
+  await rejection.getByRole("button", { name: "OK", exact: true }).click();
+  await expect(rejection).toBeHidden();
   await expect(page.getByText("Region Render Matrix", { exact: true })).toBeVisible();
 });

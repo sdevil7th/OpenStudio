@@ -4,7 +4,7 @@ import { nativeBridge } from "../services/NativeBridge";
 const bridgeInternals = nativeBridge as unknown as { isNative: boolean };
 const originalWindow = (globalThis as { window?: unknown }).window;
 
-describe("NAM native capability fallbacks", () => {
+describe("native capability fallbacks", () => {
   beforeEach(() => {
     bridgeInternals.isNative = true;
     (globalThis as { window?: unknown }).window = { __JUCE__: { backend: {} } };
@@ -29,5 +29,10 @@ describe("NAM native capability fallbacks", () => {
     await expect(nativeBridge.getNAMRackOversamplingFactor()).resolves.toBe(8);
     await expect(nativeBridge.setNAMTunerActive("track-a", true, "subscriber-a")).resolves.toBe(true);
     await expect(nativeBridge.setTrackInputMonitoring("track-a", true)).resolves.toBe(true);
+  });
+
+  it("does not report a mock script success when the native Lua engine is unavailable", async () => {
+    await expect(nativeBridge.executeScript("print('test')")).resolves.toMatchObject({ result: "", error: expect.stringContaining("unavailable") });
+    await expect(nativeBridge.loadScriptFile("/missing/test.lua")).resolves.toMatchObject({ result: "", error: expect.stringContaining("unavailable") });
   });
 });

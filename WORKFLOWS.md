@@ -59,7 +59,7 @@ npm run dev
 ## Production Build
 
 ```bash
-python build.py prod
+python build.py prod --version 0.1.02
 doppler run -- python build.py dev --run
 ```
 
@@ -119,7 +119,7 @@ xattr -dr com.apple.quarantine /Applications/OpenStudio.app
 A: Hot Module Replacement (HMR) - change React → instant update. No C++ rebuild!
 
 **Q: Can I skip Vite?**  
-A: Yes! Use `python build.py prod` for embedded assets. But you lose HMR.
+A: Yes! Use `python build.py prod --version 0.1.02` for embedded assets. But you lose HMR.
 
 **Q: How does production work?**  
 A: Frontend assets are compiled into the .exe. No server needed!

@@ -8,6 +8,7 @@ import {
   dispatchGlobalShortcut,
   resolveRegistryShortcutAction,
 } from "../utils/globalShortcutDispatcher";
+import { toGlobalShortcutPayload } from "../utils/domShortcutEvent";
 import { installBrowserZoomWheelGuard } from "../utils/browserWheelGuard";
 import { applyInputProfileWindowSnapshot } from "../utils/inputProfileWindowSync";
 import {
@@ -26,8 +27,6 @@ import {
 import {
   activateShortcutContext,
   getActiveShortcutContext,
-  isEditableShortcutTarget,
-  isNonTextControlShortcutTarget,
   registerShortcutSurface,
   shortcutContextKey,
   shortcutExactlyMatchesForPlatform,
@@ -351,21 +350,7 @@ nativeButton.addEventListener("click", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  const payload = {
-    key: event.key,
-    code: event.code,
-    ctrlKey: event.ctrlKey,
-    metaKey: event.metaKey,
-    altKey: event.altKey,
-    shiftKey: event.shiftKey,
-    repeat: event.repeat,
-    source: "e2e-dom",
-    targetIsEditable: isEditableShortcutTarget(event.target),
-    targetIsNonTextControl: isNonTextControlShortcutTarget(event.target),
-    preventDefault: () => event.preventDefault(),
-    stopPropagation: () => event.stopPropagation(),
-    stopImmediatePropagation: () => event.stopImmediatePropagation(),
-  };
+  const payload = toGlobalShortcutPayload(event, { source: "e2e-dom" });
   const previousResult = shortcutResult.textContent;
   const resolution = resolveRegistryShortcutAction(payload, selectedKeyboardPlatform());
   const handled = dispatchGlobalShortcut(payload, selectedKeyboardPlatform());

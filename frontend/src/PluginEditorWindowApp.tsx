@@ -1,17 +1,23 @@
-import { useEffect, useMemo } from "react";
-import { BuiltInPluginPanel } from "./components/BuiltInPluginPanel";
+import { useEffect, useMemo, useRef } from "react";
+import {
+  BuiltInPluginPanel,
+  isBuiltInPluginParamShortcutTarget,
+} from "./components/BuiltInPluginPanel";
 import {
   nativeBridge,
   type BuiltInPluginAddress,
-  type NativeGlobalShortcutEvent,
 } from "./services/NativeBridge";
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
-import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
-import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import {
-  isEditableShortcutTarget,
-  isNonTextControlShortcutTarget,
-} from "./utils/shortcutContext";
+  dispatchGlobalShortcut,
+  matchesActionShortcut,
+} from "./utils/globalShortcutDispatcher";
+import {
+  browserShortcutWindowIsActive,
+  toGlobalShortcutPayload,
+  type BrowserShortcutFocusSnapshot,
+} from "./utils/domShortcutEvent";
+import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
 import { windowSessionId } from "./utils/windowEnvironment";
 import { installBrowserZoomWheelGuard } from "./utils/browserWheelGuard";
@@ -23,6 +29,18 @@ type BuiltInPluginEditorSession = {
   title?: string;
   fallbackName?: string;
 };
+
+export function pluginEditorBrowserShortcutIsActive({
+  documentFocused,
+  visibilityState,
+  windowFocused,
+}: BrowserShortcutFocusSnapshot): boolean {
+  return browserShortcutWindowIsActive({
+    documentFocused,
+    visibilityState,
+    windowFocused,
+  });
+}
 
 function parseSession(): BuiltInPluginEditorSession | null {
   if (!windowSessionId) return null;
@@ -52,6 +70,7 @@ export default function PluginEditorWindowApp() {
   useEffect(() => startDetachedInputProfileSync(), []);
   const session = useMemo(parseSession, []);
   const title = session?.fallbackName || session?.title || "OpenStudio Plugin";
+  const windowFocusedRef = useRef(document.hasFocus());
 
   useEffect(() => {
     return startSharedTransportSync();
@@ -66,34 +85,40 @@ export default function PluginEditorWindowApp() {
   useEffect(() => installModalContextMenuLeakGuard(), []);
 
   useEffect(() => {
+    const handleWindowFocus = () => {
+      windowFocusedRef.current = true;
+    };
+    const handleWindowBlur = () => {
+      windowFocusedRef.current = false;
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!pluginEditorBrowserShortcutIsActive({
+        documentFocused: document.hasFocus(),
+        visibilityState: document.visibilityState,
+        windowFocused: windowFocusedRef.current,
+      })) return;
+      const shortcutEvent = toGlobalShortcutPayload(e);
+      const isPluginHistoryShortcut = isBuiltInPluginParamShortcutTarget(e.target)
+        && (
+          matchesActionShortcut(shortcutEvent, "edit.undo")
+          || matchesActionShortcut(shortcutEvent, "edit.redo")
+        );
       void dispatchGlobalShortcut({
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        repeat: e.repeat,
-        source: "browser",
-        targetIsEditable: isEditableShortcutTarget(e.target),
-        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
-        preventDefault: () => e.preventDefault(),
-        stopPropagation: () => e.stopPropagation(),
-        stopImmediatePropagation: () => e.stopImmediatePropagation(),
+        ...shortcutEvent,
+        // A focused parameter select/number field owns plugin history, while
+        // ordinary text fields retain their native editing Undo/Redo.
+        targetIsEditable: shortcutEvent.targetIsEditable && !isPluginHistoryShortcut,
       });
     };
 
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("keydown", handleKeyDown, true);
-    const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
-      (event: NativeGlobalShortcutEvent) => {
-        void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
-      },
-    );
 
     return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("keydown", handleKeyDown, true);
-      unsubscribeNativeShortcuts();
     };
   }, []);
 
@@ -115,6 +140,7 @@ export default function PluginEditorWindowApp() {
       <BuiltInPluginPanel
         address={session.address}
         fallbackName={title}
+        shortcutSessionId={windowSessionId}
         onClose={() => {
           void nativeBridge.closeBuiltInPluginEditorWindow(
             windowSessionId,

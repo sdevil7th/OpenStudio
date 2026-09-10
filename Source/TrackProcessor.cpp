@@ -1,6 +1,9 @@
+#include "AppPaths.h"
 #include "TrackProcessor.h"
+#include "IsolatedPlugin.h"
 #include "BuiltInParameterSupport.h"
 #include "BuiltInEffects2.h"
+#include "CrashDiagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,7 +105,7 @@ public:
         connected.store(false, std::memory_order_release);
         generation.fetch_add(1, std::memory_order_acq_rel);
         signalThreadShouldExit();
-        stopThread(2000);
+        stopThread(-1); // Never forcibly terminate a MIDI driver/allocator call.
 
         const juce::ScopedLock sl(outputLock);
         output.reset();
@@ -389,11 +392,7 @@ static bool isBuiltInInstrumentProcessor(const juce::AudioProcessor* processor)
     return name == "OpenStudio Piano"
         || name == "OpenStudio Drums"
         || name == "OpenStudio Basic Synth"
-        || name == "OpenStudio Clean Guitar"
-        || name == "Studio13 Piano"
-        || name == "Studio13 Drums"
-        || name == "Studio13 Basic Synth"
-        || name == "Studio13 Clean Guitar";
+        || name == "OpenStudio Clean Guitar";
 }
 
 static bool hasInternalAuditionSourceActive(
@@ -404,7 +403,7 @@ static bool hasInternalAuditionSourceActive(
 
     for (const auto& processor : *processors)
     {
-        if (auto* rack = dynamic_cast<S13NAMRack*>(processor.get()))
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor.get()))
             if (rack->hasAuditionSourceActive())
                 return true;
     }
@@ -415,10 +414,7 @@ static bool hasInternalAuditionSourceActive(
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
 {
-    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    auto openStudioLog = documentsDir.getChildFile("OpenStudio").getChildFile("debug_log.txt");
-    auto legacyLog = documentsDir.getChildFile("Studio13").getChildFile("debug_log.txt");
-    auto f = !openStudioLog.existsAsFile() && legacyLog.existsAsFile() ? legacyLog : openStudioLog;
+    auto f = AppPaths::diagnostics().getChildFile("debug_log.txt");
     f.getParentDirectory().createDirectory();
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
 }
@@ -681,7 +677,7 @@ TrackProcessor::TrackProcessor()
            std::make_unique<TrackMIDIOutputDispatcher>())
 {
     // Give the inline Channel Strip EQ its own explicit six-band contract.
-    // S13EQ's plug-in defaults are an eight-band layout, so relying on them
+    // OpenStudioEQ's plug-in defaults are an eight-band layout, so relying on them
     // made the strip's HPF/LPF labels disagree with the filters that actually
     // ran until a user moved each control at least once.
     static constexpr std::array<float, channelStripEQBandCount> stripFrequencies {
@@ -696,10 +692,10 @@ TrackProcessor::TrackProcessor()
         band.type.store(
             static_cast<float>(
                 bandIndex == 0
-                    ? S13EQ::FilterType::LowCut
+                    ? OpenStudioEQ::FilterType::LowCut
                     : bandIndex == channelStripEQBandCount - 1
-                        ? S13EQ::FilterType::HighCut
-                        : S13EQ::FilterType::Bell),
+                        ? OpenStudioEQ::FilterType::HighCut
+                        : OpenStudioEQ::FilterType::Bell),
             std::memory_order_relaxed);
         band.freq.store(stripFrequencies[static_cast<size_t>(bandIndex)],
                         std::memory_order_relaxed);
@@ -709,7 +705,7 @@ TrackProcessor::TrackProcessor()
         band.enabled.store(0.0f, std::memory_order_relaxed);
     }
     for (int bandIndex = channelStripEQBandCount;
-         bandIndex < S13EQ::numBands;
+         bandIndex < OpenStudioEQ::numBands;
          ++bandIndex)
     {
         channelStripEQ.bands[static_cast<size_t>(bandIndex)].enabled.store(
@@ -1490,6 +1486,25 @@ void TrackProcessor::publishRealtimeStateSnapshots()
     next->inputFXPrecisionOverrides = inputFXForceFloatOverrides;
     next->trackFXPrecisionOverrides = trackFXForceFloatOverrides;
     next->instrument = instrumentPlugin;
+    // Preserve quarantine by instance identity, including reorder/publication.
+    const auto safetyFor = [&] (const ProcessorPtr& processor)
+    {
+        if (previous != nullptr)
+        {
+            if (processor == previous->instrument && previous->instrumentSafety)
+                return previous->instrumentSafety;
+            for (size_t index = 0; index < previous->inputFX.size(); ++index)
+                if (processor == previous->inputFX[index]) return previous->inputSafety[index];
+            for (size_t index = 0; index < previous->trackFX.size(); ++index)
+                if (processor == previous->trackFX[index]) return previous->trackSafety[index];
+        }
+        auto safety = std::make_shared<ProcessorSafety>();
+        if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor.get())) safety->remoteFailure = isolated->faultFlag();
+        return safety;
+    };
+    for (const auto& processor : next->inputFX) next->inputSafety.push_back(safetyFor(processor));
+    for (const auto& processor : next->trackFX) next->trackSafety.push_back(safetyFor(processor));
+    next->instrumentSafety = safetyFor(next->instrument);
     next->sidechainSources = sidechainSources;
     next->sends = sends;
 
@@ -1718,7 +1733,7 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
         // Legacy projects may still contain automation lanes for retired NAM
         // controls. Ignore them permanently so old sessions cannot reactivate
         // or repeatedly publish unsupported topology/state choices.
-        if (dynamic_cast<S13NAMRack*>(proc) != nullptr
+        if (dynamic_cast<OpenStudioNAMRack*>(proc) != nullptr
             && (route->builtInParamId == "transposeSemitones"
                 || route->builtInParamId == "inputMode"))
         {
@@ -1828,16 +1843,16 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
             || parameterId == "delayTimeMs" || parameterId == "delayFeedback"
             || parameterId == "delayMod" || parameterId == "delayMode"
             || parameterId == "delayPingPong" || parameterId == "delayTempoSync")
-            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationDelay);
+            return static_cast<std::uint32_t>(OpenStudioNAMRack::tailAutomationDelay);
         if (parameterId == "reverbEnabled" || parameterId == "reverbMix"
             || parameterId == "reverbDecaySec" || parameterId == "reverbPreDelayMs"
             || parameterId == "reverbTone" || parameterId == "reverbLowCutHz"
             || parameterId == "reverbShimmer" || parameterId == "reverbVoice"
             || parameterId == "reverbPad")
-            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationReverb);
+            return static_cast<std::uint32_t>(OpenStudioNAMRack::tailAutomationReverb);
         if (parameterId == "modulatorEnabled" || parameterId == "chorusMix"
             || parameterId == "modulatorMode" || parameterId == "modulatorFeedback")
-            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationModulator);
+            return static_cast<std::uint32_t>(OpenStudioNAMRack::tailAutomationModulator);
         if (parameterId == "cabEnabled"
             || parameterId == "cabRoomEnabled"
             || parameterId == "cabRoomAmount"
@@ -1846,12 +1861,12 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
             || parameterId == "cabDoublerMix"
             || parameterId == "cabDoublerDelayMs"
             || parameterId == "cabDoublerSpread")
-            return static_cast<std::uint32_t>(S13NAMRack::tailAutomationCab);
-        return static_cast<std::uint32_t>(S13NAMRack::tailAutomationNone);
+            return static_cast<std::uint32_t>(OpenStudioNAMRack::tailAutomationCab);
+        return static_cast<std::uint32_t>(OpenStudioNAMRack::tailAutomationNone);
     };
     const auto getTailAutomationMask = [&] (bool isInputFX, int fxIndex)
     {
-        std::uint32_t mask = S13NAMRack::tailAutomationNone;
+        std::uint32_t mask = OpenStudioNAMRack::tailAutomationNone;
         if (! automationSnapshot)
             return mask;
         for (const auto& route : *automationSnapshot)
@@ -1879,7 +1894,7 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
             return;
 
         double processorTail = processor->getTailLengthSeconds();
-        if (const auto* rack = dynamic_cast<const S13NAMRack*>(processor))
+        if (const auto* rack = dynamic_cast<const OpenStudioNAMRack*>(processor))
             processorTail = rack->getAutomatedTailLengthSeconds(
                 getTailAutomationMask(isInputFX, fxIndex));
         if (std::isfinite(processorTail) && processorTail > 0.0)
@@ -1995,7 +2010,7 @@ static void preparePluginPreservingLayout(juce::AudioProcessor* plugin, double s
     // NAM graph topology depends on the host route width. Publish it before
     // prepare/reset so a newly inserted mono guitar Rack cannot begin in its
     // default stereo topology and perform an avoidable first-callback handoff.
-    if (auto* const rack = dynamic_cast<S13NAMRack*>(plugin))
+    if (auto* const rack = dynamic_cast<OpenStudioNAMRack*>(plugin))
         rack->setRoutedInputChannelCount(routedInputChannels);
 
     if (plugin->supportsDoublePrecisionProcessing())
@@ -2034,6 +2049,10 @@ static ProcessingPrecisionMode resolvePluginPrecisionMode(ProcessingPrecisionMod
 
 void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    preparedRealtimeBlockCapacity = 0;
+    if (!std::isfinite(sampleRate) || sampleRate <= 0.0
+        || samplesPerBlock <= 0 || samplesPerBlock > 65536)
+        return;
     realtimeFXTailSampleRateHz.store(
         juce::roundToInt(juce::jlimit(8000.0, 384000.0,
                                      sampleRate > 0.0 ? sampleRate : 44100.0)),
@@ -2139,6 +2158,10 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     realtimeFallbackBuffer.setSize(2, samplesPerBlock);
     publishRealtimeStateSnapshots();
     resetFXContinuityStates();
+    const auto preparedGraph = std::atomic_load(&realtimeGraphSnapshot);
+    for (const auto& safety : preparedGraph->inputSafety) safety->reset();
+    for (const auto& safety : preparedGraph->trackSafety) safety->reset();
+    preparedGraph->instrumentSafety->reset();
     invalidatePluginAutomationCache();
     refreshRealtimeFXTailBudgetOnControlThread();
     realtimeFXTailActive.store(false, std::memory_order_release);
@@ -2148,10 +2171,12 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     realtimeFXTailQuietSamples = 0;
     realtimeFXTailLastPublishedBudgetSamples = 0;
     realtimeFXPreviousBlockHadInput = false;
+    preparedRealtimeBlockCapacity = samplesPerBlock;
 }
 
 void TrackProcessor::releaseResources()
 {
+    preparedRealtimeBlockCapacity = 0;
 }
 
 void TrackProcessor::refreshRealtimeFXTailBudgetOnControlThread()
@@ -2258,6 +2283,24 @@ void TrackProcessor::resetExpiredRealtimeFXTailOnControlThread()
 
 void TrackProcessor::timerCallback()
 {
+    const auto graph = std::atomic_load(&realtimeGraphSnapshot);
+    const auto report = [this] (const std::shared_ptr<ProcessorSafety>& safety,
+                            const char* chain, int index)
+    {
+        if (safety && safety->reportPending.exchange(false, std::memory_order_acq_rel))
+            OpenStudioCrashDiagnostics::recordBreadcrumb("processor_fault",
+                "trackId=" + diagnosticsTrackId + " chain=" + chain + " slot=" + juce::String(index)
+                + " reason=" + juce::String(static_cast<int>(safety->lastFailure.load()))
+                + " fault latched; explicit bypass/re-enable or reload resets it");
+    };
+    if (graph)
+    {
+        for (size_t index = 0; index < graph->inputSafety.size(); ++index)
+            report(graph->inputSafety[index], "input", static_cast<int>(index));
+        for (size_t index = 0; index < graph->trackSafety.size(); ++index)
+            report(graph->trackSafety[index], "track", static_cast<int>(index));
+        report(graph->instrumentSafety, "instrument", -1);
+    }
     if (realtimeFXTailActive.load(std::memory_order_acquire)
         && ! realtimeFXTailResetPending.load(std::memory_order_acquire))
     {
@@ -2270,6 +2313,15 @@ void TrackProcessor::timerCallback()
     resetExpiredRealtimeFXTailOnControlThread();
 }
 
+int TrackProcessor::getProcessorFault(bool input, int index) const
+{
+    const auto graph = std::atomic_load(&realtimeGraphSnapshot);
+    if (!graph) return 0;
+    const auto& states = input ? graph->inputSafety : graph->trackSafety;
+    if (index < 0 || static_cast<size_t>(index) >= states.size()) return 0;
+    return static_cast<int>(states[static_cast<size_t>(index)]->failure.load(std::memory_order_acquire));
+}
+
 bool TrackProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     juce::ignoreUnused (layouts);
@@ -2278,11 +2330,37 @@ bool TrackProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 
 void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    processBlockInternal(buffer, midiMessages);
+    (void) tryProcessBlock(buffer, midiMessages);
 }
 
 bool TrackProcessor::tryProcessBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    // The PDC path is mono/stereo; all scratch storage is prepared off-thread.
+    // Reject before any DSP, pointer access or send tap can observe a malformed
+    // block. Re-preparation belongs to the device/control path, never here.
+    if (preparedRealtimeBlockCapacity <= 0
+        || buffer.getNumSamples() > preparedRealtimeBlockCapacity
+        || buffer.getNumChannels() < 1 || buffer.getNumChannels() > 2)
+    {
+        buffer.clear();
+        preFaderBuffer.clear();
+        midiMessages.clear();
+        resetRMS();
+        OpenStudioCrashDiagnostics::recordRealtimeFault(
+            OpenStudioCrashDiagnostics::RealtimeFault::trackBufferContract);
+        return false;
+    }
+    if (buffer.getNumSamples() == 0)
+        return true;
+    if (!ProcessorSafety::isFinite(buffer))
+    {
+        buffer.clear();
+        preFaderBuffer.clear();
+        resetRMS();
+        OpenStudioCrashDiagnostics::recordRealtimeFault(
+            OpenStudioCrashDiagnostics::RealtimeFault::trackBufferContract);
+        return false;
+    }
     processBlockInternal(buffer, midiMessages);
     return true;
 }
@@ -2298,7 +2376,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             : nullptr;
     // Only time the track when ARA diagnostics are enabled and an ARA plugin is active.
     // QueryPerformanceCounter is cheap but not free — at 32-sample blocks this fires
-    // 1500×/sec, so we avoid it for non-ARA tracks (e.g. Amplitube, S13 FX).
+    // 1500×/sec, so we avoid it for non-ARA tracks (e.g. Amplitube, OpenStudio FX).
     const bool isARATrack = kEnableARADebugDiagnostics
                          && activeARAControllerForBlock != nullptr;
     const double trackProcessStartMs = isARATrack ? juce::Time::getMillisecondCounterHiRes() : 0.0;
@@ -2320,6 +2398,13 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         graphSnapshot != nullptr ? &graphSnapshot->inputFX : nullptr;
     const auto* const trackFXSnapshot =
         graphSnapshot != nullptr ? &graphSnapshot->trackFX : nullptr;
+    const auto resolveSafety = [&] (bool input, int index) -> ProcessorSafety*
+    {
+        if (!graphSnapshot) return nullptr;
+        if (index < 0) return graphSnapshot->instrumentSafety.get();
+        const auto& states = input ? graphSnapshot->inputSafety : graphSnapshot->trackSafety;
+        return static_cast<size_t>(index) < states.size() ? states[static_cast<size_t>(index)].get() : nullptr;
+    };
     const auto* const inputFXBypassSnapshot =
         graphSnapshot != nullptr ? &graphSnapshot->inputFXBypass : nullptr;
     const auto* const trackFXBypassSnapshot =
@@ -2863,7 +2948,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
 
         if (auto* const rack =
-                dynamic_cast<S13NAMRack*>(proc))
+                dynamic_cast<OpenStudioNAMRack*>(proc))
         {
             rack->setRoutedInputChannelCount(
                 inputChannelCount.load(
@@ -2878,9 +2963,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             pluginAutomationRoutesForBlock);
 
         // Compute isARAProcessor first so we can gate expensive QPC calls on it.
-        // For non-ARA plugins (Amplitube, S13 FX, etc.) all timing overhead is skipped.
+        // For non-ARA plugins (Amplitube, OpenStudio FX, etc.) all timing overhead is skipped.
+        auto* safety = resolveSafety(isInputFXChain, fxIndex);
+        if (safety == nullptr) return false;
         int pluginChannels = juce::jmax(proc->getTotalNumInputChannels(),
                                          proc->getTotalNumOutputChannels());
+        // A legitimate MIDI-only effect has no audio buses. Preserve its MIDI
+        // processing and the host's audio pass-through instead of quarantining it.
+        if (pluginChannels == 0 && proc->isMidiEffect()) pluginChannels = bufferChannels;
+        if (pluginChannels < 1 || pluginChannels > kMaxFXChannels)
+        {
+            safety->markFailure(ProcessorSafety::Failure::bufferContract);
+            return false;
+        }
+
+        safety->refreshRemoteFailure();
+        if (safety->failure.load(std::memory_order_acquire) != ProcessorSafety::Failure::none)
+            return false;
         const bool isARAProcessor =
             activeARAControllerForBlock != nullptr
             && trackFXSnapshot
@@ -2965,7 +3064,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         {
             const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
             preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
-            proc->processBlock(buffer, midiMessages);
+            if (!safety->process(*proc, buffer, midiMessages)) return false;
             processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
             // Mono plugin on stereo track: duplicate processed output to all channels
             // (matches Reaper behaviour — avoids dry right channel when plugin is mono out)
@@ -3003,7 +3102,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 juce::AudioBuffer<double> pluginBuffer(channelPtrs, expandedCh, numSamps);
                 const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
                 preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
-                proc->processBlock(pluginBuffer, midiMessages);
+                if (!safety->process(*proc, pluginBuffer, midiMessages)) return false;
                 processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
 
                 if (expandedCh == 1 && bufferChannels > 1)
@@ -3054,7 +3153,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 juce::AudioBuffer<float> pluginBuffer(channelPtrs, expandedCh, numSamps);
                 const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
                 preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
-                proc->processBlock(pluginBuffer, midiMessages);
+                if (!safety->process(*proc, pluginBuffer, midiMessages)) return false;
                 processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
 
                 if (expandedCh == 1 && bufferChannels > 1)
@@ -3449,8 +3548,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     const double processingSampleRate = juce::jmax(1.0, getSampleRate());
     const auto blockPanLaw =
         panLaw.load(std::memory_order_acquire);
-    if (automationGainBuffer.getNumChannels() < 8 || automationGainBuffer.getNumSamples() < numSamps)
-        automationGainBuffer.setSize(8, numSamps, false, false, true);
     const float staticPreFXVolDb = 0.0f;
     const float staticPreFXPan = 0.0f;
     const float staticPreFXWidth = 100.0f;
@@ -3584,7 +3681,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
         hasSidechain = hasSidechain
                             && sidechainInputBuffer != nullptr
-                            && proc->getBusCount(true) > 1;
+                            && proc->getBusCount(true) > 1
+                            && proc->getBus(true, 1)->isEnabled();
 
         if (hasSidechain)
         {
@@ -3700,17 +3798,30 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             // Determine total channel count: main channels + sidechain channels.
             // Most sidechain buses are stereo (2 channels), but query the plugin
             // to be safe.
-            int mainCh = juce::jmax(proc->getMainBusNumInputChannels(),
-                                     proc->getMainBusNumOutputChannels());
-            if (mainCh < bufferChannels) mainCh = bufferChannels;
+            // Input-bus offsets depend on INPUT layout, not output width.
+            const int mainCh = proc->getMainBusNumInputChannels();
+            const int declaredChannels = juce::jmax(proc->getTotalNumInputChannels(),
+                                                    proc->getTotalNumOutputChannels());
 
             // The sidechain bus is the second input bus (index 1).
             int scBusCh = 0;
             if (auto* scBus = proc->getBus(true, 1))
                 scBusCh = scBus->getNumberOfChannels();
-            if (scBusCh <= 0) scBusCh = 2; // Fallback: stereo sidechain
-
-            int totalCh = mainCh + scBusCh;
+            if (mainCh < 0 || mainCh > kMaxFXChannels || scBusCh <= 0
+                || scBusCh > kMaxFXChannels - mainCh
+                || declaredChannels > kMaxFXChannels
+                || declaredChannels < mainCh + scBusCh)
+            {
+                if (auto* safety = resolveSafety(false, fxIdx))
+                    safety->markFailure(ProcessorSafety::Failure::bufferContract);
+                finishFXSlot(continuity, bypassed, false, dryInputCaptured);
+                continue;
+            }
+            // Additional enabled auxiliary buses still require real storage,
+            // even when this host routes only the first sidechain bus.
+            const int totalCh = juce::jmax(bufferChannels, declaredChannels);
+            const int sidechainSamples = juce::jmin(
+                numSamps2, sidechainInputBuffer->getNumSamples());
             const bool useDoublePrecision =
                 processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
                 && !forceFloat
@@ -3718,6 +3829,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             int expandedCh = useDoublePrecision
                 ? juce::jmin(totalCh, fxProcessBufferDouble.getNumChannels())
                 : juce::jmin(totalCh, fxProcessBuffer.getNumChannels());
+            auto* safety = resolveSafety(false, fxIdx);
+            bool processedSafely = false;
 
             if (useDoublePrecision)
             {
@@ -3747,7 +3860,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     {
                         auto* dest = fxProcessBufferDouble.getWritePointer(mainCh + ch);
                         auto* src = sidechainInputBuffer->getReadPointer(ch);
-                        for (int sample = 0; sample < numSamps2; ++sample)
+                        for (int sample = 0; sample < sidechainSamples; ++sample)
                             dest[sample] = static_cast<double>(src[sample]);
                     }
                 }
@@ -3757,7 +3870,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBufferDouble.getWritePointer(ch);
 
                 juce::AudioBuffer<double> pluginBuffer(channelPtrs, expandedCh, numSamps2);
-                proc->processBlock(pluginBuffer, midiMessages);
+                processedSafely = safety != nullptr && safety->process(*proc, pluginBuffer, midiMessages);
 
                 for (int ch = 0; ch < bufferChannels; ++ch)
                 {
@@ -3785,7 +3898,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     if (ch < scInputCh)
                     {
                         fxProcessBuffer.copyFrom(mainCh + ch, 0,
-                                                 *sidechainInputBuffer, ch, 0, numSamps2);
+                                                 *sidechainInputBuffer, ch, 0, sidechainSamples);
                     }
                 }
 
@@ -3794,17 +3907,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBuffer.getWritePointer(ch);
 
                 juce::AudioBuffer<float> pluginBuffer(channelPtrs, expandedCh, numSamps2);
-                proc->processBlock(pluginBuffer, midiMessages);
+                processedSafely = safety != nullptr && safety->process(*proc, pluginBuffer, midiMessages);
 
                 // Copy processed main channels back
                 for (int ch = 0; ch < bufferChannels; ++ch)
                     buffer.copyFrom(ch, 0, pluginBuffer, ch, 0, numSamps2);
             }
 
+            if (!processedSafely && canWriteDry)
+            {
+                prepareLatencyAlignedDry(bypassDelay, *proc, true, false);
+                for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+                    buffer.copyFrom(channel, 0, fxBypassDryBuffer, channel, 0, buffer.getNumSamples());
+            }
             finishFXSlot(
                 continuity,
                 bypassed,
-                true,
+                processedSafely,
                 dryInputCaptured);
         }
         else
@@ -3919,8 +4038,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     if (sendSnapshot && !sendSnapshot->empty())
     {
         int pfSamples = buffer.getNumSamples();
-        if (preFaderBuffer.getNumSamples() < pfSamples)
-            preFaderBuffer.setSize(2, pfSamples, false, false, true);
+        preFaderBuffer.clear();
         for (int ch = 0; ch < juce::jmin(2, bufferChannels); ++ch)
             preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
     }
@@ -4248,6 +4366,9 @@ void TrackProcessor::bypassInputFX(int index, bool bypassed)
                 const juce::ScopedLock pluginGuard(
                     processor->getCallbackLock());
                 processor->reset();
+                const auto graph = std::atomic_load(&realtimeGraphSnapshot);
+                if (graph && static_cast<size_t>(index) < graph->inputSafety.size())
+                    graph->inputSafety[static_cast<size_t>(index)]->reset();
             }
         }
         if (bypassed)
@@ -4275,6 +4396,9 @@ void TrackProcessor::bypassTrackFX(int index, bool bypassed)
                 const juce::ScopedLock pluginGuard(
                     processor->getCallbackLock());
                 processor->reset();
+                const auto graph = std::atomic_load(&realtimeGraphSnapshot);
+                if (graph && static_cast<size_t>(index) < graph->trackSafety.size())
+                    graph->trackSafety[static_cast<size_t>(index)]->reset();
             }
         }
         if (bypassed)
@@ -5467,6 +5591,7 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
 
 bool TrackProcessor::enqueueMidiMessage(const juce::MidiMessage& message, int sampleOffset)
 {
+    const juce::ScopedLock producerGuard(midiProducerLock);
     int writeIndex = midiQueueWriteIndex.load(std::memory_order_relaxed);
     const int nextIndex = (writeIndex + 1) % MIDI_QUEUE_CAPACITY;
     const int readIndex = midiQueueReadIndex.load(std::memory_order_acquire);
@@ -6336,16 +6461,16 @@ void TrackProcessor::setChannelStripEQParam(int paramIndex, float value)
     const int surfaceBand = paramIndex / channelStripEQValuesPerBand;
     const int field = paramIndex % channelStripEQValuesPerBand;
     // The compact strip exposes HPF, four bells, and LPF. Map those onto the
-    // first six S13EQ bands while setting the two edge filter types explicitly.
+    // first six OpenStudioEQ bands while setting the two edge filter types explicitly.
     auto& band = channelStripEQ.bands[static_cast<size_t>(surfaceBand)];
     if (surfaceBand == 0)
-        band.type.store(static_cast<float>(S13EQ::FilterType::LowCut),
+        band.type.store(static_cast<float>(OpenStudioEQ::FilterType::LowCut),
                         std::memory_order_relaxed);
     else if (surfaceBand == channelStripEQBandCount - 1)
-        band.type.store(static_cast<float>(S13EQ::FilterType::HighCut),
+        band.type.store(static_cast<float>(OpenStudioEQ::FilterType::HighCut),
                         std::memory_order_relaxed);
     else
-        band.type.store(static_cast<float>(S13EQ::FilterType::Bell),
+        band.type.store(static_cast<float>(OpenStudioEQ::FilterType::Bell),
                         std::memory_order_relaxed);
 
     switch (field)
@@ -6478,7 +6603,7 @@ void TrackProcessor::sendMIDIToOutput(const juce::MidiBuffer& buffer, double sam
 bool TrackProcessor::initializeARA(int fxIndex, double sampleRate, int araBlockSize,
                                     std::function<void(bool, bool, const juce::String&)> onComplete)
 {
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
     if (fxIndex < 0 || fxIndex >= static_cast<int>(trackFXPlugins.size()))
     {
         updateARAAttemptStatus(fxIndex, true, false, false, "Invalid FX index.");
@@ -6654,7 +6779,7 @@ void TrackProcessor::shutdownARA()
 {
     araFXIndexForRealtime.store(
         -1, std::memory_order_release);
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
     if (araController)
     {
         araController->shutdown();

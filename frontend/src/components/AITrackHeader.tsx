@@ -5,16 +5,13 @@ import { Power, Sparkles, SlidersHorizontal } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import {
   ACE_STEP_MODEL_ID,
-  type AIWorkflow,
   getAIWorkflow,
   getAiMusicModel,
-  mergeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
-import { nativeBridge, type AIGenerationProgress } from "../services/NativeBridge";
+import { startAITrackJob, cancelAITrackJob } from "../services/aiTrackJobs";
 import {
   getEffectiveTrackHeight,
-  type AITrackGenerationState,
   type Track,
   useDAWStore,
 } from "../store/useDAWStore";
@@ -162,20 +159,6 @@ function getProgressWidth(progress: number) {
   return `${Math.max(4, Math.round(progress * 100))}%`;
 }
 
-function getDisplayState(
-  progress: AIGenerationProgress,
-): AITrackGenerationState {
-  if (progress.state === "error") {
-    return "error";
-  }
-
-  if (progress.state === "loading") {
-    return "loading";
-  }
-
-  return "generating";
-}
-
 function getStatusHeadline(track: Track) {
   const workflow = getAIWorkflow(track.aiWorkflow, track.aiMusicModelId, "ai-track");
 
@@ -270,50 +253,6 @@ function getStatusMeta(track: Track) {
     : "Audio Generation idle";
 }
 
-function formatHeaderParamValue(key: string, value: unknown) {
-  if (value === undefined || value === null || value === "") {
-    return "";
-  }
-
-  if (key === "duration" || key === "extension_duration") {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? `${Math.round(numeric)}s` : "";
-  }
-
-  if (key === "bpm") {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? `${Math.round(numeric)} BPM` : "";
-  }
-
-  if (key === "inferenceSteps" || key === "steps") {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? `${Math.round(numeric)} steps` : "";
-  }
-
-  return String(value);
-}
-
-function getHeaderParamChips(workflow: AIWorkflow, params: Record<string, unknown>) {
-  const priority = [
-    "bpm",
-    "duration",
-    "extension_duration",
-    "keyscale",
-    "timesignature",
-    "inferenceSteps",
-    "steps",
-  ];
-
-  return priority
-    .map((key) => {
-      if (!workflow.params.some((param) => param.key === key)) return null;
-      const text = formatHeaderParamValue(key, params[key]);
-      return text ? { key, text } : null;
-    })
-    .filter((chip): chip is { key: string; text: string } => Boolean(chip))
-    .slice(0, 3);
-}
-
 export const AITrackHeader = React.memo(function AITrackHeader({
   track,
   isSelected,
@@ -335,7 +274,6 @@ export const AITrackHeader = React.memo(function AITrackHeader({
     beginAITrackParamsEdit,
     commitAITrackParamsEdit,
     setAITrackGenerationState,
-    addGeneratedAudioClip,
     trackHeight,
     aiToolsStatus,
     openAiToolsSetup,
@@ -360,7 +298,6 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       beginAITrackParamsEdit: state.beginAITrackParamsEdit,
       commitAITrackParamsEdit: state.commitAITrackParamsEdit,
       setAITrackGenerationState: state.setAITrackGenerationState,
-      addGeneratedAudioClip: state.addGeneratedAudioClip,
       trackHeight: state.trackHeight,
       aiToolsStatus: state.aiToolsStatus,
       openAiToolsSetup: state.openAiToolsSetup,
@@ -371,9 +308,6 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   );
 
   const colorBarRef = useRef<HTMLDivElement>(null);
-  const pollTimeoutRef = useRef<number | null>(null);
-  const pollActiveRef = useRef(false);
-  const generationStartTimeRef = useRef<number | null>(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showParams, setShowParams] = useState(false);
   const [showFXChain, setShowFXChain] = useState(false);
@@ -406,8 +340,6 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const modelId = resolveAiMusicModelId(track.aiMusicModelId);
   const model = getAiMusicModel(modelId);
   const workflow = getAIWorkflow(track.aiWorkflow, modelId, "ai-track");
-  const workflowParams = mergeWorkflowParams(workflow.id, track.aiWorkflowParams, modelId);
-  const headerParamChips = getHeaderParamChips(workflow, workflowParams);
   const isBusy =
     track.aiGenerationState === "loading"
     || track.aiGenerationState === "generating";
@@ -443,341 +375,17 @@ export const AITrackHeader = React.memo(function AITrackHeader({
           || "Audio Generation is not ready yet."),
   );
 
-  const stopPolling = () => {
-    if (pollTimeoutRef.current !== null) {
-      window.clearTimeout(pollTimeoutRef.current);
-      pollTimeoutRef.current = null;
-    }
-    pollActiveRef.current = false;
-  };
-
-  const scheduleNextPoll = (startTime: number) => {
-    stopPolling();
-    pollTimeoutRef.current = window.setTimeout(() => {
-      void pollGeneration(startTime);
-    }, 250);
-  };
-
-  const applyProgressUpdate = async (
-    progress: AIGenerationProgress,
-    startTime: number,
-  ) => {
-    if (progress.state === "error") {
-      stopPolling();
-      generationStartTimeRef.current = null;
-      setAITrackGenerationState(track.id, "error", {
-        progress: progress.progress ?? 0,
-        error: progress.error || progress.message || "Generation failed.",
-        phase: progress.phase,
-        message: progress.message || progress.error || "Generation failed.",
-        backend: progress.backend || track.aiGenerationBackend || "",
-        elapsedMs: progress.elapsedMs ?? 0,
-        heartbeatTs: progress.heartbeatTs ?? 0,
-        phaseProgress: progress.phaseProgress,
-        etaMs: progress.etaMs,
-        runMode: progress.runMode,
-        runtimeProfile: progress.runtimeProfile,
-        lmModel: progress.lmModel,
-        statusNote: progress.statusNote,
-        failureKind: progress.failureKind,
-        sessionMode: progress.sessionMode,
-        workerExitCode: progress.workerExitCode,
-        lastStdoutLine: progress.lastStdoutLine,
-        lastStderrLine: progress.lastStderrLine,
-        attemptMode: progress.attemptMode,
-        attemptIndex: progress.attemptIndex,
-        protocolVersion: progress.protocolVersion,
-        scriptVersion: progress.scriptVersion,
-        requestId: progress.requestId,
-        priorFailure: progress.priorFailure,
-        lastProgressAgeMs: progress.lastProgressAgeMs,
-        tracePath: progress.tracePath,
-        failureDetail: progress.failureDetail,
-        lmBackend: progress.lmBackend,
-        lmStage: progress.lmStage,
-      });
-      return;
-    }
-
-    if (progress.state === "cancelled") {
-      stopPolling();
-      generationStartTimeRef.current = null;
-      setAITrackGenerationState(track.id, "idle");
-      return;
-    }
-
-    if (progress.state === "done") {
-      stopPolling();
-      generationStartTimeRef.current = null;
-
-      if (!progress.outputFile) {
-        setAITrackGenerationState(track.id, "error", {
-          progress: progress.progress ?? 1,
-          error: "Generation finished without producing an audio file.",
-          phase: progress.phase || "done",
-          message: progress.message || "Generation finished without producing an audio file.",
-          backend: progress.backend || track.aiGenerationBackend || "",
-          elapsedMs: progress.elapsedMs ?? 0,
-          heartbeatTs: progress.heartbeatTs ?? 0,
-          phaseProgress: progress.phaseProgress,
-          etaMs: progress.etaMs,
-          runMode: progress.runMode,
-          runtimeProfile: progress.runtimeProfile,
-          lmModel: progress.lmModel,
-          statusNote: progress.statusNote,
-          failureKind: progress.failureKind,
-          sessionMode: progress.sessionMode,
-          workerExitCode: progress.workerExitCode,
-          lastStdoutLine: progress.lastStdoutLine,
-          lastStderrLine: progress.lastStderrLine,
-          attemptMode: progress.attemptMode,
-          attemptIndex: progress.attemptIndex,
-          protocolVersion: progress.protocolVersion,
-          scriptVersion: progress.scriptVersion,
-          requestId: progress.requestId,
-          priorFailure: progress.priorFailure,
-          lastProgressAgeMs: progress.lastProgressAgeMs,
-          tracePath: progress.tracePath,
-          failureDetail: progress.failureDetail,
-          lmBackend: progress.lmBackend,
-          lmStage: progress.lmStage,
-        });
-        return;
-      }
-
-      try {
-        await addGeneratedAudioClip(track.id, progress.outputFile, startTime);
-        setAITrackGenerationState(track.id, "idle");
-        setShowParams(false);
-      } catch (error) {
-        setAITrackGenerationState(track.id, "error", {
-          progress: progress.progress ?? 1,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Audio rendered, but the generated clip could not be imported.",
-          phase: "import_failed",
-          message: "Audio rendered, but clip import failed.",
-          backend: progress.backend || track.aiGenerationBackend || "",
-          elapsedMs: progress.elapsedMs ?? 0,
-          heartbeatTs: progress.heartbeatTs ?? 0,
-          phaseProgress: progress.phaseProgress,
-          etaMs: progress.etaMs,
-          runMode: progress.runMode,
-          runtimeProfile: progress.runtimeProfile,
-          lmModel: progress.lmModel,
-          statusNote: progress.statusNote,
-          failureKind: progress.failureKind,
-          sessionMode: progress.sessionMode,
-          workerExitCode: progress.workerExitCode,
-          lastStdoutLine: progress.lastStdoutLine,
-          lastStderrLine: progress.lastStderrLine,
-          attemptMode: progress.attemptMode,
-          attemptIndex: progress.attemptIndex,
-          protocolVersion: progress.protocolVersion,
-          scriptVersion: progress.scriptVersion,
-          requestId: progress.requestId,
-          priorFailure: progress.priorFailure,
-          lastProgressAgeMs: progress.lastProgressAgeMs,
-          tracePath: progress.tracePath,
-          failureDetail: progress.failureDetail,
-          lmBackend: progress.lmBackend,
-          lmStage: progress.lmStage,
-        });
-      }
-      return;
-    }
-
-    setAITrackGenerationState(track.id, getDisplayState(progress), {
-      progress: progress.progress ?? 0,
-      error: "",
-      phase: progress.phase,
-      message:
-        progress.message
-        || `${formatPhaseLabel(progress.phase)} ${formatProgressLabel(progress.progress ?? 0)}`,
-      backend: progress.backend || track.aiGenerationBackend || "",
-      elapsedMs: progress.elapsedMs ?? 0,
-      heartbeatTs: progress.heartbeatTs ?? 0,
-      phaseProgress: progress.phaseProgress,
-      etaMs: progress.etaMs,
-      runMode: progress.runMode,
-      runtimeProfile: progress.runtimeProfile,
-      lmModel: progress.lmModel,
-      statusNote: progress.statusNote,
-      failureKind: progress.failureKind,
-      sessionMode: progress.sessionMode,
-      workerExitCode: progress.workerExitCode,
-      lastStdoutLine: progress.lastStdoutLine,
-      lastStderrLine: progress.lastStderrLine,
-      attemptMode: progress.attemptMode,
-      attemptIndex: progress.attemptIndex,
-      protocolVersion: progress.protocolVersion,
-      scriptVersion: progress.scriptVersion,
-      requestId: progress.requestId,
-      priorFailure: progress.priorFailure,
-      lastProgressAgeMs: progress.lastProgressAgeMs,
-      tracePath: progress.tracePath,
-      failureDetail: progress.failureDetail,
-      lmBackend: progress.lmBackend,
-      lmStage: progress.lmStage,
-    });
-
-    scheduleNextPoll(startTime);
-  };
-
-  const pollGeneration = async (startTime: number) => {
-    if (pollActiveRef.current) {
-      return;
-    }
-
-    pollActiveRef.current = true;
-
-    try {
-      const progress = await nativeBridge.getAIGenerationProgress();
-      await applyProgressUpdate(progress, startTime);
-    } catch (error) {
-      stopPolling();
-      generationStartTimeRef.current = null;
-      setAITrackGenerationState(track.id, "error", {
-        progress: 0,
-        error: error instanceof Error ? error.message : "Generation failed.",
-        phase: "poll_failed",
-        message: "The app lost contact with the generation worker.",
-        tracePath: "",
-        failureDetail: "",
-        lmBackend: "",
-        lmStage: "",
-      });
-    } finally {
-      pollActiveRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    if (!isBusy) {
-      stopPolling();
-    }
-
-    return stopPolling;
-  }, [isBusy]);
-
   const handleGenerate = async () => {
-    if (isBusy) {
-      await nativeBridge.cancelAIGeneration();
-      stopPolling();
-      generationStartTimeRef.current = null;
-      setAITrackGenerationState(track.id, "idle");
+    if (isBusy) { await cancelAITrackJob(track.id); return; }
+    if (workflow.available === false || !canStartMusicGeneration) {
+      setAITrackGenerationState(track.id, "error", {
+        error: workflow.availabilityNote || musicGenerationBlockedMessage,
+        phase: "runtime_blocked", message: musicGenerationBlockedMessage,
+      });
+      if (!canStartMusicGeneration) openAiToolsSetup("audioGeneration");
       return;
     }
-
-    const startTime = useDAWStore.getState().transport.currentTime;
-    const workflowId = workflow.id;
-    const params = { ...(track.aiWorkflowParams ?? {}) };
-
-    if (workflow.available === false) {
-      setAITrackGenerationState(track.id, "error", {
-        progress: 0,
-        error:
-          workflow.availabilityNote
-          || "This workflow is not currently available in OpenStudio.",
-        phase: "workflow_unavailable",
-        message:
-          workflow.availabilityNote
-          || "This workflow is not currently available in OpenStudio.",
-        tracePath: "",
-        failureDetail: "",
-        lmBackend: "",
-        lmStage: "",
-      });
-      return;
-    }
-
-    if (!canStartMusicGeneration) {
-      setAITrackGenerationState(track.id, "error", {
-        progress: 0,
-        error: musicGenerationBlockedMessage,
-        phase: "runtime_blocked",
-        message: musicGenerationBlockedMessage,
-        tracePath: "",
-        failureDetail: "",
-        lmBackend: "",
-        lmStage: "",
-      });
-      openAiToolsSetup("audioGeneration");
-      return;
-    }
-
-    generationStartTimeRef.current = startTime;
-    setAITrackGenerationState(track.id, "loading", {
-      progress: 0.01,
-      error: "",
-      phase: "starting",
-      message: `Starting ${model.shortLabel}...`,
-      backend: "",
-      elapsedMs: 0,
-      heartbeatTs: 0,
-      phaseProgress: undefined,
-      etaMs: undefined,
-      runMode: "cold",
-      runtimeProfile: "ace-diffusers",
-      lmModel: "",
-      statusNote: "",
-      failureKind: "",
-      sessionMode: "persistent",
-      workerExitCode: 0,
-      lastStdoutLine: "",
-      lastStderrLine: "",
-      attemptMode: "ace_diffusers",
-      attemptIndex: 1,
-      protocolVersion: 0,
-      scriptVersion: "",
-      requestId: "",
-      priorFailure: "",
-      lastProgressAgeMs: 0,
-      tracePath: "",
-      failureDetail: "",
-      lmBackend: "",
-      lmStage: "",
-    });
-
-    try {
-      const result = await nativeBridge.startAIGeneration(
-        track.id,
-        modelId,
-        workflowId,
-        params,
-      );
-
-      if (!result.started) {
-        generationStartTimeRef.current = null;
-        setAITrackGenerationState(track.id, "error", {
-          progress: 0,
-          error: result.error || "Failed to start AI generation.",
-          phase: "start_failed",
-          message: result.error || "Failed to start AI generation.",
-          tracePath: "",
-          failureDetail: "",
-          lmBackend: "",
-          lmStage: "",
-        });
-        return;
-      }
-
-      void pollGeneration(startTime);
-    } catch (error) {
-      stopPolling();
-      generationStartTimeRef.current = null;
-      setAITrackGenerationState(track.id, "error", {
-        progress: 0,
-        error: error instanceof Error ? error.message : "Generation failed.",
-        phase: "start_failed",
-        message: "Failed to start AI generation.",
-        tracePath: "",
-        failureDetail: "",
-        lmBackend: "",
-        lmStage: "",
-      });
-    }
+    await startAITrackJob(track.id);
   };
 
   const statusHeadline = getStatusHeadline(track);
@@ -816,6 +424,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         onContextMenuCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
         onFocusCapture={() => activateShortcutContext({ kind: "track_control_panel" })}
         data-shortcut-context="track_control_panel"
+        data-qa="ai-track-header"
         style={{ height: getEffectiveTrackHeight(track, trackHeight) }}
       >
         <div className="flex shrink-0 overflow-hidden" style={{ height: trackHeight }}>
@@ -846,8 +455,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
             )}
 
           <div className="flex-1 min-w-0 px-2 py-1">
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 content-center">
-              <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="inline-flex h-6 shrink-0 items-center gap-1 text-[10px] font-semibold text-daw-text-muted">
                 <Sparkles size={11} />
                 AI
               </span>
@@ -856,7 +465,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                 trackId={track.id}
                 name={track.name}
                 placeholder="AI Track Name"
-                className="min-w-[56px] flex-1 basis-20"
+                className="min-w-0 flex-1"
                 inputClassName="w-full min-w-0"
               />
 
@@ -874,7 +483,8 @@ export const AITrackHeader = React.memo(function AITrackHeader({
               >
                 <SlidersHorizontal size={13} />
               </Button>
-
+            </div>
+            <div className="mt-1 flex min-w-0 items-center gap-1.5" data-qa="ai-track-controls">
               <span
                 className="flex items-center gap-1 shrink-0"
                 data-no-drag
@@ -948,24 +558,17 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                 className={classNames(TCP_HEADER_BUTTON_PAIR_CLASS, "shrink-0")}
               >
                 <Button
-                  variant="default"
+                  variant={hasBypassableFx && track.fxBypassed ? "danger" : hasFx ? "success" : "default"}
                   size="icon-sm"
                   shape="square"
                   onClick={() => setShowFXChain(true)}
                   title="FX Chain"
-                  className={classNames(
-                    TCP_HEADER_PRIMARY_BUTTON_CLASS,
-                    hasBypassableFx && track.fxBypassed
-                      ? "text-red-400! border-red-500! shadow-[0_0_6px_rgba(239,68,68,0.4)]"
-                      : hasFx
-                        ? "text-green-400! border-green-500! shadow-[0_0_6px_rgba(34,197,94,0.4)]"
-                        : "hover:text-green-500 hover:border-green-500",
-                  )}
+                  className={TCP_HEADER_PRIMARY_BUTTON_CLASS}
                 >
                   FX
                 </Button>
                 <Button
-                  variant="default"
+                  variant={hasBypassableFx && track.fxBypassed ? "danger" : hasFx ? "success" : "default"}
                   size="icon-xs"
                   shape="square"
                   onClick={() => {
@@ -976,21 +579,14 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                     }
                   }}
                   title={fxBypassTitle}
-                  className={classNames(
-                    TCP_HEADER_TOGGLE_BUTTON_CLASS,
-                    hasBypassableFx && track.fxBypassed
-                      ? "text-red-400! border-red-500!"
-                      : hasFx
-                        ? "text-green-400! border-green-500!"
-                        : "hover:text-green-500 hover:border-green-500",
-                  )}
+                  className={TCP_HEADER_TOGGLE_BUTTON_CLASS}
                 >
                   <Power size={10} strokeWidth={2.5} />
                 </Button>
               </span>
             </div>
 
-            <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden text-[10px]">
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden text-[10px]" data-qa="ai-track-status">
               <button
                 type="button"
                 onClick={() => setShowParams(true)}
@@ -1003,15 +599,6 @@ export const AITrackHeader = React.memo(function AITrackHeader({
                   {model.shortLabel} / {workflow.label}
                 </span>
               </button>
-              {headerParamChips.map((chip) => (
-                <span
-                  key={chip.key}
-                  className="hidden shrink-0 rounded-full border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.1em] text-daw-text-muted sm:inline-flex"
-                  title={chip.text}
-                >
-                  {chip.text}
-                </span>
-              ))}
               <span
                 className={classNames(
                   "min-w-[48px] flex-1 truncate",
@@ -1069,12 +656,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
         isOpen={showParams}
         onClose={() => setShowParams(false)}
         onGenerate={handleGenerate}
-        onCancel={async () => {
-          await nativeBridge.cancelAIGeneration();
-          stopPolling();
-          generationStartTimeRef.current = null;
-          setAITrackGenerationState(track.id, "idle");
-        }}
+        onCancel={() => cancelAITrackJob(track.id)}
         onOpenAiToolsSetup={openAiToolsSetup}
         onModelChange={(nextModelId) => setAITrackModel(track.id, nextModelId)}
         onWorkflowChange={(workflowId) => setAITrackWorkflow(track.id, workflowId)}

@@ -11,6 +11,7 @@ constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kStableAudioModelId = "stable-audio-3-medium";
+constexpr auto kMiniMaxAudioModelId = "minimax-music-3";
 constexpr auto kStableAudioAttribution = "Powered by Stability AI";
 constexpr auto kFeatureStemSeparation = "stemSeparation";
 constexpr auto kFeatureAudioGeneration = "audioGeneration";
@@ -69,22 +70,30 @@ juce::StringArray varToStringArray (const juce::var& value)
     return result;
 }
 
-juce::StringArray getStableAudioRequiredRelativePaths()
+juce::StringArray getStableAudioRequiredRelativePaths(const juce::String& modelId)
 {
-    return {
-        "model.safetensors",
-        "model_config.json",
-        "LICENSE.md",
-        "LICENSE_GEMMA.md",
-        "NOTICE",
-        "t5gemma-b-b-ul2/model.safetensors",
-        "t5gemma-b-b-ul2/config.json",
-        "t5gemma-b-b-ul2/tokenizer.json",
-        "t5gemma-b-b-ul2/tokenizer.model",
-        "t5gemma-b-b-ul2/tokenizer_config.json",
-        "t5gemma-b-b-ul2/special_tokens_map.json",
-    };
+    if (modelId == kMiniMaxAudioModelId)
+        return { "modular_model_index.json", "language_model/config.json",
+                 "transformer/config.json", "vocoder/config.json", "tokenizer/tokenizer_config.json",
+                 "condition_encoder/config.json", "rvq_depth_decoder/config.json", "scheduler/scheduler_config.json" };
+    return { "model_index.json", "vae/config.json", "transformer/config.json",
+             "text_encoder/config.json", "tokenizer/tokenizer_config.json",
+             "scheduler/scheduler_config.json", "duration_embedder/config.json" };
 }
+
+bool isOriginalStableAudioSnapshot(const juce::File& root)
+{
+    for (const auto& name : juce::StringArray { "model.safetensors", "model_config.json",
+             "t5gemma-b-b-ul2/config.json", "t5gemma-b-b-ul2/model.safetensors", "t5gemma-b-b-ul2/tokenizer.model" })
+        if (! root.getChildFile(name).existsAsFile()) return false;
+    return ! root.getChildFile("model_index.json").existsAsFile();
+}
+
+struct InstallWorkerLifetime
+{
+    std::atomic<bool>& active;
+    ~InstallWorkerLifetime() { active.store(false); }
+};
 
 juce::String normaliseFeatureId (juce::String value)
 {
@@ -243,8 +252,11 @@ StemSeparator::StemSeparator() = default;
 
 StemSeparator::~StemSeparator()
 {
+    shuttingDown.store(true);
     cancel();
     cancelAiToolsInstall();
+    backgroundTasks.removeAllJobs(true, -1);
+    cancelAiToolsInstall(); // Also stop a child launched just before cancellation.
     stopInstallMonitor();
 }
 
@@ -283,7 +295,7 @@ juce::File StemSeparator::getUserRuntimeRoot() const
 
 juce::File StemSeparator::getStableAudioRuntimeRoot() const
 {
-    return getUserDataRoot().getChildFile("stable-audio-runtime");
+    return getUserDataRoot().getChildFile("diffusers-audio-runtime");
 }
 
 juce::File StemSeparator::getUserModelsDir() const
@@ -299,9 +311,9 @@ juce::File StemSeparator::getMusicGenerationCheckpointRoot() const
         .getChildFile("diffusers");
 }
 
-juce::File StemSeparator::getStableAudioModelRoot() const
+juce::File StemSeparator::getStableAudioModelRoot(const juce::String& modelId) const
 {
-    return getUserModelsDir().getChildFile(kStableAudioModelId);
+    return getUserModelsDir().getChildFile(modelId);
 }
 
 juce::File StemSeparator::findStableAudioPython() const
@@ -728,7 +740,7 @@ bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
     return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
 }
 
-juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& modelRoot) const
+juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId) const
 {
     juce::StringArray missing;
     if (! modelRoot.isDirectory())
@@ -737,10 +749,40 @@ juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& m
         return missing;
     }
 
-    for (const auto& relativePath : getStableAudioRequiredRelativePaths())
+    for (const auto& relativePath : getStableAudioRequiredRelativePaths(modelId))
     {
         if (! modelRoot.getChildFile(relativePath).existsAsFile())
             missing.add(relativePath);
+    }
+    const juce::StringArray weightedComponents = modelId == kMiniMaxAudioModelId
+        ? juce::StringArray { "language_model", "condition_encoder", "rvq_depth_decoder", "transformer", "vocoder" }
+        : juce::StringArray { "vae", "transformer", "text_encoder", "duration_embedder" };
+    for (const auto& component : weightedComponents)
+    {
+        const auto directory = modelRoot.getChildFile(component);
+        auto weights = directory.findChildFiles(juce::File::findFiles, false, "*.safetensors");
+        weights.addArray(directory.findChildFiles(juce::File::findFiles, false, "*.bin"));
+        bool validWeights = ! weights.isEmpty();
+        for (const auto& weight : weights)
+            validWeights = validWeights && weight.getSize() > 1024; // Reject LFS pointer stubs.
+        for (const auto& index : directory.findChildFiles(juce::File::findFiles, false, "*.index.json"))
+        {
+            const auto document = juce::JSON::parse(index);
+            auto* shards = document.getProperty("weight_map", {}).getDynamicObject();
+            if (shards == nullptr || shards->getProperties().size() == 0)
+            {
+                validWeights = false;
+                continue;
+            }
+            for (const auto& shard : shards->getProperties())
+            {
+                const auto path = directory.getChildFile(shard.value.toString());
+                if (! path.isAChildOf(directory) || ! path.existsAsFile() || path.getSize() <= 1024)
+                    validWeights = false;
+            }
+        }
+        if (! validWeights)
+            missing.add(component + "/complete model weights (including every indexed shard)");
     }
     return missing;
 }
@@ -764,7 +806,7 @@ bool StemSeparator::hasStableAudioRuntime() const
     const auto python = findStableAudioPython();
     return python.existsAsFile()
         && getStableAudioRuntimeRoot()
-            .getChildFile(".openstudio-stable-audio-ready")
+            .getChildFile(".openstudio-diffusers-audio-ready-v1")
             .existsAsFile();
 }
 
@@ -1257,6 +1299,8 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
 
 void StemSeparator::startInstallMonitor()
 {
+    const juce::ScopedLock lifecycle(installMonitorLifecycleLock);
+    if (shuttingDown.load()) return;
     stopInstallMonitor();
     aiToolsInstallMonitorStopRequested = false;
     aiToolsInstallMonitorThread = std::make_unique<std::thread>([this]
@@ -1282,14 +1326,15 @@ void StemSeparator::startInstallMonitor()
 
 void StemSeparator::stopInstallMonitor()
 {
+    const juce::ScopedLock lifecycle(installMonitorLifecycleLock);
     aiToolsInstallMonitorStopRequested = true;
 
     if (aiToolsInstallMonitorThread && aiToolsInstallMonitorThread->joinable())
     {
-        if (aiToolsInstallMonitorThread->get_id() != std::this_thread::get_id())
-            aiToolsInstallMonitorThread->join();
-        else
-            aiToolsInstallMonitorThread->detach();
+        // Only the owning control/job threads stop this monitor. Retain its
+        // joinable handle if a future callback requests its own cancellation.
+        if (aiToolsInstallMonitorThread->get_id() == std::this_thread::get_id()) { jassertfalse; return; }
+        aiToolsInstallMonitorThread->join();
     }
 
     aiToolsInstallMonitorThread.reset();
@@ -1298,12 +1343,13 @@ void StemSeparator::stopInstallMonitor()
 
 void StemSeparator::scheduleStatusRefresh()
 {
+    if (shuttingDown.load()) return;
     bool shouldLaunch = false;
 
     {
         const juce::ScopedLock lock (aiToolsStatusLock);
 
-        if (aiToolsInstallWorkInProgress.load())
+        if (aiToolsInstallWorkInProgress.load() || installWorkerActive.load())
             return;
 
         if (! initialStatusPrepared)
@@ -1322,7 +1368,7 @@ void StemSeparator::scheduleStatusRefresh()
     if (! shouldLaunch)
         return;
 
-    std::thread ([this]
+    backgroundTasks.addJob ([this]
     {
         const auto previousStatus = getCachedAiToolsStatusSnapshot();
         auto installedPython = findPython();
@@ -1458,7 +1504,7 @@ void StemSeparator::scheduleStatusRefresh()
             statusRefreshInFlight = false;
             initialStatusPrepared = true;
         }
-    }).detach();
+    });
 }
 
 void StemSeparator::appendAiToolsLogLine (const juce::String& line) const
@@ -1835,6 +1881,21 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
         stableMissingArray.add(missing);
     stableModel->setProperty("missingFiles", stableMissingArray);
     musicModels->setProperty(kStableAudioModelId, juce::var(stableModel.release()));
+    const auto miniRoot = getStableAudioModelRoot(kMiniMaxAudioModelId);
+    const bool miniModelReady = getMissingStableAudioFiles(miniRoot, kMiniMaxAudioModelId).isEmpty();
+    auto miniModel = std::make_unique<juce::DynamicObject>();
+    miniModel->setProperty("id", kMiniMaxAudioModelId);
+    miniModel->setProperty("label", "MiniMax Music 3");
+    miniModel->setProperty("ready", miniModelReady && stableRuntimeReady);
+    miniModel->setProperty("installed", miniModelReady && stableRuntimeReady);
+    miniModel->setProperty("modelReady", miniModelReady);
+    miniModel->setProperty("runtimeReady", stableRuntimeReady);
+    miniModel->setProperty("compatible", true);
+    miniModel->setProperty("modelPath", miniRoot.getFullPathName());
+    miniModel->setProperty("runtimePath", getStableAudioRuntimeRoot().getFullPathName());
+    miniModel->setProperty("blocked", ! (miniModelReady && stableRuntimeReady));
+    miniModel->setProperty("blockReason", miniModelReady && stableRuntimeReady ? "" : "Import a MiniMax Music 3 Diffusers snapshot and prepare AI Tools.");
+    musicModels->setProperty(kMiniMaxAudioModelId, juce::var(miniModel.release()));
     obj->setProperty("musicModels", juce::var(musicModels.release()));
     return juce::var(obj.release());
 }
@@ -1873,6 +1934,13 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 
 juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 {
+    if (installWorkerActive.load() || shuttingDown.load())
+    {
+        auto busy = std::make_unique<juce::DynamicObject>();
+        busy->setProperty("started", false);
+        busy->setProperty("error", "The previous AI setup is still finishing or cancelling. Please wait for it to stop.");
+        return juce::var(busy.release());
+    }
     if (! aiToolsInstallWorkInProgress.load())
         scheduleStatusRefresh();
 
@@ -1884,11 +1952,12 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
     auto result = std::make_unique<juce::DynamicObject>();
 
-    const bool stableAudioSetupRequested = installOptions.modelId == kStableAudioModelId
+    const bool stableAudioSetupRequested = (installOptions.modelId == kStableAudioModelId || installOptions.modelId == kMiniMaxAudioModelId)
         || installOptions.stableAudioModelPath.isNotEmpty();
 
     if (stableAudioSetupRequested)
     {
+        const juce::String importedModelId = installOptions.modelId == kMiniMaxAudioModelId ? kMiniMaxAudioModelId : kStableAudioModelId;
         const auto stableSessionId = juce::Uuid().toString();
         appendAiToolsLogLine(makeAiLogEvent("host",
                                             "stable_audio_import",
@@ -1896,7 +1965,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                             stableSessionId,
                                             [&] (juce::DynamicObject& payload)
                                             {
-                                                payload.setProperty("modelId", kStableAudioModelId);
+                                                payload.setProperty("modelId", importedModelId);
                                                 payload.setProperty("sourcePath", installOptions.stableAudioModelPath);
                                             }));
 
@@ -1922,7 +1991,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.state = "error";
             status.progress = 0.0f;
             status.installInProgress = false;
-            status.message = "Choose the downloaded Stable Audio 3 Medium snapshot folder before setup.";
+            status.message = "Choose the downloaded Diffusers audio model snapshot folder before setup.";
             status.error = status.message;
             status.errorCode = "stable_audio_model_path_required";
             status.lastPhase = "stable_audio_import";
@@ -1958,20 +2027,28 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                     payload.setProperty("reason", "license_not_accepted");
                                                 }));
             result->setProperty("started", false);
-            result->setProperty("error", "Stable Audio 3 setup requires accepting the Stability AI and Gemma license notices before import.");
+            result->setProperty("error", "Diffusers audio setup requires accepting the selected model license notices before import.");
             result->setProperty("status", aiToolsStatusToVar(cachedStatus));
             return juce::var(result.release());
         }
 
         const juce::File sourceRoot(installOptions.stableAudioModelPath);
-        const auto missingFiles = getMissingStableAudioFiles(sourceRoot);
-        if (! missingFiles.isEmpty())
+        const auto managedDestination = getStableAudioModelRoot(importedModelId);
+        if (sourceRoot != managedDestination && managedDestination.isAChildOf(sourceRoot))
+        {
+            result->setProperty("started", false);
+            result->setProperty("error", "Choose the model snapshot itself, not a parent of OpenStudio's managed model directory.");
+            return juce::var(result.release());
+        }
+        const bool needsConversion = importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
+        const auto missingFiles = getMissingStableAudioFiles(sourceRoot, importedModelId);
+        if (! needsConversion && ! missingFiles.isEmpty())
         {
             auto status = cachedStatus;
             status.state = "error";
             status.progress = 0.0f;
             status.installInProgress = false;
-            status.message = "The selected Stable Audio 3 folder is missing required files.";
+            status.message = "The selected Diffusers audio folder is missing required files.";
             status.error = "Missing files: " + missingFiles.joinIntoString(", ");
             status.errorCode = "stable_audio_model_layout_invalid";
             status.lastPhase = "stable_audio_import";
@@ -2007,13 +2084,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.state = "installing";
             status.progress = 0.05f;
             status.installInProgress = true;
-            status.message = "Importing Stable Audio 3 Medium snapshot...";
-            status.stepLabel = "Importing Stable Audio 3 Medium";
+            status.message = "Importing Diffusers audio model snapshot...";
+            status.stepLabel = "Importing Diffusers audio model";
             status.lastPhase = "stable_audio_import";
             status.error.clear();
             status.errorCode.clear();
             status.activityLines.clear();
-            status.activityLines.add("Valid Stable Audio 3 source: " + sourceRoot.getFullPathName());
+            status.activityLines.add("Valid Diffusers audio source: " + sourceRoot.getFullPathName());
             status.activityLines.add("Copying snapshot into the managed OpenStudio model folder.");
             status.detailLogPath = getAiToolsInstallLogFile().getFullPathName();
             status.installSessionId = stableSessionId;
@@ -2030,16 +2107,20 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                             [&] (juce::DynamicObject& payload)
                                             {
                                                 payload.setProperty("sourcePath", sourceRoot.getFullPathName());
-                                                payload.setProperty("destinationPath", getStableAudioModelRoot().getFullPathName());
+                                                payload.setProperty("destinationPath", getStableAudioModelRoot(importedModelId).getFullPathName());
                                                 payload.setProperty("runtimePath", getStableAudioRuntimeRoot().getFullPathName());
                                             }));
 
-        std::thread([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId]()
+        installWorkerActive.store(true);
+        backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion]()
         {
+            const InstallWorkerLifetime workerLifetime { installWorkerActive };
             const juce::File source(sourcePath);
-            const auto destination = getStableAudioModelRoot();
+            const auto destination = getStableAudioModelRoot(importedModelId);
+            const auto importRoot = source == destination && ! needsConversion ? destination
+                : destination.getSiblingFile(destination.getFileName() + ".import-" + stableSessionId);
             const auto runtimeRoot = getStableAudioRuntimeRoot();
-            const auto readyMarker = runtimeRoot.getChildFile(".openstudio-stable-audio-ready");
+            const auto readyMarker = runtimeRoot.getChildFile(".openstudio-diffusers-audio-ready-v1");
             juce::String error;
             bool success = true;
             auto progressForStableAudioCommand = [] (const juce::String& label)
@@ -2108,7 +2189,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                         || label.containsIgnoreCase("Flash Attention")
                         || label.containsIgnoreCase("PyTorch");
                     status.downloadHint = isLargeStableAudioStep
-                        ? "Stable Audio 3 dependencies can take several minutes to install. OpenStudio will keep updating this log while pip is running."
+                        ? "Diffusers audio dependencies can take several minutes to install. OpenStudio will keep updating this log while pip is running."
                         : juce::String();
                     status.isLargeDownload = isLargeStableAudioStep;
                     status.activityLines.add(label);
@@ -2155,7 +2236,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     if (aiToolsCancelRequested.load())
                     {
                         process->kill();
-                        error = "Stable Audio 3 import was cancelled.";
+                        error = "Diffusers audio import was cancelled.";
                         appendAiToolsLogLine(makeAiLogEvent("host",
                                                             "stable_audio_runtime",
                                                             "stable_audio_command_cancelled",
@@ -2209,7 +2290,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 if (aiToolsCancelRequested.load())
                 {
                     clearStableCommandProcess();
-                    error = "Stable Audio 3 import was cancelled.";
+                    error = "Diffusers audio import was cancelled.";
                     appendAiToolsLogLine(makeAiLogEvent("host",
                                                         "stable_audio_runtime",
                                                         "stable_audio_command_cancelled",
@@ -2264,9 +2345,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             if (aiToolsCancelRequested.load())
             {
                 success = false;
-                error = "Stable Audio 3 import was cancelled.";
+                error = "Diffusers audio import was cancelled.";
             }
-            else if (source.getFullPathName() != destination.getFullPathName())
+            else if (source != destination && ! needsConversion)
             {
                 if (! destination.getParentDirectory().createDirectory())
                 {
@@ -2275,8 +2356,6 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
                 else
                 {
-                    if (destination.exists())
-                        destination.deleteRecursively();
                     appendAiToolsLogLine(makeAiLogEvent("host",
                                                         "stable_audio_import",
                                                         "stable_audio_copy_started",
@@ -2286,9 +2365,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                             payload.setProperty("sourcePath", source.getFullPathName());
                                                             payload.setProperty("destinationPath", destination.getFullPathName());
                                                         }));
-                    success = source.copyDirectoryTo(destination);
+                    success = source.copyDirectoryTo(importRoot);
                     if (! success)
-                        error = "Could not copy Stable Audio 3 files into the managed OpenStudio model folder.";
+                        error = "Could not copy Diffusers audio files into the managed OpenStudio model folder.";
                     appendAiToolsLogLine(makeAiLogEvent("host",
                                                         "stable_audio_import",
                                                         success ? "stable_audio_copy_succeeded" : "stable_audio_copy_failed",
@@ -2303,13 +2382,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
-            if (success)
+            if (success && ! needsConversion)
             {
-                const auto missingAfterCopy = getMissingStableAudioFiles(destination);
+                const auto missingAfterCopy = getMissingStableAudioFiles(importRoot, importedModelId);
                 if (! missingAfterCopy.isEmpty())
                 {
                     success = false;
-                    error = "Imported Stable Audio 3 snapshot is missing files: " + missingAfterCopy.joinIntoString(", ");
+                    error = "Imported Diffusers audio snapshot is missing files: " + missingAfterCopy.joinIntoString(", ");
                 }
                 appendAiToolsLogLine(makeAiLogEvent("host",
                                                     "stable_audio_import",
@@ -2330,7 +2409,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 if (! runtimeRoot.createDirectory())
                 {
                     success = false;
-                    error = "Could not create the Stable Audio 3 runtime directory.";
+                    error = "Could not create the Diffusers audio runtime directory.";
                 }
 
                 auto runtimePython = findStableAudioPython();
@@ -2343,7 +2422,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     if (! bootstrapPython.existsAsFile())
                     {
                         success = false;
-                        error = "Stable Audio 3 runtime setup needs Python, but no suitable Python executable was found.";
+                        error = "Diffusers audio runtime setup needs Python, but no suitable Python executable was found.";
                     }
                     else
                     {
@@ -2352,12 +2431,12 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                         command.add("-m");
                         command.add("venv");
                         command.add(runtimeRoot.getFullPathName());
-                        success = runCommand(command, "Creating separate Stable Audio 3 runtime...", 10 * 60 * 1000);
+                        success = runCommand(command, "Creating separate Diffusers audio runtime...", 10 * 60 * 1000);
                         runtimePython = findStableAudioPython();
                         if (success && ! runtimePython.existsAsFile())
                         {
                             success = false;
-                            error = "Stable Audio 3 runtime Python was not created.";
+                            error = "Diffusers audio runtime Python was not created.";
                         }
                     }
                 }
@@ -2371,7 +2450,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     command.add("install");
                     command.add("--upgrade");
                     command.add("pip");
-                    success = runCommand(command, "Updating Stable Audio 3 runtime package installer...", 15 * 60 * 1000);
+                    success = runCommand(command, "Updating Diffusers audio runtime package installer...", 15 * 60 * 1000);
                 }
 
                 if (success)
@@ -2383,13 +2462,15 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     command.add("install");
                     command.add("--upgrade");
                     command.add("--force-reinstall");
+                   #if JUCE_WINDOWS || JUCE_LINUX
                     command.add("--index-url");
                     command.add("https://download.pytorch.org/whl/cu128");
-                    command.add("torch==2.7.1");
-                    command.add("torchaudio==2.7.1");
-                    success = runCommand(command, "Installing Stable Audio 3 CUDA PyTorch runtime...", 60 * 60 * 1000);
+                   #endif
+                    command.add("torch==2.10.0");
+                    command.add("torchaudio==2.10.0");
+                    success = runCommand(command, "Installing Diffusers audio CUDA PyTorch runtime...", 60 * 60 * 1000);
                     if (! success)
-                        error = "Could not install the Stable Audio 3 CUDA PyTorch runtime. " + error;
+                        error = "Could not install the Diffusers audio CUDA PyTorch runtime. " + error;
                 }
 
                 if (success)
@@ -2400,9 +2481,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     command.add("pip");
                     command.add("install");
                     command.add("--upgrade");
-                    command.add("git+https://github.com/Stability-AI/stable-audio-3.git");
+                    command.add("https://github.com/huggingface/diffusers/archive/7643c4826609c47755e3da0e5b768e8070468f49.zip");
+                    command.add("transformers==5.16.1");
+                    command.add("accelerate==1.14.0");
+                    command.add("sentencepiece");
+                    command.add("protobuf");
                     command.add("soundfile");
-                    success = runCommand(command, "Installing Stable Audio 3 runtime dependencies...", 60 * 60 * 1000);
+                    success = runCommand(command, "Installing Diffusers audio runtime dependencies...", 60 * 60 * 1000);
                 }
 
                 if (success)
@@ -2413,7 +2498,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                         stableSessionId,
                                                         [] (juce::DynamicObject& payload)
                                                         {
-                                                            payload.setProperty("reason", "flash-attn is optional for Stable Audio 3 on Windows; using PyTorch attention fallback");
+                                                            payload.setProperty("reason", "flash-attn is optional for Diffusers audio on Windows; using PyTorch attention fallback");
                                                         }));
                 }
 
@@ -2422,17 +2507,52 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     juce::StringArray command;
                     command.add(runtimePython.getFullPathName());
                     command.add("-c");
-                    command.add("import stable_audio_3, torch, torchaudio, soundfile; assert torch.cuda.is_available(), 'CUDA PyTorch is not available in the Stable Audio 3 runtime'; print('Stable Audio 3 runtime import check passed'); print('torch=' + torch.__version__ + ', cuda=' + str(torch.version.cuda))");
-                    success = runCommand(command, "Validating Stable Audio 3 runtime imports...", 5 * 60 * 1000);
+                    command.add("import torch, soundfile; from diffusers import StableAudio3Pipeline, StableAudio3InpaintPipeline, StableAudio3AudioToAudioPipeline, MiniMaxMusic3ModularPipeline; print('Diffusers audio pipeline imports passed'); print('torch=' + torch.__version__)");
+                    success = runCommand(command, "Validating Diffusers audio runtime imports...", 5 * 60 * 1000);
                 }
 
                 if (success && ! readyMarker.replaceWithText("ready\n", false, false, "\n"))
                 {
                     success = false;
-                    error = "Could not write Stable Audio 3 runtime readiness marker.";
+                    error = "Could not write Diffusers audio runtime readiness marker.";
                 }
             }
 
+            if (success && needsConversion && ! aiToolsCancelRequested.load())
+            {
+                const auto helper = findInstallerScript().getSiblingFile("prepare_diffusers_audio.py");
+                juce::StringArray command { findStableAudioPython().getFullPathName(), helper.getFullPathName(),
+                    "--source", source.getFullPathName(), "--destination", importRoot.getFullPathName(),
+                    "--cache", runtimeRoot.getChildFile("setup-cache").getFullPathName() };
+                success = helper.existsAsFile() && runCommand(command, "Converting existing snapshot with official Diffusers converter...", 60 * 60 * 1000);
+                if (! success && error.isEmpty()) error = "Diffusers conversion helper is missing or conversion failed. Original model retained.";
+                if (success)
+                {
+                    const auto missing = getMissingStableAudioFiles(importRoot, importedModelId);
+                    success = missing.isEmpty();
+                    if (! success) error = "Converted snapshot is incomplete: " + missing.joinIntoString(", ");
+                }
+            }
+
+            // Publish only a complete import. A failed/cancelled setup leaves
+            // the previous model in place; retained folders are recoverable.
+            if (success && aiToolsCancelRequested.load())
+            {
+                success = false;
+                error = "Diffusers audio import was cancelled.";
+            }
+            if (success && importRoot != destination)
+            {
+                const auto backup = destination.getSiblingFile(destination.getFileName() + ".previous-" + stableSessionId);
+                const bool hadPrevious = destination.exists();
+                success = ! hadPrevious || destination.moveFileTo(backup);
+                if (success && ! importRoot.moveFileTo(destination))
+                {
+                    success = false;
+                    if (hadPrevious) (void) backup.moveFileTo(destination);
+                }
+                if (! success) error = "Could not publish imported model. Previous files were retained.";
+            }
             aiToolsInstallWorkInProgress = false;
             updateCachedAiToolsStatus([&] (AiToolsStatus& status)
             {
@@ -2442,7 +2562,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.progress = success ? 1.0f : 0.0f;
                 status.installInProgress = false;
                 status.message = success
-                    ? "Stable Audio 3 Medium is ready."
+                    ? "Diffusers audio model is ready."
                     : error;
                 status.stepLabel = status.message;
                 status.lastPhase = "stable_audio_import";
@@ -2459,17 +2579,17 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                 stableSessionId,
                                                 [&] (juce::DynamicObject& payload)
                                                 {
-                                                    payload.setProperty("modelId", kStableAudioModelId);
+                                                    payload.setProperty("modelId", importedModelId);
                                                     payload.setProperty("sourcePath", source.getFullPathName());
                                                     payload.setProperty("destinationPath", destination.getFullPathName());
                                                     payload.setProperty("runtimePath", runtimeRoot.getFullPathName());
                                                     if (error.isNotEmpty())
                                                         payload.setProperty("error", error);
                                                 }));
-        }).detach();
+        });
 
         result->setProperty("started", true);
-        result->setProperty("message", "Stable Audio 3 import started.");
+        result->setProperty("message", "Diffusers audio import started.");
         result->setProperty("status", aiToolsStatusToVar(getCachedAiToolsStatusSnapshot()));
         return juce::var(result.release());
     }
@@ -2580,8 +2700,10 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         status.helpUrl = status.requiresExternalPython ? juce::String(kPythonHelpUrl) : juce::String();
     });
 
-    std::thread ([this, devFallbackEnabled, installFeatures, requestedFeatures = installOptions.selectedFeatures, requestedFeature = installOptions.requestedFeature]
+    installWorkerActive.store(true);
+    backgroundTasks.addJob ([this, devFallbackEnabled, installFeatures, requestedFeatures = installOptions.selectedFeatures, requestedFeature = installOptions.requestedFeature]
     {
+        const InstallWorkerLifetime workerLifetime { installWorkerActive };
         const auto installerScript = findInstallerScript();
         const auto systemPython = findSystemPython();
         const auto logFile = getAiToolsInstallLogFile();
@@ -3417,7 +3539,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         }
 
         startInstallMonitor();
-    }).detach();
+    });
 
     result->setProperty("started", true);
     result->setProperty("status", aiToolsStatusToVar(getCachedAiToolsStatusSnapshot()));

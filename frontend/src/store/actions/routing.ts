@@ -237,7 +237,7 @@ export const routingActions = (set: SetFn, get: GetFn) => ({
         return;
       }
       try {
-        const zipPath = projectPath.replace(/\.(osproj|s13)$/i, "") + "_archive.zip";
+        const zipPath = projectPath.replace(/\.(osproj|openstudio)$/i, "") + "_archive.zip";
         const success = await nativeBridge.archiveSession(projectPath, zipPath);
         if (success) {
           showToast(`Session archived to ${zipPath}`, "success");

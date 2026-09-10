@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import {
   DndContext,
   closestCenter,
@@ -21,7 +22,10 @@ import { useDAWStore, Track, MixerSnapshot } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
 import { Button } from "./ui";
-import { useCallback, useState, useEffect } from "react";
+import { PluginActivity } from "./PluginActivity";
+import { paintPluginActivity, waitForPluginEditor } from "../utils/pluginActivity";
+import { useCallback, useState, useEffect, useRef, useId } from "react";
+import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import {
   activateShortcutContext,
@@ -29,6 +33,7 @@ import {
 } from "../utils/shortcutContext";
 
 interface MixerPanelProps {
+  dockedHeight?: number;
   isVisible: boolean;
   isDetached?: boolean;
   renderInOwnWindow?: boolean;
@@ -38,6 +43,7 @@ interface MixerPanelProps {
 }
 
 export function MixerPanel({
+  dockedHeight = 340,
   isVisible,
   isDetached = false,
   renderInOwnWindow = false,
@@ -108,11 +114,15 @@ export function MixerPanel({
     index: number;
     name: string;
     pluginPath?: string;
+    type?: string;
     bypassed?: boolean;
     precisionOverride?: "auto" | "float32";
   }
   const [monitorFXList, setMonitorFXList] = useState<MonitorFXSlot[]>([]);
   const [showMonitorPluginPicker, setShowMonitorPluginPicker] = useState(false);
+  const monitorPickerRef = useRef<HTMLDivElement>(null);
+  const monitorPickerTriggerRef = useRef<HTMLButtonElement>(null);
+  const monitorPickerId = useId();
   const [availablePlugins, setAvailablePlugins] = useState<{
     name: string;
     fileOrIdentifier: string;
@@ -120,7 +130,41 @@ export function MixerPanel({
   }[]>([]);
   const [monitorPluginSearch, setMonitorPluginSearch] = useState("");
   const [addingMonitorPlugin, setAddingMonitorPlugin] = useState(false);
+  const [monitorCatalogLoading, setMonitorCatalogLoading] = useState(false);
+  const [monitorActivity, setMonitorActivity] = useState<string | null>(null);
+  const monitorBusyRef = useRef(false);
   const [updatingMonitorPrecision, setUpdatingMonitorPrecision] = useState<number | null>(null);
+
+  const closeMonitorPluginPicker = useCallback((restoreFocus = true) => {
+    setShowMonitorPluginPicker(false);
+    setMonitorPluginSearch("");
+    if (restoreFocus && monitorPickerRef.current) monitorPickerTriggerRef.current?.focus();
+  }, []);
+  useTransientOverlayShortcutScope(isVisible && showMonitorPluginPicker, closeMonitorPluginPicker);
+
+  useEffect(() => {
+    if (!isVisible) closeMonitorPluginPicker(false);
+    if (!isVisible || !showMonitorPluginPicker) return;
+    const ownerDocument = monitorPickerRef.current?.ownerDocument ?? document;
+    const ownerWindow = ownerDocument.defaultView;
+    const handleOutside = (event: Event) => {
+      const path = event.composedPath();
+      const picker = monitorPickerRef.current;
+      const trigger = monitorPickerTriggerRef.current;
+      if ((picker && path.includes(picker)) || (trigger && path.includes(trigger))) return;
+      closeMonitorPluginPicker(false);
+    };
+    const handleWindowBlur = () => closeMonitorPluginPicker(false);
+    // Capture sees clicks on canvas/drag surfaces which stop event bubbling.
+    ownerDocument.addEventListener("pointerdown", handleOutside, true);
+    ownerDocument.addEventListener("focusin", handleOutside);
+    ownerWindow?.addEventListener("blur", handleWindowBlur);
+    return () => {
+      ownerDocument.removeEventListener("pointerdown", handleOutside, true);
+      ownerDocument.removeEventListener("focusin", handleOutside);
+      ownerWindow?.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [isVisible, showMonitorPluginPicker, closeMonitorPluginPicker]);
 
   const refreshMonitorFX = useCallback(async () => {
     try {
@@ -138,20 +182,28 @@ export function MixerPanel({
   }, [isVisible, refreshMonitorFX]);
 
   const handleAddMonitorFX = useCallback(async (pluginPath: string) => {
+    if (monitorBusyRef.current) return;
+    monitorBusyRef.current = true;
     setAddingMonitorPlugin(true);
+    setMonitorActivity(`Loading ${availablePlugins.find(p => (p.identifier || p.fileOrIdentifier) === pluginPath)?.name || "monitor effect"}…`);
     try {
+      await paintPluginActivity();
       const success = await nativeBridge.addMonitoringFX(pluginPath);
       if (success) {
         await refreshMonitorFX();
-        setShowMonitorPluginPicker(false);
-        setMonitorPluginSearch("");
+        closeMonitorPluginPicker();
+      } else {
+        useDAWStore.getState().showToast("Could not add this monitor effect. Check plugin settings and the diagnostic log.", "error");
       }
     } catch (e) {
       console.error("[MixerPanel] Failed to add monitoring FX:", e);
+      useDAWStore.getState().showToast("The monitor effect could not be loaded.", "error");
     } finally {
+      monitorBusyRef.current = false;
+      setMonitorActivity(null);
       setAddingMonitorPlugin(false);
     }
-  }, [refreshMonitorFX]);
+  }, [refreshMonitorFX, closeMonitorPluginPicker, availablePlugins]);
 
   const handleRemoveMonitorFX = useCallback(async (fxIndex: number) => {
     try {
@@ -172,12 +224,26 @@ export function MixerPanel({
   }, [refreshMonitorFX]);
 
   const handleOpenMonitorFXEditor = useCallback(async (fxIndex: number) => {
+    if (monitorBusyRef.current) return;
+    monitorBusyRef.current = true;
+    const fx = monitorFXList.find(slot => slot.index === fxIndex);
+    setMonitorActivity(`Opening ${fx?.name || "monitor effect"} editor…`);
     try {
-      await nativeBridge.openMonitoringFXEditor(fxIndex);
+      await paintPluginActivity();
+      const sessionId = JSON.stringify({ address: { trackId: "", chain: "monitor", fxIndex }, title: `${fx?.name} - Monitor FX`, fallbackName: fx?.name });
+      const opened = fx?.type === "builtin"
+        ? await nativeBridge.openBuiltInPluginEditorWindow(sessionId, { x: 140, y: 70, width: 1320, height: 860 })
+        : await nativeBridge.openMonitoringFXEditor(fxIndex);
+      if (!opened) throw new Error("Could not open the monitor effect editor.");
+      await waitForPluginEditor(fx?.type === "builtin" ? { sessionId } : { scope: "monitoring_fx", trackId: "", fxIndex });
     } catch (e) {
       console.error("[MixerPanel] Failed to open monitoring FX editor:", e);
+      useDAWStore.getState().showToast(e instanceof Error ? e.message : "Could not open the monitor effect editor.", "error");
+    } finally {
+      monitorBusyRef.current = false;
+      setMonitorActivity(null);
     }
-  }, []);
+  }, [monitorFXList]);
 
   const handleSetMonitorPrecisionOverride = useCallback(async (fxIndex: number, mode: "auto" | "float32") => {
     setUpdatingMonitorPrecision(fxIndex);
@@ -196,25 +262,33 @@ export function MixerPanel({
   }, []);
 
   const refreshAvailableMonitorPlugins = useCallback(async () => {
+    setMonitorCatalogLoading(true);
+    const builtInPlugins = [{ name: "OpenStudio NAM Rack", fileOrIdentifier: "OpenStudio NAM Rack", identifier: "OpenStudio NAM Rack" }];
+    setAvailablePlugins(builtInPlugins);
     try {
       const plugins = await nativeBridge.getAvailablePlugins();
       setAvailablePlugins(
-        plugins
+        [...builtInPlugins, ...plugins
           .filter((p: any) => !p.isInstrument)
           .map((p: any) => ({
             name: p.name,
             fileOrIdentifier: p.fileOrIdentifier,
             identifier: p.identifier,
-          }))
+          }))]
       );
+      const configuration = await nativeBridge.getPluginScanConfiguration();
+      if (configuration.settingsError) useDAWStore.getState().showToast(configuration.settingsError, "error");
     } catch (e) {
       console.error("[MixerPanel] Failed to load plugins for monitor FX:", e);
+      useDAWStore.getState().showToast("Could not load the external plugin list. The built-in NAM Rack is still available.", "error");
+    } finally {
+      setMonitorCatalogLoading(false);
     }
   }, []);
 
   const handleOpenMonitorPluginPicker = useCallback(async () => {
-    await refreshAvailableMonitorPlugins();
     setShowMonitorPluginPicker(true);
+    await refreshAvailableMonitorPlugins();
   }, [refreshAvailableMonitorPlugins]);
 
   const handleCloseMixer = useCallback(() => {
@@ -277,6 +351,12 @@ export function MixerPanel({
 
   const masterVolumeDB = masterVolume > 0 ? 20 * Math.log10(masterVolume) : -60;
 
+  const activateMixerContext = (target: EventTarget) => {
+    // Leave the picker's registered shortcut owner active while editing it.
+    if (showMonitorPluginPicker && monitorPickerRef.current?.contains(target as Node)) return;
+    activateShortcutContext({ kind: "mixer" });
+  };
+
   // Create a virtual master track for the ChannelStrip component
   const masterTrack: Track = {
     id: "master",
@@ -326,17 +406,17 @@ export function MixerPanel({
   const mixerContent = (
     <section
       aria-label="Mixer"
-      onPointerDownCapture={() => activateShortcutContext({ kind: "mixer" })}
-      onContextMenuCapture={() => activateShortcutContext({ kind: "mixer" })}
-      onFocusCapture={() => activateShortcutContext({ kind: "mixer" })}
+      onPointerDownCapture={(event) => activateMixerContext(event.target)}
+      onContextMenuCapture={(event) => activateMixerContext(event.target)}
+      onFocusCapture={(event) => activateMixerContext(event.target)}
       data-shortcut-context="mixer"
       className="bg-neutral-800 border-t-2 border-neutral-950 flex flex-col shrink-0 overflow-hidden min-h-0 min-w-0"
       style={isDetached
         ? { height: "100%", width: "100%", flex: "1 1 auto" }
         : {
-            height: isVisible ? 340 : 0,
+            height: isVisible ? dockedHeight : 0,
             opacity: isVisible ? 1 : 0,
-            transition: "height 0.2s ease-in-out, opacity 0.15s ease-in-out",
+            transition: "opacity 0.15s ease-in-out",
           }
       }
     >
@@ -408,8 +488,8 @@ export function MixerPanel({
         ))}
         <button
           className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] bg-neutral-700/50 hover:bg-neutral-600 text-neutral-400 hover:text-neutral-200 rounded cursor-pointer transition-colors whitespace-nowrap"
-          onClick={() => {
-            const name = prompt("Snapshot name:", `Snapshot ${mixerSnapshots.length + 1}`);
+          onClick={async () => {
+            const name = (await appDialogs.prompt("Snapshot name:", `Snapshot ${mixerSnapshots.length + 1}`));
             if (name) saveMixerSnapshot(name);
           }}
           title="Save current mixer state as snapshot"
@@ -422,7 +502,7 @@ export function MixerPanel({
 
       {/* Channel Strips Container */}
       <div
-        className="relative flex-1 flex overflow-x-auto overflow-y-hidden bg-neutral-900 p-1 gap-px pl-0 min-h-0 min-w-0"
+        className="relative flex-1 flex overflow-auto bg-neutral-900 p-1 gap-px pl-0 min-h-0 min-w-0"
         onClick={(e) => {
           if (e.target === e.currentTarget) deselectAllTracks();
         }}
@@ -452,17 +532,20 @@ export function MixerPanel({
 
         {/* Monitor FX Section */}
         <div className="w-px bg-neutral-600 shrink-0 my-1" />
-        <div className="flex flex-col shrink-0 w-[140px] bg-neutral-800/60 border border-dashed border-amber-700/40 rounded mx-0.5 overflow-hidden">
+        <div aria-busy={Boolean(monitorActivity)} className="flex flex-col shrink-0 w-[140px] bg-neutral-800/60 border border-dashed border-amber-700/40 rounded mx-0.5 overflow-hidden">
           {/* Header */}
           <div className="flex items-center justify-between px-2 py-1 bg-amber-900/20 border-b border-amber-700/30">
             <span className="text-[9px] font-semibold text-amber-400 uppercase tracking-wider">
               Monitor FX
             </span>
             <button
+              ref={monitorPickerTriggerRef}
               className="text-amber-500 hover:text-amber-300 transition-colors cursor-pointer"
-              onClick={handleOpenMonitorPluginPicker}
+              onClick={() => showMonitorPluginPicker ? closeMonitorPluginPicker() : void handleOpenMonitorPluginPicker()}
               title="Add Monitor FX"
               aria-label="Add monitoring effect plugin"
+              aria-expanded={showMonitorPluginPicker}
+              aria-controls={showMonitorPluginPicker ? monitorPickerId : undefined}
             >
               <Plus size={12} />
             </button>
@@ -476,6 +559,7 @@ export function MixerPanel({
           </div>
 
           {/* FX Slots */}
+          {monitorActivity && <PluginActivity message={monitorActivity} />}
           <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
             {monitorFXList.length === 0 ? (
               <div className="text-[9px] text-neutral-500 text-center py-4 px-1">
@@ -498,6 +582,7 @@ export function MixerPanel({
                         : "text-amber-400 hover:text-amber-300"
                     }`}
                     onClick={() => handleBypassMonitorFX(fx.index, !fx.bypassed)}
+                    disabled={Boolean(monitorActivity)}
                     title={fx.bypassed ? "Enable" : "Bypass"}
                     aria-label={fx.bypassed ? `Enable monitor effect ${fx.name}` : `Bypass monitor effect ${fx.name}`}
                   >
@@ -506,6 +591,7 @@ export function MixerPanel({
                   <button
                     className={`flex-1 truncate text-left cursor-pointer bg-transparent border-none p-0 text-inherit hover:text-amber-100 transition-colors ${fx.bypassed ? "line-through" : ""}`}
                     onClick={() => handleOpenMonitorFXEditor(fx.index)}
+                    disabled={Boolean(monitorActivity)}
                     title={`Open editor for ${fx.name}`}
                     aria-label={`Open editor for monitor effect ${fx.name}`}
                     >
@@ -513,7 +599,7 @@ export function MixerPanel({
                     </button>
                   <select
                     value={fx.precisionOverride || "auto"}
-                    disabled={updatingMonitorPrecision === fx.index}
+                    disabled={Boolean(monitorActivity) || updatingMonitorPrecision === fx.index}
                     onChange={(e) => {
                       void handleSetMonitorPrecisionOverride(
                         fx.index,
@@ -530,6 +616,7 @@ export function MixerPanel({
                   <button
                     className="shrink-0 text-neutral-500 hover:text-red-400 transition-colors cursor-pointer"
                     onClick={() => handleRemoveMonitorFX(fx.index)}
+                    disabled={Boolean(monitorActivity)}
                     title="Remove"
                     aria-label={`Remove monitor effect ${fx.name}`}
                   >
@@ -542,11 +629,11 @@ export function MixerPanel({
 
           {/* Inline Plugin Picker */}
           {showMonitorPluginPicker && (
-            <div className="border-t border-amber-700/30 bg-neutral-900 flex flex-col max-h-45">
+            <div ref={monitorPickerRef} id={monitorPickerId} className="border-t border-amber-700/30 bg-neutral-900 flex flex-col max-h-45">
               <div className="flex items-center gap-1 p-1">
                 <input
                   type="text"
-                  className="flex-1 bg-neutral-800 border border-neutral-600 rounded px-1.5 py-0.5 text-[10px] text-daw-text placeholder-neutral-500 outline-none focus:border-amber-500"
+                  className="min-w-0 flex-1 bg-neutral-800 border border-neutral-600 rounded px-1.5 py-0.5 text-[10px] text-daw-text placeholder-neutral-500 outline-none focus:border-amber-500"
                   placeholder="Search plugins..."
                   value={monitorPluginSearch}
                   onChange={(e) => setMonitorPluginSearch(e.target.value)}
@@ -554,18 +641,16 @@ export function MixerPanel({
                   aria-label="Search monitor effect plugins"
                 />
                 <button
-                  className="text-neutral-400 hover:text-neutral-200 cursor-pointer"
-                  onClick={() => {
-                    setShowMonitorPluginPicker(false);
-                    setMonitorPluginSearch("");
-                  }}
+                  className="size-6 shrink-0 flex items-center justify-center rounded text-neutral-400 hover:text-neutral-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-500"
+                  onClick={() => closeMonitorPluginPicker()}
                   aria-label="Close plugin picker"
                 >
                   <X size={10} />
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto px-1 pb-1 space-y-px">
-                {filteredMonitorPlugins.length === 0 ? (
+                {monitorCatalogLoading && <PluginActivity message="Loading plugin list…" />}
+                {filteredMonitorPlugins.length === 0 && !monitorCatalogLoading ? (
                   <div className="text-[9px] text-neutral-500 text-center py-2">
                     No plugins found
                   </div>
@@ -575,7 +660,7 @@ export function MixerPanel({
                       key={plugin.identifier || plugin.fileOrIdentifier}
                       className="w-full text-left px-1.5 py-0.5 text-[10px] text-neutral-300 hover:bg-amber-900/30 hover:text-amber-200 rounded truncate transition-colors cursor-pointer disabled:opacity-50"
                       onClick={() => handleAddMonitorFX(plugin.identifier || plugin.fileOrIdentifier)}
-                      disabled={addingMonitorPlugin}
+                      disabled={addingMonitorPlugin || Boolean(monitorActivity)}
                       title={plugin.name}
                     >
                       {plugin.name}

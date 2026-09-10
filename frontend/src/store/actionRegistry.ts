@@ -1,8 +1,10 @@
+import { appDialogs } from "../services/appDialogs";
 /**
  * Action Registry - Centralized registry of all available actions
  * Used by Command Palette, keyboard shortcuts reference, and Actions menu
  */
 
+import { useAppUpdateStore } from "./appUpdateStore";
 import { nativeBridge } from "../services/NativeBridge";
 import { commandManager } from "./commands";
 import {
@@ -364,10 +366,10 @@ function shortcutConditionsOverlap(a?: ActionShortcutWhen, b?: ActionShortcutWhe
  */
 export function getRegisteredActions(): ActionDef[] {
   const s = () => useDAWStore.getState();
-  const transposeSelectedMidiNotes = () => {
+  const transposeSelectedMidiNotes = async () => {
     const state = s();
     if (!state.pianoRollTrackId || !state.pianoRollClipId || state.selectedNoteIds.length === 0) return;
-    const input = prompt("Transpose selected notes by semitones:", "0");
+    const input = (await appDialogs.prompt("Transpose selected notes by semitones:", "0"));
     if (input === null) return;
     const semitones = Number(input);
     if (!Number.isFinite(semitones)) return;
@@ -382,10 +384,10 @@ export function getRegisteredActions(): ActionDef[] {
     );
     if (nextIds.length > 0) state.setSelectedNoteIds(nextIds);
   };
-  const scaleSelectedMidiVelocity = () => {
+  const scaleSelectedMidiVelocity = async () => {
     const state = s();
     if (!state.pianoRollTrackId || !state.pianoRollClipId || state.selectedNoteIds.length === 0) return;
-    const input = prompt("Scale selected note velocity (percent):", "100");
+    const input = (await appDialogs.prompt("Scale selected note velocity (percent):", "100"));
     if (input === null) return;
     const percent = Number(input);
     if (!Number.isFinite(percent) || percent < 0) return;
@@ -677,11 +679,11 @@ export function getRegisteredActions(): ActionDef[] {
     });
     if (!changed) state.setSelectedNoteIds(selectionBefore);
   };
-  const chooseByNumber = <T,>(title: string, items: readonly T[], label: (item: T) => string): T | undefined => {
+  const chooseByNumber = async <T,>(title: string, items: readonly T[], label: (item: T) => string): Promise<T | undefined> => {
     if (items.length === 0) return undefined;
     if (items.length === 1) return items[0];
     const choices = items.map((item, index) => `${index + 1}. ${label(item)}`).join("\n");
-    const input = prompt(`${title}\n\n${choices}`, "1");
+    const input = (await appDialogs.prompt(`${title}\n\n${choices}`, "1"));
     if (input === null) return undefined;
     const index = Math.round(Number(input)) - 1;
     return Number.isInteger(index) && index >= 0 && index < items.length
@@ -694,53 +696,8 @@ export function getRegisteredActions(): ActionDef[] {
       && typeof CSS.supports === "function"
       && CSS.supports("color", value);
   };
-  const checkForUpdates = () => {
-    void (async () => {
-      const result = await nativeBridge.checkForUpdates(true);
-      const state = s();
-      if (result?.status === "up-to-date") {
-        state.showToast("OpenStudio is already up to date.", "success");
-        return;
-      }
-      if (result?.status !== "update-available") {
-        state.showToast(result?.message || "Could not check for updates.", "error");
-        return;
-      }
-
-      const version = result.version || "the latest version";
-      const notes = typeof result.notes === "string" && result.notes.trim()
-        ? `\n\nRelease notes:\n${result.notes}`
-        : "";
-      const platformPrompt = result.platform === "macos"
-        ? "Download and open the DMG now?"
-        : "Download and install it now?";
-      if (!confirm(`OpenStudio ${version} is available.${notes}\n\n${platformPrompt}`)) return;
-
-      const installResult = await nativeBridge.downloadAndInstallUpdate(
-        result.downloadUrl || "",
-        result.version,
-        result.sha256,
-        result.releasePageUrl,
-        result.installerArguments,
-        result.size,
-      );
-      if (installResult?.status === "install-started") {
-        state.showToast(installResult.message || "The installer has been opened.", "success");
-      } else if (installResult?.status === "release-page-opened") {
-        state.showToast("Opened the release page for the latest update.", "info");
-      } else {
-        state.showToast(installResult?.message || "Update download or installation failed.", "error");
-      }
-    })();
-  };
-  const showAbout = () => {
-    void nativeBridge.getAppVersion().then((version) => {
-      alert(
-        `OpenStudio ${version}\n\n`
-        + "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.",
-      );
-    });
-  };
+  const checkForUpdates = () => { void useAppUpdateStore.getState().check(true); };
+  const showAbout = async () => { await appDialogs.about(await nativeBridge.getAppVersion()); };
 
   const selectedAutomationLane = () => {
     const state = s();
@@ -1250,11 +1207,11 @@ export function getRegisteredActions(): ActionDef[] {
       const state = s();
       state.createFolderTrack(`Folder ${state.tracks.filter((t: any) => t.isFolder).length + 1}`);
     }},
-    { id: "insert.multipleTracks", name: "Insert Multiple Tracks...", category: "Insert", canHandleShortcut: () => !s().globalLocked, execute: () => {
-      const countInput = prompt("How many tracks to insert?", "4");
+    { id: "insert.multipleTracks", name: "Insert Multiple Tracks...", category: "Insert", canHandleShortcut: () => !s().globalLocked, execute: async () => {
+      const countInput = (await appDialogs.prompt("How many tracks to insert?", "4"));
       if (countInput === null) return;
       const count = Math.min(100, Math.max(1, Math.floor(Number(countInput) || 1)));
-      const typeInput = prompt("Track type? (audio / midi)", "audio");
+      const typeInput = (await appDialogs.prompt("Track type? (audio / midi)", "audio"));
       if (typeInput === null) return;
       const trackType = typeInput.trim().toLowerCase() === "midi" ? "midi" : "audio";
       const state = s();
@@ -1314,8 +1271,8 @@ export function getRegisteredActions(): ActionDef[] {
       });
     }},
     { id: "insert.marker", name: "Add Marker at Playhead", category: "Insert", shortcut: "M", canHandleShortcut: () => !s().globalLocked && !s().lockSettings.markers && Number.isFinite(s().transport.currentTime), execute: () => s().addMarker(s().transport.currentTime) },
-    { id: "insert.markerNamed", name: "Add Named Marker", category: "Insert", shortcut: "Shift+M", canHandleShortcut: () => !s().globalLocked && !s().lockSettings.markers && Number.isFinite(s().transport.currentTime), execute: () => {
-      const name = prompt("Enter marker name:");
+    { id: "insert.markerNamed", name: "Add Named Marker", category: "Insert", shortcut: "Shift+M", canHandleShortcut: () => !s().globalLocked && !s().lockSettings.markers && Number.isFinite(s().transport.currentTime), execute: async () => {
+      const name = (await appDialogs.prompt("Enter marker name:"));
       if (name?.trim()) s().addMarker(s().transport.currentTime, name.trim());
     }},
     { id: "insert.regionFromSelection", name: "Region from Selection", category: "Insert", shortcut: "Shift+R", canHandleShortcut: () => {
@@ -1342,7 +1299,7 @@ export function getRegisteredActions(): ActionDef[] {
         if (!targetTrackId) {
           const firstAudioTrack = state.tracks.find((t) => t.type === "audio");
           if (!firstAudioTrack) {
-            alert("No audio track available. Please create an audio track first.");
+            void appDialogs.alert("No audio track available. Please create an audio track first.");
             return;
           }
           targetTrackId = firstAudioTrack.id;
@@ -1351,7 +1308,7 @@ export function getRegisteredActions(): ActionDef[] {
         try {
           await state.importMedia(filePath, targetTrackId, state.transport.currentTime);
         } catch (error) {
-          alert(`Failed to import media: ${error}`);
+          void appDialogs.alert(`Failed to import media: ${error}`);
         }
       })();
     }},
@@ -1402,21 +1359,21 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "file.settings", name: "Audio Settings", category: "File", execute: () => s().openSettings() },
     { id: "project.compare", name: "Compare with Saved Version", category: "File", execute: () => { void s().compareWithSavedProject(); } },
     { id: "file.saveNewVersion", name: "Save New Version", category: "File", execute: () => { void s().saveNewVersion(); } },
-    { id: "file.openRecent", name: "Open Recent Project...", category: "File", canHandleShortcut: () => s().recentProjects.length > 0, execute: () => {
+    { id: "file.openRecent", name: "Open Recent Project...", category: "File", canHandleShortcut: () => s().recentProjects.length > 0, execute: async () => {
       const state = s();
-      const projectPath = chooseByNumber("Open recent project (enter number):", state.recentProjects, (path) => path.split(/[/\\]/).pop() || path);
+      const projectPath = (await chooseByNumber("Open recent project (enter number):", state.recentProjects, (path) => path.split(/[/\\]/).pop() || path));
       if (projectPath) void state.requestOpenProject(projectPath);
     }},
     { id: "file.clearRecentProjects", name: "Clear Recent Projects", category: "File", canHandleShortcut: () => s().recentProjects.length > 0, execute: () => s().clearRecentProjects() },
-    { id: "file.loadTemplate", name: "New Project from Template...", category: "File", canHandleShortcut: () => s().projectTemplates.length > 0, execute: () => {
+    { id: "file.loadTemplate", name: "New Project from Template...", category: "File", canHandleShortcut: () => s().projectTemplates.length > 0, execute: async () => {
       const state = s();
-      const choice = chooseByNumber("Choose project template (enter number):", state.projectTemplates.map((template, index) => ({ template, index })), ({ template }) => template.name);
+      const choice = (await chooseByNumber("Choose project template (enter number):", state.projectTemplates.map((template, index) => ({ template, index })), ({ template }) => template.name));
       if (choice) void state.requestLoadTemplate(choice.index);
     }},
-    { id: "file.deleteTemplate", name: "Delete Project Template...", category: "File", canHandleShortcut: () => s().projectTemplates.length > 0, execute: () => {
+    { id: "file.deleteTemplate", name: "Delete Project Template...", category: "File", canHandleShortcut: () => s().projectTemplates.length > 0, execute: async () => {
       const state = s();
-      const choice = chooseByNumber("Delete project template (enter number):", state.projectTemplates.map((template, index) => ({ template, index })), ({ template }) => template.name);
-      if (choice && confirm(`Delete template "${choice.template.name}"?`)) state.deleteTemplate(choice.index);
+      const choice = (await chooseByNumber("Delete project template (enter number):", state.projectTemplates.map((template, index) => ({ template, index })), ({ template }) => template.name));
+      if (choice && (await appDialogs.confirm(`Delete template "${choice.template.name}"?`))) state.deleteTemplate(choice.index);
     }},
 
     // ===== Options =====
@@ -1435,7 +1392,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "edit.insertSilence", name: "Insert Silence", category: "Edit", shortcutScope: "timeline", canHandleShortcut: () => canInsertSilenceAtTimelineTimeSelection(s()), execute: () => s().insertSilenceAtTimeSelection() },
     { id: "view.bigClock", name: "Toggle Big Clock", category: "View", execute: () => s().toggleBigClock() },
     { id: "view.bigClockFormat", name: "Toggle Big Clock Format", category: "View", execute: () => s().toggleBigClockFormat() },
-    { id: "view.keyboardShortcuts", name: "Keyboard Shortcuts", category: "View", execute: () => s().toggleKeyboardShortcuts() },
+    { id: "view.keyboardShortcuts", name: "Keyboard, Mouse & Trackpad", category: "View", execute: () => s().toggleKeyboardShortcuts() },
     { id: "help.contextualHelp", name: "Help Reference", category: "Help", shortcut: "F1", execute: () => s().toggleContextualHelp() },
     { id: "help.gettingStarted", name: "Getting Started Guide", category: "Help", execute: () => s().toggleGettingStarted() },
     { id: "help.checkForUpdates", name: "Check for Updates...", category: "Help", execute: checkForUpdates },
@@ -1446,36 +1403,36 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "view.stepSequencer", name: "Toggle Step Sequencer", category: "View", execute: () => s().toggleStepSequencer() },
     { id: "view.scriptConsole", name: "Toggle Script Console", category: "View", execute: () => s().toggleScriptConsole() },
     { id: "view.aiToolsSetup", name: "Open AI Tools Setup", category: "View", execute: () => s().openAiToolsSetup() },
-    { id: "view.customToolbar", name: "Toggle Custom Toolbar...", category: "View", canHandleShortcut: () => s().customToolbars.length > 0, execute: () => {
+    { id: "view.customToolbar", name: "Toggle Custom Toolbar...", category: "View", canHandleShortcut: () => s().customToolbars.length > 0, execute: async () => {
       const state = s();
-      const toolbar = chooseByNumber("Choose custom toolbar (enter number):", state.customToolbars, (item) => item.name);
+      const toolbar = (await chooseByNumber("Choose custom toolbar (enter number):", state.customToolbars, (item) => item.name));
       if (toolbar) state.toggleToolbarVisibility(toolbar.id);
     }},
     { id: "options.preferences", name: "Preferences", category: "Options", shortcut: "Ctrl+,", execute: () => s().togglePreferences() },
     { id: "options.timecodeSettings", name: "Timecode / Sync Settings", category: "Options", execute: () => s().toggleTimecodeSettings() },
-    { id: "options.saveQuantizePreset", name: "Save Current Quantize Preset...", category: "Options", execute: () => {
+    { id: "options.saveQuantizePreset", name: "Save Current Quantize Preset...", category: "Options", execute: async () => {
       const state = s();
       const preset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
-      const name = prompt("Quantize preset name:", preset.name);
+      const name = (await appDialogs.prompt("Quantize preset name:", preset.name));
       if (name?.trim()) state.saveQuantizePreset(name.trim(), preset);
     }},
     { id: "options.renameQuantizePreset", name: "Rename Current Quantize Preset...", category: "Options", canHandleShortcut: () => {
       const state = s();
       return !getQuantizePresetById(state.quantizePresets, state.quantizePresetId).isFactory;
-    }, execute: () => {
+    }, execute: async () => {
       const state = s();
       const preset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
       if (preset.isFactory) return;
-      const name = prompt("Rename quantize preset:", preset.name);
+      const name = (await appDialogs.prompt("Rename quantize preset:", preset.name));
       if (name?.trim()) state.renameQuantizePreset(preset.id, name.trim());
     }},
     { id: "options.removeQuantizePreset", name: "Remove Current Quantize Preset", category: "Options", canHandleShortcut: () => {
       const state = s();
       return !getQuantizePresetById(state.quantizePresets, state.quantizePresetId).isFactory;
-    }, execute: () => {
+    }, execute: async () => {
       const state = s();
       const preset = getQuantizePresetById(state.quantizePresets, state.quantizePresetId);
-      if (!preset.isFactory && confirm(`Remove quantize preset "${preset.name}"?`)) {
+      if (!preset.isFactory && (await appDialogs.confirm(`Remove quantize preset "${preset.name}"?`))) {
         state.removeQuantizePreset(preset.id);
       }
     }},
@@ -1541,26 +1498,26 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "midi.invertSelection", name: "Invert MIDI Note Selection", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollClipId), execute: () => { const state = s(); if (state.pianoRollClipId) state.invertMIDISelection(state.pianoRollClipId); } },
     { id: "midi.selectSamePitch", name: "Select Notes with Same Pitch", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => { const state = s(); if (state.pianoRollClipId) state.selectMIDINotesByPitch(state.pianoRollClipId); } },
     { id: "midi.humanizeSelected", name: "Humanize Selected Notes", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.humanizeSelectedMIDINotes(state.pianoRollTrackId, state.pianoRollClipId); } },
-    { id: "midi.setSelectedVelocity", name: "Set Selected Note Velocity...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => {
+    { id: "midi.setSelectedVelocity", name: "Set Selected Note Velocity...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: async () => {
       const state = s();
       if (!state.pianoRollTrackId || !state.pianoRollClipId) return;
-      const input = prompt("Velocity (1-127):", String(state.pianoRollInsertVelocity || 80));
+      const input = (await appDialogs.prompt("Velocity (1-127):", String(state.pianoRollInsertVelocity || 80)));
       if (input === null) return;
       const velocity = Math.max(1, Math.min(127, Math.round(Number(input) || 0)));
       state.setSelectedMIDINoteVelocity(state.pianoRollTrackId, state.pianoRollClipId, velocity);
     }},
-    { id: "midi.randomizeSelectedVelocity", name: "Randomize Selected Note Velocity...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => {
+    { id: "midi.randomizeSelectedVelocity", name: "Randomize Selected Note Velocity...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: async () => {
       const state = s();
       if (!state.pianoRollTrackId || !state.pianoRollClipId) return;
-      const input = prompt("Velocity randomization amount (0-127):", "10");
+      const input = (await appDialogs.prompt("Velocity randomization amount (0-127):", "10"));
       if (input === null) return;
       const amount = Math.max(0, Math.min(127, Math.round(Number(input) || 0)));
       state.randomizeSelectedMIDINoteVelocity(state.pianoRollTrackId, state.pianoRollClipId, amount);
     }},
-    { id: "midi.setSelectedLength", name: "Set Selected Note Length...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => {
+    { id: "midi.setSelectedLength", name: "Set Selected Note Length...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: async () => {
       const state = s();
       if (!state.pianoRollTrackId || !state.pianoRollClipId) return;
-      const input = prompt("Note length in seconds:", String(state.stepInputSize || 0.5));
+      const input = (await appDialogs.prompt("Note length in seconds:", String(state.stepInputSize || 0.5)));
       if (input === null) return;
       const duration = Number(input);
       if (Number.isFinite(duration) && duration > 0) state.setSelectedMIDINoteLength(state.pianoRollTrackId, state.pianoRollClipId, duration);
@@ -1571,13 +1528,13 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "midi.mirrorSelectedPitches", name: "Mirror Selected Note Pitches", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.mirrorSelectedMIDINotePitches(state.pianoRollTrackId, state.pianoRollClipId); } },
     { id: "midi.toggleSelectedMute", name: "Mute / Unmute Selected Notes", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.toggleSelectedMIDINoteMute(state.pianoRollTrackId, state.pianoRollClipId); } },
     { id: "midi.cropClipToSelected", name: "Crop MIDI Clip to Selected Notes", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId && s().selectedNoteIds.length > 0), execute: () => { const state = s(); if (state.pianoRollTrackId && state.pianoRollClipId) state.cropMIDIClipToSelectedNotes(state.pianoRollTrackId, state.pianoRollClipId); } },
-    { id: "midi.insertChord", name: "Insert MIDI Chord...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId), execute: () => {
+    { id: "midi.insertChord", name: "Insert MIDI Chord...", category: "MIDI", shortcutScope: "piano_roll", canHandleShortcut: () => Boolean(s().pianoRollTrackId && s().pianoRollClipId), execute: async () => {
       const state = s();
       if (!state.pianoRollTrackId || !state.pianoRollClipId) return;
-      const rootInput = prompt("Root MIDI note (0-127):", "60");
+      const rootInput = (await appDialogs.prompt("Root MIDI note (0-127):", "60"));
       if (rootInput === null) return;
       const rootNote = Math.max(0, Math.min(127, Math.round(Number(rootInput) || 60)));
-      const chordInput = prompt("Chord type (major / minor / power / diatonic):", "major");
+      const chordInput = (await appDialogs.prompt("Chord type (major / minor / power / diatonic):", "major"));
       if (chordInput === null) return;
       const chordType = (["major", "minor", "power", "diatonic"] as const).includes(chordInput as "major")
         ? chordInput as "major" | "minor" | "power" | "diatonic"
@@ -1594,6 +1551,7 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== New Phase 8 Actions =====
     { id: "file.openSafeMode", name: "Open Project (Safe Mode)", category: "File", shortcut: "Ctrl+Shift+O", execute: () => { void s().requestOpenProject(undefined, { bypassFX: true }); } },
+    { id: "file.recovery", name: "Check Interrupted Session Recovery", category: "File", execute: () => { window.dispatchEvent(new Event("openstudio:discover-recovery")); } },
     { id: "insert.emptyItem", name: "Insert Empty Item", category: "Insert", shortcutScope: "timeline", canHandleShortcut: () => {
       const state = s();
       return !state.globalLocked && !state.lockSettings.items && state.tracks.some((track) => (
@@ -1719,7 +1677,6 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== Phase 16: Pro Audio & Compatibility =====
     { id: "file.ddpExport", name: "DDP Disc Image Export...", category: "File", execute: () => s().toggleDDPExport() },
-    { id: "file.captureOutput", name: "Toggle Capture Output", category: "File", execute: () => { if (s().liveCaptureEnabled) { void s().stopLiveCapture(); } else { void s().startLiveCapture(); } } },
     { id: "options.pluginBridge", name: "Toggle 32-bit Plugin Bridge", category: "Options", execute: () => s().togglePluginBridge() },
 
     // ===== Sprint 18: Interaction/Workflow =====
@@ -1828,10 +1785,10 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "track.unlinkSelected", name: "Unlink Selected Tracks", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().some((id) => s().trackGroups.some((group) => group.memberTrackIds.includes(id))), execute: () => {
       s().unlinkTracksFromGroups(selectedTrackIds());
     }},
-    { id: "track.setSelectedColor", name: "Set Selected Track Color...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0, execute: () => {
+    { id: "track.setSelectedColor", name: "Set Selected Track Color...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0, execute: async () => {
       const ids = selectedTrackIds();
       const firstTrack = s().tracks.find((track) => track.id === ids[0]);
-      const color = prompt("Track color (CSS color or #RRGGBB):", firstTrack?.color || "#4361ee")?.trim();
+      const color = (await appDialogs.prompt("Track color (CSS color or #RRGGBB):", firstTrack?.color || "#4361ee"))?.trim();
       if (!color) return;
       if (!isValidCssColor(color)) {
         s().showToast("Enter a valid CSS color or hexadecimal color.", "error");
@@ -1873,14 +1830,10 @@ export function getRegisteredActions(): ActionDef[] {
       });
     }},
     { id: "track.toggleSelectedPhaseInvert", name: "Toggle Selected Track Phase Invert", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => { s().toggleSelectedTracksPhaseInvert(); } },
-    { id: "track.moveSelectedToFolder", name: "Move Selected Tracks to Folder...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0 && s().tracks.some((track) => track.isFolder), execute: () => {
+    { id: "track.moveSelectedToFolder", name: "Move Selected Tracks to Folder...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0 && s().tracks.some((track) => track.isFolder), execute: async () => {
       const state = s();
       const ids = selectedTrackIds();
-      const folder = chooseByNumber(
-        "Move selected tracks to folder (enter number):",
-        state.tracks.filter((track) => track.isFolder && !ids.includes(track.id)),
-        (track) => track.name,
-      );
+      const folder = (await chooseByNumber("Move selected tracks to folder (enter number):", state.tracks.filter((track) => track.isFolder && !ids.includes(track.id)), (track) => track.name));
       if (folder) state.moveTracksToFolder(ids, folder.id);
     }},
     { id: "track.removeSelectedFromFolder", name: "Remove Selected Tracks from Folder", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().some((id) => Boolean(s().tracks.find((track) => track.id === id)?.parentFolderId)), execute: () => {
@@ -1923,16 +1876,16 @@ export function getRegisteredActions(): ActionDef[] {
       });
       if (trackId) void state.renderTrackInPlace(trackId);
     }},
-    { id: "track.saveSelectedAsTemplate", name: "Save Selected Track as Template...", category: "Track", shortcutScope: "track_control_panel", canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => {
+    { id: "track.saveSelectedAsTemplate", name: "Save Selected Track as Template...", category: "Track", shortcutScope: "track_control_panel", canHandleShortcut: () => selectedTrackIds().length > 0, execute: async () => {
       const state = s();
       const track = state.tracks.find((candidate) => candidate.id === selectedTrackIds()[0]);
       if (!track) return;
-      const name = prompt("Template name:", track.name);
+      const name = (await appDialogs.prompt("Template name:", track.name));
       if (name?.trim()) state.saveTrackTemplate(track.id, name.trim());
     }},
-    { id: "track.loadTemplate", name: "Load Track Template...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => s().trackTemplates.length > 0, execute: () => {
+    { id: "track.loadTemplate", name: "Load Track Template...", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => s().trackTemplates.length > 0, execute: async () => {
       const state = s();
-      const template = chooseByNumber("Load track template (enter number):", state.trackTemplates, (item) => item.name);
+      const template = (await chooseByNumber("Load track template (enter number):", state.trackTemplates, (item) => item.name));
       if (template) state.loadTrackTemplate(template.id);
     }},
     { id: "track.openSelectedEnvelopeManager", name: "Open Selected Track Envelope Manager", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer", "automation"], canHandleShortcut: () => selectedTrackIds().length > 0, execute: () => {
@@ -1989,8 +1942,8 @@ export function getRegisteredActions(): ActionDef[] {
       const state = s();
       return !state.globalLocked && !state.lockSettings.items
         && selectedTimelineClips().some((entry) => !entry.track.frozen && !entry.clip.locked);
-    }, execute: () => {
-      const countInput = prompt("Number of repeats:", "3");
+    }, execute: async () => {
+      const countInput = (await appDialogs.prompt("Number of repeats:", "3"));
       if (countInput === null) return;
       const count = Math.max(1, Math.min(128, Math.floor(Number(countInput) || 1)));
       const state = s();
@@ -2011,9 +1964,9 @@ export function getRegisteredActions(): ActionDef[] {
       const state = s();
       return !state.globalLocked && !state.lockSettings.items
         && selectedTimelineClips().some((entry) => !entry.track.frozen && !entry.clip.locked);
-    }, execute: () => {
+    }, execute: async () => {
       const entries = selectedTimelineClips();
-      const color = prompt("Clip color (CSS color or #RRGGBB):", entries[0]?.clip.color || "#4361ee");
+      const color = (await appDialogs.prompt("Clip color (CSS color or #RRGGBB):", entries[0]?.clip.color || "#4361ee"));
       if (!color?.trim()) return;
       const state = s();
       runSynchronousCommandBatch("SET_SELECTED_CLIP_COLOR", "Set selected clip color", () => {
@@ -2068,10 +2021,10 @@ export function getRegisteredActions(): ActionDef[] {
       return !state.globalLocked && !state.lockSettings.items && selectedTimelineClips().some((entry) => (
         entry.kind === "midi" && !entry.track.frozen && !entry.clip.locked
       ));
-    }, execute: () => {
+    }, execute: async () => {
       const entries = selectedTimelineClips().filter((entry) => entry.kind === "midi");
       const currentLength = entries[0]?.clip.sourceLength || entries[0]?.clip.loopLength || entries[0]?.clip.duration || 1;
-      const input = prompt("MIDI source length in seconds:", String(currentLength));
+      const input = (await appDialogs.prompt("MIDI source length in seconds:", String(currentLength)));
       if (input === null) return;
       const length = Number(input);
       if (!Number.isFinite(length) || length <= 0) return;
@@ -2102,8 +2055,8 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "clip.transposeSelectedMidiOctaveDown", name: "Transpose Selected MIDI Clips Down One Octave", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => editableSelectedMidiTimelineClips().length > 0, execute: () => {
       applyToAllNotesInSelectedMidiClips("TRANSPOSE_SELECTED_MIDI_CLIPS", "Transpose selected MIDI clips down one octave", (trackId, clipId, noteIds) => s().moveMIDINotes(trackId, clipId, noteIds, 0, -12));
     }},
-    { id: "clip.setSelectedMidiVelocity", name: "Set Velocity for Selected MIDI Clips...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => editableSelectedMidiTimelineClips().length > 0, execute: () => {
-      const input = prompt("Velocity (1-127):", "80");
+    { id: "clip.setSelectedMidiVelocity", name: "Set Velocity for Selected MIDI Clips...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => editableSelectedMidiTimelineClips().length > 0, execute: async () => {
+      const input = (await appDialogs.prompt("Velocity (1-127):", "80"));
       if (input === null) return;
       const velocity = Math.max(1, Math.min(127, Math.round(Number(input) || 0)));
       applyToAllNotesInSelectedMidiClips("SET_SELECTED_MIDI_CLIP_VELOCITY", "Set selected MIDI clip velocity", (trackId, clipId) => {
@@ -2203,19 +2156,19 @@ export function getRegisteredActions(): ActionDef[] {
 
     // ===== Mixer Snapshots & Bus/Group & Templates =====
     { id: "insert.bus", name: "Create Bus from Selected Tracks", category: "Insert", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0, execute: () => { void s().createBusFromSelectedTracks(); } },
-    { id: "mixer.saveSnapshot", name: "Save Mixer Snapshot", category: "Mixer", execute: () => {
-      const name = prompt("Snapshot name:", `Snapshot ${s().mixerSnapshots.length + 1}`);
+    { id: "mixer.saveSnapshot", name: "Save Mixer Snapshot", category: "Mixer", execute: async () => {
+      const name = (await appDialogs.prompt("Snapshot name:", `Snapshot ${s().mixerSnapshots.length + 1}`));
       if (name) s().saveMixerSnapshot(name);
     }},
-    { id: "mixer.recallSnapshot", name: "Recall Mixer Snapshot...", category: "Mixer", canHandleShortcut: () => s().mixerSnapshots.length > 0, execute: () => {
+    { id: "mixer.recallSnapshot", name: "Recall Mixer Snapshot...", category: "Mixer", canHandleShortcut: () => s().mixerSnapshots.length > 0, execute: async () => {
       const state = s();
-      const choice = chooseByNumber("Recall mixer snapshot (enter number):", state.mixerSnapshots.map((snapshot, index) => ({ snapshot, index })), ({ snapshot }) => snapshot.name);
+      const choice = (await chooseByNumber("Recall mixer snapshot (enter number):", state.mixerSnapshots.map((snapshot, index) => ({ snapshot, index })), ({ snapshot }) => snapshot.name));
       if (choice) state.recallMixerSnapshot(choice.index);
     }},
-    { id: "mixer.deleteSnapshot", name: "Delete Mixer Snapshot...", category: "Mixer", canHandleShortcut: () => s().mixerSnapshots.length > 0, execute: () => {
+    { id: "mixer.deleteSnapshot", name: "Delete Mixer Snapshot...", category: "Mixer", canHandleShortcut: () => s().mixerSnapshots.length > 0, execute: async () => {
       const state = s();
-      const choice = chooseByNumber("Delete mixer snapshot (enter number):", state.mixerSnapshots.map((snapshot, index) => ({ snapshot, index })), ({ snapshot }) => snapshot.name);
-      if (choice && confirm(`Delete mixer snapshot "${choice.snapshot.name}"?`)) state.deleteMixerSnapshot(choice.index);
+      const choice = (await chooseByNumber("Delete mixer snapshot (enter number):", state.mixerSnapshots.map((snapshot, index) => ({ snapshot, index })), ({ snapshot }) => snapshot.name));
+      if (choice && (await appDialogs.confirm(`Delete mixer snapshot "${choice.snapshot.name}"?`))) state.deleteMixerSnapshot(choice.index);
     }},
     { id: "mixer.toggleMasterMute", name: "Mute / Unmute Master", category: "Mixer", shortcutScope: "mixer", execute: () => s().toggleMasterMute() },
     { id: "mixer.toggleMasterMono", name: "Toggle Master Mono", category: "Mixer", shortcutScope: "mixer", execute: () => s().toggleMasterMono() },
@@ -2296,8 +2249,8 @@ export function getRegisteredActions(): ActionDef[] {
     availableScopedComponentAction("script.showFilesTab", "Show Script Files", "Script", "modal"),
     activeScopedComponentAction("track.openSelectedNotes", "Open Selected Track Notes", "Track", "track_control_panel"),
     activeScopedComponentAction("track.loadSelectedSamplerSample", "Load Sampler Sample on Selected Track...", "Track", "track_control_panel"),
-    { id: "file.saveAsTemplate", name: "Save as Template...", category: "File", execute: () => {
-      const name = prompt("Template name:");
+    { id: "file.saveAsTemplate", name: "Save as Template...", category: "File", execute: async () => {
+      const name = (await appDialogs.prompt("Template name:"));
       if (name) s().saveAsTemplate(name);
     }},
   ];

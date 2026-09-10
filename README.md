@@ -60,7 +60,7 @@ It combines classic multitrack production with newer tools such as stem separati
 | Render | WAV, AIFF, FLAC, MP3, and OGG; target sample rate, mono/stereo, normalize, tail, dither, track stems, and secondary output (MP3/OGG and FFmpeg conversions require system FFmpeg on macOS/Linux) |
 | Delivery | Render queue, region render matrix, DDP export, batch converter, session archive, project compare, and clean-project tools |
 | Workflow | Command palette, searchable/printable shortcut reference, 19 built-in DAW keyboard profiles, independently selectable mouse/scroll profiles, scoped rebinding, custom keyboard-profile import/export, help overlay, getting started guide, screensets, themes, toolbar editor |
-| Extensibility | Lua scripting API, script editor, JSFX/S13FX script effects, project automation helpers |
+| Extensibility | Lua scripting API, script editor, JSFX script effects, project automation helpers |
 | Sync / media | Timecode display/settings, big clock, media explorer browse/import, media-pool plumbing (partial), missing media resolver, video window plumbing |
 
 Some advanced features are still evolving. See [Implemented But Partial / Caveated](docs/implemented_features.md#implemented-but-partial--caveated) for the honest edges.
@@ -79,7 +79,7 @@ licenses, accounts, hardware requirements, and usage terms.
 | MIDI note editing | **Included — free** | Piano roll, note/velocity/CC editing, transforms, virtual keyboard, and MIDI import/export |
 | Pitch and source workflows | **Included — free** | Graphical monophonic pitch workflow, real-time pitch corrector, stem-separation integration, and audio-to-MIDI plumbing; optional models/runtime may be required |
 | Guitar and bass rig | **Included — free** | NAM A1/A2 capture hosting, pedal/amp/full-rig slots, local cabinet-IR loading, native pedalboard and post effects, Guitar/Bass voicing, presets, A/B, and project recall |
-| Plug-in and scripting host | **Included — free** | Primarily VST3 hosting with CLAP/LV2 code paths, built-in effects, JSFX/S13FX-style effects, and Lua scripting |
+| Plug-in and scripting host | **Included — free** | Primarily VST3 hosting with CLAP/LV2 code paths, built-in effects, JSFX-style effects, and Lua scripting |
 | Hotkey and mouse profiles | **Included — free** | 19 built-in DAW-style keyboard maps, independent mouse/scroll maps, scoped multi-binding, conflict checks, and named custom keyboard profiles with JSON import/export |
 | AI-assisted creation | **Free / optional setup** | Local integration for generation, variation, inpaint, continuation, stems, and audio-to-MIDI; the small Basic Pitch model is included and its inference runtime is enabled in current Windows/Linux releases, while large generation/stem runtimes and models remain optional downloads |
 | Local and inspectable workflow | **Included — free** | Local project files and source-visible JUCE/React implementation under the GNU AGPLv3 |
@@ -159,7 +159,7 @@ Cubase is a mature commercial composition DAW. OpenStudio is the open local-firs
 | Recording / editing / mixing | ✅ Decades of polished DAW workflows | ✅ Native JUCE engine, clip editing, takes, razor/ripple edits, sends, buses, mixer snapshots |
 | Pitch / stems / audio-to-MIDI | VariAudio 3 is in Artist/Pro; AI stem separation is Pro-only; Audio-to-MIDI chords are in Elements/Artist/Pro | Graphical pitch editor, real-time pitch corrector, stem separation integration, and Basic Pitch audio-to-MIDI in ONNX-enabled Windows/Linux builds |
 | AI generation | ⚠️ Assisted tools, but not a local AI music-generation DAW workflow | ✅ Optional local AI Tools runtime for ACE-Step, Stable Audio 3, variation, inpaint, continuation, stems |
-| Plugin ecosystem | VST3 hosting; ARA 2 in Artist/Pro. VST2 can be enabled in limited cases but is officially unsupported | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX/S13FX, Lua |
+| Plugin ecosystem | VST3 hosting; ARA 2 in Artist/Pro. VST2 can be enabled in limited cases but is officially unsupported | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX, Lua |
 | Local / private workflow | Local desktop DAW; proprietary software and licensing | ✅ Local project files, optional local AI runtime, source-visible implementation |
 | Open / customizable | ❌ Closed source | ✅ Fork it, script it, extend it, inspect the engine |
 | Where Cubase still wins | ✅ Mature scoring, VariAudio polish, bundled content, commercial support | ⚠️ Some advanced OpenStudio features remain partial or release-hardening dependent |
@@ -175,7 +175,7 @@ Pro Tools is the facility standard. OpenStudio is for producers and builders who
 | Recording / editing / mixing | ✅ Deep tracking, comping, editing, post-production, automation | ✅ Multitrack recording, takes, razor/ripple edits, routing, automation, mixer, render queue |
 | Pitch / repair | All tiers support ARA 2. Intro requires a separately licensed or trial ARA plug-in; active paid subscriptions and perpetual Upgrade Plans include Melodyne essential, RePitch Elements, and other repair tools | Built-in graphical pitch editor, real-time pitch corrector, ARA host plumbing |
 | AI generation | ⚠️ Integrations and assisted workflows, but not a local AI music generator inside the DAW core | ✅ Text-to-music, lyrics+style, text-to-audio, variation, inpaint, continuation, stems |
-| Plugin ecosystem | AAX Native/AudioSuite across all tiers, plus ARA 2 integration; third-party AAX works in Intro and paid tiers | VST3 plus CLAP/LV2 code paths, built-in FX, JSFX/S13FX, Lua scripting |
+| Plugin ecosystem | AAX Native/AudioSuite across all tiers, plus ARA 2 integration; third-party AAX works in Intro and paid tiers | VST3 plus CLAP/LV2 code paths, built-in FX, JSFX, Lua scripting |
 | Local / private workflow | Local desktop DAW; proprietary software/licensing with optional connected services | ✅ Local files, optional local AI runtime, inspectable source |
 | Open / customizable | ❌ Closed source | ✅ Source-visible, scriptable, hackable |
 | Where Pro Tools still wins | ✅ Commercial facilities, HDX/AAX workflows, immersive/post pipelines, support ecosystem | ⚠️ OpenStudio is not claiming facility-standard interchange parity |
@@ -255,12 +255,9 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 ## Project And File Formats
 
 - Project files: `.osproj`
-- Legacy project import/open: `.s13`
 - Theme exports: `.ostheme`
-- Legacy theme import: `.s13theme`
 - Built-in FX presets: `.ospreset`
 - Waveform peak cache: `.ospeaks`
-- Legacy peak cache support: `.s13peaks`
 
 ## Architecture
 
@@ -318,8 +315,33 @@ cmake --build build --config Debug
 cmake --build build --config Release
 
 # Production package path
-python build.py prod
+python build.py prod --version 0.1.02
 ```
+
+## Installation and first-use access
+
+On Windows, open Setup normally and approve its UAC elevation request. The VC++
+and WebView2 prerequisites are machine-wide installations; a standard account
+may need administrator credentials. Setup skips a sufficient VC++ runtime,
+recognizes restart-required results, and offers Retry with the actual exit code
+and logs under `%ProgramData%\OpenStudio\InstallerLogs`. If you explicitly
+started Setup as another administrator, launch OpenStudio yourself from the Start
+menu afterward so it uses your account's preferences and credentials.
+
+On macOS, microphone authorization is requested when you enable hardware input
+monitoring, record audio, or apply an input device. Playback, MIDI editing and
+playback effects do not need microphone consent. If access was denied, enable
+OpenStudio in **System Settings > Privacy & Security > Microphone**. User media,
+effects and scripts can still require Documents access. Internal macOS logs use
+`~/Library/Logs/OpenStudio`; plugin settings use
+`~/Library/Application Support/OpenStudio/Plugins`. Existing OpenStudio plugin
+settings are copied and verified on first plugin use, with the originals kept.
+
+For online NAM captures, open the Amp or Cab library and use **Connect TONE3000**
+next to the results-panel status. Sign in in your browser; release builds provide
+the app configuration and users do not enter an API key. Login is remembered for
+each OS user/computer, subject to provider revocation and secure-store access.
+Local NAM captures and IR files remain usable offline.
 
 ## macOS First Launch Note
 
@@ -335,6 +357,7 @@ Removing quarantine is not the preferred installation path because it recursivel
 
 ## Documentation
 
+- [Code signing policy (draft)](docs/code-signing-policy.md) and [Windows SignPath setup](docs/release-runbook.md#windows-signing-with-signpath)
 - [User Manual](docs/USER_MANUAL.md)
 - [Lua Scripting API](docs/API.md)
 - [Runtime Dependency Contract](docs/runtime-dependency-contract.md)
@@ -359,7 +382,7 @@ available in Git instead of accumulating as dated plan documents.
 | Frontend | React 18, TypeScript, Vite, Zustand, Tailwind CSS, Konva |
 | Plugins | JUCE plugin hosting, VST3, CLAP integration, LV2 code paths, ARA SDK |
 | Analysis / AI | ONNX Runtime, Basic Pitch model flow, ACE-Step, Stable Audio 3 optional runtime |
-| Scripting | Lua / sol2, S13FX / JSFX-style script processor |
+| Scripting | Lua / sol2, JSFX / JSFX-style script processor |
 | Packaging | CMake, build.py orchestration, platform release scripts |
 
 ## Status

@@ -1,7 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 
-#if S13_HAS_ONNXRUNTIME
+#if OPENSTUDIO_HAS_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
 #endif
 
@@ -81,7 +81,7 @@ private:
                                         const std::vector<std::vector<float>>& onsetActivation,
                                         int hopSize, double sampleRate);
 
-#if S13_HAS_ONNXRUNTIME
+#if OPENSTUDIO_HAS_ONNXRUNTIME
     std::unique_ptr<Ort::Env> ortEnv;
     std::unique_ptr<Ort::Session> ortSession;
     Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu (OrtArenaAllocator, OrtMemTypeDefault);

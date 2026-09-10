@@ -117,7 +117,7 @@ function buildGuideSteps(): GuideStep[] {
         keyboardPresentation.policyLabel,
         keyboardPresentation.availabilityLabel,
       ],
-      tip: "Open Keyboard Shortcuts to switch profiles or rebind any global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, or plug-in scoped action.",
+      tip: "Open Keyboard, Mouse & Trackpad to switch profiles or rebind any global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, or plug-in scoped action.",
     },
     {
       icon: <Navigation size={32} className="text-daw-accent" />,
@@ -145,7 +145,7 @@ function buildGuideSteps(): GuideStep[] {
         "Set sample rate and buffer size for a good latency/CPU balance",
         "Return to Preferences for editing, display, mouse, and backup options",
       ],
-      tip: `Use ${preferencesShortcut} for Preferences. Shortcut rebinding is handled in Keyboard Shortcuts, not inside Preferences.`,
+      tip: `Use ${preferencesShortcut} for Preferences. Shortcut rebinding is handled in Keyboard, Mouse & Trackpad, not inside Preferences.`,
     },
     {
       icon: <Music size={32} className="text-daw-accent" />,
@@ -249,11 +249,11 @@ function buildGuideSteps(): GuideStep[] {
         "Once you know the core gestures and shortcuts, the fastest next step is to use the built-in references instead of memorizing everything immediately.",
       details: [
         `${helpShortcut}: Help Reference for searchable feature guidance`,
-        "Keyboard Shortcuts window for profiles, the full shortcut list, and scoped rebinding",
+        "Keyboard, Mouse & Trackpad window for profiles, the full shortcut list, and scoped rebinding",
         `Preferences (${preferencesShortcut}) for editing, display, mouse, and backup settings`,
         `Command Palette (${commandPaletteShortcut}) to find actions by name`,
       ],
-      tip: "If a shortcut behaves differently than expected, check the Keyboard Shortcuts window first because its scoped binding or selected profile may have changed.",
+      tip: "If a shortcut behaves differently than expected, check the Keyboard, Mouse & Trackpad window first because its scoped binding or selected profile may have changed.",
     },
   ];
 }

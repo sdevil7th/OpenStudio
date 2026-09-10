@@ -4,6 +4,7 @@
 #include <array>
 #include <memory>
 #include <map>
+#include "RecordingWriterSafety.h"
 
 // Handles recording audio to disk for individual tracks.
 // Uses JUCE's ThreadedWriter to move disk I/O off the audio thread,
@@ -11,7 +12,7 @@
 class AudioRecorder
 {
 public:
-    AudioRecorder();
+    explicit AudioRecorder(const juce::File& recoveryRoot = RecoveryJournal::defaultRoot());
     ~AudioRecorder();
 
     // Start recording for a specific track
@@ -33,6 +34,7 @@ public:
     void setRecordingStartTime(const juce::String& trackId, double timeInSeconds);
     int getWriteLockMissCount() const { return writeLockMissCount.load(std::memory_order_relaxed); }
     int getWriterBufferOverflowCount() const { return writerBufferOverflowCount.load(std::memory_order_relaxed); }
+    juce::var takeWriteFailures(); // Control thread; one notification per failed take.
 
     // Stop all active recordings and return info about completed clips
     struct CompletedRecording {
@@ -61,6 +63,7 @@ private:
     {
         juce::String trackId;
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
+        std::shared_ptr<RecordingWriteStatus> writeStatus;
         juce::File outputFile;
         std::atomic<bool> isActive { false };
         double startTime = 0.0;      // Recording start time in seconds
@@ -101,6 +104,7 @@ private:
     };
 
     std::map<juce::String, ActiveRecording> activeRecordings;
+    std::vector<std::shared_ptr<RecordingWriteStatus>> pendingWriteStatuses;
     bool startRecordingInternal(const juce::String& trackId,
                                 const juce::File& file,
                                 double sampleRate,
@@ -108,6 +112,7 @@ private:
                                 double initialStartTime,
                                 CompletedRecording* replacedTake);
     juce::WavAudioFormat wavFormat;
+    RecoveryJournal recoveryJournal;
     mutable juce::CriticalSection writerLock;  // Protects activeRecordings map structure
 
     // Background thread for disk I/O (shared by all recordings)

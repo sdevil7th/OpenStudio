@@ -1,4 +1,7 @@
 #include "PeakCache.h"
+#include <cmath>
+
+namespace { constexpr juce::int64 maxPeakDataBytes = 256 * 1024 * 1024; }
 
 // Static constexpr definitions (required for ODR-use in C++17)
 constexpr int PeakCache::LEVEL_STRIDES[NUM_LEVELS];
@@ -7,17 +10,14 @@ PeakCache::PeakCache() {}
 
 PeakCache::~PeakCache()
 {
-    backgroundPool.removeAllJobs(true, 5000);
+    stopping.store(true);
+    completions.invalidate();
+    backgroundPool.removeAllJobs(true, -1); // Never destroy data beneath a surviving scan.
 }
 
 juce::File PeakCache::getPeakFilePath(const juce::File& audioFile)
 {
     return audioFile.getSiblingFile(audioFile.getFileName() + ".ospeaks");
-}
-
-juce::File PeakCache::getLegacyPeakFilePath(const juce::File& audioFile)
-{
-    return audioFile.getSiblingFile(audioFile.getFileName() + ".s13peaks");
 }
 
 bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
@@ -31,13 +31,11 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
 
     // Check disk
     auto peakFile = getPeakFilePath(audioFile);
-    if (!peakFile.existsAsFile())
-        peakFile = getLegacyPeakFilePath(audioFile);
 
     if (!peakFile.existsAsFile())
         return false;
 
-    // Validate header (quick check: magic, version, source file size/time)
+    // Validate metadata and its on-disk footprint without allocating.
     juce::FileInputStream fis(peakFile);
     if (!fis.openedOk() || fis.getTotalLength() < (juce::int64)sizeof(PeakFileHeader))
         return false;
@@ -49,6 +47,19 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
     if (header.magic != MAGIC || header.version != VERSION)
         return false;
 
+    if (header.numLevels != NUM_LEVELS || header.numChannels < 1 || header.numChannels > 64
+        || header.totalSamples < 1 || header.totalSamples > INT64_MAX - 4096
+        || !std::isfinite(header.sampleRate) || header.sampleRate < 8000 || header.sampleRate > 384000
+        || fis.getTotalLength() > maxPeakDataBytes + 4096) return false;
+
+    for (int level = 0; level < NUM_LEVELS; ++level)
+    {
+        int32_t stride = 0, count = 0;
+        if (fis.read(&stride, sizeof(stride)) != sizeof(stride) || fis.read(&count, sizeof(count)) != sizeof(count)
+            || stride != LEVEL_STRIDES[level] || count < 1 || count != (header.totalSamples + stride - 1) / stride) return false;
+        const auto bytes = static_cast<juce::int64>(count) * header.numChannels * 8;
+        if (bytes > fis.getTotalLength() - fis.getPosition() || !fis.setPosition(fis.getPosition() + bytes)) return false;
+    }
     // Check if source file matches
     if (header.sourceFileSize != audioFile.getSize())
         return false;
@@ -77,9 +88,6 @@ void PeakCache::invalidate(const juce::File& audioFile)
     if (peakFile.existsAsFile())
         peakFile.deleteFile();
 
-    auto legacyPeakFile = getLegacyPeakFilePath(audioFile);
-    if (legacyPeakFile.existsAsFile())
-        legacyPeakFile.deleteFile();
 }
 
 juce::var PeakCache::getPeaks(const juce::File& audioFile,
@@ -87,6 +95,8 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
                                int startSample,
                                int numPixels) const
 {
+    if (samplesPerPixel < 1 || numPixels < 1 || numPixels > 32768)
+        return juce::var(juce::Array<juce::var>());
     auto buildResult = [samplesPerPixel, startSample, numPixels](const CacheEntry& entry)
     {
         juce::Array<juce::var> peakData;
@@ -152,8 +162,6 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
 
     CacheEntry entry;
     auto peakFile = getPeakFilePath(audioFile);
-    if (!peakFile.existsAsFile())
-        peakFile = getLegacyPeakFilePath(audioFile);
 
     if (!peakFile.existsAsFile() || !loadFromFile(peakFile, audioFile, entry))
         return juce::var(juce::Array<juce::var>());
@@ -168,6 +176,7 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
 
 bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audioFile, CacheEntry& entry) const
 {
+    if (peakFile.getSize() > maxPeakDataBytes + 4096) return false;
     juce::FileInputStream fis(peakFile);
     if (!fis.openedOk())
         return false;
@@ -178,6 +187,11 @@ bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audio
 
     if (header.magic != MAGIC || header.version != VERSION)
         return false;
+
+    if (header.numLevels != NUM_LEVELS || header.numChannels < 1 || header.numChannels > 64
+        || header.totalSamples < 1 || header.totalSamples > INT64_MAX - 4096
+        || !std::isfinite(header.sampleRate) || header.sampleRate < 8000 || header.sampleRate > 384000) return false;
+    juce::int64 accumulatedBytes = 0;
 
     // Validate source file hasn't changed
     if (header.sourceFileSize != audioFile.getSize() ||
@@ -194,6 +208,11 @@ bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audio
         int32_t stride = 0, numPeaks = 0;
         if (fis.read(&stride, sizeof(stride)) != sizeof(stride)) return false;
         if (fis.read(&numPeaks, sizeof(numPeaks)) != sizeof(numPeaks)) return false;
+        if (stride != LEVEL_STRIDES[i] || numPeaks < 1
+            || numPeaks != (header.totalSamples + stride - 1) / stride) return false;
+        const auto byteCount = static_cast<juce::int64>(numPeaks) * header.numChannels * 2 * static_cast<juce::int64>(sizeof(float));
+        accumulatedBytes += byteCount;
+        if (accumulatedBytes > maxPeakDataBytes || byteCount > fis.getTotalLength() - fis.getPosition()) return false;
 
         auto& level = entry.levels[static_cast<size_t>(i)];
         level.stride = stride;
@@ -206,6 +225,7 @@ bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audio
         size_t bytesToRead = floatCount * sizeof(float);
         if (fis.read(level.data.data(), static_cast<int>(bytesToRead)) != static_cast<int>(bytesToRead))
             return false;
+        for (const auto value : level.data) if (!std::isfinite(value)) return false;
     }
 
     return true;
@@ -214,14 +234,17 @@ bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audio
 bool PeakCache::writeToFile(const juce::File& peakFile, const CacheEntry& entry,
                              int64_t sourceFileSize, int64_t sourceModTimeMs)
 {
-    juce::FileOutputStream fos(peakFile);
+    juce::TemporaryFile temporary(peakFile);
+    bool finalized = false;
+    {
+    juce::FileOutputStream fos(temporary.getFile());
     if (!fos.openedOk())
         return false;
 
     fos.setPosition(0);
     fos.truncate();
 
-    PeakFileHeader header;
+    PeakFileHeader header {};
     header.magic = MAGIC;
     header.version = VERSION;
     header.sourceFileSize = sourceFileSize;
@@ -243,7 +266,9 @@ bool PeakCache::writeToFile(const juce::File& peakFile, const CacheEntry& entry,
     }
 
     fos.flush();
-    return true;
+    finalized = fos.getStatus().wasOk();
+    }
+    return finalized && temporary.overwriteTargetFileWithTemporary();
 }
 
 bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
@@ -258,6 +283,16 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
     int numChannels = static_cast<int>(reader->numChannels);
     juce::int64 totalSamples = reader->lengthInSamples;
     double sampleRate = reader->sampleRate;
+    if (stopping.load() || numChannels < 1 || numChannels > 64 || totalSamples < 1 || totalSamples > INT64_MAX - 4096
+        || !std::isfinite(sampleRate) || sampleRate < 8000 || sampleRate > 384000) return false;
+    juce::int64 peakBytes = 0;
+    for (const auto stride : LEVEL_STRIDES)
+    {
+        const auto peaks = (totalSamples + stride - 1) / stride;
+        if (peaks > maxPeakDataBytes / (numChannels * 2 * static_cast<int>(sizeof(float)))) return false;
+        peakBytes += peaks * numChannels * 2 * sizeof(float);
+    }
+    if (peakBytes > maxPeakDataBytes) return false;
 
     entry.numChannels = numChannels;
     entry.sampleRate = sampleRate;
@@ -303,10 +338,11 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
 
     while (samplesRead < totalSamples)
     {
+        if (stopping.load()) return false;
         int samplesToRead = static_cast<int>(std::min(static_cast<juce::int64>(CHUNK_SIZE),
                                                        totalSamples - samplesRead));
         readBuffer.clear();
-        reader->read(&readBuffer, 0, samplesToRead, samplesRead, true, true);
+        if (!reader->read(&readBuffer, 0, samplesToRead, samplesRead, true, true)) return false;
 
         // Process each sample
         for (int s = 0; s < samplesToRead; ++s)
@@ -316,6 +352,7 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
                     const float val = readBuffer.getSample(ch, s);
+                    if (!std::isfinite(val)) return false;
                     chMin[static_cast<size_t>(ch)] = val;
                     chMax[static_cast<size_t>(ch)] = val;
                 }
@@ -325,6 +362,7 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
                 for (int ch = 0; ch < numChannels; ++ch)
                 {
                     const float val = readBuffer.getSample(ch, s);
+                    if (!std::isfinite(val)) return false;
                     if (val < chMin[static_cast<size_t>(ch)]) chMin[static_cast<size_t>(ch)] = val;
                     if (val > chMax[static_cast<size_t>(ch)]) chMax[static_cast<size_t>(ch)] = val;
                 }
@@ -348,6 +386,7 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
 
         for (int peak = 0; peak < level.numPeaks; ++peak)
         {
+            if ((peak & 4095) == 0 && stopping.load()) return false;
             const int fineStart = peak * finePeaksPerCoarsePeak;
             const int fineEnd = juce::jmin(fineStart + finePeaksPerCoarsePeak, fineLevel.numPeaks);
             if (fineStart >= fineEnd)
@@ -379,7 +418,7 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
 bool PeakCache::generateSync(const juce::File& audioFile)
 {
     CacheEntry entry;
-    if (!buildPeaks(audioFile, entry))
+    if (!buildPeaks(audioFile, entry) || stopping.load())
         return false;
 
     // Write to disk
@@ -402,11 +441,15 @@ bool PeakCache::generateSync(const juce::File& audioFile)
 
 void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()> onComplete)
 {
+    if (stopping.load()) return;
+    const auto complete = [alive = completions.token(), onComplete] {
+        if (MessageThreadLifetime::accepts(alive) && onComplete) onComplete();
+    };
     // If already cached, call completion immediately
     if (hasCachedPeaks(audioFile))
     {
         if (onComplete)
-            juce::MessageManager::callAsync(onComplete);
+            juce::MessageManager::callAsync(complete);
         return;
     }
 
@@ -420,7 +463,7 @@ void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()>
     }
 
     // Queue background generation
-    backgroundPool.addJob([this, audioFile, onComplete]()
+    backgroundPool.addJob([this, audioFile, complete]()
     {
         generateSync(audioFile);
 
@@ -429,7 +472,6 @@ void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()>
             pendingGenerations.erase(audioFile.getFullPathName());
         }
 
-        if (onComplete)
-            juce::MessageManager::callAsync(onComplete);
+        juce::MessageManager::callAsync(complete);
     });
 }

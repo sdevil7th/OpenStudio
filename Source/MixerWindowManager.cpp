@@ -190,6 +190,12 @@ bool MixerWindowManager::close()
     if (! ensureMessageThread("close"))
         return false;
 
+    // A later close supersedes a reopen/prewarm queued during retirement.
+    // In particular, an FX removed while its editor is closing must not reopen
+    // against the replacement processor at the same chain index.
+    pendingRequest = {};
+    managersWithPendingRequests.removeFirstMatchingValue(this);
+
     if (state == WindowState::closing || state == WindowState::retired)
     {
         juce::Logger::writeToLog("Secondary window close ignored because close is already in progress: "
@@ -199,15 +205,6 @@ bool MixerWindowManager::close()
 
     if (mixerWindow == nullptr)
     {
-        if (pendingRequest.type != PendingRequest::Type::none)
-        {
-            juce::Logger::writeToLog("Secondary window close cancelled pending request before creation: "
-                                     + windowTitle + " state=" + getStateDescription());
-            pendingRequest = {};
-            managersWithPendingRequests.removeFirstMatchingValue(this);
-            return true;
-        }
-
         juce::Logger::writeToLog("Secondary window close ignored because no active window exists: "
                                  + windowTitle + " state=" + getStateDescription());
         return state == WindowState::idle;

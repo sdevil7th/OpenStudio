@@ -41,7 +41,7 @@ OpenStudio/
 │   ├── MIDIClip.h/cpp           # MIDI note event storage and time-range queries
 │   ├── Metronome.h/cpp          # Click track generation (BPM, time sig, accent patterns)
 │   ├── AudioConverter.h/cpp     # Channel/sample-rate conversion utilities
-│   ├── PeakCache.h/cpp          # REAPER-style multi-resolution peak cache (.s13peaks sidecar files)
+│   ├── PeakCache.h/cpp          # REAPER-style multi-resolution peak cache (.ospeaks sidecar files)
 │   ├── AudioAnalyzer.h/cpp      # Audio analysis utilities
 │   ├── BuiltInEffects.h/cpp     # Built-in audio effects (EQ, compressor, etc.)
 │   ├── BuiltInEffects2.h/cpp    # Additional built-in effects
@@ -58,13 +58,13 @@ OpenStudio/
 │   ├── HarmonicMaskGenerator.h/cpp # Wiener-filter soft masks at harmonic positions for poly separation
 │   ├── SpectralPitchShifter.h/cpp  # Phase vocoder on masked spectrograms with cepstral formant preservation
 │   ├── SpectralProcessor.h/cpp  # STFT/ISTFT utilities for spectral processing
-│   ├── S13PitchCorrector.h/cpp  # Real-time inline pitch corrector (auto-tune style)
+│   ├── OpenStudioPitchCorrector.h/cpp  # Real-time inline pitch corrector (auto-tune style)
 │   │
 │   │   # Plugin System
-│   ├── S13FXProcessor.h/cpp     # JSFX/Lua script-based audio processor (wraps YSFX)
-│   ├── S13FXGfxEditor.h/cpp     # JSFX @gfx rendering via juce::Image framebuffer at 30fps
-│   ├── S13PluginEditors.h/cpp   # Built-in plugin editor windows
-│   ├── S13ScriptWindow.h/cpp    # Lua gfx API framebuffer window
+│   ├── JSFXProcessor.h/cpp     # JSFX/Lua script-based audio processor (wraps YSFX)
+│   ├── JSFXGfxEditor.h/cpp     # JSFX @gfx rendering via juce::Image framebuffer at 30fps
+│   ├── OpenStudioPluginEditors.h/cpp   # Built-in plugin editor windows
+│   ├── OpenStudioScriptWindow.h/cpp    # Lua gfx API framebuffer window
 │   ├── ScriptEngine.h/cpp       # Lua scripting engine (sol2)
 │   │
 │   │   # Other Features
@@ -115,7 +115,7 @@ OpenStudio/
 │   │       ├── PitchCorrectorPanel.tsx  # Real-time inline corrector (auto-tune style, key/scale/retune)
 │   │       ├── PitchEditorLowerZone.tsx # Graphical pitch editor: canvas host, tools, controls, interaction handlers
 │   │       ├── PitchEditorCanvas.ts     # Imperative canvas renderer (60fps RAF loop): notes, contour, grid, piano keys
-│   │       ├── S13PitchEditor.tsx       # Pitch editor wrapper/container
+│   │       ├── OpenStudioPitchEditor.tsx       # Pitch editor wrapper/container
 │   │       ├── pitchCorrectorPresets.ts # Preset definitions for real-time pitch corrector
 │   │       │
 │   │       │   # Other
@@ -160,7 +160,7 @@ cmake --build build --config Debug
 cmake --build build --config Release
 
 # Production (builds frontend + Release C++, single .exe with embedded frontend)
-python build.py prod
+python build.py prod --version 0.1.02
 ```
 
 **No feature flags** — all features (ASIO, WASAPI, DirectSound, VST3 hosting, WebView2) are always enabled via hardcoded `target_compile_definitions` in CMakeLists.txt. The `build.py dev` mode uses Debug config; `build.py prod` uses Release.
@@ -200,7 +200,7 @@ For **continuous edits** (faders, knobs), use the begin/commit pattern: `beginXE
 
 ### Timeline Rendering
 - **Konva** (react-konva) for canvas-based rendering
-- Waveform peaks fetched from C++ via `getWaveformPeaks(filePath, samplesPerPixel, numPixels)` — backed by PeakCache (`.s13peaks` files), never reads audio files directly
+- Waveform peaks fetched from C++ via `getWaveformPeaks(filePath, samplesPerPixel, numPixels)` — backed by PeakCache (`.ospeaks` files), never reads audio files directly
 - `samplesPerPixel` uses the clip's `sampleRate` (not hardcoded) with power-of-2 quantization for cache stability
 - Zoom: exponential scaling via `Math.exp(-deltaY * sensitivity)`, anchored to cursor position
 - Zoom debounce: suppresses waveform re-fetches during active zoom (`isZoomingRef`, 200ms timeout)
@@ -228,7 +228,7 @@ Polyphonic pipeline:
   PolyPitchDetector (Basic-Pitch ONNX) → PolyNotes → HarmonicMaskGenerator (Wiener) → SpectralPitchShifter → PolyResynthesizer
 
 Real-time corrector:
-  S13PitchCorrector (per-block, key/scale aware) → inserted as FX plugin on track
+  OpenStudioPitchCorrector (per-block, key/scale aware) → inserted as FX plugin on track
 ```
 
 **Key data flow** (graphical editor):
@@ -259,11 +259,11 @@ Real-time corrector:
 - **Cached pan gains**: `TrackProcessor` pre-computes `cos`/`sin` pan gains as `std::atomic<float>` (`cachedPanL`, `cachedPanR`) when `setPan()` or `setVolume()` is called on the message thread. `processBlock()` on the audio thread loads these atomics cheaply — no trig computation per callback.
 - **AudioRecorder::writeBlock()** also uses `ScopedTryLock` — same pattern.
 
-### PeakCache System (.s13peaks)
+### PeakCache System (.ospeaks)
 
-- REAPER-inspired multi-resolution peak cache stored as `.s13peaks` sidecar files alongside audio files
+- REAPER-inspired multi-resolution peak cache stored as `.ospeaks` sidecar files alongside audio files
 - 4 mipmap levels at strides: 64, 256, 1024, 4096 samples per peak
-- File format: `PeakFileHeader` (magic `0x53313350` / "S13P", version, source file size/timestamp for invalidation, sample rate, channels, level count) followed by flat float arrays per level
+- File format: `PeakFileHeader` (magic `0x4f53504b` / "OSPK", version, source file size/timestamp for invalidation, sample rate, channels, level count) followed by flat float arrays per level
 - `AudioEngine::getWaveformPeaks()` reads from PeakCache — never reads audio files directly. First call generates the cache synchronously; subsequent calls are instant (memory-cached mipmap lookup)
 - Peak generation is triggered automatically in the background when recording stops (`peakCache.generateAsync()` for each completed clip)
 - `PeakCache::buildPeaks()` reads the audio file in a single pass, computing all 4 mipmap levels simultaneously using per-level accumulators

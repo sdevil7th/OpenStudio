@@ -32,6 +32,14 @@ describe("NAM Rack Cabinet Space controls", () => {
       label: "Doubler",
       paramIds: ["cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread"],
     });
+    expect(NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0].paramIds).toEqual([
+      "cabEnabled",
+      "cabDirectMix",
+      "cabLevelDb",
+      "cabPan",
+      "cabIRStereo",
+      "cabPhaseInvert",
+    ]);
     expect(NAM_RACK_ADVANCED_CONTROL_IDS.cab).toEqual([...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[0].paramIds]);
     expect(NAM_RACK_ADVANCED_CONTROL_IDS.room).toEqual([...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[1].paramIds]);
     expect(NAM_RACK_ADVANCED_CONTROL_IDS.doubler).toEqual([...NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS[2].paramIds]);
@@ -124,7 +132,7 @@ describe("NAM Rack Cabinet Space controls", () => {
     });
   });
 
-  it("keeps compact Cab/IR, Room, and Doubler independently powered without duplicate advanced editors", () => {
+  it("keeps Room editable in Signal Chain after removing it from the Cab faceplate", () => {
     const panelSource = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
 
     expect(panelSource).toContain("const cabinetStageActive = embeddedCabCapture || cabActive || cabinetSpaceAudible");
@@ -138,7 +146,7 @@ describe("NAM Rack Cabinet Space controls", () => {
     expect(panelSource).not.toContain("cabinetSpaceBusy");
     expect(panelSource).toContain('onToggle: !cabEnabledParam || !cabPresentation.canToggleExternalCab ? undefined : toggleCabPower');
     expect(namRackAdvancedStageForCompactModule("cab-ir")).toBeNull();
-    expect(namRackAdvancedStageForCompactModule("room")).toBeNull();
+    expect(namRackAdvancedStageForCompactModule("room")).toBe("room");
     expect(namRackAdvancedStageForCompactModule("doubler")).toBeNull();
   });
 
@@ -179,17 +187,15 @@ describe("NAM Rack Cabinet Space controls", () => {
     expect(doublerUtility).toContain('"4.5 ms"');
   });
 
-  it("keeps legacy cabRoomSend named Bloom rather than misrepresenting it as the new room", () => {
+  it("removes the legacy Low Bloom shaper from the current Cab faceplate", () => {
     const design = readFileSync(new URL("../components/NAMRackDesignPort.tsx", import.meta.url), "utf8");
-    const paramIndex = design.indexOf('paramId="cabRoomSend"');
-    const controlStart = design.lastIndexOf("<Knob", paramIndex);
-    const controlEnd = design.indexOf("/>", paramIndex);
-    const control = design.slice(controlStart, controlEnd + 2);
+    const cabStageStart = design.indexOf("function CabStage(");
+    const cabStageEnd = design.indexOf("function EqStage()", cabStageStart);
+    const cabStage = design.slice(cabStageStart, cabStageEnd);
 
-    expect(paramIndex).toBeGreaterThan(-1);
-    expect(controlStart).toBeGreaterThan(-1);
-    expect(control).toContain('paramId="cabRoomSend"');
-    expect(control).toContain('labelText="LOW BLOOM"');
-    expect(control).not.toContain('labelText="ROOM"');
+    expect(cabStage).not.toContain('paramId="cabRoomSend"');
+    expect(cabStage).not.toContain('labelText="LOW BLOOM"');
+    expect(cabStage).not.toContain("Legacy cabinet shaping");
+    expect(cabStage).not.toContain("Convert to IR-only");
   });
 });

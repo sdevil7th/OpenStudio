@@ -12,16 +12,35 @@ on:
       release_notes_file:
         description: "Path to a markdown file in the repo for release notes"
         required: false
-        default: "packaging/release-notes-template.md"
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  validate-release-notes:
+    runs-on: ubuntu-24.04
+    outputs:
+      notes_file: ${{ steps.notes.outputs.notes_file }}
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      NOTES_FILE: ${{ github.event.inputs.release_notes_file }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate exact-version release notes before building
+        id: notes
+        run: python3 tools/validate-release-notes.py --version "$VERSION" --notes-file "$NOTES_FILE" --github-output "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: validate-release-notes
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      WINDOWS_SIGNING_PROVIDER: ${{ vars.OPENSTUDIO_WINDOWS_SIGNING_PROVIDER || 'certificate' }}
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       BUILD_DIR: build-release-windows
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
@@ -33,6 +52,25 @@ jobs:
       RELEASE_SITE_URL: https://openstudio.org.in
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate Windows signing configuration
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+        run: |
+          if ($env:WINDOWS_SIGNING_PROVIDER -notin @('certificate', 'signpath')) {
+            throw "OPENSTUDIO_WINDOWS_SIGNING_PROVIDER must be certificate or signpath."
+          }
+          if ($env:WINDOWS_SIGNING_PROVIDER -eq 'signpath') {
+            foreach ($name in @('SIGNPATH_API_TOKEN', 'SIGNPATH_ORGANIZATION_ID', 'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG')) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                throw "SignPath is enabled but $name is missing. See docs/release-runbook.md#windows-signing-with-signpath."
+              }
+            }
+          }
 
       - name: Normalize version
         shell: pwsh
@@ -165,7 +203,50 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
           ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
 
+      - name: Stage Windows payload for SignPath
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        shell: pwsh
+        run: |
+          . ./tools/windows-signing.ps1
+          Copy-OpenStudioSigningFiles -SourceDirectory "$env:BUILD_DIR/OpenStudio_artefacts/Release" `
+            -DestinationDirectory "$env:RUNNER_TEMP/signpath-payload-unsigned" -Version $env:VERSION -RequireEmptyDestination
+
+      - name: Upload unsigned Windows payload
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        id: signpath-payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signpath-payload-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signpath-payload-unsigned/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign Windows payload
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2.3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: windows-payload
+          github-artifact-id: ${{ steps.signpath-payload.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ runner.temp }}/signpath-payload-signed
+          parameters: |
+            version: ${{ toJSON(env.VERSION) }}
+
+      - name: Verify and restore signed Windows payload
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        shell: pwsh
+        run: |
+          . ./tools/windows-signing.ps1
+          Copy-OpenStudioSigningFiles -SourceDirectory "$env:RUNNER_TEMP/signpath-payload-signed" `
+            -DestinationDirectory "$env:BUILD_DIR/OpenStudio_artefacts/Release" -Version $env:VERSION -RequireSignature
+
       - name: Prepare Windows signing certificate
+        if: env.WINDOWS_SIGNING_PROVIDER == 'certificate'
         shell: pwsh
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -189,6 +270,7 @@ jobs:
           "WINDOWS_CODESIGN_CERT_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Package Windows installer
+        if: env.WINDOWS_SIGNING_PROVIDER == 'certificate'
         shell: pwsh
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -215,6 +297,7 @@ jobs:
           $env:WINDOWS_TIMESTAMP_URL = ""
           $arguments = @{
             Version = $env:VERSION
+            NotesFile = $env:RELEASE_NOTES_FILE
             SourceDir = "$env:BUILD_DIR/OpenStudio_artefacts/Release"
           }
 
@@ -236,6 +319,52 @@ jobs:
 
           ./tools/package-windows-release.ps1 @arguments
 
+      - name: Package Windows installer with signed payload
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        shell: pwsh
+        run: |
+          ./tools/package-windows-release.ps1 -Version $env:VERSION -NotesFile $env:RELEASE_NOTES_FILE `
+            -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -RequireSignedPayload
+          . ./tools/windows-signing.ps1
+          Copy-OpenStudioSigningFiles -SourceDirectory "dist/windows" -Kind installer `
+            -DestinationDirectory "$env:RUNNER_TEMP/signpath-installer-unsigned" -Version $env:VERSION -RequireEmptyDestination
+
+      - name: Upload unsigned Windows installer
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        id: signpath-installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signpath-installer-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signpath-installer-unsigned/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign Windows installer
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2.3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: windows-installer
+          github-artifact-id: ${{ steps.signpath-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ runner.temp }}/signpath-installer-signed
+          parameters: |
+            version: ${{ toJSON(env.VERSION) }}
+
+      - name: Verify and restore signed Windows installer
+        if: env.WINDOWS_SIGNING_PROVIDER == 'signpath'
+        shell: pwsh
+        run: |
+          . ./tools/windows-signing.ps1
+          Copy-OpenStudioSigningFiles -SourceDirectory "$env:RUNNER_TEMP/signpath-installer-signed" -Kind installer `
+            -DestinationDirectory "dist/windows" -Version $env:VERSION -RequireSignature
+          Assert-OpenStudioSigningFiles -Directory "$env:BUILD_DIR/OpenStudio_artefacts/Release" `
+            -Version $env:VERSION -RequireSignature
+
       - name: Verify Windows release outputs
         shell: pwsh
         run: |
@@ -254,6 +383,33 @@ jobs:
         shell: pwsh
         run: ./tools/setup-ffmpeg.ps1 -CorrespondingSourceDestination "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
 
+      - name: Build validated Microsoft Store package
+        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+        shell: pwsh
+        env:
+          RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
+        run: |
+          $storeVersion = python tools/submit_store_release.py --version $env:VERSION --print-package-version
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid Store release version.' }
+          ./tools/package-windows-store.ps1 -Version $storeVersion -NotesFile $env:RELEASE_NOTES_FILE `
+            -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -OutputDir dist/store
+          python tools/submit_store_release.py --version $env:VERSION --package-dir dist/store `
+            --notes-file $env:RELEASE_NOTES_FILE --report dist/store/validation.json
+          if ($LASTEXITCODE -ne 0) { throw 'Store submission preflight failed.' }
+
+      - name: Retain Microsoft Store submission artifact
+        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microsoft-store-package
+          path: |
+            dist/store/*.msix
+            dist/store/package-report.json
+            dist/store/validation.json
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release
@@ -263,9 +419,11 @@ jobs:
           if-no-files-found: error
 
   build-macos:
+    needs: validate-release-notes
     runs-on: macos-14
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       BUILD_DIR: build-release-macos
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
@@ -449,7 +607,7 @@ jobs:
             echo "OpenStudio.app was not found in the build output." >&2
             exit 1
           fi
-          ./tools/package-macos-release.sh "$APP_PATH" "$VERSION"
+          ./tools/package-macos-release.sh "$APP_PATH" "$VERSION" dist/macos "$RELEASE_NOTES_FILE"
           if [[ -n "$MACOS_CODESIGN_IDENTITY" ]]; then
             echo "OPENSTUDIO_MACOS_PACKAGE_SIGNED=true" >> "$GITHUB_ENV"
           fi
@@ -502,9 +660,11 @@ jobs:
           if-no-files-found: error
 
   build-linux:
+    needs: validate-release-notes
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       BUILD_DIR: build-release-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
@@ -610,7 +770,7 @@ jobs:
       - name: Package AppImage
         run: |
           chmod +x ./tools/package-linux-release.sh
-          bash ./tools/package-linux-release.sh "$VERSION" "$BUILD_DIR"
+          bash ./tools/package-linux-release.sh "$VERSION" "$BUILD_DIR" "$RELEASE_NOTES_FILE"
 
       - name: Verify Linux release outputs
         run: test -f "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
@@ -642,6 +802,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs:
+      - validate-release-notes
       - build-windows
       - build-macos
       - build-linux
@@ -649,7 +810,7 @@ jobs:
       contents: write
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
-      RELEASE_NOTES_FILE: ${{ github.event.inputs.release_notes_file || 'packaging/release-notes-template.md' }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_RELEASE_TAG }}
       WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
@@ -849,3 +1010,46 @@ jobs:
           event-type: ${{ env.WEBSITE_DISPATCH_EVENT_TYPE }}
           client-payload: >-
             {"tag":"${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', github.event.inputs.version) }}","channel":"stable","desktopRepo":"${{ github.repository }}"}
+
+  submit-store:
+    name: Submit Microsoft Store update
+    needs: [publish, build-windows, validate-release-notes]
+    if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: microsoft-store
+    concurrency:
+      group: openstudio-microsoft-store-submission
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: microsoft-store-package
+          path: dist/store
+
+      - name: Submit the exact release package and notes
+        env:
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        run: >-
+          python3 tools/submit_store_release.py --version "$VERSION"
+          --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
+          --report output/store-submission.json --submit
+
+      - name: Retain sanitized submission status
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microsoft-store-submission-${{ github.run_attempt }}
+          path: output/store-submission.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -46,9 +46,9 @@ describe("AI feature installer contract", () => {
     expect(modalSource).not.toContain("Use Downloads Folder");
     expect(modalSource).toContain("Cancel Setup");
     expect(modalSource).toContain("stableAudioSelectedFolder");
-    expect(modalSource).toContain("modelId: STABLE_AUDIO_3_MODEL_ID");
+    expect(modalSource).toContain("modelId: selectedItem.modelId ?? STABLE_AUDIO_3_MODEL_ID");
     expect(modalSource).toContain("stableAudioLicenseAccepted");
-    expect(modalSource).toContain("LICENSE_GEMMA.md");
+    expect(modalSource).toContain("model_index.json");
     expect(bridgeSource).toContain("stableAudioModelPath?: string");
     expect(bridgeSource).toContain("stableAudioLicenseAccepted?: boolean");
     expect(bridgeSource).toContain("modelId?: AiMusicModelId");
@@ -57,31 +57,32 @@ describe("AI feature installer contract", () => {
   });
 
   it("validates Stable Audio 3 folder layout and license before import", () => {
-    expect(stemSeparatorSource).toContain("model.safetensors");
-    expect(stemSeparatorSource).toContain("t5gemma-b-b-ul2/tokenizer.model");
-    expect(stemSeparatorSource).toContain("Stable Audio 3 setup requires accepting");
+    expect(stemSeparatorSource).toContain("*.safetensors");
+    expect(stemSeparatorSource).not.toContain("git+https://github.com/Stability-AI/stable-audio-3.git");
+    expect(stemSeparatorSource).toContain("complete model weights (including every indexed shard)");
+    expect(stemSeparatorSource).toContain("Diffusers audio setup requires accepting");
     expect(stemSeparatorSource).toContain("stable_audio_model_path_required");
     expect(stemSeparatorSource).toContain("stable_audio_model_layout_invalid");
     expect(stemSeparatorSource).toContain("stable_audio_import_requested");
     expect(stemSeparatorSource).toContain("stable_audio_command_started");
-    expect(stemSeparatorSource).toContain("Stable Audio 3 dependencies can take several minutes to install.");
+    expect(stemSeparatorSource).toContain("Diffusers audio dependencies can take several minutes to install.");
     expect(stemSeparatorSource).toContain("stable_audio_command_cancelled");
-    expect(stemSeparatorSource).toContain("copyDirectoryTo(destination)");
+    expect(stemSeparatorSource).toContain("copyDirectoryTo(importRoot)");
   });
 
   it("keeps Stable Audio runtime separate from the ACE runtime", () => {
     expect(stemSeparatorSource).toContain("getStableAudioRuntimeRoot");
-    expect(stemSeparatorSource).toContain("stable-audio-runtime");
-    expect(stemSeparatorSource).toContain("Installing Stable Audio 3 CUDA PyTorch runtime");
-    expect(stemSeparatorSource).toContain("git+https://github.com/Stability-AI/stable-audio-3.git");
+    expect(stemSeparatorSource).toContain("diffusers-audio-runtime");
+    expect(stemSeparatorSource).toContain("Installing Diffusers audio CUDA PyTorch runtime");
+    expect(stemSeparatorSource).toContain("https://github.com/huggingface/diffusers/archive/");
     expect(stemSeparatorSource).toContain("stable_audio_flash_attention_skipped");
     expect(stemSeparatorSource).toContain("PyTorch attention fallback");
   });
 
   it("keeps Stable Audio install options intact through the store action", () => {
-    expect(storeSource).toContain("const isStableAudioImport = options.modelId === STABLE_AUDIO_3_MODEL_ID");
+    expect(storeSource).toContain("const isStableAudioImport = isDiffusersImportModel(options.modelId)");
     expect(storeSource).toContain("...options");
-    expect(storeSource).toContain("Stable Audio 3 setup is starting in the background.");
+    expect(storeSource).toContain("Diffusers audio setup is starting in the background.");
   });
 
   it("sanitizes internal ACE runtime paths from setup UI copy", () => {

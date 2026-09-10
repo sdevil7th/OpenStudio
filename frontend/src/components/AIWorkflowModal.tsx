@@ -345,9 +345,9 @@ export function AIWorkflowModal({
     <Modal isOpen={isOpen} onClose={onClose} size="xl">
       <ModalHeader title="AI Generation" onClose={onClose} />
       <ModalContent ref={contentRef}>
-        <div className="space-y-4">
-          <section className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="min-w-0 space-y-4" data-qa="ai-workflow-form">
+          <section className="rounded-lg border border-daw-accent/30 bg-daw-accent/5 p-4">
+            <div className="flex min-w-0 flex-col gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="inline-flex items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
@@ -369,7 +369,7 @@ export function AIWorkflowModal({
                 </p>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Select
                   label="Model"
                   value={modelId}

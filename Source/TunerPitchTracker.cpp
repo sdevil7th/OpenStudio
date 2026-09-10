@@ -1440,7 +1440,7 @@ void TunerPitchTracker::stopWorker() noexcept
 
     signalThreadShouldExit();
     notify();
-    stopThread(2000);
+    stopThread(-1); // Analysis observes the stop flag between bounded frames; no forced kill.
 }
 
 void TunerPitchTracker::publishSnapshot(

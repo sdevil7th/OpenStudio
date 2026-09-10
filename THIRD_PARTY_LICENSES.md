@@ -21,7 +21,7 @@ OpenStudio is released under AGPLv3-compatible terms.
 - **Website:** https://github.com/jpcima/ysfx
 - **License:** Apache License 2.0
 - **Copyright:** (c) Jean Pierre Cimalando and contributors
-- **Usage:** JSFX/EEL2 scripting runtime for built-in S13FX audio effects
+- **Usage:** JSFX/EEL2 scripting runtime for built-in JSFX audio effects
 
 Licensed under the Apache License, Version 2.0. You may obtain a copy at:
 http://www.apache.org/licenses/LICENSE-2.0

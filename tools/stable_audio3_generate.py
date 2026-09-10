@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import os
@@ -29,14 +28,15 @@ ORIGINAL_STDOUT = sys.stdout
 WORKER_PROTOCOL_VERSION = 2
 MAX_FRAMED_PAYLOAD_BYTES = 8 * 1024 * 1024
 SCRIPT_PATH = Path(__file__).resolve()
-SCRIPT_VERSION = hashlib.md5(SCRIPT_PATH.read_bytes()).hexdigest()[:16]
+SCRIPT_VERSION = hashlib.md5(SCRIPT_PATH.read_bytes() + SCRIPT_PATH.with_name("diffusers_audio_pipeline.py").read_bytes()).hexdigest()[:16]
 MODEL_ID = "stable-audio-3-medium"
+MODEL_LABEL = "Stable Audio 3 Medium"
 STABLE_AUDIO_DEFAULT_STEPS = 8
 STABLE_AUDIO_MIN_STEPS = 4
 STABLE_AUDIO_MAX_STEPS = 32
 STABLE_AUDIO_DEFAULT_CFG_SCALE = 1.0
-STABLE_AUDIO_MIN_CFG_SCALE = 0.1
-STABLE_AUDIO_MAX_CFG_SCALE = 3.0
+STABLE_AUDIO_MIN_CFG_SCALE = 1.0
+STABLE_AUDIO_MAX_CFG_SCALE = 1.0
 SOURCE_WORKFLOWS = {"variation", "inpaint-selection", "continue-clip"}
 STABLE_SOURCE_DEFAULT_NOISE_AMOUNT = 0.5
 STABLE_SOURCE_DEFAULT_EXTENSION_SECONDS = 8.0
@@ -93,7 +93,12 @@ def resolve_ffmpeg_executable() -> tuple[str | None, list[str]]:
 
 
 def emit_payload(payload: dict[str, Any]) -> None:
+    payload.setdefault("modelId", MODEL_ID)
+    for key in ("message", "error", "statusNote"):
+        if isinstance(payload.get(key), str):
+            payload[key] = payload[key].replace("Stable Audio 3 Medium", MODEL_LABEL)
     if payload.get("backend") == "stable-audio-3":
+        payload["backend"] = "diffusers-audio"
         payload.setdefault("runtimeProfile", "")
         payload.setdefault("lmModel", "")
         payload.setdefault("attemptMode", "")
@@ -209,7 +214,7 @@ def resample_wav_with_ffmpeg(
 
 def get_model_audio_format(model: Any) -> tuple[int, int]:
     model_config = getattr(model, "model_config", {}) if model is not None else {}
-    inner_model = getattr(model, "model", None)
+    inner_model = model
 
     sample_rate = getattr(inner_model, "sample_rate", None)
     if not sample_rate and isinstance(model_config, dict):
@@ -306,9 +311,6 @@ def audio_to_array(audio: Any) -> np.ndarray:
     if not np.all(np.isfinite(audio_array)):
         bad_samples = int(audio_array.size - np.count_nonzero(np.isfinite(audio_array)))
         raise RuntimeError(f"Stable Audio returned {bad_samples} non-finite samples; refusing to write a corrupted WAV.")
-    peak = float(np.max(np.abs(audio_array))) if audio_array.size else 0.0
-    if peak > 0.98:
-        audio_array = audio_array * (0.98 / peak)
     return audio_array.astype(np.float32)
 
 
@@ -453,7 +455,9 @@ def write_audio(
         target_peak=target_peak,
         target_rms=target_rms,
     )
-    sf.write(str(output_path), audio_array, sample_rate)
+    # Preserve unedited context and float headroom; default PCM16 would clip
+    # and requantize samples outside a requested inpaint selection.
+    sf.write(str(output_path), audio_array, sample_rate, subtype="FLOAT")
     return diagnostics
 
 
@@ -481,7 +485,25 @@ def build_generation_request(
     source_audio: tuple[int, Any] | None = None,
     source_meta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    from diffusers_audio_pipeline import MINIMAX_MODEL, model_workflows, normalize_song_lyrics
+    if workflow not in model_workflows(MODEL_ID):
+        raise ValueError(f"{MODEL_ID} does not support {workflow}.")
     prompt = normalize_text(params.get("prompt")).strip()
+    if MODEL_ID == MINIMAX_MODEL:
+        duration = clamp_float(normalize_float(params.get("duration"), 60), 5, 300)
+        lyrics = normalize_song_lyrics(normalize_text(params.get("lyrics")))
+        if workflow == "structured-song":
+            lyrics = "\n".join(f"[{tag}]\n{normalize_text(params.get(tag)).strip()}"
+                               for tag in ("verse", "chorus", "bridge") if normalize_text(params.get(tag)).strip())
+            prompt = "\n".join(part for part in (prompt, normalize_text(params.get("vocals")), normalize_text(params.get("arrangement"))) if part)
+        if not prompt or not lyrics:
+            raise ValueError("MiniMax song generation needs a music description and lyrics.")
+        steps = clamp_int(normalize_int(params.get("steps"), 30), 1, 100)
+        return dict(prompt=prompt, lyrics=lyrics, duration=duration, steps=steps,
+                    seed=normalize_int(params.get("seed"), -1)), {
+                        "expectedOutputDuration": 0,  # The model may stop early.
+                        "effectiveSteps": steps, "parameterAdjustments": [],
+                    }
     if workflow in SOURCE_WORKFLOWS and not prompt:
         raise RuntimeError(
             "Stable Audio source workflows need a direction prompt. Describe how the source should change or continue."
@@ -640,100 +662,9 @@ class StableAudioWorker:
                 "scriptVersion": SCRIPT_VERSION,
             })
 
-    def _disable_unavailable_triton_flex_attention(self) -> None:
-        try:
-            import triton  # noqa: F401
-            return
-        except Exception:
-            pass
-
-        try:
-            import stable_audio_3.models.transformer as transformer
-
-            transformer.flex_attention_available = False
-            transformer.flex_attention = None
-            transformer.flex_attention_compiled = None
-        except Exception:
-            pass
-
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
-        config_path = self.model_root / "model_config.json"
-        ckpt_path = self.model_root / "model.safetensors"
-        text_encoder_path = self.model_root / "t5gemma-b-b-ul2"
-        missing = [
-            str(path)
-            for path in (config_path, ckpt_path, text_encoder_path)
-            if not path.exists()
-        ]
-        if missing:
-            raise RuntimeError("Stable Audio 3 local model snapshot is incomplete: " + ", ".join(missing))
-
-        emit_payload({
-            "state": "loading",
-            "progress": 0.06,
-            "phase": "loading_model_config",
-            "message": "Reading local Stable Audio 3 model config...",
-            "backend": "stable-audio-3",
-            "modelId": MODEL_ID,
-            "workflowId": workflow,
-            "requestId": request_id,
-        })
-
-        import torch
-        from stable_audio_3 import StableAudioModel
-        from stable_audio_3.loading_utils import load_diffusion_cond
-        self._disable_unavailable_triton_flex_attention()
-
-        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        model_half = device != "cpu"
-        with config_path.open("r", encoding="utf-8") as handle:
-            model_config = copy.deepcopy(json.load(handle))
-
-        conditioning_configs = (
-            model_config
-            .get("model", {})
-            .get("conditioning", {})
-            .get("configs", [])
-        )
-        for conditioner in conditioning_configs:
-            if conditioner.get("type") == "t5gemma":
-                conditioner_config = conditioner.setdefault("config", {})
-                conditioner_config.pop("repo_id", None)
-                conditioner_config.pop("subfolder", None)
-                conditioner_config["model_path"] = str(text_encoder_path)
-
-        emit_payload({
-            "state": "loading",
-            "progress": 0.08,
-            "phase": "loading_model_weights",
-            "message": "Loading local Stable Audio 3 weights...",
-            "statusNote": f"Using {device.upper()} from the imported OpenStudio model folder.",
-            "backend": "stable-audio-3",
-            "modelId": MODEL_ID,
-            "workflowId": workflow,
-            "requestId": request_id,
-        })
-
-        model = load_diffusion_cond(
-            model_config,
-            str(ckpt_path),
-            device=device,
-            model_half=model_half,
-        )
-        model.use_lora = False
-        model.lora_names = []
-
-        emit_payload({
-            "state": "loading",
-            "progress": 0.18,
-            "phase": "model_ready",
-            "message": "Stable Audio 3 Medium model is loaded.",
-            "backend": "stable-audio-3",
-            "modelId": MODEL_ID,
-            "workflowId": workflow,
-            "requestId": request_id,
-        })
-        return StableAudioModel(model, model_config, device, model_half)
+        from diffusers_audio_pipeline import DiffusersAudioSession
+        return DiffusersAudioSession(self.model_root, MODEL_ID)
 
     def _load_model(self, workflow: str, request_id: str) -> Any:
         with self._lock:
@@ -752,7 +683,7 @@ class StableAudioWorker:
             except Exception as exc:
                 raise RuntimeError(
                     "Could not load the imported Stable Audio 3 Medium snapshot from "
-                    f"{self.model_root}. OpenStudio will not fall back to a Hugging Face download during generation."
+                    f"{self.model_root}: {exc}. OpenStudio will not download models during generation."
                 ) from exc
             finally:
                 stop_event.set()
@@ -802,17 +733,6 @@ class StableAudioWorker:
             effective_cfg_scale = normalize_float(request_details.get("effectiveCfgScale"), STABLE_AUDIO_DEFAULT_CFG_SCALE)
             parameter_adjustments = request_details.get("parameterAdjustments") or []
 
-            lora_path = normalize_text(params.get("lora_path"))
-            if lora_path:
-                if not Path(lora_path).expanduser().exists():
-                    raise RuntimeError(f"LoRA file does not exist: {lora_path}")
-                if hasattr(model, "load_lora"):
-                    model.load_lora([str(Path(lora_path).expanduser())])
-                else:
-                    raise RuntimeError("The installed Stable Audio runtime does not support LoRA loading.")
-                if hasattr(model, "set_lora_strength"):
-                    model.set_lora_strength(normalize_float(params.get("lora_strength"), 1.0))
-
             emit_payload({
                 "state": "generating",
                 "progress": 0.2,
@@ -857,20 +777,7 @@ class StableAudioWorker:
             )
             generation_heartbeat.start()
             try:
-                try:
-                    audio = model.generate(**kwargs)
-                except TypeError as exc:
-                    unsupported = ["negative_prompt", "steps", "cfg_scale"]
-                    retry_kwargs = dict(kwargs)
-                    for key in unsupported:
-                        retry_kwargs.pop(key, None)
-                    if retry_kwargs == kwargs:
-                        raise
-                    if workflow != "text-to-audio":
-                        raise RuntimeError(
-                            "The installed Stable Audio 3 runtime does not expose source-audio generation parameters."
-                        ) from exc
-                    audio = model.generate(**retry_kwargs)
+                audio = model.generate(workflow=workflow, **kwargs)
             finally:
                 generation_stop_event.set()
                 generation_heartbeat.join(timeout=1.0)
@@ -974,6 +881,7 @@ def run_worker(model_root: Path) -> None:
     port = server.getsockname()[1]
     emit_payload({
         "event": "ready",
+        "modelId": MODEL_ID,
         "port": port,
         "pid": os.getpid(),
         "backend": "stable-audio-3",
@@ -988,6 +896,10 @@ def run_worker(model_root: Path) -> None:
         with connection:
             request = read_framed_json(connection)
             request_id = normalize_text(request.get("requestId")) or str(uuid.uuid4())
+            if request.get("modelId") != MODEL_ID:
+                write_framed_json(connection, {"accepted": False, "requestId": request_id,
+                                              "error": "Worker model does not match the request."})
+                continue
             write_framed_json(connection, {
                 "accepted": True,
                 "requestId": request_id,
@@ -1005,9 +917,13 @@ def run_worker(model_root: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    global MODEL_ID, MODEL_LABEL
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--model-id", choices=["stable-audio-3-medium", "minimax-music-3"], default="stable-audio-3-medium")
     parser.add_argument("--model-root", required=True)
     args = parser.parse_args()
+    MODEL_ID = args.model_id
+    MODEL_LABEL = "MiniMax Music 3" if MODEL_ID == "minimax-music-3" else "Stable Audio 3 Medium"
     if not args.worker:
         raise SystemExit("--worker is required")
     run_worker(Path(args.model_root).expanduser())

@@ -5,6 +5,12 @@ type RackMutationPatch = {
   modelState?: Record<string, unknown>;
 };
 
+/** Selection expresses durable intent, not the previous render's effective
+ * bypass state. The native rack resolves full-rig auto-bypass at publication. */
+export function cabinetSelectionPatch(path: string): RackMutationPatch {
+  return { modelState: { cabIRPath: path.trim(), cabRequestedEnabled: true } };
+}
+
 export type VerifiedNAMRackMutationResult = "verified" | "rejected" | "unverified";
 
 export interface NAMRackMutationBridge {
@@ -51,6 +57,11 @@ export function doesNAMRackMutationMatchReadback(
     const actual = modelState[id];
     if (id.endsWith("Path")) {
       if (normalizedPath(actual, platform) !== normalizedPath(expected, platform)) return false;
+      // A remembered path may point to a missing resource. It is not a mount.
+      const presentKey = id === "cabIRPath" ? "hasCabIR"
+        : id === "ampModelPath" ? "hasAmpModel"
+        : id === "pedalModelPath" ? "hasPedalModel" : undefined;
+      if (presentKey && normalizedPath(expected, platform) && modelState[presentKey] !== true) return false;
     } else if (typeof expected === "number") {
       if (!Number.isFinite(Number(actual)) || Math.abs(Number(actual) - expected) >= 0.0001) return false;
     } else if (actual !== expected) {

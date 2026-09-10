@@ -10,6 +10,7 @@ type GetFn = () => any;
  */
 import { nativeBridge, type MissingMediaEntry } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
+import { advanceProjectEpoch, getProjectEpoch, getRecoveryDocumentId, getProjectEditRevision, markProjectEdited, serializeProjectSave } from "../../utils/projectLifetime";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
 import { createFreshProjectDocumentState } from "../useDAWStore";
@@ -23,7 +24,7 @@ import {
   resolveAiMusicModelId,
 } from "../../data/aiWorkflows";
 import { normalizeMIDIClipLoopLength, serializeMIDIClipsForBackend, syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
-import { FACTORY_QUANTIZE_PRESETS } from "../../utils/snapToGrid";
+import { FACTORY_QUANTIZE_PRESETS, GRID_SIZE_GROUPS, SNAP_TYPE_OPTIONS } from "../../utils/snapToGrid";
 import {
   findNAMAssetByIdentity,
   withStableNAMAssetIdentity,
@@ -35,18 +36,19 @@ import {
 } from "../../utils/namProjectState";
 import { isRetiredNAMRackAutomationParamId } from "../../utils/namPortableState";
 import { migrateLegacyChorusRateAutomationValue } from "../../utils/builtInParamValue";
+import { parseValidatedProject } from "../../utils/projectValidation";
 
 const AUTOMATION_CURVE_VERSION = 2;
+const SAVED_GRID_VALUES = new Set([
+  ...GRID_SIZE_GROUPS.flatMap(group => [...group.options]),
+  "half_bar", "quarter_bar", "eighth_bar", "half_beat", "quarter_beat",
+]);
 
 const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Piano",
   "OpenStudio Drums",
   "OpenStudio Basic Synth",
   "OpenStudio Clean Guitar",
-  "Studio13 Piano",
-  "Studio13 Drums",
-  "Studio13 Basic Synth",
-  "Studio13 Clean Guitar",
   "OpenStudio EQ",
   "OpenStudio Compressor",
   "OpenStudio Gate",
@@ -57,16 +59,6 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Saturator",
   "OpenStudio NAM Rack",
   "OpenStudio Pitch Correct",
-  "S13 EQ",
-  "S13 Compressor",
-  "S13 Gate",
-  "S13 Limiter",
-  "S13 Delay",
-  "S13 Reverb",
-  "S13 Chorus",
-  "S13 Saturator",
-  "S13 NAM Rack",
-  "S13 Pitch Correct",
 ]);
 
 function isBuiltInPluginPath(pluginPath: string | undefined): boolean {
@@ -77,15 +69,11 @@ function isBuiltInInstrumentPluginPath(pluginPath: string | undefined): boolean 
   return pluginPath === "OpenStudio Piano" ||
     pluginPath === "OpenStudio Drums" ||
     pluginPath === "OpenStudio Basic Synth" ||
-    pluginPath === "OpenStudio Clean Guitar" ||
-    pluginPath === "Studio13 Piano" ||
-    pluginPath === "Studio13 Drums" ||
-    pluginPath === "Studio13 Basic Synth" ||
-    pluginPath === "Studio13 Clean Guitar";
+    pluginPath === "OpenStudio Clean Guitar";
 }
 
 function isNAMRackPluginPath(pluginPath: string | undefined): boolean {
-  return pluginPath === "OpenStudio NAM Rack" || pluginPath === "S13 NAM Rack";
+  return pluginPath === "OpenStudio NAM Rack";
 }
 
 function pathKey(path: unknown): string {
@@ -262,6 +250,7 @@ const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "stepInputEnabled", "stepInputSize", "stepInputPosition",
   "audioDeviceSetup", "canUndo", "canRedo",
   "isProjectLoading", "projectLoadingMessage",
+  "metronomePracticeEnabled", "metronomePracticePending", "metronomePracticeError",
   "toastMessage", "toastType", "toastVisible",
   "tapTimestamps", "recentActions", "scriptConsoleOutput", "pluginABStates",
 ]);
@@ -479,6 +468,7 @@ function buildSerializedProjectData(
     automationCurveVersion: AUTOMATION_CURVE_VERSION,
     savedAt: Date.now(),
     projectName: state.projectName,
+    projectPersistentId: state.projectPersistentId,
     projectNotes: state.projectNotes,
     projectSampleRate: state.projectSampleRate,
     projectBitDepth: state.projectBitDepth,
@@ -542,10 +532,23 @@ function buildSerializedProjectData(
   };
 }
 
+function documentFingerprint(state: any) {
+  const document = buildSerializedProjectData(state, state.tracks, [], []);
+  return JSON.stringify({ ...document, savedAt: 0, undoHistory: undefined }, projectJsonReplacer);
+}
+
 async function teardownCurrentProject(get: GetFn, set: SetFn) {
+  const retiredDocumentId = getRecoveryDocumentId();
+  advanceProjectEpoch();
   const freshProjectState = createFreshProjectDocumentState();
   const removalIssues: NAMProjectStateIssue[] = [];
   await get().stop();
+  // Stop the session-only clock before changing any routing or removing FX.
+  // A failed native stop must not be hidden by replacing the frontend state.
+  if (!await get().setMetronomePracticeEnabled(false)) {
+    removalIssues.push({ phase: "remove", location: "Metronome", detail: "could not stop click-only playback" });
+    return removalIssues;
+  }
   await nativeBridge.closeAllPluginWindows().catch(() => false);
 
   const currentMasterFX = await nativeBridge.getMasterFX().catch((error) => {
@@ -613,6 +616,7 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
   }
 
   set(buildProjectResetState());
+  await nativeBridge.dismissProjectRecovery(retiredDocumentId, true).catch(logBridgeError("sync"));
   await nativeBridge.setProcessingPrecision(freshProjectState.processingPrecision).catch(logBridgeError("sync"));
   await nativeBridge.setTempo(freshProjectState.transport.tempo).catch(logBridgeError("sync"));
   await nativeBridge.setTimeSignature(
@@ -815,18 +819,24 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       await performPendingProjectAction(pendingAction, get);
     },
 
-    setModified: (modified) => set({ isModified: modified }),
+    setModified: (modified) => { if (modified) markProjectEdited(); set({ isModified: modified }); },
 
-    saveProject: async (saveAs = false) => {
+    saveProject: (saveAs = false, recoveryOnly = false) => serializeProjectSave(async () => {
+      const epoch = getProjectEpoch();
+      const documentId = getRecoveryDocumentId();
       let path = get().projectPath;
 
-      if (!path || saveAs) {
+      if (!recoveryOnly && (!path || saveAs)) {
         path = await nativeBridge.showSaveDialog(path || undefined);
         if (!path) return false;
       }
 
       try {
       const state = get();
+      if (epoch !== getProjectEpoch()) return false;
+      const savedRevision = commandManager.getRevision();
+      const savedEditRevision = getProjectEditRevision();
+      const savedFingerprint = documentFingerprint(state);
       const namLibraryPayload = await nativeBridge.getNAMLibrary().catch(() => ({ installed: [] }));
       const namInstalledByPath = buildNAMInstalledPathIndex(namLibraryPayload.installed || []);
 
@@ -989,11 +999,20 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         midiLearnMappings,
       );
 
+      if (epoch !== getProjectEpoch()) return false;
       const success = await nativeBridge.saveProjectToFile(
-        path,
+        path || "",
         JSON.stringify(projectData, projectJsonReplacer, 2),
+        recoveryOnly,
+        state.autoSaveMaxVersions,
+        documentId,
       );
 
+      if (epoch !== getProjectEpoch()) return false;
+      if (recoveryOnly) {
+        if (!success) get().showToast("Recovery backup failed; your last saved project was retained.", "error");
+        return success; // A recovery copy does not replace Save or clear dirty state.
+      }
       if (success) {
         get().showToast("Project saved", "success");
         set((ctx) => {
@@ -1003,11 +1022,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           ].slice(0, 10);
           return {
             projectPath: path,
-            isModified: false,
+            isModified: commandManager.getRevision() !== savedRevision
+              || getProjectEditRevision() !== savedEditRevision
+              || documentFingerprint(ctx) !== savedFingerprint,
             recentProjects: newRecent,
           };
         });
         persistRecentProjects(get().recentProjects);
+        if (!get().isModified)
+          await nativeBridge.dismissProjectRecovery(documentId, true).catch(logBridgeError("sync"));
       } else {
         console.error(`[saveProject] Save failed for path: ${path}`);
         get().showToast("Failed to save project", "error");
@@ -1019,7 +1042,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         get().showToast("Save failed: " + String(e), "error");
         return false;
       }
-    },
+    }),
 
     saveNewVersion: async () => {
       const state = get();
@@ -1029,7 +1052,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         return get().saveProject(true);
       }
 
-      // Increment version: "project.s13" → "project_v2.s13" → "project_v3.s13"
+      // Increment version: "project.osproj" → "project_v2.osproj" → "project_v3.osproj"
       const ext = basePath.match(/\.[^.]+$/)?.[0] || ".osproj";
       const base = basePath.replace(/\.[^.]+$/, "");
       const versionMatch = base.match(/_v(\d+)$/);
@@ -1050,6 +1073,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       await resetSyncCache();
 
       const bypassFX = options?.bypassFX ?? false;
+      const recoveryCopy = options?.recoveryCopy ?? false;
       if (!path) {
         path = await nativeBridge.showOpenDialog();
         if (!path) return false;
@@ -1074,7 +1098,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       await new Promise((r) => setTimeout(r, 0));
 
       try {
-        const data = JSON.parse(json);
+        const data = parseValidatedProject(json);
         const namProjectStateIssues: NAMProjectStateIssue[] = [];
         const recordNAMProjectStateIssue = (
           phase: NAMProjectStateIssue["phase"],
@@ -1167,6 +1191,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
         set({
           projectName: data.projectName || "Untitled Project",
+          projectPersistentId: typeof data.projectPersistentId === "string" && /^[a-f0-9-]{36}$/i.test(data.projectPersistentId)
+            ? data.projectPersistentId : freshProjectState.projectPersistentId,
           projectNotes: data.projectNotes || "",
           projectSampleRate: data.projectSampleRate || 44100,
           projectBitDepth: data.projectBitDepth || 24,
@@ -1180,9 +1206,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           metronomeAccentBeats: loadedMetronomeAccentBeats,
           metronomeTrackId: data.metronomeTrackId ?? null,
           projectRange: data.projectRange || freshProjectState.projectRange,
-          snapEnabled: data.snapEnabled ?? freshProjectState.snapEnabled,
-          snapType: data.snapType || freshProjectState.snapType,
-          gridSize: data.gridSize || freshProjectState.gridSize,
+          snapEnabled: typeof data.snapEnabled === "boolean" ? data.snapEnabled : freshProjectState.snapEnabled,
+          snapType: SNAP_TYPE_OPTIONS.some(option => option.value === data.snapType) ? data.snapType : freshProjectState.snapType,
+          gridSize: SAVED_GRID_VALUES.has(data.gridSize) ? data.gridSize : freshProjectState.gridSize,
           quantizePresetId: loadedQuantizePresetId,
           quantizePresets: loadedQuantizePresets,
           markers: Array.isArray(data.markers) ? data.markers : freshProjectState.markers,
@@ -1681,14 +1707,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         }
 
         set((ctx) => {
-          const newRecent = [
+          const newRecent = recoveryCopy ? ctx.recentProjects : [
             path,
             ...ctx.recentProjects.filter((p) => p !== path),
           ].slice(0, 10);
 
           return {
-            projectPath: path,
-            isModified: false,
+            projectPath: recoveryCopy ? null : path,
+            isModified: recoveryCopy,
             recentProjects: newRecent,
           };
         });
@@ -1775,7 +1801,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
       set((s) => {
         const updated = [...s.projectTemplates, template];
-        localStorage.setItem("s13_projectTemplates", JSON.stringify(updated));
+        localStorage.setItem("openstudio_projectTemplates", JSON.stringify(updated));
         return { projectTemplates: updated };
       });
       get().showToast(`Template "${name}" saved`, "success");
@@ -1879,7 +1905,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
     deleteTemplate: (index: number) => {
       set((s) => {
         const updated = s.projectTemplates.filter((_, i) => i !== index);
-        localStorage.setItem("s13_projectTemplates", JSON.stringify(updated));
+        localStorage.setItem("openstudio_projectTemplates", JSON.stringify(updated));
         return { projectTemplates: updated };
       });
     },

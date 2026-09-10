@@ -15,7 +15,7 @@ test.beforeEach(async ({ page }) => {
     localStorage.removeItem(customProfilesKey);
     localStorage.removeItem(mouseOverridesKey);
     localStorage.removeItem("openstudio_essentialControlsDismissed");
-    localStorage.removeItem("s13_customShortcuts");
+    localStorage.removeItem("openstudio_customShortcuts");
   }, {
     settingsKey: PROFILE_SETTINGS_KEY,
     customProfilesKey: CUSTOM_KEYBOARD_PROFILES_KEY,
@@ -89,7 +89,7 @@ test("Review shortcuts carries selections into the full editor", async ({ page }
   await page.getByLabel("Mouse & scroll profile").selectOption("cubase");
   await page.getByRole("button", { name: "Review shortcuts" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  const dialog = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Keyboard profile")).toHaveValue("pro_tools");
   await expect(dialog.getByLabel("Mouse & scroll profile")).toHaveValue("cubase");
@@ -103,7 +103,7 @@ test("shortcut rows expose actions, unassigned state, rebinding status, and all 
   await page.getByLabel("Keyboard profile").selectOption("pro_tools");
   await page.getByRole("button", { name: "Review shortcuts" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  const dialog = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
   const search = dialog.getByLabel("Search keyboard shortcuts");
   await search.fill("Split Tool");
   const splitAction = dialog.getByRole("button", { name: "Split Tool", exact: true });
@@ -133,7 +133,7 @@ test("profile-specific selected-track commands advertise their Timeline scope", 
   await page.getByLabel("Keyboard profile").selectOption("garageband");
   await page.getByRole("button", { name: "Review shortcuts" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  const dialog = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
   await dialog.getByLabel("Search keyboard shortcuts").fill("Mute / Unmute Selected Tracks");
   const row = dialog
     .getByRole("button", { name: "Mute / Unmute Selected Tracks", exact: true })
@@ -227,6 +227,7 @@ test("real timeline wheel uses the selected REAPER modifier map", async ({ page 
   const initialHeight = (await trackHeader.boundingBox())?.height ?? 0;
   expect(initialHeight).toBeGreaterThan(0);
 
+  await page.keyboard.down(IS_MAC_HOST ? "Meta" : "Control");
   await page.locator(".timeline-container").dispatchEvent("wheel", {
     deltaY: -100,
     ctrlKey: !IS_MAC_HOST,
@@ -234,6 +235,7 @@ test("real timeline wheel uses the selected REAPER modifier map", async ({ page 
     bubbles: true,
     cancelable: true,
   });
+  await page.keyboard.up(IS_MAC_HOST ? "Meta" : "Control");
   await expect.poll(async () => (await trackHeader.boundingBox())?.height ?? 0).toBeGreaterThan(initialHeight);
 });
 
@@ -260,8 +262,9 @@ test("real mixer parameter controls own normal and fine wheel adjustment", async
 
 test("named profiles keep multiple keys, platform unbinds, persistence, and export", async ({ page }) => {
   await page.getByRole("button", { name: "Review shortcuts" }).click();
-  const dialog = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  const dialog = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
 
+  await dialog.getByText("Custom profiles & platform overrides", { exact: true }).click();
   const nameInput = dialog.getByLabel("Profile name", { exact: true });
   await nameInput.fill("Editing Keys");
   await dialog.getByRole("button", { name: "New", exact: true }).click();
@@ -307,8 +310,54 @@ test("named profiles keep multiple keys, platform unbinds, persistence, and expo
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await page.reload();
   await page.getByRole("menuitem", { name: "Help menu" }).click();
-  await page.getByRole("menuitem", { name: "Keyboard Shortcuts" }).click();
-  const reopened = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  await page.getByRole("menuitem", { name: "Keyboard, Mouse & Trackpad…" }).click();
+  const reopened = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
   await expect(reopened.getByLabel("Keyboard profile").locator("option:checked"))
     .toHaveText("Custom - Editing Keys");
+});
+
+test("profile import reports precedence overlaps and changes nothing when cancelled", async ({ page }) => {
+  await page.getByRole("button", { name: "Review shortcuts" }).click();
+  const shortcutsDialog = page.getByRole("dialog", { name: "Keyboard, Mouse & Trackpad" });
+  await shortcutsDialog.getByText("Custom profiles & platform overrides", { exact: true }).click();
+  const profileManager = shortcutsDialog.getByRole("region", { name: "Manage custom shortcuts" });
+  const importedProfile = JSON.stringify({
+    schemaVersion: 2,
+    type: "openstudio-keyboard-profile",
+    profile: {
+      id: "import-overlap",
+      name: "Overlap Check",
+      baseProfileId: "openstudio",
+      bindings: {
+        "file.save": { common: ["B"] },
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  });
+  const profileFile = {
+    name: "overlap-check.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(importedProfile),
+  };
+  const input = profileManager.locator('input[type="file"]');
+
+  await input.setInputFiles(profileFile);
+  const cancelledDialog = page.getByRole("dialog", { name: "Confirm", exact: true });
+  await expect(cancelledDialog).toContainText("overlapping shortcuts");
+  await expect(cancelledDialog).toContainText("Save Project / Split Tool");
+  await expect(cancelledDialog).toContainText("Split Tool takes priority");
+  await cancelledDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(profileManager.getByRole("status"))
+    .toHaveText("Profile import cancelled; no shortcuts were changed.");
+  await expect(shortcutsDialog.getByLabel("Keyboard profile").locator("option:checked"))
+    .not.toHaveText("Custom - Overlap Check");
+
+  await input.setInputFiles(profileFile);
+  const acceptedDialog = page.getByRole("dialog", { name: "Confirm", exact: true });
+  await acceptedDialog.getByRole("button", { name: "OK", exact: true }).click();
+  await expect(profileManager.getByRole("status"))
+    .toHaveText("Imported and selected Overlap Check.");
+  await expect(shortcutsDialog.getByLabel("Keyboard profile").locator("option:checked"))
+    .toHaveText("Custom - Overlap Check");
 });

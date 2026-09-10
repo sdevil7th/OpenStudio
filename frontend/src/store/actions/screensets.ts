@@ -33,7 +33,7 @@ export const screensetActions = (set: SetFn, get: GetFn) => ({
         } else {
           screensets.push(entry);
         }
-        localStorage.setItem("s13_screensets", JSON.stringify(screensets));
+        localStorage.setItem("openstudio_screensets", JSON.stringify(screensets));
         return { screensets };
       });
     },
@@ -57,7 +57,7 @@ export const screensetActions = (set: SetFn, get: GetFn) => ({
     deleteScreenset: (slotIndex) => {
       set((s) => {
         const screensets = s.screensets.filter((ss) => ss.id !== `screenset_${slotIndex}`);
-        localStorage.setItem("s13_screensets", JSON.stringify(screensets));
+        localStorage.setItem("openstudio_screensets", JSON.stringify(screensets));
         return { screensets };
       });
     },

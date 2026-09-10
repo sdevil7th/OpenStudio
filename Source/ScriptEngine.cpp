@@ -1,6 +1,7 @@
+#include "AppPaths.h"
 #include "ScriptEngine.h"
 #include "AudioEngine.h"
-#include "S13ScriptWindow.h"
+#include "OpenStudioScriptWindow.h"
 
 // Lua is compiled as C, so we need extern "C" linkage
 extern "C" {
@@ -12,8 +13,8 @@ extern "C" {
 // ============================================================================
 // Registry key for the AudioEngine pointer stored in Lua
 // ============================================================================
-static const char* const kEngineKey = "s13_engine_ptr";
-static const char* const kScriptEngineKey = "s13_script_engine_ptr";
+static const char* const kEngineKey = "openstudio_engine_ptr";
+static const char* const kScriptEngineKey = "openstudio_script_engine_ptr";
 
 namespace
 {
@@ -23,11 +24,7 @@ juce::File getOpenStudioDocumentsDirectory()
     return documentsDir.getChildFile("OpenStudio");
 }
 
-juce::File getLegacyStudio13DocumentsDirectory()
-{
-    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    return documentsDir.getChildFile("Studio13");
-}
+
 }
 
 static AudioEngine* getEngine(lua_State* L)
@@ -97,7 +94,7 @@ static void pushVar(lua_State* L, const juce::var& v)
 }
 
 // ============================================================================
-// s13.print(...)  — capture output for the console
+// openstudio.print(...)  — capture output for the console
 // ============================================================================
 static int l_print(lua_State* L)
 {
@@ -590,9 +587,9 @@ static int l_getTrackSends(lua_State* L)
 }
 
 // ============================================================================
-// S13FX (JSFX) from Lua
+// JSFX (JSFX) from Lua
 // ============================================================================
-static int l_addTrackS13FX(lua_State* L)
+static int l_addTrackJSFX(lua_State* L)
 {
     auto* engine = getEngine(L);
     if (!engine) { lua_pushboolean(L, 0); return 1; }
@@ -600,17 +597,17 @@ static int l_addTrackS13FX(lua_State* L)
     const char* trackId = luaL_checkstring(L, 1);
     const char* scriptPath = luaL_checkstring(L, 2);
     bool isInputFX = lua_toboolean(L, 3) != 0;
-    bool result = engine->addTrackS13FX(juce::String(trackId), juce::String(scriptPath), isInputFX);
+    bool result = engine->addTrackJSFX(juce::String(trackId), juce::String(scriptPath), isInputFX);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
-static int l_getAvailableS13FX(lua_State* L)
+static int l_getAvailableJSFX(lua_State* L)
 {
     auto* engine = getEngine(L);
     if (!engine) { lua_pushnil(L); return 1; }
 
-    auto fx = engine->getAvailableS13FX();
+    auto fx = engine->getAvailableJSFX();
     pushVar(L, fx);
     return 1;
 }
@@ -794,36 +791,18 @@ static int l_renderProject(lua_State* L)
     return 1;
 }
 
-// --- File dialog (returns a temp file path for script I/O) ---
-// Current JUCE APIs use asynchronous file dialogs; Lua scripts run on the message thread.
-// so we can't use async+WaitableEvent without deadlocking. Scripts should use
-// explicit file paths passed as arguments instead.
+// Synchronous Lua execution owns the message thread. A modal/async-wait picker
+// would deadlock; never return a fabricated selection from this retired API.
 static int l_fileDialog(lua_State* L)
 {
-    auto* engine = getEngine(L);
-    juce::ignoreUnused(engine);
-    const char* title = luaL_optstring(L, 1, "Select File");
-    const char* defaultPath = luaL_optstring(L, 2, "");
-    juce::ignoreUnused(title);
-
-    // If a default path was given, return it directly
-    if (juce::String(defaultPath).isNotEmpty())
-    {
-        lua_pushstring(L, defaultPath);
-        return 1;
-    }
-
-    // Otherwise return the user's documents folder as a starting point
-    auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    lua_pushstring(L, docs.getFullPathName().toRawUTF8());
-    return 1;
+    return luaL_error(L, "openstudio.fileDialog is unavailable. Select a file before running the script and pass its explicit path.");
 }
 
 // ============================================================================
-// GFX API — Lua functions under s13.gfx.*
+// GFX API — Lua functions under openstudio.gfx.*
 // ============================================================================
 
-// s13.gfx.init(title, width, height) — open/resize script GUI window
+// openstudio.gfx.init(title, width, height) — open/resize script GUI window
 static int l_gfx_init(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -837,7 +816,7 @@ static int l_gfx_init(lua_State* L)
     return 0;
 }
 
-// s13.gfx.close() — close script GUI window
+// openstudio.gfx.close() — close script GUI window
 static int l_gfx_close(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -845,7 +824,7 @@ static int l_gfx_close(lua_State* L)
     return 0;
 }
 
-// s13.gfx.set(r, g, b [, a]) — set current drawing color (0-1)
+// openstudio.gfx.set(r, g, b [, a]) — set current drawing color (0-1)
 static int l_gfx_set(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -859,7 +838,7 @@ static int l_gfx_set(lua_State* L)
     return 0;
 }
 
-// s13.gfx.rect(x, y, w, h [, filled])
+// openstudio.gfx.rect(x, y, w, h [, filled])
 static int l_gfx_rect(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -875,7 +854,7 @@ static int l_gfx_rect(lua_State* L)
     return 0;
 }
 
-// s13.gfx.line(x1, y1, x2, y2 [, aa])
+// openstudio.gfx.line(x1, y1, x2, y2 [, aa])
 static int l_gfx_line(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -890,7 +869,7 @@ static int l_gfx_line(lua_State* L)
     return 0;
 }
 
-// s13.gfx.circle(x, y, r [, fill, aa])
+// openstudio.gfx.circle(x, y, r [, fill, aa])
 static int l_gfx_circle(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -905,7 +884,7 @@ static int l_gfx_circle(lua_State* L)
     return 0;
 }
 
-// s13.gfx.arc(x, y, r, ang1, ang2 [, aa])
+// openstudio.gfx.arc(x, y, r, ang1, ang2 [, aa])
 static int l_gfx_arc(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -921,7 +900,7 @@ static int l_gfx_arc(lua_State* L)
     return 0;
 }
 
-// s13.gfx.roundrect(x, y, w, h, radius)
+// openstudio.gfx.roundrect(x, y, w, h, radius)
 static int l_gfx_roundrect(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -936,7 +915,7 @@ static int l_gfx_roundrect(lua_State* L)
     return 0;
 }
 
-// s13.gfx.drawstr(text [, flags])
+// openstudio.gfx.drawstr(text [, flags])
 static int l_gfx_drawstr(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -948,7 +927,7 @@ static int l_gfx_drawstr(lua_State* L)
     return 0;
 }
 
-// s13.gfx.setfont(size [, face, flags])
+// openstudio.gfx.setfont(size [, face, flags])
 static int l_gfx_setfont(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -961,7 +940,7 @@ static int l_gfx_setfont(lua_State* L)
     return 0;
 }
 
-// s13.gfx.measurestr(text) -> w, h
+// openstudio.gfx.measurestr(text) -> w, h
 static int l_gfx_measurestr(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -974,7 +953,7 @@ static int l_gfx_measurestr(lua_State* L)
     return 2;
 }
 
-// s13.gfx.getchar() -> keycode
+// openstudio.gfx.getchar() -> keycode
 static int l_gfx_getchar(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -984,7 +963,7 @@ static int l_gfx_getchar(lua_State* L)
     return 1;
 }
 
-// s13.gfx.clear([color])
+// openstudio.gfx.clear([color])
 static int l_gfx_clear(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -995,7 +974,7 @@ static int l_gfx_clear(lua_State* L)
     return 0;
 }
 
-// s13.defer(callback) — schedule callback for next frame
+// openstudio.defer(callback) — schedule callback for next frame
 static int l_defer(lua_State* L)
 {
     auto* se = getScriptEngine(L);
@@ -1017,7 +996,7 @@ static int l_defer(lua_State* L)
 
     // Store ref directly in registry with a known key
     lua_pushinteger(L, ref);
-    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_setfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
 
     return 0;
 }
@@ -1026,10 +1005,10 @@ static int l_defer(lua_State* L)
 // ScriptEngine gfx window and defer methods
 // ============================================================================
 
-S13ScriptWindow* ScriptEngine::getOrCreateGfxWindow(const juce::String& title, int w, int h)
+OpenStudioScriptWindow* ScriptEngine::getOrCreateGfxWindow(const juce::String& title, int w, int h)
 {
     if (!gfxWindow || !gfxWindow->isWindowOpen())
-        gfxWindow = std::make_unique<S13ScriptWindow>(title, w, h);
+        gfxWindow = std::make_unique<OpenStudioScriptWindow>(title, w, h);
     return gfxWindow.get();
 }
 
@@ -1041,7 +1020,7 @@ void ScriptEngine::closeGfxWindow()
 bool ScriptEngine::hasDeferredCallback() const
 {
     if (!L) return false;
-    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_getfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
     bool has = lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0;
     lua_pop(L, 1);
     return has;
@@ -1052,7 +1031,7 @@ bool ScriptEngine::runDeferredCallback()
     if (!L) return false;
 
     // Get the deferred ref from registry
-    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_getfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
     if (!lua_isinteger(L, -1))
     {
         lua_pop(L, 1);
@@ -1066,7 +1045,7 @@ bool ScriptEngine::runDeferredCallback()
 
     // Clear the stored ref
     lua_pushnil(L);
-    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_setfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
 
     // Update gfx globals before calling the deferred function
     if (gfxWindow)
@@ -1100,7 +1079,7 @@ bool ScriptEngine::runDeferredCallback()
     }
 
     // Check if a new defer was registered
-    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_getfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
     bool hasNext = lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0;
     lua_pop(L, 1);
 
@@ -1110,7 +1089,7 @@ bool ScriptEngine::runDeferredCallback()
 void ScriptEngine::clearDeferredCallback()
 {
     if (!L) return;
-    lua_getfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_getfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
     if (lua_isinteger(L, -1))
     {
         int ref = static_cast<int>(lua_tointeger(L, -1));
@@ -1119,7 +1098,7 @@ void ScriptEngine::clearDeferredCallback()
     }
     lua_pop(L, 1);
     lua_pushnil(L);
-    lua_setfield(L, LUA_REGISTRYINDEX, "s13_deferred_ref");
+    lua_setfield(L, LUA_REGISTRYINDEX, "openstudio_deferred_ref");
 }
 
 // ============================================================================
@@ -1144,7 +1123,10 @@ ScriptEngine::ScriptEngine()
     }
 
     // Ensure user scripts directory exists
+    // Create user content only when its feature is explicitly used.
+   #if !JUCE_MAC
     getUserScriptsDirectory().createDirectory();
+   #endif
 }
 
 ScriptEngine::~ScriptEngine()
@@ -1173,7 +1155,7 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
     lua_pushlightuserdata(L, &engine);
     lua_setfield(L, LUA_REGISTRYINDEX, kEngineKey);
 
-    // Create the "s13" global table
+    // Create the "openstudio" global table
     lua_newtable(L);
 
     // ------ Track operations ------
@@ -1237,9 +1219,9 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
     reg("setTrackSendLevel",   l_setTrackSendLevel);
     reg("getTrackSends",       l_getTrackSends);
 
-    // ------ S13FX ------
-    reg("addTrackS13FX",       l_addTrackS13FX);
-    reg("getAvailableS13FX",   l_getAvailableS13FX);
+    // ------ JSFX ------
+    reg("addTrackJSFX",       l_addTrackJSFX);
+    reg("getAvailableJSFX",   l_getAvailableJSFX);
 
     // ------ Plugins ------
     reg("scanForPlugins",      l_scanForPlugins);
@@ -1275,8 +1257,8 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
     // ------ Defer ------
     reg("defer",           l_defer);
 
-    // Set the table as global "s13"
-    lua_setglobal(L, "s13");
+    // Set the table as global "openstudio"
+    lua_setglobal(L, "openstudio");
 
     // ---- Create "gfx" global table (REAPER-compatible naming) ----
     lua_newtable(L);
@@ -1312,8 +1294,8 @@ void ScriptEngine::registerAPI(AudioEngine& engine)
 
     lua_setglobal(L, "gfx");
 
-    // Also expose gfx functions under s13.gfx for namespaced access
-    lua_getglobal(L, "s13");
+    // Also expose gfx functions under openstudio.gfx for namespaced access
+    lua_getglobal(L, "openstudio");
     lua_getglobal(L, "gfx");
     lua_setfield(L, -2, "gfx");
     lua_pop(L, 1);
@@ -1413,13 +1395,7 @@ bool ScriptEngine::executeString(const juce::String& luaCode)
 
 juce::File ScriptEngine::getUserScriptsDirectory()
 {
-    auto openStudioDir = getOpenStudioDocumentsDirectory().getChildFile("Scripts");
-    auto legacyDir = getLegacyStudio13DocumentsDirectory().getChildFile("Scripts");
-
-    if (!openStudioDir.isDirectory() && legacyDir.isDirectory())
-        return legacyDir;
-
-    return openStudioDir;
+    return getOpenStudioDocumentsDirectory().getChildFile("Scripts");
 }
 
 juce::File ScriptEngine::getStockScriptsDirectory()

@@ -51,6 +51,18 @@ function buildHelpTexts(): Record<string, HelpEntry> {
   const commandPalettePath = `${commandPaletteShortcut}: Command Palette`;
 
   return {
+    "settings.permissions": {
+      title: "macOS microphone and Documents access",
+      description: "Playback and editing do not need microphone access. macOS asks when you enable hardware monitoring, record audio, or apply an input device. If denied, enable OpenStudio under System Settings > Privacy & Security > Microphone. Documents access is used for your recordings, scripts, effects, chosen files, and the first import of existing OpenStudio plugin settings. Internal macOS logs and plugin settings use Library folders.",
+    },
+    "settings.windowsInstall": {
+      title: "Windows installation and prerequisites",
+      description: "Open Setup normally and approve its Windows elevation request. Setup installs machine-wide VC++ and WebView2 prerequisites when needed. If repair fails, use Retry or the official download link shown in the error. The error includes an exit code and log path. Restart Windows if Setup requests it, then launch OpenStudio from the Start menu.",
+    },
+    "fx.tone3000Login": {
+      title: "Connect NAM Rack to TONE3000",
+      description: "In the Amp or Cab library, choose Connect TONE3000 beside the connection status in the results panel. Sign in in your browser, then return to OpenStudio. Release builds provide the application configuration; users do not need an API key. Login is remembered for this OS user and computer. Local captures and IR files work without login. A new computer needs its own first login.",
+    },
     "navigation.essentials": {
       title: "Navigation & Essential Controls",
       description: `${wheelHelp} Keyboard labels follow ${keyboardProfile.name}.`,
@@ -338,16 +350,16 @@ function buildHelpTexts(): Record<string, HelpEntry> {
       shortcut: preferencesShortcut,
     },
     "shortcuts": {
-      title: "Keyboard Shortcuts",
+      title: "Keyboard, Mouse & Trackpad",
       description:
-        "The Keyboard Shortcuts window is the searchable reference for profile and custom bindings in every supported scope. Use it to review commands, print a cheat sheet, rebind shortcuts, or reset them.",
-      shortcut: `${keyboardShortcut}: Keyboard Shortcuts Window`,
+        "The Keyboard, Mouse & Trackpad window is the searchable reference for profile and custom bindings in every supported scope. Use it to review commands, print a cheat sheet, rebind shortcuts, or reset them.",
+      shortcut: `${keyboardShortcut}: Keyboard, Mouse & Trackpad Window`,
     },
     "shortcuts.custom": {
       title: "Custom Shortcut Editing",
       description:
-        "Custom shortcuts are edited in the Keyboard Shortcuts window, not in Preferences. Global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, plug-in, automation, track-control, and modal scopes are rebindable.",
-      shortcut: `Open Keyboard Shortcuts from the Help menu, then choose Rebind on any action`,
+        "Custom shortcuts are edited in the Keyboard, Mouse & Trackpad window, not in Preferences. Global, Timeline, Piano Roll, Pitch Editor, Mixer, browser, plug-in, automation, track-control, and modal scopes are rebindable.",
+      shortcut: `Open Keyboard, Mouse & Trackpad from the Help menu, then choose Rebind on any action`,
     },
     "settings.audio": {
       title: "Audio Settings",
@@ -357,7 +369,7 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "settings.preferences": {
       title: "Preferences",
       description:
-        "Use Preferences for editing, display, mouse, and backup settings. Shortcut rebinding lives in Keyboard Shortcuts, while mouse behavior lives in the Mouse tab here.",
+        "Use Preferences for editing, display, mouse, and backup settings. Shortcut rebinding lives in Keyboard, Mouse & Trackpad, while mouse behavior lives in the Mouse tab here.",
       shortcut: preferencesShortcut,
     },
     "settings.timecode": {

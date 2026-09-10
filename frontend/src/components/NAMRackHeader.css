@@ -836,7 +836,7 @@
   .nam-rack-design-port .mini-param .global-label { font-size: 9px; }
   .nam-rack-design-port .mini-param strong { font-size: 10px; }
   .nam-rack-design-port .premium-output-instrument-switch-title { font-size: 9px; letter-spacing: .09em; }
-  .nam-rack-design-port .premium-output-instrument-switch-toggle-label { font-size: 6.5px; }
+  .nam-rack-design-port .premium-output-instrument-switch-toggle-label { font-size: 7px; }
   .nam-rack-design-port .preset-console {
     height: 57px;
   }
@@ -891,7 +891,7 @@
   }
   .nam-rack-design-port .premium-output-instrument-switch-toggle-thumb { width: 15px; }
   .nam-rack-design-port .premium-output-instrument-switch-toggle-label {
-    font: 700 6.5px/16px inherit;
+    font: 700 7px/16px inherit;
   }
   .nam-rack-design-port .premium-utility-heading { font-size: 8px; }
   .nam-rack-design-port .premium-doubler-utility { gap: 3px; padding-inline: 6px; }
@@ -1275,13 +1275,13 @@
     flex-basis: 24px;
   }
   .nam-rack-design-port .premium-oversampling-selector > strong { font-size: 7px; line-height: 8px; }
-  .nam-rack-design-port .premium-oversampling-stage-label { height: 8px; font-size: 6px; line-height: 8px; }
+  .nam-rack-design-port .premium-oversampling-stage-label { height: 8px; font-size: 7px; line-height: 8px; }
   .nam-rack-design-port .premium-oversampling-track { grid-template-rows: repeat(3, 14px); }
   .nam-rack-design-port .premium-oversampling-track::before { left: 6px; top: 7px; bottom: 7px; }
   .nam-rack-design-port .premium-oversampling-track button {
     grid-template-columns: 13px minmax(0, 1fr);
     height: 14px;
-    font-size: 6px;
+    font-size: 7px;
   }
   .nam-rack-design-port .premium-oversampling-track button i { width: 6px; height: 6px; }
 }

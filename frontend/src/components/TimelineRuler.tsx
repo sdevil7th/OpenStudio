@@ -159,6 +159,8 @@ export function TimelineRuler() {
         const factor = gesture.amount > 0 ? 0.9 : 1.1;
         if (gesture.amount !== 0) setTrackHeight(trackHeightRef.current * factor);
       } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
+        const workspace = container.closest<HTMLElement>(".workspace");
+        if (gesture.ruleId === "trackpad.pan" && workspace) workspace.scrollTop += gesture.delta.y;
         const state = useDAWStore.getState();
         const maxTimelineScroll = getTimelineHorizontalScrollMax(
           state.tracks,
@@ -168,7 +170,7 @@ export function TimelineRuler() {
         );
         setScroll(
           Math.max(0, Math.min(maxTimelineScroll, scrollXRef.current + gesture.amount)),
-          scrollYRef.current,
+          workspace?.scrollTop ?? scrollYRef.current,
         );
       } else if (gesture.operation === "scroll") {
         const workspace = container.closest(".workspace") as HTMLElement | null;

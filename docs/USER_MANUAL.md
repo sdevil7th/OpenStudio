@@ -112,7 +112,7 @@ After configuring audio, you are ready to begin:
 
 ### 1.5 Project File Format
 
-OpenStudio projects are saved as `.osproj` files. Legacy `.s13` projects continue to load. These contain:
+OpenStudio projects are saved as `.osproj` files. These contain:
 
 - Track layout and properties (names, colors, types, volume, pan, solo, mute, armed state)
 - Clip references (file paths, positions, durations, offsets, fades, volume)
@@ -379,7 +379,7 @@ Tracks can be reordered by drag-and-drop in both the Track Control Panel and the
 2. Click and drag the track to the desired position.
 3. Release to drop.
 
-Track reordering can also be done via Lua scripting using `s13.reorderTrack(fromIndex, toIndex)`.
+Track reordering can also be done via Lua scripting using `openstudio.reorderTrack(fromIndex, toIndex)`.
 
 ### 3.6 Track Colors
 
@@ -474,10 +474,10 @@ VCA (Voltage Controlled Amplifier) style grouping allows controlling the volume 
 
 Freezing a track renders all its effects to a temporary audio file, reducing CPU load while preserving the ability to unfreeze later:
 
-1. Right-click a track > "Freeze Track" or use `s13.freezeTrack(trackId)` in Lua.
+1. Right-click a track > "Freeze Track" or use `openstudio.freezeTrack(trackId)` in Lua.
 2. The track's FX chain is rendered offline and the frozen audio replaces live processing.
 3. The frozen indicator appears on the track.
-4. To restore: right-click > "Unfreeze Track" or `s13.unfreezeTrack(trackId)`.
+4. To restore: right-click > "Unfreeze Track" or `openstudio.unfreezeTrack(trackId)`.
 
 ### 3.14 Track Spacers
 
@@ -578,7 +578,7 @@ OpenStudio automatically detects connected MIDI devices:
 
 - MIDI devices are listed in the Track Header's MIDI input selector.
 - Select a MIDI device from the dropdown on a MIDI or Instrument track.
-- Available devices can be queried via Lua: `s13.getMIDIDevices()`.
+- Available devices can be queried via Lua: `openstudio.getMIDIDevices()`.
 
 ### 5.2 Recording MIDI
 
@@ -1062,7 +1062,7 @@ OpenStudio supports three FX chain positions per track:
 
 ### 9.3 Built-in OpenStudio Effects
 
-OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `S13` effect names are still accepted for compatibility in older projects and scripts.
+OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `OpenStudio` effect names are still accepted for compatibility in older projects and scripts.
 
 | Effect           | Description                                    |
 |------------------|------------------------------------------------|
@@ -1232,7 +1232,7 @@ Each automation lane has a mode that determines how automation interacts with pl
 | **Touch** | Records automation only while the user is actively touching a control. Reverts to existing automation on release. |
 | **Latch** | Like Touch, but after release, continues writing the last value until transport stops. |
 
-Set the automation mode via the lane dropdown or `s13.setAutomationMode()` in Lua.
+Set the automation mode via the lane dropdown or `openstudio.setAutomationMode()` in Lua.
 
 ### 10.5 Automation and Clip Movement
 
@@ -1255,7 +1255,7 @@ The frontend stores normalized values (0-1) which are converted to native units 
 
 - Delete individual points by selecting and pressing Delete.
 - Clear all automation for a parameter: right-click the lane > "Clear Automation".
-- Via Lua: `s13.clearAutomation(trackId, parameterId)`.
+- Via Lua: `openstudio.clearAutomation(trackId, parameterId)`.
 
 ---
 
@@ -1554,97 +1554,97 @@ Open the Script Editor via **View > Script Editor**:
 - Write Lua scripts in the editor pane.
 - Click **Run** to execute the script.
 - Output appears in the console pane below.
-- Use `s13.print(...)` to output messages to the console.
+- Use `openstudio.print(...)` to output messages to the console.
 
 ### 14.3 Scripting API Overview
 
-All scripting functions are currently accessed through the legacy `s13.*` namespace. Key categories include:
+All scripting functions are currently accessed through the legacy `openstudio.*` namespace. Key categories include:
 
 **Track Operations:**
 ```lua
-local id = s13.addTrack("Vocals")        -- Create a new track
-s13.setTrackVolume(id, -6.0)             -- Set volume in dB
-s13.setTrackPan(id, -0.5)               -- Pan left 50%
-s13.setTrackMute(id, true)              -- Mute the track
-s13.setTrackSolo(id, true)              -- Solo the track
-s13.setTrackArm(id, true)               -- Arm for recording
-s13.removeTrack(id)                      -- Delete a track
-s13.reorderTrack(0, 3)                  -- Move track from index 0 to index 3
+local id = openstudio.addTrack("Vocals")        -- Create a new track
+openstudio.setTrackVolume(id, -6.0)             -- Set volume in dB
+openstudio.setTrackPan(id, -0.5)               -- Pan left 50%
+openstudio.setTrackMute(id, true)              -- Mute the track
+openstudio.setTrackSolo(id, true)              -- Solo the track
+openstudio.setTrackArm(id, true)               -- Arm for recording
+openstudio.removeTrack(id)                      -- Delete a track
+openstudio.reorderTrack(0, 3)                  -- Move track from index 0 to index 3
 ```
 
 **Transport Control:**
 ```lua
-s13.play()                               -- Start playback
-s13.stop()                               -- Stop
-s13.record()                             -- Start recording
-s13.setPlayhead(10.5)                    -- Jump to 10.5 seconds
-s13.setTempo(120)                        -- Set BPM
-s13.setTimeSignature(3, 4)              -- Set 3/4 time
-s13.setLoop(true, 4, 12)               -- Enable loop from 4s to 12s
+openstudio.play()                               -- Start playback
+openstudio.stop()                               -- Stop
+openstudio.record()                             -- Start recording
+openstudio.setPlayhead(10.5)                    -- Jump to 10.5 seconds
+openstudio.setTempo(120)                        -- Set BPM
+openstudio.setTimeSignature(3, 4)              -- Set 3/4 time
+openstudio.setLoop(true, 4, 12)               -- Enable loop from 4s to 12s
 ```
 
 **FX Chain:**
 ```lua
-s13.addTrackFX(trackId, pluginId)        -- Add VST3 plugin
-s13.addTrackS13FX(trackId, "OpenStudio EQ") -- Add built-in effect
-s13.removeTrackFX(trackId, 0)           -- Remove first FX
-s13.bypassTrackFX(trackId, 0, true)     -- Bypass first FX
-local fx = s13.getAvailableS13FX()       -- List built-in effects
+openstudio.addTrackFX(trackId, pluginId)        -- Add VST3 plugin
+openstudio.addTrackJSFX(trackId, "OpenStudio EQ") -- Add built-in effect
+openstudio.removeTrackFX(trackId, 0)           -- Remove first FX
+openstudio.bypassTrackFX(trackId, 0, true)     -- Bypass first FX
+local fx = openstudio.getAvailableJSFX()       -- List built-in effects
 ```
 
 **Master Bus:**
 ```lua
-s13.setMasterVolume(1.0)                -- Set master volume (linear)
-s13.setMasterPan(0.0)                   -- Set master pan (center)
+openstudio.setMasterVolume(1.0)                -- Set master volume (linear)
+openstudio.setMasterPan(0.0)                   -- Set master pan (center)
 ```
 
 **Sends:**
 ```lua
-local idx = s13.addTrackSend(trackId, busId)  -- Add send
-s13.setTrackSendLevel(trackId, idx, 0.7)      -- Set send level
-s13.removeTrackSend(trackId, idx)              -- Remove send
+local idx = openstudio.addTrackSend(trackId, busId)  -- Add send
+openstudio.setTrackSendLevel(trackId, idx, 0.7)      -- Set send level
+openstudio.removeTrackSend(trackId, idx)              -- Remove send
 ```
 
 **Automation:**
 ```lua
-s13.setAutomationPoints(trackId, "volume", {
+openstudio.setAutomationPoints(trackId, "volume", {
     { time = 0, value = 0.5 },
     { time = 4, value = 1.0 },
     { time = 8, value = 0.3 },
 })
-s13.setAutomationMode(trackId, "volume", "read")
-s13.clearAutomation(trackId, "volume")
+openstudio.setAutomationMode(trackId, "volume", "read")
+openstudio.clearAutomation(trackId, "volume")
 ```
 
 **Audio Analysis:**
 ```lua
-local stats = s13.measureLUFS("C:/audio/mix.wav")
-s13.print("Integrated: " .. stats.integrated .. " LUFS")
-s13.print("True Peak: " .. stats.truePeak .. " dBTP")
+local stats = openstudio.measureLUFS("C:/audio/mix.wav")
+openstudio.print("Integrated: " .. stats.integrated .. " LUFS")
+openstudio.print("True Peak: " .. stats.truePeak .. " dBTP")
 
-local transients = s13.detectTransients("C:/audio/drums.wav", 0.3)
-s13.print("Found " .. #transients .. " transients")
+local transients = openstudio.detectTransients("C:/audio/drums.wav", 0.3)
+openstudio.print("Found " .. #transients .. " transients")
 
-local silences = s13.detectSilentRegions("C:/audio/take.wav", -50, 0.5)
+local silences = openstudio.detectSilentRegions("C:/audio/take.wav", -50, 0.5)
 ```
 
 **Track Freeze:**
 ```lua
-s13.freezeTrack(trackId)                -- Freeze (render FX offline)
-s13.unfreezeTrack(trackId)              -- Unfreeze (restore)
+openstudio.freezeTrack(trackId)                -- Freeze (render FX offline)
+openstudio.unfreezeTrack(trackId)              -- Unfreeze (restore)
 ```
 
 **Rendering:**
 ```lua
-s13.renderProject("C:/output/mix.wav", "wav", 24, 44100, 0, 60)
+openstudio.renderProject("C:/output/mix.wav", "wav", 24, 44100, 0, 60)
 ```
 
 **Utility:**
 ```lua
-s13.print("Hello from OpenStudio!")      -- Console output
-local ver = s13.getAppVersion()          -- Get version string
-s13.showMessage("Alert", "Processing complete!")  -- Dialog
-local file = s13.fileDialog("Open Audio", "*.wav;*.aiff")  -- File picker
+openstudio.print("Hello from OpenStudio!")      -- Console output
+local ver = openstudio.getAppVersion()          -- Get version string
+openstudio.showMessage("Alert", "Processing complete!")  -- Dialog
+local file = openstudio.fileDialog("Open Audio", "*.wav;*.aiff")  -- File picker
 ```
 
 For the complete API reference, see [API.md](API.md).
@@ -1654,35 +1654,35 @@ For the complete API reference, see [API.md](API.md).
 **Set up a recording template:**
 ```lua
 -- Create tracks for a band recording
-local drums = s13.addTrack("Drums OH")
-local bass = s13.addTrack("Bass DI")
-local guitar = s13.addTrack("Guitar")
-local vocal = s13.addTrack("Vocal")
+local drums = openstudio.addTrack("Drums OH")
+local bass = openstudio.addTrack("Bass DI")
+local guitar = openstudio.addTrack("Guitar")
+local vocal = openstudio.addTrack("Vocal")
 
 -- Set levels
-s13.setTrackVolume(drums, -3.0)
-s13.setTrackVolume(bass, -6.0)
-s13.setTrackVolume(guitar, -6.0)
-s13.setTrackVolume(vocal, 0.0)
+openstudio.setTrackVolume(drums, -3.0)
+openstudio.setTrackVolume(bass, -6.0)
+openstudio.setTrackVolume(guitar, -6.0)
+openstudio.setTrackVolume(vocal, 0.0)
 
 -- Pan instruments
-s13.setTrackPan(guitar, -0.3)
+openstudio.setTrackPan(guitar, -0.3)
 
 -- Add EQ to all tracks
 for _, id in ipairs({ drums, bass, guitar, vocal }) do
-    s13.addTrackS13FX(id, "OpenStudio EQ")
+    openstudio.addTrackJSFX(id, "OpenStudio EQ")
 end
 
-s13.setTempo(120)
-s13.print("Band template ready!")
+openstudio.setTempo(120)
+openstudio.print("Band template ready!")
 ```
 
 **Analyze and report loudness for all audio files:**
 ```lua
 local files = { "C:/audio/verse.wav", "C:/audio/chorus.wav", "C:/audio/bridge.wav" }
 for _, file in ipairs(files) do
-    local stats = s13.measureLUFS(file)
-    s13.print(file .. ": " .. stats.integrated .. " LUFS, peak " .. stats.truePeak .. " dBTP")
+    local stats = openstudio.measureLUFS(file)
+    openstudio.print(file .. ": " .. stats.integrated .. " LUFS, peak " .. stats.truePeak .. " dBTP")
 end
 ```
 
@@ -2110,7 +2110,7 @@ microphone permission for every application.
 
 **Solutions**:
 1. This may occur on first load as the peak cache is being built. Wait a moment.
-2. OpenStudio uses `.ospeaks` sidecar files for waveform display. Legacy `.s13peaks` files are still supported and will be regenerated automatically if needed.
+2. OpenStudio uses `.ospeaks` sidecar files for waveform display. Legacy `.ospeaks` files are still supported and will be regenerated automatically if needed.
 3. Ensure the referenced audio file exists and is readable.
 4. Try zooming in or out to trigger a waveform refresh.
 
@@ -2208,7 +2208,7 @@ The audio-to-MIDI workflow uses Basic Pitch / ONNX plumbing where available to e
 
 ## Appendix A: Project File Location
 
-OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Legacy `.s13` files are still supported. Recorded audio files are stored in a subdirectory alongside the project file.
+OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Recorded audio files are stored in a subdirectory alongside the project file.
 
 ## Appendix B: Audio Format Support
 
@@ -2332,7 +2332,7 @@ OpenStudio uses the following audio-thread safety patterns:
 ### Scripting
 
 1. Use Lua scripts to automate repetitive tasks (e.g., adding the same FX chain to every vocal track).
-2. The `s13.print()` function is useful for debugging scripts.
+2. The `openstudio.print()` function is useful for debugging scripts.
 3. Scripts can access all track, transport, FX, and automation functions.
 4. Save commonly used scripts as files for reuse across projects.
 
@@ -2395,3 +2395,68 @@ OpenStudio uses the following audio-thread safety patterns:
 
 *OpenStudio -- User Manual*
 *For the latest documentation and updates, refer to the project repository.*
+
+## In-app updates
+
+### Microsoft Store installations
+
+Store MSIX installations retain the in-app check, download, progress, cancellation
+and save-before-install interface. Package identity selects Microsoft's Store
+APIs; they never launch the direct EXE updater. Each new version must be submitted
+to Partner Center. Microsoft may request confirmation and close the app during
+installation. OpenStudio's automatic-check preference does not change Windows'
+own Store automatic-update settings. See [Store qualification](release-runbook.md#microsoft-store-distribution)
+for the implementation, tests and outstanding Store-flight upgrade check.
+
+### Direct-download installations
+
+Debug development builds do not check for, download, or launch release installers.
+The update panel identifies the running development version and explains that the
+checkout must be rebuilt. A separately installed app does not change the version
+of a running development executable.
+
+Release builds offer an update only when its numeric version is strictly newer
+than the running application. Leading zeroes are equivalent (`0.1.01` equals
+`0.1.1`); stale same/older offers are rejected again before download and install.
+
+Release builds check for updates shortly after startup and periodically while the app is
+open, skipping scheduled checks during playback or recording. Successful checks
+are normally limited to once per 24 hours. An available update appears in a
+non-blocking banner. **Help > Check for Updates** opens the update panel and
+checks immediately. The panel also lets users disable automatic checks.
+
+Users choose when to download and install. Downloads run in the background with
+progress and cancellation. The native updater accepts only its own checked
+release offer, requires HTTPS plus a published size and SHA-256 checksum, and
+verifies both the downloaded file and the file immediately before opening it.
+Partial or invalid downloads are discarded. This verifies consistency with the
+HTTPS feed; it does not replace platform code signing or notarization.
+
+Before installation, playback and recording must stop. Modified projects must
+save successfully; cancelling the save postpones installation. If the project
+changes while saving, installation is also postponed.
+
+| Platform | Final installation step |
+| --- | --- |
+| Windows | Opens the installer and requests normal app shutdown. Follow the installer and reopen OpenStudio. The installer is explicitly prevented from force-closing the app. |
+| macOS | Opens the verified DMG. Quit OpenStudio, drag the replacement app into Applications, and reopen it. |
+| Linux | Makes the verified AppImage executable and shows its folder. Replace the previous AppImage and launch it. Package-manager installations are not overwritten. |
+
+Downloads are staged under the user's OpenStudio application-data `updates`
+directory. Download progress and the ready-to-install offer are session state;
+after restarting OpenStudio, check and download again if necessary. The automatic
+check preference is saved in the embedded browser's local storage.
+
+## File formats and upgrade compatibility
+
+Current projects use `.osproj`; rack preset exports use `.ospreset`, themes use
+`.ostheme`, and waveform caches use `.ospeaks`. Scripted effects use standard
+`.jsfx` files and the Lua application API uses `openstudio.*`.
+
+Older product identifiers and file formats are unsupported by the current loader.
+Renaming a file or folder does not convert its serialized processor state. Back up
+projects, recordings and presets before updating; retain the older application if
+you still need to open unconverted sessions. A maintainer's one-time conversion of
+individual NAM presets does not establish automatic project/preset migration for
+other installations. Model and cabinet IR files must remain available separately.
+Waveform caches can be regenerated from the original audio.
