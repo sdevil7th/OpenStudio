@@ -32,6 +32,12 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
+# Enable Objective-C++ before adding dependencies so their directory scopes
+# inherit its compile rules as well as the application's macOS sources.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 # Visual Studio's Debug CRT defaults to checked STL iterators. Their
 # construction/destruction is serialized by a process-wide lock, so unrelated
 # UI/background container work can priority-invert a 16-sample ASIO callback.
@@ -671,7 +677,6 @@ endif()
 # macOS-only: Link system frameworks
 # ==============================================================================
 if(APPLE)
-    enable_language(OBJCXX)
     set_target_properties(OpenStudio PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
     target_sources(OpenStudio PRIVATE Source/MicrophoneAccess.mm)
     find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)

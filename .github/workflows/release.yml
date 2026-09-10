@@ -700,7 +700,7 @@ jobs:
       - name: Download ONNX Runtime (Linux CPU)
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          wget -q "$URL" -O onnxruntime.tgz
+          curl --fail --location --show-error --retry 3 --retry-delay 2 --output onnxruntime.tgz "$URL"
           echo "${ONNXRUNTIME_LINUX_X64_SHA256}  onnxruntime.tgz" | sha256sum --check --strict
           mkdir -p thirdparty/onnxruntime
           tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime

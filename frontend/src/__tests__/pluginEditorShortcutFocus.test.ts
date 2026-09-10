@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as platform from "../utils/platform";
 import pluginEditorSource from "../PluginEditorWindowApp.tsx?raw";
 import builtInPanelSource from "../components/BuiltInPluginPanel.tsx?raw";
 import { pluginEditorBrowserShortcutIsActive } from "../PluginEditorWindowApp";
@@ -9,6 +10,8 @@ import {
 } from "../components/BuiltInPluginPanel";
 
 describe("detached built-in plugin shortcut focus", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it("accepts browser shortcuts only from the visible OS-focused editor", () => {
     expect(pluginEditorBrowserShortcutIsActive({
       documentFocused: true,
@@ -61,31 +64,44 @@ describe("detached built-in plugin shortcut focus", () => {
     expect(pluginEditorSource).toContain("document.visibilityState");
   });
 
-  it("registers plugin history ownership and claims empty Undo/Redo", () => {
+  it.each(["windows", "macos", "linux"] as const)("claims plugin Undo/Redo on %s", (host) => {
+    vi.spyOn(platform, "getShortcutPlatform").mockReturnValue(host);
+    const primaryModifier = host === "macos" ? { metaKey: true } : { ctrlKey: true };
     const undo = vi.fn();
     const redo = vi.fn();
     const emptyHistory = { active: true, canUndo: false, canRedo: false, undo, redo };
 
     expect(dispatchBuiltInPluginHistoryShortcut(
-      { key: "z", ctrlKey: true },
+      { key: "z", ...primaryModifier },
       emptyHistory,
     )).toBe("claimed_noop");
     expect(dispatchBuiltInPluginHistoryShortcut(
-      { key: "z", ctrlKey: true, shiftKey: true },
+      { key: "z", ...primaryModifier, shiftKey: true },
       emptyHistory,
     )).toBe("claimed_noop");
     expect(undo).not.toHaveBeenCalled();
     expect(redo).not.toHaveBeenCalled();
 
     expect(dispatchBuiltInPluginHistoryShortcut(
-      { key: "z", ctrlKey: true },
+      { key: "z", ...primaryModifier },
       { ...emptyHistory, canUndo: true },
     )).toBe("handled");
     expect(undo).toHaveBeenCalledOnce();
 
     expect(dispatchBuiltInPluginHistoryShortcut(
-      { key: "z", ctrlKey: true },
+      { key: "z", ...primaryModifier },
       { ...emptyHistory, active: false, canUndo: true },
+    )).toBe("unmatched");
+    expect(undo).toHaveBeenCalledOnce();
+
+    expect(dispatchBuiltInPluginHistoryShortcut(
+      { key: "z", ...primaryModifier, shiftKey: true },
+      { ...emptyHistory, canRedo: true },
+    )).toBe("handled");
+    expect(redo).toHaveBeenCalledOnce();
+    expect(dispatchBuiltInPluginHistoryShortcut(
+      { key: "z", ...(host === "macos" ? { ctrlKey: true } : { metaKey: true }) },
+      { ...emptyHistory, canUndo: true },
     )).toBe("unmatched");
     expect(undo).toHaveBeenCalledOnce();
 

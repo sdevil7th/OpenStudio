@@ -372,12 +372,16 @@ jobs:
   verify-linux:
     runs-on: ubuntu-24.04
     env:
-      VERSION: 0.0.0
+      # AppImage verification exercises the real release-notes gate.
+      VERSION: 0.1.02
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate AppImage release notes
+        run: python3 tools/validate-release-notes.py --version "$VERSION"
 
       - name: Install system dependencies
         shell: bash
@@ -402,7 +406,7 @@ jobs:
         shell: bash
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          wget -q "$URL" -O onnxruntime.tgz
+          curl --fail --location --show-error --retry 3 --retry-delay 2 --output onnxruntime.tgz "$URL"
           echo "${ONNXRUNTIME_LINUX_X64_SHA256}  onnxruntime.tgz" | sha256sum --check --strict
           mkdir -p thirdparty/onnxruntime
           tar -xzf onnxruntime.tgz --strip-components=1 -C thirdparty/onnxruntime

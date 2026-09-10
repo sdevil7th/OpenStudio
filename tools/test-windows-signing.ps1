@@ -10,6 +10,22 @@ function Assert-Fails {
     }
 }
 
+function New-SigningFixture {
+    param([string]$Path, [string]$Product, [string]$Version)
+    # PowerShell 7 Add-Type does not emit the Win32 version resource read by
+    # FileVersionInfo. Use the Windows .NET Framework compiler in both shells.
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+    $sourceFile = [IO.Path]::ChangeExtension($Path, '.cs')
+    Set-Content -LiteralPath $sourceFile -Value @"
+using System.Reflection;
+[assembly: AssemblyProduct("$Product")]
+[assembly: AssemblyInformationalVersion("$Version")]
+public class SigningFixture {}
+"@
+    & $compiler /nologo /target:library "/out:$Path" $sourceFile
+    if ($LASTEXITCODE -ne 0) { throw 'Signing fixture compilation failed.' }
+}
+
 $signingTestParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $signingTestRoot = Join-Path $signingTestParent ("openstudio-signing-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $signingTestRoot | Out-Null
@@ -20,12 +36,7 @@ try {
     New-Item -ItemType Directory -Path $source, $destination | Out-Null
     # Use a reviewed release version so packaging exercises the notes gate before signature checks.
     $fixture = Join-Path $signingTestRoot "fixture.dll"
-    Add-Type -OutputAssembly $fixture -OutputType Library -TypeDefinition @'
-using System.Reflection;
-[assembly: AssemblyProduct("OpenStudio")]
-[assembly: AssemblyInformationalVersion("0.1.01")]
-public class SigningFixture {}
-'@
+    New-SigningFixture -Path $fixture -Product 'OpenStudio' -Version '0.1.01'
     foreach ($file in Get-OpenStudioSigningFiles -Directory $source) {
         Copy-Item -LiteralPath $fixture -Destination $file
     }
@@ -79,12 +90,7 @@ public class SigningFixture {}
 
     # Inno Setup's real metadata strings contain trailing space padding.
     $installerFixture = Join-Path $signingTestRoot "installer-fixture.dll"
-    Add-Type -OutputAssembly $installerFixture -OutputType Library -TypeDefinition @'
-using System.Reflection;
-[assembly: AssemblyProduct("OpenStudio    ")]
-[assembly: AssemblyInformationalVersion("0.1.01    ")]
-public class InstallerSigningFixture {}
-'@
+    New-SigningFixture -Path $installerFixture -Product 'OpenStudio    ' -Version '0.1.01    '
     $installerFile = Join-Path $source "OpenStudio-Setup-x64.exe"
     Copy-Item -LiteralPath $installerFixture -Destination $installerFile
     Copy-OpenStudioSigningFiles -SourceDirectory $source -DestinationDirectory (Join-Path $signingTestRoot "installer") `
