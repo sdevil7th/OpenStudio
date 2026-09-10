@@ -176,14 +176,14 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         PeakCache::CacheEntry loaded;
         check("peak_cache_atomic_round_trip", write() && cache.hasCachedPeaks(audio)
             && cache.loadFromFile(file, audio, loaded) && loaded.levels[0].data == entry.levels[0].data);
-        entry.levels[0].numPeaks = INT_MAX;
+        entry.levels[0].numPeaks = std::numeric_limits<int>::max();
         check("peak_cache_rejects_oversized_count_before_allocation", write() && !cache.hasCachedPeaks(audio)
             && !cache.loadFromFile(file, audio, loaded));
         entry.levels[0].numPeaks = 1; entry.sampleRate = std::numeric_limits<double>::quiet_NaN();
         check("peak_cache_rejects_invalid_rate", write() && !cache.hasCachedPeaks(audio) && !cache.loadFromFile(file, audio, loaded));
         entry.sampleRate = 48000; entry.levels[0].data[0] = std::numeric_limits<float>::infinity();
         check("peak_cache_rejects_nonfinite_values", write() && !cache.loadFromFile(file, audio, loaded));
-        check("peak_requests_bound_pixel_allocation", cache.getPeaks(audio, 0, 0, INT_MAX).size() == 0
+        check("peak_requests_bound_pixel_allocation", cache.getPeaks(audio, 0, 0, std::numeric_limits<int>::max()).size() == 0
             && cache.getPeaks(audio, 64, 0, -1).size() == 0);
         cache.stopping.store(true);
         check("peak_generation_rejects_work_after_shutdown", !cache.generateSync(audio));

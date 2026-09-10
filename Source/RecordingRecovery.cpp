@@ -1,5 +1,6 @@
 #include "RecordingRecovery.h"
 #include "RecordingWriterSafety.h"
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -135,7 +136,7 @@ juce::var RecordingRecovery::repair(const juce::String& id, const std::function<
     while (written < info.frames)
     {
         if (keepRunning && !keepRunning()) return fail("Recording repair cancelled; original retained");
-        const int frames = static_cast<int>(juce::jmin<juce::int64>(blockSize, info.frames - written));
+        const int frames = static_cast<int>(std::min<juce::int64>(blockSize, info.frames - written));
         const int count = frames * info.channels * 2;
         if (input->read(bytes.getData(), count) != count) return fail("Recording read failed; original retained");
         for (int channel = 0; channel < info.channels; ++channel)
