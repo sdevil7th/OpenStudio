@@ -33,7 +33,11 @@ $arguments = @(
 )
 
 Write-Host "Running native window lifecycle smoke test: $resolvedAppPath"
-$process = Start-Process -FilePath $resolvedAppPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
+$startOptions = @{ FilePath = $resolvedAppPath; ArgumentList = $arguments; PassThru = $true }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $startOptions.WindowStyle = 'Hidden'
+}
+$process = Start-Process @startOptions
 
 try {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
