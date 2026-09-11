@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import gc
+from functools import partial
 import runpy
 import shutil
 import sys
@@ -124,6 +125,12 @@ def prepare(source: Path, destination: Path, cache: Path):
         converter.write_bytes(data)
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     namespace = runpy.run_path(str(converter))
+    if sys.platform == "win32":
+        # Large copy-on-write mappings can crash torch_cpu.dll on Windows
+        # before Python can raise an error. Use safetensors' supported reader
+        # for this converter only; keep the verified upstream script intact.
+        globals_ = namespace["convert"].__globals__
+        globals_["load_file"] = partial(globals_["load_file"], backend="pread")
     namespace["convert"](argparse.Namespace(checkpoint_path=str(source / "model.safetensors"),
         model_config_path=str(source / "model_config.json"), text_encoder_repo=str(source / "t5gemma-b-b-ul2"),
         output_dir=str(destination), dtype="bfloat16", skip_sanity_check=True))

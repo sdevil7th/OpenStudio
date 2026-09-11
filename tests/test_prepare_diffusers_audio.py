@@ -143,5 +143,35 @@ class HubProgressTests(unittest.TestCase):
             self.assertEqual(report.call_count, count)
 
 
+class StableConversionTests(unittest.TestCase):
+    def test_windows_converter_uses_supported_reader_without_changing_upstream_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination, cache = root / "source", root / "staging", root / "cache"
+            for name in ["model.safetensors", "model_config.json", "t5gemma-b-b-ul2/config.json",
+                         "t5gemma-b-b-ul2/model.safetensors", "t5gemma-b-b-ul2/tokenizer.model"]:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            cache.mkdir()
+            converter = cache / f"convert_stable_audio_3_{setup.DIFFUSERS_REVISION}.py"
+            script = b"def convert(args):\n    load_file(args.checkpoint_path, device='cpu')\n"
+            converter.write_bytes(script)
+            for platform, expected in [("win32", {"device": "cpu", "backend": "pread"}),
+                                       ("linux", {"device": "cpu"})]:
+                loader = Mock()
+                namespace = {"load_file": loader}
+                exec(script, namespace)
+                with patch.object(setup.sys, "platform", platform), \
+                     patch.object(setup, "CONVERTER_SHA256", setup.hashlib.sha256(script).hexdigest()), \
+                     patch.object(setup.runpy, "run_path", return_value=namespace), \
+                     patch.object(setup, "DiffusersAudioSession") as validate, \
+                     patch.dict(os.environ):
+                    setup.prepare(source, destination, cache)
+                loader.assert_called_once_with(str(source / "model.safetensors"), **expected)
+                validate.assert_called_once_with(destination, setup.STABLE_MODEL)
+                self.assertEqual(converter.read_bytes(), script)
+
+
 if __name__ == "__main__":
     unittest.main()

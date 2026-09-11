@@ -3665,7 +3665,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           : await nativeBridge.getAiToolsStatus();
 
         const reconciledStatus =
-          !nextStatus.installInProgress && (nextStatus.available || nextStatus.state === "ready")
+          !nextStatus.installInProgress && nextStatus.state !== "error" && nextStatus.state !== "cancelled"
+            && (nextStatus.available || nextStatus.state === "ready")
             ? {
                 ...nextStatus,
                 state: "ready" as const,
@@ -3722,7 +3723,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     applyAiToolsStatusUpdate: (status) => {
       const currentStatus = get().aiToolsStatus;
       const nextStatus =
-        !status.installInProgress && (status.available || status.state === "ready")
+        !status.installInProgress && status.state !== "error" && status.state !== "cancelled"
+          && (status.available || status.state === "ready")
           ? {
               ...currentStatus,
               ...status,
@@ -3806,6 +3808,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           statusWarningCode: undefined,
           message: pendingMessage,
           stepLabel: pendingMessage,
+          elapsedMs: 0,
+          progress: 0,
+          bytesDownloaded: 0,
+          bytesTotal: 0,
+          bytesCached: 0,
+          errorCode: undefined,
+          terminalReason: undefined,
           activityLines: [pendingMessage],
         },
         aiToolsStatusLastUpdatedAt: Date.now(),

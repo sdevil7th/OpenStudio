@@ -1363,6 +1363,12 @@ void StemSeparator::scheduleStatusRefresh()
             initialStatusPrepared = true;
         }
 
+        // A different installed model cannot reconcile a failed/cancelled
+        // Diffusers setup. Keep its result until the next explicit attempt.
+        if (lastAiToolsStatus.lastPhase == "stable_audio_import"
+            && (lastAiToolsStatus.state == "error" || lastAiToolsStatus.state == "cancelled"))
+            return;
+
         if (! statusRefreshInFlight)
         {
             statusRefreshInFlight = true;
@@ -2107,10 +2113,15 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.progress = 0.05f;
             status.installInProgress = true;
             status.message = downloadRequested ? "Preparing Hugging Face model download..." : "Importing Diffusers audio model snapshot...";
+            status.elapsedMs = 0;
+            status.bytesDownloaded = 0;
+            status.bytesTotal = 0;
+            status.bytesCached = 0;
             status.stepLabel = status.message;
             status.lastPhase = "stable_audio_import";
             status.error.clear();
             status.errorCode.clear();
+            status.terminalReason.clear();
             status.activityLines.clear();
             status.activityLines.add(downloadRequested ? "Downloading the selected model into OpenStudio managed storage."
                 : "Local Diffusers audio source: " + sourceRoot.getFullPathName());
@@ -2530,6 +2541,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     command.add("https://github.com/huggingface/diffusers/archive/7643c4826609c47755e3da0e5b768e8070468f49.zip");
                     command.add("transformers==5.16.1");
                     command.add("accelerate==1.14.0");
+                    command.add("safetensors==0.8.0");
                     command.add("sentencepiece");
                     command.add("protobuf");
                     command.add("soundfile");

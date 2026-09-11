@@ -142,6 +142,20 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         separator.publishStatusRefresh(probe, separator.aiToolsStatusRevision);
         check("ai_status_fresh_idle_probe_publishes_and_releases_refresh",
               separator.lastAiToolsStatus.state == "ready" && ! separator.statusRefreshInFlight);
+        for (const auto* terminalState : { "error", "cancelled" })
+        {
+            separator.updateCachedAiToolsStatus([terminalState] (StemSeparator::AiToolsStatus& status)
+            {
+                status.state = terminalState;
+                status.lastPhase = "stable_audio_import";
+                status.requestedModelId = "stable-audio-3-medium";
+                status.available = true; // A different tool is already installed.
+            });
+            separator.scheduleStatusRefresh();
+            check(terminalState[0] == 'e' ? "ai_diffusers_failure_survives_other_ready_tools"
+                                         : "ai_diffusers_cancellation_survives_other_ready_tools",
+                  separator.lastAiToolsStatus.state == terminalState && ! separator.statusRefreshInFlight);
+        }
         const auto parsed = separator.applyDiffusersSetupProgress(
             R"(OPENSTUDIO_SETUP_PROGRESS {"stage":"Downloading model files","bytesDownloaded":3221225472,"bytesTotal":12884901888,"bytesCached":2147483648})", probe);
         check("ai_hub_progress_preserves_large_byte_counts",
