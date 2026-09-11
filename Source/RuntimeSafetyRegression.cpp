@@ -149,12 +149,20 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
                 status.state = terminalState;
                 status.lastPhase = "stable_audio_import";
                 status.requestedModelId = "stable-audio-3-medium";
-                status.available = true; // A different tool is already installed.
+                status.available = false; // Other tools have not finished probing yet.
+                status.error = "Setup did not finish";
             });
-            separator.scheduleStatusRefresh();
+            probe.available = true;
+            probe.runtimeVersion = "refreshed-runtime";
+            separator.publishStatusRefresh(probe, separator.aiToolsStatusRevision);
             check(terminalState[0] == 'e' ? "ai_diffusers_failure_survives_other_ready_tools"
                                          : "ai_diffusers_cancellation_survives_other_ready_tools",
-                  separator.lastAiToolsStatus.state == terminalState && ! separator.statusRefreshInFlight);
+                  separator.lastAiToolsStatus.state == terminalState
+                  && separator.lastAiToolsStatus.requestedModelId == "stable-audio-3-medium"
+                  && separator.lastAiToolsStatus.error == "Setup did not finish"
+                  && separator.lastAiToolsStatus.available
+                  && separator.lastAiToolsStatus.runtimeVersion == "refreshed-runtime"
+                  && ! separator.statusRefreshInFlight);
         }
         const auto parsed = separator.applyDiffusersSetupProgress(
             R"(OPENSTUDIO_SETUP_PROGRESS {"stage":"Downloading model files","bytesDownloaded":3221225472,"bytesTotal":12884901888,"bytesCached":2147483648})", probe);

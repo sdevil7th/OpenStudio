@@ -1363,12 +1363,6 @@ void StemSeparator::scheduleStatusRefresh()
             initialStatusPrepared = true;
         }
 
-        // A different installed model cannot reconcile a failed/cancelled
-        // Diffusers setup. Keep its result until the next explicit attempt.
-        if (lastAiToolsStatus.lastPhase == "stable_audio_import"
-            && (lastAiToolsStatus.state == "error" || lastAiToolsStatus.state == "cancelled"))
-            return;
-
         if (! statusRefreshInFlight)
         {
             statusRefreshInFlight = true;
@@ -1448,7 +1442,8 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (previousStatus.state == "error" && refreshedStatus.available && musicGenerationFullyReady)
+        if (previousStatus.lastPhase != "stable_audio_import"
+            && previousStatus.state == "error" && refreshedStatus.available && musicGenerationFullyReady)
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
                                                 "refresh",
@@ -1462,7 +1457,8 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (! previousStatus.available && refreshedStatus.available && musicGenerationFullyReady
+        if (previousStatus.lastPhase != "stable_audio_import"
+            && ! previousStatus.available && refreshedStatus.available && musicGenerationFullyReady
             && previousStatus.installSessionId.isNotEmpty())
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
@@ -1544,7 +1540,29 @@ void StemSeparator::publishStatusRefresh (const AiToolsStatus& status, juce::uin
     if (revision == aiToolsStatusRevision
         && ! aiToolsInstallWorkInProgress.load() && ! installWorkerActive.load())
     {
+        const auto previous = lastAiToolsStatus;
         lastAiToolsStatus = status;
+        // Refresh other tools' capabilities without letting their readiness
+        // erase the result of a failed/cancelled Diffusers setup attempt.
+        if (previous.lastPhase == "stable_audio_import"
+            && (previous.state == "error" || previous.state == "cancelled"))
+        {
+            lastAiToolsStatus.state = previous.state;
+            lastAiToolsStatus.progress = previous.progress;
+            lastAiToolsStatus.message = previous.message;
+            lastAiToolsStatus.stepLabel = previous.stepLabel;
+            lastAiToolsStatus.error = previous.error;
+            lastAiToolsStatus.errorCode = previous.errorCode;
+            lastAiToolsStatus.terminalReason = previous.terminalReason;
+            lastAiToolsStatus.lastPhase = previous.lastPhase;
+            lastAiToolsStatus.installSessionId = previous.installSessionId;
+            lastAiToolsStatus.requestedModelId = previous.requestedModelId;
+            lastAiToolsStatus.selectedFeatures = previous.selectedFeatures;
+            lastAiToolsStatus.requestedFeatures = previous.requestedFeatures;
+            lastAiToolsStatus.requestedFeature = previous.requestedFeature;
+            lastAiToolsStatus.activityLines = previous.activityLines;
+            lastAiToolsStatus.elapsedMs = previous.elapsedMs;
+        }
         initialStatusPrepared = true;
     }
     statusRefreshInFlight = false;
