@@ -104,7 +104,8 @@ def emit_payload(payload: dict[str, Any]) -> None:
         payload.setdefault("attemptMode", "")
         payload.setdefault("lmBackend", "")
         payload.setdefault("lmStage", "")
-    print(json.dumps(payload, ensure_ascii=False), file=ORIGINAL_STDOUT, flush=True)
+    # stdout is a JSON wire protocol; Windows console code pages must not alter it.
+    print(json.dumps(payload, ensure_ascii=True), file=ORIGINAL_STDOUT, flush=True)
 
 
 def normalize_text(value: Any, fallback: str = "") -> str:

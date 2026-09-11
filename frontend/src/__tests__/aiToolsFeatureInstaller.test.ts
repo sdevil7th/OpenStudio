@@ -73,7 +73,7 @@ describe("AI feature installer contract", () => {
   it("keeps Stable Audio runtime separate from the ACE runtime", () => {
     expect(stemSeparatorSource).toContain("getStableAudioRuntimeRoot");
     expect(stemSeparatorSource).toContain("diffusers-audio-runtime");
-    expect(stemSeparatorSource).toContain("Installing Diffusers audio CUDA PyTorch runtime");
+    expect(stemSeparatorSource).toContain("Installing Diffusers audio PyTorch runtime for this machine");
     expect(stemSeparatorSource).toContain("https://github.com/huggingface/diffusers/archive/");
     expect(stemSeparatorSource).toContain("stable_audio_flash_attention_skipped");
     expect(stemSeparatorSource).toContain("PyTorch attention fallback");

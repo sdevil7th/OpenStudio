@@ -1,4 +1,6 @@
 import importlib.util
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +18,14 @@ SPEC.loader.exec_module(stable_audio)
 
 
 class ExecutionProgressTests(unittest.TestCase):
+    def test_unicode_status_round_trips_through_ascii_console(self):
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="ascii")
+        message = "GPU \u00b7 bfloat16 \u2014 preparing"
+        with mock.patch.object(stable_audio, "ORIGINAL_STDOUT", stream):
+            stable_audio.emit_payload({"message": message})
+        self.assertEqual(json.loads(buffer.getvalue().decode("utf-8"))["message"], message)
+
     def test_real_stage_survives_heartbeat_and_decode_resets_percentage(self):
         worker = stable_audio.StableAudioWorker(Path("unused"))
         worker._phase_update("denoising", "Denoising step 3/8.", 3/8)

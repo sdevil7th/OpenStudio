@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import sys
 import tempfile
@@ -20,6 +21,14 @@ import ai_runtime_probe  # noqa: E402
 
 
 class AceDiffusersGenerationTests(unittest.TestCase):
+    def test_unicode_status_round_trips_through_ascii_console(self):
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="ascii")
+        message = "GPU \u00b7 bfloat16 \u2014 preparing"
+        with mock.patch.object(music, "ORIGINAL_STDOUT", stream):
+            music.emit_payload({"message": message})
+        self.assertEqual(json.loads(buffer.getvalue().decode("utf-8"))["message"], message)
+
     def test_invalid_generated_audio_is_rejected_before_writing(self):
         for data in (np.empty((0, 2)), np.array([[float("nan"), 0]]), np.array([[float("inf"), 0]])):
             with self.subTest(data=data), self.assertRaises(music.GenerationFailure):

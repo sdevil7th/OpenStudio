@@ -166,7 +166,7 @@ def emit_payload(payload: dict[str, Any]) -> None:
     normalized = dict(payload)
     if "progress" in normalized:
         normalized["progress"] = round(float(normalized.get("progress", 0.0)), 4)
-    ORIGINAL_STDOUT.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+    ORIGINAL_STDOUT.write(json.dumps(normalized, ensure_ascii=True) + "\n")
     ORIGINAL_STDOUT.flush()
 
 
