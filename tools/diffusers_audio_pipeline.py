@@ -6,6 +6,8 @@ without loading multi-gigabyte weights. Generation never downloads checkpoints.
 from __future__ import annotations
 
 import math
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,103 @@ def module_weight_bytes(modules: Any) -> int:
     return total
 
 
+def plan_audio_memory(free_vram: int | None, weights: int, largest: int,
+                      duration: float = 30, conservative: bool = False,
+                      allow_group: bool = True) -> str:
+    """Reserve grows with duration; measured OOM retries choose layer offload."""
+    if conservative:
+        return "group-offload" if allow_group else "model-offload"
+    reserve = int((3 + max(0, duration - 30) / 60) * GIB)
+    if free_vram is not None and free_vram >= weights + reserve:
+        return "resident"
+    if free_vram is None or free_vram >= largest + reserve:
+        return "model-offload"
+    return "group-offload" if allow_group else "model-offload"
+
+
+def cuda_memory_budget() -> int | None:
+    import torch
+    try:
+        # Cached allocations owned by this worker can be reused on the next call.
+        return int(torch.cuda.mem_get_info()[0] + torch.cuda.memory_reserved())
+    except (RuntimeError, OSError, AttributeError):
+        return None
+
+
+def memory_snapshot(device: str) -> dict[str, Any]:
+    import torch
+    result: dict[str, Any] = {"availableRamBytes": available_host_memory()}
+    try:
+        import psutil
+        result["workerRssBytes"] = psutil.Process().memory_info().rss
+    except (ImportError, OSError):
+        pass
+    if device == "cuda":
+        result.update(freeVramBytes=int(torch.cuda.mem_get_info()[0]),
+                      peakAllocatedBytes=torch.cuda.max_memory_allocated(),
+                      peakReservedBytes=torch.cuda.max_memory_reserved())
+    return result
+
+
+@contextmanager
+def observe_generation(pipe: Any, model_id: str, duration: float, steps: int, callback):
+    """Observe supported module boundaries without replacing upstream inference.
+
+    MiniMax's custom autoregressive loop has no public progress callback. Count
+    completed decoder forwards; report an upper bound since EOS may finish early.
+    Diffusion chunks/decoding remain indeterminate unless a public callback exists.
+    """
+    handles = []
+    started = time.monotonic()
+    phase_started = started
+    phase = "preparing_audio"
+    timings: dict[str, float] = {}
+    frames = 0
+
+    def report(next_phase, message, fraction=-1.0):
+        nonlocal phase, phase_started
+        now = time.monotonic()
+        if next_phase != phase:
+            timings[phase] = timings.get(phase, 0) + now - phase_started
+            phase, phase_started = next_phase, now
+        if callback:
+            callback(next_phase, message, fraction)
+
+    def boundary(name, message):
+        def hook(_module, _args):
+            if phase != name:
+                report(name, message)
+        return hook
+
+    def frame_done(_module, _args, _output):
+        nonlocal frames
+        frames += 1
+        maximum = max(1, int(duration * pipe.frame_rate))
+        completed = max(0, frames - 2)  # Text prefill, then the audio-start advance.
+        if completed % 10 == 0:
+            report("generating_tokens", f"Composing audio: {completed} of up to {maximum} frames.")
+
+    def attach(module, hook, post=False):
+        method = "register_forward_hook" if post else "register_forward_pre_hook"
+        if hasattr(module, method):
+            handles.append(getattr(module, method)(hook))
+
+    try:
+        if model_id == MINIMAX_MODEL:
+            attach(pipe.language_model.model, frame_done, True)
+        attach(getattr(pipe, "transformer", None), boundary("denoising", "Synthesizing audio."))
+        attach(getattr(pipe, "vocoder", None), boundary("decoding_audio", "Decoding audio waveform."))
+        # Audio VAEs call decode directly, so observe their decoder module.
+        attach(getattr(getattr(pipe, "vae", None), "decoder", None),
+               boundary("decoding_audio", "Decoding audio waveform."))
+        yield report, timings
+    finally:
+        for handle in handles:
+            handle.remove()
+        timings[phase] = timings.get(phase, 0) + time.monotonic() - phase_started
+        timings["total"] = time.monotonic() - started
+
+
 def normalize_song_lyrics(lyrics: str) -> str:
     import re
     # MiniMax drops words on the same line as a leading structure tag.
@@ -85,12 +184,16 @@ def model_workflows(model_id: str) -> set[str]:
 
 
 class DiffusersAudioSession:
-    def __init__(self, root: Path, model_id: str = STABLE_MODEL) -> None:
+    def __init__(self, root: Path, model_id: str = STABLE_MODEL, *, conservative: bool = False) -> None:
         import torch
         # This separate worker must not create a full-machine CPU thread pool
         # beside live monitoring. GPU offload still consumes RAM/bandwidth.
         torch.set_num_threads(4)
         self.model_id = model_id
+        self.root = root
+        self.conservative = conservative
+        self._active_pipe = None
+        self._placement = None
         model_workflows(model_id)
         self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.sample_rate = 44100
@@ -98,11 +201,19 @@ class DiffusersAudioSession:
         dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
         if self.device == "cuda" and not torch.cuda.is_bf16_supported():
             dtype = torch.float32  # Avoid silently using unsupported BF16 kernels.
+        self.dtype = dtype
         backend = "ROCm" if self.device == "cuda" and torch.version.hip else self.device.upper()
         self.execution_details = {"device": backend, "precision": str(dtype).removeprefix("torch."),
                                   "attentionPolicy": "PyTorch SDPA (automatic)",
                                   "offload": "model-offload" if self.device == "cuda" else "resident",
                                   "streaming": False}
+        if self.device == "cuda" and hasattr(torch.cuda, "get_device_name"):
+            self.execution_details["physicalDevice"] = torch.cuda.get_device_name()
+        else:
+            self.execution_details["physicalDevice"] = "Apple Metal" if self.device == "mps" else "CPU"
+        self.execution_details["fallbackReason"] = (
+            "Retrying with reduced device memory use after an out-of-memory error."
+            if conservative else "" if self.device != "cpu" else "No supported GPU is available in this runtime.")
         self.pipelines: dict[str, Any] = {}
         if model_id == STABLE_MODEL:
             from diffusers import StableAudio3Pipeline
@@ -138,6 +249,8 @@ class DiffusersAudioSession:
                     weights_bytes=module_weight_bytes(getattr(self.pipe, name) for name in required),
                     language_model_bytes=module_weight_bytes([self.pipe.language_model]),
                     bf16=dtype == torch.bfloat16)
+                if conservative:
+                    plan = MiniMaxMemoryPlan("group-offload")
                 self.execution_details.update(offload=plan.mode, streaming=plan.use_stream,
                     lowCpuMemory=plan.low_cpu_mem_usage, freeVramBytes=free_vram,
                     availableRamBytes=available_ram)
@@ -167,6 +280,65 @@ class DiffusersAudioSession:
                         manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin="3GiB")
             else:
                 self.pipe.to(self.device)
+        components = getattr(self.pipe, "components", {})
+        self.execution_details["weightsBytes"] = module_weight_bytes(components.values())
+
+    def needs_reload(self) -> bool:
+        if self.device != "cuda" or self.model_id != MINIMAX_MODEL or self.conservative:
+            return False
+        budget = cuda_memory_budget()
+        mode = self.execution_details["offload"]
+        scale = 1 if self.execution_details["precision"] == "bfloat16" else 2
+        minimum = ({"resident": 23, "model-offload": 22, "group-offload": 8}[mode] * scale
+                   + (0 if mode == "group-offload" else 3)) * GIB
+        return budget is not None and budget < minimum and (mode != "group-offload" or self.execution_details["streaming"])
+
+    def _configure_stable(self, pipe, duration):
+        if self.device != "cuda":
+            pipe.to(self.device)
+            return
+        components = list(self.pipe.components.values())
+        weights = module_weight_bytes(components)
+        largest = max((module_weight_bytes([component]) for component in components), default=0)
+        mode = plan_audio_memory(cuda_memory_budget(), weights, largest, duration, self.conservative,
+                                 allow_group=False)
+        if self._active_pipe is pipe and self._placement == mode:
+            return
+        # Source pipelines share modules. Retire the previous hook owner before
+        # installing a new one; never stack model and sequential hooks.
+        if self._active_pipe is not None:
+            self._active_pipe.remove_all_hooks()
+        pipe.remove_all_hooks()
+        pipe.to("cpu")
+        if mode == "resident":
+            pipe.to("cuda")
+        else:
+            pipe.enable_model_cpu_offload()
+        self._active_pipe, self._placement = pipe, mode
+        self.execution_details.update(offload=mode, weightsBytes=weights,
+                                      freeVramBytes=cuda_memory_budget())
+
+    def _replan_stable(self, duration):
+        if self.device != "cuda" or self.model_id != STABLE_MODEL or self._placement is None:
+            return
+        components = list(self.pipe.components.values())
+        weights = module_weight_bytes(components)
+        largest = max((module_weight_bytes([component]) for component in components), default=0)
+        mode = plan_audio_memory(cuda_memory_budget(), weights, largest, duration, self.conservative,
+                                 allow_group=False)
+        if mode == self._placement:
+            return
+        # Re-hooking warmed source pipelines can retain invalid device state in
+        # this pin. Retire all shared variants before loading a new hook owner.
+        import gc
+        import torch
+        del components
+        self.pipe = None
+        self.pipelines.clear()
+        self._active_pipe = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.__init__(self.root, self.model_id, conservative=self.conservative)
 
     def execution_summary(self) -> str:
         details = self.execution_details
@@ -176,9 +348,32 @@ class DiffusersAudioSession:
             placement += " with transfer overlap"
             if details.get("lowCpuMemory"):
                 placement += " (lower RAM use)"
-        return f"{details['device']} · {details['precision']} · {placement} · automatic SDPA"
+        physical = details.get("physicalDevice", details["device"])
+        summary = f"{physical} · {details['device']} · {details['precision']} · {placement} · automatic SDPA"
+        if self.device == "cuda":
+            try:
+                import torch
+                summary += f" · GPU {torch.cuda.memory_allocated() / GIB:.1f} GiB allocated"
+            except (ImportError, RuntimeError, AttributeError):
+                pass
+        return summary
 
-    def generate(self, *, workflow: str, prompt: str, duration: float,
+    def generate(self, *, progress_callback=None, **kwargs):
+        import torch
+        self._replan_stable(kwargs["duration"])
+        if self.device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        with observe_generation(self.pipe, self.model_id, kwargs["duration"], kwargs.get("steps", 8), progress_callback) as (report, timings):
+            self._report_progress = report
+            try:
+                return self._generate(**kwargs)
+            finally:
+                self._report_progress = None
+                if hasattr(self, "execution_details"):
+                    self.execution_details.update(memory_snapshot(self.device))
+                    self.execution_details["phaseSeconds"] = timings
+
+    def _generate(self, *, workflow: str, prompt: str, duration: float,
                  steps: int = 8, seed: int = -1, lyrics: str = "",
                  init_audio: Any = None, init_noise_level: float = 0.5,
                  inpaint_audio: Any = None, inpaint_mask_start_seconds: float = 0,
@@ -208,19 +403,26 @@ class DiffusersAudioSession:
         kind = "inpaint" if inpaint_audio is not None else "variation" if init_audio is not None else "text"
         pipe = self.pipelines.get(kind)
         if pipe is None:
+            if self._active_pipe is not None:
+                self._active_pipe.remove_all_hooks()
+                self._active_pipe = None
+            # The pinned from_pipe() casts every component/buffer, defaulting to
+            # FP32. Construct from shared components to preserve mixed-precision
+            # buffers as well as weights, without copies or dtype conversion.
             pipe = self.pipe if kind == "text" else (
                 StableAudio3InpaintPipeline if kind == "inpaint" else StableAudio3AudioToAudioPipeline
-            ).from_pipe(self.pipe)
+            )(**self.pipe.components)
             self.pipelines[kind] = pipe
-        if self.device == "cuda":
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to(self.device)
+        self._configure_stable(pipe, duration)
         # Distilled CFG is baked into the weights; negative prompts have no
         # effect at guidance 1. Do not retry while silently dropping arguments.
         kwargs = dict(prompt=prompt, duration=duration, num_inference_steps=steps,
                       silence_padding_duration=0.0,
                       generator=generator, output_type="pt")
+        def on_step(_pipe, index, _timestep, values):
+            self._report_progress("denoising", f"Denoising step {index + 1}/{steps}.", (index + 1) / steps)
+            return values
+        kwargs.update(callback_on_step_end=on_step, callback_on_step_end_tensor_inputs=[])
         if kind == "text":
             kwargs["guidance_scale"] = 1.0
         # The source pipelines do not expose CFG at all in this pinned API.

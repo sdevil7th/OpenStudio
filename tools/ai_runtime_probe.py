@@ -553,8 +553,10 @@ def probe_runtime_capabilities(
     else:
         bridge_import_ok, bridge_import_error = _can_import_music_generation_bridge()
         if bridge_import_ok:
-            report["musicGenerationComputeBackend"] = "cuda" if torch.cuda.is_available() else "cpu"
-            if report["musicGenerationComputeBackend"] != "cuda":
+            cuda_available = torch.cuda.is_available()
+            report["musicGenerationComputeBackend"] = ("rocm" if cuda_available and torch.version.hip
+                                                       else "cuda" if cuda_available else "cpu")
+            if not cuda_available:
                 _set_music_generation_status(
                     report,
                     ready=False,

@@ -20,6 +20,11 @@ import ai_runtime_probe  # noqa: E402
 
 
 class AceDiffusersGenerationTests(unittest.TestCase):
+    def test_invalid_generated_audio_is_rejected_before_writing(self):
+        for data in (np.empty((0, 2)), np.array([[float("nan"), 0]]), np.array([[float("inf"), 0]])):
+            with self.subTest(data=data), self.assertRaises(music.GenerationFailure):
+                music.output_to_soundfile_array(data)
+
     def test_default_music_generation_cache_root_is_diffusers(self):
         with mock.patch.object(ai_runtime_probe.Path, "home", return_value=Path("C:/Users/example")):
             root = ai_runtime_probe.resolve_music_gen_checkpoint_root("")

@@ -1,3 +1,4 @@
+import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Music2, Settings2, WandSparkles } from "lucide-react";
 import { useShallow } from "zustand/shallow";
@@ -150,9 +151,6 @@ function formatSessionModeLabel(sessionMode?: string) {
   }
 }
 
-function progressWidth(progress?: number) {
-  return `${Math.max(4, Math.round((progress ?? 0) * 100))}%`;
-}
 
 function shouldShowParam(workflowId: string, param: AIWorkflowParam) {
   if (workflowId === "variation") {
@@ -651,7 +649,7 @@ export default function AIClipGenerationModal() {
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
                   <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
-                    {Math.round((progress.progress ?? 0) * 100)}%
+                    {formatGenerationStageProgress(progress.phaseProgress)}
                   </span>
                   {progress.elapsedMs ? (
                     <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
@@ -660,12 +658,7 @@ export default function AIClipGenerationModal() {
                   ) : null}
                 </div>
               </div>
-              <div className="mt-3 h-2.5 w-full rounded-full bg-neutral-900">
-                <div
-                  className="h-2.5 rounded-full bg-daw-accent transition-all duration-200"
-                  style={{ width: progressWidth(progress.progress) }}
-                />
-              </div>
+              <AIGenerationProgressBar value={progress.phaseProgress} />
               {hasProgressDetails ? (
                 <div className="mt-3">
                   <Button

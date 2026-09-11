@@ -621,15 +621,37 @@ class StableAudioWorker:
         self.model_root = model_root
         self._model: Any | None = None
         self._lock = threading.Lock()
+        self._conservative = False
+        self._phase = ("generating_audio", "Preparing audio generation.", -1.0)
+        self._phase_lock = threading.Lock()
+        self._progress_context = None
+        self._request_started = time.monotonic()
+
+    def unload(self) -> None:
+        import gc
+        self._model = None
+        gc.collect()
+        if "torch" in sys.modules:
+            torch = sys.modules["torch"]
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def _phase_update(self, phase, message, fraction):
+        with self._phase_lock:
+            self._phase = (phase, message, fraction)
+        if self._progress_context is not None:
+            emit_payload({**self._progress_context, "state": "generating", "phase": phase,
+                "message": message, "progress": max(0, fraction), "phaseProgress": fraction,
+                "elapsedMs": int((time.monotonic() - self._request_started) * 1000),
+                "statusNote": self._execution_note()})
 
     def _emit_loading_progress(self, request_id: str, workflow: str, stop_event: threading.Event) -> None:
-        started = time.monotonic()
         while not stop_event.wait(8.0):
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            progress = min(0.18, 0.07 + (elapsed_ms / 300000.0) * 0.10)
+            elapsed_ms = int((time.monotonic() - self._request_started) * 1000)
             emit_payload({
                 "state": "loading",
-                "progress": progress,
+                "progress": 0.0,
+                "phaseProgress": -1.0,
                 "phase": "loading_model",
                 "message": "Still loading the local Stable Audio 3 Medium snapshot...",
                 "statusNote": "First load can take several minutes while weights move into memory.",
@@ -643,15 +665,16 @@ class StableAudioWorker:
             })
 
     def _emit_generation_progress(self, request_id: str, workflow: str, stop_event: threading.Event) -> None:
-        started = time.monotonic()
         while not stop_event.wait(8.0):
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            progress = min(0.92, 0.20 + (elapsed_ms / 360000.0) * 0.72)
+            elapsed_ms = int((time.monotonic() - self._request_started) * 1000)
+            with self._phase_lock:
+                phase, message, fraction = self._phase
             emit_payload({
                 "state": "generating",
-                "progress": progress,
-                "phase": "generating_audio",
-                "message": "Still generating with Stable Audio 3 Medium...",
+                "progress": max(0.0, fraction),
+                "phaseProgress": fraction,
+                "phase": phase,
+                "message": message,
                 "statusNote": self._execution_note(),
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
@@ -664,7 +687,7 @@ class StableAudioWorker:
 
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
         from diffusers_audio_pipeline import DiffusersAudioSession
-        return DiffusersAudioSession(self.model_root, MODEL_ID)
+        return DiffusersAudioSession(self.model_root, MODEL_ID, conservative=self._conservative)
 
     def _execution_note(self) -> str:
         summary = getattr(self._model, "execution_summary", None)
@@ -672,6 +695,9 @@ class StableAudioWorker:
 
     def _load_model(self, workflow: str, request_id: str) -> Any:
         with self._lock:
+            if self._model is not None and self._model.needs_reload():
+                self.unload()
+                self._conservative = True
             if self._model is not None:
                 return self._model
 
@@ -695,12 +721,17 @@ class StableAudioWorker:
             return self._model
 
     def generate(self, workflow: str, params_json: str, output_path: Path, request_id: str) -> bool:
+        completed = False
         try:
             params = json.loads(params_json)
+            self._request_started = time.monotonic()
+            self._progress_context = {"modelId": MODEL_ID, "workflowId": workflow, "requestId": request_id}
+            self._phase_update("generating_audio", "Preparing audio generation.", -1.0)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             emit_payload({
                 "state": "loading",
                 "progress": 0.05,
+                "phaseProgress": -1.0,
                 "phase": "loading_model",
                 "message": "Loading Stable Audio 3 Medium...",
                 "backend": "stable-audio-3",
@@ -732,6 +763,9 @@ class StableAudioWorker:
                 source_audio=source_audio,
                 source_meta=source_meta,
             )
+            # Resolve a random seed once so an OOM retry keeps the same request.
+            if kwargs.get("seed", -1) < 0:
+                kwargs["seed"] = int.from_bytes(os.urandom(4), "little")
             source_clip_id = normalize_text(request_details.get("sourceClipId"))
             effective_steps = normalize_int(request_details.get("effectiveSteps"), STABLE_AUDIO_DEFAULT_STEPS)
             effective_cfg_scale = normalize_float(request_details.get("effectiveCfgScale"), STABLE_AUDIO_DEFAULT_CFG_SCALE)
@@ -782,7 +816,22 @@ class StableAudioWorker:
             )
             generation_heartbeat.start()
             try:
-                audio = model.generate(workflow=workflow, **kwargs)
+                import torch
+                for attempt in range(2):
+                    try:
+                        audio = model.generate(workflow=workflow, progress_callback=self._phase_update, **kwargs)
+                        break
+                    except torch.OutOfMemoryError as exc:
+                        if attempt or self._conservative:
+                            raise RuntimeError("Not enough memory for this request even with reduced-memory offloading. Close other GPU applications or choose a smaller model/duration.") from exc
+                        # Release traceback tensors before rebuilding hooks. No
+                        # output has been published and all request values stay fixed.
+                        exc.__traceback__ = None
+                        model = None
+                        self.unload()
+                        self._conservative = True
+                        self._phase_update("loading_model", "Memory limit reached; reloading with reduced-memory offloading.", -1.0)
+                        model = self._load_model(workflow, request_id)
             finally:
                 generation_stop_event.set()
                 generation_heartbeat.join(timeout=1.0)
@@ -800,6 +849,7 @@ class StableAudioWorker:
                 "state": "generating",
                 "progress": 0.95,
                 "phase": "writing_audio",
+                "phaseProgress": -1.0,
                 "message": "Writing Stable Audio 3 output...",
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
@@ -834,7 +884,9 @@ class StableAudioWorker:
                 "fullOutputStats": output_stats.get("fullOutputStats"),
                 "tailStats": output_stats.get("tailStats"),
                 "outputDiagnostics": output_stats,
+                "generationDetails": {"execution": getattr(model, "execution_details", {}), "resolvedSeed": kwargs["seed"]},
             })
+            completed = True
             return True
         except Exception as exc:
             emit_payload({
@@ -850,6 +902,11 @@ class StableAudioWorker:
                 "failureDetail": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             })
             return False
+        finally:
+            self._progress_context = None
+            if not completed:
+                model = None
+                self.unload()
 
 
 def recv_exact(connection: socket.socket, byte_count: int) -> bytes:
@@ -883,6 +940,7 @@ def run_worker(model_root: Path) -> None:
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
+    server.settimeout(120.0)
     port = server.getsockname()[1]
     emit_payload({
         "event": "ready",
@@ -897,7 +955,12 @@ def run_worker(model_root: Path) -> None:
     })
 
     while True:
-        connection, _ = server.accept()
+        try:
+            connection, _ = server.accept()
+        except socket.timeout:
+            worker.unload()
+            worker._conservative = False
+            continue
         with connection:
             request = read_framed_json(connection)
             request_id = normalize_text(request.get("requestId")) or str(uuid.uuid4())

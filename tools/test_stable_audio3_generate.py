@@ -16,6 +16,41 @@ SPEC.loader.exec_module(stable_audio)
 
 
 class ExecutionProgressTests(unittest.TestCase):
+    def test_real_stage_survives_heartbeat_and_decode_resets_percentage(self):
+        worker = stable_audio.StableAudioWorker(Path("unused"))
+        worker._phase_update("denoising", "Denoising step 3/8.", 3/8)
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, True]
+        with mock.patch.object(stable_audio, "emit_payload") as emit:
+            worker._emit_generation_progress("request", "text-to-audio", stop)
+        self.assertEqual(emit.call_args.args[0]["phaseProgress"], 3/8)
+        worker._phase_update("decoding_audio", "Decoding waveform.", -1)
+        stop.wait.side_effect = [False, True]
+        with mock.patch.object(stable_audio, "emit_payload") as emit:
+            worker._emit_generation_progress("request", "text-to-audio", stop)
+        self.assertEqual(emit.call_args.args[0]["phaseProgress"], -1)
+        self.assertEqual(emit.call_args.args[0]["phase"], "decoding_audio")
+
+    def test_oom_retries_once_without_changing_request_or_publishing_partial_audio(self):
+        import torch
+        worker = stable_audio.StableAudioWorker(Path("unused"))
+        first = mock.Mock()
+        first.generate.side_effect = torch.OutOfMemoryError("test capacity")
+        second = mock.Mock()
+        second.generate.return_value = np.ones((2, 44100)) * .1
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(worker, "_load_model", side_effect=[first, second]), \
+             mock.patch.object(worker, "unload") as unload, \
+             mock.patch.object(stable_audio, "get_model_audio_format", return_value=(44100, 2)), \
+             mock.patch.object(stable_audio, "write_audio", return_value={}) as write, \
+             mock.patch.object(stable_audio, "emit_payload"):
+            self.assertTrue(worker.generate("text-to-audio", '{"prompt":"piano","duration":1,"seed":123}', Path(directory)/"out.wav", "request"))
+            self.assertEqual(first.generate.call_args, second.generate.call_args)
+            self.assertEqual(first.generate.call_args.kwargs["seed"], 123)
+            self.assertEqual(write.call_count, 1)
+            unload.assert_called_once()
+        self.assertTrue(worker._conservative)
+
     def test_heartbeat_retains_execution_policy(self):
         worker = stable_audio.StableAudioWorker(Path("unused-model"))
         worker._model = mock.Mock(execution_summary=lambda: "CUDA · bfloat16 · CPU layer offload")

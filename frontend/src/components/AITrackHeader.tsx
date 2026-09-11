@@ -1,3 +1,4 @@
+import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
@@ -151,13 +152,7 @@ function formatFailureKindLabel(failureKind?: string) {
   }
 }
 
-function formatProgressLabel(progress: number) {
-  return `${Math.max(0, Math.round(progress * 100))}%`;
-}
 
-function getProgressWidth(progress: number) {
-  return `${Math.max(4, Math.round(progress * 100))}%`;
-}
 
 function getStatusHeadline(track: Track) {
   const workflow = getAIWorkflow(track.aiWorkflow, track.aiMusicModelId, "ai-track");
@@ -181,7 +176,7 @@ function getStatusHeadline(track: Track) {
 
   if (track.aiGenerationState === "loading" || track.aiGenerationState === "generating") {
     return track.aiGenerationMessage
-      || `${formatPhaseLabel(track.aiGenerationPhase)} ${formatProgressLabel(track.aiGenerationProgress ?? 0)}`;
+      || `${formatPhaseLabel(track.aiGenerationPhase)} ${formatGenerationStageProgress(track.aiGenerationPhaseProgress)}`;
   }
 
   return "Ready to generate";
@@ -616,14 +611,9 @@ export const AITrackHeader = React.memo(function AITrackHeader({
 
             {isBusy ? (
               <div className="mt-1.5 flex items-center gap-2">
-                <div className="h-1.5 min-w-0 flex-1 rounded-full bg-neutral-900">
-                  <div
-                    className="h-1.5 rounded-full bg-cyan-400 transition-all duration-200"
-                    style={{ width: getProgressWidth(track.aiGenerationProgress ?? 0) }}
-                  />
-                </div>
+                <AIGenerationProgressBar value={track.aiGenerationPhaseProgress} compact />
                 <span className="shrink-0 text-[10px] tabular-nums text-daw-text-muted">
-                  {formatProgressLabel(track.aiGenerationProgress ?? 0)}
+                  {formatGenerationStageProgress(track.aiGenerationPhaseProgress)}
                 </span>
               </div>
             ) : null}

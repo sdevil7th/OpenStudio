@@ -51,7 +51,7 @@ WORKER_PROTOCOL_VERSION = 2
 MAX_FRAMED_PAYLOAD_BYTES = 8 * 1024 * 1024
 SOURCE_WORKFLOWS = {"variation", "inpaint-selection", "continue-clip"}
 SCRIPT_PATH = Path(__file__).resolve()
-SCRIPT_VERSION = hashlib.md5(SCRIPT_PATH.read_bytes()).hexdigest()[:16]
+SCRIPT_VERSION = hashlib.md5(SCRIPT_PATH.read_bytes() + SCRIPT_PATH.with_name("diffusers_audio_pipeline.py").read_bytes()).hexdigest()[:16]
 ORIGINAL_STDOUT = sys.stdout
 ORIGINAL_STDERR = sys.stderr
 
@@ -411,6 +411,7 @@ class ProgressReporter:
                 {
                     "state": state,
                     "progress": progress,
+                    "phaseProgress": extra.get("phaseProgress", -1),
                     "phase": phase,
                     "message": message,
                     "backend": self.backend,
@@ -677,6 +678,9 @@ def output_to_soundfile_array(audio: Any) -> np.ndarray:
     if hasattr(audio, "detach"):
         audio = audio.detach().cpu().float().numpy()
     data = np.asarray(audio, dtype=np.float32)
+    if data.size == 0 or not np.isfinite(data).all():
+        raise GenerationFailure("ACE-Step returned empty or non-finite audio; no clip was published.",
+                                failureKind="invalid_audio_output")
     if data.ndim == 3:
         data = data[0]
     if data.ndim == 2 and data.shape[0] <= 8 and data.shape[1] > data.shape[0]:
@@ -916,6 +920,11 @@ class DiffusersAcePipelineManager:
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.backend = "unknown"
         self._load_lock = threading.Lock()
+        self._placement = None
+        self.conservative = False
+        self.execution_details = {}
+        self._streaming = False
+        self._low_cpu_memory = False
 
     def load(self, reporter: ProgressReporter | None = None):
         if self.pipe is not None:
@@ -936,22 +945,22 @@ class DiffusersAcePipelineManager:
                     failureKind="cuda_required",
                 )
 
-            self.backend = "cuda"
+            self.backend = "rocm" if torch.version.hip else "cuda"
             if reporter:
-                reporter.set_backend("cuda")
+                reporter.set_backend(self.backend)
                 reporter.update("loading", 0.08, phase="loading_model", message="Loading ACE-Step Diffusers pipeline.")
 
             self.cache_root.mkdir(parents=True, exist_ok=True)
             os.environ.setdefault("HF_HOME", str(self.cache_root))
-            os.environ.setdefault("HF_ENABLE_PARALLEL_LOADING", "YES")
             os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
             from diffusers import AceStepPipeline
 
             pipe = AceStepPipeline.from_pretrained(
                 self.model_id,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32,
                 cache_dir=str(self.cache_root),
+                local_files_only=True,
             )
 
             if reporter:
@@ -961,32 +970,65 @@ class DiffusersAcePipelineManager:
             elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
                 pipe.vae.enable_tiling()
 
-            if self.enable_group_offload and hasattr(pipe, "transformer"):
-                if reporter:
-                    reporter.update("loading", 0.17, phase="loading_model", message="Enabling transformer group offload.")
-                pipe.transformer.enable_group_offload(
-                    onload_device=torch.device("cuda"),
-                    offload_device=torch.device("cpu"),
-                    offload_type="leaf_level",
-                    use_stream=True,
-                    record_stream=True,
-                )
-                if reporter:
-                    reporter.update("loading", 0.2, phase="loading_model", message="Moving ACE-Step pipeline components to CUDA.")
-                for name, component in pipe.components.items():
-                    if name == "transformer" or not hasattr(component, "to"):
-                        continue
-                    component.to(torch.device("cuda"))
-            else:
-                if reporter:
-                    reporter.update("loading", 0.2, phase="loading_model", message="Moving ACE-Step pipeline to CUDA.")
-                pipe.to("cuda")
-
             self.pipe = pipe
             self.sample_rate = int(getattr(pipe, "sample_rate", DEFAULT_SAMPLE_RATE))
             if reporter:
                 reporter.update("loading", 0.24, phase="loading_model", message="ACE-Step Diffusers pipeline is ready.")
             return pipe
+
+    def configure_memory(self, duration: float, reporter) -> None:
+        from diffusers_audio_pipeline import plan_audio_memory, cuda_memory_budget, module_weight_bytes, available_host_memory, GIB
+        import torch
+        components = list(self.pipe.components.values())
+        weights = module_weight_bytes(components)
+        largest = max((module_weight_bytes([component]) for component in components), default=0)
+        mode = plan_audio_memory(cuda_memory_budget(), weights, largest, duration, self.conservative)
+        if not self.enable_group_offload and not self.conservative:
+            mode = "resident"
+        free, ram = cuda_memory_budget(), available_host_memory()
+        stream = (mode == "group-offload" and not self.conservative
+                  and free is not None and free >= 8 * GIB and ram is not None and ram >= 3 * GIB)
+        low_cpu_memory = stream and ram < largest + 3 * GIB
+        if self._placement is not None and (mode != self._placement
+                or stream != self._streaming or low_cpu_memory != self._low_cpu_memory):
+            del components
+            self.unload()
+            self.load(reporter)
+        if mode != self._placement:
+            self.pipe.remove_all_hooks()
+            self.pipe.to("cpu")
+            if mode == "resident":
+                self.pipe.to("cuda")
+            elif mode == "model-offload":
+                self.pipe.enable_model_cpu_offload()
+            else:
+                # ACE reads condition tensors outside forward(); keep those
+                # resident and group-offload only the transformer.
+                self.pipe.transformer.enable_group_offload(
+                    onload_device=torch.device("cuda"), offload_device=torch.device("cpu"),
+                    offload_type="leaf_level", use_stream=stream,
+                    low_cpu_mem_usage=low_cpu_memory)
+                for name, component in self.pipe.components.items():
+                    if name != "transformer" and hasattr(component, "to"):
+                        component.to("cuda")
+            self._placement = mode
+            self._streaming, self._low_cpu_memory = stream, low_cpu_memory
+        self.execution_details = {"physicalDevice": torch.cuda.get_device_name(),
+            "device": self.backend, "offload": mode, "weightsBytes": weights,
+            "precision": str(self.pipe.transformer.dtype), "attentionPolicy": "automatic SDPA",
+            "streaming": stream, "lowCpuMemory": low_cpu_memory}
+        reporter.update("generating", 0, phase="preparing_audio", phaseProgress=-1,
+            message="Preparing ACE-Step audio.",
+            statusNote=f"{torch.cuda.get_device_name()} · {self.pipe.transformer.dtype} · {mode} · automatic SDPA",
+            generationDetails={"execution": self.execution_details})
+
+    def unload(self):
+        import gc
+        self.pipe = None
+        self._placement = None
+        gc.collect()
+        if "torch" in sys.modules and sys.modules["torch"].cuda.is_available():
+            sys.modules["torch"].cuda.empty_cache()
 
     def generate(
         self,
@@ -996,7 +1038,9 @@ class DiffusersAcePipelineManager:
         output_path: Path,
         reporter: ProgressReporter,
     ) -> Path:
-        pipe = self.load(reporter)
+        self.load(reporter)
+        self.configure_memory(spec.duration, reporter)
+        pipe = self.pipe
         sample_rate = int(getattr(pipe, "sample_rate", self.sample_rate))
         source_duration: float | None = None
         src_audio = None
@@ -1074,10 +1118,39 @@ class DiffusersAcePipelineManager:
 
         import torch
 
-        with torch.inference_mode():
-            result = pipe(**kwargs)
+        from diffusers_audio_pipeline import memory_snapshot, observe_generation
+        # Preserve random state even for the random-seed UI option on recovery.
+        if kwargs["generator"] is None:
+            kwargs["generator"] = torch.Generator(device="cuda")
+            kwargs["generator"].seed()
+        initial_rng = kwargs["generator"].get_state()
+        torch.cuda.reset_peak_memory_stats()
+        for attempt in range(2):
+            try:
+                def phase_update(phase, message, fraction):
+                    reporter.update("generating", max(0, fraction), phase=phase,
+                                    message=message, phaseProgress=fraction)
+                with observe_generation(pipe, "ace-step", spec.duration, spec.steps, phase_update) as (_, timings):
+                    with torch.inference_mode():
+                        result = pipe(**kwargs)
+                break
+            except torch.OutOfMemoryError as exc:
+                if attempt or self.conservative:
+                    raise GenerationFailure("Not enough memory for ACE-Step after reduced-memory retry.", failureKind="out_of_memory") from exc
+                exc.__traceback__ = None
+                pipe = None
+                self.unload()
+                self.conservative = True
+                reporter.update("loading", 0, phase="loading_model", phaseProgress=-1,
+                                message="Reloading ACE-Step with reduced-memory offloading.")
+                pipe = self.load(reporter)
+                self.configure_memory(spec.duration, reporter)
+                kwargs["generator"].set_state(initial_rng)
+        self.execution_details.update(memory_snapshot("cuda"))
+        self.execution_details["phaseSeconds"] = timings
 
-        reporter.update("generating", 0.94, phase="saving", message="Saving generated WAV.")
+
+        reporter.update("generating", 0.94, phase="saving", phaseProgress=-1, message="Saving generated WAV.", generationDetails={"execution": self.execution_details})
         if spec.workflow == "continue-clip":
             full_output_path = output_path.parent / f"{trace_safe_request_id(reporter.request_id)}_full.wav"
             write_wav(result.audios, full_output_path, sample_rate)
@@ -1205,6 +1278,7 @@ class WorkerSession:
             run_mode="warm" if self.manager.pipe is not None else "cold",
         )
         reporter.start_heartbeat()
+        completed = False
         try:
             try:
                 raw_params = json.loads(raw_params_json)
@@ -1258,6 +1332,7 @@ class WorkerSession:
                 reporter=reporter,
             )
             reporter.done(str(final_output))
+            completed = True
             return True
         except GenerationFailure as failure:
             trace_session.log_event(
@@ -1283,6 +1358,8 @@ class WorkerSession:
             return False
         finally:
             reporter.stop_heartbeat()
+            if not completed:
+                self.manager.unload()
             trace_session.finalize()
             self._busy = False
 
@@ -1337,6 +1414,7 @@ def run_worker_server(
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
+    server.settimeout(120.0)
     port = server.getsockname()[1]
 
     emit(
@@ -1363,7 +1441,12 @@ def run_worker_server(
 
     try:
         while True:
-            connection, _address = server.accept()
+            try:
+                connection, _address = server.accept()
+            except socket.timeout:
+                session.manager.unload()
+                session.manager.conservative = False
+                continue
             with connection:
                 try:
                     request = recv_framed_json(connection)

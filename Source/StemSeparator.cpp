@@ -2546,15 +2546,21 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     command.add("install");
                     command.add("--upgrade");
                     command.add("--force-reinstall");
-                   #if JUCE_WINDOWS || JUCE_LINUX
+                   #if JUCE_WINDOWS
                     command.add("--index-url");
-                    command.add("https://download.pytorch.org/whl/cu128");
+                    command.add(isLikelyNvidiaWindowsMachine() ? "https://download.pytorch.org/whl/cu128"
+                                                              : "https://download.pytorch.org/whl/cpu");
+                   #elif JUCE_LINUX
+                    command.add("--index-url");
+                    command.add(isLikelyNvidiaLinuxMachine() ? "https://download.pytorch.org/whl/cu128"
+                        : isLikelyRocmLinuxMachine() ? "https://download.pytorch.org/whl/rocm7.1"
+                                                   : "https://download.pytorch.org/whl/cpu");
                    #endif
                     command.add("torch==2.10.0");
                     command.add("torchaudio==2.10.0");
-                    success = runCommand(command, "Installing Diffusers audio CUDA PyTorch runtime...", 60 * 60 * 1000);
+                    success = runCommand(command, "Installing Diffusers audio PyTorch runtime for this machine...", 60 * 60 * 1000);
                     if (! success)
-                        error = "Could not install the Diffusers audio CUDA PyTorch runtime. " + error;
+                        error = "Could not install the Diffusers audio PyTorch runtime. " + error;
                 }
 
                 if (success)

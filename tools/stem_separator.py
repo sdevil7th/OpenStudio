@@ -93,7 +93,10 @@ def detect_separator_backend(separator) -> str:
     providers = list(getattr(separator, "onnx_execution_provider", []) or [])
     torch_device = getattr(getattr(separator, "torch_device", None), "type", "")
 
-    if "CUDAExecutionProvider" in providers or torch_device == "cuda":
+    if torch_device == "cuda":
+        import torch
+        return "rocm" if torch.version.hip else "cuda"
+    if "CUDAExecutionProvider" in providers:
         return "cuda"
     if "DmlExecutionProvider" in providers or "privateuseone" in torch_device:
         return "directml"

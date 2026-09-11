@@ -7,10 +7,18 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from diffusers_audio_pipeline import DiffusersAudioSession, MINIMAX_MODEL, GIB, module_weight_bytes, plan_minimax_memory
+from diffusers_audio_pipeline import DiffusersAudioSession, MINIMAX_MODEL, GIB, module_weight_bytes, plan_minimax_memory, plan_audio_memory
 
 
 class MiniMaxMemoryTests(unittest.TestCase):
+    def test_audio_policy_reserves_memory_for_long_requests(self):
+        self.assertEqual(plan_audio_memory(10 * GIB, 6 * GIB, 4 * GIB, 30), "resident")
+        self.assertEqual(plan_audio_memory(10 * GIB, 6 * GIB, 4 * GIB, 150), "model-offload")
+        self.assertEqual(plan_audio_memory(6 * GIB, 6 * GIB, 4 * GIB), "group-offload")
+        self.assertEqual(plan_audio_memory(None, 6 * GIB, 4 * GIB), "model-offload")
+        self.assertEqual(plan_audio_memory(32 * GIB, 6 * GIB, 4 * GIB, conservative=True), "group-offload")
+        self.assertEqual(plan_audio_memory(4 * GIB, 6 * GIB, 4 * GIB, allow_group=False), "model-offload")
+
     def plan(self, vram, ram=32, bf16=True, weights=24):
         return plan_minimax_memory(free_vram=None if vram is None else int(vram * GIB),
             available_ram=None if ram is None else int(ram * GIB),

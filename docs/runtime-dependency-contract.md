@@ -225,9 +225,8 @@ machine can run every model.
 
 AMD Linux requires a qualified ROCm wheel set and supported hardware. Torch's
 ROCm backend uses the `cuda` API namespace, so log the HIP runtime and physical
-device rather than labeling all `torch.cuda` execution NVIDIA. The current
-Stable/MiniMax installer incorrectly forces the CUDA wheel index on Linux;
-correcting runtime selection is a separate first-priority implementation item.
+device rather than labeling all `torch.cuda` execution NVIDIA. Stable/MiniMax setup now chooses the pinned ROCm, CUDA or CPU wheel index for
+new Linux runtimes; real AMD hardware qualification remains required.
 AMD Windows DirectML support for separation does not imply that these generation
 pipelines support DirectML. Check native ROCm availability against the actual
 release matrix before adding a Windows generation route.
@@ -330,20 +329,84 @@ audition for lyrics, rhythm, transients, pitch and seams. Numerical metrics are
 diagnostic only for subjective audio quality. No benchmark here establishes
 that any generated music is natural or artifact-free.
 
-Current status: research complete and first MiniMax placement/reporting slice
-implemented. Nine planner/API integration tests pass, as do the existing audio
-workflow tests and a new repeated-progress-message test. A local-weight two-frame
-MiniMax check completed twice with finite stereo output. First/warm generation
-times were 53.61/65.03 seconds on the previous implementation and 38.36/26.52
-seconds on the candidate. This very small diagnostic uses a 0.08-second request,
-eight diffusion steps and seed 123; it is not representative song throughput,
-an audio-quality test, or a controlled cold-load comparison. An earlier two-second
-streamed run was stopped after approximately six minutes without completion;
-that run establishes neither success nor a regression against a matching baseline.
-Longer-request qualification remains open. Stable Audio/ACE adaptive placement,
-quantization, runtime-platform repair, request-time replanning and cross-platform
-performance qualification also remain open. This is not an announcement that
-all optimization modes are supported.
+### Implementation status and qualification decisions
+
+The implementation now includes these production changes:
+
+- Stable Audio and ACE select resident or component offload using actual weight
+  sizes, free device memory and a duration-dependent reserve. ACE uses transformer
+  group offload at lower capacity, with RAM-aware transfer overlap. Stable Audio sequential offload is
+  **excluded**: repeated warm-session tests returned non-finite output, although
+  a fresh sequential session completed. Its fallback remains component offload;
+  this does not claim that every small GPU can fit the model.
+- Source variants share Stable Audio components through their public constructors.
+  The pinned `from_pipe()` defaults to FP32, doubling the BF16 weights; forcing
+  BF16 there also casts buffers which the loader deliberately keeps in FP32.
+  Constructor sharing preserves each original parameter and buffer dtype.
+- Placement changes rebuild the session from local weights before the request.
+  The worker permits one OOM retry using a more conservative policy, preserves
+  the resolved seed and all generation parameters, and publishes no partial clip.
+  MiniMax falls back to synchronous group offload on memory pressure. CPU/MPS
+  precision and existing hardware eligibility are unchanged.
+- Stable/MiniMax use actual diffusion callbacks and observational module hooks.
+  MiniMax reports completed autoregressive forwards as frames against an upper
+  bound (EOS may finish early). Unmeasured phases are indeterminate; percentages
+  mean **current stage**, never an elapsed-time estimate of whole-song completion.
+  The clip dialog, track dialog and track header share the same accessible bar.
+- Execution diagnostics include the physical GPU, precision, placement, current
+  allocation, free memory, peak allocated/reserved bytes, worker RSS and phase
+  wall times. These are host-side phase timings, not synchronized GPU profiles.
+  Diagnostic details are retained in worker JSON output; live device/placement
+  and memory information appears in generation details.
+- Both persistent generation workers release model references and GPU cache after
+  two idle minutes. New requests can reuse the worker process but reload weights.
+  ACE inference is explicitly local-only and no longer enables parallel shard
+  loading regardless of available RAM.
+- New Stable/MiniMax runtime setup selects the pinned PyTorch CPU wheel on
+  non-NVIDIA Windows/Linux, CUDA on NVIDIA, and ROCm 7.1 on detected AMD Linux.
+  macOS retains its native PyTorch wheel. These are upstream wheel selections,
+  not new hardware qualification claims. Existing ready runtimes are not silently
+  replaced. BS-Roformer reports HIP-backed Torch execution as ROCm.
+
+| Plan phase | Decision |
+| --- | --- |
+| 1. MiniMax memory placement | Implemented; existing local-weight CUDA checks passed. |
+| 2. Capacity and stage telemetry | Implemented; callbacks, phase reset and repeated heartbeat tests cover status continuity. |
+| 3. Shared policy / platform repair | Shared placement and setup selection implemented. Stable sequential offload excluded after failed validation. ACE sequential offload is also excluded because its condition tensor is read outside forward and becomes an unusable meta tensor. MPS/CPU/XPU/AMD end-to-end qualification remains unavailable on this Windows machine; existing eligibility is retained. |
+| 4. Quantization | Not promoted. The user reported audible problems in the exact NF4 audition artifact. INT8 evaluation did not complete a 30-second request within an eight-minute bound and was stopped; other GPU work was present, so this is not a controlled speed comparison. |
+| 5. Compile / attention / caches | Native SDPA retained. An actual CUDA Inductor compile probe failed because this managed Windows runtime has no working Triton. The Stable/MiniMax runtime has no Triton, TorchAO, flash-attn or xFormers. ACE has an optional flash-attn package whose import fails with a DLL error; its existing native-attention fallback remains in use. Approximate caches/attention remain excluded without model-specific auditory qualification. The pinned MiniMax loop already uses KV caching; alternate cache implementations need upstream loop integration. |
+| 6. Low-memory / release qualification | Idle unloading and bounded recovery implemented. Disk offload has no measured justification yet. Real 8/12 GiB, AMD, Apple Silicon and maximum-duration qualification remain open. Website release claims must wait for a qualified published application release. |
+
+Prior local MiniMax evidence remains diagnostic: a 0.08-second BF16 request
+completed first/warm at 38.36/26.52 seconds versus 53.61/65.03 seconds previously.
+A later two-second request completed in 377.58 seconds with finite stereo output
+and approximately 4.85 GiB peak reserved VRAM. These are not song-quality results.
+An isolated NF4 30-second experiment completed in 59.13 seconds with 14.51 GiB
+peak reserved VRAM; component offload completed in 86.61 seconds with 8.41 GiB.
+Those two saved WAVs matched, but the user's audition failed. NF4 and the private
+bitsandbytes experiment remain outside the application and Git.
+
+The first Stable Audio GPU integration check found the source-pipeline upcast:
+weight storage grew from 5,174,153,442 to 10,348,305,092 bytes. Constructor sharing
+preserves the original mixed dtypes. The failing sequential transition is not a
+supported production mode; finite-output checks correctly prevented publication.
+A fresh sequential diagnostic used about 0.38 GiB peak reserved memory, but that
+single success does not override the failed warm-session gate or establish audio
+quality. Cross-platform CI establishes build/test portability, not generation
+performance or audio quality on hardware that was not tested.
+
+Final production-policy CUDA checks passed for Stable Audio text, variation,
+then a rebuilt component-offloaded text request: all produced finite stereo
+output. Weights stayed at 5,174,153,442 bytes; peak reserved memory was about
+5.07/5.08/2.84 GiB respectively. ACE's ten-second minimum request completed in
+resident and synchronous transformer-group modes, with about 11.66/3.86 GiB
+peak reserved memory. The MiniMax observational-progress check completed two
+0.08-second requests with finite stereo output (57.73/34.84 seconds). These are
+functional checks on the RTX 4080, not clean-machine comparative benchmarks or
+proof of audio quality on smaller cards. NF4 remains `fail` by user audition;
+production output quality remains `not_asserted` pending listening.
+
+PyTorch wheel selection follows the pinned [PyTorch 2.10.0 installation matrix](https://pytorch.org/get-started/previous-versions/#v2100).
 
 ### Research sources
 

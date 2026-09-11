@@ -101,7 +101,7 @@ juce::String computeScriptVersion(const juce::File& script)
     if (! script.loadFileAsData(scriptBytes))
         return {};
 
-    if (script.getFileName() == "stable_audio3_generate.py")
+    if (script.getFileName() == "stable_audio3_generate.py" || script.getFileName() == "generate_music.py")
     {
         juce::MemoryBlock adapterBytes;
         if (! script.getSiblingFile("diffusers_audio_pipeline.py").loadFileAsData(adapterBytes))

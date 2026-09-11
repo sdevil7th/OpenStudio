@@ -78181,8 +78181,7 @@ juce::var AudioEngine::getAIGenerationProgress()
         obj->setProperty("sourceClipId", progress.sourceClipId);
     obj->setProperty("elapsedMs", progress.elapsedMs);
     obj->setProperty("heartbeatTs", progress.heartbeatTs);
-    if (progress.phaseProgress >= 0.0)
-        obj->setProperty("phaseProgress", progress.phaseProgress);
+    obj->setProperty("phaseProgress", progress.phaseProgress);
     if (progress.etaMs >= 0.0)
         obj->setProperty("etaMs", progress.etaMs);
     if (progress.runMode.isNotEmpty())

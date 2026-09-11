@@ -1,7 +1,7 @@
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import torch
 
@@ -12,6 +12,7 @@ class FakePipeline:
     def __init__(self):
         self.calls = []
         self.bad_output = None
+        self.components = {"vae": object(), "transformer": object()}
 
     def to(self, device):
         return self
@@ -32,10 +33,14 @@ class DiffusersContractTests(unittest.TestCase):
         self.session = DiffusersAudioSession.__new__(DiffusersAudioSession)
         self.session.model_id = STABLE_MODEL
         self.session.device = "cpu"
+        self.session.dtype = torch.float32
         self.session.sample_rate = 1000
         self.session.pipe = self.pipe
         self.session.pipelines = {}
-        adapter = types.SimpleNamespace(from_pipe=lambda pipe: pipe)
+        self.session._active_pipe = None
+        self.session._placement = None
+        self.from_pipe = Mock(side_effect=lambda **kwargs: self.pipe)
+        adapter = self.from_pipe
         module = types.SimpleNamespace(StableAudio3InpaintPipeline=adapter, StableAudio3AudioToAudioPipeline=adapter)
         self.import_patch = patch.dict(sys.modules, {"diffusers": module})
         self.import_patch.start()
@@ -57,6 +62,7 @@ class DiffusersContractTests(unittest.TestCase):
         self.assertTrue(torch.equal(output[..., 700:], self.source[..., 700:]))
         self.assertEqual(self.pipe.calls[0]["mask_start_seconds"], .2)
         self.assertNotIn("guidance_scale", self.pipe.calls[0])
+        self.from_pipe.assert_called_once_with(**self.pipe.components)
         self.assertTrue(torch.allclose(output[..., 300:600], torch.full((2, 300), .2)))
 
     def test_zero_variation_is_exact_noop_without_inference(self):
