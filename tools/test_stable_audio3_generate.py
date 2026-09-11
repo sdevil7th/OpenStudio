@@ -15,6 +15,19 @@ stable_audio = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stable_audio)
 
 
+class ExecutionProgressTests(unittest.TestCase):
+    def test_heartbeat_retains_execution_policy(self):
+        worker = stable_audio.StableAudioWorker(Path("unused-model"))
+        worker._model = mock.Mock(execution_summary=lambda: "CUDA · bfloat16 · CPU layer offload")
+        stop = mock.Mock()
+        stop.wait.side_effect = [False, False, True]
+        with mock.patch.object(stable_audio, "emit_payload") as emit:
+            worker._emit_generation_progress("request", "lyrics-style", stop)
+        self.assertEqual(emit.call_count, 2)
+        for call in emit.call_args_list:
+            self.assertEqual(call.args[0]["statusNote"], "CUDA · bfloat16 · CPU layer offload")
+
+
 def source_meta(duration: float = 10.0) -> dict:
     return {
         "clipDuration": duration,

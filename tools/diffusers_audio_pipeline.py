@@ -6,12 +6,68 @@ without loading multi-gigabyte weights. Generation never downloads checkpoints.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 STABLE_MODEL = "stable-audio-3-medium"
 MINIMAX_MODEL = "minimax-music-3"
 DIFFUSERS_REVISION = "7643c4826609c47755e3da0e5b768e8070468f49"
+GIB = 1024 ** 3
+
+
+@dataclass(frozen=True)
+class MiniMaxMemoryPlan:
+    mode: str
+    use_stream: bool = False
+    low_cpu_mem_usage: bool = False
+
+
+def plan_minimax_memory(*, free_vram: int | None, available_ram: int | None,
+                       weights_bytes: int, language_model_bytes: int,
+                       bf16: bool) -> MiniMaxMemoryPlan:
+    """Conservative placement estimates, not a guarantee against request-time OOM.
+
+    HF documents ~23 GB resident / ~22 GB component offload in BF16.
+    Keep 3 GiB beyond those estimates for the DAW, activations and KV growth.
+    FP32 needs larger budgets; unknown memory retains the previous safe path.
+    """
+    scale = 1 if bf16 else 2
+    reserve = 3 * GIB
+    if free_vram is not None:
+        if free_vram >= max(weights_bytes, 23 * scale * GIB) + reserve:
+            return MiniMaxMemoryPlan("resident")
+        if free_vram >= 22 * scale * GIB + reserve:
+            return MiniMaxMemoryPlan("model-offload")
+    # Prefetch needs both GPU headroom and host memory. Only pre-pin the full
+    # LM when another LM-sized allocation plus DAW headroom fits in free RAM.
+    stream = (free_vram is not None and free_vram >= 8 * scale * GIB
+              and available_ram is not None and available_ram >= 3 * GIB)
+    low_ram = stream and available_ram < language_model_bytes + reserve
+    return MiniMaxMemoryPlan("group-offload", stream, low_ram)
+
+
+def available_host_memory() -> int | None:
+    try:
+        import psutil  # Already supplied by Accelerate; never required for fallback.
+        return int(psutil.virtual_memory().available)
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+def module_weight_bytes(modules: Any) -> int:
+    """Count parameters/buffers once without making state-dict tensor copies."""
+    seen: set[int] = set()
+    total = 0
+    for module in modules:
+        if not hasattr(module, "parameters"):
+            continue
+        for tensors in (module.parameters(), module.buffers()):
+            for tensor in tensors:
+                if id(tensor) not in seen:
+                    seen.add(id(tensor))
+                    total += tensor.numel() * tensor.element_size()
+    return total
 
 
 def normalize_song_lyrics(lyrics: str) -> str:
@@ -42,6 +98,11 @@ class DiffusersAudioSession:
         dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
         if self.device == "cuda" and not torch.cuda.is_bf16_supported():
             dtype = torch.float32  # Avoid silently using unsupported BF16 kernels.
+        backend = "ROCm" if self.device == "cuda" and torch.version.hip else self.device.upper()
+        self.execution_details = {"device": backend, "precision": str(dtype).removeprefix("torch."),
+                                  "attentionPolicy": "PyTorch SDPA (automatic)",
+                                  "offload": "model-offload" if self.device == "cuda" else "resident",
+                                  "streaming": False}
         self.pipelines: dict[str, Any] = {}
         if model_id == STABLE_MODEL:
             from diffusers import StableAudio3Pipeline
@@ -56,8 +117,6 @@ class DiffusersAudioSession:
             if not (root / "modular_model_index.json").is_file():
                 raise RuntimeError("Import the MiniMax Music 3 Modular Diffusers snapshot (modular_model_index.json).")
             manager = ComponentsManager()
-            if self.device == "cuda":
-                manager.enable_auto_cpu_offload(device="cuda")
             self.pipe = ModularPipeline.from_pretrained(str(root), components_manager=manager, local_files_only=True)
             # Snapshot indexes may still name the public repository. Resolve
             # every component against the imported local root, never the cache.
@@ -69,12 +128,55 @@ class DiffusersAudioSession:
                 raise RuntimeError("MiniMax components could not be loaded locally: " + ", ".join(missing))
             self.sample_rate = int(self.pipe.sampling_rate)
             if self.device == "cuda":
-                from diffusers.hooks.group_offloading import apply_group_offloading
-                # Follow the documented low-memory path; never compete for all
-                # VRAM while the DAW is monitoring. CPU RAM is still required.
-                apply_group_offloading(self.pipe.language_model, onload_device=torch.device("cuda"), offload_type="leaf_level", use_stream=False)
+                try:
+                    free_vram = int(torch.cuda.mem_get_info()[0])
+                except (RuntimeError, OSError):
+                    free_vram = None
+                available_ram = available_host_memory()
+                plan = plan_minimax_memory(
+                    free_vram=free_vram, available_ram=available_ram,
+                    weights_bytes=module_weight_bytes(getattr(self.pipe, name) for name in required),
+                    language_model_bytes=module_weight_bytes([self.pipe.language_model]),
+                    bf16=dtype == torch.bfloat16)
+                self.execution_details.update(offload=plan.mode, streaming=plan.use_stream,
+                    lowCpuMemory=plan.low_cpu_mem_usage, freeVramBytes=free_vram,
+                    availableRamBytes=available_ram)
+                if plan.mode == "resident":
+                    self.pipe.to(self.device)
+                else:
+                    if plan.mode == "group-offload":
+                        # The default manager estimates whole-model footprints,
+                        # which is wrong for a streamed LM. Follow the pinned
+                        # manager's custom-strategy contract: LM and RVQ are used
+                        # together; later stages can retire their resident peers.
+                        pair = (self.pipe.language_model, self.pipe.rvq_depth_decoder)
+
+                        def offload_stage(hooks, model_id, model, execution_device):
+                            if any(model is member for member in pair):
+                                return [hook for hook in hooks
+                                        if not any(hook.model is member for member in pair)]
+                            return hooks
+
+                        manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin="3GiB",
+                                                       offload_strategy=offload_stage)
+                        from diffusers.hooks.group_offloading import apply_group_offloading
+                        apply_group_offloading(self.pipe.language_model,
+                            onload_device=torch.device("cuda"), offload_type="leaf_level",
+                            use_stream=plan.use_stream, low_cpu_mem_usage=plan.low_cpu_mem_usage)
+                    else:
+                        manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin="3GiB")
             else:
                 self.pipe.to(self.device)
+
+    def execution_summary(self) -> str:
+        details = self.execution_details
+        placement = {"resident": "model stays on device", "model-offload": "CPU model offload",
+                     "group-offload": "CPU layer offload"}[details["offload"]]
+        if details["streaming"]:
+            placement += " with transfer overlap"
+            if details.get("lowCpuMemory"):
+                placement += " (lower RAM use)"
+        return f"{details['device']} · {details['precision']} · {placement} · automatic SDPA"
 
     def generate(self, *, workflow: str, prompt: str, duration: float,
                  steps: int = 8, seed: int = -1, lyrics: str = "",

@@ -652,7 +652,7 @@ class StableAudioWorker:
                 "progress": progress,
                 "phase": "generating_audio",
                 "message": "Still generating with Stable Audio 3 Medium...",
-                "statusNote": "Sampling and decoding can take several minutes for longer durations.",
+                "statusNote": self._execution_note(),
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
                 "workflowId": workflow,
@@ -665,6 +665,10 @@ class StableAudioWorker:
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
         from diffusers_audio_pipeline import DiffusersAudioSession
         return DiffusersAudioSession(self.model_root, MODEL_ID)
+
+    def _execution_note(self) -> str:
+        summary = getattr(self._model, "execution_summary", None)
+        return summary() if callable(summary) else "Sampling and decoding can take several minutes for longer durations."
 
     def _load_model(self, workflow: str, request_id: str) -> Any:
         with self._lock:
@@ -747,6 +751,7 @@ class StableAudioWorker:
                 "effectiveCfgScale": effective_cfg_scale,
                 "sourceStats": request_details.get("sourceStats"),
                 "generationDetails": {
+                    "execution": getattr(model, "execution_details", {}),
                     "workflow": workflow,
                     "sourceSegment": str(segment_path) if segment_path else "",
                     "sourceOriginalSampleRate": request_details.get("sourceOriginalSampleRate"),
@@ -765,7 +770,7 @@ class StableAudioWorker:
                     "Adjusted Stable Audio 3 Medium parameters to the supported safe range: "
                     + ", ".join(parameter_adjustments)
                     if parameter_adjustments
-                    else "Using Stable Audio 3 Medium recommended sampling range."
+                    else self._execution_note()
                 ),
             })
 

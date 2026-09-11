@@ -15,6 +15,8 @@ lives in [Testing](testing.md) and the
   setup reliable on clean systems.
 - Preserve old projects and presets while strengthening audio-thread safety,
   deterministic state migration, and failure recovery.
+- Implement and qualify [AI generation memory and speed improvements](runtime-dependency-contract.md#ai-generation-optimization-research-and-implementation-plan),
+  starting with memory-aware MiniMax placement and truthful execution details.
 
 ## Next: DAW foundations
 

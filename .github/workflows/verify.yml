@@ -29,6 +29,7 @@ jobs:
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
           tests.test_prepare_diffusers_audio
+          tests.test_diffusers_memory_policy
 
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})
