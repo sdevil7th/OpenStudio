@@ -42,6 +42,16 @@ struct RuntimeDownloadCandidate
     juce::var backendInstallPlan;
 };
 
+bool isDiffusersSetupFailure(const StemSeparator::AiToolsStatus& status)
+{
+    // Cancellation can finish in either the worker or the common cancel path,
+    // which labels its phase "cancelled". Model identity survives both paths.
+    return (status.state == "error" || status.state == "cancelled")
+        && (status.lastPhase == "stable_audio_import"
+            || status.requestedModelId == kStableAudioModelId
+            || status.requestedModelId == kMiniMaxAudioModelId);
+}
+
 juce::String makePythonImportCommand()
 {
     return "-c \"import audio_separator.separator; print('ok')\"";
@@ -1442,7 +1452,7 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (previousStatus.lastPhase != "stable_audio_import"
+        if (! isDiffusersSetupFailure(previousStatus)
             && previousStatus.state == "error" && refreshedStatus.available && musicGenerationFullyReady)
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
@@ -1457,7 +1467,7 @@ void StemSeparator::scheduleStatusRefresh()
                                                 }));
         }
 
-        if (previousStatus.lastPhase != "stable_audio_import"
+        if (! isDiffusersSetupFailure(previousStatus)
             && ! previousStatus.available && refreshedStatus.available && musicGenerationFullyReady
             && previousStatus.installSessionId.isNotEmpty())
         {
@@ -1544,8 +1554,7 @@ void StemSeparator::publishStatusRefresh (const AiToolsStatus& status, juce::uin
         lastAiToolsStatus = status;
         // Refresh other tools' capabilities without letting their readiness
         // erase the result of a failed/cancelled Diffusers setup attempt.
-        if (previous.lastPhase == "stable_audio_import"
-            && (previous.state == "error" || previous.state == "cancelled"))
+        if (isDiffusersSetupFailure(previous))
         {
             lastAiToolsStatus.state = previous.state;
             lastAiToolsStatus.progress = previous.progress;

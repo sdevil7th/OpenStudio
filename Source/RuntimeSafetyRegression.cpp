@@ -139,6 +139,11 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("ai_status_probe_does_not_publish_during_install",
               separator.lastAiToolsStatus.state == "cancelled");
         separator.aiToolsInstallWorkInProgress = false;
+        separator.updateCachedAiToolsStatus([] (StemSeparator::AiToolsStatus& status)
+        {
+            status.state = "idle";
+            status.requestedModelId.clear();
+        });
         separator.publishStatusRefresh(probe, separator.aiToolsStatusRevision);
         check("ai_status_fresh_idle_probe_publishes_and_releases_refresh",
               separator.lastAiToolsStatus.state == "ready" && ! separator.statusRefreshInFlight);
@@ -147,7 +152,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
             separator.updateCachedAiToolsStatus([terminalState] (StemSeparator::AiToolsStatus& status)
             {
                 status.state = terminalState;
-                status.lastPhase = "stable_audio_import";
+                status.lastPhase = terminalState[0] == 'e' ? "stable_audio_import" : "cancelled";
                 status.requestedModelId = "stable-audio-3-medium";
                 status.available = false; // Other tools have not finished probing yet.
                 status.error = "Setup did not finish";
