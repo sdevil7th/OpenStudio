@@ -21,13 +21,15 @@ add_executable(OpenStudioUpdateInstaller
     "${juce_SOURCE_DIR}/modules/juce_cryptography/juce_cryptography.cpp")
 target_include_directories(OpenStudioUpdateInstaller PRIVATE "${juce_SOURCE_DIR}/modules" "${root}/thirdparty/monocypher")
 target_compile_features(OpenStudioUpdateInstaller PRIVATE cxx_std_17)
+find_package(ZLIB REQUIRED)
+target_link_libraries(OpenStudioUpdateInstaller PRIVATE ZLIB::ZLIB)
 target_compile_definitions(OpenStudioUpdateInstaller PRIVATE
     JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
     JUCE_STANDALONE_APPLICATION=1 NDEBUG=1
     OPENSTUDIO_INSTALLER_VERSION="0.0.1" OPENSTUDIO_INSTALLER_CHANNEL="stable")
 if(APPLE)
     set_source_files_properties("${juce_SOURCE_DIR}/modules/juce_core/juce_core.cpp" PROPERTIES LANGUAGE OBJCXX)
-    target_link_libraries(OpenStudioUpdateInstaller PRIVATE "-framework Foundation" "-framework IOKit" "-framework Security")
+    target_link_libraries(OpenStudioUpdateInstaller PRIVATE "-framework Cocoa" "-framework CoreServices" "-framework IOKit" "-framework Security")
 else()
     target_link_libraries(OpenStudioUpdateInstaller PRIVATE pthread dl rt)
 endif()
