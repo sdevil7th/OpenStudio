@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(OpenStudioInstallerQualification LANGUAGES C CXX)
+add_executable(UpdaterFixture FixtureApp.cpp)
+target_compile_features(UpdaterFixture PRIVATE cxx_std_17)
 if(APPLE)
     enable_language(OBJCXX)
 endif()
@@ -26,6 +28,7 @@ target_link_libraries(OpenStudioUpdateInstaller PRIVATE ZLIB::ZLIB)
 target_compile_definitions(OpenStudioUpdateInstaller PRIVATE
     JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
     JUCE_STANDALONE_APPLICATION=1 NDEBUG=1
+    OPENSTUDIO_INSTALLER_TEST_FIXTURES=1
     OPENSTUDIO_INSTALLER_VERSION="0.0.1" OPENSTUDIO_INSTALLER_CHANNEL="stable")
 if(APPLE)
     set_source_files_properties("${juce_SOURCE_DIR}/modules/juce_core/juce_core.cpp" PROPERTIES LANGUAGE OBJCXX)

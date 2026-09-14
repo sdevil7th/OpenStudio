@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <vector>
 #include <stdexcept>
+#if defined(OPENSTUDIO_INSTALLER_TEST_FIXTURES)
+ #include <monocypher-ed25519.h>
+#endif
 #if JUCE_MAC || JUCE_LINUX
  #include <fcntl.h>
  #include <signal.h>
@@ -348,7 +351,8 @@ juce::String previousResult(const juce::File& stateRoot)
     return {};
 }
 
-int runHelper(const juce::File& transaction)
+static int runTransaction(const juce::File& transaction, const juce::String& trustedKey,
+                          int shutdownTimeout, int startupTimeout)
 {
     if (!validTransaction(transaction)) return 2;
     auto fail = [&](const juce::String& message) { writeMarker(transaction, "result", message); return 2; };
@@ -362,7 +366,7 @@ int runHelper(const juce::File& transaction)
     Descriptor transactionLock { lockFile(target.getParentDirectory(), ".OpenStudio-install.lock", LOCK_EX) };
     if (transactionLock.value < 0) return fail("Another update is already in progress, or the installation folder is not writable.");
     juce::String error;
-    const auto manifest = UpdateManifest::verify(request["envelope"], UpdateManifest::publicKey(), error);
+    const auto manifest = UpdateManifest::verify(request["envelope"], trustedKey, error);
     const auto platform = manifest["platforms"][juce::Identifier(platformName)];
     if (!manifest.isObject() || manifest["channel"].toString() != OPENSTUDIO_INSTALLER_CHANNEL
         || !UpdateManifest::numericVersion(manifest["version"].toString())
@@ -438,7 +442,7 @@ int runHelper(const juce::File& transaction)
         || !writeMarker(transaction, "prepared", newHash + "\n" + oldHash)
         || !writeMarker(transaction, "ready", "ready")) return fail("Could not safely persist the prepared update.");
     bool authorised = false;
-    for (int i = 0; i < shutdownSeconds * 10; ++i)
+    for (int i = 0; i < shutdownTimeout * 10; ++i)
     {
         if (exists(transaction, "cancel")) return fail("Update cancelled. The installed application was not changed.");
         if (transaction.getChildFile("commit").loadFileAsString() == "normal shutdown"
@@ -460,7 +464,7 @@ int runHelper(const juce::File& transaction)
     ::close(applicationLock.value); applicationLock.value = -1;
     const auto child = launchApplication(target, transaction);
     bool exited = child <= 0;
-    for (int i = 0; !exited && i < startupSeconds * 10; ++i)
+    for (int i = 0; !exited && i < startupTimeout * 10; ++i)
     {
         if (transaction.getChildFile("healthy").loadFileAsString() == manifest["version"].toString())
         {
@@ -483,6 +487,15 @@ int runHelper(const juce::File& transaction)
     launchApplication(target);
     return 2;
 }
+
+int runHelper(const juce::File& transaction)
+{
+    return runTransaction(transaction, UpdateManifest::publicKey(), shutdownSeconds, startupSeconds);
+}
+
+#if defined(OPENSTUDIO_INSTALLER_TEST_FIXTURES)
+ #include "UpdateInstallerIntegration.h"
+#endif
 
 int selfTest(const juce::File& directory)
 {
@@ -546,6 +559,9 @@ int selfTest(const juce::File& directory)
     const auto prepared = root.getChildFile(juce::Uuid().toString()); prepared.createDirectory();
     writeMarker(prepared, "ready", "ready"); commit(prepared);
     check("prepared_transaction_requires_explicit_commit", prepared.getChildFile("commit").loadFileAsString() == "normal shutdown");
+#if defined(OPENSTUDIO_INSTALLER_TEST_FIXTURES)
+    runIntegrationFixtures(root, check);
+#endif
     auto report = juce::var(new juce::DynamicObject());
     report.getDynamicObject()->setProperty("pass", pass); report.getDynamicObject()->setProperty("checks", checks);
     directory.getChildFile("installer-result.json").replaceWithText(juce::JSON::toString(report, true));
