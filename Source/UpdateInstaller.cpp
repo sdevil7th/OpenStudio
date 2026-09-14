@@ -179,7 +179,7 @@ juce::String fingerprint(const juce::File& file, bool syncFiles = false)
             else if (fs::is_regular_file(status))
             {
                 struct stat info {};
-                if (::lstat(p.c_str(), &info) != 0 || info.st_nlink != 1 || (info.st_mode & 06000) != 0)
+                if (::lstat(p.c_str(), &info) != 0 || info.st_nlink != 1 || (info.st_mode & 06022) != 0)
                     throw std::runtime_error("Unsafe file");
                 const juce::File item(juce::String(p.string()));
                 if (syncFiles)
@@ -189,7 +189,12 @@ juce::String fingerprint(const juce::File& file, bool syncFiles = false)
                 }
                 entries.add(juce::String(relative) + "|" + juce::String(static_cast<int>(info.st_mode & 0777)) + "|" + juce::SHA256(item).toHexString());
             }
-            else if (fs::is_directory(status)) entries.add(juce::String(relative) + "|directory");
+            else if (fs::is_directory(status))
+            {
+                struct stat info {};
+                if (::lstat(p.c_str(), &info) != 0 || (info.st_mode & 0022) != 0) throw std::runtime_error("Writable bundle directory");
+                entries.add(juce::String(relative) + "|directory|" + juce::String(static_cast<int>(info.st_mode & 0777)));
+            }
             else throw std::runtime_error("Unexpected file type");
         };
         add(root);
