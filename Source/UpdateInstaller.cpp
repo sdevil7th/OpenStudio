@@ -190,12 +190,30 @@ juce::String fingerprint(const juce::File& file, bool syncFiles = false)
             else throw std::runtime_error("Unexpected file type");
         };
         add(root);
-        if (fs::is_directory(root)) for (const auto& entry : fs::recursive_directory_iterator(root)) add(entry.path());
+        if (fs::is_directory(root))
+        {
+            for (const auto& entry : fs::recursive_directory_iterator(root)) add(entry.path());
+            if (syncFiles)
+            {
+                for (const auto& entry : fs::recursive_directory_iterator(root))
+                    if (fs::is_directory(entry.symlink_status()) && !syncDirectory(juce::File(juce::String(entry.path().string())))) return {};
+                if (!syncDirectory(file)) return {};
+            }
+        }
         entries.sort(false);
         const auto text = entries.joinIntoString("\n");
         return juce::SHA256(text.toRawUTF8(), text.getNumBytesAsUTF8()).toHexString();
     }
     catch (...) { return {}; }
+}
+
+bool swapVerified(const juce::File& target, const juce::File& candidate,
+                  const juce::String& oldHash, const juce::String& newHash)
+{
+    return oldHash.isNotEmpty() && newHash.isNotEmpty()
+        && safePath(target, target.isDirectory()) && safePath(candidate, candidate.isDirectory())
+        && fingerprint(target) == oldHash && fingerprint(candidate) == newHash
+        && exchange(target, candidate);
 }
 
 pid_t launchApplication(const juce::File& target, const juce::File& receipt = {})
@@ -423,7 +441,8 @@ int runHelper(const juce::File& transaction)
     for (int i = 0; i < shutdownSeconds * 10; ++i)
     {
         if (exists(transaction, "cancel")) return fail("Update cancelled. The installed application was not changed.");
-        if (exists(transaction, "commit") && ::kill(parent, 0) != 0 && errno == ESRCH) { authorised = true; break; }
+        if (transaction.getChildFile("commit").loadFileAsString() == "normal shutdown"
+            && ::kill(parent, 0) != 0 && errno == ESRCH) { authorised = true; break; }
         juce::Thread::sleep(100);
     }
     if (!authorised) return fail("Update postponed because OpenStudio did not finish an authorised shutdown within two minutes.");
@@ -433,7 +452,7 @@ int runHelper(const juce::File& transaction)
         || fingerprint(target) != oldHash || fingerprint(candidate) != newHash || exists(transaction, "cancel"))
         return fail("The application or staged update changed after preparation. Installation refused.");
     if (!writeMarker(transaction, "swapping", "swap authorised") || !syncDirectory(transaction)) return fail("Could not persist the installation journal.");
-    if (!exchange(target, candidate)) return fail("This filesystem cannot safely exchange the application and its backup. Use manual installation.");
+    if (!swapVerified(target, candidate, oldHash, newHash)) return fail("The installation changed or this filesystem cannot safely exchange the application and its backup. Use manual installation.");
     syncDirectory(target.getParentDirectory()); syncDirectory(workspace);
     writeMarker(transaction, "swapped", "awaiting frontend readiness");
     // Release the exclusive application lock before the new process takes its
@@ -443,7 +462,7 @@ int runHelper(const juce::File& transaction)
     bool exited = child <= 0;
     for (int i = 0; !exited && i < startupSeconds * 10; ++i)
     {
-        if (exists(transaction, "healthy"))
+        if (transaction.getChildFile("healthy").loadFileAsString() == manifest["version"].toString())
         {
             writeMarker(transaction, "result", "Update installed and the main interface started successfully. Previous version retained at: " + candidate.getFullPathName());
             return 0;
@@ -456,8 +475,8 @@ int runHelper(const juce::File& transaction)
     // already contain user edits. Preserve both versions when readiness is late.
     if (!exited) return fail("The updated app has not confirmed startup. It was left running; the previous version is retained at: " + candidate.getFullPathName());
     Descriptor recoveryLock { lockFile(target.getParentDirectory(), ".OpenStudio-running.lock", LOCK_EX) };
-    if (recoveryLock.value < 0 || fingerprint(target) != newHash || fingerprint(candidate) != oldHash
-        || !exchange(target, candidate)) return fail("Automatic recovery could not safely replace the failed update. Previous version retained at: " + candidate.getFullPathName());
+    if (recoveryLock.value < 0 || !swapVerified(target, candidate, newHash, oldHash))
+        return fail("Automatic recovery could not safely replace the failed update. Previous version retained at: " + candidate.getFullPathName());
     syncDirectory(target.getParentDirectory()); syncDirectory(workspace);
     writeMarker(transaction, "result", "The update exited before its interface was ready. The previous version was restored. macOS may require Open Anyway for an unsigned release.");
     ::close(recoveryLock.value); recoveryLock.value = -1;
@@ -472,17 +491,64 @@ int selfTest(const juce::File& directory)
     const auto a = root.getChildFile("old app"), b = root.getChildFile("new app");
     if (!a.replaceWithText("old") || !b.replaceWithText("new")) return 2;
     const auto oldHash = fingerprint(a), newHash = fingerprint(b);
-    bool pass = oldHash.isNotEmpty() && oldHash != newHash && exchange(a, b)
-        && fingerprint(a) == newHash && fingerprint(b) == oldHash
-        && exchange(a, b) && fingerprint(a) == oldHash;
+    juce::Array<juce::var> checks;
+    bool pass = true;
+    auto check = [&](const char* name, bool result) {
+        auto value = juce::var(new juce::DynamicObject());
+        value.getDynamicObject()->setProperty("name", name);
+        value.getDynamicObject()->setProperty("pass", result);
+        checks.add(value); pass = pass && result;
+    };
+    check("atomic_file_replacement_retains_old_bytes", oldHash.isNotEmpty() && oldHash != newHash && swapVerified(a, b, oldHash, newHash)
+        && fingerprint(a) == newHash && fingerprint(b) == oldHash);
+    check("rollback_restores_exact_original", swapVerified(a, b, newHash, oldHash) && fingerprint(a) == oldHash);
+    b.replaceWithText("tampered");
+    check("staged_tampering_leaves_installed_app_intact", !swapVerified(a, b, oldHash, newHash) && a.loadFileAsString() == "old");
+    b.replaceWithText("new");
+    a.replaceWithText("changed installed app");
+    check("concurrent_installed_change_prevents_swap", !swapVerified(a, b, oldHash, newHash) && a.loadFileAsString() == "changed installed app");
+    a.replaceWithText("old");
+    check("missing_hash_cannot_authorise_swap", !swapVerified(a, b, {}, newHash));
     const auto link = root.getChildFile("link");
-    pass = pass && ::symlink(a.getFullPathName().toRawUTF8(), link.getFullPathName().toRawUTF8()) == 0 && !safePath(link, false);
+    check("symlink_target_rejected", ::symlink(a.getFullPathName().toRawUTF8(), link.getFullPathName().toRawUTF8()) == 0
+        && !safePath(link, false) && !swapVerified(link, b, oldHash, newHash));
+    ::chmod(a.getFullPathName().toRawUTF8(), 0666);
+    check("world_writable_target_rejected", !safePath(a, false));
+    ::chmod(a.getFullPathName().toRawUTF8(), 0644);
+    const auto hard = root.getChildFile("hardlink");
+    check("hardlinked_package_rejected", ::link(a.getFullPathName().toRawUTF8(), hard.getFullPathName().toRawUTF8()) == 0 && fingerprint(a).isEmpty());
+    hard.deleteFile();
     Descriptor first { lockFile(root, "lock", LOCK_EX) };
     Descriptor second { lockFile(root, "lock", LOCK_EX) };
-    pass = pass && first.value >= 0 && second.value < 0;
-    pass = pass && writeMarker(root, "once", "one") && !writeMarker(root, "once", "two");
-    pass = pass && !exchange(a, root.getChildFile("missing")) && a.loadFileAsString() == "old";
-    directory.getChildFile("installer-result.json").replaceWithText(pass ? "{\"pass\":true}" : "{\"pass\":false}");
+    check("concurrent_installer_excluded", first.value >= 0 && second.value < 0);
+    Descriptor sharedA { lockFile(root, "running", LOCK_SH) }, sharedB { lockFile(root, "running", LOCK_SH) };
+    Descriptor exclusive { lockFile(root, "running", LOCK_EX) };
+    check("running_instances_prevent_installation", sharedA.value >= 0 && sharedB.value >= 0 && exclusive.value < 0);
+    check("journal_markers_cannot_be_overwritten", writeMarker(root, "once", "one") && !writeMarker(root, "once", "two"));
+    check("failed_exchange_preserves_target", !exchange(a, root.getChildFile("missing")) && a.loadFileAsString() == "old");
+    const auto oldBundle = root.getChildFile("Old.app"), newBundle = root.getChildFile("New.app");
+    oldBundle.getChildFile("Contents").createDirectory(); newBundle.getChildFile("Contents").createDirectory();
+    oldBundle.getChildFile("Contents/file").replaceWithText("old bundle");
+    newBundle.getChildFile("Contents/file").replaceWithText("new bundle");
+    const auto oldBundleHash = fingerprint(oldBundle, true), newBundleHash = fingerprint(newBundle, true);
+    check("atomic_bundle_swap_and_rollback", swapVerified(oldBundle, newBundle, oldBundleHash, newBundleHash)
+        && oldBundle.getChildFile("Contents/file").loadFileAsString() == "new bundle"
+        && swapVerified(oldBundle, newBundle, newBundleHash, oldBundleHash)
+        && oldBundle.getChildFile("Contents/file").loadFileAsString() == "old bundle");
+    const auto escapingLink = oldBundle.getChildFile("escape");
+    check("bundle_link_escape_rejected", ::symlink(a.getFullPathName().toRawUTF8(), escapingLink.getFullPathName().toRawUTF8()) == 0
+        && fingerprint(oldBundle).isEmpty());
+    const auto tx = root.getChildFile(juce::Uuid().toString()); tx.createDirectory();
+    cancel(tx); commit(tx);
+    check("cancelled_transaction_cannot_commit", exists(tx, "cancel") && !exists(tx, "commit"));
+    const auto unprepared = root.getChildFile(juce::Uuid().toString()); unprepared.createDirectory(); commit(unprepared);
+    check("unprepared_transaction_cannot_commit", !exists(unprepared, "commit"));
+    const auto prepared = root.getChildFile(juce::Uuid().toString()); prepared.createDirectory();
+    writeMarker(prepared, "ready", "ready"); commit(prepared);
+    check("prepared_transaction_requires_explicit_commit", prepared.getChildFile("commit").loadFileAsString() == "normal shutdown");
+    auto report = juce::var(new juce::DynamicObject());
+    report.getDynamicObject()->setProperty("pass", pass); report.getDynamicObject()->setProperty("checks", checks);
+    directory.getChildFile("installer-result.json").replaceWithText(juce::JSON::toString(report, true));
     return pass ? 0 : 2;
 }
 #else
