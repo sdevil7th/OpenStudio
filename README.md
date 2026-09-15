@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/icon.svg" height="112" alt="OpenStudio logo"/>
+  <img src="frontend/public/icon.png" height="112" alt="OpenStudio logo"/>
 </p>
 
 <h1 align="center">OpenStudio</h1>
@@ -443,3 +443,7 @@ OpenStudio is under active development. Many core DAW workflows are implemented,
 ## License
 
 OpenStudio is distributed in this repository under the GNU AGPLv3. See `LICENSE`, [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), and the generated [frontend production notices](frontend/THIRD_PARTY_NOTICES.txt) for licensing and dependency notices. Release bundles include upstream notices for the native dependencies they contain. Build-time pinned checksums cover YSFX/WDL, dr_libs, stb, CLAP, Signalsmith, ARA, Basic Pitch, and the complete bundled Windows FFmpeg runtime; notices from the pinned NeuralAmpModelerCore/Eigen source and a provenance-verified ONNX Runtime installation are also packaged when applicable. The FFmpeg runtime build, tests, binary manifest, and complete corresponding-source release process are documented in [docs/ffmpeg-runtime.md](docs/ffmpeg-runtime.md).
+
+## Branding assets
+
+See [logo sources and icon generation](docs/branding.md) for native app, frontend, README and Store artwork references.

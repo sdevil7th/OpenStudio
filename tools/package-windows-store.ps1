@@ -120,7 +120,7 @@ $manifest = (Get-Content (Join-Path $repoRoot 'packaging/msix/AppxManifest.xml.i
 Add-Type -AssemblyName System.Drawing
 $assets = Join-Path $stage 'Assets'
 New-Item -ItemType Directory -Path $assets | Out-Null
-$icon = [Drawing.Image]::FromFile((Join-Path $repoRoot 'assets/icon-256x256.png'))
+$icon = [Drawing.Image]::FromFile((Join-Path $repoRoot 'assets/icon-1024x1024.png'))
 try {
     foreach ($entry in @(@('StoreLogo',50), @('Square44x44Logo',44), @('Square150x150Logo',150))) {
         $bitmap = [Drawing.Bitmap]::new([int]$entry[1], [int]$entry[1])

@@ -1,3 +1,5 @@
+<p align="center"><img src="../frontend/public/icon.png" width="80" height="80" alt="OpenStudio logo" /></p>
+
 # OpenStudio Documentation
 
 OpenStudio keeps documentation task-oriented and close to the code. The goal is
@@ -42,3 +44,7 @@ that an existing installer contains those changes.
 Detailed research that remains useful for pitch rendering is consolidated in
 `pitch_renderer_research_notes.md`. It is technical reference material, not an
 active release plan.
+
+## Branding
+
+[Logo sources and icon generation](branding.md) lists the master image and every app icon consumer.

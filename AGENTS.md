@@ -1,6 +1,6 @@
 # OpenStudio
 
-A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in WebView2.
+A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in a platform WebView (WebView2 on Windows).
 
 ## Architecture
 
@@ -21,7 +21,7 @@ C++ (JUCE) Backend          React/TypeScript Frontend
 
 - **C++ backend** handles: audio I/O, recording to disk, clip playback with sample-rate conversion, VST3 plugin hosting, MIDI device management, metering, offline render/export
 - **React frontend** handles: all UI, state management (Zustand), canvas-based timeline (Konva/react-konva), keyboard shortcuts, drag-and-drop, project save/load
-- **Communication**: synchronous bridge via `window.__JUCE__.backend.*` functions (defined in NativeBridge.ts, exposed in MainComponent.cpp)
+- **Communication**: asynchronous bridge via `window.__JUCE__.backend.*` functions (wrapped as Promises in NativeBridge.ts, exposed in MainComponent.cpp)
 
 ## Directory Structure
 
@@ -175,11 +175,11 @@ cmake --build build --config Debug
 # C++ rebuild only — Release
 cmake --build build --config Release
 
-# Production (builds frontend + Release C++, single .exe with embedded frontend)
-python build.py prod --version 0.1.02
+# Production (reviewed notes required; builds frontend + Release C++ and copies webui/runtime files)
+python build.py prod --version <candidate-version>
 ```
 
-**No feature flags** — all features (ASIO, WASAPI, DirectSound, VST3 hosting, WebView2) are always enabled via hardcoded `target_compile_definitions` in CMakeLists.txt. The `build.py dev` mode uses Debug config; `build.py prod` uses Release.
+`build.py dev` uses Debug and `build.py prod` uses Release. Read `CMakeLists.txt` and the platform packaging scripts for current dependency, feature and signing options; do not assume every backend is enabled on every platform.
 
 ### Manual Testing Handoff Requirement
 
@@ -195,6 +195,29 @@ Before asking for manual testing:
 - Do not require the user to pre-run Vite, npm, or any other server. `python build.py dev --run` must start what it needs.
 - Stop any Codex-started dev servers, harness browsers, or background Vite/npm processes before handing off. Verify port `5183` is not left occupied by a Codex-started process.
 - In the handoff, state that the CMake Debug build was completed and that no pre-running server is required.
+
+### Branding and website documentation
+
+- The approved 2160 px master is `assets/branding/openstudio-logo-source.png`.
+  Run `node tools/generate-icons.mjs` after installing frontend dependencies to
+  regenerate native, frontend, menu-bar and README icons. Follow
+  [docs/branding.md](docs/branding.md) for all consumers and cache versions.
+- Keep the master synchronized with `../openstudio-website/assets/branding/`.
+  The website owns its favicon, social card and Store promotional exports; the
+  app owns native package icons and MSIX resources. New source icons do not update
+  already-built or installed binaries. Follow the existing release smoke checklist.
+- Product guides describe the source checkout unless tied to a released tag.
+  Update the app manual and the relevant website guides when public behavior
+  changes; the website lives in the separate `../openstudio-website` repository.
+  Its guides record an app commit and release/development status.
+- Verify menu names and bindings against `MenuBar.tsx`, `actionRegistry.ts`,
+  `shortcutProfiles.ts` and `mouseBehaviorProfiles.ts`. The current window is
+  **Keyboard, Mouse & Trackpad** in Options and Help. `F1` opens Help Reference.
+  Keyboard and mouse profiles are independent; platform, scope and custom
+  overrides can change a displayed shortcut. See [docs/input-profiles.md](docs/input-profiles.md).
+- The website owns shared legal policy and public app/update metadata. Keep
+  stable download/appcast contracts compatible with shipped clients, and only
+  advertise new models/features as released after checking the actual app tag.
 
 ## Key Technical Details
 
@@ -353,11 +376,11 @@ Real-time corrector:
 ## Coding Preferences
 
 - Prefer targeted, minimal fixes over large refactors
-- Frontend changes don't require C++ rebuild — just refresh the WebView
+- During Vite development, frontend edits update through HMR without recompiling C++; follow the Debug build/copy requirement above before a manual-testing handoff.
 - C++ changes require `cmake --build build --config Debug` (or Release)
 - C++ builds should compile with **zero warnings** (`/W4` is enabled) — use `juce::ignoreUnused()` for required-but-unused params, avoid C macro name collisions, use `const auto&` for rvalue refs
-- TypeScript has some pre-existing errors in MenuBar, Playhead, ProjectSettingsModal, TrackHeader — these are known
-- Use `npx tsc --noEmit` to check for new TS errors after changes
+- Run `npm run build` in `frontend` for the dependency-notice check, TypeScript and Vite build. Do not waive diagnostics based on a historical list of known errors.
+- Use `npx tsc --noEmit` in `frontend` for a focused TypeScript check during iteration.
 
 ## Known Pitfalls & Past Issues
 
@@ -393,11 +416,16 @@ In Konva, `onMouseDown` fires before `onClick`. Handle all selection logic in `o
 
 Some VST3 plugins (e.g., Amplitube) expect specific channel counts — `TrackProcessor` and render path expand buffers before `processBlock()` if needed (`safeRenderFX` lambda). The render path must also re-prepare all FX plugins with render block size (512) and `reset()` them, then restore original state after. Without this, plugins overflow internal buffers and produce noise.
 
-### Render Modal — What Actually Works in Backend
+### Render and Export Documentation
 
-- **Working**: format (wav/aiff/flac), bit depth (16/24/32), channels (stereo/mono), normalize, tail
-- **Ignored**: sample rate (always renders at device rate)
-- **Not implemented**: "selected_tracks"/"stems" source (always master mix), dither
+- The current renderer supports selected output sample rates, selected-track/stem
+  sources and dither; the old notes saying these are ignored are obsolete.
+- Verify source selection and queue behavior in `frontend/src/store/actions/rendering.ts`
+  and `frontend/src/utils/renderJobPlanning.ts`, and native rendering in
+  `Source/AudioEngine.h/cpp`. Do not infer behavior solely from visible controls.
+- Keep [the user manual](docs/USER_MANUAL.md#12-rendering-and-exporting) and
+  [the implemented-feature inventory](docs/implemented_features.md) aligned.
+  Metadata fields remain a disabled placeholder; do not claim they are written.
 
 ### C++ Naming Conflicts with C Standard Library Macros
 

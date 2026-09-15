@@ -15,6 +15,18 @@ Use this checklist for every release candidate before publishing installers, man
 - A Debug pass is not a Windows Release pass. Run the lifecycle checks against
   the installed Release executable.
 
+## Branding and public download consistency
+
+- For branding changes, regenerate from the approved master and rebuild the
+  candidate configuration; see [branding.md](branding.md). Verify the menu mark,
+  native executable/bundle/window icon, taskbar/Dock/launcher and Store tiles as
+  applicable. Reopen/reinstall the candidate when checking OS icon caches.
+- Confirm the main and documentation README images use the current generated
+  PNG. Coordinate the website favicon, web manifest and social card separately.
+- After publishing, compare the website's displayed version, filenames and sizes
+  with the exact GitHub installer assets. Verify the stable redirect/update-feed
+  endpoints separately. A website deploy cannot update an installed app's icon.
+
 ## Window Lifecycle Matrix
 
 Run this matrix from the packaged app while audio is active. Repeat close/reopen,

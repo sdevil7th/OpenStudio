@@ -34,6 +34,21 @@ the GitHub release and update feeds. Never publish the template directly.
 
 Before distributing a locally built Windows candidate, retain its matching binaries and symbols with `./tools/archive-runtime-symbols.ps1 -Configuration Release`. The ignored `output/symbols/` archive is for crash diagnosis and is not installer content.
 
+## Branding before packaging
+
+When the logo changes, follow [the branding inventory](branding.md): regenerate
+icons from the approved master with `node tools/generate-icons.mjs`, build the
+frontend, then rebuild the native configuration being packaged. JUCE native
+icons use the 1024/16 px sources, Linux launchers use the 256 px source, and the
+MSIX packager creates Store resources from the 1024 px source.
+
+Check the installed window/taskbar/Dock/launcher icons and the menu-bar mark on
+each release platform. A Debug build does not update a cached Release build or
+an existing published installer. Coordinate the website favicon/social/Store
+artwork separately; `RELEASE_SYNC.md` in the [website repository](https://github.com/sdevil7th/OpenStudioWebsite)
+lists its deployment checks. The approved source and generated assets are listed
+in `docs/branding.md`, not in ad hoc copies of the old SVG.
+
 ## Preferred public release path
 
 For normal public releases, do not draft a GitHub release manually and do not upload installer assets by hand.

@@ -916,7 +916,7 @@ export function MenuBar() {
         aria-label="Main menu"
       >
         {!usesNativeWindowChrome && (
-          <img src="./icon.svg" alt="OpenStudio" className="w-4 h-4 mx-2" />
+          <img src="./icon-32x32.png" width="16" height="16" alt="OpenStudio" className="w-4 h-4 mx-2" />
         )}
         <MenuDropdown label="File" items={fileMenuItems} />
         <EditMenu />
