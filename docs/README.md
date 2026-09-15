@@ -18,6 +18,7 @@ date-stamped implementation diaries.
 - [Release smoke checklist](release-smoke-checklist.md) — final build acceptance.
 - [Runtime dependency contract](runtime-dependency-contract.md) — optional runtimes and models.
 - [Lua API](API.md) — scripting reference.
+- [Frontend component map](frontend-components.md) — component ownership, dependencies, styling, and website extraction guidance.
 
 ## Documentation rules
 
