@@ -90,7 +90,7 @@ void AppUpdater::shutdown()
     // OS shutdown during preparation must not accidentally commit the update.
     if (installQuitAuthorised) UpdateInstaller::commit(installTransaction);
     else UpdateInstaller::cancel(installTransaction);
-    installTransaction = {};
+    installTransaction = juce::File();
     installQuitAuthorised = false;
     setStatusCallback({});
 }
@@ -225,7 +225,7 @@ void AppUpdater::cancelDownload()
         cancelRequested = true;
         const juce::ScopedLock lock(stateLock);
         UpdateInstaller::cancel(installTransaction);
-        installTransaction = {};
+        installTransaction = juce::File();
         installQuitAuthorised = false;
     }
 }
