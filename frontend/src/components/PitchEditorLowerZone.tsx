@@ -182,7 +182,7 @@ function auditionNote(midiPitch: number, durationMs = 200) {
   osc.stop(ctx.currentTime + durationMs / 1000 + 0.05);
 }
 
-export function PitchEditorLowerZone() {
+export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
@@ -639,10 +639,16 @@ export function PitchEditorLowerZone() {
         const newScrollX = Math.max(0, timeAtCursor * newPps - cursorX);
         setZoom(newPps);
         setScroll(newScrollX, daw.scrollY);
+      } else if (gesture.operation === "zoom" && gesture.target === "midi-note-height") {
+        const nextZoomY = Math.max(4, Math.min(80, curZoomY * Math.exp(-gesture.amount * ZOOM_SENSITIVITY)));
+        const pointerY = canvas.getBoundingClientRect().bottom - e.clientY;
+        usePitchEditorStore.getState().setZoomY(nextZoomY);
+        setScrollY(curScrollY + pointerY / curZoomY - pointerY / nextZoomY);
       } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
         // Horizontal scroll — same scrollSpeed as Timeline
         const newScrollX = Math.max(0, curScrollX + gesture.amount);
         setScroll(newScrollX, daw.scrollY);
+        if (gesture.ruleId === "trackpad.pan") setScrollY(curScrollY - gesture.delta.y / curZoomY);
       } else if (gesture.operation === "scroll") {
         // Vertical pitch scroll
         setScrollY(curScrollY + gesture.amount / curZoomY);
@@ -1076,7 +1082,7 @@ export function PitchEditorLowerZone() {
     e.preventDefault();
     isDragging.current = true;
     const startY = e.clientY;
-    const startH = lowerZoneHeight;
+    const startH = height ?? lowerZoneHeight;
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
     const onMove = (me: MouseEvent) => setLowerZoneHeight(startH + (startY - me.clientY));
@@ -1089,7 +1095,7 @@ export function PitchEditorLowerZone() {
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [lowerZoneHeight, setLowerZoneHeight]);
+  }, [height, lowerZoneHeight, setLowerZoneHeight]);
 
   const hoveredNote = hoveredNoteId ? notes.find((n) => n.id === hoveredNoteId) : null;
   const selectedNote = selectedNoteIds.length === 1 ? notes.find((n) => n.id === selectedNoteIds[0]) : null;
@@ -1101,8 +1107,8 @@ export function PitchEditorLowerZone() {
 
   return (
     <div
-      className="flex flex-col border-t border-neutral-800 bg-neutral-950 shrink-0"
-      style={{ height: lowerZoneHeight }}
+      className="flex flex-col h-[var(--pitch-panel-height)] min-h-0 overflow-auto border-t border-neutral-800 bg-neutral-950 shrink-0"
+      style={{ "--pitch-panel-height": `${height ?? lowerZoneHeight}px` } as React.CSSProperties}
       onPointerDownCapture={() => activateShortcutContext({ kind: "pitch_editor" })}
       onContextMenuCapture={() => activateShortcutContext({ kind: "pitch_editor" })}
       onFocusCapture={() => activateShortcutContext({ kind: "pitch_editor" })}

@@ -514,8 +514,20 @@
   border-color: rgba(255,255,255,.08);
   background: rgba(255,255,255,.025);
 }
+.nam-rack-design-port .cab-source-actions > .cab-source-unload {
+  color: #e6a28f;
+  border-color: rgba(226,112,82,.24);
+  background: rgba(181,65,43,.08);
+}
+.nam-rack-design-port .cab-source-actions > .cab-source-unload:hover:not(:disabled),
+.nam-rack-design-port .cab-source-actions > .cab-source-unload:focus-visible {
+  color: #ffd0c2;
+  border-color: rgba(239,132,104,.7);
+  background: rgba(181,65,43,.17);
+  outline-color: rgba(239,132,104,.45);
+}
 .nam-rack-design-port .cab-controls-locked .cab-control-deck .knob-position-indicator { opacity: .24; }
-.nam-rack-design-port .cab-controls-locked .cab-room-bay .knob-position-indicator { opacity: 1; }
+.nam-rack-design-port .cab-controls-locked .cab-control-deck [data-param-id="cabDirectMix"] .knob-position-indicator { opacity: 1; }
 .nam-rack-design-port .amp-tone-note {
   color: rgba(245,224,190,.66);
   font-size: max(8px, .6cqw);
@@ -677,6 +689,18 @@
 .nam-rack-design-port .premium-rig-card:hover {
   border-color: rgba(255,255,255,.14);
   background: rgba(255,255,255,.035);
+}
+.nam-rack-design-port .premium-rig-card:disabled {
+  cursor: wait;
+  opacity: .52;
+}
+.nam-rack-design-port .premium-rig-card:focus-visible,
+.nam-rack-design-port .premium-library-search:focus-visible,
+.nam-rack-design-port .premium-library-cta:focus-visible,
+.nam-rack-design-port .premium-retained-ir-note button:focus-visible,
+.nam-rack-design-port .premium-rig-drawer-toggle:focus-visible {
+  outline: 2px solid rgba(255,195,108,.82);
+  outline-offset: 2px;
 }
 .nam-rack-design-port .premium-rig-card[data-active="true"] {
   border-color: rgba(224,161,73,.48);
@@ -867,12 +891,6 @@
   .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr) 270px; }
   .nam-rack-design-port .premium-rig-drawer { padding: 17px 14px 13px; gap: 9px; }
   .nam-rack-design-port .premium-rig-card { min-height: 62px; }
-}
-@media (max-width: 1030px) {
-  .nam-rack-design-port .hardware-stage { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-design-port .premium-rig-drawer:not(.premium-tuner-drawer) { display: none; }
-  .nam-rack-design-port .hardware-stage:has(.premium-tuner-drawer) { grid-template-columns: minmax(0,1fr) 270px; }
-  .nam-rack-design-port .premium-tuner-drawer { display: grid; }
 }
 @media (max-width: 780px) {
   .nam-rack-design-port .premium-nam-shell { grid-template-rows: 94px 46px minmax(0,1fr) 40px; }
@@ -1065,254 +1083,352 @@
   font-weight: 700;
   text-align: right;
 }
-.nam-rack-design-port .ir-shaper-panel .cab-control-deck {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
+.nam-rack-design-port .cabinet-speaker-unit {
+  z-index: 10;
 }
-.nam-rack-design-port .ir-shaper-panel .cab-ir-primary-controls {
-  position: absolute;
-  inset: 0;
-}
-.nam-rack-design-port .ir-shaper-panel .ir-utility-label {
-  color: rgba(237,232,222,.86);
-  font-size: max(8px, .55cqw);
-  font-weight: 620;
-  letter-spacing: .055em;
-  text-shadow: 0 1px 2px rgba(0,0,0,.9);
-}
-.nam-rack-design-port .ir-shaper-panel .ir-utility-label {
-  color: rgba(218,183,126,.84);
-  font-size: max(7px, .48cqw);
-  letter-spacing: .09em;
-}
-.nam-rack-design-port .ir-shaper-panel .cab-control-deck[data-locked="true"] .ir-utility-label {
-  filter: grayscale(.75);
-  opacity: .36;
-}
-.nam-rack-design-port .cab-room-console .cab-source-selector {
-  left: 2.5%;
-  top: 4.6%;
-  width: 95%;
-  height: 13%;
-  padding: 4px 7px 4px 15px;
-  border-color: rgba(228,188,126,.22);
-  background: linear-gradient(180deg, rgba(17,18,18,.98), rgba(6,7,8,.99));
-}
-.nam-rack-design-port .cab-room-console .cab-source-copy > small {
-  color: rgba(228,179,103,.82);
-  font-size: 9px;
-  letter-spacing: .1em;
-}
-.nam-rack-design-port .cab-room-console .cab-source-copy > strong {
-  font-size: 12.5px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions {
-  gap: 7px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions > button {
-  padding-inline: 14px;
-  border-radius: 4px;
-  font-size: 9px;
-}
-.nam-rack-design-port .cab-room-console .cab-source-actions > button svg {
-  width: 14px;
-  height: 14px;
-}
-.nam-rack-design-port .cab-room-console .ir-primary-label {
-  color: rgba(242,238,230,.9);
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: .045em;
-}
-.nam-rack-design-port .cab-room-console .ir-filter-value {
-  min-width: 10%;
-  padding: 4px 0 3px;
-  color: rgba(222,216,204,.75);
-  border-bottom: 1px solid rgba(255,255,255,.09);
-  font-size: 9px;
-  font-weight: 560;
-  letter-spacing: .015em;
-  text-transform: none;
-}
-.nam-rack-design-port .cab-room-console .cab-room-bay {
-  position: absolute;
-  left: 2.2%;
-  right: 2.2%;
-  top: 62.2%;
-  bottom: 2%;
-  z-index: 18;
-  display: grid;
-  grid-template-columns: .96fr 1fr 1fr 1fr;
-  align-items: stretch;
+.nam-rack-design-port .cabinet-speaker-unit .module-frame {
   overflow: hidden;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  border-radius: 3.8%;
+}
+.nam-rack-design-port .cabinet-speaker-unit .module-skin {
+  z-index: 1;
+  filter: brightness(.86) contrast(1.1) saturate(.72) drop-shadow(0 22px 18px rgba(0,0,0,.65));
+}
+.nam-rack-design-port .cab-speaker-cones {
+  position: absolute;
+  inset: 11.5% 6.6% 11.2%;
+  z-index: 2;
+  overflow: hidden;
+  border-radius: 1.2%;
   pointer-events: none;
 }
-.nam-rack-design-port .cab-room-console .cab-room-power-zone,
-.nam-rack-design-port .cab-room-console .cab-room-control,
-.nam-rack-design-port .cab-room-console .cab-room-purpose {
+.nam-rack-design-port .cab-speaker-cones > i {
+  position: absolute;
+  top: 50%;
+  width: 43%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 47% 43%, #08090a 0 8%, #35383b 9%, #101214 13% 34%, #34373a 35%, #0b0c0e 43% 52%, #25282b 53%, #060708 61% 68%, transparent 69%),
+    radial-gradient(circle, rgba(123,128,132,.28), rgba(0,0,0,.9) 67%);
+  box-shadow: inset 0 0 16px rgba(255,255,255,.08), 0 0 28px rgba(0,0,0,.92);
+  filter: contrast(1.16);
+  opacity: .8;
+  transform: translateY(-50%);
+}
+.nam-rack-design-port .cab-speaker-cones > i:first-child { left: 4%; }
+.nam-rack-design-port .cab-speaker-cones > i:last-child { right: 4%; }
+.nam-rack-design-port .cab-speaker-grille {
+  position: absolute;
+  inset: 11.5% 6.6% 11.2%;
+  z-index: 3;
+  border-radius: 1.2%;
+  background:
+    repeating-linear-gradient(90deg, rgba(0,0,0,.22) 0 1px, rgba(155,158,158,.07) 1px 2px, transparent 2px 4px),
+    repeating-linear-gradient(0deg, rgba(0,0,0,.34) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at 50% 42%, transparent 35%, rgba(0,0,0,.42) 90%);
+  box-shadow: inset 0 0 38px rgba(0,0,0,.7);
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-speaker-badge {
+  position: absolute;
+  left: 50%;
+  bottom: 15.5%;
+  z-index: 4;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 5px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(198,194,184,.48);
+  border-radius: 1px;
+  color: rgba(238,235,226,.88);
+  background: linear-gradient(180deg, #252627, #0b0c0d);
+  box-shadow: 0 2px 4px rgba(0,0,0,.8), inset 0 1px rgba(255,255,255,.12);
+  text-shadow: 0 1px 1px #000;
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-speaker-badge strong {
+  color: #dda557;
+  font-size: 9px;
+  letter-spacing: .05em;
+}
+.nam-rack-design-port .cab-speaker-badge span {
+  font-size: 6.5px;
+  font-weight: 720;
+  letter-spacing: .16em;
+}
+.nam-rack-design-port .cab-ir-controller {
+  z-index: 12;
+}
+.nam-rack-design-port .cab-ir-controller .module-frame {
+  overflow: hidden;
+  border-radius: 2.1%;
+}
+.nam-rack-design-port .cab-ir-controller .module-skin {
+  filter: brightness(.9) contrast(1.08) saturate(.74) drop-shadow(0 24px 20px rgba(0,0,0,.7));
+}
+.nam-rack-design-port .cab-controller-heading {
+  position: absolute;
+  left: 6.5%;
+  right: 6.5%;
+  top: 5.5%;
+  z-index: 7;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: rgba(232,231,226,.82);
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-controller-heading > span {
+  font-size: 6px;
+  font-weight: 720;
+  letter-spacing: .21em;
+}
+.nam-rack-design-port .cab-controller-heading > strong {
+  color: #e3ad60;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: .12em;
+}
+.nam-rack-design-port .cab-controller-heading > em {
+  margin-left: auto;
+  color: rgba(180,185,188,.54);
+  font-size: 6px;
+  font-style: normal;
+  font-weight: 650;
+  letter-spacing: .11em;
+}
+.nam-rack-design-port .cabinet-stage .cab-source-selector {
+  left: 6.2%;
+  top: 13.2%;
+  width: 87.6%;
+  height: 18.2%;
+  padding: 4px 7px 4px 12px;
+  border: 1px solid rgba(204,181,143,.38);
+  border-radius: 3px;
+  background:
+    radial-gradient(circle at 7px 7px, #908674 0 1px, #111 1.4px 2.5px, transparent 2.8px),
+    radial-gradient(circle at calc(100% - 7px) 7px, #908674 0 1px, #111 1.4px 2.5px, transparent 2.8px),
+    radial-gradient(circle at 7px calc(100% - 7px), #756d60 0 1px, #111 1.4px 2.5px, transparent 2.8px),
+    radial-gradient(circle at calc(100% - 7px) calc(100% - 7px), #756d60 0 1px, #111 1.4px 2.5px, transparent 2.8px),
+    linear-gradient(180deg, rgba(25,27,28,.98), rgba(7,8,9,.99));
+  box-shadow: 0 5px 10px rgba(0,0,0,.66), inset 0 1px rgba(255,255,255,.07), inset 0 -1px rgba(0,0,0,.92);
+}
+.nam-rack-design-port .cabinet-stage .cab-source-copy > small {
+  color: rgba(226,181,111,.86);
+  font-size: 7px;
+  letter-spacing: .1em;
+}
+.nam-rack-design-port .cabinet-stage .cab-source-copy > strong {
+  color: #f0ece4;
+  font-size: 10.5px;
+  letter-spacing: .015em;
+}
+.nam-rack-design-port .cabinet-stage .cab-source-actions {
+  gap: 4px;
+}
+.nam-rack-design-port .cabinet-stage .cab-source-actions > button {
+  padding-inline: 8px;
+  border-radius: 2px;
+  font-size: 7px;
+}
+.nam-rack-design-port .cabinet-stage .cab-source-actions > button svg {
+  width: 10px;
+  height: 10px;
+}
+.nam-rack-design-port .cabinet-stage .cab-control-deck {
+  position: absolute;
+  left: 4.4%;
+  right: 4.4%;
+  top: 33.5%;
+  height: 27.2%;
+  z-index: 6;
+  border-top: 1px solid rgba(214,198,171,.2);
+  border-bottom: 1px solid rgba(0,0,0,.72);
+  background:
+    repeating-linear-gradient(90deg, rgba(255,255,255,.012) 0 1px, transparent 1px 4px),
+    linear-gradient(180deg, rgba(35,35,33,.72), rgba(9,10,11,.54));
+  box-shadow: inset 0 1px rgba(255,255,255,.035), inset 0 -1px rgba(255,255,255,.025);
+}
+.nam-rack-design-port .cabinet-stage .cab-control-deck::before,
+.nam-rack-design-port .cabinet-stage .cab-control-deck::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  bottom: 9%;
+  width: 1px;
+  background: rgba(216,185,137,.17);
+  box-shadow: 1px 0 rgba(0,0,0,.72);
+}
+.nam-rack-design-port .cabinet-stage .cab-control-deck::before { left: 21%; }
+.nam-rack-design-port .cabinet-stage .cab-control-deck::after { left: 77%; }
+.nam-rack-design-port .cabinet-stage .cab-primary-controls {
+  position: absolute;
+  inset: 0;
+}
+.nam-rack-design-port .cabinet-stage .cab-control-name {
+  color: rgba(239,234,223,.88);
+  font-size: 7px;
+  font-weight: 690;
+  letter-spacing: .08em;
+  text-shadow: 0 1px 2px #000;
+}
+.nam-rack-design-port .cabinet-stage .cab-control-value {
+  min-width: 9%;
+  text-align: center;
+  color: rgba(216,203,181,.68);
+  font-size: 7px;
+  font-weight: 590;
+  letter-spacing: .02em;
+  text-shadow: 0 1px 2px #000;
+  text-transform: none;
+  white-space: nowrap;
+}
+.nam-rack-design-port .cab-control-deck[data-instrument="guitar"] [data-param-id="cabDirectMix"],
+.nam-rack-design-port .cab-control-deck[data-instrument="guitar"] [data-param-id="cabDirectMix"] + .knob-position-indicator {
+  opacity: .36;
+}
+.nam-rack-design-port .cabinet-stage .cab-room-bay {
+  position: absolute;
+  left: 4.4%;
+  right: 4.4%;
+  top: 64.1%;
+  bottom: 4.7%;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: 1.05fr 1fr 1fr 1.18fr;
+  align-items: stretch;
+  overflow: hidden;
+  border-top: 1px solid rgba(94,145,199,.17);
+  background: linear-gradient(180deg, rgba(7,20,31,.18), rgba(2,8,13,.04));
+  pointer-events: none;
+}
+.nam-rack-design-port .cab-room-power-zone,
+.nam-rack-design-port .cab-room-control,
+.nam-rack-design-port .cab-room-purpose {
   position: relative;
   min-width: 0;
 }
-.nam-rack-design-port .cab-room-console .cab-room-power-zone::after,
-.nam-rack-design-port .cab-room-console .cab-room-control::after {
+.nam-rack-design-port .cab-room-power-zone::after,
+.nam-rack-design-port .cab-room-control::after {
   content: "";
   position: absolute;
-  top: 15%;
+  top: 16%;
   right: 0;
-  bottom: 15%;
+  bottom: 16%;
   width: 1px;
-  background: rgba(157,178,194,.18);
+  background: rgba(126,161,190,.17);
   box-shadow: 1px 0 rgba(0,0,0,.72);
 }
-.nam-rack-design-port .cab-room-console .cab-room-amount::after { display: none; }
-.nam-rack-design-port .cab-room-console .cab-room-power-zone {
-  display: block;
-  padding: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-title {
+.nam-rack-design-port .cab-room-title,
+.nam-rack-design-port .cab-room-subtitle {
   position: absolute;
-  left: 22%;
-  top: 22%;
-  color: #659ddd;
-  font-size: 10px;
+  left: 12%;
+}
+.nam-rack-design-port .cab-room-title {
+  top: 18%;
+  color: #72a7df;
+  font-size: 9px;
+  font-weight: 780;
+  letter-spacing: .12em;
+}
+.nam-rack-design-port .cab-room-subtitle {
+  top: 39%;
+  color: rgba(170,192,214,.48);
+  font-size: 5px;
+  font-weight: 650;
+  letter-spacing: .08em;
+}
+.nam-rack-design-port .cab-room-power-switch {
+  position: absolute;
+  left: 12%;
+  right: 18%;
+  top: 66%;
+  height: 18%;
+  min-height: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid rgba(154,169,184,.5);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #141a20, #080b0e 72%);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,.9), 0 1px rgba(255,255,255,.07);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.nam-rack-design-port .cab-room-power-switch > i {
+  position: absolute;
+  left: calc(100% - 2px);
+  top: 50%;
+  width: 27%;
+  aspect-ratio: 1;
+  transform: translate(-100%, -50%);
+  border: 1px solid rgba(235,237,238,.62);
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #d7dadd 0 10%, #8c9195 28%, #3e4245 62%, #16191b 100%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.42), 0 2px 4px rgba(0,0,0,.82);
+  transition: left 140ms cubic-bezier(.2,.75,.25,1), transform 140ms cubic-bezier(.2,.75,.25,1);
+}
+.nam-rack-design-port .cab-room-power-switch[data-active="true"] > i {
+  left: 2px;
+  transform: translate(0, -50%);
+}
+.nam-rack-design-port .cab-room-status-led {
+  position: absolute;
+  right: -14%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  transform: translateY(-50%);
+  border: 1px solid rgba(0,0,0,.72);
+  border-radius: 50%;
+  background: #282b2d;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.86);
+}
+.nam-rack-design-port .cab-room-status-led[data-active="true"] {
+  background: #6bb7f0;
+  box-shadow: 0 0 7px rgba(92,173,233,.72), inset 0 1px rgba(255,255,255,.55);
+}
+.nam-rack-design-port .cab-room-control > strong {
+  position: absolute;
+  left: 50%;
+  top: 9%;
+  transform: translateX(-50%);
+  color: rgba(232,232,228,.82);
+  font-size: 7px;
+  font-weight: 680;
+  letter-spacing: .08em;
+}
+.nam-rack-design-port .cab-room-value {
+  position: absolute;
+  left: 50%;
+  bottom: 5%;
+  transform: translateX(-50%);
+  color: rgba(201,211,220,.68);
+  font-size: 7px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+.nam-rack-design-port .cab-room-purpose {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 12%;
+  color: rgba(115,174,226,.78);
+  text-align: left;
+}
+.nam-rack-design-port .cab-room-purpose > span {
+  font-size: 7px;
   font-weight: 760;
   letter-spacing: .08em;
 }
-.nam-rack-design-port .cab-room-console .cab-room-switch-row {
-  position: absolute;
-  inset: 0;
+.nam-rack-design-port .cab-room-purpose > small {
+  color: rgba(176,185,193,.48);
+  font-size: 5.5px;
+  line-height: 1.25;
 }
-.nam-rack-design-port .cab-room-console .cab-room-power-switch {
-  position: absolute;
-  left: 22%;
-  top: 52%;
-  width: 35%;
-  height: 11%;
-  min-height: 0;
-  padding: 0;
-  overflow: visible;
-  border: 1px solid rgba(154,169,184,.58);
-  border-radius: 999px;
-  background: linear-gradient(180deg, #141a20, #080b0e 72%);
-  box-shadow: inset 0 2px 4px rgba(0,0,0,.9), 0 1px rgba(255,255,255,.08);
-  pointer-events: auto;
-  transform: translateY(-50%);
-  cursor: pointer;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch > i {
-  position: absolute;
-  top: 50%;
-  left: calc(100% - 3px);
-  width: 31%;
-  aspect-ratio: 1;
-  border: 1px solid rgba(235,237,238,.64);
-  border-radius: 50%;
-  background: radial-gradient(circle at 38% 32%, #d7dadd 0 10%, #8c9195 28%, #3e4245 62%, #16191b 100%);
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.45), 0 2px 4px rgba(0,0,0,.82);
-  transform: translate(-100%, -50%);
-  transition: left 140ms cubic-bezier(.2,.75,.25,1), transform 140ms cubic-bezier(.2,.75,.25,1);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] {
-  border-color: rgba(108,163,220,.72);
-  background: linear-gradient(180deg, #16283a, #0a121a 72%);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch[data-active="true"] > i {
-  left: 3px;
-  transform: translate(0, -50%);
-}
-.nam-rack-design-port .cab-room-console .cab-room-status-led {
-  position: absolute;
-  left: 145%;
-  top: 50%;
-  width: 18%;
-  aspect-ratio: 1;
-  border: 1px solid rgba(158,190,226,.72);
-  border-radius: 50%;
-  background: radial-gradient(circle at 42% 36%, #dbeaff 0 12%, #79aaf0 28%, #315a8b 60%, #111b27 100%);
-  box-shadow: inset 0 1px rgba(255,255,255,.52), 0 0 8px rgba(92,154,231,.82), 0 2px 3px rgba(0,0,0,.8);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.nam-rack-design-port .cab-room-console .cab-room-status-led[data-active="false"] {
-  filter: grayscale(.72) brightness(.46);
-  box-shadow: inset 0 1px rgba(255,255,255,.24), 0 2px 3px rgba(0,0,0,.8);
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch:focus-visible {
-  outline: 1px solid #73aee8;
-  outline-offset: 2px;
-}
-.nam-rack-design-port .cab-room-console .cab-room-power-switch:disabled {
-  cursor: default;
-  opacity: .46;
-}
-.nam-rack-design-port .cab-room-console .cab-room-state-labels {
-  position: absolute;
-  left: 22%;
-  top: 72%;
-  display: flex;
-  width: 35%;
-  justify-content: space-between;
-  color: rgba(230,232,234,.8);
-  font-size: 8px;
-  font-weight: 610;
-}
-.nam-rack-design-port .cab-room-console .cab-room-state-labels i {
-  font-style: normal;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control {
-  display: block;
-  padding: 0;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control > strong {
-  position: absolute;
-  left: 50%;
-  top: 11%;
-  transform: translateX(-50%);
-  color: rgba(235,233,227,.88);
-  font-size: 10px;
-  font-weight: 630;
-  letter-spacing: .045em;
-}
-.nam-rack-design-port .cab-room-console .cab-room-control > .cab-room-value {
-  position: absolute;
-  left: 50%;
-  bottom: 13%;
-  min-width: 42%;
-  padding: 2px 5px 1px;
-  transform: translateX(-50%);
-  color: rgba(223,225,227,.77);
-  font-size: 9px;
-  font-weight: 570;
-  line-height: 1.15;
-  text-align: center;
-  white-space: nowrap;
-}
-.nam-rack-design-port .cab-room-console .cab-room-purpose {
-  display: grid;
-  place-items: center;
-  padding: 10%;
-  color: #6198d7;
-  font-size: 10px;
-  font-weight: 720;
-  letter-spacing: .045em;
-  text-align: center;
-}
-.nam-rack-design-port .cab-room-console .cab-room-purpose[data-status="no-source"] {
+.nam-rack-design-port .cab-room-purpose[data-status="no-source"] > span {
   color: #d9a15d;
-}
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-bay {
-  filter: none;
-  opacity: 1;
-}
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-control,
-.nam-rack-design-port .cab-room-console.cab-controls-locked .cab-room-power-zone {
-  filter: none;
-  opacity: 1;
 }
 .nam-rack-design-port .amp-capture-nameplate {
   position: absolute;
@@ -1594,6 +1710,56 @@
 .nam-rack-design-port .premium-tuner-reference { height: 38px; display: flex; align-items: center; justify-content: space-between; padding: 0 11px; border-top: 1px solid rgba(255,255,255,.08); color: #737b86; font-size: 10px; }
 .nam-rack-design-port .premium-tuner-reference strong { color: #d9dce0; font-size: 11px; }
 
+.nam-rack-design-port .premium-retained-ir-note {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(224,161,73,.24);
+  border-radius: 6px;
+  color: #d8dce2;
+  background: linear-gradient(135deg, rgba(224,161,73,.1), rgba(255,255,255,.02));
+}
+.nam-rack-design-port .premium-retained-ir-note > span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.nam-rack-design-port .premium-retained-ir-note strong {
+  color: #f2d1a0;
+  font-size: 10px;
+  font-weight: 790;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.nam-rack-design-port .premium-retained-ir-note small {
+  color: #9299a3;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.nam-rack-design-port .premium-retained-ir-note button {
+  min-height: 32px;
+  border: 1px solid rgba(224,161,73,.32);
+  border-radius: 4px;
+  color: #e9bd7c;
+  background: rgba(224,161,73,.08);
+  font-size: 10px;
+  font-weight: 730;
+  cursor: pointer;
+}
+.nam-rack-design-port .premium-retained-ir-note button:hover:not(:disabled) {
+  border-color: rgba(255,195,108,.62);
+  color: #ffd49a;
+  background: rgba(224,161,73,.15);
+}
+.nam-rack-design-port .premium-retained-ir-note button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+.nam-rack-design-port .premium-rig-drawer-toggle,
+.nam-rack-design-port .premium-rig-drawer-scrim {
+  display: none;
+}
+
 @media (max-width: 1400px) {
   .nam-rack-design-port .premium-nam-shell { grid-template-rows: 174px 60px minmax(0,1fr) 48px; }
   .nam-rack-design-port .premium-brand { left: 22px; top: 14px; }
@@ -1614,9 +1780,68 @@
   .nam-rack-design-port .premium-brand > span { font-size: 9px; }
   .nam-rack-design-port .premium-brand > strong { font-size: 18px; }
   .nam-rack-design-port .hardware-stage,
-.nam-rack-design-port .hardware-stage:has(.premium-tuner-drawer) { grid-template-columns: minmax(0,1fr); }
-  .nam-rack-design-port .premium-rig-drawer,
-.nam-rack-design-port .premium-tuner-drawer { display: none; }
+  .nam-rack-design-port .hardware-stage:has(.premium-tuner-drawer) {
+    grid-template-columns: minmax(0,1fr);
+  }
+  .nam-rack-design-port .premium-tuner-drawer { display: none; }
+  .nam-rack-design-port .premium-rig-drawer:not(.premium-tuner-drawer) {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 46;
+    width: min(360px, calc(100% - 52px));
+    display: grid;
+    padding-top: 58px;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(104%);
+    transition: transform 180ms ease, opacity 150ms ease, visibility 180ms step-end;
+  }
+  .nam-rack-design-port .premium-rig-drawer:not(.premium-tuner-drawer)[data-compact-open="true"] {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(0);
+    transition: transform 180ms ease, opacity 150ms ease, visibility 0s step-start;
+  }
+  .nam-rack-design-port .premium-rig-drawer-toggle {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 49;
+    min-width: 102px;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 0 12px;
+    border: 1px solid rgba(224,161,73,.4);
+    border-radius: 5px;
+    color: #f2c98b;
+    background: rgba(12,14,18,.94);
+    box-shadow: 0 9px 24px rgba(0,0,0,.42);
+    font-size: 11px;
+    font-weight: 760;
+    cursor: pointer;
+  }
+  .nam-rack-design-port .premium-rig-drawer-toggle svg {
+    width: 15px;
+    height: 15px;
+  }
+  .nam-rack-design-port .premium-rig-drawer-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 45;
+    display: block;
+    border: 0;
+    background: rgba(0,0,0,.58);
+    backdrop-filter: blur(2px);
+    cursor: pointer;
+  }
+  .nam-rack-design-port .premium-drawer-heading > i { display: none; }
   .nam-rack-design-port .premium-tuner-stage { inset: 24px 42px; }
 }
 @media (max-width: 780px) {

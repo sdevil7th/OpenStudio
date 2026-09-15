@@ -1,6 +1,10 @@
 import { create } from "zustand";
+import { getProjectEpoch } from "../utils/projectLifetime";
+import { projectNativeQueue } from "../utils/projectNativeQueue";
+import { sourceClipIdentity } from "../utils/sourceClipIdentity";
+import { graphProblem } from "../utils/projectValidation";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type InstallAiToolsOptions, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -14,6 +18,7 @@ import { isClipEditLocked } from "../utils/clipEditLock";
 import { uiStateActions } from "./actions/uiState";
 import { meteringActions } from "./actions/metering";
 import { transportActions } from "./actions/transport";
+import { metronomePracticeActions } from "./actions/metronomePractice";
 import { clipActions } from "./actions/clips";
 import { clipEditingActions } from "./actions/clipEditing";
 import { mixerActions } from "./actions/mixer";
@@ -60,7 +65,7 @@ import {
 import { loadStoredMouseModifierOverrides } from "../utils/mouseModifierPersistence";
 import {
   DEFAULT_AI_MUSIC_MODEL_ID,
-  STABLE_AUDIO_3_MODEL_ID,
+  isDiffusersImportModel,
   type AIWorkflowId,
   type AiMusicModelId,
   getAIWorkflow,
@@ -71,14 +76,7 @@ import {
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
 
-export interface InstallAiToolsOptions {
-  userConfirmedDownload?: boolean;
-  selectedFeatures?: AiFeatureId[];
-  requestedFeature?: AiFeatureId;
-  modelId?: AiMusicModelId;
-  stableAudioModelPath?: string;
-  stableAudioLicenseAccepted?: boolean;
-}
+export type { InstallAiToolsOptions } from "../services/NativeBridge";
 
 
 // Module-level helpers moved to store/actions/: _editSnapshots → tracks.ts,
@@ -711,6 +709,7 @@ export function getTrackAtY(
 }
 
 export interface AudioClip {
+  recoveryJobId?: string;
   id: string;
   filePath: string;
   pitchCorrectionSourceFilePath?: string; // Immutable source audio for repeated pitch renders
@@ -748,12 +747,14 @@ export interface AIClipGenerationRange {
 }
 
 export interface AddGeneratedSourceAudioOptions {
+  recoveryJobId?: string;
   sourceTrackId: string;
   sourceClipId: string;
   workflowId: AIWorkflowId;
   filePath: string;
   clipName?: string;
   extensionDuration?: number;
+  stillValid?: () => boolean;
 }
 
 export interface AddTrackOptions {
@@ -1328,6 +1329,9 @@ interface DAWState {
 
   // Metronome
   metronomeEnabled: boolean;
+  metronomePracticeEnabled: boolean;
+  metronomePracticePending: boolean;
+  metronomePracticeError: string;
   metronomeVolume: number; // 0.0 to 1.0 (linear volume for metronome click)
   metronomeAccentBeats: boolean[]; // Which beats in the bar should be accented (index 0 = beat 1, etc.)
   metronomeTrackId: string | null; // Track ID for the rendered metronome track
@@ -1515,6 +1519,7 @@ interface DAWState {
   // Project Settings/Metadata
   showProjectSettings: boolean;
   projectName: string;
+  projectPersistentId: string;
   projectNotes: string;
   projectSampleRate: 44100 | 48000 | 88200 | 96000 | 192000;
   projectBitDepth: 16 | 24 | 32;
@@ -1763,13 +1768,13 @@ interface DAWActions {
 
   // Project Management (F2)
   newProject: () => Promise<boolean>;
-  saveProject: (saveAs?: boolean) => Promise<boolean>;
+  saveProject: (saveAs?: boolean, recoveryOnly?: boolean) => Promise<boolean>;
   saveNewVersion: () => Promise<boolean>;
-  loadProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
+  loadProject: (path?: string, options?: { bypassFX?: boolean; recoveryCopy?: boolean }) => Promise<boolean>;
   requestNewProject: () => Promise<boolean>;
-  requestOpenProject: (path?: string, options?: { bypassFX?: boolean }) => Promise<boolean>;
+  requestOpenProject: (path?: string, options?: { bypassFX?: boolean; recoveryCopy?: boolean }) => Promise<boolean>;
   requestCloseProject: () => Promise<boolean>;
-  requestQuit: () => Promise<boolean>;
+  requestQuit: (installPreparedUpdate?: boolean) => Promise<boolean>;
   requestLoadTemplate: (index: number) => Promise<boolean>;
   resolveUnsavedChanges: (choice: "save" | "discard" | "cancel") => Promise<void>;
   dismissUnsavedChangesDialog: () => void;
@@ -1920,6 +1925,8 @@ interface DAWActions {
     filePath: string,
     startTime: number,
     clipName?: string,
+    stillValid?: () => boolean,
+    recoveryJobId?: string,
   ) => Promise<void>;
   addGeneratedSourceAudioClip: (
     options: AddGeneratedSourceAudioOptions,
@@ -2024,6 +2031,7 @@ interface DAWActions {
   clearTimeSelection: () => void;
   setLoopToSelection: () => void;
   toggleMetronome: () => void;
+  setMetronomePracticeEnabled: (enabled: boolean) => Promise<boolean>;
   setMetronomeVolume: (volume: number) => Promise<void>;
   setMetronomeAccentBeats: (accentBeats: boolean[]) => void;
   setTimeSignature: (numerator: number, denominator: number) => void;
@@ -2748,7 +2756,7 @@ interface DAWActions {
 
 export type PendingProjectAction =
   | { type: "newProject" }
-  | { type: "openProject"; path?: string; options?: { bypassFX?: boolean } }
+  | { type: "openProject"; path?: string; options?: { bypassFX?: boolean; recoveryCopy?: boolean } }
   | { type: "closeProject" }
   | { type: "quit" }
   | { type: "loadTemplate"; index: number };
@@ -3024,11 +3032,17 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     playStartPosition: 0,
     timeSelection: null,
     metronomeEnabled: false,
+    metronomePracticeEnabled: false,
+    metronomePracticePending: false,
+    metronomePracticeError: "",
     metronomeVolume: 0.5,
     metronomeAccentBeats: [true, false, false, false],
     metronomeTrackId: null,
     timeSignature: { numerator: 4, denominator: 4 },
     projectRange: { start: 0, end: 0 },
+    snapEnabled: true,
+    snapType: "grid",
+    gridSize: "use_quantize",
     selectedClipId: null,
     selectedClipIds: [],
     midiEditorSessions: [],
@@ -3060,6 +3074,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     projectPath: null,
     isModified: false,
     projectName: "Untitled Project",
+    projectPersistentId: crypto.randomUUID(),
     projectNotes: "",
     projectSampleRate: 44100,
     projectBitDepth: 24,
@@ -3261,6 +3276,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     playStartPosition: 0,
     timeSelection: null,
     metronomeEnabled: false,
+    metronomePracticeEnabled: false,
+    metronomePracticePending: false,
+    metronomePracticeError: "",
     metronomeVolume: 0.5,
     metronomeAccentBeats: [true, false, false, false], // Accent beat 1 by default (4/4 time)
     metronomeTrackId: null,
@@ -3430,6 +3448,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // Project Settings/Metadata
     showProjectSettings: false,
     projectName: "Untitled Project",
+    projectPersistentId: crypto.randomUUID(),
     projectNotes: "",
     projectSampleRate: 44100,
     projectBitDepth: 24,
@@ -3450,7 +3469,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     mouseBehaviorProfileId: initialInputProfileSettings.mouseProfileId,
     inputProfileOnboardingSeen: initialInputProfileSettings.onboardingSeen,
 
-    trackTemplates: getStoredJSON("s13_trackTemplates", []),
+    trackTemplates: getStoredJSON("openstudio_trackTemplates", []),
 
     // Project Loading
     isProjectLoading: false,
@@ -3472,10 +3491,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     recentActions: [],
 
     // Screensets / Layouts
-    screensets: getStoredJSON("s13_screensets", []),
+    screensets: getStoredJSON("openstudio_screensets", []),
 
     // Custom Actions (Macros)
-    customActions: getStoredJSON("s13_customActions", []),
+    customActions: getStoredJSON("openstudio_customActions", []),
 
     // Move Envelope Points with Items
     moveEnvelopesWithItems: true,
@@ -3609,7 +3628,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     mixerSnapshots: [],
 
     // Project Templates
-    projectTemplates: getStoredJSON("s13_projectTemplates", []),
+    projectTemplates: getStoredJSON("openstudio_projectTemplates", []),
 
     // Project Compare
     showProjectCompare: false,
@@ -3618,7 +3637,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // Collaborative Metadata
     projectAuthor: (() => {
       try {
-        return getStoredString("s13_projectAuthor", "Unknown Author");
+        return getStoredString("openstudio_projectAuthor", "Unknown Author");
       } catch {
         return "Unknown Author";
       }
@@ -3646,7 +3665,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           : await nativeBridge.getAiToolsStatus();
 
         const reconciledStatus =
-          nextStatus.available || nextStatus.state === "ready"
+          !nextStatus.installInProgress && nextStatus.state !== "error" && nextStatus.state !== "cancelled"
+            && (nextStatus.available || nextStatus.state === "ready")
             ? {
                 ...nextStatus,
                 state: "ready" as const,
@@ -3703,7 +3723,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     applyAiToolsStatusUpdate: (status) => {
       const currentStatus = get().aiToolsStatus;
       const nextStatus =
-        status.available || status.state === "ready"
+        !status.installInProgress && status.state !== "error" && status.state !== "cancelled"
+          && (status.available || status.state === "ready")
           ? {
               ...currentStatus,
               ...status,
@@ -3730,7 +3751,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
-        const isStableAudioImport = options.modelId === STABLE_AUDIO_3_MODEL_ID;
+        const isStableAudioImport = isDiffusersImportModel(options.modelId);
         const selectedFeatures = options.selectedFeatures?.length
           ? options.selectedFeatures
           : [options.requestedFeature ?? "stemSeparation"];
@@ -3756,13 +3777,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       get().showToast(
         isStableAudioImport
-          ? "Stable Audio 3 setup is starting in the background."
+          ? "Diffusers audio setup is starting in the background."
           : "Selected AI features are being installed in the background.",
         "info",
       );
 
       const pendingMessage = isStableAudioImport
-        ? "Preparing Stable Audio 3 Medium import..."
+        ? "Preparing Diffusers audio model setup..."
         : currentStatus.buildRuntimeMode === "downloaded-runtime"
           ? "Checking OpenStudio AI runtime downloads..."
           : "Preparing AI tools installation...";
@@ -3780,12 +3801,20 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           available: false,
           selectedFeatures,
           requestedFeatures: selectedFeatures,
+          requestedModelId: options.modelId,
           requestedFeature: options.requestedFeature,
           error: undefined,
           statusWarning: undefined,
           statusWarningCode: undefined,
           message: pendingMessage,
           stepLabel: pendingMessage,
+          elapsedMs: 0,
+          progress: 0,
+          bytesDownloaded: 0,
+          bytesTotal: 0,
+          bytesCached: 0,
+          errorCode: undefined,
+          terminalReason: undefined,
           activityLines: [pendingMessage],
         },
         aiToolsStatusLastUpdatedAt: Date.now(),
@@ -4252,7 +4281,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
       set((s) => {
         const templates = [...s.trackTemplates, template];
-        localStorage.setItem("s13_trackTemplates", JSON.stringify(templates));
+        localStorage.setItem("openstudio_trackTemplates", JSON.stringify(templates));
         return { trackTemplates: templates };
       });
     },
@@ -4271,7 +4300,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     deleteTrackTemplate: (templateId) => {
       set((s) => {
         const templates = s.trackTemplates.filter((t) => t.id !== templateId);
-        localStorage.setItem("s13_trackTemplates", JSON.stringify(templates));
+        localStorage.setItem("openstudio_trackTemplates", JSON.stringify(templates));
         return { trackTemplates: templates };
       });
     },
@@ -4334,6 +4363,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       if (state.globalLocked) return;
       const folder = state.tracks.find((t) => t.id === folderId && t.isFolder);
       if (!folder) return;
+      const problem = graphProblem(state.tracks.map(track => trackIds.includes(track.id)
+        ? { ...track, parentFolderId: folderId } : track));
+      if (problem) { state.showToast(problem, "error"); return; }
       // Capture old parentFolderIds for undo
       const oldParents = new Map<string, string | undefined>();
       for (const tid of trackIds) {
@@ -4455,11 +4487,15 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       if (collapsedFolderIds.size === 0) return tracks;
 
       // Build set of all ancestor folder IDs for each track; if any ancestor is collapsed, hide
+      const byId = new Map(tracks.map(track => [track.id, track]));
       return tracks.filter((t) => {
         let current = t;
+        const visited = new Set<string>();
         while (current.parentFolderId) {
+          if (visited.has(current.id)) break; // Defensive even for in-memory/undo state.
+          visited.add(current.id);
           if (collapsedFolderIds.has(current.parentFolderId)) return false;
-          const parent = tracks.find((p) => p.id === current.parentFolderId);
+          const parent = byId.get(current.parentFolderId);
           if (!parent) break;
           current = parent;
         }
@@ -5541,18 +5577,23 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }));
     },
 
-    addGeneratedAudioClip: async (trackId, filePath, startTime, clipName) => {
+    addGeneratedAudioClip: async (trackId, filePath, startTime, clipName, stillValid, recoveryJobId) => {
+      const epoch = getProjectEpoch();
       const track = get().tracks.find((entry) => entry.id === trackId);
       if (!track) {
         throw new Error(`Track not found: ${trackId}`);
       }
 
       const mediaInfo = await nativeBridge.importMediaFile(filePath);
-      if (!mediaInfo?.filePath || !mediaInfo.duration) {
+      if (!mediaInfo?.filePath || !Number.isFinite(mediaInfo.duration) || mediaInfo.duration <= 0) {
         throw new Error(`Failed to prepare generated audio: ${filePath}`);
+      }
+      if (epoch !== getProjectEpoch() || (stillValid && !stillValid()) || !get().tracks.some(entry => entry.id === trackId)) {
+        throw new Error("Generation was cancelled or its target track was removed during import.");
       }
 
       const newClip: AudioClip = {
+        recoveryJobId,
         id: crypto.randomUUID(),
         filePath: mediaInfo.filePath,
         name:
@@ -5570,6 +5611,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         sourceLength: mediaInfo.duration,
       };
 
+      const sync = projectNativeQueue(epoch, logBridgeError("AI audio sync"));
+      let firstSync = Promise.resolve();
       get().executeCommand({
         type: "ADD_CLIP",
         description: `Add generated clip to "${track.name}"`,
@@ -5583,7 +5626,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ),
             isModified: true,
           }));
-          void nativeBridge.addPlaybackClip(
+          firstSync = sync(() => nativeBridge.addPlaybackClip(
             trackId,
             newClip.filePath,
             newClip.startTime,
@@ -5595,7 +5638,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             newClip.id,
             newClip.pitchCorrectionSourceFilePath,
             newClip.pitchCorrectionSourceOffset,
-          );
+          ));
         },
         undo: () => {
           set((state) => ({
@@ -5609,31 +5652,46 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             ),
             isModified: true,
           }));
-          void nativeBridge.removePlaybackClipById(trackId, newClip.id);
+          void sync(() => nativeBridge.removePlaybackClipById(trackId, newClip.id));
         },
       });
+      await firstSync;
     },
 
     addGeneratedSourceAudioClip: async (options) => {
+      if (options.stillValid && !options.stillValid()) return;
+      const epoch = getProjectEpoch();
       const state = get();
       const sourceTrack = state.tracks.find((entry) => entry.id === options.sourceTrackId);
       const sourceClip = sourceTrack?.clips.find((clip) => clip.id === options.sourceClipId);
       if (!sourceTrack || !sourceClip) {
         throw new Error("Source clip is no longer available.");
       }
+      const identity = sourceClipIdentity(sourceClip);
 
       const workflow = getAIWorkflow(options.workflowId, DEFAULT_AI_MUSIC_MODEL_ID, "clip-context");
       const mediaInfo = await nativeBridge.importMediaFile(options.filePath);
-      if (!mediaInfo?.filePath || !mediaInfo.duration) {
+      if (options.stillValid && !options.stillValid()) return;
+      if (!mediaInfo?.filePath || !Number.isFinite(mediaInfo.duration) || mediaInfo.duration <= 0) {
         throw new Error(`Failed to prepare generated audio: ${options.filePath}`);
       }
 
+      const currentSourceTrack = get().tracks.find((entry) => entry.id === options.sourceTrackId);
+      const currentSourceClip = currentSourceTrack?.clips.find(clip => clip.id === options.sourceClipId);
+      if (epoch !== getProjectEpoch() || !currentSourceClip || sourceClipIdentity(currentSourceClip) !== identity) {
+        throw new Error("Source clip or project changed while generated audio was being imported.");
+      }
+
       const sourceName = sourceClip.name || "Audio";
-      const visibleDuration =
+      const requestedDuration =
         options.workflowId === "continue-clip"
           ? Math.max(0.001, options.extensionDuration || mediaInfo.duration)
           : sourceClip.duration;
+      // Models can finish early. Never publish a clip extending beyond the
+      // actual file and manufacture an unexplained silent tail.
+      const visibleDuration = Math.min(requestedDuration, mediaInfo.duration);
       const generatedClip: AudioClip = {
+        recoveryJobId: options.recoveryJobId,
         id: crypto.randomUUID(),
         filePath: mediaInfo.filePath,
         name:
@@ -5657,7 +5715,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const continuationEnd = generatedClip.startTime + generatedClip.duration;
       const continuationClear =
         options.workflowId === "continue-clip"
-        && sourceTrack.clips.every((clip) => {
+        && currentSourceTrack!.clips.every((clip) => {
           if (clip.id === sourceClip.id) return true;
           const clipEnd = clip.startTime + clip.duration;
           return clip.startTime >= continuationEnd || clipEnd <= generatedClip.startTime;
@@ -5677,6 +5735,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           }
         : null;
       const targetTrackId = placeOnSourceTrack ? sourceTrack.id : newTrackId!;
+      const sync = projectNativeQueue(epoch, logBridgeError("AI source audio sync"));
+      let firstSync = Promise.resolve();
 
       get().executeCommand({
         type: "ADD_CLIP",
@@ -5708,10 +5768,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             return { tracks, isModified: true };
           });
 
-          if (newTrackId) {
-            void nativeBridge.addTrack(newTrackId).catch(logBridgeError("sync"));
-          }
-          void nativeBridge.addPlaybackClip(
+          firstSync = sync(async current => {
+          if (newTrackId) await nativeBridge.addTrack(newTrackId, "audio");
+          if (!current()) return;
+          await nativeBridge.addPlaybackClip(
             targetTrackId,
             generatedClip.filePath,
             generatedClip.startTime,
@@ -5723,7 +5783,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             generatedClip.id,
             generatedClip.pitchCorrectionSourceFilePath,
             generatedClip.pitchCorrectionSourceOffset,
-          ).catch(logBridgeError("sync"));
+          );
+          });
           void nativeBridge.refreshWaveformPeaks(generatedClip.filePath).catch(logBridgeError("sync"));
         },
         undo: () => {
@@ -5746,12 +5807,11 @@ export const useDAWStore = create<DAWState & DAWActions>()(
               isModified: true,
             };
           });
-          void nativeBridge.removePlaybackClipById(targetTrackId, generatedClip.id).catch(logBridgeError("sync"));
-          if (newTrackId) {
-            void nativeBridge.removeTrack(newTrackId).catch(logBridgeError("sync"));
-          }
+          void sync(() => newTrackId ? nativeBridge.removeTrack(newTrackId)
+            : nativeBridge.removePlaybackClipById(targetTrackId, generatedClip.id));
         },
       });
+      await firstSync;
     },
 
     // ========== Empty Item (silent clip) ==========
@@ -5887,6 +5947,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...uiStateActions(set),
     ...meteringActions(set, get),
     ...transportActions(set, get),
+    ...metronomePracticeActions(set, get),
     ...clipActions(set, get),
     ...clipEditingActions(set, get),
     ...mixerActions(set, get),

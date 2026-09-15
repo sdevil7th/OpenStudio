@@ -4,6 +4,7 @@ import {
   rankNAMRackAmpCaptures,
   rankNAMRackCabIRs,
 } from "../utils/namRackAmpCaptureLibrary";
+import { captureTypeForInstalled } from "../utils/namCaptureType";
 import "./NAMRackBrowser.css";
 import "./NAMRackPresets.css";
 import "./NAMRackPedalboard.css";
@@ -54,7 +55,7 @@ import {
   namRackTelemetryIntervalMs,
   shouldRefreshNAMRackDiagnostics,
 } from "../utils/namRackTelemetryCadence";
-import { applyVerifiedNAMRackMutation } from "../utils/namRackMutationReadback";
+import { applyVerifiedNAMRackMutation, cabinetSelectionPatch } from "../utils/namRackMutationReadback";
 import { useShallow } from "zustand/shallow";
 import {
   NAMExplorer,
@@ -417,7 +418,7 @@ const NAM_RACK_PRESET_METADATA_KEY = "openstudio_nam_rack_preset_metadata";
 const NAM_RACK_IR_LIBRARY_KEY = "openstudio_nam_rack_ir_library";
 const NAM_RACK_PRESET_BUNDLE_KIND = "openstudio.namRackPreset";
 const NAM_RACK_PRESET_METADATA_KIND = "openstudio.namRackPresetMetadata";
-const NAM_RACK_PRESET_BUNDLE_EXT = ".s13nampreset";
+const NAM_RACK_PRESET_BUNDLE_EXT = ".ospreset";
 const DEFAULT_PRESET_FOLDERS = ["Clean", "Crunch", "Lead", "Studio"];
 const NAM_RACK_GRAPHIC_EQ_PARAM_IDS = ["eq65Db", "eq125Db", "eq250Db", "eq500Db", "eq1kDb", "eq2kDb", "eq4kDb", "eq8kDb", "eq16kDb"];
 const NAM_RACK_GRAPHIC_EQ_HPF_PARAM_ID = "eqHPFHz";
@@ -512,10 +513,12 @@ const NAM_RACK_GLOBAL_DEFAULT_VALUES: Record<string, number> = {
   ampBoost: 0,
   ampVoice: 0,
   ampOutputDb: 0,
-  cabMicPosition: 0.5,
-  cabMicDistance: 0,
-  cabMicBlend: 0.5,
-  cabRoomSend: 0,
+  cabHPFEnabled: 0,
+  cabLPFEnabled: 0,
+  cabHPFHz: 30,
+  cabLPFHz: 16000,
+  cabIRStereo: 0,
+  cabDirectMix: 0,
   cabRoomEnabled: 0,
   cabRoomAmount: 0.22,
   cabRoomWidth: 0.65,
@@ -739,9 +742,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 2.1,
       presenceDb: 1.4,
       cabLevelDb: 0,
-      cabHPFHz: 80,
-      cabLPFHz: 8500,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 80,
+      eqLPFHz: 8500,
       chorusMix: 0,
       chorusRateHz: 0.75,
       chorusDepth: 0.32,
@@ -777,9 +786,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 1.5,
       presenceDb: 2.2,
       cabLevelDb: -0.8,
-      cabHPFHz: 90,
-      cabLPFHz: 9200,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 90,
+      eqLPFHz: 9200,
       chorusMix: 0.34,
       chorusRateHz: 0.58,
       chorusDepth: 0.58,
@@ -817,9 +832,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 1.8,
       presenceDb: 2.4,
       cabLevelDb: -0.5,
-      cabHPFHz: 95,
-      cabLPFHz: 7800,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 95,
+      eqLPFHz: 7800,
       chorusMix: 0.08,
       chorusRateHz: 0.85,
       chorusDepth: 0.26,
@@ -861,9 +882,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 0.8,
       presenceDb: 1.2,
       cabLevelDb: -1.5,
-      cabHPFHz: 105,
-      cabLPFHz: 6800,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 105,
+      eqLPFHz: 6800,
       chorusMix: 0,
       chorusRateHz: 0.75,
       chorusDepth: 0.28,
@@ -913,9 +940,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 1,
       presenceDb: 2.8,
       cabLevelDb: -2,
-      cabHPFHz: 115,
-      cabLPFHz: 6200,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 115,
+      eqLPFHz: 6200,
       chorusMix: 0,
       chorusRateHz: 0.75,
       chorusDepth: 0.24,
@@ -951,9 +984,15 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: 1.2,
       presenceDb: 1.4,
       cabLevelDb: -1,
-      cabHPFHz: 90,
-      cabLPFHz: 8600,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 1,
       cabPhaseInvert: 0,
+      eqEnabled: 1,
+      eqHPFHz: 90,
+      eqLPFHz: 8600,
       chorusMix: 0.16,
       chorusRateHz: 0.46,
       chorusDepth: 0.42,
@@ -983,28 +1022,32 @@ const NAM_RACK_PRESETS: Array<{
     values: {
       instrumentProfile: 1,
       inputTrimDb: 0,
-      gateThresholdDb: -84,
+      gateThresholdDb: -70,
       gateReleaseMs: 190,
       pedalMix: 0,
       ampMix: 1,
-      bassDb: 0.8,
-      midDb: 0.4,
+      bassDb: 0,
+      midDb: 0,
       trebleDb: 0,
-      presenceDb: -0.4,
-      cabLevelDb: -0.5,
-      cabHPFHz: 35,
-      cabLPFHz: 9000,
+      presenceDb: 0,
+      cabLevelDb: 0,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 0,
+      cabDirectMix: 0.25,
       cabPhaseInvert: 0,
-      eqEnabled: 1,
-      eq65Db: 0.6,
-      eq125Db: -0.4,
-      eq250Db: 0.6,
-      eq500Db: 0.4,
+      eqEnabled: 0,
+      eq65Db: 0,
+      eq125Db: 0,
+      eq250Db: 0,
+      eq500Db: 0,
       eq1kDb: 0,
       eq2kDb: 0,
-      eq4kDb: -0.4,
-      eq8kDb: -0.8,
-      eq16kDb: -1.2,
+      eq4kDb: 0,
+      eq8kDb: 0,
+      eq16kDb: 0,
       chorusMix: 0,
       delayMix: 0,
       reverbVoice: 0,
@@ -1024,7 +1067,7 @@ const NAM_RACK_PRESETS: Array<{
     values: {
       instrumentProfile: 1,
       inputTrimDb: -1,
-      gateThresholdDb: -72,
+      gateThresholdDb: -65,
       gateReleaseMs: 145,
       compressorEnabled: 1,
       compressorAttackMs: 28,
@@ -1049,8 +1092,12 @@ const NAM_RACK_PRESETS: Array<{
       trebleDb: -0.3,
       presenceDb: 0.7,
       cabLevelDb: -1,
-      cabHPFHz: 38,
-      cabLPFHz: 7600,
+      cabHPFEnabled: 0,
+      cabLPFEnabled: 0,
+      cabHPFHz: 30,
+      cabLPFHz: 16000,
+      cabIRStereo: 0,
+      cabDirectMix: 0.35,
       cabPhaseInvert: 0,
       chorusMix: 0,
       delayMix: 0,
@@ -1600,10 +1647,9 @@ function moduleParamIds(moduleId: RackModuleId) {
     ],
     amp: ["ampEnabled", "ampGainDb", "ampBoost", "ampVoice", "bassDb", "midDb", "trebleDb", "presenceDb", "ampMix", "ampOutputDb"],
     cab: [
-      "cabEnabled", "cabMicPosition", "cabMicDistance", "cabMicBlend", "cabRoomSend",
+      "cabEnabled", "cabIRStereo", "cabDirectMix", "cabLevelDb", "cabPan", "cabPhaseInvert",
       "cabRoomEnabled", "cabRoomAmount", "cabRoomWidth",
       "cabDoublerEnabled", "cabDoublerMix", "cabDoublerDelayMs", "cabDoublerSpread",
-      "cabLevelDb", "cabPan", "cabHPFHz", "cabLPFHz", "cabPhaseInvert",
     ],
     eq: ["eqEnabled", ...NAM_RACK_GRAPHIC_EQ_CONTROL_PARAM_IDS],
     mod: ["modulatorEnabled", "chorusMix", "chorusRateHz", "chorusDepth", "chorusCharacter", "modulatorMode", "modulatorFeedback", "modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalMode", "modulatorPedalPosition"],
@@ -1730,7 +1776,7 @@ function moduleStageBody(moduleId: RackModuleId) {
     case "mod": return "Chorus-style width for clean and edge-clean guitar tones.";
     case "delay": return "OpenStudio delay after the Capture and IR stages, with mix, time, and feedback.";
     case "reverb": return "OpenStudio reverb at the end of the rack, with mix, decay, and tone.";
-    case "cab": return "Convolution IR loading plus HPF, LPF, level, and phase controls.";
+    case "cab": return "Literal cabinet IR, level, polarity and stereo controls. Tone filters live in Graphic EQ.";
     case "amp": return "A1/A2 neural amp capture host.";
   }
 }
@@ -2014,7 +2060,7 @@ export function NAMRackPanel({
     return () => {
       current = false;
     };
-  }, [activeView]);
+  }, [activeView, libraryFlow]);
   const [rackRailTab, setRackRailTab] = useState<RackRightRailTab>("tones");
   const [explorerIntent, setExplorerIntent] = useState<NAMExplorerIntent | null>(() => initialNAMExplorerIntent());
   // Loading the first amp capture starts an unsaved rig; it does not apply the
@@ -2057,6 +2103,7 @@ export function NAMRackPanel({
   });
   const [presetBusy, setPresetBusy] = useState(false);
   const [cabBusy, setCabBusy] = useState(false);
+  const cabResourceMutationRef = useRef({ active: false, token: 0 });
   const [modelQualityBusySlot, setModelQualityBusySlot] = useState<"pedal" | "amp" | null>(null);
   const [recoveryBusySlot, setRecoveryBusySlot] = useState<NAMRackMissingAsset["slot"] | null>(null);
   const recoveryBusyRef = useRef(false);
@@ -2076,6 +2123,11 @@ export function NAMRackPanel({
   const [presetFolderFilter, setPresetFolderFilter] = useState("all");
   const [presetNameDraft, setPresetNameDraft] = useState("");
   const [presetStatus, setPresetStatus] = useState("");
+  useEffect(() => {
+    if (!presetStatus) return;
+    const timeout = setTimeout(() => setPresetStatus(""), 8000);
+    return () => clearTimeout(timeout);
+  }, [presetStatus]);
   const [presetPrompt, setPresetPrompt] = useState<NAMRackPrompt | null>(null);
   const presetPromptResolverRef = useRef<((result: string | null) => void) | null>(null);
   const uiStatePersistenceRef = useRef<Promise<void>>(Promise.resolve());
@@ -2101,7 +2153,13 @@ export function NAMRackPanel({
     const value = new URLSearchParams(window.location.search).get("namSlotCategory");
     return (isRackModuleId(value) && value !== "pedal") || value === "utility" ? value : "amp";
   });
-  const [slotActionStatus, setSlotActionStatus] = useState("");
+  const [slotActionStatus, setSlotActionStatusValue] = useState("");
+  const setSlotActionStatus = useCallback((message: string) => {
+    setSlotActionStatusValue(message);
+    // The rack faceplate does not render the chain browser's status line.
+    // Resource failures must also be visible on Amp/Cab, where they occur.
+    setPresetStatus(message);
+  }, []);
   const presetNavigationPendingRef = useRef(false);
   const presetTransactionPendingRef = useRef(false);
   const [draggedSlot, setDraggedSlot] = useState<RackModuleId | null>(null);
@@ -2688,6 +2746,15 @@ export function NAMRackPanel({
   const rackOutputSafetyGuardHits = Number(
     rackDiagnostics?.rackOutputSafetyGuardHitCount ?? 0,
   );
+  const rackOutputEmergencyMuteActive = Boolean(
+    rackDiagnostics?.rackOutputEmergencyMuteActive,
+  );
+  const rackOutputEmergencyMuteTripCount = Number(
+    rackDiagnostics?.rackOutputEmergencyMuteTripCount ?? 0,
+  );
+  const rackOutputEmergencyLastTripPeak = Number(
+    rackDiagnostics?.rackOutputEmergencyLastTripPeakLinear ?? 0,
+  );
   const reverbEmergencyBoundHits = Number(
     rackDiagnostics?.reverbEmergencyBoundHitCount ?? 0,
   );
@@ -2857,8 +2924,8 @@ export function NAMRackPanel({
   const cabMissingWarning = Boolean(ampActive && cabPresentation.needsCabIR);
   const liveInputDetected = rawInputDb > -60 && !auditionSourceRendered;
   const inputDiagnosticTone =
-    modelProcessFailCount > 0 || resizeAvoidedCount > 0 || oversizeBypassCount > 0 || realtimeDSPBlocked ? "error" :
-    reverbIntegrityHits > 0 || unsafePeakGuardActive || audioDeadlineWarning || (dspBudgetPct ?? 0) >= 80 ? "warning" :
+    modelProcessFailCount > 0 || resizeAvoidedCount > 0 || oversizeBypassCount > 0 || realtimeDSPBlocked || rackOutputEmergencyMuteActive ? "error" :
+    rackOutputEmergencyMuteTripCount > 0 || reverbIntegrityHits > 0 || unsafePeakGuardActive || audioDeadlineWarning || (dspBudgetPct ?? 0) >= 80 ? "warning" :
     monoInputOneWarning || cabMissingWarning ? "warning" :
     liveInputDetected ? "success" :
     auditionSourceRendered ? "info" :
@@ -2901,7 +2968,7 @@ export function NAMRackPanel({
     presetPromptResolverRef.current = null;
   }, []);
   useEffect(() => {
-    const trackId = address.trackId?.trim() ?? "";
+    const trackId = address.chain === "master" || address.chain === "monitor" ? "" : address.trackId?.trim() ?? "";
     if (rackRailTab !== "tuner") return;
 
     const subscriberId = tunerSubscriberIdRef.current;
@@ -4063,7 +4130,7 @@ export function NAMRackPanel({
   };
 
   const removeSlotModule = async (moduleId: RackModuleId) => {
-    if ((moduleId === "pedal" || moduleId === "cab")
+    if ((moduleId === "pedal" || moduleId === "amp" || moduleId === "cab")
       && blockResourceChangeWhilePreviewing(`Remove ${moduleTitle(moduleId)}`)) return;
     const values: Record<string, number> = {};
     const nextModelState: RackCompareSnapshot["modelState"] = {};
@@ -4077,10 +4144,9 @@ export function NAMRackPanel({
       values.chaosEnabled = 0;
       nextModelState.clearPedalModel = true;
     } else if (moduleId === "amp") {
+      values.ampEnabled = 1;
       values.ampMix = 1;
-      const reset = await resetSlotModule("amp");
-      if (reset) setSlotActionStatus("Amp Capture is the required rack spine, so it was reset instead of removed");
-      return;
+      nextModelState.clearAmpModel = true;
     } else if (moduleId === "cab") {
       values.cabEnabled = 0;
       nextModelState.clearCabIR = true;
@@ -4106,7 +4172,9 @@ export function NAMRackPanel({
           : `${moduleTitle(moduleId)} removal could not be verified. Refresh the rack before retrying.`);
         return;
       }
-      setSlotActionStatus(`${moduleTitle(moduleId)} removed from the active rig`);
+      setSlotActionStatus(moduleId === "amp"
+        ? "Amp Capture unloaded"
+        : `${moduleTitle(moduleId)} removed from the active rig`);
       await Promise.resolve(onRefreshRack());
     } catch (error) {
       console.warn(`[NAMRackPanel] Could not remove ${moduleTitle(moduleId)}`, error);
@@ -5156,20 +5224,34 @@ export function NAMRackPanel({
     rememberIRPath(currentCabIRPath);
   }, [currentCabIRPath, hasCabIR]);
 
+  const beginCabResourceMutation = (action: string) => {
+    if (cabResourceMutationRef.current.active) {
+      setSlotActionStatus(`Wait for the current Cab/IR change to finish before ${action.toLocaleLowerCase()}.`);
+      return null;
+    }
+    const token = cabResourceMutationRef.current.token + 1;
+    cabResourceMutationRef.current = { active: true, token };
+    setCabBusy(true);
+    return token;
+  };
+
+  const finishCabResourceMutation = (token: number) => {
+    if (cabResourceMutationRef.current.token !== token) return;
+    cabResourceMutationRef.current = { active: false, token };
+    setCabBusy(false);
+  };
+
   const applyCabIRPath = async (path: string) => {
     const cleanPath = path.trim();
     if (!cleanPath) return;
     if (blockResourceChangeWhilePreviewing("Load Cab/IR")) return;
-    if (embeddedCabCapture) {
-      setSlotActionStatus("This amp capture already includes a cabinet. Revert or load an amp-only capture before selecting an external Cab/IR.");
-      return;
-    }
-    setCabBusy(true);
+    const mutationToken = beginCabResourceMutation("loading another IR");
+    if (mutationToken === null) return;
     try {
-      const result = await applyVerifiedRackMutation({
-        modelState: { cabIRPath: cleanPath },
-        values: { cabEnabled: 1 },
-      });
+      // Flush older Cab power/parameter writes before publishing the new
+      // resource. Otherwise a trailing bypass click can undo this selection.
+      if (!await drainPendingWritesForPresetTransaction("Cab/IR selection")) return;
+      const result = await applyVerifiedRackMutation(cabinetSelectionPatch(cleanPath));
       if (result !== "verified") {
         setSlotActionStatus(result === "rejected"
           ? "The Cab/IR could not be loaded. The current cabinet was kept."
@@ -5177,13 +5259,17 @@ export function NAMRackPanel({
         return;
       }
       rememberIRPath(cleanPath);
-      setSlotActionStatus(`${fileName(cleanPath) || "Cab/IR"} loaded and verified`);
+      const mountedState = await nativeBridge.getBuiltInPluginState(address);
+      const retained = mountedState.modelState?.ampIncludesCab === true;
+      setSlotActionStatus(retained
+        ? `${fileName(cleanPath) || "Cab/IR"} retained and verified. The full-rig cabinet remains audible until you choose an amp-only Capture.`
+        : `${fileName(cleanPath) || "Cab/IR"} loaded and verified`);
       await Promise.resolve(onRefreshRack());
     } catch (error) {
       console.warn("[NAMRackPanel] Could not load Cab/IR", error);
       setSlotActionStatus("The Cab/IR load failed; the rack could not confirm the change.");
     } finally {
-      setCabBusy(false);
+      finishCabResourceMutation(mutationToken);
     }
   };
 
@@ -5191,7 +5277,7 @@ export function NAMRackPanel({
     if (!cabPresentation.canLoadLocalIR) {
       setActiveRackSection("cab");
       setFocusedModule("cab");
-      setSlotActionStatus("This full-rig Capture already includes its cabinet. Load an amp-only Capture before choosing an external IR.");
+      setSlotActionStatus("Load an Amp Capture before choosing an external IR.");
       return;
     }
     const path = await nativeBridge.browseForFile("Select cabinet impulse response", "*.wav;*.aiff;*.aif;*.flac");
@@ -5250,7 +5336,7 @@ export function NAMRackPanel({
       setActiveView("rack");
       setActiveRackSection("cab");
       setFocusedModule("cab");
-      setSlotActionStatus("Cab included in this full-rig Capture. Browse amp-only Captures to use an external IR.");
+      setSlotActionStatus("Load an Amp Capture before choosing an external IR.");
       return;
     }
     openSourceFlow("ir");
@@ -5262,11 +5348,12 @@ export function NAMRackPanel({
 
   const clearCabIR = async () => {
     if (blockResourceChangeWhilePreviewing("Remove Cab/IR")) return;
-    setCabBusy(true);
+    const mutationToken = beginCabResourceMutation("unloading the IR");
+    if (mutationToken === null) return;
     try {
+      if (!await drainPendingWritesForPresetTransaction("Cab/IR unload")) return;
       const result = await applyVerifiedRackMutation({
-        modelState: { clearCabIR: true },
-        values: { cabEnabled: 0 },
+        modelState: { clearCabIR: true, cabRequestedEnabled: false },
       });
       if (result !== "verified") {
         setSlotActionStatus(result === "rejected"
@@ -5274,13 +5361,15 @@ export function NAMRackPanel({
           : "Cab/IR removal could not be verified. Refresh the rack before retrying.");
         return;
       }
-      setSlotActionStatus("Cab/IR removed from the active rig");
+      setSlotActionStatus(embeddedCabCapture
+        ? "Retained Cab/IR unloaded. The cabinet embedded in the full-rig Capture remains audible."
+        : "Cab/IR unloaded from the active rig");
       await Promise.resolve(onRefreshRack());
     } catch (error) {
       console.warn("[NAMRackPanel] Could not remove Cab/IR", error);
       setSlotActionStatus("Cab/IR removal failed; the rack could not confirm the change.");
     } finally {
-      setCabBusy(false);
+      finishCabResourceMutation(mutationToken);
     }
   };
 
@@ -6329,7 +6418,12 @@ export function NAMRackPanel({
     ...designPortToneItems,
   ];
   const onDesignPortParamChange = (param: BuiltInParamDescriptor, value: number) => {
-    if (param.id.startsWith("cab") && !isNAMRackCabinetSpaceParamId(param.id) && cabPresentation.mode !== "loaded") {
+    if (
+      param.id.startsWith("cab")
+      && param.id !== "cabDirectMix"
+      && !isNAMRackCabinetSpaceParamId(param.id)
+      && cabPresentation.mode !== "loaded"
+    ) {
       setSlotActionStatus(cabControlsUnavailableReason ?? "Choose a cabinet IR before changing the Cab/IR controls.");
       return;
     }
@@ -6361,6 +6455,21 @@ export function NAMRackPanel({
       nextInstrumentProfile,
     );
     onParamChange(param, value);
+    if (param.id === "instrumentProfile" && nextInstrumentProfile !== instrumentProfile) {
+      const gateProfileDefault = paramById(params, "gateThresholdDb");
+      const sourceGateDefault = nextInstrumentProfile === NAM_INSTRUMENT_PROFILE_BASS ? -80 : -65;
+      const targetGateDefault = nextInstrumentProfile === NAM_INSTRUMENT_PROFILE_BASS ? -65 : -80;
+      // Keep these commits synchronous with the profile commit. The host groups
+      // the gate default migration into the same parameter history transaction.
+      // Graphic-EQ cutoffs are explicit user choices and never change as a
+      // hidden side effect of the instrument voicing selector.
+      if (gateProfileDefault && (
+        Math.abs(gateProfileDefault.value - sourceGateDefault) < 0.01
+        || Math.abs(gateProfileDefault.value - quantizeParamValue(gateProfileDefault, sourceGateDefault)) < 0.01
+      )) {
+        onParamChange(gateProfileDefault, quantizeParamValue(gateProfileDefault, targetGateDefault));
+      }
+    }
     if (clearIncompatibleFactoryIdentity) {
       // The rack is now a deliberate cross-profile edit, not the recalled
       // factory template. Clear both the optimistic label and the persisted
@@ -6383,7 +6492,7 @@ export function NAMRackPanel({
     frequencyLabel: tunerFrequencyLabel,
     inputLevelLabel: formatDb(tunerInputLevelDb),
     confidenceLabel: tunerConfidenceLabel,
-    routeLabel: address.chain === "master"
+    routeLabel: address.chain === "master" || address.chain === "monitor"
       ? "Input 1 - global tuner"
       : selectedInputLabel,
     meterPct: meterPercent(tunerInputLevelDb) * 100,
@@ -6393,6 +6502,10 @@ export function NAMRackPanel({
       ? "The NAM model faulted while processing, so the rack bypassed it instead of crashing."
       : realtimeDSPBlocked
         ? "NAM processing entered its internal safety bypass after a processing fault. The selected device buffer has not been changed."
+        : rackOutputEmergencyMuteActive
+          ? `NAM Rack safety mute is active because the raw final output exceeded the emergency boundary${rackOutputEmergencyLastTripPeak > 0 ? ` (peak ${rackOutputEmergencyLastTripPeak.toFixed(2)})` : ""}. Lower Input, Drive Volume, Amp Output, or Cab Level. Output will fade back in only after the signal remains safe for 250 ms.`
+          : rackOutputEmergencyMuteTripCount > 0
+            ? `NAM Rack safety mute tripped ${rackOutputEmergencyMuteTripCount} time${rackOutputEmergencyMuteTripCount === 1 ? "" : "s"} and recovered. Lower Input, Drive Volume, Amp Output, or Cab Level before continuing.`
         : reverbIntegrityHits > 0
           ? `The Reverb recorded ${reverbIntegrityHits} internal DSP containment event${reverbIntegrityHits === 1 ? "" : "s"}${reverbIntegrityDetail}. This identifies the Reverb processing boundary; it does not identify a device, cable, or input fault.`
           : unsafePeakGuardActive
@@ -7342,7 +7455,7 @@ export function NAMRackPanel({
                     </button>}
                     {!embeddedCabSlot && <button type="button" onClick={() => void removeSlotModule(moduleId)}>
                       <Trash2 size={12} />
-                      {moduleId === "amp" ? "Reset Amp" : "Remove"}
+                      {moduleId === "amp" ? "Unload Amp" : moduleId === "cab" ? "Unload Cab" : "Remove"}
                     </button>}
                   </div>
                   {copy && !embeddedCabSlot && (
@@ -7585,6 +7698,8 @@ export function NAMRackPanel({
                 onBrowseAmpOnlyCapture={openAmpOnlyCaptureLibrary}
                 onBrowseCabIR={cabPresentation.canBrowseExternalIR ? openCabIRLibrary : undefined}
                 onBrowseLocalCabIR={cabPresentation.canLoadLocalIR ? () => void loadCabIR() : undefined}
+                onClearCabIR={cabPresentation.canClearExternalIR ? () => void clearCabIR() : undefined}
+                cabResourceBusy={cabBusy}
                 onOpenLibrary={(section) => {
                   setAdvancedFocus(null);
                   openDesignPortLibrary(section);
@@ -7606,27 +7721,25 @@ export function NAMRackPanel({
                 onSelectLibraryItem={(itemId) => {
                   if (itemId.startsWith("installed-ir:")) {
                     const localPath = decodeURIComponent(itemId.slice("installed-ir:".length));
-                    void nativeBridge.loadNAMModelIntoRack(address, "cab", localPath)
-                      .then((loaded) => {
-                        if (loaded) {
-                          setSlotActionStatus("Cabinet IR loaded");
-                          onRefreshRack();
-                        } else {
-                          setSlotActionStatus("Could not load the selected Cabinet IR.");
-                        }
-                      })
-                      .catch((error) => {
-                        setSlotActionStatus(error instanceof Error ? error.message : "Could not load the selected Cabinet IR.");
-                      });
+                    void applyCabIRPath(localPath);
                     return;
                   }
                   if (itemId.startsWith("installed:")) {
                     const localPath = decodeURIComponent(itemId.slice("installed:".length));
+                    const selectedCapture = designInstalledCaptures.find((entry) => (
+                      normalizeNAMRackCapturePath(entry.localPath)
+                        === normalizeNAMRackCapturePath(localPath)
+                    ));
                     void nativeBridge.loadNAMModelIntoRack(
                       address,
                       "amp",
                       localPath,
-                      { modelSize: NAM_FULL_MODEL_SIZE },
+                      {
+                        modelSize: NAM_FULL_MODEL_SIZE,
+                        declaredCaptureType: selectedCapture
+                          ? captureTypeForInstalled(selectedCapture)
+                          : "unknown",
+                      },
                     )
                       .then((loaded) => {
                         if (loaded) {

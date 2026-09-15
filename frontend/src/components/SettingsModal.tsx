@@ -360,6 +360,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 </div>
               )}
 
+              {config.current.microphonePermissionRequired && <div role="status" className="rounded border border-amber-500/40 p-3 text-xs text-amber-200">
+                {config.current.microphonePermissionStatus === "notDetermined"
+                  ? "Audio input is off until you enable monitoring, record audio, or apply an input device. macOS asks when input is first needed."
+                  : "Audio input is unavailable. Enable OpenStudio in System Settings > Privacy & Security > Microphone. Playback, editing, and MIDI remain available."}
+              </div>}
+
               {/* Input Device (hide for ASIO, show for others) */}
               {config.current.audioDeviceType !== "ASIO" && (
                 <NativeSelect
@@ -442,7 +448,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 />
                 <div className="mt-2 text-xs leading-relaxed text-neutral-500">
                   Every size reported by the active driver is available. Smaller
-                  buffers reduce latency but leave less time for audio processing.
+                  buffers reduce latency but leave less time for audio processing. If 8 samples is absent, the selected device, I/O pair, sample rate, and driver did not report it; Windows and Core Audio can offer different sizes.
                 </div>
                 {performanceAdvisory.shouldWarn && (
                   <div className="mt-2 rounded border border-amber-500/45 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200">

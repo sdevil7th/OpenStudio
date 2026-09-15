@@ -55,6 +55,9 @@ function Copy-OptionalFile {
 $resolvedMetadataDir = Resolve-RepoPath $MetadataDir
 $resolvedOutputDir = Resolve-RepoPath $OutputDir
 
+& python (Join-Path $PSScriptRoot "updater_manifest.py") verify --metadata-dir $resolvedMetadataDir
+if ($LASTEXITCODE -ne 0) { throw "Refusing to publish unsigned or invalid application update manifests." }
+
 if (-not (Test-Path $resolvedMetadataDir)) {
     throw "Metadata directory not found: $resolvedMetadataDir"
 }

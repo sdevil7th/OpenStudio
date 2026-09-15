@@ -83,6 +83,8 @@ export type WheelTarget =
 export type WheelPrecision = "normal" | "fine";
 
 export interface WheelEventLike {
+  /** Set by the platform gesture adapter, not inferred from profile modifiers. */
+  openStudioPinch?: boolean;
   deltaX?: number;
   deltaY?: number;
   deltaMode?: number;
@@ -426,9 +428,29 @@ export function resolveWheelGesture(
   );
   const modifiers = normalizeWheelModifiers(event, context.platform);
   const device = inferWheelInputDevice(event, context.deviceHint);
+  if (event.openStudioPinch && ["timeline", "piano_roll", "pitch_editor"].includes(context.surface)) {
+    return {
+      profileId: profile.id, ruleId: "trackpad.pinch", matched: true,
+      operation: "zoom", target: "timeline", axis: "horizontal", amount: delta.y,
+      delta, modifiers, device: { device: "trackpad", basis: "explicit" },
+      anchor: buildAnchor("pointer", event, context), precision: "normal",
+      preventDefault: true, stopPropagation: true,
+    };
+  }
   const rule = profile.rules.find((candidate) => (
     matchesRule(candidate, context, modifiers, device.device)
   ));
+  // Horizontal wheel/trackpad packets must reach canvas scroll state. Native
+  // scrolling cannot move a timeline drawn inside a non-scrolling canvas.
+  if (!rule?.devices && delta.x !== 0 && !modifiers.primary && !modifiers.secondary && !modifiers.alt && !modifiers.shift
+    && ["timeline", "piano_roll", "pitch_editor"].includes(context.surface) && context.subtarget !== "sidebar") {
+    return {
+      profileId: profile.id, ruleId: "trackpad.pan", matched: true,
+      operation: "scroll", target: "viewport", axis: "horizontal", amount: delta.x,
+      delta, modifiers, device, anchor: buildAnchor("surface", event, context), precision: "normal",
+      preventDefault: true, stopPropagation: true,
+    };
+  }
   if (!rule) return nativeFallback(profile, event, context, delta, modifiers, device);
 
   const axis = resolveAxis(rule.axis, delta);

@@ -1639,8 +1639,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     if (!container) return;
 
     const handleWheel = (event: WheelEvent) => {
-      if (isEditorWheelOwnedTarget(event.target)) return;
       const eventElement = event.target instanceof Element ? event.target : null;
+      // Piano keys are buttons for audition/accessibility, but scrolling over
+      // the key strip belongs to the editor's navigation, not a value control.
+      if (isEditorWheelOwnedTarget(event.target, container)
+        && !eventElement?.closest(".piano-roll-key-viewport")) return;
       const isSidebar = Boolean(eventElement?.closest(".piano-roll-sidebar"));
       const keyboardViewport = eventElement?.closest<HTMLElement>(".piano-roll-key-viewport");
       const isKeyboard = Boolean(keyboardViewport);
@@ -1902,6 +1905,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       }
       if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
         setTimelineScroll(clamp(timelineScrollX + gesture.amount, 0, maxScrollX), timelineScrollY);
+        if (gesture.ruleId === "trackpad.pan") setScrollY((previous) => clamp(previous + gesture.delta.y, 0, maxScrollY));
       } else if (gesture.operation === "scroll") {
         setScrollY((previous) => clamp(previous + gesture.amount, 0, maxScrollY));
       }

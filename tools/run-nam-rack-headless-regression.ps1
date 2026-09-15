@@ -59,12 +59,21 @@ $processStartInfo.Arguments = "--nam-rack-regression-headless `"$resultPath`""
 $processStartInfo.UseShellExecute = $false
 $processStartInfo.CreateNoWindow = $true
 $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+$processStartInfo.RedirectStandardOutput = $true
+$processStartInfo.RedirectStandardError = $true
 
 $process = [System.Diagnostics.Process]::Start($processStartInfo)
+$stdoutTask = $process.StandardOutput.ReadToEndAsync()
+$stderrTask = $process.StandardError.ReadToEndAsync()
 if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
     $process.Kill()
+    $process.WaitForExit()
+    $stdoutTask.Result | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $runDir "stdout.log")
+    $stderrTask.Result | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $runDir "stderr.log")
     throw "NAM rack headless regression timed out after $TimeoutSeconds seconds."
 }
+$stdoutTask.Result | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $runDir "stdout.log")
+$stderrTask.Result | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $runDir "stderr.log")
 if ($process.ExitCode -ne 0) {
     Write-Warning "NAM rack headless regression exited with code $($process.ExitCode). Reading result if available."
 }
@@ -85,7 +94,11 @@ if ($result.checks) {
     }
 }
 
-if ($result.objectiveGateStatus -eq "fail") {
+if ($process.ExitCode -ne 0) {
+    # A late shutdown crash/ASan abort must fail even after a passing JSON report.
+    exit 3
+}
+if ($result.objectiveGateStatus -ne "pass") {
     exit 2
 }
 exit 0

@@ -2,7 +2,7 @@ OpenStudio Custom JSFX Effects
 ============================
 
 Place your custom .jsfx scripts in this directory.
-They will be bundled with OpenStudio and appear in the Plugin Browser under "S13FX".
+They will be bundled with OpenStudio and appear in the Plugin Browser under "JSFX".
 
 For user-created scripts that persist across updates, use:
   Documents/OpenStudio/Effects/

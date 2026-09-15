@@ -1,10 +1,7 @@
-import { createPortal } from "react-dom";
-import { X } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import classNames from "classnames";
-import { Button, TimeSignatureInput, Slider } from "./ui";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { MetronomeControls } from "./MetronomeControls";
+import { Button, Modal, TimeSignatureInput, Slider } from "./ui";
 
 interface MetronomeSettingsProps {
   isOpen: boolean;
@@ -17,8 +14,10 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setTimeSignature,
     metronomeAccentBeats,
     setMetronomeAccentBeats,
-    metronomeEnabled,
-    toggleMetronome,
+    practiceEnabled,
+    practiceError,
+    isPlaying,
+    isRecording,
     metronomeVolume,
     setMetronomeVolume,
     metronomeTrackId,
@@ -31,8 +30,10 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setTimeSignature: s.setTimeSignature,
     metronomeAccentBeats: s.metronomeAccentBeats,
     setMetronomeAccentBeats: s.setMetronomeAccentBeats,
-    metronomeEnabled: s.metronomeEnabled,
-    toggleMetronome: s.toggleMetronome,
+    practiceEnabled: s.metronomePracticeEnabled,
+    practiceError: s.metronomePracticeError,
+    isPlaying: s.transport.isPlaying,
+    isRecording: s.transport.isRecording,
     metronomeVolume: s.metronomeVolume,
     setMetronomeVolume: s.setMetronomeVolume,
     metronomeTrackId: s.metronomeTrackId,
@@ -64,41 +65,22 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     setMetronomeAccentBeats(Array(timeSignature.numerator).fill(true));
   };
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[10000] flex items-center justify-center"
-      data-modal-root="true"
-      onContextMenu={guardModalContextMenu}
-    >
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} onContextMenu={guardModalContextMenu} />
-
-      {/* Modal */}
-      <div className="relative bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl p-4 min-w-[320px]" onContextMenu={guardModalContextMenu}>
-        {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-white">
-            Metronome Settings
-          </h3>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onClose}
-          >
-            <X size={16} />
-          </Button>
-        </div>
-
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Metronome Settings" size="sm" className="max-w-full">
         {/* Enable/Disable */}
-        <div className="flex items-center gap-3 mb-4 pb-3 border-b border-neutral-700">
-          <Button
-            variant="warning"
-            size="sm"
-            active={metronomeEnabled}
-            onClick={() => toggleMetronome()}
-          >
-            {metronomeEnabled ? "Enabled" : "Disabled"}
-          </Button>
+        <div className="mb-4 space-y-2 border-b border-neutral-700 pb-3">
+          <MetronomeControls />
+          <p className="text-xs leading-relaxed text-neutral-400">
+            Enable lights up whenever either metronome mode is on; switch it off to stop both.
+            Click only keeps live monitoring on without playing clips or moving the playhead.
+            It follows Play/Record, then continues when transport stops.
+          </p>
+          {practiceEnabled && (
+            <p role="status" className="text-xs font-medium text-amber-300">
+              {isRecording ? "Click following recording" : isPlaying ? "Click following playback" : "Click only · transport stopped"}
+            </p>
+          )}
+          {practiceError && <p role="alert" className="text-xs text-red-300">{practiceError}</p>}
         </div>
 
         {/* Volume Control */}
@@ -106,6 +88,7 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           <div className="text-xs text-neutral-400 mb-2">Volume</div>
           <div className="flex items-center gap-3">
             <Slider
+              aria-label="Metronome volume"
               orientation="horizontal"
               variant="default"
               min={0}
@@ -146,17 +129,12 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
             {Array.from({ length: timeSignature.numerator }).map((_, i) => (
               <Button
                 key={i}
-                variant="warning"
+                variant={i === 0 || metronomeAccentBeats[i] ? "warning" : "default"}
                 size="md"
                 onClick={() => handleBeatClick(i)}
                 disabled={i === 0}
                 active={i === 0 || metronomeAccentBeats[i]}
-                className={classNames("w-10 h-10 rounded-lg", {
-                  "cursor-default": i === 0,
-                  "!bg-yellow-500/70": i !== 0 && metronomeAccentBeats[i],
-                  "!bg-neutral-700 !text-neutral-300 hover:!bg-neutral-600 !border-neutral-600":
-                    i !== 0 && !metronomeAccentBeats[i],
-                })}
+                className="h-10 w-10 rounded-lg"
               >
                 {i + 1}
               </Button>
@@ -202,7 +180,8 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
           </div>
           {metronomeTrackId && (
             <p className="text-[10px] text-neutral-500 mt-1">
-              Track auto-regenerates when metronome settings change.
+              Track auto-regenerates when metronome settings change. This is a separate
+              audio track: mute it during practice playback to avoid doubling the live click.
             </p>
           )}
         </div>
@@ -273,8 +252,6 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
             Accent All
           </Button>
         </div>
-      </div>
-    </div>,
-    document.body
+    </Modal>
   );
 }

@@ -40,7 +40,7 @@ const makeFilter = (
 
 describe("NAM Rack PRE EQ V19 state and control contract", () => {
   it("uses logarithmic active travel with opposite six-percent OFF detents", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
     const detent = NAM_GRAPHIC_EQ_FILTER_OFF_DETENT;
 
     expect(namGraphicEqFilterHzFromNormalized("preEqHPFHz", detent / 2)).toBe(0);
@@ -180,7 +180,7 @@ describe("NAM Rack PRE EQ V19 state and control contract", () => {
       preEq8kDb: 3,
       preEq12kDb: 4,
     });
-    expect(current.dspState.namEffectsDspVersion).toBe(19);
+    expect(current.dspState.namEffectsDspVersion).toBe(20);
   });
 
   it("migrates baseline and Compare snapshots with the enclosing legacy version", () => {

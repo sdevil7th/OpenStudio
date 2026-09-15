@@ -118,7 +118,7 @@ async function launchBrowserIfNeeded(args) {
   if (await isCdpReachable(args.cdpUrl)) return null;
   const browserPath = await findBrowserPath(args.edgePath);
   const cdpPort = new URL(args.cdpUrl).port || "9222";
-  const profile = path.join(process.env.TEMP || ".", `studio13-ai-generation-qa-${Date.now()}`);
+  const profile = path.join(process.env.TEMP || ".", `openstudio-ai-generation-qa-${Date.now()}`);
   const child = spawn(browserPath, [
     "--headless=new",
     `--remote-debugging-port=${cdpPort}`,
@@ -189,7 +189,7 @@ async function openTab(args, viewport) {
 
 async function evaluate(cdp, expression, awaitPromise = true) {
   const wrappedExpression = awaitPromise
-    ? `(() => { globalThis.__studio13AiQaPromise = (${expression}); return globalThis.__studio13AiQaPromise; })()`
+    ? `(() => { globalThis.__openstudioAiQaPromise = (${expression}); return globalThis.__openstudioAiQaPromise; })()`
     : expression;
   const result = await cdp.send("Runtime.evaluate", {
     expression: wrappedExpression,

@@ -4,15 +4,15 @@
 
 // ARA hosting requires the ARA SDK and JUCE_PLUGINHOST_ARA=1
 #if JUCE_PLUGINHOST_ARA && (JUCE_MAC || JUCE_WINDOWS || JUCE_LINUX)
-#define S13_HAS_ARA 1
+#define OpenStudio_HAS_ARA 1
 #else
-#define S13_HAS_ARA 0
+#define OpenStudio_HAS_ARA 0
 #endif
 
 #include <JuceHeader.h>
 #include "ARADebug.h"
 
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
 #include <ARA_API/ARAInterface.h>
 #include <ARA_Library/Dispatch/ARAHostDispatch.h>
 #endif
@@ -125,13 +125,13 @@ private:
     int currentBlockSize = 512;
     int pluginInputChannelCount = 0;
 
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
 
     // =========================================================================
     // ARA Host Interface Controllers
     // =========================================================================
 
-    class S13AudioAccessController final : public ARA::Host::AudioAccessControllerInterface
+    class OpenStudioAudioAccessController final : public ARA::Host::AudioAccessControllerInterface
     {
     public:
         struct AudioReader
@@ -156,7 +156,7 @@ private:
         std::map<AudioReader*, std::unique_ptr<AudioReader>> audioReaders;
     };
 
-    class S13ArchivingController final : public ARA::Host::ArchivingControllerInterface
+    class OpenStudioArchivingController final : public ARA::Host::ArchivingControllerInterface
     {
     public:
         using ReaderConverter = ARAHostModel::ConversionFunctions<juce::MemoryBlock*, ARA::ARAArchiveReaderHostRef>;
@@ -174,7 +174,7 @@ private:
         ARA::ARAPersistentID getDocumentArchiveID (ARA::ARAArchiveReaderHostRef archiveReaderHostRef) noexcept override;
     };
 
-    class S13ContentAccessController final : public ARA::Host::ContentAccessControllerInterface
+    class OpenStudioContentAccessController final : public ARA::Host::ContentAccessControllerInterface
     {
     public:
         using Converter = ARAHostModel::ConversionFunctions<ARA::ARAContentType, ARA::ARAContentReaderHostRef>;
@@ -199,10 +199,10 @@ private:
         ARA::ARAContentBarSignature barSignature {};
     };
 
-    class S13ModelUpdateController final : public ARA::Host::ModelUpdateControllerInterface
+    class OpenStudioModelUpdateController final : public ARA::Host::ModelUpdateControllerInterface
     {
     public:
-        explicit S13ModelUpdateController(ARAHostController& ownerIn) : owner(ownerIn) {}
+        explicit OpenStudioModelUpdateController(ARAHostController& ownerIn) : owner(ownerIn) {}
 
         // Keep this adapter aligned with the vendored ARA 2.2.0 SDK.
         void notifyAudioSourceAnalysisProgress (ARA::ARAAudioSourceHostRef, ARA::ARAAnalysisProgressState, float) noexcept override;
@@ -218,10 +218,10 @@ private:
         ARAHostController& owner;
     };
 
-    class S13PlaybackController final : public ARA::Host::PlaybackControllerInterface
+    class OpenStudioPlaybackController final : public ARA::Host::PlaybackControllerInterface
     {
     public:
-        explicit S13PlaybackController(ARAHostController& ownerIn) : owner(ownerIn) {}
+        explicit OpenStudioPlaybackController(ARAHostController& ownerIn) : owner(ownerIn) {}
 
         void requestStartPlayback() noexcept override;
         void requestStopPlayback() noexcept override;
@@ -262,11 +262,11 @@ private:
     };
 
     // Raw pointers to our controllers (ownership is transferred to ARAHostDocumentController)
-    S13AudioAccessController* audioAccessControllerPtr = nullptr;
-    S13ArchivingController* archivingControllerPtr = nullptr;
-    S13ContentAccessController* contentAccessControllerPtr = nullptr;
-    S13ModelUpdateController* modelUpdateControllerPtr = nullptr;
-    S13PlaybackController* playbackControllerPtr = nullptr;
+    OpenStudioAudioAccessController* audioAccessControllerPtr = nullptr;
+    OpenStudioArchivingController* archivingControllerPtr = nullptr;
+    OpenStudioContentAccessController* contentAccessControllerPtr = nullptr;
+    OpenStudioModelUpdateController* modelUpdateControllerPtr = nullptr;
+    OpenStudioPlaybackController* playbackControllerPtr = nullptr;
 
     // JUCE high-level ARA document controller (owns the host interface controllers)
     std::unique_ptr<juce::ARAHostDocumentController> araDocController;
@@ -288,9 +288,9 @@ private:
     void completeInitialization (juce::ARAFactoryWrapper factory,
                                  std::function<void (bool, bool, const juce::String&)> onComplete);
 
-    friend class S13AudioAccessController;
+    friend class OpenStudioAudioAccessController;
 
-#endif // S13_HAS_ARA
+#endif // OpenStudio_HAS_ARA
 
     void noteDebugOperation(const juce::String& operationType, const juce::String& clipId);
     void noteEditDrivenDebugEvent(const juce::String& eventType, const juce::String& clipId);

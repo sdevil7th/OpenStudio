@@ -37,7 +37,7 @@ describe("master FX removal contracts", () => {
     expect(automationActionsSource).toContain("removeMasterFXWithUndo: async (fxIndex: number)");
     expect(automationActionsSource).toContain("getMasterPluginState(fxIndex)");
     expect(automationActionsSource).toContain("addMasterBuiltInFX(pluginReference)");
-    expect(automationActionsSource).toContain("addMasterS13FX(pluginReference)");
+    expect(automationActionsSource).toContain("addMasterJSFX(pluginReference)");
     expect(automationActionsSource).toContain("addMasterFX(pluginReference)");
     expect(automationActionsSource).toContain("setMasterPluginState(appendedIndex, savedState)");
     expect(automationActionsSource).toContain("setMasterFXPrecisionOverride(");

@@ -59,7 +59,6 @@ describe("AI generation store actions", () => {
     expect(updated.aiWorkflow).toBe("text-to-audio");
     expect(updated.aiWorkflowParams).toMatchObject({
       prompt: "",
-      negative_prompt: "",
       duration: 30,
     });
     expect(useDAWStore.getState().canUndo).toBe(true);
@@ -84,7 +83,7 @@ describe("AI generation store actions", () => {
     expect(tracks).toHaveLength(2);
     expect(tracks[1].name).toBe("AI Variation - Source Loop");
     expect(tracks[1].clips[0].startTime).toBe(10);
-    expect(tracks[1].clips[0].duration).toBe(5);
+    expect(tracks[1].clips[0].duration).toBe(3);
     expect(useDAWStore.getState().canUndo).toBe(true);
 
     useDAWStore.getState().undo();
@@ -108,7 +107,7 @@ describe("AI generation store actions", () => {
     expect(tracks).toHaveLength(1);
     expect(tracks[0].clips).toHaveLength(2);
     expect(tracks[0].clips[1].startTime).toBe(15);
-    expect(tracks[0].clips[1].duration).toBe(8);
+    expect(tracks[0].clips[1].duration).toBe(3);
   });
 
   it("places continuation on a new track when the source tail range collides", async () => {

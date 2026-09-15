@@ -348,7 +348,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
 
   // Load user preset
   const loadUserPreset = useCallback(async () => {
-    const path = await nativeBridge.showOpenDialog("Load Preset", "*.ospreset;*.s13preset");
+    const path = await nativeBridge.showOpenDialog("Load Preset", "*.ospreset");
     if (!path) return;
     const json = await nativeBridge.loadProjectFromFile(path);
     if (!json) return;
@@ -421,7 +421,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
                   <button
                     className="flex-1 text-[9px] text-neutral-400 hover:text-white bg-neutral-700 rounded px-1 py-0.5"
                     onClick={loadUserPreset}
-                    title="Load an .ospreset or legacy .s13preset file from disk"
+                    title="Load an .ospreset  file from disk"
                   >Load...</button>
                 </div>
                 {/* Factory presets by category */}

@@ -21,7 +21,7 @@ PolyPitchDetector::~PolyPitchDetector()
 
 bool PolyPitchDetector::loadModel (const juce::File& onnxModelPath)
 {
-#if S13_HAS_ONNXRUNTIME
+#if OPENSTUDIO_HAS_ONNXRUNTIME
     if (! onnxModelPath.existsAsFile())
     {
         juce::Logger::writeToLog ("PolyPitchDetector: Model file not found: " + onnxModelPath.getFullPathName());
@@ -30,7 +30,7 @@ bool PolyPitchDetector::loadModel (const juce::File& onnxModelPath)
 
     try
     {
-        ortEnv = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_WARNING, "S13PolyPitch");
+        ortEnv = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_WARNING, "OpenStudioPolyPitch");
 
         Ort::SessionOptions sessionOpts;
         sessionOpts.SetIntraOpNumThreads (2);
@@ -88,7 +88,7 @@ bool PolyPitchDetector::loadModel (const juce::File& onnxModelPath)
     }
 #else
     juce::ignoreUnused (onnxModelPath);
-    juce::Logger::writeToLog ("PolyPitchDetector: ONNX Runtime not available (compiled without S13_HAS_ONNXRUNTIME)");
+    juce::Logger::writeToLog ("PolyPitchDetector: ONNX Runtime not available (compiled without OPENSTUDIO_HAS_ONNXRUNTIME)");
     return false;
 #endif
 }
@@ -225,7 +225,7 @@ PolyPitchDetector::analyze (const float* monoAudio, int numSamples,
     result.sampleRate = kModelSampleRate;
     result.hopSize = kHopSize;
 
-#if S13_HAS_ONNXRUNTIME
+#if OPENSTUDIO_HAS_ONNXRUNTIME
     if (! modelLoaded || ortSession == nullptr)
     {
         juce::Logger::writeToLog ("PolyPitchDetector::analyze: Model not loaded");

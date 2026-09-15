@@ -125,7 +125,7 @@ async function launchBrowserIfNeeded(args) {
 
   const browserPath = await findBrowserPath(args.edgePath);
   const cdpPort = new URL(args.cdpUrl).port || "9222";
-  const profile = path.join(process.env.TEMP || ".", `studio13-midi-qa-${Date.now()}`);
+  const profile = path.join(process.env.TEMP || ".", `openstudio-midi-qa-${Date.now()}`);
   const child = spawn(browserPath, [
     "--headless=new",
     `--remote-debugging-port=${cdpPort}`,
@@ -289,7 +289,7 @@ function timelineFixtureExpression(baseUrl, storeUrl, options = {}) {
       const storeModule = await import('${storeUrl}');
       const timelineModule = await import('${baseUrl}/src/components/Timeline.tsx');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       const fixtureConfig = ${JSON.stringify(config)};
       const track = createDefaultTrack('qa-midi-track', 'Timeline MIDI', '#49a7c7', 'midi');
       track.midiClips = [{
@@ -395,7 +395,7 @@ function timelineFixtureExpression(baseUrl, storeUrl, options = {}) {
 function timelineStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clips = state.tracks.flatMap((track) => track.midiClips.map((clip) => ({ track, clip })));
       const clip = clips[0];
@@ -433,7 +433,7 @@ function timelineStateExpression(storeUrl) {
 function setTimelineToolExpression(storeUrl, toolMode) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().setToolMode('${toolMode}');
       return useDAWStore.getState().toolMode;
     })()
@@ -443,7 +443,7 @@ function setTimelineToolExpression(storeUrl, toolMode) {
 function setPianoToolExpression(storeUrl, tool) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().setActiveMidiTool('${tool}');
       return useDAWStore.getState().activeMidiTool;
     })()
@@ -597,7 +597,7 @@ async function hoverContextMenuLabel(cdp, label) {
 function storeUndoRedoExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       const state = useDAWStore.getState();
       const clips = state.tracks.flatMap((track) => track.midiClips.map((clip) => ({ track, clip })));
@@ -630,7 +630,7 @@ function appShortcutFixtureExpression(storeUrl) {
     (async () => {
       const storeModule = await import('${storeUrl}');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       const track = createDefaultTrack('qa-app-track', 'App MIDI', '#49a7c7', 'midi');
       track.midiClips = [{
         id: 'qa-app-midi-clip',
@@ -685,7 +685,7 @@ function appShortcutFixtureExpression(storeUrl) {
 function appShortcutStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clip = state.tracks[0]?.midiClips[0];
       return {
@@ -703,7 +703,7 @@ function appTimelineFixtureExpression(storeUrl) {
     (async () => {
       const storeModule = await import('${storeUrl}');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       const track = createDefaultTrack('qa-app-track', 'App MIDI', '#49a7c7', 'midi');
       track.midiClips = [{
         id: 'qa-app-midi-clip',
@@ -759,7 +759,7 @@ function appTimelineFixtureExpression(storeUrl) {
 function appTimelineClipStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clips = state.tracks.flatMap((track) => track.midiClips.map((clip) => ({ trackId: track.id, clip })));
       return {
@@ -783,7 +783,7 @@ function appDockedPianoFixtureExpression(baseUrl, storeUrl) {
     (async () => {
       const storeModule = await import('${storeUrl}');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       const track = createDefaultTrack('qa-dock-track', 'Docked MIDI', '#58c3a3', 'midi');
       track.midiClips = [
         {
@@ -845,34 +845,34 @@ function appDockedPianoFixtureExpression(baseUrl, storeUrl) {
       });
       document.getElementById('openstudio-boot-overlay')?.remove();
       const bridgeModule = await import('${baseUrl}/src/services/NativeBridge.ts');
-      window.__studio13QAMidiWindowCalls = { open: [], prewarm: [], focus: [], close: [], publish: [] };
+      window.__openstudioQAMidiWindowCalls = { open: [], prewarm: [], focus: [], close: [], publish: [] };
       bridgeModule.nativeBridge.openMidiEditorWindow = async (sessionId, bounds) => {
-        window.__studio13QAMidiWindowCalls.open.push({ sessionId, bounds });
+        window.__openstudioQAMidiWindowCalls.open.push({ sessionId, bounds });
         return true;
       };
       bridgeModule.nativeBridge.prewarmMidiEditorWindow = async (sessionId, bounds) => {
-        window.__studio13QAMidiWindowCalls.prewarm.push({ sessionId, bounds });
+        window.__openstudioQAMidiWindowCalls.prewarm.push({ sessionId, bounds });
         return true;
       };
       bridgeModule.nativeBridge.focusMidiEditorWindow = async (sessionId) => {
-        window.__studio13QAMidiWindowCalls.focus.push({ sessionId });
+        window.__openstudioQAMidiWindowCalls.focus.push({ sessionId });
         return true;
       };
       bridgeModule.nativeBridge.closeMidiEditorWindow = async (sessionId, reason = 'close') => {
-        window.__studio13QAMidiWindowCalls.close.push({ sessionId, reason });
+        window.__openstudioQAMidiWindowCalls.close.push({ sessionId, reason });
         return true;
       };
       bridgeModule.nativeBridge.publishMidiEditorUISnapshot = async (sessionId, snapshot) => {
-        window.__studio13QAMidiWindowCalls.publish.push({
+        window.__openstudioQAMidiWindowCalls.publish.push({
           sessionId,
           trackCount: snapshot?.tracks?.length ?? 0,
           clipId: snapshot?.pianoRollClipId ?? null,
         });
         return true;
       };
-      window.__studio13QANotePreviewEvents = [];
+      window.__openstudioQANotePreviewEvents = [];
       window.addEventListener('openstudio-midi-note-preview', (event) => {
-        window.__studio13QANotePreviewEvents.push(event.detail);
+        window.__openstudioQANotePreviewEvents.push(event.detail);
       });
       await new Promise((resolve) => setTimeout(resolve, 1000));
       useDAWStore.getState().openMidiEditorForClip(track.id, 'qa-dock-clip-a');
@@ -884,7 +884,7 @@ function appDockedPianoFixtureExpression(baseUrl, storeUrl) {
 
 function appDockedPianoStateBody() {
   return `() => {
-    const useDAWStore = window.__studio13QADAWStore;
+    const useDAWStore = window.__openstudioQADAWStore;
     const state = useDAWStore.getState();
     const track = state.tracks[0];
     const dock = document.querySelector('[data-qa="docked-piano-roll"]');
@@ -955,8 +955,8 @@ function appDockedPianoStateBody() {
       })),
       activeMidiEditorSessionId: state.activeMidiEditorSessionId,
       dockedMidiEditorSessionId: state.dockedMidiEditorSessionId,
-      midiWindowCalls: window.__studio13QAMidiWindowCalls || { open: [], prewarm: [], focus: [], close: [], publish: [] },
-      notePreviewEvents: window.__studio13QANotePreviewEvents || [],
+      midiWindowCalls: window.__openstudioQAMidiWindowCalls || { open: [], prewarm: [], focus: [], close: [], publish: [] },
+      notePreviewEvents: window.__openstudioQANotePreviewEvents || [],
       firstClipClick: clickForClip('qa-dock-clip-a'),
       secondClipClick: secondClick,
       expectedClipRects,
@@ -986,10 +986,10 @@ function midiFXFixtureExpression(baseUrl, storeUrl) {
       const midiFXModule = await import('${baseUrl}/src/components/MIDIFXControls.tsx');
       const bridgeModule = await import('${baseUrl}/src/services/NativeBridge.ts');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
-      window.__studio13QAMIDIFXSyncPayloads = [];
+      window.__openstudioQADAWStore = useDAWStore;
+      window.__openstudioQAMIDIFXSyncPayloads = [];
       bridgeModule.nativeBridge.setTrackMIDIClips = async (trackId, clips) => {
-        window.__studio13QAMIDIFXSyncPayloads.push({ trackId, clips: JSON.parse(JSON.stringify(clips)) });
+        window.__openstudioQAMIDIFXSyncPayloads.push({ trackId, clips: JSON.parse(JSON.stringify(clips)) });
         return true;
       };
       const track = createDefaultTrack('qa-midi-fx-track', 'MIDI FX Track', '#49a7c7', 'midi');
@@ -1046,11 +1046,11 @@ function midiFXPlacementFixtureExpression(baseUrl, storeUrl) {
       const trackHeaderModule = await import('${baseUrl}/src/components/TrackHeader.tsx');
       const bridgeModule = await import('${baseUrl}/src/services/NativeBridge.ts');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
-      window.__studio13QAPromptCount = 0;
-      window.__studio13QASamplerCalls = [];
+      window.__openstudioQADAWStore = useDAWStore;
+      window.__openstudioQAPromptCount = 0;
+      window.__openstudioQASamplerCalls = [];
       window.prompt = () => {
-        window.__studio13QAPromptCount += 1;
+        window.__openstudioQAPromptCount += 1;
         return null;
       };
       bridgeModule.nativeBridge.getMIDIInputDevices = async () => [];
@@ -1059,11 +1059,11 @@ function midiFXPlacementFixtureExpression(baseUrl, storeUrl) {
       bridgeModule.nativeBridge.getTrackInputFX = async () => [];
       bridgeModule.nativeBridge.getTrackFX = async () => [];
       bridgeModule.nativeBridge.getAvailablePlugins = async () => [];
-      bridgeModule.nativeBridge.getAvailableS13FX = async () => [];
+      bridgeModule.nativeBridge.getAvailableJSFX = async () => [];
       bridgeModule.nativeBridge.getAvailableBuiltInFX = async () => [];
       bridgeModule.nativeBridge.showOpenDialog = async () => 'C:/qa/review-sampler.wav';
       bridgeModule.nativeBridge.setTrackSamplerSample = async (trackId, samplePath, rootNote) => {
-        window.__studio13QASamplerCalls.push({ trackId, samplePath, rootNote });
+        window.__openstudioQASamplerCalls.push({ trackId, samplePath, rootNote });
         return true;
       };
       bridgeModule.nativeBridge.clearTrackSamplerSample = async () => true;
@@ -1121,7 +1121,7 @@ function midiFXPlacementStateBody() {
       const samplerButton = [...(header?.querySelectorAll('button') || [])].find((button) => button.getAttribute('aria-label') === 'Load built-in sampler sample');
       const panel = document.querySelector('.fx-chain-panel-two-column');
       const panelButtons = [...(panel?.querySelectorAll('button') || [])].map((button) => normalize(button.textContent));
-      const state = window.__studio13QADAWStore?.getState?.();
+      const state = window.__openstudioQADAWStore?.getState?.();
       const track = state?.tracks?.[0];
       return {
         headerMidiFxButtons: headerButtons.filter((label) => midiFxLabels.has(label)),
@@ -1131,8 +1131,8 @@ function midiFXPlacementStateBody() {
         hasSamplerDialog: Boolean(document.querySelector('#sampler-root-note-input')),
         samplerSamplePath: track?.samplerSamplePath ?? null,
         samplerRootNote: track?.samplerRootNote ?? null,
-        samplerCalls: window.__studio13QASamplerCalls || [],
-        promptCount: window.__studio13QAPromptCount || 0,
+        samplerCalls: window.__openstudioQASamplerCalls || [],
+        promptCount: window.__openstudioQAPromptCount || 0,
         hasPanel: Boolean(panel),
         hasPanelMidiFxSection: Boolean(panel && normalize(panel.textContent).includes('MIDI FX')),
       };
@@ -1151,7 +1151,7 @@ function appTcpMidiHeaderPlacementFixtureExpression(storeUrl) {
     (async () => {
       const storeModule = await import('${storeUrl}');
       const { useDAWStore, createDefaultTrack } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       document.getElementById('openstudio-boot-overlay')?.remove();
       const midiTrack = createDefaultTrack('qa-app-midi-track', 'QA MIDI Track', '#49a7c7', 'midi');
       const instrumentTrack = createDefaultTrack('qa-app-instrument-track', 'QA Instrument Track', '#a78bfa', 'instrument');
@@ -1206,14 +1206,14 @@ function appTcpMidiHeaderPlacementStateBody() {
 function midiFXBackendPayloadExpression(baseUrl, storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       await new Promise((resolve) => setTimeout(resolve, 350));
       const state = useDAWStore.getState();
       const track = state.tracks[0];
       const direct = serializationModule.serializeMIDIClipsForBackend(track?.midiClips || [], track?.midiEffects || []);
       const directAgain = serializationModule.serializeMIDIClipsForBackend(track?.midiClips || [], track?.midiEffects || []);
-      const payloads = window.__studio13QAMIDIFXSyncPayloads || [];
+      const payloads = window.__openstudioQAMIDIFXSyncPayloads || [];
       const lastSync = payloads[payloads.length - 1] || null;
       const events = lastSync?.clips?.[0]?.events || [];
       const shiftedNote = events.find((event) => event.type === 'noteOn' && event.note === 67);
@@ -1245,7 +1245,7 @@ function midiFXBackendPayloadExpression(baseUrl, storeUrl) {
 function midiFXStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const effects = state.tracks[0]?.midiEffects || [];
       return {
@@ -1261,7 +1261,7 @@ function midiFXStateExpression(storeUrl) {
 function midiFXUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       const state = useDAWStore.getState();
       const effects = state.tracks[0]?.midiEffects || [];
@@ -1289,9 +1289,9 @@ function midiProjectPersistenceExpression(baseUrl, storeUrl) {
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       const { useDAWStore, createDefaultTrack } = storeModule;
       const { nativeBridge } = bridgeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
 
-      const path = 'C:/qa/midi-project-persistence.s13';
+      const path = 'C:/qa/midi-project-persistence.osproj';
       const savedFiles = {};
       const syncPayloads = [];
       const samplerCalls = [];
@@ -1552,7 +1552,7 @@ function midiExportPayloadExpression(baseUrl, storeUrl) {
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       const { useDAWStore, createDefaultTrack } = storeModule;
       const { nativeBridge } = bridgeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
 
       const exportCalls = [];
       const filePath = 'C:/qa/midi-export-payload.mid';
@@ -1996,7 +1996,7 @@ async function runAppDockedPianoFocus(args) {
 
     await evalInPage(cdp, `
       (() => {
-        const useDAWStore = window.__studio13QADAWStore;
+        const useDAWStore = window.__openstudioQADAWStore;
         useDAWStore.getState().setLowerZoneHeight(${Math.round(afterFirst.dockRect.height + 110)});
         return true;
       })()
@@ -2051,7 +2051,7 @@ async function runAppMidiMultiSession(args) {
 
     await evalInPage(cdp, `
       (() => {
-        const useDAWStore = window.__studio13QADAWStore;
+        const useDAWStore = window.__openstudioQADAWStore;
         useDAWStore.getState().setCurrentTime(1.25);
         return true;
       })()
@@ -2157,7 +2157,7 @@ async function runAppMidiRecordingVisibility(args) {
         const bridgeModule = await import('${bridgeUrl}');
         const { useDAWStore, createDefaultTrack } = storeModule;
         const { nativeBridge } = bridgeModule;
-        window.__studio13QADAWStore = useDAWStore;
+        window.__openstudioQADAWStore = useDAWStore;
 
         const calls = [];
         nativeBridge.getMIDIInputDevices = async () => ['QA MIDI Keyboard'];
@@ -2712,16 +2712,16 @@ async function runTimelineArrange(args) {
       }
       const bridgeResult = await evalInPage(cdp, `
         (async () => {
-          const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+          const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
           const bridgeModule = await import('${args.baseUrl}/src/services/NativeBridge.ts');
           const serializationModule = await import('${args.baseUrl}/src/utils/midiClipSerialization.ts');
           const state = useDAWStore.getState();
           const track = state.tracks.find((candidate) => candidate.id === 'qa-midi-track');
           const direct = serializationModule.serializeMIDIClipsForBackend(track?.midiClips || [], track?.midiEffects || []);
           const original = bridgeModule.nativeBridge.setTrackMIDIClips;
-          window.__studio13LastMIDIBackendPayload = null;
+          window.__openstudioLastMIDIBackendPayload = null;
           bridgeModule.nativeBridge.setTrackMIDIClips = async (trackId, clips) => {
-            window.__studio13LastMIDIBackendPayload = {
+            window.__openstudioLastMIDIBackendPayload = {
               trackId,
               clips: JSON.parse(JSON.stringify(clips)),
             };
@@ -2731,7 +2731,7 @@ async function runTimelineArrange(args) {
           bridgeModule.nativeBridge.setTrackMIDIClips = original;
           return {
             direct,
-            payload: window.__studio13LastMIDIBackendPayload,
+            payload: window.__openstudioLastMIDIBackendPayload,
             clipState: track?.midiClips?.[0] || null,
           };
         })()
@@ -2762,7 +2762,7 @@ async function runTimelineArrange(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-arrange-left-trim-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -2779,7 +2779,7 @@ async function runTimelineArrange(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-arrange-left-trim-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -2828,16 +2828,16 @@ async function runTimelineArrange(args) {
       }
       const bridgeResult = await evalInPage(cdp, `
         (async () => {
-          const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+          const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
           const bridgeModule = await import('${args.baseUrl}/src/services/NativeBridge.ts');
           const serializationModule = await import('${args.baseUrl}/src/utils/midiClipSerialization.ts');
           const state = useDAWStore.getState();
           const track = state.tracks.find((candidate) => candidate.id === 'qa-midi-track');
           const direct = serializationModule.serializeMIDIClipsForBackend(track?.midiClips || [], track?.midiEffects || []);
           const original = bridgeModule.nativeBridge.setTrackMIDIClips;
-          window.__studio13LastMIDIBackendPayload = null;
+          window.__openstudioLastMIDIBackendPayload = null;
           bridgeModule.nativeBridge.setTrackMIDIClips = async (trackId, clips) => {
-            window.__studio13LastMIDIBackendPayload = {
+            window.__openstudioLastMIDIBackendPayload = {
               trackId,
               clips: JSON.parse(JSON.stringify(clips)),
             };
@@ -2847,7 +2847,7 @@ async function runTimelineArrange(args) {
           bridgeModule.nativeBridge.setTrackMIDIClips = original;
           return {
             direct,
-            payload: window.__studio13LastMIDIBackendPayload,
+            payload: window.__openstudioLastMIDIBackendPayload,
             clipState: track?.midiClips?.[0] || null,
           };
         })()
@@ -2872,7 +2872,7 @@ async function runTimelineArrange(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-arrange-alt-slip-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -2889,7 +2889,7 @@ async function runTimelineArrange(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-arrange-alt-slip-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -2934,7 +2934,7 @@ async function runTimelineArrange(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-arrange-copy-drag-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -2950,7 +2950,7 @@ async function runTimelineArrange(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-arrange-copy-drag-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -2994,7 +2994,7 @@ async function runTimelineArrange(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-arrange-split-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3011,7 +3011,7 @@ async function runTimelineArrange(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-arrange-split-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3050,7 +3050,7 @@ async function runTimelineArrange(args) {
       }
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3065,7 +3065,7 @@ async function runTimelineArrange(args) {
       }
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3089,7 +3089,7 @@ async function runTimelineArrange(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-arrange-duplicate-delete-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3105,7 +3105,7 @@ async function runTimelineArrange(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-arrange-duplicate-delete-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3163,7 +3163,7 @@ async function runTimelineActions(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-actions-mute-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3175,7 +3175,7 @@ async function runTimelineActions(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-actions-mute-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3221,7 +3221,7 @@ async function runTimelineActions(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-actions-context-lock-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3233,7 +3233,7 @@ async function runTimelineActions(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-actions-context-lock-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3286,7 +3286,7 @@ async function runTimelineActions(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-actions-repeat-dialog-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3298,7 +3298,7 @@ async function runTimelineActions(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-actions-repeat-dialog-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3355,7 +3355,7 @@ async function runTimelineCrossTrack(args) {
       const afterShot = await screenshot(cdp, args.outDir, "timeline-cross-track-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3373,7 +3373,7 @@ async function runTimelineCrossTrack(args) {
       const undoShot = await screenshot(cdp, args.outDir, "timeline-cross-track-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3431,7 +3431,7 @@ async function runTimelineCrossTrack(args) {
       const afterCopyShot = await screenshot(cdp, args.outDir, "timeline-cross-track-copy-after.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3451,7 +3451,7 @@ async function runTimelineCrossTrack(args) {
       const afterUndoShot = await screenshot(cdp, args.outDir, "timeline-cross-track-copy-after-undo.png");
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3528,7 +3528,7 @@ async function runTimelineDropTargets(args) {
 
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().undo();
+          window.__openstudioQADAWStore.getState().undo();
           return true;
         })()
       `);
@@ -3542,7 +3542,7 @@ async function runTimelineDropTargets(args) {
 
       await evalInPage(cdp, `
         (() => {
-          window.__studio13QADAWStore.getState().redo();
+          window.__openstudioQADAWStore.getState().redo();
           return true;
         })()
       `);
@@ -3917,16 +3917,16 @@ async function runTimelineBackendPayload(args) {
 
     const bridgeResult = await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         const bridgeModule = await import('${args.baseUrl}/src/services/NativeBridge.ts');
         const serializationModule = await import('${args.baseUrl}/src/utils/midiClipSerialization.ts');
         const state = useDAWStore.getState();
         const track = state.tracks.find((candidate) => candidate.id === 'qa-midi-track');
         const direct = serializationModule.serializeMIDIClipsForBackend(track?.midiClips || [], track?.midiEffects || []);
         const original = bridgeModule.nativeBridge.setTrackMIDIClips;
-        window.__studio13LastMIDIBackendPayload = null;
+        window.__openstudioLastMIDIBackendPayload = null;
         bridgeModule.nativeBridge.setTrackMIDIClips = async (trackId, clips) => {
-          window.__studio13LastMIDIBackendPayload = {
+          window.__openstudioLastMIDIBackendPayload = {
             trackId,
             clips: JSON.parse(JSON.stringify(clips)),
           };
@@ -3936,7 +3936,7 @@ async function runTimelineBackendPayload(args) {
         bridgeModule.nativeBridge.setTrackMIDIClips = original;
         return {
           direct,
-          payload: window.__studio13LastMIDIBackendPayload,
+          payload: window.__openstudioLastMIDIBackendPayload,
           clipState: track?.midiClips?.[0] || null,
         };
       })()
@@ -4006,7 +4006,7 @@ function pianoFixtureExpression(baseUrl, storeUrl, options = {}) {
       const storeModule = await import('${storeUrl}');
       const pianoModule = await import('${baseUrl}/src/components/PianoRoll.tsx');
       const { useDAWStore, createDefaultTrack, DEFAULT_PIANO_ROLL_VISIBLE_LANES } = storeModule;
-      window.__studio13QADAWStore = useDAWStore;
+      window.__openstudioQADAWStore = useDAWStore;
       const fixtureConfig = ${JSON.stringify(config)};
       const track = createDefaultTrack('qa-track', 'QA Instrument', '#5bc0de', 'instrument');
       track.midiPitchBendRangeUp = 12;
@@ -4120,7 +4120,7 @@ function pianoFixtureExpression(baseUrl, storeUrl, options = {}) {
 function pianoStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const note = useDAWStore.getState().tracks[0].midiClips[0].events.find((event) => event.type === 'noteOn' && event.note === 60);
       return {
         noteStart: note.timestamp,
@@ -4134,7 +4134,7 @@ function pianoStateExpression(storeUrl) {
 function pianoDetailedStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const events = state.tracks[0].midiClips[0].events;
       const clipId = state.tracks[0].midiClips[0].id;
@@ -4205,7 +4205,7 @@ function pianoDetailedStateExpression(storeUrl) {
 function pianoSelectFirstTwoNotesExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clip = state.tracks[0].midiClips[0];
       const noteOns = clip.events
@@ -4231,7 +4231,7 @@ function pianoSelectFirstTwoNotesExpression(storeUrl) {
 function pianoUndoRedoDetailedStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 160));
       const state = useDAWStore.getState();
@@ -4304,7 +4304,7 @@ function pianoUndoRedoDetailedStateExpression(storeUrl, action) {
 function pianoNoteMetadataLaneStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clip = state.tracks[0].midiClips[0];
       const noteOn = clip.events.find((event) => event.type === 'noteOn' && event.note === 60);
@@ -4329,7 +4329,7 @@ function pianoNoteMetadataLaneStateExpression(storeUrl) {
 function pianoNoteMetadataLaneUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 100));
       const state = useDAWStore.getState();
@@ -4356,7 +4356,7 @@ function pianoNoteMetadataLaneUndoRedoStateExpression(storeUrl, action) {
 function pianoToolStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const events = state.tracks[0].midiClips[0].events;
       const used = new Set();
@@ -4405,7 +4405,7 @@ function pianoToolStateExpression(storeUrl) {
 function pianoControllerLaneStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clip = state.tracks[0].midiClips[0];
       const cc1 = (clip.ccEvents || [])
@@ -4436,7 +4436,7 @@ function pianoControllerLaneStateExpression(storeUrl) {
         cc74,
         canUndo: state.canUndo,
         canRedo: state.canRedo,
-        promptCalls: window.__studio13QAPromptCalls || 0,
+        promptCalls: window.__openstudioQAPromptCalls || 0,
         pasteDisabled: pasteButton ? pasteButton.disabled : null,
       };
     })()
@@ -4446,7 +4446,7 @@ function pianoControllerLaneStateExpression(storeUrl) {
 function pianoControllerLaneUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 120));
       const state = useDAWStore.getState();
@@ -4479,7 +4479,7 @@ function pianoControllerLaneUndoRedoStateExpression(storeUrl, action) {
         cc74,
         canUndo: state.canUndo,
         canRedo: state.canRedo,
-        promptCalls: window.__studio13QAPromptCalls || 0,
+        promptCalls: window.__openstudioQAPromptCalls || 0,
         pasteDisabled: pasteButton ? pasteButton.disabled : null,
       };
     })()
@@ -4489,7 +4489,7 @@ function pianoControllerLaneUndoRedoStateExpression(storeUrl, action) {
 function pianoAuditionInsertStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const events = state.tracks[0].midiClips[0].events;
       const used = new Set();
@@ -4525,7 +4525,7 @@ function pianoAuditionInsertStateExpression(storeUrl) {
         insertVelocityInput: document.querySelector('#pr-insert-velocity')?.value ?? null,
         auditionButtonLabel: document.querySelector('button[aria-label*="MIDI note audition"]')?.getAttribute('aria-label') ?? null,
         pairs,
-        auditionCalls: window.__studio13QAAuditionCalls || [],
+        auditionCalls: window.__openstudioQAAuditionCalls || [],
         canUndo: state.canUndo,
         canRedo: state.canRedo,
       };
@@ -4536,7 +4536,7 @@ function pianoAuditionInsertStateExpression(storeUrl) {
 function pianoAuditionInsertUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 160));
       const state = useDAWStore.getState();
@@ -4574,7 +4574,7 @@ function pianoAuditionInsertUndoRedoStateExpression(storeUrl, action) {
         insertVelocityInput: document.querySelector('#pr-insert-velocity')?.value ?? null,
         auditionButtonLabel: document.querySelector('button[aria-label*="MIDI note audition"]')?.getAttribute('aria-label') ?? null,
         pairs,
-        auditionCalls: window.__studio13QAAuditionCalls || [],
+        auditionCalls: window.__openstudioQAAuditionCalls || [],
         canUndo: state.canUndo,
         canRedo: state.canRedo,
       };
@@ -4585,7 +4585,7 @@ function pianoAuditionInsertUndoRedoStateExpression(storeUrl, action) {
 function pianoNavigationToolsStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const scrollbar = document.querySelector('.piano-roll-horizontal-scroll');
       return {
@@ -4597,7 +4597,7 @@ function pianoNavigationToolsStateExpression(storeUrl) {
         scrollWidth: scrollbar ? scrollbar.scrollWidth : null,
         clientWidth: scrollbar ? scrollbar.clientWidth : null,
         lineDialogOpen: Boolean(document.querySelector('.piano-roll-controller-dialog')),
-        promptCalls: window.__studio13QAPromptCalls || 0,
+        promptCalls: window.__openstudioQAPromptCalls || 0,
       };
     })()
   `;
@@ -4606,7 +4606,7 @@ function pianoNavigationToolsStateExpression(storeUrl) {
 function pianoSourceHeaderStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const clip = state.tracks[0].midiClips.find((candidate) => candidate.id === state.pianoRollClipId) || state.tracks[0].midiClips[0];
       const canvas = document.querySelector('canvas')?.getBoundingClientRect();
@@ -4633,7 +4633,7 @@ function pianoSourceHeaderStateExpression(storeUrl) {
 function pianoCCDirectStateExpression(baseUrl, storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       const state = useDAWStore.getState();
       const track = state.tracks[0];
@@ -4676,7 +4676,7 @@ function pianoCCDirectStateExpression(baseUrl, storeUrl) {
 function pianoLaneManagementStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const track = state.tracks[0];
       const clip = track.midiClips[0];
@@ -4708,7 +4708,7 @@ function pianoLaneManagementStateExpression(storeUrl) {
 function pianoLaneManagementUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 160));
       const state = useDAWStore.getState();
@@ -4742,7 +4742,7 @@ function pianoLaneManagementUndoRedoStateExpression(storeUrl, action) {
 function pianoAdvancedLaneStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const track = state.tracks[0];
       const clip = track.midiClips[0];
@@ -4785,7 +4785,7 @@ function pianoAdvancedLaneStateExpression(storeUrl) {
 function pianoAdvancedLaneUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 140));
       const state = useDAWStore.getState();
@@ -4830,7 +4830,7 @@ function pianoAdvancedLaneUndoRedoStateExpression(storeUrl, action) {
 function pianoAdvancedLaneBackendPayloadExpression(baseUrl, storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       const state = useDAWStore.getState();
       const track = state.tracks[0];
@@ -4859,7 +4859,7 @@ function pianoAdvancedLaneBackendPayloadExpression(baseUrl, storeUrl) {
 function pianoPitchBendDirectStateExpression(baseUrl, storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const controllerModule = await import('${baseUrl}/src/utils/midiControllerLanes.ts');
       const serializationModule = await import('${baseUrl}/src/utils/midiClipSerialization.ts');
       const state = useDAWStore.getState();
@@ -4907,7 +4907,7 @@ function pianoPitchBendDirectStateExpression(baseUrl, storeUrl) {
 function pianoVisualLayoutStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const rectFor = (selector) => {
         const element = document.querySelector(selector);
@@ -4975,7 +4975,7 @@ function pianoVisualLayoutStateExpression(storeUrl) {
 function pianoResponsiveToolbarStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const rectFor = (element) => {
         if (!element) return null;
@@ -5033,7 +5033,7 @@ function pianoResponsiveToolbarStateExpression(storeUrl) {
 function pianoMultiItemStateExpression(storeUrl) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       const state = useDAWStore.getState();
       const track = state.tracks[0];
       const summarize = (clipId, note) => {
@@ -5067,7 +5067,7 @@ function pianoMultiItemStateExpression(storeUrl) {
 function pianoMultiItemUndoRedoStateExpression(storeUrl, action) {
   return `
     (async () => {
-      const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+      const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
       useDAWStore.getState().${action}();
       await new Promise((resolve) => setTimeout(resolve, 160));
       const state = useDAWStore.getState();
@@ -5412,7 +5412,7 @@ async function runPianoTools(args) {
     step = "velocity-tool";
     await evalInPage(cdp, `
       (() => {
-        const useDAWStore = window.__studio13QADAWStore;
+        const useDAWStore = window.__openstudioQADAWStore;
         useDAWStore.getState().setPianoRollActiveLane('velocity');
         return true;
       })()
@@ -5890,7 +5890,7 @@ async function runPianoSourceHeader(args) {
     }
     await evalInPage(cdp, `
       (() => {
-        const useDAWStore = window.__studio13QADAWStore;
+        const useDAWStore = window.__openstudioQADAWStore;
         useDAWStore.setState((state) => ({
           tracks: state.tracks.map((track) => ({
             ...track,
@@ -6050,9 +6050,9 @@ async function runPianoAuditionInsert(args) {
     await evalInPage(cdp, `
       (async () => {
         const bridgeModule = await import('${args.baseUrl}/src/services/NativeBridge.ts');
-        window.__studio13QAAuditionCalls = [];
+        window.__openstudioQAAuditionCalls = [];
         bridgeModule.nativeBridge.sendMidiNote = async (trackId, note, velocity, isNoteOn) => {
-          window.__studio13QAAuditionCalls.push({ trackId, note, velocity, isNoteOn });
+          window.__openstudioQAAuditionCalls.push({ trackId, note, velocity, isNoteOn });
           return true;
         };
         return true;
@@ -6154,7 +6154,7 @@ async function runPianoNavigationTools(args) {
     }
     await evalInPage(cdp, `
       (() => {
-        const useDAWStore = window.__studio13QADAWStore;
+        const useDAWStore = window.__openstudioQADAWStore;
         useDAWStore.setState((state) => ({
           tracks: state.tracks.map((track) => ({
             ...track,
@@ -6169,10 +6169,10 @@ async function runPianoNavigationTools(args) {
     await sleep(220);
     await evalInPage(cdp, `
       (() => {
-        window.__studio13QAPromptCalls = 0;
+        window.__openstudioQAPromptCalls = 0;
         const originalPrompt = window.prompt;
         window.prompt = (...args) => {
-          window.__studio13QAPromptCalls += 1;
+          window.__openstudioQAPromptCalls += 1;
           return originalPrompt ? originalPrompt(...args) : null;
         };
         return true;
@@ -6443,9 +6443,9 @@ async function runPianoControllerShapes(args) {
     }
     await evalInPage(cdp, `
       (() => {
-        window.__studio13QAPromptCalls = 0;
+        window.__openstudioQAPromptCalls = 0;
         window.prompt = () => {
-          window.__studio13QAPromptCalls += 1;
+          window.__openstudioQAPromptCalls += 1;
           return null;
         };
         return true;
@@ -6481,7 +6481,7 @@ async function runPianoControllerShapes(args) {
     step = "undo-ramp";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6529,7 +6529,7 @@ async function runPianoControllerShapes(args) {
     step = "undo-step";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6576,7 +6576,7 @@ async function runPianoControllerShapes(args) {
     step = "undo-parabola";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6725,7 +6725,7 @@ async function runPianoCCDirect(args) {
     step = "undo";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6738,7 +6738,7 @@ async function runPianoCCDirect(args) {
     step = "redo";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().redo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6751,7 +6751,7 @@ async function runPianoCCDirect(args) {
     step = "undo-after-redo";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6786,7 +6786,7 @@ async function runPianoCCDirect(args) {
     step = "undo-cc74";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6799,7 +6799,7 @@ async function runPianoCCDirect(args) {
     step = "redo-cc74";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().redo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -6992,7 +6992,7 @@ async function runPianoPitchBendDirect(args) {
     step = "undo";
     const afterUndo = await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().undo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;
@@ -7008,7 +7008,7 @@ async function runPianoPitchBendDirect(args) {
     step = "redo";
     await evalInPage(cdp, `
       (async () => {
-        const useDAWStore = window.__studio13QADAWStore ?? (await import('${storeUrl}')).useDAWStore;
+        const useDAWStore = window.__openstudioQADAWStore ?? (await import('${storeUrl}')).useDAWStore;
         useDAWStore.getState().redo();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return true;

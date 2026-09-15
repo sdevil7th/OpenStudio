@@ -594,8 +594,9 @@ function BackupTab() {
         <span className="text-xs text-daw-text-muted">min</span>
       </Row>
       <div className="mt-2 text-xs text-daw-text-muted">
-        Auto-backup saves the project at regular intervals when changes are detected.
-        Only works when the project has been saved at least once.
+        Auto-backup writes rotating recovery snapshots when changes are detected,
+        including untitled projects. It does not overwrite your saved project or
+        mark edits as saved. Use Save or Save As to save the project normally.
       </div>
     </div>
   );

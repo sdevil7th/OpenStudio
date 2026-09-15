@@ -320,21 +320,21 @@ let _runningPreviewSegmentJobs = 0;
 let _stagedPreviewBase: Omit<PitchCorrectionRequestMeta, "requestId" | "stage" | "renderMode" | "windowStartSec" | "windowEndSec" | "segmentIndex"> | null = null;
 
 function shouldLogPitchEditorFormant() {
-  const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
+  const win = window as Window & { __OpenStudio_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
   const host = win.location?.hostname ?? "";
-  return win.__S13_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
+  return win.__OpenStudio_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
 }
 
 function shouldCaptureAppFinalPitchContext(routeSuspect = false) {
   if (routeSuspect) return true;
   const win = window as Window & {
     __JUCE__?: { backend?: { capturePitchAppFinalContext?: unknown } };
-    __S13_CAPTURE_APP_FINAL_PITCH__?: boolean;
+    __OpenStudio_CAPTURE_APP_FINAL_PITCH__?: boolean;
   };
-  if (win.__S13_CAPTURE_APP_FINAL_PITCH__ === false) return false;
-  if (win.__S13_CAPTURE_APP_FINAL_PITCH__ === true) return true;
+  if (win.__OpenStudio_CAPTURE_APP_FINAL_PITCH__ === false) return false;
+  if (win.__OpenStudio_CAPTURE_APP_FINAL_PITCH__ === true) return true;
   try {
-    const stored = window.localStorage?.getItem("s13.pitch.captureAppFinal");
+    const stored = window.localStorage?.getItem("openstudio.pitch.captureAppFinal");
     if (stored === "0") return false;
     if (stored === "1") return true;
   } catch {

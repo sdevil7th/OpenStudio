@@ -124,47 +124,47 @@ function eqSchema() {
   params.push(toggle("autoGain", "Auto Gain", 1, "output"));
   params.push(choice("stereoMode", "Processing", 0, ["Stereo", "Mid", "Side"], "routing"));
   params.push(choice("auditionBand", "Audition", 0, ["Off", "Band 1"], "eqBand"));
-  return schemaWithParams("S13 EQ", "EQ", params);
+  return schemaWithParams("OpenStudio EQ", "EQ", params);
 }
 
 const panelSchemas = [
   eqSchema(),
-  schemaWithParams("S13 Compressor", "Dynamics", [
+  schemaWithParams("OpenStudio Compressor", "Dynamics", [
     continuous("threshold", "Threshold", -18, -60, 0, "dynamics", "dB"),
     continuous("ratio", "Ratio", 4, 1, 20, "dynamics"),
     continuous("attack", "Attack", 12, 0.1, 100, "dynamics", "ms"),
     continuous("release", "Release", 160, 10, 2000, "dynamics", "ms"),
     toggle("autoMakeup", "Auto Makeup", 1, "output"),
   ]),
-  schemaWithParams("S13 Delay", "Delay", [
+  schemaWithParams("OpenStudio Delay", "Delay", [
     continuous("delayTimeL", "Delay L", 250, 1, 2000, "time", "ms"),
     continuous("delayTimeR", "Delay R", 375, 1, 2000, "time", "ms"),
     continuous("feedback", "Feedback", 0.42, 0, 0.95, "feedback"),
     continuous("mix", "Mix", 0.5, 0, 1, "mix"),
     continuous("ducking", "Ducking", 0.2, 0, 1, "dynamics"),
   ]),
-  schemaWithParams("S13 Reverb", "Reverb", [
+  schemaWithParams("OpenStudio Reverb", "Reverb", [
     choice("algorithm", "Algorithm", 1, ["Room", "Hall", "Plate"], "space"),
     continuous("roomSize", "Size", 0.6, 0, 1, "space"),
     continuous("decayTime", "Decay", 2.2, 0.1, 20, "space", "s"),
     continuous("wetLevel", "Wet", 0.33, 0, 1, "mix"),
     continuous("dryLevel", "Dry", 0.7, 0, 1, "mix"),
   ]),
-  schemaWithParams("S13 Chorus", "Modulation", [
+  schemaWithParams("OpenStudio Chorus", "Modulation", [
     choice("mode", "Mode", 0, ["Chorus", "Flanger", "Phaser"], "modulation"),
     continuous("rate", "Rate", 1, 0.01, 20, "modulation", "Hz"),
     continuous("depth", "Depth", 0.5, 0, 1, "modulation"),
     continuous("mix", "Mix", 0.5, 0, 1, "mix"),
     choice("characterMode", "Character", 1, ["Clean", "Ensemble"], "character"),
   ]),
-  schemaWithParams("S13 Saturator", "Saturation", [
+  schemaWithParams("OpenStudio Saturator", "Saturation", [
     choice("satType", "Type", 1, ["Tape", "Tube", "Console"], "character"),
     continuous("drive", "Drive", 6, 0, 30, "drive", "dB"),
     continuous("mix", "Mix", 1, 0, 1, "mix"),
     continuous("outputGain", "Output", -3, -12, 0, "output", "dB"),
     choice("oversampleMode", "Oversampling", 2, ["Off", "2x", "4x"], "quality"),
   ]),
-  schemaWithParams("S13 Pitch Correct", "Pitch", [
+  schemaWithParams("OpenStudio Pitch Correct", "Pitch", [
     choice("key", "Key", 0, ["C", "C#"], "scale"),
     choice("scale", "Scale", 1, ["Chromatic", "Major"], "scale"),
     continuous("retuneSpeed", "Retune", 50, 0, 400, "correction", "ms"),
@@ -462,8 +462,8 @@ describe("BuiltInPluginPanel schema model", () => {
 
   it("classifies built-in plugin schemas and selects primary controls", () => {
     const drums = schema("OpenStudio Drums", "Instrument");
-    const reverb = schema("S13 Reverb", "Reverb");
-    const limiter = schema("S13 Limiter", "Dynamics");
+    const reverb = schema("OpenStudio Reverb", "Reverb");
+    const limiter = schema("OpenStudio Limiter", "Dynamics");
 
     expect(getPluginKind(drums)).toBe("drums");
     expect(getPluginKind(reverb)).toBe("reverb");

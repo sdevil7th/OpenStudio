@@ -55,37 +55,38 @@ const filterParam = (
 });
 
 describe("NAM Rack current graphic EQ frontend contract", () => {
-  it("migrates old complete presets to a flat current output level without losing an explicit level", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+  it("preserves active EQ settings while migrating old complete presets", () => {
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
 
     const migrated = migrateLegacyNAMRackPresetDspState({
-      values: { eq65Db: -4.5 },
+      values: { eqEnabled: 1, eq65Db: -4.5 },
       dspState: { namEffectsDspVersion: 6, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
     expect(migrated.values.eq65Db).toBe(-4.5);
     expect(migrated.values.eqLevelDb).toBe(0);
-    expect(migrated.values.eqHPFHz).toBe(0);
-    expect(migrated.values.eqLPFHz).toBe(24000);
-    expect(migrated.dspState.namEffectsDspVersion).toBe(19);
+    expect(migrated.values.eqEnabled).toBe(1);
+    expect(migrated.values.eqHPFHz).toBe(80);
+    expect(migrated.values.eqLPFHz).toBe(8500);
+    expect(migrated.dspState.namEffectsDspVersion).toBe(20);
     expect(isCurrentNAMRackPresetState(migrated)).toBe(true);
 
     const explicit = migrateLegacyNAMRackPresetDspState({
-      values: { eqLevelDb: -3.25 },
+      values: { eqEnabled: 1, eqLevelDb: -3.25 },
       dspState: { namEffectsDspVersion: 6, reverbEngineVersion: 4 },
     }, { completePreset: true }) as { values: Record<string, number> };
     expect(explicit.values.eqLevelDb).toBe(-3.25);
 
     const current = migrateLegacyNAMRackPresetDspState({
-      values: { eqHPFHz: 82, eqLPFHz: 12750 },
+      values: { eqEnabled: 1, eqHPFHz: 82, eqLPFHz: 12750 },
       dspState: { namEffectsDspVersion: 14, reverbEngineVersion: 5 },
     }, { completePreset: true }) as { values: Record<string, number> };
-    expect(current.values).toMatchObject({ eqHPFHz: 82, eqLPFHz: 12750 });
+    expect(current.values).toMatchObject({ eqEnabled: 1, eqHPFHz: 82, eqLPFHz: 8500 });
 
     const developmentV13 = migrateLegacyNAMRackPresetDspState({
-      values: { eqHPFHz: 82, eqLPFHz: 12750 },
+      values: { eqEnabled: 1, eqHPFHz: 82, eqLPFHz: 12750 },
       dspState: { namEffectsDspVersion: 13, reverbEngineVersion: 5 },
     }, { completePreset: true }) as { values: Record<string, number> };
-    expect(developmentV13.values).toMatchObject({ eqHPFHz: 0, eqLPFHz: 24000 });
+    expect(developmentV13.values).toMatchObject({ eqEnabled: 1, eqHPFHz: 80, eqLPFHz: 8500 });
   });
 
   it("keeps the native +/-12 dB level contract intact through UI projection", () => {

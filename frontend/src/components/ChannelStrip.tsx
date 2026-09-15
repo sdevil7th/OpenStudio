@@ -467,7 +467,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         role="group"
         aria-label={`Channel strip for ${track.name}`}
         className={classNames(
-          "flex flex-col shrink-0 h-full border-r border-l border-neutral-800",
+          "flex flex-col shrink-0 h-full min-h-[240px] border-r border-l border-neutral-800",
           {
             "w-[90px] bg-slate-800 sticky left-0 z-10 border-x-2 border-x-green-600":
               isMaster,

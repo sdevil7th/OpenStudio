@@ -355,6 +355,7 @@ function dawTimelineWheelRules(
 
     case "fl_studio":
       return [
+        horizontalZoomRule("fl-studio.horizontal-zoom", primary),
         {
           id: "fl-studio.clip-nudge",
           surface: "timeline",
@@ -747,13 +748,41 @@ function createWheelProfile(
     stopPropagation: true,
   };
 
+  const timelineRules = dawTimelineWheelRules(id, platform);
+  // The note/pitch canvases have no native scrolling element. Apply the
+  // profile's general navigation there as an OpenStudio editor adaptation,
+  // leaving item-specific edits to their own explicitly scoped rules.
+  const editorNavigation: WheelBehaviorRule[] = ["piano_roll", "pitch_editor"].flatMap((surface) => (
+    timelineRules.filter((rule) => !rule.subtargets && (
+      rule.operation === "scroll" || (rule.operation === "zoom" && rule.target === "timeline")
+      || (rule.operation === "resize" && rule.target === "track-height")
+    )).map((rule): WheelBehaviorRule => ({
+      ...rule,
+      id: `${rule.id}.${surface}`,
+      surface: surface as "piano_roll" | "pitch_editor",
+      subtargets: ["grid", "note", "keyboard", "controller_lane", "content"],
+      ...(surface === "pitch_editor" && rule.operation === "scroll" && rule.axis === "vertical"
+        ? { multiplier: -(rule.multiplier ?? 1) } : {}),
+      ...(rule.target === "track-height" ? { operation: "zoom", target: "midi-note-height", anchor: "pointer" } : {}),
+    }))
+  ));
   return {
     id,
     name,
     normalization: OPENSTUDIO_WHEEL_PROFILE.normalization,
     rules: [
-      ...dawTimelineWheelRules(id, platform),
+      ...timelineRules,
       ...dawEditorWheelRules(id, platform),
+      ...editorNavigation,
+      ...(["piano_roll", "pitch_editor"] as const).map((surface): WheelBehaviorRule => ({
+        id: `${id}.${surface}.default-scroll`, surface,
+        subtargets: ["grid", "note", "keyboard", "controller_lane", "content"],
+        modifiers: PLAIN_MODIFIERS,
+        operation: "scroll", target: "viewport", axis: "vertical", deltaSource: "y",
+        multiplier: surface === "pitch_editor" ? -1 : 1,
+        preventDefault: true, stopPropagation: true,
+      })).filter((rule) => !editorNavigation.some((navigation) => navigation.surface === rule.surface
+        && Object.values(navigation.modifiers ?? {}).every((pressed) => !pressed))),
       // Vendor profiles do not silently inherit OpenStudio's TCP, Piano Roll,
       // Pitch Editor, or parameter-wheel mutations. A final parameter guard
       // prevents native range inputs from stepping on an unsupported gesture.

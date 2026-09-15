@@ -56,4 +56,14 @@ describe("NAM Rack feedback presentation contract", () => {
     expect(panel).toContain('"Retained IR bypassed"');
     expect(designPort).toContain("CAB INCLUDED / IR BYPASSED");
   });
+
+  it("surfaces the final-output emergency mute and actionable recovery guidance", () => {
+    const panel = readSource("../components/NAMRackPanel.tsx");
+
+    expect(panel).toContain("rackOutputEmergencyMuteActive");
+    expect(panel).toContain("rackOutputEmergencyMuteTripCount");
+    expect(panel).toContain("NAM Rack safety mute is active");
+    expect(panel).toContain("Lower Input, Drive Volume, Amp Output, or Cab Level");
+    expect(panel).toContain("signal remains safe for 250 ms");
+  });
 });

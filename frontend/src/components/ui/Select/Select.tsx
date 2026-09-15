@@ -1,5 +1,5 @@
 import classNames from 'classnames';
-import { forwardRef } from 'react';
+import { forwardRef, useId } from 'react';
 import { ChevronDown } from 'lucide-react';
 import {
   SelectProps,
@@ -72,6 +72,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     },
     ref
   ) => {
+    const controlId = useId();
     const selectClasses = classNames(
       selectSizeStyles[size],
       selectVariantStyles[variant],
@@ -98,13 +99,14 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     return (
       <WrapperComponent className={wrapperClasses}>
         {label && (
-          <label className="block text-sm font-medium text-daw-text-muted mb-1">
+          <label htmlFor={controlId} className="block text-sm font-medium text-daw-text-muted mb-1">
             {label}
           </label>
         )}
 
         <span className={controlClasses}>
           <select
+            id={controlId}
             ref={ref}
             value={value !== undefined ? String(value) : ''}
             onChange={handleChange}

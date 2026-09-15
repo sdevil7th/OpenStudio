@@ -1,8 +1,25 @@
 # OpenStudio Release Runbook
 
+Microsoft Store package/submission automation and one-time enablement are documented
+in [Store release automation](release-runbook.md#microsoft-store-release-automation). Once enabled, the Store
+job runs after successful release publication, preserves the saved listing settings,
+and submits the matching MSIX for certification. Do not bypass the initial Store
+qualification, privacy publication, or restricted-capability approval.
+
+Every application release requires reviewed notes in `docs/releases/<version>.md`.
+Inspect the exact previous-tag to target-tag diff, explain user-visible changes,
+separate known limitations from fixes, and include upgrade steps and a source link.
+Run `python tools/validate-release-notes.py --version <version>` before packaging.
+For cumulative release notes, review the main release PR and its included hotfixes;
+the preceding tag may already contain the main features. Label the full-release
+overview and the hotfix-only comparison clearly.
+Missing notes, wrong versions and template text stop CI before the build jobs and
+stop local preparation/metadata generation. The validated file is used for both
+the GitHub release and update feeds. Never publish the template directly.
+
 ## What this repo now provides
 
-- Windows installer packaging via `packaging/windows/OpenStudio.iss`
+- Windows installer packaging via `packaging/windows/OpenStudio.iss` (debug symbols, logs and dumps are excluded)
 - macOS DMG packaging via `tools/package-macos-release.sh`
 - A runtime dependency contract in `docs/runtime-dependency-contract.md`
 - Release metadata generation via `tools/generate-release-metadata.ps1`
@@ -13,6 +30,24 @@
 - AI runtime archive packaging via `tools/package-ai-runtime.ps1`
 - A tag-driven GitHub Actions workflow in `.github/workflows/release.yml`
 - A release QA checklist in `docs/release-smoke-checklist.md`
+- In-app update checks, verified downloads, and installation handoff documented in [App updates](USER_MANUAL.md#in-app-updates)
+
+Before distributing a locally built Windows candidate, retain its matching binaries and symbols with `./tools/archive-runtime-symbols.ps1 -Configuration Release`. The ignored `output/symbols/` archive is for crash diagnosis and is not installer content.
+
+## Branding before packaging
+
+When the logo changes, follow [the branding inventory](branding.md): regenerate
+icons from the approved master with `node tools/generate-icons.mjs`, build the
+frontend, then rebuild the native configuration being packaged. JUCE native
+icons use the 1024/16 px sources, Linux launchers use the 256 px source, and the
+MSIX packager creates Store resources from the 1024 px source.
+
+Check the installed window/taskbar/Dock/launcher icons and the menu-bar mark on
+each release platform. A Debug build does not update a cached Release build or
+an existing published installer. Coordinate the website favicon/social/Store
+artwork separately; `RELEASE_SYNC.md` in the [website repository](https://github.com/sdevil7th/OpenStudioWebsite)
+lists its deployment checks. The approved source and generated assets are listed
+in `docs/branding.md`, not in ad hoc copies of the old SVG.
 
 ## Preferred public release path
 
@@ -127,6 +162,19 @@ VST3/CLAP/AU editor lifecycle checks while audio is active.
 
 ## Local Windows release flow
 
+For Microsoft Store MSIX packaging and installed qualification, follow
+[Microsoft Store distribution](release-runbook.md#microsoft-store-distribution). Store MSIX artifacts are
+separate from the direct-download EXE and must not be referenced by its updater
+feed. Review the fixed WebView2 runtime and app-local VC++ security updates on
+every Store release; package validation alone is not installed qualification.
+
+For SignPath Foundation signing in GitHub Actions, follow
+[Windows signing setup](release-runbook.md#windows-signing-with-signpath). Select `signpath` only after account
+approval/configuration. The release job signs the app and crash reporter before
+packaging, then signs the installer before release metadata is generated. An
+enabled SignPath failure blocks publication. Local packaging does not submit
+Foundation signing requests because they require verifiable GitHub build origin.
+
 The local Windows RC gate is now the required no-surprises check before any push/tag for release:
 `./tools/run-windows-rc.ps1 -Version 1.0.0`
 
@@ -162,7 +210,7 @@ If you want one command for the full guarded Windows path, use:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json`
 11. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
-12. If signing is enabled, the packaging helper now verifies the Authenticode signature on both `OpenStudio.exe` and `OpenStudio-Setup-x64.exe`.
+12. If certificate signing is enabled, the packaging helper signs and verifies `OpenStudio.exe`, `OpenStudioCrashReporter.exe` and `OpenStudio-Setup-x64.exe`. The SignPath workflow verifies product metadata, trusted signatures and timestamps before packaging/publishing.
 
 ## Local macOS release flow
 
@@ -216,7 +264,7 @@ That script is a fallback path for staging:
 
 It is not the preferred day-to-day release flow now that the tag-driven GitHub workflow is the source of truth.
 
-The Windows installer now also registers `.osproj` as the primary project extension and keeps `.s13` associated for legacy project open support.
+The Windows installer registers `.osproj` as the project extension. Retired file associations and formats are unsupported; see [current formats](USER_MANUAL.md#file-formats-and-upgrade-compatibility).
 The default base app no longer bundles the optional stem-separation Python runtime; users install AI Tools later from inside OpenStudio when they need stem separation.
 
 ## Secrets expected by GitHub Actions
@@ -227,6 +275,11 @@ not receive Doppler credentials. `DOPPLER_TOKEN` is an optional bootstrap for
 the allowlisted build/signing values used inside their specific build steps; it
 does not replace the website dispatch secret. Signing/notarization secrets stay
 optional unless you decide to enable trusted distribution later.
+
+SignPath uses a separate `SIGNPATH_API_TOKEN` GitHub secret and repository
+variables documented in [Windows signing setup](release-runbook.md#windows-signing-with-signpath). Once
+`OPENSTUDIO_WINDOWS_SIGNING_PROVIDER=signpath`, all SignPath configuration is
+required and the Windows certificate secrets below are not used.
 
 - `MACOS_CODESIGN_IDENTITY`
 - `MACOS_CERTIFICATE_BASE64`
@@ -270,3 +323,400 @@ Optional future additions:
 
 - Sparkle/WinSparkle-specific signature generation
 - Beta channel metadata publishing alongside the stable channel
+
+
+### macOS field-test qualification
+
+`tools/package-macos-release.sh` retains the free unsigned path. For the planned
+zero-cost identity experiment only, set `MACOS_CODESIGN_KIND=self-signed` with an
+existing persistent `MACOS_CODESIGN_IDENTITY`. It disables timestamping, rejects
+notarization credentials in this mode and emits `OpenStudio-macOS.signing.txt`
+with the actual designated requirement. No certificate or trust-store change is
+performed by this script. Reuse the same protected release key across versions;
+do not ask users to install a trusted root. Self-signing is **not** Gatekeeper
+acceptance and its TCC/Keychain continuity is unqualified until tested on macOS.
+The default identity branch remains Developer ID when an identity is supplied.
+
+Before publishing these field fixes, qualify the actual downloaded package on a
+fresh macOS account: output-only first launch, first input consent, denial,
+relaunch, same-key update, existing OpenStudio plugin settings, MIDI popout/Dock,
+physical pinch, snapshot save/reopen, TONE3000 browser login/refresh and NAM
+insertion in the reported monitoring route. Record macOS/app versions, selected
+I/O pair, available buffer sizes and crash report if insertion still fails.
+Do not advertise an 8-sample Core Audio setting unless that device reports it.
+Windows prerequisite compilation is separate from clean-VM UAC/reboot/repair
+qualification. Use the field-test plan for the complete evidence matrix.
+
+## Microsoft Store distribution
+
+MSIX is a separate full-trust Win32 distribution. Package identity selects Store
+delivery; the direct EXE updater must not install over a Store package. Packaging
+and development-registration checks do not establish Store certification, a
+clean-machine installation, or an older-to-newer Store flight. Those remain
+required release qualification. See the automation section below for enablement.
+
+### Reserved identity
+
+| Field | Value |
+| --- | --- |
+| Name | `SouravDas.OpenStudio` |
+| Publisher | `CN=40F9D2C5-1757-4552-B213-B0651C58A9F5` |
+| Publisher display name | `Sourav Das` |
+| Package family | `SouravDas.OpenStudio_sqr0dv9eeh28p` |
+| Store ID | `9N3MQ442VXGW` |
+
+The package identity, not a build flag or writable file, selects Store package
+delivery. This also applies to locally registered packages with this identity.
+OpenStudio keeps its Check, Download, progress, cancellation and Install controls.
+`StoreContext` is associated with the native HWND on the message thread, and async
+callbacks return through the JUCE message queue with lifetime/generation guards.
+Checks time out after 60 seconds. A successful automatic check is throttled to
+once per session-day; Microsoft also applies its own check limits. The automatic
+check preference does not change Windows' separate Store update settings.
+
+Download calls `RequestDownloadStorePackageUpdatesAsync` without installation.
+Install calls `RequestDownloadAndInstallStorePackageUpdatesAsync` after the same
+stopped-transport and successful-save protections as the direct updater. Windows
+may show consent UI and close the app during installation. OpenStudio does not
+launch an EXE or issue its direct-installer quit handoff for this channel.
+Failures and user cancellation allow retry. We do not display an invented target
+version: the update-list API exposes installed package identity, not reliable
+release notes or a target version. Store updates require submitting each MSIX
+version to Partner Center; GitHub release publication alone does not update MSIX.
+
+### Build a submission candidate
+
+1. Build the production frontend and Release native app with the intended
+   `OPENSTUDIO_APP_VERSION` using the existing release build/dependency setup.
+   The release's TONE3000 publishable OAuth client ID must be configured; do not
+   ship a build that requires users to obtain their own API key.
+2. Run from the repository root, substituting the compiled three-part version
+   followed by `.0` (Store reserves the fourth component):
+
+   ```powershell
+   ./tools/package-windows-store.ps1 -Version 0.1.1.0 -SourceDir build/OpenStudio_artefacts/Release
+   ```
+
+3. Inspect `dist/store/package-report.json`. The script uses the Windows SDK
+   MakePri/MakeAppx tools, checks version metadata, validates the MSIX, unpacks
+   it, and compares every staged file's SHA256 with the unpacked payload.
+   It uses unique working directories and refuses to overwrite a previous MSIX.
+4. Qualify the installed package before submitting it. Package validation and
+   hash parity do not prove runtime compatibility or Microsoft certification.
+5. Upload the `.msix` under the MSIX submission's Packages section. The artifact
+   is intentionally unsigned for Microsoft to sign after certification. It is
+   not a public sideload installer and should not replace the GitHub EXE asset.
+
+The script accepts `-RuntimeCab`, `-VCRedistDir` and `-SdkBinDir` for controlled
+build environments. Runtime downloads must match the committed SHA256 and have
+a trusted Microsoft signature. Third-party binaries retain their own signatures.
+
+### Dependencies and writable data
+
+- VC++ Release DLLs come from Visual Studio's `VC/Redist/MSVC/.../x64/Microsoft.VC143.CRT`
+  and are deployed beside the application. No VC++ installer or elevation is used.
+  Universal CRT is supplied by the supported Windows 10/11 OS.
+- The fixed WebView2 distribution is pinned in `packaging/msix/webview2-runtime.json`.
+  All extracted runtime files are included. The app configures its process-local
+  runtime path before JUCE availability probes or browser creation. Existing
+  writable WebView user-data paths and detached-browser lifecycle are preserved.
+- Bundling fixed WebView2 increases download/disk size. These bundled Microsoft
+  components do not receive independent Evergreen/central CRT servicing. Review
+  security updates and refresh the lock/CRT on every Store release, with an urgent
+  release for relevant security fixes. Never scrape a floating runtime in CI.
+- Prerequisite EXE installers, PDBs and downloaded Python/model caches are excluded.
+  Bundled scripts, presets, effects, models, licenses and web UI are retained.
+- Optional AI runtime installations continue to use writable user storage. They
+  must be tested under actual package identity, including subprocess launches.
+- Standard MSIX file/registry virtualization remains enabled. Test existing
+  settings/auth visibility and uninstall behavior; do not promise that a direct
+  installation's settings automatically transfer or that package-local caches
+  survive uninstall. User-selected projects outside package data remain external.
+- Audio-interface drivers remain installed by their vendors outside MSIX. The
+  package does not attempt to install drivers.
+
+### Installed qualification
+
+Use a clean Windows 10 2004+ or Windows 11 test environment without Visual Studio,
+VC++ Redistributable or Evergreen WebView2 to establish dependency independence.
+Use a Store private flight for final Store-signed install/update qualification.
+For local package-identity testing, Microsoft supports development registration:
+
+```powershell
+Add-AppxPackage -Register '<stage from package-report.json>\AppxManifest.xml'
+```
+
+This requires Windows Developer Mode and is a development registration, not proof
+of a Store-signed installation. Do not change machine policy or install test-root
+certificates automatically. Do not replace an existing installed Store package.
+
+Launch by package AUMID (Start menu / IApplicationActivationManager), not by
+double-clicking the staging EXE, and verify:
+
+| Check | Required evidence |
+| --- | --- |
+| Store update routing | `--store-package-self-test <absolute report.json>` reports Store identity, unprepared transfer rejection, and deterministic updater regression |
+| Store API query | `--store-update-query-self-test <absolute report.json>` invokes the real read-only Store API with a native owner window; development association errors are not upgrade success |
+| In-app Store upgrade | Install an older version through a private Store flight, publish a newer package to that flight, check/download/cancel/retry/install inside OpenStudio, verify saved project and new package version |
+| Shell and detached windows | Main, mixer, MIDI and plugin browsers reach `boot-ready`; close/reopen/quit safely |
+| Audio and plugins | Enumerate ASIO/WASAPI/MIDI; record/play/export; scan/load external VST3/CLAP plugins and open editors |
+| Projects | Save/reopen an external `.osproj`, file-association launch, media import, recovery and monitor snapshots |
+| NAM | Browser login callback, credential persistence after restart, library/search/download and Monitor FX insertion |
+| AI | Download runtime/model into user data, run helper, generate/separate audio and cancel safely |
+| Upgrade/uninstall | Two Store package versions, external projects preserved, documented settings/cache behavior |
+| Certification | Windows App Certification Kit report, then Partner Center certification |
+
+Native headless regression metrics do not assert subjective audio quality. ASIO
+hardware, live OAuth, clean-machine dependencies and Store updates require their
+own evidence; record unexecuted checks as `not_asserted`.
+
+### Listing and privacy
+
+Answer **Yes** to access/collection/transmission of personal information. The app
+accesses user audio (which can include identifiable voices), projects and paths;
+optional TONE3000 integration handles account-linked tokens and network requests.
+This answer is not a claim that recordings are uploaded to OpenStudio servers.
+Microsoft Store policy 10.5.1 also explicitly requires privacy policies for
+Win32 and Desktop Bridge products. No Google Analytics or Microsoft Clarity
+integration was found in the app source audit; the owner reports these on the
+website. Describe website analytics separately from the desktop application's
+local processing and optional network features.
+
+Publish a policy at a stable public URL covering the actual implementation:
+local audio/project processing and storage, optional third-party authentication
+and downloads, diagnostics/log contents and user-controlled sharing, retention
+and deletion, third-party links, and a maintainer contact. Verify actual network
+behavior before claiming no telemetry, no uploads or no third-party disclosure.
+The website source was audited at `../openstudio-website` (OpenStudioWebsite).
+Use **Yes → Provide privacy policy URL → https://openstudio.org.in/privacy**.
+Verify the published privacy policy against the shipped implementation before submission; local website changes do not establish deployed behavior.
+
+In Partner Center, prepare Pricing and availability (Free), Properties, Age
+ratings, Store listings and certification notes. Explain that `runFullTrust` is
+needed for the JUCE desktop audio engine, external plugin hosting and helper
+processes; optional TONE3000 authentication is user initiated. Submit only when
+the package and required qualification are ready.
+
+### References
+
+- [Microsoft MSIX submission checklist](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/create-app-submission)
+- [In-app Store updates](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/package-updates-from-store)
+- [Desktop HWND association](https://learn.microsoft.com/en-us/windows/uwp/monetize/in-app-purchases-and-trials#using-the-storecontext-class-with-the-desktop-bridge)
+- [Manual package creation](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-manual-conversion)
+- [Desktop packaging requirements](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-prepare)
+- [WebView2 runtime distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
+- [VC++ local deployment](https://learn.microsoft.com/en-us/cpp/windows/deployment-examples)
+- [Privacy policy requirements](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/support-info)
+
+## Microsoft Store release automation
+
+### Plan and scope
+
+The owner requested automatic Store delivery after each OpenStudio release.
+Implement it as a dependent job in the existing Release workflow, not a second
+`release: published` listener (releases created with `GITHUB_TOKEN` do not reliably
+trigger another workflow). Use the same source and Release binaries as the desktop
+release. Submit only after the GitHub release job succeeds. Preserve the Store's
+existing audience, publishing schedule, privacy URL, ratings, screenshots and
+other listing settings. Publishing a GitHub release does not skip certification.
+
+1. Validate a stable numeric version and exact-version release notes.
+2. Build the MSIX from the Windows release payload using the existing pinned
+   WebView2/CRT packaging checks; retain the MSIX as a workflow artifact.
+3. Authenticate to the Store API using GitHub environment secrets.
+4. Validate package identity, version, SHA256, and the last published Store version.
+5. Clone the last published submission; replace only the x64 desktop package and
+   English release notes. Refuse to overwrite unrelated pending submissions.
+6. Upload a ZIP containing the MSIX, commit for certification, and report status.
+   Resume the same tagged/hash-bound submission on retry; never blindly retry
+   an ambiguous create/commit request or delete a pending submission.
+7. Test with fake HTTP/API responses and the actual local MSIX. Run the first live
+   submission only after the initial manual Store submission and account setup.
+
+### One-time enablement
+
+This repository implements the automation; it cannot provision the owner's
+Microsoft tenant or approve the initial Store listing. It stays inactive until:
+
+1. Complete the initial manual Store submission, including age ratings and the
+   `runFullTrust` explanation, and publish a qualified first package. The current
+   `0.0.1.0` candidate is not the selected public release.
+2. Link a Microsoft Entra application to Partner Center, assign the required
+   Manager role, and obtain tenant ID, client ID and client secret. See Microsoft's
+   [API prerequisites](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services).
+3. In GitHub repository Settings → Environments, create `microsoft-store`.
+   Add environment secrets `MS_STORE_TENANT_ID`, `MS_STORE_CLIENT_ID`, and
+   `MS_STORE_CLIENT_SECRET`. Add the secret directly in GitHub; never paste it in
+   chat, commit it, or place it in workflow inputs. Rotate it before expiration.
+4. Set repository Actions variable `OPENSTUDIO_STORE_ENABLED` to `true` after
+   the code is merged and the Store flight/installed qualification is complete.
+   The app identity is fixed to Store ID `9N3MQ442VXGW` and the reserved publisher.
+5. Push the normal stable release tag. The `submit-store` job follows `publish`.
+   To require a human gate, configure required reviewers on the `microsoft-store`
+   environment. With no reviewer gate, submission is automatic. The existing
+   Partner Center publish mode remains authoritative after certification.
+
+Do not edit an API-created pending submission in Partner Center: Microsoft warns
+that mixing API and portal edits can invalidate it. If another submission is
+pending, resolve it deliberately; automation leaves it intact and fails visibly.
+On timeout/failure, the job records the submission ID and status without tokens
+or SAS upload URLs. Rerun failed jobs to resume the same release artifact. A new
+package with a different hash requires a new version, not an overwrite.
+
+### Package-page warning
+
+`runFullTrust` is required by this packaged Win32 DAW. It runs at the user's
+normal medium-integrity level, not as administrator. Saving the package section
+is safe; the warning requires an explanation/approval during certification.
+Suggested explanation for the restricted-capability/Notes for certification field:
+
+> OpenStudio is a JUCE-based Win32 digital audio workstation packaged as MSIX.
+> It requires runFullTrust to run its native audio/MIDI engine, access user-selected
+> project and audio files, host third-party audio plugins, and launch audio-processing
+> and crash-reporting helper processes. The application runs as the signed-in user
+> at medium integrity and does not require administrator elevation. Microsoft Store
+> installations use Store APIs for application updates.
+
+Keep Windows Desktop selected. Other device families are not qualified. The
+AArch32 notice is unrelated to this x64 package. The separate future-device-family
+checkbox controls future availability; the automation preserves your saved choice.
+
+
+### Validation and activation limits
+
+Run `python -m unittest tests.test_store_submission`,
+`tools/test-windows-store-package.ps1` and the installed qualification above.
+Offline/mock tests never establish live API submission, certification or delivery.
+Only the existing en-us release notes and x64 Desktop package are replaced;
+other architectures and listing settings remain unchanged. An accepted commit can
+still be in preprocessing/certification. Check Partner Center's final result.
+HTTP reports must exclude tokens, response bodies and SAS upload URLs. A new
+artifact hash requires a new package version. Enable the workflow only after the
+first manually published, qualified package and required account setup exist.
+
+## Windows signing with SignPath
+
+Repository integration is implemented; SignPath Foundation enrollment, approval,
+account configuration and a successful production signing run are not confirmed.
+Adding this workflow does not sign existing downloads or establish SmartScreen
+reputation. The existing certificate/unsigned path remains the default until the
+repository owner activates SignPath.
+
+### What the release workflow does
+
+The GitHub-hosted Windows release job builds and tests OpenStudio, then:
+
+1. Stages only `OpenStudio.exe` and `OpenStudioCrashReporter.exe` as a GitHub
+   artifact. Third-party DLLs and prerequisite installers are not re-signed.
+2. Submits that artifact to SignPath using the `windows-payload` configuration.
+   It waits up to one hour for approval/completion and downloads the signed files.
+3. Checks the product name, exact product version (ignoring Inno's trailing space padding), trusted Authenticode signature
+   and timestamp of every returned file before replacing any package input.
+4. Builds the Inno Setup installer using `-RequireSignedPayload`.
+5. Submits the installer as another GitHub artifact using `windows-installer`,
+   waits for its approval, and verifies/restores the signed installer.
+6. Uploads the final installer to the existing `windows-release` artifact. The
+   publish job generates checksums/update metadata from this signed installer.
+
+Once selected, SignPath failure or missing configuration fails the release. There
+is no fallback to unsigned output. Both signing requests need approval under the
+Foundation policy. Monitor the action's signing-request links while the release
+is running. A timeout fails the workflow; do not publish its intermediate artifacts.
+
+The SignPath action is pinned to v2.3's commit, and its token is available only
+to configuration validation and signing steps. The job grants `actions: read`
+and `contents: read` for GitHub artifact/origin verification. It does not grant
+repository write access. Normal Verify/PR builds do not request signing.
+
+This covers the app, crash reporter and downloadable installer. Inno Setup's
+generated uninstaller is not separately signed by this integration. Optional AI
+runtime archives keep their existing separate release process.
+
+### Owner setup needed before activation
+
+1. Check your email/SignPath dashboard for an existing application. If there is
+   none, apply at <https://signpath.org/apply.html> for the public repository
+   <https://github.com/sdevil7th/OpenStudio> and website
+   <https://openstudio.org.in>. The repository uses GNU AGPLv3 and has published
+   Windows installers. Approval is discretionary; it is not implied by the license.
+2. Review the [Foundation conditions](https://signpath.org/terms.html). Confirm
+   eligibility of the actual bundled components, including JUCE/ASIO license
+   choices and the Microsoft WebView2/VC++ redistributables under its system-library
+   exception. Do not assume that an open-source top-level license settles all
+   component or project requirements.
+3. Confirm the authors, reviewers and signing approvers; enable MFA for their
+   GitHub and SignPath accounts. Finalize [the signing policy draft](code-signing-policy.md),
+   including a verified privacy-policy link, and link it from the website's home
+   and download/release pages. The website is maintained outside this checkout.
+4. In the approved SignPath organization, configure the project repository URL as
+   `https://github.com/sdevil7th/OpenStudio`. Add the predefined **GitHub.com**
+   Trusted Build System to the organization and link it to the project. Install
+   the SignPath GitHub App if the account's source/build policy setup requires it.
+5. Import these XML files as artifact configurations with the exact slugs below.
+   They use a ZIP root because `actions/upload-artifact@v4` creates ZIP artifacts.
+   The required `version` parameter restricts product metadata to this release.
+
+   | Slug | Configuration |
+   | --- | --- |
+   | `windows-payload` | [windows-payload.xml](../packaging/signpath/windows-payload.xml) |
+   | `windows-installer` | [windows-installer.xml](../packaging/signpath/windows-installer.xml) |
+
+6. Configure a production signing policy with the Foundation certificate,
+   authorized submitter and required human approvers. Restrict it to the intended
+   repository/release workflow and release refs using the controls available in
+   your account. A test/self-signed certificate will fail this release workflow's
+   Windows trust checks; do not install a test root on the release runner.
+7. In GitHub **Settings > Secrets and variables > Actions**, add:
+
+   | Type | Name | Value |
+   | --- | --- | --- |
+   | Secret | `SIGNPATH_API_TOKEN` | Token for the authorized SignPath submitter |
+   | Variable | `SIGNPATH_ORGANIZATION_ID` | Organization ID from SignPath |
+   | Variable | `SIGNPATH_PROJECT_SLUG` | Project slug from SignPath |
+   | Variable | `SIGNPATH_SIGNING_POLICY_SLUG` | Production signing-policy slug |
+   | Variable | `OPENSTUDIO_WINDOWS_SIGNING_PROVIDER` | `signpath` (set this last) |
+
+   Keep the API token in the secret store, not in chat, Git, or a repository
+   variable. No Windows PFX/private key or Doppler signing secret is needed for
+   this route. Configuration is deliberately explicit; partial setup cannot
+   silently switch an enabled SignPath release back to certificate/unsigned mode.
+8. Run a release from the committed workflow and approve both signing requests.
+   Inspect the resulting installer and installed executables on Windows. Confirm
+   the expected publisher, signature/timestamp and successful installation/launch.
+   Signing does not promise an immediate SmartScreen reputation bypass.
+
+### Validation
+
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-windows-signing.ps1`
+on Windows. Verify CI also runs this test without SignPath credentials. It tests
+the staging allowlist, missing helper, metadata mismatch, stale staging, real
+unsigned-file rejection, missing timestamp, and rejection without partial restore.
+Successful signature responses in unit tests are mocked; they are not evidence
+of a live SignPath signing run.
+
+When adding a first-party executable, add its product/version resource and extend
+the appropriate XML configuration. Packaging and staging read their file lists
+from those configurations. Import the reviewed updated configuration into
+SignPath before releasing. Never use a blanket `**/*.dll` signing rule for
+third-party runtime files.
+
+## Publishing in-app updates
+
+
+Use the existing [release runbook](release-runbook.md). Each release needs a
+strictly newer application version and matching platform URLs, byte sizes and
+SHA-256 checksums in the generated stable release manifest. Generate metadata
+from the final packaged/signed files, then publish all assets together.
+
+The updater first uses its configured website JSON/appcast feeds. Stable builds
+also try the GitHub release manifest if those feeds fail:
+`https://github.com/sdevil7th/OpenStudio/releases/latest/download/OpenStudio-release-stable-latest.json`.
+The website feed should still be maintained for previously installed versions.
+
+No updater account, new paid service, or SignPath activation is needed. The
+optional SignPath integration can remain unconfigured. Unsigned releases can
+still encounter operating-system trust warnings during installation.
+
+These changes take effect once a release containing them is distributed. Users
+on older builds need to install that release first; if their old update feed is
+unavailable, they need to download it manually once.

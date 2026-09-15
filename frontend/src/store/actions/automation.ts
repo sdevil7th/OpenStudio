@@ -995,8 +995,8 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const restorePlugin = async () => {
         const added = pluginType === "builtin"
           ? await nativeBridge.addMasterBuiltInFX(pluginReference)
-          : pluginType === "s13fx"
-            ? await nativeBridge.addMasterS13FX(pluginReference)
+          : pluginType === "jsfx"
+            ? await nativeBridge.addMasterJSFX(pluginReference)
             : await nativeBridge.addMasterFX(pluginReference);
         if (!added) return false;
 
@@ -1083,8 +1083,8 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         const beforeLength = (await getFXChainSlots(trackId, chainType)).length;
         const added = pluginType === "builtin"
           ? await nativeBridge.addTrackBuiltInFX(trackId, pluginReference, isInput)
-          : pluginType === "s13fx"
-            ? await nativeBridge.addTrackS13FX(trackId, pluginReference, isInput)
+          : pluginType === "jsfx"
+            ? await nativeBridge.addTrackJSFX(trackId, pluginReference, isInput)
             : isInput
               ? await nativeBridge.addTrackInputFX(trackId, pluginReference, false)
               : await nativeBridge.addTrackFX(trackId, pluginReference, false);

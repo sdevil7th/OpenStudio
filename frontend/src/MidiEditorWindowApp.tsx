@@ -1,20 +1,20 @@
-import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { Dock, X } from "lucide-react";
 import { Button } from "./components/ui";
 import { PianoRoll } from "./components/PianoRoll";
-import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
+import { nativeBridge } from "./services/NativeBridge";
 import { useDAWStore } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import {
-  isEditableShortcutTarget,
-  isNonTextControlShortcutTarget,
-} from "./utils/shortcutContext";
+  browserShortcutWindowIsActive,
+  toGlobalShortcutPayload,
+} from "./utils/domShortcutEvent";
 import { installModalContextMenuLeakGuard } from "./utils/modalEventGuards";
 import { windowSessionId } from "./utils/windowEnvironment";
 import {
   hydrateMidiEditorUISnapshotFromNative,
-  publishMidiEditorSessionSnapshot,
+  requestMidiEditorDock,
   startMidiEditorUISync,
 } from "./utils/midiEditorWindowSync";
 import { startSharedTransportSync } from "./utils/sharedTransportSync";
@@ -23,6 +23,7 @@ import { startDetachedInputProfileSync } from "./utils/inputProfileWindowSync";
 
 export default function MidiEditorWindowApp() {
   const [hydrated, setHydrated] = useState(false);
+  const windowFocusedRef = useRef(document.hasFocus());
   useEffect(() => installBrowserZoomWheelGuard(document), []);
   useEffect(() => startDetachedInputProfileSync(), []);
   const {
@@ -73,34 +74,29 @@ export default function MidiEditorWindowApp() {
   useEffect(() => installModalContextMenuLeakGuard(), []);
 
   useEffect(() => {
+    const handleWindowFocus = () => {
+      windowFocusedRef.current = true;
+    };
+    const handleWindowBlur = () => {
+      windowFocusedRef.current = false;
+    };
     const handleKeyDown = (e: KeyboardEvent) => {
-      void dispatchGlobalShortcut({
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        repeat: e.repeat,
-        source: "browser",
-        targetIsEditable: isEditableShortcutTarget(e.target),
-        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
-        preventDefault: () => e.preventDefault(),
-        stopPropagation: () => e.stopPropagation(),
-        stopImmediatePropagation: () => e.stopImmediatePropagation(),
-      });
+      if (!browserShortcutWindowIsActive({
+        documentFocused: document.hasFocus(),
+        visibilityState: document.visibilityState,
+        windowFocused: windowFocusedRef.current,
+      })) return;
+      void dispatchGlobalShortcut(toGlobalShortcutPayload(e));
     };
 
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("keydown", handleKeyDown, true);
-    const unsubscribeNativeShortcuts = nativeBridge.onNativeGlobalShortcut(
-      (event: NativeGlobalShortcutEvent) => {
-        void dispatchGlobalShortcut({ ...event, source: "pluginWindow" });
-      },
-    );
 
     return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("keydown", handleKeyDown, true);
-      unsubscribeNativeShortcuts();
     };
   }, []);
 
@@ -124,13 +120,16 @@ export default function MidiEditorWindowApp() {
     ? `${activeTrack.name || "Track"} - ${activeClip.name || "MIDI Clip"}`
     : "MIDI Editor";
 
+  const [docking, setDocking] = useState(false);
   const handleDock = useCallback(async () => {
     const targetSessionId = sessionId || useDAWStore.getState().activeMidiEditorSessionId;
     if (!targetSessionId) return;
-    useDAWStore.getState().dockMidiEditorSession(targetSessionId);
-    await publishMidiEditorSessionSnapshot(targetSessionId);
-    await nativeBridge.closeMidiEditorWindow(targetSessionId, "dock");
-  }, [sessionId]);
+    if (docking) return;
+    setDocking(true);
+    try { await requestMidiEditorDock(targetSessionId); }
+    catch (error) { useDAWStore.getState().showToast(String(error), "error"); }
+    finally { setDocking(false); }
+  }, [sessionId, docking]);
 
   const handleClose = useCallback(async () => {
     const targetSessionId = sessionId || useDAWStore.getState().activeMidiEditorSessionId;

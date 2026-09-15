@@ -512,7 +512,7 @@ juce::AudioProcessorEditor* SurroundPannerProcessor::createEditor()
 }
 
 bool SurroundPannerProcessor::hasEditor() const    { return false; }
-const juce::String SurroundPannerProcessor::getName() const  { return "S13 Surround Panner"; }
+const juce::String SurroundPannerProcessor::getName() const  { return "OpenStudio Surround Panner"; }
 bool SurroundPannerProcessor::acceptsMidi() const  { return false; }
 bool SurroundPannerProcessor::producesMidi() const { return false; }
 bool SurroundPannerProcessor::isMidiEffect() const { return false; }

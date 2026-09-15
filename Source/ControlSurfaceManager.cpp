@@ -4,7 +4,7 @@
 // GenericMIDIControl
 //==============================================================================
 
-GenericMIDIControl::GenericMIDIControl() = default;
+GenericMIDIControl::GenericMIDIControl() : inbox([this](const juce::MidiMessage& message) { handleControlMessage(message); }) {}
 
 GenericMIDIControl::~GenericMIDIControl()
 {
@@ -58,6 +58,7 @@ void GenericMIDIControl::disconnect()
         midiInput->stop();
         midiInput.reset();
     }
+    inbox.clear();
     midiOutput.reset();
     connected = false;
 }
@@ -80,7 +81,7 @@ void GenericMIDIControl::cancelLearn()
 void GenericMIDIControl::addMapping(const MIDICCMapping& mapping)
 {
     juce::ScopedLock sl(mappingLock);
-    int key = (mapping.channel << 8) | mapping.cc;
+    int key = (mapping.channel * 256) | mapping.cc;
     mappings[key] = mapping;
     juce::Logger::writeToLog("GenericMIDI: Added mapping ch=" + juce::String(mapping.channel) +
                              " cc=" + juce::String(mapping.cc) + " -> " +
@@ -90,7 +91,7 @@ void GenericMIDIControl::addMapping(const MIDICCMapping& mapping)
 void GenericMIDIControl::removeMapping(int channel, int cc)
 {
     juce::ScopedLock sl(mappingLock);
-    int key = (channel << 8) | cc;
+    int key = (channel * 256) | cc;
     mappings.erase(key);
 }
 
@@ -128,7 +129,7 @@ void GenericMIDIControl::loadMappings(const juce::File& file)
         m.cc = (int)item.getProperty("cc", 0);
         m.trackId = item.getProperty("trackId", "").toString();
         m.parameter = item.getProperty("parameter", "").toString();
-        int key = (m.channel << 8) | m.cc;
+        int key = (m.channel * 256) | m.cc;
         mappings[key] = m;
     }
     juce::Logger::writeToLog("GenericMIDI: Loaded " + juce::String((int)mappings.size()) + " mappings from " + file.getFullPathName());
@@ -173,7 +174,11 @@ void GenericMIDIControl::sendFeedback(const juce::String& trackId, const juce::S
 void GenericMIDIControl::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
     juce::ignoreUnused(source);
+    inbox.push(message);
+}
 
+void GenericMIDIControl::handleControlMessage(const juce::MidiMessage& message)
+{
     if (!message.isController()) return;
 
     int channel = message.getChannel() - 1; // Convert to 0-based
@@ -204,7 +209,7 @@ void GenericMIDIControl::handleIncomingMidiMessage(juce::MidiInput* source, cons
     // Also try "any channel" mapping (-1 << 8 | cc)
     if (it == mappings.end())
     {
-        key = (-1 << 8) | cc;
+        key = (-256) | cc;
         it = mappings.find(key);
     }
 
@@ -353,7 +358,7 @@ void OSCControl::oscMessageReceived(const juce::OSCMessage& message)
 // MCUControl — Mackie Control Universal
 //==============================================================================
 
-MCUControl::MCUControl() = default;
+MCUControl::MCUControl() : inbox([this](const juce::MidiMessage& message) { handleControlMessage(message); }) {}
 
 MCUControl::~MCUControl()
 {
@@ -407,6 +412,7 @@ void MCUControl::disconnect()
         midiInput->stop();
         midiInput.reset();
     }
+    inbox.clear();
     midiOutput.reset();
     connected = false;
 }
@@ -516,7 +522,11 @@ void MCUControl::refreshSurface()
 void MCUControl::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
     juce::ignoreUnused(source);
+    inbox.push(message);
+}
 
+void MCUControl::handleControlMessage(const juce::MidiMessage& message)
+{
     if (message.isNoteOn())
         handleNoteOn(message.getNoteNumber(), message.getVelocity());
     else if (message.isController())

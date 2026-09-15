@@ -1,3 +1,5 @@
+import { appDialogs } from "../services/appDialogs";
+import { useAppUpdateStore } from "../store/appUpdateStore";
 import { useState, useEffect, useCallback } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { EditMenu } from "./menus/EditMenu";
@@ -111,81 +113,13 @@ export function MenuBar() {
     setIsMaximized(newState);
   }, []);
 
-  const handleCheckForUpdates = useCallback(async () => {
-    const result = await nativeBridge.checkForUpdates(true);
-
-    if (result?.status === "up-to-date") {
-      useDAWStore
-        .getState()
-        .showToast("OpenStudio is already up to date.", "success");
-      return;
-    }
-
-    if (result?.status === "update-available") {
-      const version = result.version || "the latest version";
-      const mandatoryLabel = result.mandatory ? "A required " : "";
-      const isMacUpdate = result.platform === "macos";
-      const notes =
-        typeof result.notes === "string" && result.notes.trim().length > 0
-          ? `\n\nRelease notes:\n${result.notes}`
-          : "";
-      const actionPrompt = isMacUpdate
-        ? "Download and open the DMG now? You may still need to drag the app into Applications and use right-click > Open."
-        : "Download and install it now?";
-
-      const shouldInstall = confirm(
-        `${mandatoryLabel}OpenStudio ${version} update is available.${notes}\n\n${actionPrompt}`,
-      );
-
-      if (!shouldInstall) return;
-
-      const installResult = await nativeBridge.downloadAndInstallUpdate(
-        result.downloadUrl || "",
-        result.version,
-        result.sha256,
-        result.releasePageUrl,
-        result.installerArguments,
-        result.size,
-      );
-
-      if (installResult?.status === "install-started") {
-        useDAWStore
-          .getState()
-          .showToast(
-            installResult?.message ||
-              "Update downloaded. The installer has been opened.",
-            "success",
-          );
-      } else if (installResult?.status === "release-page-opened") {
-        useDAWStore
-          .getState()
-          .showToast("Opened the release page for the latest update.", "info");
-      } else {
-        useDAWStore
-          .getState()
-          .showToast(
-            installResult?.message || "Update download or installation failed.",
-            "error",
-          );
-      }
-
-      return;
-    }
-
-    useDAWStore
-      .getState()
-      .showToast(result?.message || "Could not check for updates.", "error");
+  const handleCheckForUpdates = useCallback(() => {
+    void useAppUpdateStore.getState().check(true);
   }, []);
 
   const handleAbout = useCallback(async () => {
     const version = await nativeBridge.getAppVersion();
-    alert(
-      `OpenStudio ${version}\n\n` +
-        "A hybrid DAW with a JUCE C++ backend and React/TypeScript frontend.\n\n" +
-        "Built with:\n  JUCE 9.0.1 - Audio engine, VST3 hosting\n" +
-        "  React - User interface\n  Konva - Timeline canvas\n  Zustand - State management\n\n" +
-        "github.com/openstudio",
-    );
+    await appDialogs.about(version);
   }, []);
 
   // Helper to get just the filename from a full path
@@ -193,7 +127,14 @@ export function MenuBar() {
     return path.split("\\").pop() || path.split("/").pop() || path;
   };
 
-  // File menu - fully implemented
+  // Keep menu checks and dynamic submenus subscribed without transport ticks.
+  useDAWStore(useShallow(s => [s.projectTemplates, s.customToolbars, s.theme,
+    s.recordMode, s.rippleMode, s.lockSettings, s.globalLocked, s.moveEnvelopesWithItems,
+    s.showRegionMarkerManager, s.showClipProperties, s.showBigClock, s.showRenderQueue,
+    s.showRoutingMatrix, s.showMediaExplorer, s.showCrosshair, s.showClipLauncher,
+    s.freePositioning, s.showVideoWindow, s.showScriptEditor, s.transport.loopEnabled, s.autoCrossfade]));
+
+  // File menu
   const fileMenuItems: MenuItemProps[] = [
     {
       label: "New Project",
@@ -261,8 +202,8 @@ export function MenuBar() {
     },
     {
       label: "Save as Template...",
-      onClick: () => {
-        const name = prompt("Template name:");
+      onClick: async () => {
+        const name = (await appDialogs.prompt("Template name:"));
         if (name) useDAWStore.getState().saveAsTemplate(name);
       },
     },
@@ -272,7 +213,7 @@ export function MenuBar() {
         const state = useDAWStore.getState();
         const templates = state.projectTemplates;
         if (templates.length === 0) {
-          alert("No templates saved yet. Use 'Save as Template' first.");
+          void appDialogs.alert("No templates saved yet. Use 'Save as Template' first.");
           return;
         }
         state.toggleProjectTemplates();
@@ -292,8 +233,8 @@ export function MenuBar() {
             label: "Delete Template...",
             submenu: templates.map((t, i) => ({
               label: t.name,
-              onClick: () => {
-                if (confirm(`Delete template "${t.name}"?`)) {
+              onClick: async () => {
+                if ((await appDialogs.confirm(`Delete template "${t.name}"?`))) {
                   useDAWStore.getState().deleteTemplate(i);
                 }
               },
@@ -344,19 +285,6 @@ export function MenuBar() {
       onClick: () => useDAWStore.getState().toggleDDPExport(),
     },
     {
-      label: "Capture Output",
-      checked: useDAWStore.getState().liveCaptureEnabled,
-      onClick: () => {
-        const state = useDAWStore.getState();
-        if (state.liveCaptureEnabled) {
-          state.stopLiveCapture();
-        } else {
-          state.startLiveCapture();
-        }
-      },
-      dividerAfter: true,
-    },
-    {
       label: "Open Project (Safe Mode)...",
       shortcut: shortcut("file.openSafeMode", "Ctrl+Shift+O"),
       onClick: () => {
@@ -370,8 +298,12 @@ export function MenuBar() {
       },
     },
     {
-      label: "Media Pool",
-      onClick: () => useDAWStore.getState().toggleMediaPool(),
+      label: "Check Interrupted Session Recovery...",
+      onClick: () => window.dispatchEvent(new Event("openstudio:discover-recovery")),
+    },
+    {
+      label: "Media Pool — unavailable",
+      disabled: true,
       dividerAfter: true,
     },
     {
@@ -450,9 +382,8 @@ export function MenuBar() {
       checked: useDAWStore.getState().showClipLauncher,
     },
     {
-      label: "Free Item Positioning",
-      onClick: () => useDAWStore.getState().toggleFreePositioning(),
-      checked: useDAWStore.getState().freePositioning,
+      label: "Free Item Positioning — unavailable",
+      disabled: true,
     },
     {
       label: "Video Window",
@@ -472,12 +403,12 @@ export function MenuBar() {
       label: "Metering",
       submenu: [
         {
-          label: "Loudness Meter (LUFS)",
-          onClick: () => useDAWStore.getState().toggleLoudnessMeter(),
+          label: "Loudness Meter (LUFS) — unavailable",
+          disabled: true,
         },
         {
-          label: "Phase Correlation",
-          onClick: () => useDAWStore.getState().togglePhaseCorrelation(),
+          label: "Phase Correlation — unavailable",
+          disabled: true,
         },
       ],
     },
@@ -547,7 +478,7 @@ export function MenuBar() {
         if (timeSelection) {
           setLoopToSelection();
         } else {
-          alert("No time selection. Please select a time range first.");
+          void appDialogs.alert("No time selection. Please select a time range first.");
         }
       },
       dividerAfter: true,
@@ -618,9 +549,7 @@ export function MenuBar() {
         if (!targetTrackId) {
           const firstAudioTrack = tracks.find((t) => t.type === "audio");
           if (!firstAudioTrack) {
-            alert(
-              "No audio track available. Please create an audio track first.",
-            );
+            void appDialogs.alert("No audio track available. Please create an audio track first.");
             return;
           }
           targetTrackId = firstAudioTrack.id;
@@ -631,7 +560,7 @@ export function MenuBar() {
           await importMedia(filePath, targetTrackId, transport.currentTime);
           console.log(`Media imported successfully: ${filePath}`);
         } catch (error) {
-          alert(`Failed to import media: ${error}`);
+          void appDialogs.alert(`Failed to import media: ${error}`);
         }
       },
       dividerAfter: true,
@@ -701,11 +630,11 @@ export function MenuBar() {
     },
     {
       label: "Insert Multiple Tracks...",
-      onClick: () => {
-        const countStr = prompt("How many tracks to insert?", "4");
+      onClick: async () => {
+        const countStr = (await appDialogs.prompt("How many tracks to insert?", "4"));
         if (countStr === null) return;
         const count = Math.min(100, Math.max(1, parseInt(countStr, 10) || 1));
-        const typeStr = prompt("Track type? (audio / midi)", "audio");
+        const typeStr = (await appDialogs.prompt("Track type? (audio / midi)", "audio"));
         const trackType = typeStr === "midi" ? "midi" : "audio";
         const { addTrack, tracks } = useDAWStore.getState();
         for (let i = 0; i < count; i++) {
@@ -725,7 +654,7 @@ export function MenuBar() {
         if (!targetTrackId) {
           const audioTrack = state.tracks.find((t) => t.type === "audio");
           if (!audioTrack) {
-            alert("No audio track. Create one first.");
+            void appDialogs.alert("No audio track. Create one first.");
             return;
           }
           state.addEmptyClip(audioTrack.id, state.transport.currentTime, 4);
@@ -744,7 +673,7 @@ export function MenuBar() {
             (t) => t.type === "midi" || t.type === "instrument",
           );
           if (!midiTrack) {
-            alert("No MIDI or instrument track. Create one first.");
+            void appDialogs.alert("No MIDI or instrument track. Create one first.");
             return;
           }
           state.addMIDIClip(midiTrack.id, state.transport.currentTime, 4);
@@ -765,9 +694,9 @@ export function MenuBar() {
     {
       label: "Marker with name...",
       shortcut: shortcut("insert.markerNamed", "Shift+M"),
-      onClick: () => {
+      onClick: async () => {
         const { addMarker, transport } = useDAWStore.getState();
-        const name = prompt("Enter marker name:");
+        const name = (await appDialogs.prompt("Enter marker name:"));
         if (name !== null) {
           addMarker(transport.currentTime, name);
         }
@@ -781,7 +710,7 @@ export function MenuBar() {
         if (timeSelection) {
           addRegion(timeSelection.start, timeSelection.end);
         } else {
-          alert("No time selection. Please select a time range first.");
+          void appDialogs.alert("No time selection. Please select a time range first.");
         }
       },
       dividerAfter: true,
@@ -809,6 +738,11 @@ export function MenuBar() {
     moveEnvelopesWithItems,
   } = useDAWStore.getState();
   const optionsMenuItems: MenuItemProps[] = [
+    {
+      label: "Keyboard, Mouse & Trackpad…",
+      onClick: () => useDAWStore.getState().toggleKeyboardShortcuts(),
+      dividerAfter: true,
+    },
     {
       label: "Record Mode",
       submenu: [
@@ -938,7 +872,7 @@ export function MenuBar() {
       dividerAfter: true,
     },
     {
-      label: "Keyboard Shortcuts",
+      label: "Keyboard, Mouse & Trackpad…",
       onClick: () => useDAWStore.getState().toggleKeyboardShortcuts(),
     },
     {
@@ -982,7 +916,7 @@ export function MenuBar() {
         aria-label="Main menu"
       >
         {!usesNativeWindowChrome && (
-          <img src="./icon.svg" alt="OpenStudio" className="w-4 h-4 mx-2" />
+          <img src="./icon-32x32.png" width="16" height="16" alt="OpenStudio" className="w-4 h-4 mx-2" />
         )}
         <MenuDropdown label="File" items={fileMenuItems} />
         <EditMenu />

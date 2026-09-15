@@ -26,6 +26,13 @@ public:
     
     // Add click to the buffer based on current transport position
     void getNextAudioBlock(juce::AudioBuffer<float>& buffer, double currentSamplePosition);
+    // Live-only clock selection. Offline rendering continues to use the method above.
+    void getNextTransportBlock(juce::AudioBuffer<float>& buffer, double transportSamplePosition, bool transportRunning);
+    bool setPracticeEnabled(bool shouldRun);
+    // prepareToPlay makes practice available; a device stop atomically revokes
+    // both availability and the latch so a concurrent start cannot revive it.
+    void setPracticePlaybackAvailable(bool available);
+    bool isPracticeEnabled() const { return (practiceState.load(std::memory_order_acquire) & 1u) != 0; }
 
     void setBpm(double newBpm);
     void setTimeSignature(int numerator, int denominator);
@@ -70,6 +77,7 @@ private:
         bool usingCustomAccent = false;
         juce::String customClickPath;
         juce::String customAccentPath;
+        std::uint64_t soundRevision = 0;
     };
 
     static constexpr std::uint64_t defaultTimeSignature =
@@ -83,14 +91,34 @@ private:
     };
     std::atomic<float> volume { 0.5f };
     std::atomic<bool> enabled { false };
+    std::atomic<std::uint64_t> practiceState { 0 };
+    std::atomic<std::uint64_t> resetGeneration { 0 };
 
     // Playback state
     int clickSampleCounter = 0; // Current position within the click sound
     bool isClicking = false;    // Are we currently playing a click?
     bool isHighClick = false;   // Is the current click a bar start (high pitch)?
     double lastSamplePosition = -1.0; // Track last position to detect playback restart
+    double scheduledSamplesPerBeat = 0.0;
+    double nextBeatIndex = 0.0;
+    double nextBeatSample = 0.0;
+    double freeRunSamplePosition = 0.0;
+    double freeRunBpm = 120.0;
+    std::uint64_t consumedPracticeState = 0;
+    std::uint64_t consumedResetGeneration = 0;
+    std::uint64_t renderedSoundRevision = 0;
+    bool clockWasRunning = false;
+    bool clockWasTransport = false;
+    bool renderWasActive = false;
+    float lastClickOutput = 0.0f;
+    float transitionTail = 0.0f;
+    int transitionSamplesLeft = 0;
+    int transitionLength = 44;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> clickGain { 0.5f };
     
     // Internal helpers
+    void renderBlock(juce::AudioBuffer<float>& buffer, double position, bool active, bool resetClock);
+    void retireClick() noexcept;
     static std::uint64_t packTimeSignature(
         int numerator, int denominator) noexcept;
     static int unpackNumerator(

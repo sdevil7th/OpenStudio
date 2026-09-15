@@ -1,11 +1,19 @@
 #include "AudioEngine.h"
+#include "MicrophoneAccess.h"
+#include "AudioInputPolicy.h"
+#include "RecordingDestination.h"
+#include "AppPaths.h"
+#include "OwnedChildProcess.h"
+#include "IsolatedPlugin.h"
 #include "BuiltInParameterSupport.h"
-#include "S13FXProcessor.h"
+#include "JSFXProcessor.h"
 #include "BuiltInEffects.h"
 #include "BuiltInEffects2.h"
 #include "NAMModelSafety.h"
+#include "PluginStateValidation.h"
+#include "SendGraphSafety.h"
 #include "NAMDelayRegression.h"
-#include "S13PitchCorrector.h"
+#include "OpenStudioPitchCorrector.h"
 #include "PitchAnalyzer.h"
 #include "PitchResynthesizer.h"
 #include "CrashDiagnostics.h"
@@ -234,55 +242,11 @@ struct PitchPhraseRenderRegion
     bool expandedToFullClip = true;
 };
 
-juce::File getOpenStudioDocumentsDirectory()
-{
-    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    return documentsDir.getChildFile("OpenStudio");
-}
-
-juce::File getLegacyStudio13DocumentsDirectory()
-{
-    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    return documentsDir.getChildFile("Studio13");
-}
-
-juce::File getOpenStudioApplicationDataDirectory()
-{
-    auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
-    return appDataDir.getChildFile("OpenStudio");
-}
-
-juce::File getLegacyStudio13ApplicationDataDirectory()
-{
-    auto appDataDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
-    return appDataDir.getChildFile("Studio13");
-}
-
-juce::File getPreferredAppDataDirectory()
-{
-    auto openStudioDir = getOpenStudioDocumentsDirectory();
-    auto legacyDir = getLegacyStudio13DocumentsDirectory();
-
-    if (!openStudioDir.exists() && legacyDir.exists())
-        return legacyDir;
-
-    return openStudioDir;
-}
-
+juce::File getPreferredAppDataDirectory() { return AppPaths::documents(); }
+juce::File getPreferredApplicationDataDirectory() { return AppPaths::applicationData(); }
 juce::File getApplicationRuntimeDirectory()
 {
     return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
-}
-
-juce::File getPreferredApplicationDataDirectory()
-{
-    auto openStudioDir = getOpenStudioApplicationDataDirectory();
-    auto legacyDir = getLegacyStudio13ApplicationDataDirectory();
-
-    if (!openStudioDir.exists() && legacyDir.exists())
-        return legacyDir;
-
-    return openStudioDir;
 }
 
 int midiNoteFromFrequencyHz (float frequencyHz)
@@ -2669,7 +2633,7 @@ PitchCompositeStats compositeDryProtectedPitchPatch (juce::AudioBuffer<float>& d
 // Debug logging — always active for FX diagnostics
 static void logToDisk(const juce::String& msg)
 {
-    auto f = getPreferredAppDataDirectory().getChildFile("debug_log.txt");
+    auto f = AppPaths::diagnostics().getChildFile("debug_log.txt");
     f.getParentDirectory().createDirectory();
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
 }
@@ -3385,6 +3349,17 @@ AudioEngine::AudioEngine()
 
 AudioEngine::~AudioEngine()
 {
+    // Stop/join external producers while every field they use is still alive.
+    if (midiManager)
+    {
+        midiManager->closeAllDevices();
+        midiManager->setMessageCallback({});
+    }
+    controlSurfaceManager.getMIDIControl().disconnect();
+    controlSurfaceManager.getMCUControl().disconnect();
+    controlSurfaceManager.getOSCControl().disconnect();
+    controlSurfaceManager.setCallback(nullptr);
+    deferredCallbacks.invalidate();
     deviceManager.removeAudioCallback (this);
     realtimeTrackSnapshotForAudio.store(
         nullptr, std::memory_order_seq_cst);
@@ -3400,6 +3375,25 @@ AudioEngine::~AudioEngine()
     tunerPitchTracker.setEnabled(false);
 }
 
+void AudioEngine::reportStageProcessorFaults()
+{
+    const auto report = [](const std::shared_ptr<const ActiveFXStage>& stage, const char* chain)
+    {
+        if (!stage) return;
+        for (size_t index = 0; index < stage->slots.size(); ++index)
+        {
+            const auto& slot = stage->slots[index];
+            if (slot.safety->reportPending.exchange(false, std::memory_order_acq_rel))
+                OpenStudioCrashDiagnostics::recordBreadcrumb("processor_fault",
+                    juce::String("chain=") + chain + " slot=" + juce::String(static_cast<int>(index))
+                    + " reason=" + juce::String(static_cast<int>(slot.safety->lastFailure.load()))
+                    + " fault latched; explicit bypass/re-enable or reload resets it");
+        }
+    };
+    report(std::atomic_load(&realtimeMasterFXSnapshot), "master");
+    report(std::atomic_load(&realtimeMonitoringFXSnapshot), "monitoring");
+}
+
 juce::String AudioEngine::serialiseProcessorStateToBase64(juce::AudioProcessor* processor) const
 {
     if (processor == nullptr)
@@ -3407,7 +3401,7 @@ juce::String AudioEngine::serialiseProcessorStateToBase64(juce::AudioProcessor* 
 
     juce::MemoryBlock stateData;
     if (auto* rack =
-            dynamic_cast<S13NAMRack*>(processor))
+            dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         // NAM Rack state is composed from atomics plus its model/Cab/UI
         // publication locks, none of which are acquired by processBlock().
@@ -3429,13 +3423,14 @@ bool AudioEngine::applyBase64StateToProcessor(juce::AudioProcessor* processor, c
         return processor != nullptr;
 
     juce::MemoryBlock stateData;
-    if (!stateData.fromBase64Encoding(base64State))
+    if (!PluginStateValidation::decode(base64State, stateData))
         return false;
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
         return rack->restoreProjectStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
 
     processor->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
+    if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor)) return isolated->isHealthy();
     return true;
 }
 
@@ -3506,15 +3501,15 @@ std::unique_ptr<juce::AudioProcessor> AudioEngine::createProcessorForStageSlot(c
     {
         processor = createBuiltInEffect(slot.name);
     }
-    else if (slot.type == "s13fx")
+    else if (slot.type == "jsfx")
     {
-        auto s13fx = std::make_unique<S13FXProcessor>();
-        if (!s13fx->loadScript(slot.pluginPath))
+        auto jsfx = std::make_unique<JSFXProcessor>();
+        if (!jsfx->loadScript(slot.pluginPath))
         {
-            errorMessage = "Failed to load S13FX script: " + slot.pluginPath;
+            errorMessage = "Failed to load JSFX script: " + slot.pluginPath;
             return nullptr;
         }
-        processor = std::move(s13fx);
+        processor = std::move(jsfx);
     }
     else
     {
@@ -3528,7 +3523,7 @@ std::unique_ptr<juce::AudioProcessor> AudioEngine::createProcessorForStageSlot(c
         return nullptr;
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor.get()))
     {
         rack->setEmbeddedDriveOversamplingFactor(
             getNAMRackOversamplingFactor());
@@ -3578,6 +3573,8 @@ std::shared_ptr<AudioEngine::ActiveFXStage> AudioEngine::buildActiveFXStage(cons
         activeSlot.forceFloat = desiredSlot.forceFloat;
         activeSlot.supportsDouble = processor->supportsDoublePrecisionProcessing();
         activeSlot.processor = std::shared_ptr<juce::AudioProcessor>(std::move(processor));
+        if (auto* isolated = dynamic_cast<IsolatedPlugin*>(activeSlot.processor.get()))
+            activeSlot.safety->remoteFailure = isolated->faultFlag();
         activeSlot.bypassDelay =
             std::make_shared<StageFXBypassDelayStorage>();
         activeSlot.bypassDelay->processor =
@@ -3627,8 +3624,6 @@ void AudioEngine::rebindStageEditors(const std::shared_ptr<const ActiveFXStage>&
     struct EditorRebindRequest
     {
         juce::AudioProcessor* oldProcessor = nullptr;
-        juce::AudioProcessor* newProcessor = nullptr;
-        juce::String title;
         int slotId = 0;
     };
 
@@ -3640,15 +3635,7 @@ void AudioEngine::rebindStageEditors(const std::shared_ptr<const ActiveFXStage>&
 
         EditorRebindRequest request;
         request.oldProcessor = oldSlot.processor.get();
-        if (const auto* newSlot = findActiveStageSlot(newStage, oldSlot.slotId))
-        {
-            if (newSlot->processor)
-            {
-                request.newProcessor = newSlot->processor.get();
-                request.title = newSlot->name;
-                request.slotId = newSlot->slotId;
-            }
-        }
+        request.slotId = oldSlot.slotId;
         requests.push_back(std::move(request));
     }
 
@@ -3658,13 +3645,19 @@ void AudioEngine::rebindStageEditors(const std::shared_ptr<const ActiveFXStage>&
     // Capture oldStage by value to keep old processors alive until the async lambda runs.
     // Without this, raw AudioProcessor* pointers in 'requests' could dangle if the old
     // stage's shared_ptr drops before the lambda executes.
-    juce::MessageManager::callAsync([this, requests = std::move(requests), monitoringStage,
+    juce::ignoreUnused(newStage); // Resolve the latest publication when the UI task actually runs.
+    juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), requests = std::move(requests), monitoringStage,
                                      keepAlive = oldStage]() mutable
     {
+        if (!MessageThreadLifetime::accepts(lifetime)) return;
+        const auto currentStage = monitoringStage
+            ? std::atomic_load(&realtimeMonitoringFXSnapshot)
+            : std::atomic_load(&realtimeMasterFXSnapshot);
         for (const auto& request : requests)
         {
             pluginWindowManager.closeEditor(request.oldProcessor);
-            if (request.newProcessor != nullptr)
+            const auto* currentSlot = findActiveStageSlot(currentStage, request.slotId);
+            if (currentSlot != nullptr && currentSlot->processor != nullptr)
             {
                 PluginWindowManager::PluginEditorTarget target;
                 target.scope = monitoringStage
@@ -3680,7 +3673,7 @@ void AudioEngine::rebindStageEditors(const std::shared_ptr<const ActiveFXStage>&
                         break;
                     }
                 }
-                pluginWindowManager.openEditor(request.newProcessor, request.title, target);
+                pluginWindowManager.openEditor(currentSlot->processor, currentSlot->name, target);
             }
         }
     });
@@ -3883,11 +3876,12 @@ void AudioEngine::rebuildRealtimeProcessingSnapshots()
         tracks,
         sidechainOutputBuffers,
         sendAccumBuffers);
+    trackSnapshot.processingOrder.resize(tracks.size());
     buildSidechainProcessingOrder(
         tracks,
         trackSnapshot.processingOrder.data(),
         trackSnapshot.processingOrderCount,
-        maxRealtimeTracks);
+        static_cast<int>(tracks.size()));
 
     publishRealtimeTrackSnapshot(
         std::make_shared<const RealtimeTrackSnapshot>(
@@ -3904,10 +3898,10 @@ AudioEngine::getPublishedBuiltInProcessor(
     if (fxIndex < 0)
         return owner;
 
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         const auto stage = std::atomic_load_explicit(
-            &realtimeMasterFXSnapshot, std::memory_order_acquire);
+            &(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (stage != nullptr
             && fxIndex < static_cast<int>(stage->slots.size()))
         {
@@ -3970,7 +3964,7 @@ bool AudioEngine::setNAMRackOversamplingFactor(int factor)
     namRackOversamplingFactor.store(factor, std::memory_order_release);
     const auto applyToProcessor = [factor] (juce::AudioProcessor* processor)
     {
-        if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
             rack->setEmbeddedDriveOversamplingFactor(factor);
     };
 
@@ -4016,6 +4010,8 @@ void AudioEngine::saveDeviceSettings()
         xml->setAttribute(
             "namRackOversamplingFactor",
             getNAMRackOversamplingFactor());
+        if (!isMicrophonePermissionGrantedForInput() && inputPermissionSavedSettings != nullptr)
+            AudioInputPolicy::preserveInputPreference(*xml, *inputPermissionSavedSettings);
         auto settingsFile = getDeviceSettingsFile();
         settingsFile.getParentDirectory().createDirectory();
         xml->writeTo(settingsFile);
@@ -4025,32 +4021,8 @@ void AudioEngine::saveDeviceSettings()
 
 void AudioEngine::loadDeviceSettings()
 {
-   #if JUCE_MAC
-    if (! isMicrophonePermissionGrantedForInput())
-    {
-        juce::Logger::writeToLog("AudioEngine: macOS microphone permission is not granted; opening output-only audio first.");
-        loadDeviceSettingsWithChannelCounts(0, 2);
-        requestMicrophonePermissionIfNeeded([this] (bool granted)
-        {
-            juce::MessageManager::callAsync([this, granted]
-            {
-                if (granted)
-                {
-                    juce::Logger::writeToLog("AudioEngine: macOS microphone permission granted; reopening audio inputs.");
-                    loadDeviceSettingsWithChannelCounts(2, 2);
-                    saveDeviceSettings();
-                }
-                else
-                {
-                    juce::Logger::writeToLog("AudioEngine: macOS microphone permission denied; keeping output-only audio configuration.");
-                }
-            });
-        });
-        return;
-    }
-   #endif
-
-    loadDeviceSettingsWithChannelCounts(2, 2);
+    // Checking authorization never prompts. Request only when hardware input is used.
+    loadDeviceSettingsWithChannelCounts(isMicrophonePermissionGrantedForInput() ? 2 : 0, 2);
 }
 
 void AudioEngine::applyRoutedDeviceChannelPolicy(
@@ -4195,6 +4167,15 @@ void AudioEngine::loadDeviceSettingsWithChannelCounts(int inputChannels, int out
                     ? restoredOversamplingFactor
                     : 4,
                 std::memory_order_release);
+            if (requestedInputChannels == 0)
+            {
+                inputPermissionSavedSettings = std::make_unique<juce::XmlElement>(*xml);
+                AudioInputPolicy::suppressInput(*xml);
+            }
+            else
+            {
+                inputPermissionSavedSettings.reset();
+            }
             auto error = deviceManager.initialise(requestedInputChannels, requestedOutputChannels, xml.get(), true);
             if (error.isEmpty())
             {
@@ -4216,27 +4197,44 @@ void AudioEngine::loadDeviceSettingsWithChannelCounts(int inputChannels, int out
 
 bool AudioEngine::isMicrophonePermissionGrantedForInput() const
 {
-   #if JUCE_MAC
-    if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio))
-        return juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio);
-   #endif
-
-    return true;
+    return MicrophoneAccess::status() == MicrophoneAccess::Status::authorized;
 }
 
 void AudioEngine::requestMicrophonePermissionIfNeeded(std::function<void(bool)> completion)
 {
-   #if JUCE_MAC
-    if (juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio)
-        && ! juce::RuntimePermissions::isGranted(juce::RuntimePermissions::recordAudio))
-    {
-        juce::Logger::writeToLog("AudioEngine: requesting macOS microphone permission.");
-        juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio, std::move(completion));
-        return;
-    }
-   #endif
+    MicrophoneAccess::request(std::move(completion));
+}
 
-    completion(true);
+bool AudioEngine::trackRequiresAudioInput(const juce::String& trackId) const
+{
+    const auto found = trackMap.find(trackId);
+    if (found == trackMap.end() || found->second == nullptr) return false;
+    const auto type = found->second->getTrackType();
+    return type != TrackType::MIDI && type != TrackType::Instrument;
+}
+
+bool AudioEngine::recordingRequiresAudioInput() const
+{
+    for (const auto& [id, track] : trackMap)
+        if (track != nullptr && track->getRecordArmed() && trackRequiresAudioInput(id)) return true;
+    return false;
+}
+
+void AudioEngine::requestAudioInputAccess(std::function<void(bool)> completion)
+{
+    requestMicrophonePermissionIfNeeded([this, lifetime = deferredCallbacks.token(), completion = std::move(completion)](bool granted) mutable
+    {
+        if (!MessageThreadLifetime::accepts(lifetime)) return;
+        if (granted)
+        {
+            const auto* device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr || device->getActiveInputChannels().isZero())
+                loadDeviceSettingsWithChannelCounts(2, 2);
+        }
+        refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
+        const auto* inputDevice = deviceManager.getCurrentAudioDevice();
+        if (completion) completion(granted && inputDevice != nullptr && !inputDevice->getActiveInputChannels().isZero());
+    });
 }
 
 void AudioEngine::resetAudioCallbackWindowTelemetry() noexcept
@@ -4465,6 +4463,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     previousAudioCallbackArrivalWallTimeMs.store(
         0.0, std::memory_order_relaxed);
     currentSampleRate = device->getCurrentSampleRate();
+    transportSampleRate.store(currentSampleRate, std::memory_order_release);
     currentBlockSize = device->getCurrentBufferSizeSamples();
     inputLatencySamples = device->getInputLatencyInSamples();
     // Query driver capabilities once, before streaming begins. UI callers read
@@ -4577,7 +4576,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
                     1.0,
                     device->getCurrentSampleRate())
                 * continuityRampSeconds));
-        reusableRealtimeMidiBuffer.ensureSize(8192);
+    reusableRealtimeMidiBuffer.ensureSize(8192);
+    reusableMasterMidiBuffer.ensureSize(8192);
+    reusableMonitoringMidiBuffer.ensureSize(8192);
         for (auto& continuity : masterFXContinuity)
             continuity = {};
         for (auto& continuity : monitoringFXContinuity)
@@ -4651,6 +4652,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
 void AudioEngine::audioDeviceStopped()
 {
+    metronome.setPracticePlaybackAvailable(false);
     audioDeviceStopCount.fetch_add(1, std::memory_order_relaxed);
     lastAudioDeviceStopWallTimeMs.store(
         juce::Time::getMillisecondCounterHiRes(),
@@ -5150,7 +5152,8 @@ void AudioEngine::processMasterFXChain (const ActiveFXStage* rtMasterFX,
             masterBuffer.copyFrom (ch, 0, outputChannelData[ch], numSamples);
     }
 
-    juce::MidiBuffer dummyMidi;
+    auto& dummyMidi = reusableMasterMidiBuffer;
+    dummyMidi.clear();
     for (size_t slotIndex = 0;
          slotIndex < rtMasterFX->slots.size();
          ++slotIndex)
@@ -5350,9 +5353,14 @@ void AudioEngine::processMasterFXChain (const ActiveFXStage* rtMasterFX,
         }
 
         juce::ScopedTryLock pluginProcessLock(proc->getCallbackLock());
-        if (!pluginProcessLock.isLocked())
+        if (!pluginProcessLock.isLocked()
+            || (slot.safety->refreshRemoteFailure(), slot.safety->failure.load(std::memory_order_acquire) != ProcessorSafety::Failure::none)
+            || proc->getTotalNumInputChannels() > masterChans
+            || proc->getTotalNumOutputChannels() > masterChans)
         {
-            masterFXBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+            if (!pluginProcessLock.isLocked()) masterFXBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+            else if (proc->getTotalNumInputChannels() > masterChans || proc->getTotalNumOutputChannels() > masterChans)
+                slot.safety->markFailure(ProcessorSafety::Failure::bufferContract);
             if (! dryInputAvailable
                 && slot.bypassDelay != nullptr)
             {
@@ -5475,7 +5483,8 @@ void AudioEngine::processMasterFXChain (const ActiveFXStage* rtMasterFX,
 
         if (canProcessDouble)
         {
-            proc->processBlock (masterBufferDouble, dummyMidi);
+            if (!slot.safety->process(*proc, masterBufferDouble, dummyMidi) && continuity)
+                continuity->skippedLastBlock = true;
         }
         else
         {
@@ -5490,7 +5499,8 @@ void AudioEngine::processMasterFXChain (const ActiveFXStage* rtMasterFX,
                 }
             }
 
-            proc->processBlock (masterBuffer, dummyMidi);
+            if (!slot.safety->process(*proc, masterBuffer, dummyMidi) && continuity)
+                continuity->skippedLastBlock = true;
 
             if (useHybrid64Summing)
             {
@@ -5631,7 +5641,8 @@ void AudioEngine::processMonitoringFXChain (const ActiveFXStage* rtMonitoringFX,
         }
     };
 
-    juce::MidiBuffer dummyMidi;
+    auto& dummyMidi = reusableMonitoringMidiBuffer;
+    dummyMidi.clear();
     for (size_t slotIndex = 0;
          slotIndex < rtMonitoringFX->slots.size();
          ++slotIndex)
@@ -5799,9 +5810,14 @@ void AudioEngine::processMonitoringFXChain (const ActiveFXStage* rtMonitoringFX,
         }
 
         juce::ScopedTryLock pluginProcessLock(proc->getCallbackLock());
-        if (!pluginProcessLock.isLocked())
+        if (!pluginProcessLock.isLocked()
+            || (slot.safety->refreshRemoteFailure(), slot.safety->failure.load(std::memory_order_acquire) != ProcessorSafety::Failure::none)
+            || proc->getTotalNumInputChannels() > monChans
+            || proc->getTotalNumOutputChannels() > monChans)
         {
-            monitoringFXBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+            if (!pluginProcessLock.isLocked()) monitoringFXBusySkipCount.fetch_add(1, std::memory_order_relaxed);
+            else if (proc->getTotalNumInputChannels() > monChans || proc->getTotalNumOutputChannels() > monChans)
+                slot.safety->markFailure(ProcessorSafety::Failure::bufferContract);
             if (! dryInputAvailable
                 && slot.bypassDelay != nullptr)
             {
@@ -5891,14 +5907,16 @@ void AudioEngine::processMonitoringFXChain (const ActiveFXStage* rtMonitoringFX,
 
         if (canProcessDouble)
         {
-            proc->processBlock (monBufferDouble, dummyMidi);
+            if (!slot.safety->process(*proc, monBufferDouble, dummyMidi) && continuity)
+                continuity->skippedLastBlock = true;
         }
         else
         {
             if (hybrid64PostChainActive)
                 copyDoubleBufferToFloatBuffer (monBufferDouble, monBuffer, monChans, numSamples);
 
-            proc->processBlock (monBuffer, dummyMidi);
+            if (!slot.safety->process(*proc, monBuffer, dummyMidi) && continuity)
+                continuity->skippedLastBlock = true;
 
             if (hybrid64PostChainActive)
                 copyFloatBufferToDoubleBuffer (monBuffer, monBufferDouble, monChans, numSamples);
@@ -6061,10 +6079,11 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
 void AudioEngine::buildSidechainProcessingOrder (const std::vector<RealtimeTrackEntry>& rtTracks,
                                                   int processedOrder[], int& orderCount, int maxTracks)
 {
-    std::array<bool, maxRealtimeTracks> trackProcessed {};
     const int numTracks = juce::jmin(
         static_cast<int>(rtTracks.size()),
-        juce::jmin(maxTracks, maxRealtimeTracks));
+        juce::jmax(0, maxTracks));
+    // Called only while constructing a new immutable routing publication.
+    std::vector<bool> trackProcessed(static_cast<size_t>(numTracks), false);
     orderCount = 0;
 
     // Sidechains and sends both require each source to run before its
@@ -6201,6 +6220,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     lastCallbackInputChannels.store(numInputChannels, std::memory_order_relaxed);
     lastCallbackOutputChannels.store(numOutputChannels, std::memory_order_relaxed);
     lastActiveOutputChannels.store(numOutputChannels, std::memory_order_relaxed);
+    lastAudioBlockSamples.store(numSamples, std::memory_order_relaxed);
     const double callbackBlockDurationMs =
         currentSampleRate > 0.0
             ? (static_cast<double>(numSamples)
@@ -6450,14 +6470,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             / currentSampleRate);
     metronome.setBpm(callbackTempo);
 
-    // Mix Metronome (if enabled and transport is running)
-    if (isPlaying || isRecordMode)
+    // One sample-clock generator: practice never changes track/record/playhead
+    // state. Transport takes over its phase when Play or Record is triggered.
     {
-        juce::AudioBuffer<float> outputBuffer(const_cast<float**>(outputChannelData), numOutputChannels, numSamples);
-        metronome.getNextAudioBlock(
+        // The click only addresses L/R. A wider AudioBuffer pointer view can
+        // allocate its channel table on devices exposing 32+ output channels.
+        juce::AudioBuffer<float> outputBuffer(outputChannelData, juce::jmin(2, numOutputChannels), numSamples);
+        metronome.getNextTransportBlock(
             outputBuffer,
             static_cast<double>(
-                blockStartSamplePosition));
+                blockStartSamplePosition),
+            // Record mode can be armed before the transport advances. A parked
+            // record latch must not repeatedly restart the click at one position.
+            isPlaying.load(std::memory_order_relaxed));
     }
     if (shouldSampleAudioCallbackStages)
     {
@@ -7283,6 +7308,7 @@ juce::String AudioEngine::addTrack(const juce::String& explicitId, const juce::S
     if (trackNode)
     {
         juce::String trackId = explicitId.isNotEmpty() ? explicitId : juce::Uuid().toString();
+        rawTrackPtr->setDiagnosticsTrackId(trackId);
 
         trackMap[trackId] = rawTrackPtr;
         trackNodeMap[trackId] = trackNode;
@@ -7379,6 +7405,11 @@ bool AudioEngine::removeTrack(const juce::String& trackId)
         invalidatePluginABStatesForTrack(trackId);
     }
 
+    if (onFXSlotsRemoved)
+    {
+        onFXSlotsRemoved(trackId, "input", 0);
+        onFXSlotsRemoved(trackId, "track", 0);
+    }
     recalculatePDC();
 
     return true;
@@ -7707,7 +7738,8 @@ bool AudioEngine::sendMidiNote(const juce::String& trackId, int note, int veloci
     auto* track = it->second;
     const int channel = track->getMIDIChannel() > 0 ? track->getMIDIChannel() : 1;
     int sampleOffset = 0;
-    if (currentSampleRate > 0.0 && currentBlockSize > 0)
+    const int midiBlockSamples = lastAudioBlockSamples.load(std::memory_order_relaxed);
+    if (midiBlockSamples > 0)
     {
         const double blockStartMs = lastAudioBlockWallTimeMs.load(std::memory_order_acquire);
         const double blockDurationMs = lastAudioBlockDurationMs.load(std::memory_order_acquire);
@@ -7724,8 +7756,8 @@ bool AudioEngine::sendMidiNote(const juce::String& trackId, int note, int veloci
 
             sampleOffset = juce::jlimit(
                 0,
-                juce::jmax(0, currentBlockSize - 1),
-                static_cast<int>(std::round((elapsedMs / 1000.0) * currentSampleRate)));
+                midiBlockSamples - 1,
+                static_cast<int>(std::round((elapsedMs / blockDurationMs) * midiBlockSamples)));
             midiLastComputedSampleOffset.store(sampleOffset, std::memory_order_relaxed);
         }
     }
@@ -7895,7 +7927,7 @@ bool AudioEngine::setInstrumentState(const juce::String& trackId, const juce::St
         return false;
 
     juce::MemoryBlock stateData;
-    if (!stateData.fromBase64Encoding(base64State))
+    if (!PluginStateValidation::decode(base64State, stateData))
         return false;
 
     {
@@ -7904,6 +7936,7 @@ bool AudioEngine::setInstrumentState(const juce::String& trackId, const juce::St
     }
 
     juce::Logger::writeToLog("AudioEngine: Restored instrument state for track " + trackId);
+    if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor)) return isolated->isHealthy();
     return true;
 }
 
@@ -7978,8 +8011,9 @@ void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel,
         if (!updates.isEmpty())
         {
             midiMappedParameterUpdateCount.fetch_add(updates.size(), std::memory_order_relaxed);
-            juce::MessageManager::callAsync([this, updates]()
+            juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), updates]()
             {
+                if (!MessageThreadLifetime::accepts(lifetime)) return;
                 for (const auto& update : updates)
                 {
                     auto it = trackMap.find(update.trackId);
@@ -8010,7 +8044,8 @@ void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel,
     }
 
     int sampleOffset = 0;
-    if (currentSampleRate > 0.0 && currentBlockSize > 0)
+    const int midiBlockSamples = lastAudioBlockSamples.load(std::memory_order_relaxed);
+    if (midiBlockSamples > 0)
     {
         const double blockStartMs = lastAudioBlockWallTimeMs.load(std::memory_order_acquire);
         const double blockDurationMs = lastAudioBlockDurationMs.load(std::memory_order_acquire);
@@ -8027,16 +8062,21 @@ void AudioEngine::handleMIDIMessage(const juce::String& deviceName, int channel,
 
             sampleOffset = juce::jlimit(
                 0,
-                juce::jmax(0, currentBlockSize - 1),
-                static_cast<int>(std::round((elapsedMs / 1000.0) * currentSampleRate)));
+                midiBlockSamples - 1,
+                static_cast<int>(std::round((elapsedMs / blockDurationMs) * midiBlockSamples)));
             midiLastComputedSampleOffset.store(sampleOffset, std::memory_order_relaxed);
         }
     }
 
-    // Route MIDI to appropriate tracks
+    // MIDI device callbacks must not walk the message-thread-owned trackMap.
+    // Retain nodes through an immutable snapshot until this producer returns.
     int fanoutCount = 0;
-    for (auto const& [id, track] : trackMap)
+    const auto routing = std::atomic_load_explicit(&realtimeTrackSnapshot, std::memory_order_acquire);
+    if (!routing) return;
+    for (const auto& entry : routing->tracks)
     {
+        const auto& id = entry.id;
+        auto* track = entry.processor;
         if (!track) continue;
 
         // Check if track accepts MIDI
@@ -8145,19 +8185,27 @@ void AudioEngine::resetMeterClip(const juce::String& trackId)
 
 juce::var AudioEngine::getAudioDeviceSetup()
 {
+    juce::var snapshot;
     {
         const juce::ScopedLock lock(audioDeviceSetupSnapshotLock);
-        if (! audioDeviceSetupSnapshot.isVoid())
-            return audioDeviceSetupSnapshot;
+        snapshot = audioDeviceSetupSnapshot;
     }
-
-    // This path is only expected before the first device start. Do not query a
-    // possibly-streaming device here; aboutToStart publishes the full snapshot.
-    auto fallbackSnapshot = buildAudioDeviceSetupSnapshot(nullptr);
-    const juce::ScopedLock lock(audioDeviceSetupSnapshotLock);
-    if (audioDeviceSetupSnapshot.isVoid())
-        audioDeviceSetupSnapshot = fallbackSnapshot;
-    return audioDeviceSetupSnapshot;
+    // Do not enumerate or query a streaming device from a UI polling request.
+    if (snapshot.isVoid()) snapshot = buildAudioDeviceSetupSnapshot(nullptr);
+   #if JUCE_MAC
+    // Consent can change in System Settings without a device restart. Overlay
+    // current authorization on a copy, leaving the shared device snapshot intact.
+    snapshot = snapshot.clone();
+    if (auto* current = snapshot.getProperty("current", {}).getDynamicObject())
+    {
+        const auto status = MicrophoneAccess::status();
+        const bool granted = status == MicrophoneAccess::Status::authorized;
+        current->setProperty("microphonePermissionGranted", granted);
+        current->setProperty("microphonePermissionRequired", !granted);
+        current->setProperty("microphonePermissionStatus", MicrophoneAccess::statusName());
+    }
+   #endif
+    return snapshot;
 }
 
 void AudioEngine::refreshAudioDeviceSetupSnapshot(
@@ -8180,15 +8228,18 @@ juce::var AudioEngine::buildAudioDeviceSetupSnapshot(
 
     currentSetup->setProperty("audioDeviceType", currentDeviceType);
     currentSetup->setProperty("microphonePermissionGranted", microphonePermissionGranted);
+    currentSetup->setProperty("microphonePermissionStatus", MicrophoneAccess::statusName());
    #if JUCE_MAC
-    currentSetup->setProperty("microphonePermissionRequired", juce::RuntimePermissions::isRequired(juce::RuntimePermissions::recordAudio));
+    currentSetup->setProperty("microphonePermissionRequired", !microphonePermissionGranted);
    #else
     currentSetup->setProperty("microphonePermissionRequired", false);
    #endif
     if (device)
     {
-        currentSetup->setProperty("inputDevice", device->getName());
-        currentSetup->setProperty("outputDevice", device->getName()); // Basic assumption for now
+        juce::AudioDeviceManager::AudioDeviceSetup actualSetup;
+        deviceManager.getAudioDeviceSetup(actualSetup);
+        currentSetup->setProperty("inputDevice", actualSetup.inputDeviceName);
+        currentSetup->setProperty("outputDevice", actualSetup.outputDeviceName);
         currentSetup->setProperty("sampleRate", device->getCurrentSampleRate());
         currentSetup->setProperty("bufferSize", device->getCurrentBufferSizeSamples());
 
@@ -8404,11 +8455,12 @@ void AudioEngine::setAudioDeviceSetup(
     {
         juce::Logger::writeToLog("AudioEngine: audio input setup requested before macOS microphone permission was granted.");
         requestMicrophonePermissionIfNeeded(
-            [this, type, input, output, sampleRate, bufferSize, completion = std::move(completion)] (bool granted) mutable
+            [this, lifetime = deferredCallbacks.token(), type, input, output, sampleRate, bufferSize, completion = std::move(completion)] (bool granted) mutable
         {
             juce::MessageManager::callAsync(
-                [this, type, input, output, sampleRate, bufferSize, granted, completion = std::move(completion)] () mutable
+                [this, lifetime, type, input, output, sampleRate, bufferSize, granted, completion = std::move(completion)] () mutable
             {
+                if (!MessageThreadLifetime::accepts(lifetime)) return;
                 juce::String errorMessage;
                 bool applied = false;
                 if (granted)
@@ -8418,7 +8470,7 @@ void AudioEngine::setAudioDeviceSetup(
                 }
                 else
                 {
-                    errorMessage = "Microphone permission was denied.";
+                    errorMessage = "Audio input access is unavailable. Enable OpenStudio in System Settings > Privacy & Security > Microphone. Playback and MIDI remain available.";
                     juce::Logger::writeToLog("AudioEngine: macOS microphone permission denied; input device setup was not applied.");
                 }
 
@@ -8450,7 +8502,18 @@ bool AudioEngine::applyAudioDeviceSetup(
     // 1. Change Type if needed
     if (deviceManager.getCurrentAudioDeviceType() != type)
     {
-        deviceManager.setCurrentAudioDeviceType(type, true);
+        if (!isMicrophonePermissionGrantedForInput())
+        {
+            // Switching type normally restores JUCE's last per-type input mask.
+            // Install an output-only configuration before that device can open.
+            juce::XmlElement effective("DEVICESETUP");
+            effective.setAttribute("deviceType", type);
+            effective.setAttribute("audioOutputDeviceName", output);
+            AudioInputPolicy::suppressInput(effective);
+            errorMessage = deviceManager.initialise(0, 2, &effective, false);
+            if (errorMessage.isNotEmpty()) return false;
+        }
+        else deviceManager.setCurrentAudioDeviceType(type, true);
     }
 
     // 2. Setup Config
@@ -8518,8 +8581,24 @@ void AudioEngine::setTrackRecordArm(const juce::String& trackId, bool armed)
     }
 }
 
+void AudioEngine::setTrackInputMonitoringAsync(const juce::String& trackId, bool enabled, std::function<void(bool)> completion)
+{
+    const auto generation = ++monitorRequestGenerations[trackId];
+    auto apply = [this, trackId, enabled, generation, completion = std::move(completion)](bool allowed)
+    {
+        const bool accepted = allowed && monitorRequestGenerations[trackId] == generation
+            && trackMap.find(trackId) != trackMap.end();
+        if (accepted) setTrackInputMonitoring(trackId, enabled);
+        if (completion) completion(accepted);
+    };
+    if (enabled && trackRequiresAudioInput(trackId)) requestAudioInputAccess(std::move(apply));
+    else apply(true);
+}
+
 void AudioEngine::setTrackInputMonitoring(const juce::String& trackId, bool enabled)
 {
+    ++monitorRequestGenerations[trackId];
+    if (enabled && trackRequiresAudioInput(trackId) && !isMicrophonePermissionGrantedForInput()) return;
     if (trackMap.find(trackId) != trackMap.end())
     {
         auto* track = trackMap[trackId];
@@ -9029,8 +9108,22 @@ bool AudioEngine::hasAnyActiveARA() const
     return false;
 }
 
+void AudioEngine::setTransportRecordingAsync(bool recording, std::function<void(bool)> completion)
+{
+    const auto generation = ++recordingRequestGeneration;
+    auto apply = [this, recording, generation, completion = std::move(completion)](bool allowed)
+    {
+        const bool accepted = allowed && recordingRequestGeneration == generation;
+        if (accepted) setTransportRecording(recording);
+        if (completion) completion(accepted && isTransportRecording() == recording);
+    };
+    if (recording && recordingRequiresAudioInput()) requestAudioInputAccess(std::move(apply));
+    else apply(true);
+}
+
 void AudioEngine::setTransportRecording(bool recording)
 {
+    ++recordingRequestGeneration;
     logToDisk("setTransportRecording(" + juce::String(recording ? "true" : "false") + ") called. Current: " + juce::String(isRecordMode ? "true" : "false"));
     logAudioRecord("setTransportRecording recording=" + juce::String(recording ? "true" : "false")
         + " current=" + juce::String(isRecordMode.load() ? "true" : "false"));
@@ -9038,23 +9131,27 @@ void AudioEngine::setTransportRecording(bool recording)
     if (isRecordMode == recording)
         return; // No change
 
-    isRecordMode = recording;
-
+    if (recording && recordingRequiresAudioInput() && !isMicrophonePermissionGrantedForInput())
+    {
+        juce::Logger::writeToLog("Recording requires microphone authorization; no recording state was changed.");
+        return;
+    }
     if (recording)
     {
+        const auto destination = getPreferredAppDataDirectory().getChildFile("Audio");
+        const auto ready = prepareRecordingDirectory(destination);
+        if (ready.failed())
+        {
+            juce::Logger::writeToLog("Recording did not start: " + ready.getErrorMessage());
+            return;
+        }
         loopTakeCounter = 0;  // Reset loop take counter for new recording session
         lastCompletedClips.clear();
         lastCompletedMIDIClips.clear();
 
-        projectAudioFolder = getPreferredAppDataDirectory().getChildFile("Audio");
+        projectAudioFolder = destination;
 
         logToDisk("Target Audio Folder: " + projectAudioFolder.getFullPathName());
-
-        if (!projectAudioFolder.exists())
-        {
-            bool created = projectAudioFolder.createDirectory();
-            logToDisk("Folder created status: " + juce::String(created ? "SUCCESS" : "FAIL"));
-        }
 
         // Start recording for each armed track
         logToDisk("Checking " + juce::String((int)trackMap.size()) + " tracks for arming...");
@@ -9125,9 +9222,11 @@ void AudioEngine::setTransportRecording(bool recording)
         }
         logAudioRecord("record start armedTracks=" + armedTrackIds.joinIntoString(",")
             + " anyStarted=" + juce::String(anyAudioStarted ? "true" : "false"));
+        isRecordMode = anyAudioStarted;
     }
     else
     {
+        isRecordMode = false;
         // Stop all recordings and collect clip info
         logToDisk("Record mode OFF - stopping recordings");
         auto completedAudioTakes = audioRecorder.stopAllRecordings(currentSampleRate);
@@ -9193,6 +9292,11 @@ bool AudioEngine::retryBlacklistedPlugin(const juce::String& path)
 
 juce::var AudioEngine::getAvailablePlugins()
 {
+#if JUCE_WINDOWS
+    constexpr bool isolationAvailable = true;
+#else
+    constexpr bool isolationAvailable = false;
+#endif
     auto plugins = pluginManager.getAvailablePlugins();
 
     juce::Array<juce::var> pluginList;
@@ -9206,6 +9310,10 @@ juce::var AudioEngine::getAvailablePlugins()
         pluginObj->setProperty("identifier", plugin.createIdentifierString());
         pluginObj->setProperty("isInstrument", plugin.isInstrument);
         pluginObj->setProperty("hasARA", plugin.hasARAExtension);
+        pluginObj->setProperty("isolatedHosting", pluginManager.usesIsolatedHosting(plugin));
+        pluginObj->setProperty("isolationAvailable", isolationAvailable);
+        pluginObj->setProperty("isolationLatencySamples", 2 * juce::jmax(512, currentBlockSize));
+        pluginObj->setProperty("isolationLatencyMs", 2000.0 * juce::jmax(512, currentBlockSize) / juce::jmax(8000.0, currentSampleRate));
         pluginObj->setProperty("pluginFormatName", plugin.pluginFormatName);
         pluginObj->setProperty("pluginFormat", plugin.pluginFormatName.toLowerCase());
         pluginObj->setProperty("numInputChannels", plugin.numInputChannels);
@@ -9500,7 +9608,7 @@ juce::var AudioEngine::runEngineBenchmarks()
         if (backup.processor)
         {
             if (auto* rack =
-                    dynamic_cast<S13NAMRack*>(
+                    dynamic_cast<OpenStudioNAMRack*>(
                         backup.processor))
             {
                 // Engine benchmarking mutates preparation/runtime history, not
@@ -9887,7 +9995,7 @@ juce::var AudioEngine::runCleanGuitarPitchBendRegression()
                             int pitchWheelValue,
                             float stringMode) -> GuitarProbe
     {
-        S13CleanGuitarInstrument guitar;
+        OpenStudioCleanGuitarInstrument guitar;
         guitar.model.store(0.0f);
         guitar.tone.store(0.22f);
         guitar.body.store(0.62f);
@@ -10199,7 +10307,7 @@ juce::var AudioEngine::runNAMRackRegression()
         return writer->writeFromAudioSampleBuffer(ir, 0, ir.getNumSamples());
     };
 
-    auto configureRack = [] (S13NAMRack& rack)
+    auto configureRack = [] (OpenStudioNAMRack& rack)
     {
         rack.inputTrimDb.store(0.0f);
         rack.setRoutedInputChannelCount(1);
@@ -10252,10 +10360,6 @@ juce::var AudioEngine::runNAMRackRegression()
         rack.cabHPFHz.store(75.0f);
         rack.cabLPFHz.store(6800.0f);
         rack.cabPhaseInvert.store(0.0f);
-        rack.cabMicPosition.store(0.5f);
-        rack.cabMicDistance.store(0.0f);
-        rack.cabMicBlend.store(0.5f);
-        rack.cabRoomSend.store(0.0f);
         rack.cabPan.store(0.0f);
         rack.eqEnabled.store(1.0f);
         rack.chorusMix.store(0.18f);
@@ -10301,7 +10405,7 @@ juce::var AudioEngine::runNAMRackRegression()
         }
     };
 
-    auto renderRack = [&] (S13NAMRack& rack,
+    auto renderRack = [&] (OpenStudioNAMRack& rack,
                            bool compareDry,
                            float inputScale = 1.0f)
     {
@@ -10369,7 +10473,7 @@ juce::var AudioEngine::runNAMRackRegression()
         return probe;
     };
 
-    auto renderRackCapture = [&] (S13NAMRack& rack)
+    auto renderRackCapture = [&] (OpenStudioNAMRack& rack)
     {
         const int totalBlocks = static_cast<int>(std::ceil(totalDurationSec * fixtureSampleRate / static_cast<double>(fixtureBlockSize)));
         juce::AudioBuffer<float> captured(2, totalBlocks * fixtureBlockSize);
@@ -11762,7 +11866,7 @@ juce::var AudioEngine::runNAMRackRegression()
     const auto irFile = makeTempFile("openstudio_cab_ir_fixture", ".wav");
     const auto alternateIRFile = makeTempFile("openstudio_cab_ir_swap_fixture", ".wav");
 
-    auto configureNeutralRack = [] (S13NAMRack& rack)
+    auto configureNeutralRack = [] (OpenStudioNAMRack& rack)
     {
         rack.inputTrimDb.store(0.0f);
         rack.setRoutedInputChannelCount(1);
@@ -11859,7 +11963,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "A selected mono hardware input must be added to both processing channels after the raw recorder tap without replacing existing stereo clip/send content or modifying the source buffer.",
         monoHardwareInputCenteringProbe);
 
-    S13NAMRack neutralRack;
+    OpenStudioNAMRack neutralRack;
     neutralRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     configureNeutralRack(neutralRack);
     const auto neutralRackProbe = renderRack(neutralRack, true);
@@ -11875,7 +11979,7 @@ juce::var AudioEngine::runNAMRackRegression()
     // Exercise the rack-owned pre-trim and final-output meters with deliberately
     // unequal channels, then prove a mono source hides and clears its R input
     // lane even though the host processing buffer remains stereo.
-    S13NAMRack channelMeterRack;
+    OpenStudioNAMRack channelMeterRack;
     channelMeterRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     configureNeutralRack(channelMeterRack);
     channelMeterRack.setRoutedInputChannelCount(2);
@@ -12004,7 +12108,7 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::var(channelMeterValue));
 
     constexpr float highLevelNeutralInputScale = 16.0f;
-    S13NAMRack highLevelNeutralRack;
+    OpenStudioNAMRack highLevelNeutralRack;
     highLevelNeutralRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     configureNeutralRack(highLevelNeutralRack);
     const auto highLevelNeutralRackProbe = renderRack(
@@ -12022,15 +12126,42 @@ juce::var AudioEngine::runNAMRackRegression()
             highLevelNeutralRackDiagnostics.getProperty(
                 "rackOutputSafetyGuardHitCount",
                 static_cast<juce::int64>(0)));
+    const auto highLevelEmergencyMuteTrips =
+        static_cast<juce::int64>(
+            highLevelNeutralRackDiagnostics.getProperty(
+                "rackOutputEmergencyMuteTripCount",
+                static_cast<juce::int64>(0)));
+    const bool highLevelEmergencyMuteRecovered =
+        ! static_cast<bool>(
+            highLevelNeutralRackDiagnostics.getProperty(
+                "rackOutputEmergencyMuteActive", true));
+    const auto postEmergencyRecoveryProbe = renderRack(
+        highLevelNeutralRack, false, 1.0f);
+    const auto postEmergencyRecoveryDiagnostics =
+        highLevelNeutralRack.getDiagnosticState();
+    const auto postEmergencyTripCount =
+        static_cast<juce::int64>(
+            postEmergencyRecoveryDiagnostics.getProperty(
+                "rackOutputEmergencyMuteTripCount",
+                static_cast<juce::int64>(0)));
     const bool highLevelNeutralRackProtected =
         highLevelNeutralRackProbe.nonFiniteCount == 0
         && highLevelNeutralRawPeak
-            > S13NAMRack::namOutputSafetyKnee
+            > OpenStudioNAMRack::namOutputSafetyKnee
         && highLevelNeutralGuardHits > 0
+        && highLevelEmergencyMuteTrips == 0
+        && highLevelEmergencyMuteRecovered
+        && highLevelNeutralRackProbe.peak > 1.0e-5f
         && highLevelNeutralRackProbe.peak
-            < S13NAMRack::namOutputSafetyCeiling
+            < OpenStudioNAMRack::namOutputSafetyCeiling
         && highLevelNeutralRackProbe.maxDiffFromDry
-            > 1.0e-6f;
+            > 1.0e-6f
+        && postEmergencyRecoveryProbe.nonFiniteCount == 0
+        && postEmergencyRecoveryProbe.peak > 1.0e-5f
+        && postEmergencyRecoveryProbe.peak
+            < OpenStudioNAMRack::namOutputSafetyKnee
+        && postEmergencyTripCount
+            == highLevelEmergencyMuteTrips;
     auto* highLevelNeutralValue =
         new juce::DynamicObject();
     highLevelNeutralValue->setProperty(
@@ -12042,13 +12173,22 @@ juce::var AudioEngine::runNAMRackRegression()
     highLevelNeutralValue->setProperty(
         "rackOutputSafetyGuardHitCount",
         highLevelNeutralGuardHits);
+    highLevelNeutralValue->setProperty(
+        "emergencyMuteTripCount",
+        highLevelEmergencyMuteTrips);
+    highLevelNeutralValue->setProperty(
+        "emergencyMuteRecovered",
+        highLevelEmergencyMuteRecovered);
+    highLevelNeutralValue->setProperty(
+        "postRecoveryProbe",
+        makeProbeVar(postEmergencyRecoveryProbe));
     addCheck(checks,
              "high_level_neutral_rack_final_output_guard",
              highLevelNeutralRackProtected ? "pass" : "fail",
-             "The single final NAM Rack guard must contain an intentionally over-hot rack output while the separate below-knee neutral probe remains sample-transparent.",
+             "The final NAM Rack guard must contain an intentionally over-hot but finite rack output without misclassifying ordinary gain staging as numerical runaway, entering a timed mute, or silencing the following below-knee signal.",
              juce::var(highLevelNeutralValue));
 
-    S13NAMRack compressorImpulseRack;
+    OpenStudioNAMRack compressorImpulseRack;
     compressorImpulseRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     configureNeutralRack(compressorImpulseRack);
     compressorImpulseRack.compressorEnabled.store(1.0f);
@@ -12128,7 +12268,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         for (const float visibleMix : mixValues)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(2);
             rack.delayEnabled.store(visibleMix > 0.0f ? 1.0f : 0.0f);
@@ -12193,7 +12333,7 @@ juce::var AudioEngine::runNAMRackRegression()
             cases.add(juce::var(caseValue));
         }
 
-        S13Delay standaloneDelay;
+        OpenStudioDelay standaloneDelay;
         constexpr float standaloneMix = 0.80f;
         standaloneDelay.mix.store(standaloneMix);
         standaloneDelay.delayTimeL.store(2000.0f);
@@ -12240,7 +12380,7 @@ juce::var AudioEngine::runNAMRackRegression()
         rackDelayDirectGainContract.getProperty("pass", false)
             ? "pass"
             : "fail",
-        "At several visible Mix positions the post-Cab Rack Delay must apply its explicit equal-power dry gain before any repeat can arrive, while standalone S13Delay retains its historical 1-Mix direct law.",
+        "At several visible Mix positions the post-Cab Rack Delay must apply its explicit equal-power dry gain before any repeat can arrive, while standalone OpenStudioDelay retains its historical 1-Mix direct law.",
         rackDelayDirectGainContract);
 
     auto runCompressorCurrentOutputAndDrainProbe = [&] ()
@@ -12260,7 +12400,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto configureCompressor = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             bool enabled,
             float volumeDb)
         {
@@ -12313,7 +12453,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         const auto render = [&] (int effectsVersion, float volumeDb)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.namEffectsDspVersion.store(effectsVersion);
             configureCompressor(rack, true, volumeDb);
@@ -12362,13 +12502,13 @@ juce::var AudioEngine::runNAMRackRegression()
         const auto legacyV1 = render(1, 6.0f);
         const auto legacyV2 = render(2, 6.0f);
         const auto currentMinus = render(
-            S13NAMRack::currentNAMEffectsDspVersion, -6.0f);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion, -6.0f);
         const auto currentZero = render(
-            S13NAMRack::currentNAMEffectsDspVersion, 0.0f);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion, 0.0f);
         const auto currentPlus = render(
-            S13NAMRack::currentNAMEffectsDspVersion, 6.0f);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion, 6.0f);
         const auto currentPlusEighteen = render(
-            S13NAMRack::currentNAMEffectsDspVersion, 18.0f);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion, 18.0f);
 
         float plusScalingError = 0.0f;
         float minusScalingError = 0.0f;
@@ -12415,8 +12555,8 @@ juce::var AudioEngine::runNAMRackRegression()
             maxDiffBetweenBuffers(
                 legacyV2.capture, currentPlus.capture);
 
-        S13NAMRack previouslyExcited;
-        S13NAMRack cleanReference;
+        OpenStudioNAMRack previouslyExcited;
+        OpenStudioNAMRack cleanReference;
         configureNeutralRack(previouslyExcited);
         configureNeutralRack(cleanReference);
         previouslyExcited.namEffectsDspVersion.store(3);
@@ -12495,7 +12635,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 lifecycleBlocks * fixtureBlockSize);
             result.capture.clear();
 
-            S13NAMRack lifecycleRack;
+            OpenStudioNAMRack lifecycleRack;
             configureNeutralRack(lifecycleRack);
             lifecycleRack.namEffectsDspVersion.store(
                 effectsVersion);
@@ -12579,9 +12719,9 @@ juce::var AudioEngine::runNAMRackRegression()
             + legacyLifecycleNonFiniteCount;
         const bool pass =
             nonFiniteCount == 0
-            && currentPlus.peak < S13NAMRack::namOutputSafetyKnee
+            && currentPlus.peak < OpenStudioNAMRack::namOutputSafetyKnee
             && currentPlusEighteen.peak
-                < S13NAMRack::namOutputSafetyKnee
+                < OpenStudioNAMRack::namOutputSafetyKnee
             && plusScalingError <= 2.0e-5f
             && minusScalingError <= 2.0e-5f
             && plusEighteenScalingError <= 2.0e-5f
@@ -12658,7 +12798,7 @@ juce::var AudioEngine::runNAMRackRegression()
             bool bassStimulus,
             bool unevenPartition)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.compressorEnabled.store(1.0f);
             rack.compressorComp.store(0.86f);
@@ -12788,7 +12928,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float intensity,
             float sidechainMode)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.compressorEnabled.store(1.0f);
             rack.compressorComp.store(comp);
@@ -12832,7 +12972,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
         const auto renderDetectorDc = [&] (float sidechainMode)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.compressorEnabled.store(1.0f);
             rack.compressorComp.store(0.86f);
@@ -12886,7 +13026,7 @@ juce::var AudioEngine::runNAMRackRegression()
             bool unevenPartition,
             bool silentInput)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.compressorEnabled.store(1.0f);
             rack.compressorComp.store(0.86f);
@@ -13223,7 +13363,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int totalSamples = 8192;
 
         const auto configurePedalParameters = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             PedalKind kind)
         {
             switch (kind)
@@ -13251,7 +13391,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
         };
         const auto setPedalActive = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             PedalKind kind,
             bool active)
         {
@@ -13317,7 +13457,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const auto& pattern,
             int inputLayout)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             configurePedalParameters(rack, kind);
             rack.prepareToPlay(sampleRate, 1024);
@@ -13465,8 +13605,8 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr double lifecycleSampleRate = 48000.0;
         for (const auto& pedalCase : pedalCases)
         {
-            S13NAMRack activeRack;
-            S13NAMRack referenceRack;
+            OpenStudioNAMRack activeRack;
+            OpenStudioNAMRack referenceRack;
             configureNeutralRack(activeRack);
             configureNeutralRack(referenceRack);
             activeRack.namEffectsDspVersion.store(3);
@@ -13652,8 +13792,8 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runRackReverbSpilloverProbe = [&] ()
     {
-        S13NAMRack unityDryRack;
-        S13NAMRack unityDryReferenceRack;
+        OpenStudioNAMRack unityDryRack;
+        OpenStudioNAMRack unityDryReferenceRack;
         configureNeutralRack(unityDryRack);
         configureNeutralRack(unityDryReferenceRack);
         unityDryRack.reverbEnabled.store(1.0f);
@@ -13728,8 +13868,8 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool unityDryMixLawPass =
             maximumUnityDryError <= 1.0e-6f;
 
-        S13NAMRack spillRack;
-        S13NAMRack referenceRack;
+        OpenStudioNAMRack spillRack;
+        OpenStudioNAMRack referenceRack;
         spillRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         referenceRack.prepareToPlay(
@@ -13893,7 +14033,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         constexpr int totalSamples = 8192;
         auto configureOctaver = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             float direct,
             float down,
             float up)
@@ -13944,7 +14084,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     octaverInputSample(1, absoluteSample));
             }
         };
-        auto renderOctaver = [&] (S13NAMRack& rack)
+        auto renderOctaver = [&] (OpenStudioNAMRack& rack)
         {
             juce::AudioBuffer<float> capture(2, totalSamples);
             capture.clear();
@@ -13966,9 +14106,9 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13NAMRack directOneRack;
-        S13NAMRack directZeroRack;
-        S13NAMRack directBoostRack;
+        OpenStudioNAMRack directOneRack;
+        OpenStudioNAMRack directZeroRack;
+        OpenStudioNAMRack directBoostRack;
         configureOctaver(directOneRack, 1.0f, 0.52f, 0.31f);
         configureOctaver(directZeroRack, 0.0f, 0.52f, 0.31f);
         configureOctaver(directBoostRack, 1.25f, 0.0f, 0.0f);
@@ -14045,7 +14185,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr float sourceFrequency = 110.0f;
         auto renderOctaver = [&] (bool antiPhase)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.octaverEnabled.store(1.0f);
             rack.octaverDirectMix.store(0.0f);
@@ -14170,10 +14310,10 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr std::array<int, 7> unevenPattern {
             127, 509, 64, 1000, 31, 257, 733
         };
-        auto configureChorus = [] (S13Chorus& chorus)
+        auto configureChorus = [] (OpenStudioChorus& chorus)
         {
             chorus.mode.store(
-                static_cast<float>(S13Chorus::Mode::Flanger));
+                static_cast<float>(OpenStudioChorus::Mode::Flanger));
             chorus.rate.store(9.5f);
             chorus.depth.store(0.82f);
             chorus.fbAmount.store(0.63f);
@@ -14181,7 +14321,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.voices.store(3.0f);
             chorus.lfoShape.store(
                 static_cast<float>(
-                    S13Chorus::LFOShape::SampleAndHold));
+                    OpenStudioChorus::LFOShape::SampleAndHold));
             chorus.spread.store(0.67f);
             chorus.highCut.store(7200.0f);
             chorus.lowCut.store(110.0f);
@@ -14189,7 +14329,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.characterMode.store(1.0f);
         };
         auto renderChorus = [&] (
-            S13Chorus& chorus,
+            OpenStudioChorus& chorus,
             const auto& pattern)
         {
             juce::AudioBuffer<float> capture(2, totalSamples);
@@ -14239,14 +14379,14 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13Chorus fixedChorus;
+        OpenStudioChorus fixedChorus;
         configureChorus(fixedChorus);
         fixedChorus.prepareToPlay(
             fixtureSampleRate, 1024);
         const auto fixedCapture =
             renderChorus(fixedChorus, fixedPattern);
 
-        S13Chorus unevenChorus;
+        OpenStudioChorus unevenChorus;
         configureChorus(unevenChorus);
         unevenChorus.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -14295,11 +14435,11 @@ juce::var AudioEngine::runNAMRackRegression()
             127, 509, 64, 1000, 31, 257, 733
         };
         auto configureEnsemble = [] (
-            S13Chorus& chorus,
+            OpenStudioChorus& chorus,
             float stereoSpread)
         {
             chorus.mode.store(
-                static_cast<float>(S13Chorus::Mode::Chorus));
+                static_cast<float>(OpenStudioChorus::Mode::Chorus));
             chorus.rate.store(0.92f);
             chorus.depth.store(0.68f);
             chorus.fbAmount.store(0.18f);
@@ -14307,7 +14447,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.voices.store(5.0f);
             chorus.lfoShape.store(
                 static_cast<float>(
-                    S13Chorus::LFOShape::Sine));
+                    OpenStudioChorus::LFOShape::Sine));
             chorus.spread.store(stereoSpread);
             chorus.highCut.store(12000.0f);
             chorus.lowCut.store(90.0f);
@@ -14316,7 +14456,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.randomBlend.store(0.0f);
         };
         auto renderEnsemble = [&] (
-            S13Chorus& chorus,
+            OpenStudioChorus& chorus,
             const auto& pattern,
             int channelCount)
         {
@@ -14372,7 +14512,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13Chorus fixedChorus;
+        OpenStudioChorus fixedChorus;
         configureEnsemble(fixedChorus, 0.72f);
         fixedChorus.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -14380,7 +14520,7 @@ juce::var AudioEngine::runNAMRackRegression()
             renderEnsemble(
                 fixedChorus, fixedPattern, 2);
 
-        S13Chorus unevenChorus;
+        OpenStudioChorus unevenChorus;
         configureEnsemble(unevenChorus, 0.72f);
         unevenChorus.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -14395,7 +14535,7 @@ juce::var AudioEngine::runNAMRackRegression()
             renderEnsemble(
                 fixedChorus, fixedPattern, 2);
 
-        S13Chorus narrowStereoChorus;
+        OpenStudioChorus narrowStereoChorus;
         configureEnsemble(narrowStereoChorus, 0.0f);
         narrowStereoChorus.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -14403,7 +14543,7 @@ juce::var AudioEngine::runNAMRackRegression()
             renderEnsemble(
                 narrowStereoChorus, fixedPattern, 2);
 
-        S13Chorus monoChorus;
+        OpenStudioChorus monoChorus;
         configureEnsemble(monoChorus, 0.0f);
         monoChorus.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -14511,10 +14651,10 @@ juce::var AudioEngine::runNAMRackRegression()
             float frequency,
             bool impulse)
         {
-            S13Chorus chorus;
+            OpenStudioChorus chorus;
             chorus.mode.store(
                 static_cast<float>(
-                    S13Chorus::Mode::Chorus));
+                    OpenStudioChorus::Mode::Chorus));
             chorus.rate.store(0.73f);
             chorus.depth.store(0.61f);
             chorus.fbAmount.store(0.12f);
@@ -14522,7 +14662,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.voices.store(5.0f);
             chorus.lfoShape.store(
                 static_cast<float>(
-                    S13Chorus::LFOShape::Sine));
+                    OpenStudioChorus::LFOShape::Sine));
             chorus.spread.store(0.68f);
             chorus.highCut.store(12000.0f);
             chorus.lowCut.store(80.0f);
@@ -14724,7 +14864,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         const auto render = [&] (float visibleMix)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(2);
             rack.modulatorEnabled.store(1.0f);
@@ -14961,10 +15101,10 @@ juce::var AudioEngine::runNAMRackRegression()
 
         const auto render = [&] (int character)
         {
-            S13Chorus chorus;
+            OpenStudioChorus chorus;
             chorus.mode.store(
                 static_cast<float>(
-                    S13Chorus::Mode::Chorus));
+                    OpenStudioChorus::Mode::Chorus));
             chorus.rate.store(0.01f);
             chorus.depth.store(1.0f);
             chorus.fbAmount.store(0.0f);
@@ -14972,7 +15112,7 @@ juce::var AudioEngine::runNAMRackRegression()
             chorus.voices.store(6.0f);
             chorus.lfoShape.store(
                 static_cast<float>(
-                    S13Chorus::LFOShape::Sine));
+                    OpenStudioChorus::LFOShape::Sine));
             chorus.spread.store(0.72f);
             chorus.highCut.store(16000.0f);
             chorus.lowCut.store(40.0f);
@@ -15114,7 +15254,7 @@ juce::var AudioEngine::runNAMRackRegression()
             int effectsDspVersion,
             int character)
         {
-            S13NAMRack rackProbe;
+            OpenStudioNAMRack rackProbe;
             configureNeutralRack(rackProbe);
             rackProbe.namEffectsDspVersion.store(
                 effectsDspVersion,
@@ -15222,7 +15362,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const int observationSamples =
             observationBlocks * fixtureBlockSize;
         auto configureModulator = [&] (
-            S13NAMRack& rack)
+            OpenStudioNAMRack& rack)
         {
             configureNeutralRack(rack);
             rack.modulatorEnabled.store(1.0f);
@@ -15237,7 +15377,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.modulatorPedalPosition.store(0.50f);
         };
         auto prepareRack = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             bool withModulator)
         {
             if (withModulator)
@@ -15248,7 +15388,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixtureSampleRate, fixtureBlockSize);
         };
         auto warmSilence = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             juce::MidiBuffer& midi)
         {
             for (int blockIndex = 0;
@@ -15262,8 +15402,8 @@ juce::var AudioEngine::runNAMRackRegression()
             }
         };
 
-        S13NAMRack markerRack;
-        S13NAMRack silenceRack;
+        OpenStudioNAMRack markerRack;
+        OpenStudioNAMRack silenceRack;
         prepareRack(markerRack, true);
         prepareRack(silenceRack, true);
         juce::MidiBuffer midi;
@@ -15359,8 +15499,8 @@ juce::var AudioEngine::runNAMRackRegression()
             }
         }
 
-        S13NAMRack dryRack;
-        S13NAMRack dryReferenceRack;
+        OpenStudioNAMRack dryRack;
+        OpenStudioNAMRack dryReferenceRack;
         prepareRack(dryRack, true);
         prepareRack(dryReferenceRack, false);
         warmSilence(dryRack, midi);
@@ -15425,7 +15565,7 @@ juce::var AudioEngine::runNAMRackRegression()
             absoluteSample += fixtureBlockSize;
         }
 
-        S13NAMRack staleRack;
+        OpenStudioNAMRack staleRack;
         prepareRack(staleRack, true);
         warmSilence(staleRack, midi);
         juce::AudioBuffer<float> excitation(
@@ -15507,7 +15647,7 @@ juce::var AudioEngine::runNAMRackRegression()
         auto renderRandomAmount = [&] (
             float randomAmount)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.modulatorEnabled.store(1.0f);
             rack.chorusMix.store(0.78f);
@@ -15623,7 +15763,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         constexpr int totalSamples = 8192;
         auto configureDrive = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             float drive)
         {
             configureNeutralRack(rack);
@@ -15634,7 +15774,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.precisionDriveGate.store(0.0f);
             rack.precisionDriveVolumeDb.store(0.0f);
         };
-        auto renderDrive = [&] (S13NAMRack& rack)
+        auto renderDrive = [&] (OpenStudioNAMRack& rack)
         {
             juce::AudioBuffer<float> capture(2, totalSamples);
             capture.clear();
@@ -15678,8 +15818,8 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13NAMRack belowBoundary;
-        S13NAMRack aboveBoundary;
+        OpenStudioNAMRack belowBoundary;
+        OpenStudioNAMRack aboveBoundary;
         configureDrive(belowBoundary, 0.6799f);
         configureDrive(aboveBoundary, 0.6801f);
         belowBoundary.prepareToPlay(
@@ -15726,7 +15866,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         auto renderAttack = [&] (float attack)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.precisionDriveEnabled.store(1.0f);
             rack.precisionDriveDrive.store(1.0f);
@@ -15903,7 +16043,7 @@ juce::var AudioEngine::runNAMRackRegression()
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
 
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.namEffectsDspVersion.store(
                 recalledVersion, std::memory_order_relaxed);
@@ -16083,7 +16223,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const bool casePass =
                 capture.nonFiniteCount == 0
                 && capture.outputGuardHits == 0
-                && capture.peak < S13NAMRack::namOutputSafetyKnee
+                && capture.peak < OpenStudioNAMRack::namOutputSafetyKnee
                 && std::abs(capture.mean) < 0.002
                 && capture.residualToFundamental
                     >= minimumResidualRatios[index]
@@ -16281,7 +16421,7 @@ juce::var AudioEngine::runNAMRackRegression()
             factorValue->setProperty("pass", factorPass);
             multirateValues.add(juce::var(factorValue));
         }
-        S13NAMRack defaultRack;
+        OpenStudioNAMRack defaultRack;
         const bool defaultVolumeIsPlusNine =
             std::abs(
                 defaultRack.precisionDriveVolumeDb.load(
@@ -16301,7 +16441,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && levelPlusNine.nonFiniteCount == 0
             && std::abs(levelPlusNine.mean) < 0.002
             && levelPlusNine.outputGuardHits == 0
-            && levelPlusNine.peak < S13NAMRack::namOutputSafetyKnee;
+            && levelPlusNine.peak < OpenStudioNAMRack::namOutputSafetyKnee;
         const bool realtimeInvariantPass =
             partitionError <= 2.0e-5f
             && versionMarkerError <= 1.0e-7f
@@ -16414,7 +16554,7 @@ juce::var AudioEngine::runNAMRackRegression()
         auto renderDrive = [&] (float driveAmount)
         {
             GuardedDistortionCapture result;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.chaosEnabled.store(1.0f);
             rack.chaosDrive.store(driveAmount);
@@ -16530,7 +16670,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     / static_cast<double>(measuredSamples))
                 : 0.0f;
 
-        S13NAMRack stateSource;
+        OpenStudioNAMRack stateSource;
         configureNeutralRack(stateSource);
         stateSource.chaosEnabled.store(1.0f);
         stateSource.chaosDrive.store(0.73f);
@@ -16540,7 +16680,7 @@ juce::var AudioEngine::runNAMRackRegression()
         stateSource.chaosLevelDb.store(-1.5f);
         juce::MemoryBlock state;
         stateSource.getStateInformation(state);
-        S13NAMRack stateRestored;
+        OpenStudioNAMRack stateRestored;
         stateRestored.setStateInformation(
             state.getData(),
             static_cast<int>(state.getSize()));
@@ -16580,7 +16720,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 && highDriveCapture.outputGuardHits == 0
                 && differenceRms > 0.005f
                 && highDriveRms > 0.005f
-                && highDrivePeak < S13NAMRack::namOutputSafetyKnee
+                && highDrivePeak < OpenStudioNAMRack::namOutputSafetyKnee
                 && std::abs(highDriveMean) < 0.05f
                 && stateRoundTrips);
         return juce::var(value);
@@ -16630,7 +16770,7 @@ juce::var AudioEngine::runNAMRackRegression()
             Render result;
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.precisionDriveEnabled.store(distortion ? 0.0f : 1.0f);
             rack.precisionDriveDrive.store(drive);
@@ -16878,7 +17018,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && silentRightPeak <= 1.0e-7f
             && silencePeak <= 1.0e-7f
             && std::abs(current.mean) < 0.01f
-            && current.peak < S13NAMRack::namOutputSafetyKnee
+            && current.peak < OpenStudioNAMRack::namOutputSafetyKnee
             && outputGuardHits == 0
             && precision.latency == current.latency;
         auto* value = new juce::DynamicObject();
@@ -16942,7 +17082,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 const int totalSamples = static_cast<int>(
                     std::round(sampleRate * 0.25));
                 juce::AudioBuffer<float> capture(1, totalSamples);
-                S13NAMRack rack;
+                OpenStudioNAMRack rack;
                 configureNeutralRack(rack);
                 rack.setEmbeddedDriveOversamplingFactor(factor);
                 rack.chaosEnabled.store(1.0f);
@@ -17135,7 +17275,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const int totalSamples = static_cast<int>(
                 std::round(sampleRate * 0.25));
             juce::AudioBuffer<float> capture(1, totalSamples);
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setEmbeddedDriveOversamplingFactor(factor);
             rack.chaosEnabled.store(1.0f);
@@ -17315,7 +17455,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     juce::Decibels::decibelsToGain(
                         static_cast<float>(inputPeakDbfs),
                         -300.0f);
-                S13NAMRack rack;
+                OpenStudioNAMRack rack;
                 configureNeutralRack(rack);
                 rack.setEmbeddedDriveOversamplingFactor(4);
                 rack.chaosEnabled.store(1.0f);
@@ -17448,7 +17588,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const int totalSamples =
                 static_cast<int>(
                     std::round(sampleRate * 0.5));
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.precisionDriveEnabled.store(1.0f);
             rack.precisionDriveDrive.store(
@@ -17893,7 +18033,7 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             AliasRender result;
             result.audio.resize(source.size(), 0.0f);
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setEmbeddedDriveOversamplingFactor(oversamplingFactor);
             rack.precisionDriveEnabled.store(distortion ? 0.0f : 1.0f);
@@ -18499,7 +18639,7 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 for (int profile = 0; profile < 2; ++profile)
                 {
-                    S13NAMRack rack;
+                    OpenStudioNAMRack rack;
                     configureNeutralRack(rack);
                     rack.setRoutedInputChannelCount(2);
                     rack.setEmbeddedDriveOversamplingFactor(factor);
@@ -18561,7 +18701,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             const float drive =
                                 calibrationDrives[driveIndex];
                             const float scale =
-                                S13NAMRack::resolveChaosSmallSignalScale(
+                                OpenStudioNAMRack::resolveChaosSmallSignalScale(
                                     static_cast<float>(mode), drive);
                             const double envelopeBoundDb = scale < 1.0f
                                 ? 32.0
@@ -18813,9 +18953,9 @@ juce::var AudioEngine::runNAMRackRegression()
         }
 
         const float heavyDefaultScale =
-            S13NAMRack::resolveChaosSmallSignalScale(0.0f, 0.62f);
+            OpenStudioNAMRack::resolveChaosSmallSignalScale(0.0f, 0.62f);
         const float crunchDefaultScale =
-            S13NAMRack::resolveChaosSmallSignalScale(2.0f, 0.62f);
+            OpenStudioNAMRack::resolveChaosSmallSignalScale(2.0f, 0.62f);
         const double heavyCollapsedDefaultRawGainDb =
             maximumRawByModeDrive[0][10];
         const double crunchCollapsedDefaultRawGainDb =
@@ -18840,10 +18980,10 @@ juce::var AudioEngine::runNAMRackRegression()
                 const float input = 0.25f
                     * static_cast<float>(index) / 1024.0f;
                 const float positive =
-                    S13NAMRack::applyChaosSmallSignalNormalizer(
+                    OpenStudioNAMRack::applyChaosSmallSignalNormalizer(
                         input, scale);
                 const float negative =
-                    S13NAMRack::applyChaosSmallSignalNormalizer(
+                    OpenStudioNAMRack::applyChaosSmallSignalNormalizer(
                         -input, scale);
                 maximumOddError = juce::jmax(
                     maximumOddError,
@@ -18860,7 +19000,7 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 mapperSaturatedIdentityExact =
                     mapperSaturatedIdentityExact
-                    && S13NAMRack::applyChaosSmallSignalNormalizer(
+                    && OpenStudioNAMRack::applyChaosSmallSignalNormalizer(
                            saturated, scale) == saturated;
             }
         }
@@ -19052,7 +19192,7 @@ juce::var AudioEngine::runNAMRackRegression()
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
 
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(2);
             rack.setEmbeddedDriveOversamplingFactor(factor);
@@ -19332,8 +19472,8 @@ juce::var AudioEngine::runNAMRackRegression()
         // renders do not enter that fallback, so fixed/uneven partition parity
         // alone cannot prove skip() agrees with one getNext() per sample at
         // the exact release-hold boundary.
-        S13NAMRack perSampleNormalizer;
-        S13NAMRack bulkNormalizer;
+        OpenStudioNAMRack perSampleNormalizer;
+        OpenStudioNAMRack bulkNormalizer;
         constexpr double skipParityEmbeddedRate = 192000.0;
         perSampleNormalizer.prepareChaosSmallSignalNormalizer(
             skipParityEmbeddedRate);
@@ -19341,16 +19481,16 @@ juce::var AudioEngine::runNAMRackRegression()
             skipParityEmbeddedRate);
         perSampleNormalizer.setChaosSmallSignalNormalizerTarget(
             1.0f, 1.0f, 1.0f, 1.0f,
-            S13NAMRack::bassInstrumentProfile, true);
+            OpenStudioNAMRack::bassInstrumentProfile, true);
         bulkNormalizer.setChaosSmallSignalNormalizerTarget(
             1.0f, 1.0f, 1.0f, 1.0f,
-            S13NAMRack::bassInstrumentProfile, true);
+            OpenStudioNAMRack::bassInstrumentProfile, true);
         perSampleNormalizer.setChaosSmallSignalNormalizerTarget(
             2.0f, 0.0f, 0.0f, 0.0f,
-            S13NAMRack::guitarInstrumentProfile, false);
+            OpenStudioNAMRack::guitarInstrumentProfile, false);
         bulkNormalizer.setChaosSmallSignalNormalizerTarget(
             2.0f, 0.0f, 0.0f, 0.0f,
-            S13NAMRack::guitarInstrumentProfile, false);
+            OpenStudioNAMRack::guitarInstrumentProfile, false);
         const int holdSamples =
             perSampleNormalizer.chaosSmallSignalReleaseHoldSamples;
         const std::array<int, 6> skipChunks {
@@ -19405,7 +19545,7 @@ juce::var AudioEngine::runNAMRackRegression()
             AutomationCapture result;
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(2);
             rack.setEmbeddedDriveOversamplingFactor(factor);
@@ -19894,7 +20034,7 @@ juce::var AudioEngine::runNAMRackRegression()
             constexpr float inputPeak = 1.0e-7f;
             StackedLevelCapture capture;
             capture.audio.resize(totalSamples, 0.0f);
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(1);
             rack.setEmbeddedDriveOversamplingFactor(4);
@@ -20229,7 +20369,7 @@ juce::var AudioEngine::runNAMRackRegression()
         result.audio.setSize(2, totalSamples);
         result.audio.clear();
 
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         configureNeutralRack(rack);
         rack.namEffectsDspVersion.store(
             recalledVersionMarker, std::memory_order_relaxed);
@@ -20506,7 +20646,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         std::abs(right)));
         }
         const float musicalTargetPeak =
-            S13NAMRack::namOutputSafetyKnee
+            OpenStudioNAMRack::namOutputSafetyKnee
             - 0.01f;
         musicalSource.applyGain(
             musicalTargetPeak
@@ -20519,7 +20659,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 const juce::AudioBuffer<float>& source,
                 juce::AudioBuffer<float>& destination)
         {
-            S13NAMRack::NAMOutputSafetyGuardResult
+            OpenStudioNAMRack::NAMOutputSafetyGuardResult
                 aggregate;
             std::array<float, 2> previous {};
             std::array<bool, 2> hasPrevious {};
@@ -20557,7 +20697,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         chunkSamples);
                 }
                 const auto result =
-                    S13NAMRack::
+                    OpenStudioNAMRack::
                         applyNAMOutputSafetyGuard(
                             chunk,
                             source
@@ -20603,7 +20743,7 @@ juce::var AudioEngine::runNAMRackRegression()
         std::array<bool, 2>
             musicalHasPrevious {};
         const auto musicalWholeResult =
-            S13NAMRack::
+            OpenStudioNAMRack::
                 applyNAMOutputSafetyGuard(
                     musicalWhole,
                     musicalWhole
@@ -20695,21 +20835,21 @@ juce::var AudioEngine::runNAMRackRegression()
             1, 0, -6.0f);
         excursionSource.setSample(
             0, 10,
-            S13NAMRack::
+            OpenStudioNAMRack::
                 namOutputSafetyKnee);
         excursionSource.setSample(
             1, 10,
-            -S13NAMRack::
+            -OpenStudioNAMRack::
                 namOutputSafetyKnee
                 * 0.5f);
         excursionSource.setSample(
             0, 11,
-            S13NAMRack::
+            OpenStudioNAMRack::
                 namOutputSafetyKnee
                 + 0.01f);
         excursionSource.setSample(
             1, 11,
-            -(S13NAMRack::
+            -(OpenStudioNAMRack::
                   namOutputSafetyKnee
               + 0.01f)
                 * 0.5f);
@@ -20735,7 +20875,7 @@ juce::var AudioEngine::runNAMRackRegression()
         std::array<bool, 2>
             excursionHasPrevious {};
         const auto excursionWholeResult =
-            S13NAMRack::
+            OpenStudioNAMRack::
                 applyNAMOutputSafetyGuard(
                     excursionWhole,
                     excursionWhole
@@ -20840,12 +20980,12 @@ juce::var AudioEngine::runNAMRackRegression()
                    + 0.75f)
                 <= 1.0e-6f
             && std::abs(protectedLeft)
-                < S13NAMRack::
+                < OpenStudioNAMRack::
                       namOutputSafetyCeiling
             && std::abs(
                    excursionWhole
                        .getSample(0, 10)
-                   - S13NAMRack::
+                   - OpenStudioNAMRack::
                          namOutputSafetyKnee)
                 <= 1.0e-7f
             && excursionWhole
@@ -20869,11 +21009,11 @@ juce::var AudioEngine::runNAMRackRegression()
             new juce::DynamicObject();
         value->setProperty(
             "knee",
-            S13NAMRack::
+            OpenStudioNAMRack::
                 namOutputSafetyKnee);
         value->setProperty(
             "ceiling",
-            S13NAMRack::
+            OpenStudioNAMRack::
                 namOutputSafetyCeiling);
         value->setProperty(
             "musicalTargetPeak",
@@ -20961,9 +21101,9 @@ juce::var AudioEngine::runNAMRackRegression()
             stereoHost.setSample(1, sample, stereoDryRight);
         }
 
-        S13NAMRack::mixNAMOutputForHost(
+        OpenStudioNAMRack::mixNAMOutputForHost(
             monoHost, monoDry, modelOutput, 2, wetMix);
-        S13NAMRack::mixNAMOutputForHost(
+        OpenStudioNAMRack::mixNAMOutputForHost(
             stereoHost, stereoDry, modelOutput, 2, wetMix);
 
         float monoMaxError = 0.0f;
@@ -21023,9 +21163,9 @@ juce::var AudioEngine::runNAMRackRegression()
             stageRamp.setSample(0, sample, 1.0f);
         }
 
-        S13NAMRack::mixNAMOutputForHost(
+        OpenStudioNAMRack::mixNAMOutputForHost(
             modelRamp, rampDry, rampWet, 1, 0.0f, 1.0f);
-        S13NAMRack::crossfadeProcessedWithDry(
+        OpenStudioNAMRack::crossfadeProcessedWithDry(
             stageRamp, rampDry, 0.0f, 1.0f);
 
         float modelRampMaxError = 0.0f;
@@ -21044,7 +21184,8 @@ juce::var AudioEngine::runNAMRackRegression()
 
         auto renderTrimRamp = [&] (bool inputTrim)
         {
-            S13NAMRack rack;
+            constexpr float sourceLevel = 0.2f;
+            OpenStudioNAMRack rack;
             rack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
             configureNeutralRack(rack);
 
@@ -21054,8 +21195,8 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::AudioBuffer<float> warmup(2, fixtureBlockSize);
             for (int sample = 0; sample < fixtureBlockSize; ++sample)
             {
-                warmup.setSample(0, sample, 1.0f);
-                warmup.setSample(1, sample, -0.5f);
+                warmup.setSample(0, sample, sourceLevel);
+                warmup.setSample(1, sample, -0.5f * sourceLevel);
             }
             juce::MidiBuffer midi;
             rack.processBlock(warmup, midi);
@@ -21068,8 +21209,8 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::AudioBuffer<float> block(2, fixtureBlockSize);
             for (int sample = 0; sample < fixtureBlockSize; ++sample)
             {
-                block.setSample(0, sample, 1.0f);
-                block.setSample(1, sample, -0.5f);
+                block.setSample(0, sample, sourceLevel);
+                block.setSample(1, sample, -0.5f * sourceLevel);
             }
             rack.processBlock(block, midi);
 
@@ -21093,10 +21234,11 @@ juce::var AudioEngine::runNAMRackRegression()
             value->setProperty(
                 "pass",
                 monotonic
-                    && block.getSample(0, 0) >= 0.9999f
-                    && block.getSample(0, 0) < 1.01f
-                    && block.getSample(0, fixtureBlockSize - 1) > 1.5f
-                    && block.getSample(0, fixtureBlockSize - 1) < 3.98f
+                    && block.getSample(0, 0) >= sourceLevel - 1.0e-4f
+                    && block.getSample(0, 0) < sourceLevel + 0.002f
+                    && block.getSample(0, fixtureBlockSize - 1) > 0.3f
+                    && block.getSample(0, fixtureBlockSize - 1)
+                        < sourceLevel * 3.98f
                     && maximumStep < 0.01f);
             return juce::var(value);
         };
@@ -21126,7 +21268,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runEmptyAmpProbe = [&] ()
     {
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         rack.setEmbeddedDriveOversamplingFactor(4);
         rack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         configureNeutralRack(rack);
@@ -21163,7 +21305,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runEmbeddedSaturatorOversamplingPolicyProbe = [&] ()
     {
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         rack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         configureNeutralRack(rack);
         rack.precisionDriveDrive.store(0.65f);
@@ -21235,7 +21377,7 @@ juce::var AudioEngine::runNAMRackRegression()
         bool factorSelectionPassed = true;
         for (const int factor : { 2, 4, 8 })
         {
-            S13NAMRack factorRack;
+            OpenStudioNAMRack factorRack;
             factorRack.setEmbeddedDriveOversamplingFactor(factor);
             factorRack.prepareToPlay(
                 fixtureSampleRate, fixtureBlockSize);
@@ -21331,7 +21473,7 @@ juce::var AudioEngine::runNAMRackRegression()
             bool distortionOn,
             bool enabledBeforePrepare)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.precisionDriveDrive.store(0.83f);
             rack.precisionDriveBright.store(0.71f);
@@ -21572,7 +21714,7 @@ juce::var AudioEngine::runNAMRackRegression()
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
 
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setEmbeddedDriveOversamplingFactor(factor);
             rack.precisionDriveEnabled.store(
@@ -22095,7 +22237,7 @@ juce::var AudioEngine::runNAMRackRegression()
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
 
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.chaosEnabled.store(1.0f, std::memory_order_relaxed);
             rack.chaosMode.store(0.0f, std::memory_order_relaxed);
@@ -22511,7 +22653,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     == gateDisabledFixed.latencySamples;
             outputBounded = outputBounded
                 && capture->maximumRawOutputPeak
-                    < S13NAMRack::namOutputSafetyKnee;
+                    < OpenStudioNAMRack::namOutputSafetyKnee;
             dcControlled = dcControlled
                 && std::abs(capture->means[0]) < 0.012
                 && std::abs(capture->means[1]) < 0.012;
@@ -22631,7 +22773,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runSaturatorAlignmentProbe = [&] ()
     {
-        S13Saturator saturator;
+        OpenStudioSaturator saturator;
         saturator.setOversamplingMode(1.0f);
         saturator.setOversamplingEnabled(true);
         saturator.mix.store(0.0f);
@@ -22731,7 +22873,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runSaturatorStateProbe = [&] ()
     {
-        S13Saturator source;
+        OpenStudioSaturator source;
         source.setOversamplingMode(2.0f);
         source.setOversamplingEnabled(true);
         source.prepareToPlay(
@@ -22739,7 +22881,7 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::MemoryBlock state;
         source.getStateInformation(state);
 
-        S13Saturator restored;
+        OpenStudioSaturator restored;
         restored.setStateInformation(
             state.getData(),
             static_cast<int>(state.getSize()));
@@ -22777,7 +22919,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "Standalone Saturator state must restore both its 4x quality selection and the enabled latency-bearing processing path.",
         saturatorStateProbe);
 
-    auto configureDrivenRack = [&] (S13NAMRack& rack)
+    auto configureDrivenRack = [&] (OpenStudioNAMRack& rack)
     {
         configureNeutralRack(rack);
         rack.precisionDriveEnabled.store(1.0f);
@@ -22826,7 +22968,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto renderPass = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             const auto& pattern)
         {
             juce::AudioBuffer<float> capture(2, totalSamples);
@@ -22854,13 +22996,13 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13NAMRack fixedRack;
+        OpenStudioNAMRack fixedRack;
         fixedRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         configureDrivenRack(fixedRack);
         const auto fixedCapture =
             renderPass(fixedRack, fixedPattern);
 
-        S13NAMRack unevenRack;
+        OpenStudioNAMRack unevenRack;
         unevenRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         configureDrivenRack(unevenRack);
         const auto unevenCapture =
@@ -22868,7 +23010,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const float partitionError =
             maxDiffBetweenBuffers(fixedCapture, unevenCapture);
 
-        S13NAMRack renderPreparedRack;
+        OpenStudioNAMRack renderPreparedRack;
         renderPreparedRack.prepareToPlay(
             fixtureSampleRate, 2048);
         configureDrivenRack(renderPreparedRack);
@@ -22938,7 +23080,7 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 for (int channels = 1; channels <= 2; ++channels)
                 {
-                    S13NAMRack rack;
+                    OpenStudioNAMRack rack;
                     rack.prepareToPlay(sampleRate, blockSize);
                     configureDrivenRack(rack);
                     int nonFiniteCount = 0;
@@ -23024,7 +23166,7 @@ juce::var AudioEngine::runNAMRackRegression()
         TrackProcessor track;
         track.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
-        auto rack = std::make_unique<S13NAMRack>();
+        auto rack = std::make_unique<OpenStudioNAMRack>();
         auto* const rackPointer = rack.get();
         const bool added = track.addTrackFX(
             std::move(rack),
@@ -23277,7 +23419,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr double benchmarkSampleRate = 48000.0;
         constexpr int benchmarkBlockSize = 128;
         constexpr int benchmarkBlocks = 4096;
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         rack.prepareToPlay(
             benchmarkSampleRate, benchmarkBlockSize);
         configureDrivenRack(rack);
@@ -23346,7 +23488,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const juce::String& id,
             int configuration)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.prepareToPlay(
                 benchmarkSampleRate, benchmarkBlockSize);
             configureNeutralRack(rack);
@@ -23578,7 +23720,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto configureReverb = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             float engineVersion,
             bool shimmerEnabled)
         {
@@ -23587,7 +23729,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 std::memory_order_relaxed);
             reverb.algorithm.store(
                 static_cast<float>(
-                    S13Reverb::Algorithm::Plate),
+                    OpenStudioReverb::Algorithm::Plate),
                 std::memory_order_relaxed);
             reverb.roomSize.store(
                 0.55f, std::memory_order_relaxed);
@@ -23725,7 +23867,7 @@ juce::var AudioEngine::runNAMRackRegression()
                  repeat < repeatCount;
                  ++repeat)
             {
-                S13Reverb reverb;
+                OpenStudioReverb reverb;
                 configureReverb(
                     reverb,
                     engineVersion,
@@ -23937,7 +24079,7 @@ juce::var AudioEngine::runNAMRackRegression()
         checks,
         "reverb_v4_huge_endpoint_cpu_comparison",
         "diagnostic_only",
-        "Machine/build-specific direct S13Reverb V3-versus-V4 timing at Decay 10 with Shimmer off/on and exact 8/16/128-sample calls. Each result is the median of three equal-duration runs and includes the identical input-copy fixture overhead; no timing value is an objective release gate.",
+        "Machine/build-specific direct OpenStudioReverb V3-versus-V4 timing at Decay 10 with Shimmer off/on and exact 8/16/128-sample calls. Each result is the median of three equal-duration runs and includes the identical input-copy fixture overhead; no timing value is an objective release gate.",
         reverbV4HugeCpuDiagnostic);
 
     auto runReverbRuntimeCacheProbe = [&] ()
@@ -23946,7 +24088,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int cacheBlockSize = 128;
         juce::MidiBuffer midi;
 
-        S13Reverb directReverb;
+        OpenStudioReverb directReverb;
         directReverb.engineVersion.store(
             2.0f, std::memory_order_relaxed);
         directReverb.lowCut.store(
@@ -23993,7 +24135,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && coefficientRestabilisedCount == 2
             && coefficientReprepareCount == 1;
 
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         rack.reverbEnabled.store(
             1.0f, std::memory_order_relaxed);
         rack.reverbMix.store(
@@ -24028,12 +24170,12 @@ juce::var AudioEngine::runNAMRackRegression()
         const auto tailStableBlockCount =
             processRackBlock();
         rack.reverbVoice.store(
-            static_cast<float>(S13NAMRack::plateReverbVoice),
+            static_cast<float>(OpenStudioNAMRack::plateReverbVoice),
             std::memory_order_relaxed);
         const auto tailVoiceChangedCount =
             processRackBlock();
         rack.reverbVoice.store(
-            static_cast<float>(S13NAMRack::studioReverbVoice),
+            static_cast<float>(OpenStudioNAMRack::studioReverbVoice),
             std::memory_order_relaxed);
         const auto tailVoiceRestoredCount =
             processRackBlock();
@@ -24199,7 +24341,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "Standalone V2 coefficients must remain cached, while the NAM Rack current Reverb tail cache invalidates for Voice and current tail controls. Retired Character, Freeze, Shimmer Regen, and engine selectors must be inert.",
         reverbRuntimeCacheProbe);
 
-    S13NAMRack retiredTransposeRack;
+    OpenStudioNAMRack retiredTransposeRack;
     retiredTransposeRack.prepareToPlay(
         fixtureSampleRate, fixtureBlockSize);
     const int latencyBeforeLegacyTransposeRequest =
@@ -24232,70 +24374,70 @@ juce::var AudioEngine::runNAMRackRegression()
         "Legacy NAM transpose requests must remain neutral: the compatibility setter stores zero and cannot change rack latency.",
         juce::var(retiredTransposeValue));
 
-    constexpr std::array<S13Reverb::Algorithm, 4> supportedReverbAlgorithms {
-        S13Reverb::Algorithm::Room,
-        S13Reverb::Algorithm::Hall,
-        S13Reverb::Algorithm::Plate,
-        S13Reverb::Algorithm::Chamber
+    constexpr std::array<OpenStudioReverb::Algorithm, 4> supportedReverbAlgorithms {
+        OpenStudioReverb::Algorithm::Room,
+        OpenStudioReverb::Algorithm::Hall,
+        OpenStudioReverb::Algorithm::Plate,
+        OpenStudioReverb::Algorithm::Chamber
     };
     std::array<double, supportedReverbAlgorithms.size()> supportedReverbTailSeconds {};
     bool supportedReverbTailsFinite = true;
     for (size_t index = 0; index < supportedReverbAlgorithms.size(); ++index)
     {
-        supportedReverbTailSeconds[index] = S13Reverb::calculateTailLengthSeconds(
+        supportedReverbTailSeconds[index] = OpenStudioReverb::calculateTailLengthSeconds(
             static_cast<int>(supportedReverbAlgorithms[index]),
             0.92f, 1.0f, 0.28f, false, 500.0f, 12.0f, fixtureSampleRate);
         supportedReverbTailsFinite = supportedReverbTailsFinite
             && std::isfinite(supportedReverbTailSeconds[index])
             && supportedReverbTailSeconds[index] > 0.5;
     }
-    const double frozenPlateTailSeconds = S13Reverb::calculateTailLengthSeconds(
-        static_cast<int>(S13Reverb::Algorithm::Plate),
+    const double frozenPlateTailSeconds = OpenStudioReverb::calculateTailLengthSeconds(
+        static_cast<int>(OpenStudioReverb::Algorithm::Plate),
         0.92f, 1.0f, 0.28f, true, 500.0f, 12.0f, fixtureSampleRate);
-    const double bypassedReverbTailSeconds = S13Reverb::calculateTailLengthSeconds(
-        static_cast<int>(S13Reverb::Algorithm::Plate),
+    const double bypassedReverbTailSeconds = OpenStudioReverb::calculateTailLengthSeconds(
+        static_cast<int>(OpenStudioReverb::Algorithm::Plate),
         0.92f, 0.0f, 0.0f, false, 500.0f, 12.0f, fixtureSampleRate);
     const double v2BasePlateTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV2(
+        OpenStudioReverb::calculateTailLengthSecondsV2(
             static_cast<int>(
-                S13Reverb::Algorithm::Plate),
+                OpenStudioReverb::Algorithm::Plate),
             0.92f, 1.0f, 0.28f, false, 500.0f,
             12.0f, fixtureSampleRate, 0.0f, 0.55f);
     const double v2ShimmerPlateTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV2(
+        OpenStudioReverb::calculateTailLengthSecondsV2(
             static_cast<int>(
-                S13Reverb::Algorithm::Plate),
+                OpenStudioReverb::Algorithm::Plate),
             0.92f, 1.0f, 0.28f, false, 500.0f,
             12.0f, fixtureSampleRate, 1.0f, 1.0f);
     const double v2BypassedShimmerTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV2(
+        OpenStudioReverb::calculateTailLengthSecondsV2(
             static_cast<int>(
-                S13Reverb::Algorithm::Plate),
+                OpenStudioReverb::Algorithm::Plate),
             0.92f, 0.0f, 0.0f, false, 500.0f,
             12.0f, fixtureSampleRate, 1.0f, 1.0f);
     const double v3BaseTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV3(
+        OpenStudioReverb::calculateTailLengthSecondsV3(
             1.0f, 500.0f, 12.0f,
             fixtureSampleRate, 0.0f);
     const double v3ShimmerTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV3(
+        OpenStudioReverb::calculateTailLengthSecondsV3(
             1.0f, 500.0f, 12.0f,
             fixtureSampleRate, 1.0f);
     const double v3BypassedShimmerTailSeconds =
-        S13Reverb::calculateTailLengthSecondsV3(
+        OpenStudioReverb::calculateTailLengthSecondsV3(
             0.0f, 500.0f, 12.0f,
             fixtureSampleRate, 1.0f);
-    S13NAMRack automatedReverbTailRack;
+    OpenStudioNAMRack automatedReverbTailRack;
     automatedReverbTailRack.prepareToPlay(
         fixtureSampleRate, fixtureBlockSize);
     automatedReverbTailRack.reverbEngineVersion.store(
         3.0f, std::memory_order_relaxed);
     const double ordinaryAutomatedReverbTailSeconds =
         automatedReverbTailRack.getAutomatedTailLengthSeconds(
-            S13NAMRack::tailAutomationReverb);
+            OpenStudioNAMRack::tailAutomationReverb);
     const double retiredFreezeAutomatedReverbTailSeconds =
         automatedReverbTailRack.getAutomatedTailLengthSeconds(
-            S13NAMRack::tailAutomationReservedReverbFreeze);
+            OpenStudioNAMRack::tailAutomationReservedReverbFreeze);
     const bool retiredFreezeTailIsIgnored =
         retiredFreezeAutomatedReverbTailSeconds == 0.0
         && ordinaryAutomatedReverbTailSeconds > 0.0
@@ -24306,7 +24448,7 @@ juce::var AudioEngine::runNAMRackRegression()
         track.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
 
-        auto rack = std::make_unique<S13NAMRack>();
+        auto rack = std::make_unique<OpenStudioNAMRack>();
         auto* const rackPointer = rack.get();
         rackPointer->reverbEnabled.store(
             1.0f, std::memory_order_relaxed);
@@ -24426,8 +24568,8 @@ juce::var AudioEngine::runNAMRackRegression()
         TrackProcessor track;
         track.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
 
-        auto neighbourRack = std::make_unique<S13NAMRack>();
-        auto automatedRack = std::make_unique<S13NAMRack>();
+        auto neighbourRack = std::make_unique<OpenStudioNAMRack>();
+        auto automatedRack = std::make_unique<OpenStudioNAMRack>();
         auto* const neighbourRackIdentity = neighbourRack.get();
         auto* const automatedRackIdentity = automatedRack.get();
         const bool neighbourRackAdded = track.addTrackFX(
@@ -24514,9 +24656,9 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool staleRackRouteGone = ! track.resolveAutomationTarget(
             "builtin_track_1_ampGainDb", false).has_value();
 
-        auto* rackAfterReorder = dynamic_cast<S13NAMRack*>(
+        auto* rackAfterReorder = dynamic_cast<OpenStudioNAMRack*>(
             track.getTrackFXProcessor(0));
-        auto* neighbourAfterReorder = dynamic_cast<S13NAMRack*>(
+        auto* neighbourAfterReorder = dynamic_cast<OpenStudioNAMRack*>(
             track.getTrackFXProcessor(1));
         if (rackAfterReorder != nullptr)
         {
@@ -24573,8 +24715,8 @@ juce::var AudioEngine::runNAMRackRegression()
         // race that a purely sequential lifecycle check cannot observe.
         TrackProcessor stressTrack;
         stressTrack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
-        auto stressFirstRack = std::make_unique<S13NAMRack>();
-        auto stressSecondRack = std::make_unique<S13NAMRack>();
+        auto stressFirstRack = std::make_unique<OpenStudioNAMRack>();
+        auto stressSecondRack = std::make_unique<OpenStudioNAMRack>();
         auto* const stressFirstIdentity = stressFirstRack.get();
         auto* const stressSecondIdentity = stressSecondRack.get();
         const bool stressRacksAdded = stressTrack.addTrackFX(
@@ -24640,9 +24782,9 @@ juce::var AudioEngine::runNAMRackRegression()
                 std::this_thread::yield();
         }
         stressAudioThread.join();
-        auto* const stressFirstAfter = dynamic_cast<S13NAMRack*>(
+        auto* const stressFirstAfter = dynamic_cast<OpenStudioNAMRack*>(
             stressTrack.getTrackFXProcessor(0));
-        auto* const stressSecondAfter = dynamic_cast<S13NAMRack*>(
+        auto* const stressSecondAfter = dynamic_cast<OpenStudioNAMRack*>(
             stressTrack.getTrackFXProcessor(1));
         const bool concurrentPublicationStressPassed =
             stressReordersPassed
@@ -24712,7 +24854,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int totalSamples = 96000;
         constexpr int analysisStart = 48000;
         constexpr float sourceFrequency = 220.0f;
-        S13OctaveShimmerShifter shifter;
+        OpenStudioOctaveShimmerShifter shifter;
         shifter.prepare(fixtureSampleRate);
         std::vector<float> firstPass(
             static_cast<size_t>(totalSamples), 0.0f);
@@ -24929,7 +25071,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 juce::roundToInt(sampleRate);
             const int analysisSamples =
                 totalSamples - analysisStart;
-            S13OctaveShimmerShifter shifter;
+            OpenStudioOctaveShimmerShifter shifter;
             shifter.prepare(sampleRate);
 
             std::array<double, 3> real {};
@@ -25274,7 +25416,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             minimumGrainWrapCount,
                             grainWrapCount);
 
-                    S13OctaveShimmerShifter shifter;
+                    OpenStudioOctaveShimmerShifter shifter;
                     shifter.prepare(
                         sampleRate,
                         grainDurationSeconds,
@@ -25602,13 +25744,13 @@ juce::var AudioEngine::runNAMRackRegression()
             {
               for (const int blockSize : blockSizes)
               {
-                S13Reverb reverb;
+                OpenStudioReverb reverb;
                 reverb.engineVersion.store(
                     engineVersion,
                     std::memory_order_relaxed);
                 reverb.algorithm.store(
                     static_cast<float>(
-                        S13Reverb::Algorithm::Plate),
+                        OpenStudioReverb::Algorithm::Plate),
                     std::memory_order_relaxed);
                 reverb.roomSize.store(
                     0.55f, std::memory_order_relaxed);
@@ -26169,7 +26311,7 @@ juce::var AudioEngine::runNAMRackRegression()
             127, 509, 64, 1000, 31, 257, 733
         };
         auto configureReverb = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             float shimmer,
             float shimmerRegen = 0.55f,
             float engineVersion = 3.0f)
@@ -26178,7 +26320,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 engineVersion);
             reverb.algorithm.store(
                 static_cast<float>(
-                    S13Reverb::Algorithm::Plate));
+                    OpenStudioReverb::Algorithm::Plate));
             reverb.roomSize.store(0.72f);
             reverb.damping.store(0.34f);
             reverb.wetLevel.store(1.0f);
@@ -26200,7 +26342,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 shimmerRegen);
         };
         auto renderReverb = [&] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             const auto& pattern,
             int inputMode)
         {
@@ -26296,7 +26438,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return capture;
         };
 
-        S13Reverb fixedShimmerReverb;
+        OpenStudioReverb fixedShimmerReverb;
         configureReverb(fixedShimmerReverb, 0.78f);
         fixedShimmerReverb.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -26306,7 +26448,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb legacyShimmerReverb;
+        OpenStudioReverb legacyShimmerReverb;
         configureReverb(
             legacyShimmerReverb,
             0.78f,
@@ -26320,7 +26462,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb unevenShimmerReverb;
+        OpenStudioReverb unevenShimmerReverb;
         configureReverb(unevenShimmerReverb, 0.78f);
         unevenShimmerReverb.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -26339,7 +26481,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb baseReverb;
+        OpenStudioReverb baseReverb;
         configureReverb(baseReverb, 0.0f);
         baseReverb.prepareToPlay(
             fixtureSampleRate, 1024);
@@ -26349,7 +26491,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb fixedVoiceReferenceReverb;
+        OpenStudioReverb fixedVoiceReferenceReverb;
         configureReverb(
             fixedVoiceReferenceReverb, 0.47f);
         fixedVoiceReferenceReverb.prepareToPlay(
@@ -26360,12 +26502,12 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb retiredControlsReverb;
+        OpenStudioReverb retiredControlsReverb;
         configureReverb(
             retiredControlsReverb, 0.47f);
         retiredControlsReverb.algorithm.store(
             static_cast<float>(
-                S13Reverb::Algorithm::Room));
+                OpenStudioReverb::Algorithm::Room));
         retiredControlsReverb.roomSize.store(0.0f);
         retiredControlsReverb.width.store(0.0f);
         retiredControlsReverb.freezeMode.store(1.0f);
@@ -26383,7 +26525,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb preDelayOnsetReverb;
+        OpenStudioReverb preDelayOnsetReverb;
         configureReverb(
             preDelayOnsetReverb, 0.0f);
         constexpr float onsetPreDelayMs = 50.0f;
@@ -26423,7 +26565,7 @@ juce::var AudioEngine::runNAMRackRegression()
             firstWetOutputIndex
                 >= expectedPreDelaySamples - 2;
 
-        S13Reverb shimmerZeroMaximumRegenReverb;
+        OpenStudioReverb shimmerZeroMaximumRegenReverb;
         configureReverb(
             shimmerZeroMaximumRegenReverb,
             0.0f,
@@ -26436,7 +26578,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeStereo);
 
-        S13Reverb antiPhaseReverb;
+        OpenStudioReverb antiPhaseReverb;
         configureReverb(antiPhaseReverb, 0.0f);
         antiPhaseReverb.preDelay.store(0.0f);
         antiPhaseReverb.earlyLevel.store(0.0f);
@@ -26448,7 +26590,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeAntiPhase);
 
-        S13Reverb leftOnlyReverb;
+        OpenStudioReverb leftOnlyReverb;
         configureReverb(
             leftOnlyReverb, 0.78f, 0.75f);
         leftOnlyReverb.preDelay.store(0.0f);
@@ -26462,7 +26604,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeLeftOnly);
 
-        S13Reverb rightOnlyReverb;
+        OpenStudioReverb rightOnlyReverb;
         configureReverb(
             rightOnlyReverb, 0.78f, 0.75f);
         rightOnlyReverb.preDelay.store(0.0f);
@@ -26476,7 +26618,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeRightOnly);
 
-        S13Reverb leftOnlyBaseReverb;
+        OpenStudioReverb leftOnlyBaseReverb;
         configureReverb(
             leftOnlyBaseReverb, 0.0f, 0.75f);
         leftOnlyBaseReverb.preDelay.store(0.0f);
@@ -26490,7 +26632,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeLeftOnly);
 
-        S13Reverb rightOnlyBaseReverb;
+        OpenStudioReverb rightOnlyBaseReverb;
         configureReverb(
             rightOnlyBaseReverb, 0.0f, 0.75f);
         rightOnlyBaseReverb.preDelay.store(0.0f);
@@ -26504,7 +26646,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeRightOnly);
 
-        S13Reverb monoInputReverb;
+        OpenStudioReverb monoInputReverb;
         configureReverb(
             monoInputReverb, 0.0f, 0.75f);
         monoInputReverb.preDelay.store(0.0f);
@@ -26518,7 +26660,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fixedPattern,
                 reverbProbeMono);
 
-        S13Reverb collapsedStereoInputReverb;
+        OpenStudioReverb collapsedStereoInputReverb;
         configureReverb(
             collapsedStereoInputReverb, 0.0f);
         collapsedStereoInputReverb.prepareToPlay(
@@ -26962,7 +27104,7 @@ juce::var AudioEngine::runNAMRackRegression()
             baseStereoTransferPass
             && shimmerStereoTransferPass;
 
-        S13Reverb dryLatencyReverb;
+        OpenStudioReverb dryLatencyReverb;
         configureReverb(
             dryLatencyReverb, 1.0f, 1.0f);
         dryLatencyReverb.wetLevel.store(0.0f);
@@ -27026,7 +27168,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && dryImpulseMaximumError <= 1.0e-7f
             && dryPathLatencySamples == 0;
 
-        S13Reverb stabilityReverb;
+        OpenStudioReverb stabilityReverb;
         configureReverb(
             stabilityReverb, 1.0f, 1.0f);
         stabilityReverb.roomSize.store(0.92f);
@@ -27087,7 +27229,7 @@ juce::var AudioEngine::runNAMRackRegression()
             stabilityReverb
                 .getEmergencyBoundHitCount();
 
-        S13Reverb tailShutdownReverb;
+        OpenStudioReverb tailShutdownReverb;
         configureReverb(
             tailShutdownReverb, 0.0f);
         tailShutdownReverb.preDelay.store(0.0f);
@@ -27124,7 +27266,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && tailShutdownSamples
                 < tailShutdownLimit;
 
-        S13Reverb enabledSleepReverb;
+        OpenStudioReverb enabledSleepReverb;
         configureReverb(
             enabledSleepReverb, 0.0f);
         enabledSleepReverb.preDelay.store(50.0f);
@@ -27425,7 +27567,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float maximumRawWetOutputPeak = 0.0f;
         };
 
-        auto configure = [] (S13Reverb& reverb,
+        auto configure = [] (OpenStudioReverb& reverb,
                              float engineVersion,
                              float decaySeconds,
                              float shimmerAmount)
@@ -27434,7 +27576,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 engineVersion, std::memory_order_relaxed);
             reverb.algorithm.store(
                 static_cast<float>(
-                    S13Reverb::Algorithm::Plate),
+                    OpenStudioReverb::Algorithm::Plate),
                 std::memory_order_relaxed);
             reverb.roomSize.store(
                 0.55f, std::memory_order_relaxed);
@@ -27482,7 +27624,7 @@ juce::var AudioEngine::runNAMRackRegression()
                            int inputMode,
                            bool automateDecay)
         {
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             configure(
                 reverb,
                 engineVersion,
@@ -29174,7 +29316,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto configure = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             float engineVersion,
             int voice,
             float decayControl,
@@ -29183,7 +29325,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float padMode = 0.0f)
         {
             const auto macro =
-                S13NAMRack::resolveReverbMacroState(
+                OpenStudioNAMRack::resolveReverbMacroState(
                     static_cast<float>(voice),
                     0.46f,
                     decayControl,
@@ -29191,7 +29333,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     23.0f,
                     90.0f,
                     textureControl,
-                    S13NAMRack::guitarInstrumentProfile,
+                    OpenStudioNAMRack::guitarInstrumentProfile,
                     padMode);
             reverb.engineVersion.store(
                 engineVersion, std::memory_order_relaxed);
@@ -29251,7 +29393,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float padMode = 0.0f,
             bool padToneBurst = false)
         {
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             configure(
                 reverb,
                 engineVersion,
@@ -29443,56 +29585,56 @@ juce::var AudioEngine::runNAMRackRegression()
         }
 
         const auto studioMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 0.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.0f, S13NAMRack::bassInstrumentProfile);
+                0.0f, OpenStudioNAMRack::bassInstrumentProfile);
         const auto plateGuitarMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 1.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.0f, S13NAMRack::guitarInstrumentProfile);
+                0.0f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto plateBassMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 1.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.0f, S13NAMRack::bassInstrumentProfile);
+                0.0f, OpenStudioNAMRack::bassInstrumentProfile);
         const auto plateShimmerMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 1.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.73f, S13NAMRack::guitarInstrumentProfile);
+                0.73f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto hallStillMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 2.0f, 0.28f, 2.2f, 0.15f, 18.0f, 120.0f,
-                0.0f, S13NAMRack::guitarInstrumentProfile);
+                0.0f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto hallMotionMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 2.0f, 0.28f, 2.2f, 0.85f, 18.0f, 120.0f,
-                1.0f, S13NAMRack::guitarInstrumentProfile);
+                1.0f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto hallBassMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 2.0f, 0.28f, 2.2f, 0.85f, 18.0f, 120.0f,
-                1.0f, S13NAMRack::bassInstrumentProfile);
+                1.0f, OpenStudioNAMRack::bassInstrumentProfile);
         const auto roomSmallMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 3.0f, 0.28f, 0.2f, 0.62f, 18.0f, 120.0f,
-                0.0f, S13NAMRack::guitarInstrumentProfile);
+                0.0f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto roomLargeEarlyMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 3.0f, 0.28f, 12.0f, 0.62f, 18.0f, 120.0f,
-                1.0f, S13NAMRack::guitarInstrumentProfile);
+                1.0f, OpenStudioNAMRack::guitarInstrumentProfile);
         const auto roomBassMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 3.0f, 0.28f, 12.0f, 0.62f, 18.0f, 120.0f,
-                1.0f, S13NAMRack::bassInstrumentProfile);
+                1.0f, OpenStudioNAMRack::bassInstrumentProfile);
         const auto padOffMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 0.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.40f, S13NAMRack::guitarInstrumentProfile, 0.0f);
+                0.40f, OpenStudioNAMRack::guitarInstrumentProfile, 0.0f);
         const auto padMacro =
-            S13NAMRack::resolveReverbMacroState(
+            OpenStudioNAMRack::resolveReverbMacroState(
                 0.0f, 0.28f, 2.2f, 0.62f, 18.0f, 120.0f,
-                0.40f, S13NAMRack::guitarInstrumentProfile, 1.0f);
+                0.40f, OpenStudioNAMRack::guitarInstrumentProfile, 1.0f);
         const auto ordinaryFieldsMatch = [] (
-            const S13NAMRack::ReverbMacroState& first,
-            const S13NAMRack::ReverbMacroState& second) noexcept
+            const OpenStudioNAMRack::ReverbMacroState& first,
+            const OpenStudioNAMRack::ReverbMacroState& second) noexcept
         {
             return first.voice == second.voice
                 && first.algorithmIndex == second.algorithmIndex
@@ -29519,9 +29661,9 @@ juce::var AudioEngine::runNAMRackRegression()
             && padMacro.padMode == 1.0f
             && ordinaryFieldsMatch(padOffMacro, padMacro);
         const bool macroContractPass =
-            studioMacro.voice == S13NAMRack::studioReverbVoice
+            studioMacro.voice == OpenStudioNAMRack::studioReverbVoice
             && studioMacro.algorithmIndex
-                == static_cast<int>(S13Reverb::Algorithm::Plate)
+                == static_cast<int>(OpenStudioReverb::Algorithm::Plate)
             && studioMacro.roomSize == 0.55f
             && studioMacro.damping == 1.0f - 0.62f * 0.82f
             && studioMacro.wetGain == 0.28f * (2.0f - 0.28f)
@@ -29564,28 +29706,28 @@ juce::var AudioEngine::runNAMRackRegression()
 
         const auto hallStillCapture = render(
             5.0f,
-            S13NAMRack::hallReverbVoice,
+            OpenStudioNAMRack::hallReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
             0.0f);
         const auto hallMotionCapture = render(
             5.0f,
-            S13NAMRack::hallReverbVoice,
+            OpenStudioNAMRack::hallReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
             1.0f);
         const auto roomLateCapture = render(
             5.0f,
-            S13NAMRack::roomReverbVoice,
+            OpenStudioNAMRack::roomReverbVoice,
             fixedPartitions,
             6.1f,
             0.63f,
             0.0f);
         const auto roomEarlyCapture = render(
             5.0f,
-            S13NAMRack::roomReverbVoice,
+            OpenStudioNAMRack::roomReverbVoice,
             fixedPartitions,
             6.1f,
             0.63f,
@@ -29600,7 +29742,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         const auto ordinaryShimmerCapture = render(
             5.0f,
-            S13NAMRack::studioReverbVoice,
+            OpenStudioNAMRack::studioReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
@@ -29609,7 +29751,7 @@ juce::var AudioEngine::runNAMRackRegression()
             true);
         const auto padFixedCapture = render(
             5.0f,
-            S13NAMRack::studioReverbVoice,
+            OpenStudioNAMRack::studioReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
@@ -29618,7 +29760,7 @@ juce::var AudioEngine::runNAMRackRegression()
             true);
         const auto padUnevenCapture = render(
             5.0f,
-            S13NAMRack::studioReverbVoice,
+            OpenStudioNAMRack::studioReverbVoice,
             unevenPartitions,
             4.4f,
             0.63f,
@@ -29627,7 +29769,7 @@ juce::var AudioEngine::runNAMRackRegression()
             true);
         const auto padOffZeroShimmerCapture = render(
             5.0f,
-            S13NAMRack::studioReverbVoice,
+            OpenStudioNAMRack::studioReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
@@ -29636,7 +29778,7 @@ juce::var AudioEngine::runNAMRackRegression()
             true);
         const auto padZeroShimmerCapture = render(
             5.0f,
-            S13NAMRack::studioReverbVoice,
+            OpenStudioNAMRack::studioReverbVoice,
             fixedPartitions,
             4.4f,
             0.63f,
@@ -29762,12 +29904,12 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr int switchSample = 12000;
             constexpr int switchRenderSamples = 48000;
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             configure(
                 reverb,
                     static_cast<float>(
-                        S13NAMRack::currentReverbEngineVersion),
-                    S13NAMRack::studioReverbVoice,
+                        OpenStudioNAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::studioReverbVoice,
                     4.4f,
                     0.63f,
                     0.0f);
@@ -29788,8 +29930,8 @@ juce::var AudioEngine::runNAMRackRegression()
                     configure(
                         reverb,
                         static_cast<float>(
-                            S13NAMRack::currentReverbEngineVersion),
-                        S13NAMRack::roomReverbVoice,
+                            OpenStudioNAMRack::currentReverbEngineVersion),
+                        OpenStudioNAMRack::roomReverbVoice,
                         4.4f,
                         0.63f,
                         0.0f);
@@ -30051,22 +30193,22 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto configure = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             bool padEnabled)
         {
-            const auto macro = S13NAMRack::resolveReverbMacroState(
-                static_cast<float>(S13NAMRack::studioReverbVoice),
+            const auto macro = OpenStudioNAMRack::resolveReverbMacroState(
+                static_cast<float>(OpenStudioNAMRack::studioReverbVoice),
                 0.46f,
                 2.4f,
                 0.63f,
                 23.0f,
                 90.0f,
                 0.0f,
-                S13NAMRack::guitarInstrumentProfile,
+                OpenStudioNAMRack::guitarInstrumentProfile,
                 padEnabled ? 1.0f : 0.0f);
             reverb.engineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::currentReverbEngineVersion),
                 std::memory_order_relaxed);
             reverb.rackVoice.store(
                 static_cast<float>(macro.voice),
@@ -30120,7 +30262,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const std::array<int, 6>& partitions,
             double livePadOffSeconds)
         {
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             configure(reverb, padEnabled);
             reverb.prepareToPlay(sampleRate, maximumBlockSize);
             juce::AudioBuffer<float> storage(2, maximumBlockSize);
@@ -30928,7 +31070,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         auto* value = new juce::DynamicObject();
         value->setProperty(
-            "fixture", "full_s13_reverb_pad_on_minus_pad_off");
+            "fixture", "full_openstudio_reverb_pad_on_minus_pad_off");
         value->setProperty("renderSeconds", renderSeconds);
         value->setProperty("capturesHealthy", capturesHealthy);
         value->setProperty("maximumOutputPeak", sparseOn.peak);
@@ -31087,7 +31229,7 @@ juce::var AudioEngine::runNAMRackRegression()
         reverbV5PadV3ReferenceBehaviorProbe.getProperty(
             "referenceBehaviorPass", false)
             ? "pass" : "fail",
-        "Using the complete S13Reverb path with ordinary Shimmer at zero, PAD V3 must keep the whole deterministic fixture within 1 dB and its intentionally more audible isolated wet window within -3 to +4.5 dB of ordinary Reverb, sustain a longer but declining and bounded tail, drain below -90 dBFS after a live Off, keep residual stereo correlation in -0.25 to +0.40 and Side/Mid in -3 to +1.5 dB, and remain callback-partition invariant. This deliberately does not force Neural's phase-cancelling replacement behavior onto the additive NAM PAD contract.",
+        "Using the complete OpenStudioReverb path with ordinary Shimmer at zero, PAD V3 must keep the whole deterministic fixture within 1 dB and its intentionally more audible isolated wet window within -3 to +4.5 dB of ordinary Reverb, sustain a longer but declining and bounded tail, drain below -90 dBFS after a live Off, keep residual stereo correlation in -0.25 to +0.40 and Side/Mid in -3 to +1.5 dB, and remain callback-partition invariant. This deliberately does not force Neural's phase-cancelling replacement behavior onto the additive NAM PAD contract.",
         reverbV5PadV3ReferenceBehaviorProbe);
     addCheck(
         checks,
@@ -31127,8 +31269,8 @@ juce::var AudioEngine::runNAMRackRegression()
     auto runReverbV5PadMacroIsolationProbe = [] ()
     {
         const auto ordinaryFieldsMatch = [] (
-            const S13NAMRack::ReverbMacroState& first,
-            const S13NAMRack::ReverbMacroState& second) noexcept
+            const OpenStudioNAMRack::ReverbMacroState& first,
+            const OpenStudioNAMRack::ReverbMacroState& second) noexcept
         {
             return first.voice == second.voice
                 && first.algorithmIndex == second.algorithmIndex
@@ -31153,12 +31295,12 @@ juce::var AudioEngine::runNAMRackRegression()
 
         juce::Array<juce::var> cases;
         bool allCasesPass = true;
-        for (int voice = S13NAMRack::studioReverbVoice;
-             voice <= S13NAMRack::roomReverbVoice;
+        for (int voice = OpenStudioNAMRack::studioReverbVoice;
+             voice <= OpenStudioNAMRack::roomReverbVoice;
              ++voice)
         {
-            for (int profile = S13NAMRack::guitarInstrumentProfile;
-                 profile <= S13NAMRack::bassInstrumentProfile;
+            for (int profile = OpenStudioNAMRack::guitarInstrumentProfile;
+                 profile <= OpenStudioNAMRack::bassInstrumentProfile;
                  ++profile)
             {
                 const float mix = 0.17f
@@ -31176,7 +31318,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     : 0.31f
                         + 0.19f * static_cast<float>(profile);
                 const auto padOff =
-                    S13NAMRack::resolveReverbMacroState(
+                    OpenStudioNAMRack::resolveReverbMacroState(
                         static_cast<float>(voice),
                         mix,
                         decay,
@@ -31187,7 +31329,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         profile,
                         0.0f);
                 const auto padOn =
-                    S13NAMRack::resolveReverbMacroState(
+                    OpenStudioNAMRack::resolveReverbMacroState(
                         static_cast<float>(voice),
                         mix,
                         decay,
@@ -31198,7 +31340,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         profile,
                         1.0f);
                 const auto belowThreshold =
-                    S13NAMRack::resolveReverbMacroState(
+                    OpenStudioNAMRack::resolveReverbMacroState(
                         static_cast<float>(voice),
                         mix,
                         decay,
@@ -31209,7 +31351,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         profile,
                         0.499f);
                 const auto atThreshold =
-                    S13NAMRack::resolveReverbMacroState(
+                    OpenStudioNAMRack::resolveReverbMacroState(
                         static_cast<float>(voice),
                         mix,
                         decay,
@@ -31293,22 +31435,22 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto applyPadMacro = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             float padMode)
         {
-            const auto macro = S13NAMRack::resolveReverbMacroState(
-                static_cast<float>(S13NAMRack::studioReverbVoice),
+            const auto macro = OpenStudioNAMRack::resolveReverbMacroState(
+                static_cast<float>(OpenStudioNAMRack::studioReverbVoice),
                 0.46f,
                 4.4f,
                 0.63f,
                 23.0f,
                 90.0f,
                 0.0f,
-                S13NAMRack::guitarInstrumentProfile,
+                OpenStudioNAMRack::guitarInstrumentProfile,
                 padMode);
             reverb.engineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::currentReverbEngineVersion),
                 std::memory_order_relaxed);
             reverb.rackVoice.store(
                 static_cast<float>(macro.voice),
@@ -31367,7 +31509,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 sampleRate * 1.45);
             const int totalSamples = juce::roundToInt(
                 sampleRate * 2.55);
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             applyPadMacro(reverb, 0.0f);
             reverb.prepareToPlay(sampleRate, blockSize);
             juce::AudioBuffer<float> storage(2, blockSize);
@@ -31985,7 +32127,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto configure = [&configureNeutralRack] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             int routedInputChannels,
             bool padEnabled)
         {
@@ -31995,7 +32137,7 @@ juce::var AudioEngine::runNAMRackRegression()
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(routedInputChannels);
             rack.reverbVoice.store(
-                static_cast<float>(S13NAMRack::studioReverbVoice),
+                static_cast<float>(OpenStudioNAMRack::studioReverbVoice),
                 std::memory_order_relaxed);
             rack.reverbMix.store(0.46f, std::memory_order_relaxed);
             rack.reverbDecaySec.store(4.4f, std::memory_order_relaxed);
@@ -32123,9 +32265,9 @@ juce::var AudioEngine::runNAMRackRegression()
 
         for (const auto& definition : caseDefinitions)
         {
-            S13NAMRack ordinaryRack;
-            S13NAMRack preconfiguredPadRack;
-            S13NAMRack liveToggleRack;
+            OpenStudioNAMRack ordinaryRack;
+            OpenStudioNAMRack preconfiguredPadRack;
+            OpenStudioNAMRack liveToggleRack;
             ordinaryRack.prepareToPlay(sampleRate, maximumBlockSize);
             preconfiguredPadRack.prepareToPlay(
                 sampleRate, maximumBlockSize);
@@ -32377,7 +32519,7 @@ juce::var AudioEngine::runNAMRackRegression()
         auto* value = new juce::DynamicObject();
         value->setProperty(
             "fixture",
-            "full_s13_nam_rack_post_prepare_pad_live_toggle");
+            "full_openstudio_nam_rack_post_prepare_pad_live_toggle");
         value->setProperty("sampleRate", sampleRate);
         value->setProperty("maximumBlockSize", maximumBlockSize);
         value->setProperty("switchOnSeconds", 0.25);
@@ -32422,7 +32564,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "nam_rack_reverb_pad_post_prepare_live_toggle_and_quiet_level_contract",
         namRackReverbPadPostPrepareLevelProbe.getProperty("pass", false)
             ? "pass" : "fail",
-        "Through the complete S13NAMRack path, a live PAD parameter write made only after prepare and while guitar audio is already flowing must remain identical to PAD Off before the switch, become an objectively non-zero stereo and mono-compatible additive layer after its bloom, remain within 12 dB of an otherwise identical preconfigured PAD render, preserve a non-zero release after Off, and retain its residual-to-ordinary level within 6 dB when the input falls from 0.20 to 0.02 peak. Mono-hot, mono-medium, mono-quiet, and stereo-quiet routes must each stay finite and bounded. Perceived Neural/whisper similarity and subjective audibility remain not_asserted.",
+        "Through the complete OpenStudioNAMRack path, a live PAD parameter write made only after prepare and while guitar audio is already flowing must remain identical to PAD Off before the switch, become an objectively non-zero stereo and mono-compatible additive layer after its bloom, remain within 12 dB of an otherwise identical preconfigured PAD render, preserve a non-zero release after Off, and retain its residual-to-ordinary level within 6 dB when the input falls from 0.20 to 0.02 peak. Mono-hot, mono-medium, mono-quiet, and stereo-quiet routes must each stay finite and bounded. Perceived Neural/whisper similarity and subjective audibility remain not_asserted.",
         namRackReverbPadPostPrepareLevelProbe);
 
     auto runReverbV5PadStereoMonoSilenceProbe = [] ()
@@ -32446,22 +32588,22 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto configure = [] (
-            S13Reverb& reverb,
+            OpenStudioReverb& reverb,
             bool padEnabled)
         {
-            const auto macro = S13NAMRack::resolveReverbMacroState(
-                static_cast<float>(S13NAMRack::studioReverbVoice),
+            const auto macro = OpenStudioNAMRack::resolveReverbMacroState(
+                static_cast<float>(OpenStudioNAMRack::studioReverbVoice),
                 0.46f,
                 2.2f,
                 0.63f,
                 23.0f,
                 90.0f,
                 0.0f,
-                S13NAMRack::guitarInstrumentProfile,
+                OpenStudioNAMRack::guitarInstrumentProfile,
                 padEnabled ? 1.0f : 0.0f);
             reverb.engineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::currentReverbEngineVersion),
                 std::memory_order_relaxed);
             reverb.rackVoice.store(
                 static_cast<float>(macro.voice),
@@ -32497,7 +32639,7 @@ juce::var AudioEngine::runNAMRackRegression()
             int stimulus,
             bool padEnabled)
         {
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             configure(reverb, padEnabled);
             reverb.prepareToPlay(sampleRate, blockSize);
             if (stimulus == 0)
@@ -32851,7 +32993,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto applyControlState =
-            [] (S13Reverb& reverb,
+            [] (OpenStudioReverb& reverb,
                 const ControlState& state)
         {
             reverb.decayTime.store(
@@ -32914,11 +33056,11 @@ juce::var AudioEngine::runNAMRackRegression()
             [&] (bool stereoInput,
                  bool movingControls)
         {
-            S13Reverb reverb;
+            OpenStudioReverb reverb;
             reverb.engineVersion.store(4.0f);
             reverb.algorithm.store(
                 static_cast<float>(
-                    S13Reverb::Algorithm::Plate));
+                    OpenStudioReverb::Algorithm::Plate));
             reverb.roomSize.store(0.55f);
             reverb.wetLevel.store(1.0f);
             reverb.dryLevel.store(0.0f);
@@ -33667,7 +33809,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto configure =
-            [] (S13Reverb& reverb,
+            [] (OpenStudioReverb& reverb,
                 float engineVersion,
                 float decaySeconds,
                 float preDelayMs,
@@ -33680,7 +33822,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 std::memory_order_relaxed);
             reverb.algorithm.store(
                 static_cast<float>(
-                    S13Reverb::Algorithm::Plate),
+                    OpenStudioReverb::Algorithm::Plate),
                 std::memory_order_relaxed);
             reverb.roomSize.store(
                 0.55f, std::memory_order_relaxed);
@@ -33728,7 +33870,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 1.0f, std::memory_order_relaxed);
         };
 
-        S13Reverb representativeReverb;
+        OpenStudioReverb representativeReverb;
         configure(
             representativeReverb,
             3.0f,
@@ -33743,7 +33885,7 @@ juce::var AudioEngine::runNAMRackRegression()
         representativeReverb
             .resetEmergencyBoundHitCount();
 
-        S13Reverb maximumShimmerReverb;
+        OpenStudioReverb maximumShimmerReverb;
         configure(
             maximumShimmerReverb,
             4.0f,
@@ -33758,7 +33900,7 @@ juce::var AudioEngine::runNAMRackRegression()
         maximumShimmerReverb
             .resetEmergencyBoundHitCount();
 
-        std::array<S13Reverb*, 2> reverbs {
+        std::array<OpenStudioReverb*, 2> reverbs {
             &representativeReverb,
             &maximumShimmerReverb
         };
@@ -34577,10 +34719,10 @@ juce::var AudioEngine::runNAMRackRegression()
         const int lateSilenceStartSample = totalSamples - juce::roundToInt(
             stressSampleRate * lateSilenceWindowSeconds);
 
-        S13Reverb reverb;
+        OpenStudioReverb reverb;
         reverb.engineVersion.store(4.0f, std::memory_order_relaxed);
         reverb.algorithm.store(
-            static_cast<float>(S13Reverb::Algorithm::Plate),
+            static_cast<float>(OpenStudioReverb::Algorithm::Plate),
             std::memory_order_relaxed);
         reverb.roomSize.store(0.55f, std::memory_order_relaxed);
         reverb.damping.store(
@@ -34840,7 +34982,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int blockSize = 16;
         constexpr float finiteFaultSample = 1000.0f;
 
-        S13Reverb reverb;
+        OpenStudioReverb reverb;
         reverb.engineVersion.store(4.0f, std::memory_order_relaxed);
         reverb.wetLevel.store(1.0f, std::memory_order_relaxed);
         reverb.dryLevel.store(1.0f, std::memory_order_relaxed);
@@ -34923,7 +35065,7 @@ juce::var AudioEngine::runNAMRackRegression()
         reverbV4WetStateIntegrityRecovery);
 
     auto configureWetOnlyReverb =
-        [] (S13Reverb& reverb,
+        [] (OpenStudioReverb& reverb,
             double sampleRate,
             int blockSize,
             float decaySeconds,
@@ -34957,8 +35099,8 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int blockSize = 16;
         constexpr int totalSamples = 16384;
         constexpr float scale = 2.0f;
-        S13Reverb lowReverb;
-        S13Reverb highReverb;
+        OpenStudioReverb lowReverb;
+        OpenStudioReverb highReverb;
         configureWetOnlyReverb(
             lowReverb,
             sampleRate,
@@ -35115,7 +35257,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int blockSize = 16;
         constexpr int totalSamples =
             static_cast<int>(sampleRate * 12.0);
-        S13Reverb reverb;
+        OpenStudioReverb reverb;
         configureWetOnlyReverb(
             reverb,
             sampleRate,
@@ -35335,7 +35477,7 @@ juce::var AudioEngine::runNAMRackRegression()
                    expectedDefault);
     };
 
-    S13NAMRack rackSchemaProbe;
+    OpenStudioNAMRack rackSchemaProbe;
     const auto rackSchema = describeBuiltInProcessor(&rackSchemaProbe, "track", 0);
     const auto* currentCompressorOutputParameter =
         findSchemaParameter(rackSchema, "compressorVolumeDb");
@@ -35349,7 +35491,7 @@ juce::var AudioEngine::runNAMRackRegression()
             -18.0,
             18.0,
             0.0);
-    S13NAMRack retiredMarkerRackSchemaProbe;
+    OpenStudioNAMRack retiredMarkerRackSchemaProbe;
     retiredMarkerRackSchemaProbe.namEffectsDspVersion.store(2);
     const auto retiredMarkerRackSchema = describeBuiltInProcessor(
         &retiredMarkerRackSchemaProbe, "track", 0);
@@ -35373,9 +35515,9 @@ juce::var AudioEngine::runNAMRackRegression()
     };
     const bool schemaEffectsVersionTruthful =
         schemaEffectsVersion(rackSchema)
-            == S13NAMRack::currentNAMEffectsDspVersion
+            == OpenStudioNAMRack::currentNAMEffectsDspVersion
         && schemaEffectsVersion(retiredMarkerRackSchema)
-            == S13NAMRack::currentNAMEffectsDspVersion;
+            == OpenStudioNAMRack::currentNAMEffectsDspVersion;
     const auto* retiredMarkerCompressorVolumeParameter =
         findSchemaParameter(retiredMarkerRackSchema, "compressorVolumeDb");
     const bool retiredMarkerPreNAMLabelsCanonicalized =
@@ -35556,7 +35698,7 @@ juce::var AudioEngine::runNAMRackRegression()
     const bool chorusCharacterLabelsTruthful = labelsMatch(
         chorusCharacterLabels,
         { "Clean", "Ensemble" });
-    S13Reverb reverbSchemaProbe;
+    OpenStudioReverb reverbSchemaProbe;
     const auto reverbSchema = describeBuiltInProcessor(&reverbSchemaProbe, "track", 0);
     const auto reverbAlgorithmLabels = enumLabelsFromParameter(
         findSchemaParameter(reverbSchema, "algorithm"));
@@ -35687,7 +35829,7 @@ juce::var AudioEngine::runNAMRackRegression()
         && std::abs(
                rackSchemaProbe.reverbEngineVersion.load()
                - static_cast<float>(
-                   S13NAMRack::currentReverbEngineVersion)) <= 0.0001f;
+                   OpenStudioNAMRack::currentReverbEngineVersion)) <= 0.0001f;
     auto* defaultEffectStateValue = new juce::DynamicObject();
     defaultEffectStateValue->setProperty("allPreAndPostEffectsBypassed", defaultEffectPowerPass);
     defaultEffectStateValue->setProperty("chorusMix", rackSchemaProbe.chorusMix.load());
@@ -35800,7 +35942,7 @@ juce::var AudioEngine::runNAMRackRegression()
     const bool irWritten = writeFixtureIR(irFile);
     const bool alternateIRWritten = writeFixtureIR(alternateIRFile, true);
 
-    S13NAMRack rack;
+    OpenStudioNAMRack rack;
     rack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     configureRack(rack);
 
@@ -35819,13 +35961,13 @@ juce::var AudioEngine::runNAMRackRegression()
              "A rejected direct NAM load must not replace the current slot identity with the failed path.",
              rack.getAmpModelPath());
 
-    juce::ValueTree missingProjectTree("S13NAMRack");
+    juce::ValueTree missingProjectTree("OpenStudioNAMRack");
     missingProjectTree.setProperty("ampModelPath", missingNAMPath, nullptr);
     missingProjectTree.setProperty("inputTrimDb", -4.0, nullptr);
     juce::MemoryBlock missingProjectState;
     juce::MemoryOutputStream missingProjectStream(missingProjectState, false);
     missingProjectTree.writeToStream(missingProjectStream);
-    S13NAMRack recoveryRack;
+    OpenStudioNAMRack recoveryRack;
     recoveryRack.inputTrimDb.store(2.0f);
     const bool partialProjectRestoreUsable = recoveryRack.restoreProjectStateInformation(
         missingProjectState.getData(), static_cast<int>(missingProjectState.getSize()))
@@ -35839,7 +35981,7 @@ juce::var AudioEngine::runNAMRackRegression()
              "Project recovery should retain a missing path for relinking, publish other usable state, and report success with degraded detail in lastLoadError.",
              recoveryRack.getLastLoadError());
 
-    S13NAMRack strictToneRack;
+    OpenStudioNAMRack strictToneRack;
     strictToneRack.inputTrimDb.store(3.0f);
     const bool strictToneFailurePreservesState = ! strictToneRack.restoreTonePresetStateInformation(
         missingProjectState.getData(), static_cast<int>(missingProjectState.getSize()))
@@ -35887,7 +36029,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack fixtureRack;
+        OpenStudioNAMRack fixtureRack;
         fixtureRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         fixtureRack.inputTrimDb.store(0.0f);
         fixtureRack.outputTrimDb.store(0.0f);
@@ -35917,7 +36059,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         static_cast<juce::int64>(0)));
             const bool expectedGuardActivity =
                 maximumRawOutputPeak
-                        <= S13NAMRack::
+                        <= OpenStudioNAMRack::
                                namOutputSafetyKnee
                             + 1.0e-6f
                     ? guardHitCount == 0
@@ -35925,7 +36067,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const bool guardContract =
                 expectedGuardActivity
                 && probe.peak
-                    <= S13NAMRack::
+                    <= OpenStudioNAMRack::
                            namOutputSafetyCeiling
                         + 1.0e-3f;
             value->setProperty("probe", makeProbeVar(probe));
@@ -35978,7 +36120,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack swapRack;
+        OpenStudioNAMRack swapRack;
         swapRack.prepareToPlay(fixtureSampleRate, stressBlockSize);
         swapRack.inputTrimDb.store(0.0f);
         swapRack.outputTrimDb.store(0.0f);
@@ -36191,7 +36333,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack handoffRack;
+        OpenStudioNAMRack handoffRack;
         handoffRack.prepareToPlay(
             fixtureSampleRate, handoffBlockSize);
         handoffRack.inputTrimDb.store(0.0f);
@@ -36216,8 +36358,16 @@ juce::var AudioEngine::runNAMRackRegression()
         handoffRack.setCabRequestedEnabled(false);
         handoffRack.eqEnabled.store(0.0f);
         handoffRack.modulatorEnabled.store(0.0f);
-        handoffRack.delayEnabled.store(0.0f);
-        handoffRack.reverbEnabled.store(0.0f);
+        // Keep both post-Amp time effects active and already excited. The
+        // complete-rack handoff boundary must mute their existing tails while
+        // the model graph and its latency domain are being replaced; muting
+        // only the Amp input would let those tails escape the transaction.
+        handoffRack.delayEnabled.store(1.0f);
+        handoffRack.delayTimeMs.store(20.0f);
+        handoffRack.delayFeedback.store(0.48f);
+        handoffRack.delayMix.store(0.38f);
+        handoffRack.reverbEnabled.store(1.0f);
+        handoffRack.reverbMix.store(0.42f);
 
         juce::AudioBuffer<float> buffer(
             2, handoffBlockSize);
@@ -36230,6 +36380,9 @@ juce::var AudioEngine::runNAMRackRegression()
         float maximumAdjacentOutputDelta = 0.0f;
         double settledEnergy = 0.0;
         int settledEnergySamples = 0;
+        bool observeHandoffMute = false;
+        int observedHandoffBlocks = 0;
+        int mutedHandoffBlocks = 0;
 
         const auto processBlocks =
             [&] (int blockCount,
@@ -36289,6 +36442,23 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
 
                 handoffRack.processBlock(buffer, midi);
+
+                if (observeHandoffMute)
+                {
+                    ++observedHandoffBlocks;
+                    float blockPeak = 0.0f;
+                    for (int channel = 0;
+                         channel < buffer.getNumChannels();
+                         ++channel)
+                    {
+                        blockPeak = juce::jmax(
+                            blockPeak,
+                            buffer.getMagnitude(
+                                channel, 0, handoffBlockSize));
+                    }
+                    if (blockPeak <= 1.0e-9f)
+                        ++mutedHandoffBlocks;
+                }
 
                 for (int channel = 0;
                      channel < buffer.getNumChannels();
@@ -36370,14 +36540,23 @@ juce::var AudioEngine::runNAMRackRegression()
             handoffRack.loadAmpModel(
                 stableModelFile
                     .getFullPathName());
+        observeHandoffMute = true;
         processBlocks(
             blocksForSeconds(0.140), false);
+        observeHandoffMute = false;
+        const int firstHandoffMutedBlocks =
+            mutedHandoffBlocks;
         const bool replacementGraphLoaded =
             handoffRack.loadAmpModel(
                 stableModelFile
                     .getFullPathName());
+        observeHandoffMute = true;
         processBlocks(
             blocksForSeconds(0.160), true);
+        observeHandoffMute = false;
+        const int replacementHandoffMutedBlocks =
+            mutedHandoffBlocks
+            - firstHandoffMutedBlocks;
 
         const auto diagnostics =
             handoffRack.getDiagnosticState();
@@ -36414,6 +36593,8 @@ juce::var AudioEngine::runNAMRackRegression()
             && oversizeBypassCount == 0
             && modelProcessFailCount == 0
             && realtimeSafetyBypassCount == 0
+            && firstHandoffMutedBlocks > 0
+            && replacementHandoffMutedBlocks > 0
             && maximumOutputPeak > 1.0e-5f
             && maximumOutputPeak < 4.0f
             && maximumAdjacentOutputDelta
@@ -36454,6 +36635,15 @@ juce::var AudioEngine::runNAMRackRegression()
             "realtimeSafetyBypassCount",
             realtimeSafetyBypassCount);
         value->setProperty(
+            "observedHandoffBlocks",
+            observedHandoffBlocks);
+        value->setProperty(
+            "firstHandoffMutedBlocks",
+            firstHandoffMutedBlocks);
+        value->setProperty(
+            "replacementHandoffMutedBlocks",
+            replacementHandoffMutedBlocks);
+        value->setProperty(
             "diagnostics", diagnostics);
         value->setProperty(
             "lastLoadError",
@@ -36482,6 +36672,491 @@ juce::var AudioEngine::runNAMRackRegression()
     const auto slimmableWavenetModelFile =
         findNAMCoreExample("slimmable_wavenet.nam");
 
+    auto runStableBiquadAutomationProbe = [&] ()
+    {
+        struct StageCapture
+        {
+            juce::AudioBuffer<float> audio;
+            int nonFiniteSamples = 0;
+            float maximumPeak = 0.0f;
+            float maximumAdjacentDelta = 0.0f;
+            std::uint64_t toneRecoveries = 0;
+            std::uint64_t preEqRecoveries = 0;
+            std::uint64_t graphicEqRecoveries = 0;
+        };
+
+        constexpr std::array<float, 9> gainSequence {
+            -12.0f, 12.0f, -9.0f, 9.0f, -6.0f,
+            6.0f, -3.0f, 3.0f, 0.0f
+        };
+        const auto setAllGainBands = [&gainSequence] (
+            OpenStudioNAMRack& rack,
+            int eventIndex)
+        {
+            const auto gain = [&] (int offset)
+            {
+                const auto index = static_cast<size_t>(
+                    (eventIndex + offset)
+                    % static_cast<int>(gainSequence.size()));
+                return gainSequence[index];
+            };
+            rack.bassDb.store(gain(0));
+            rack.midDb.store(gain(2));
+            rack.trebleDb.store(gain(4));
+            rack.presenceDb.store(gain(6));
+            rack.preEq120Db.store(gain(1));
+            rack.preEq250Db.store(gain(2));
+            rack.preEq500Db.store(gain(3));
+            rack.preEq1kDb.store(gain(4));
+            rack.preEq2k5Db.store(gain(5));
+            rack.preEq5kDb.store(gain(6));
+            rack.preEq8kDb.store(gain(7));
+            rack.preEq12kDb.store(gain(8));
+            rack.eq65Db.store(gain(8));
+            rack.eq125Db.store(gain(7));
+            rack.eq250Db.store(gain(6));
+            rack.eq500Db.store(gain(5));
+            rack.eq1kDb.store(gain(4));
+            rack.eq2kDb.store(gain(3));
+            rack.eq4kDb.store(gain(2));
+            rack.eq8kDb.store(gain(1));
+            rack.eq16kDb.store(gain(0));
+        };
+        const auto setAllGainBandsNeutral = [] (OpenStudioNAMRack& rack)
+        {
+            rack.bassDb.store(0.0f);
+            rack.midDb.store(0.0f);
+            rack.trebleDb.store(0.0f);
+            rack.presenceDb.store(0.0f);
+            rack.preEq120Db.store(0.0f);
+            rack.preEq250Db.store(0.0f);
+            rack.preEq500Db.store(0.0f);
+            rack.preEq1kDb.store(0.0f);
+            rack.preEq2k5Db.store(0.0f);
+            rack.preEq5kDb.store(0.0f);
+            rack.preEq8kDb.store(0.0f);
+            rack.preEq12kDb.store(0.0f);
+            rack.eq65Db.store(0.0f);
+            rack.eq125Db.store(0.0f);
+            rack.eq250Db.store(0.0f);
+            rack.eq500Db.store(0.0f);
+            rack.eq1kDb.store(0.0f);
+            rack.eq2kDb.store(0.0f);
+            rack.eq4kDb.store(0.0f);
+            rack.eq8kDb.store(0.0f);
+            rack.eq16kDb.store(0.0f);
+        };
+        const auto renderStages = [
+            &configureNeutralRack,
+            &setAllGainBands,
+            &setAllGainBandsNeutral] (
+                double sampleRate,
+                const std::vector<int>& partitions,
+                bool retargetEveryCallback)
+        {
+            const int totalSamples = juce::roundToInt(sampleRate * 0.70);
+            const int automationEndSample =
+                juce::roundToInt(sampleRate * 0.42);
+            const int alignedAutomationStep = juce::jmax(
+                8, juce::roundToInt(sampleRate * 0.0015));
+            OpenStudioNAMRack rack;
+            configureNeutralRack(rack);
+            rack.instrumentProfile.store(
+                static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile));
+            rack.preEqEnabled.store(1.0f);
+            rack.eqEnabled.store(1.0f);
+            setAllGainBands(rack, 0);
+            rack.prepareToPlay(sampleRate, 1024);
+
+            StageCapture capture;
+            capture.audio.setSize(2, totalSamples, false, true, false);
+            std::array<float, 2> previous {};
+            std::array<bool, 2> hasPrevious {};
+            int cursor = 0;
+            int eventIndex = 0;
+            int nextAlignedEvent = 0;
+            bool neutralTargetApplied = false;
+            size_t partitionIndex = 0;
+            while (cursor < totalSamples)
+            {
+                if (retargetEveryCallback && cursor < automationEndSample)
+                {
+                    setAllGainBands(rack, eventIndex++);
+                }
+                else if (! retargetEveryCallback
+                         && cursor == nextAlignedEvent
+                         && cursor < automationEndSample)
+                {
+                    setAllGainBands(rack, eventIndex++);
+                    nextAlignedEvent = juce::jmin(
+                        automationEndSample,
+                        cursor + alignedAutomationStep);
+                }
+                if (cursor >= automationEndSample
+                    && ! neutralTargetApplied)
+                {
+                    setAllGainBandsNeutral(rack);
+                    neutralTargetApplied = true;
+                    nextAlignedEvent = totalSamples;
+                }
+
+                int blockSamples = juce::jmin(
+                    partitions[partitionIndex % partitions.size()],
+                    totalSamples - cursor);
+                if (! retargetEveryCallback
+                    && nextAlignedEvent > cursor)
+                {
+                    blockSamples = juce::jmin(
+                        blockSamples,
+                        nextAlignedEvent - cursor);
+                }
+                if (! neutralTargetApplied
+                    && cursor < automationEndSample)
+                {
+                    blockSamples = juce::jmin(
+                        blockSamples,
+                        automationEndSample - cursor);
+                }
+
+                juce::AudioBuffer<float> block(2, blockSamples);
+                for (int sample = 0; sample < blockSamples; ++sample)
+                {
+                    const int absoluteSample = cursor + sample;
+                    const double time =
+                        static_cast<double>(absoluteSample) / sampleRate;
+                    const float transient = absoluteSample % 4096 < 20
+                        ? 0.07f * static_cast<float>(
+                            20 - absoluteSample % 4096) / 20.0f
+                        : 0.0f;
+                    const float value = transient
+                        + 0.060f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                                * 41.2034 * time))
+                        + 0.040f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                                * 82.4069 * time))
+                        + 0.025f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                                * 329.6276 * time));
+                    block.setSample(0, sample, value);
+                    block.setSample(1, sample, value);
+                }
+
+                rack.latchInstrumentProfileForBlock();
+                rack.processPreEQ(block);
+                rack.processAmpToneStack(block);
+                rack.processGraphicEQ(block);
+                rack.releaseInstrumentProfileForBlock();
+                for (int channel = 0; channel < 2; ++channel)
+                {
+                    for (int sample = 0; sample < blockSamples; ++sample)
+                    {
+                        const float output = block.getSample(channel, sample);
+                        if (! std::isfinite(output))
+                        {
+                            ++capture.nonFiniteSamples;
+                            continue;
+                        }
+                        capture.maximumPeak = juce::jmax(
+                            capture.maximumPeak, std::abs(output));
+                        if (hasPrevious[static_cast<size_t>(channel)])
+                        {
+                            capture.maximumAdjacentDelta = juce::jmax(
+                                capture.maximumAdjacentDelta,
+                                std::abs(
+                                    output
+                                    - previous[static_cast<size_t>(channel)]));
+                        }
+                        previous[static_cast<size_t>(channel)] = output;
+                        hasPrevious[static_cast<size_t>(channel)] = true;
+                    }
+                    capture.audio.copyFrom(
+                        channel, cursor, block, channel, 0, blockSamples);
+                }
+                cursor += blockSamples;
+                ++partitionIndex;
+            }
+            capture.toneRecoveries =
+                rack.diagnosticAmpToneFilterRecoveryCount.load();
+            capture.preEqRecoveries =
+                rack.diagnosticPreEqFilterRecoveryCount.load();
+            capture.graphicEqRecoveries =
+                rack.diagnosticGraphicEqFilterRecoveryCount.load();
+            rack.releaseResources();
+            return capture;
+        };
+        const auto captureHealthy = [] (const StageCapture& capture)
+        {
+            return capture.nonFiniteSamples == 0
+                && capture.maximumPeak < 64.0f
+                && capture.maximumAdjacentDelta < 16.0f
+                && capture.toneRecoveries == 0
+                && capture.preEqRecoveries == 0
+                && capture.graphicEqRecoveries == 0;
+        };
+        const auto maximumDifference = [] (
+            const juce::AudioBuffer<float>& first,
+            const juce::AudioBuffer<float>& second)
+        {
+            float difference = 0.0f;
+            for (int channel = 0; channel < first.getNumChannels(); ++channel)
+            {
+                for (int sample = 0; sample < first.getNumSamples(); ++sample)
+                {
+                    difference = juce::jmax(
+                        difference,
+                        std::abs(
+                            first.getSample(channel, sample)
+                            - second.getSample(channel, sample)));
+                }
+            }
+            return difference;
+        };
+
+        constexpr std::array<double, 3> sampleRates {
+            44100.0, 48000.0, 96000.0
+        };
+        constexpr std::array<int, 4> callbackSizes { 8, 64, 512, 1024 };
+        juce::Array<juce::var> rateResults;
+        bool stageMatrixPass = true;
+        for (const double sampleRate : sampleRates)
+        {
+            const auto reference = renderStages(
+                sampleRate, { 8 }, false);
+            const auto fixed64 = renderStages(
+                sampleRate, { 64 }, false);
+            const auto fixed512 = renderStages(
+                sampleRate, { 512 }, false);
+            const auto fixed1024 = renderStages(
+                sampleRate, { 1024 }, false);
+            const auto uneven = renderStages(
+                sampleRate, { 3, 17, 5, 257, 11, 1024, 29, 64 }, false);
+            const float partitionError = juce::jmax(
+                maximumDifference(reference.audio, fixed64.audio),
+                maximumDifference(
+                    reference.audio,
+                    fixed512.audio),
+                maximumDifference(
+                    reference.audio,
+                    fixed1024.audio),
+                maximumDifference(reference.audio, uneven.audio));
+
+            bool callbackStressPass = true;
+            float callbackStressPeak = 0.0f;
+            float callbackStressDelta = 0.0f;
+            for (const int callbackSize : callbackSizes)
+            {
+                const auto stressed = renderStages(
+                    sampleRate, { callbackSize }, true);
+                callbackStressPass = callbackStressPass
+                    && captureHealthy(stressed);
+                callbackStressPeak = juce::jmax(
+                    callbackStressPeak, stressed.maximumPeak);
+                callbackStressDelta = juce::jmax(
+                    callbackStressDelta,
+                    stressed.maximumAdjacentDelta);
+            }
+            const bool ratePass = captureHealthy(reference)
+                && captureHealthy(fixed64)
+                && captureHealthy(fixed512)
+                && captureHealthy(fixed1024)
+                && captureHealthy(uneven)
+                && partitionError <= 2.0e-6f
+                && callbackStressPass;
+            stageMatrixPass = stageMatrixPass && ratePass;
+            auto* rateValue = new juce::DynamicObject();
+            rateValue->setProperty("sampleRate", sampleRate);
+            rateValue->setProperty("partitionMaximumError", partitionError);
+            rateValue->setProperty(
+                "sampleAlignedMaximumPeak", reference.maximumPeak);
+            rateValue->setProperty(
+                "sampleAlignedMaximumAdjacentDelta",
+                reference.maximumAdjacentDelta);
+            rateValue->setProperty(
+                "callbackStressMaximumPeak", callbackStressPeak);
+            rateValue->setProperty(
+                "callbackStressMaximumAdjacentDelta", callbackStressDelta);
+            rateValue->setProperty("pass", ratePass);
+            rateResults.add(juce::var(rateValue));
+        }
+
+        auto* realModelValue = new juce::DynamicObject();
+        const bool realModelAvailable = calibratedModelFile.existsAsFile();
+        realModelValue->setProperty("available", realModelAvailable);
+        realModelValue->setProperty(
+            "modelPath", calibratedModelFile.getFullPathName());
+        bool realModelPass = ! realModelAvailable;
+        if (realModelAvailable)
+        {
+            constexpr double hostSampleRate = 44100.0;
+            constexpr int blockSize = 8;
+            const int totalSamples = juce::roundToInt(
+                hostSampleRate * 0.70);
+            const int automationStart = juce::roundToInt(
+                hostSampleRate * 0.10);
+            const int automationEnd = juce::roundToInt(
+                hostSampleRate * 0.48);
+            const int audibleTailStart = juce::roundToInt(
+                hostSampleRate * 0.60);
+            OpenStudioNAMRack rack;
+            configureNeutralRack(rack);
+            rack.instrumentProfile.store(
+                static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile));
+            rack.ampEnabled.store(1.0f);
+            rack.ampMix.store(1.0f);
+            rack.bassDb.store(0.0f);
+            rack.prepareToPlay(hostSampleRate, blockSize);
+            const bool modelLoaded = rack.loadAmpModel(
+                calibratedModelFile.getFullPathName());
+            juce::AudioBuffer<float> block(2, blockSize);
+            juce::MidiBuffer midi;
+            int nonFiniteSamples = 0;
+            float maximumPeak = 0.0f;
+            float maximumAdjacentDelta = 0.0f;
+            std::array<float, 2> previous {};
+            std::array<bool, 2> hasPrevious {};
+            double audibleTailSquares = 0.0;
+            int audibleTailSamples = 0;
+            int automationEvent = 0;
+            for (int cursor = 0; cursor < totalSamples; cursor += blockSize)
+            {
+                if (cursor >= automationStart && cursor < automationEnd)
+                {
+                    const int phase = automationEvent++ % 97;
+                    const float rapidBassDb = phase <= 48
+                        ? -12.0f + static_cast<float>(phase) * 0.5f
+                        : 12.0f - static_cast<float>(phase - 48) * 0.5f;
+                    rack.bassDb.store(rapidBassDb);
+                }
+                else if (cursor == automationEnd)
+                {
+                    rack.bassDb.store(12.0f);
+                }
+                for (int sample = 0; sample < blockSize; ++sample)
+                {
+                    const int absoluteSample = cursor + sample;
+                    const double time =
+                        static_cast<double>(absoluteSample) / hostSampleRate;
+                    const float value =
+                        0.14f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                                * 41.2034 * time))
+                        + 0.08f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                                * 82.4069 * time));
+                    block.setSample(0, sample, value);
+                    block.setSample(1, sample, value);
+                }
+                midi.clear();
+                rack.processBlock(block, midi);
+                for (int channel = 0; channel < 2; ++channel)
+                {
+                    for (int sample = 0; sample < blockSize; ++sample)
+                    {
+                        const float output = block.getSample(channel, sample);
+                        if (! std::isfinite(output))
+                        {
+                            ++nonFiniteSamples;
+                            continue;
+                        }
+                        maximumPeak = juce::jmax(
+                            maximumPeak, std::abs(output));
+                        if (hasPrevious[static_cast<size_t>(channel)])
+                        {
+                            maximumAdjacentDelta = juce::jmax(
+                                maximumAdjacentDelta,
+                                std::abs(
+                                    output
+                                    - previous[static_cast<size_t>(channel)]));
+                        }
+                        previous[static_cast<size_t>(channel)] = output;
+                        hasPrevious[static_cast<size_t>(channel)] = true;
+                        if (cursor + sample >= audibleTailStart)
+                        {
+                            audibleTailSquares +=
+                                static_cast<double>(output) * output;
+                            ++audibleTailSamples;
+                        }
+                    }
+                }
+            }
+            const float audibleTailRms = static_cast<float>(std::sqrt(
+                audibleTailSquares
+                / static_cast<double>(juce::jmax(1, audibleTailSamples))));
+            const auto diagnostics = rack.getDiagnosticState();
+            const auto emergencyTrips = static_cast<juce::int64>(
+                diagnostics.getProperty(
+                    "rackOutputEmergencyMuteTripCount",
+                    static_cast<juce::int64>(-1)));
+            const auto toneRecoveries = static_cast<juce::int64>(
+                diagnostics.getProperty(
+                    "ampToneFilterRecoveryCount",
+                    static_cast<juce::int64>(-1)));
+            const int modelProcessFailures = static_cast<int>(
+                diagnostics.getProperty("modelProcessFailCount", -1));
+            const bool resampled = static_cast<bool>(
+                diagnostics.getProperty("lastResampled", false));
+            const bool modelFaulted = static_cast<bool>(
+                diagnostics.getProperty("ampModelFaulted", true));
+            realModelPass = modelLoaded
+                && resampled
+                && ! modelFaulted
+                && modelProcessFailures == 0
+                && emergencyTrips == 0
+                && toneRecoveries == 0
+                && nonFiniteSamples == 0
+                && maximumPeak <= OpenStudioNAMRack::namOutputSafetyCeiling
+                && maximumAdjacentDelta < 1.5f
+                && audibleTailRms > 1.0e-5f;
+            realModelValue->setProperty("modelLoaded", modelLoaded);
+            realModelValue->setProperty("hostSampleRate", hostSampleRate);
+            realModelValue->setProperty("callbackSize", blockSize);
+            realModelValue->setProperty("lastResampled", resampled);
+            realModelValue->setProperty("modelFaulted", modelFaulted);
+            realModelValue->setProperty(
+                "modelProcessFailCount", modelProcessFailures);
+            realModelValue->setProperty(
+                "emergencyMuteTripCount", emergencyTrips);
+            realModelValue->setProperty(
+                "toneFilterRecoveryCount", toneRecoveries);
+            realModelValue->setProperty(
+                "nonFiniteSamples", nonFiniteSamples);
+            realModelValue->setProperty("maximumPeak", maximumPeak);
+            realModelValue->setProperty(
+                "maximumAdjacentDelta", maximumAdjacentDelta);
+            realModelValue->setProperty("audibleTailRms", audibleTailRms);
+            realModelValue->setProperty("pass", realModelPass);
+            rack.releaseResources();
+        }
+
+        auto* value = new juce::DynamicObject();
+        value->setProperty("rates", rateResults);
+        value->setProperty("stageMatrixPass", stageMatrixPass);
+        value->setProperty(
+            "real48kModelAt44100",
+            juce::var(realModelValue));
+        value->setProperty("realModelAvailable", realModelAvailable);
+        value->setProperty("realModelPass", realModelPass);
+        value->setProperty(
+            "pass", stageMatrixPass && realModelPass);
+        return juce::var(value);
+    };
+    const auto stableBiquadAutomationProbe =
+        runStableBiquadAutomationProbe();
+    const bool stableBiquadRealModelAvailable = static_cast<bool>(
+        stableBiquadAutomationProbe.getProperty(
+            "realModelAvailable", false));
+    addCheck(
+        checks,
+        "nam_rack_stable_biquad_rapid_automation_contract",
+        ! stableBiquadRealModelAvailable
+            ? "not_asserted"
+            : (stableBiquadAutomationProbe.getProperty("pass", false)
+                ? "pass"
+                : "fail"),
+        "Amp tone, PRE EQ, and Graphic EQ must switch only between complete stable biquad coefficient sets, coalesce rapid full-range retargets without a queue, remain finite and callback-partition invariant at 44.1/48/96 kHz and 8/64/512/1024 samples, and never invoke local recovery for valid controls. A real 48 kHz bass-amp NAM at a 44.1 kHz host additionally receives a continuous Bass -12 to +12 dB live sweep at exact 8-sample callbacks without a model fault, emergency mute, silent latch, or filter recovery.",
+        stableBiquadAutomationProbe);
+
     auto runDualMonoNAMGraphContractProbe = [&] ()
     {
         auto* value = new juce::DynamicObject();
@@ -36500,7 +37175,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int testBlockSize = 8;
         constexpr int totalSamples = 4096;
         const auto configureModelRack = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             bool loadPedal)
         {
             rack.prepareToPlay(
@@ -36532,7 +37207,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return pedalLoaded && ampLoaded;
         };
 
-        S13NAMRack ownershipRack;
+        OpenStudioNAMRack ownershipRack;
         const bool ownershipLoaded =
             configureModelRack(ownershipRack, true);
         const auto* const pedalPrimary =
@@ -36570,7 +37245,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && pedalSecondary != ampSecondary
             && ampPrimary != ampSecondary;
 
-        S13NAMRack emptyRouteRack;
+        OpenStudioNAMRack emptyRouteRack;
         emptyRouteRack.prepareToPlay(
             testSampleRate, testBlockSize);
         configureNeutralRack(emptyRouteRack);
@@ -36603,7 +37278,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     "effectiveInputRoutingMode", -1)) == 0;
 
         const auto render = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             bool antiPhase,
             bool identicalStereo,
             const std::array<int, 4>& partitions,
@@ -36704,8 +37379,8 @@ juce::var AudioEngine::runNAMRackRegression()
             return measurement;
         };
 
-        S13NAMRack dualAntiRack;
-        S13NAMRack singleAntiRack;
+        OpenStudioNAMRack dualAntiRack;
+        OpenStudioNAMRack singleAntiRack;
         const bool antiRacksLoaded =
             configureModelRack(dualAntiRack, false)
             && configureModelRack(singleAntiRack, false);
@@ -36773,7 +37448,7 @@ juce::var AudioEngine::runNAMRackRegression()
             leftOnlyPeak > 1.0e-4f
             && rightLaneIsolationDifference <= 1.0e-7f;
 
-        S13NAMRack identicalRack;
+        OpenStudioNAMRack identicalRack;
         const bool identicalLoaded =
             configureModelRack(identicalRack, false);
         const auto identicalOutput = render(
@@ -36789,8 +37464,8 @@ juce::var AudioEngine::runNAMRackRegression()
             && identicalMeasurement[2] == 0.0
             && identicalMeasurement[1] <= 1.0e-6;
 
-        S13NAMRack pausedDoublerReferenceRack;
-        S13NAMRack pausedDoublerStereoRack;
+        OpenStudioNAMRack pausedDoublerReferenceRack;
+        OpenStudioNAMRack pausedDoublerStereoRack;
         const bool pausedDoublerRackLoaded =
             configureModelRack(
                 pausedDoublerReferenceRack, false)
@@ -36877,8 +37552,8 @@ juce::var AudioEngine::runNAMRackRegression()
                        std::memory_order_relaxed)
                    - 5.25f) <= 1.0e-6f;
 
-        S13NAMRack fixedRack;
-        S13NAMRack unevenRack;
+        OpenStudioNAMRack fixedRack;
+        OpenStudioNAMRack unevenRack;
         const bool partitionRacksLoaded =
             configureModelRack(fixedRack, false)
             && configureModelRack(unevenRack, false);
@@ -36967,9 +37642,9 @@ juce::var AudioEngine::runNAMRackRegression()
             std::atomic<bool>& faultFlag;
         };
 
-        S13NAMRack runtimeFaultRack;
-        S13NAMRack runtimeFaultDryReferenceRack;
-        S13NAMRack runtimeFaultWetControlRack;
+        OpenStudioNAMRack runtimeFaultRack;
+        OpenStudioNAMRack runtimeFaultDryReferenceRack;
+        OpenStudioNAMRack runtimeFaultWetControlRack;
         const bool runtimeFaultRacksLoaded =
             configureModelRack(runtimeFaultRack, false)
             && configureModelRack(
@@ -37148,7 +37823,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 > 1.0e-5f;
 
         const auto renderModeChange = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             const std::array<int, 4>& partitions)
         {
             rack.setRoutedInputChannelCount(1);
@@ -37315,7 +37990,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const auto savedStateTree =
             juce::ValueTree::readFromData(
                 savedState.getData(), savedState.getSize());
-        S13NAMRack restoredRack;
+        OpenStudioNAMRack restoredRack;
         restoredRack.prepareToPlay(
             testSampleRate, testBlockSize);
         const bool restored =
@@ -37353,7 +38028,7 @@ juce::var AudioEngine::runNAMRackRegression()
                    ->dualMonoLane.get()
                 == originalAmpLane;
 
-        S13NAMRack singleLaneFallbackRack;
+        OpenStudioNAMRack singleLaneFallbackRack;
         const bool singleLaneFallbackLoaded =
             configureModelRack(
                 singleLaneFallbackRack, false);
@@ -37419,7 +38094,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     "ampDualMonoWarning", juce::var()).toString()
                 .isNotEmpty();
 
-        S13NAMRack routedChannelGuardRack;
+        OpenStudioNAMRack routedChannelGuardRack;
         const bool routedChannelGuardLoaded =
             configureModelRack(
                 routedChannelGuardRack, false);
@@ -37515,7 +38190,7 @@ juce::var AudioEngine::runNAMRackRegression()
                        std::memory_order_relaxed)
                    - 0.63f) <= 1.0e-6f;
 
-        S13NAMRack timingRack;
+        OpenStudioNAMRack timingRack;
         const bool timingRackLoaded =
             configureModelRack(timingRack, false);
         const auto measureEightSampleProcessing = [&] (
@@ -37752,7 +38427,7 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::Array<juce::var> cases;
         bool allCasesPass = true;
         const auto configure = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             int blockSize,
             int routedChannels)
         {
@@ -37783,8 +38458,8 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             for (const int routedChannels : { 1, 2 })
             {
-                S13NAMRack transitionRack;
-                S13NAMRack bypassRack;
+                OpenStudioNAMRack transitionRack;
+                OpenStudioNAMRack bypassRack;
                 const bool transitionLoaded = configure(
                     transitionRack, blockSize, routedChannels);
                 const bool bypassLoaded = configure(
@@ -37917,7 +38592,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     && rackGuardHits == 0
                     && lateRms > 1.0e-5
                     && earlyToLate > 0.16
-                    && maximumPeak < S13NAMRack::namOutputSafetyCeiling
+                    && maximumPeak < OpenStudioNAMRack::namOutputSafetyCeiling
                     && maximumAdjacentDelta < 0.45f;
                 allCasesPass = allCasesPass && casePass;
                 auto* caseValue = new juce::DynamicObject();
@@ -37958,7 +38633,7 @@ juce::var AudioEngine::runNAMRackRegression()
         for (const bool distortion : { false, true })
         {
             const auto configureCurrentDriveCase = [&] (
-                S13NAMRack& target,
+                OpenStudioNAMRack& target,
                 bool precisionOn,
                 bool distortionOn)
             {
@@ -37974,9 +38649,9 @@ juce::var AudioEngine::runNAMRackRegression()
                 target.chaosDrive.store(0.70f);
                 target.chaosMix.store(1.0f);
             };
-            S13NAMRack preFirstCallbackRack;
-            S13NAMRack preFirstActiveReferenceRack;
-            S13NAMRack preFirstBypassReferenceRack;
+            OpenStudioNAMRack preFirstCallbackRack;
+            OpenStudioNAMRack preFirstActiveReferenceRack;
+            OpenStudioNAMRack preFirstBypassReferenceRack;
             configureCurrentDriveCase(
                 preFirstCallbackRack, ! distortion, distortion);
             configureCurrentDriveCase(
@@ -38066,7 +38741,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
                 }
             }
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureCurrentDriveCase(rack, ! distortion, distortion);
             rack.prepareToPlay(48000.0, 8);
             rack.reset();
@@ -38216,7 +38891,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int bypassSamples = 4096;
         constexpr int captureSamples = 6144;
         const auto configureCase = [&] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             bool precisionOn,
             bool distortionOn)
         {
@@ -38258,8 +38933,8 @@ juce::var AudioEngine::runNAMRackRegression()
         bool allPass = true;
         for (const bool oldPedalWasDistortion : { false, true })
         {
-            S13NAMRack sequenced;
-            S13NAMRack freshOtherOnly;
+            OpenStudioNAMRack sequenced;
+            OpenStudioNAMRack freshOtherOnly;
             configureCase(
                 sequenced,
                 ! oldPedalWasDistortion,
@@ -38436,7 +39111,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float& outputPeak,
             int& reportedLatency)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             configureNeutralRack(rack);
             rack.setRoutedInputChannelCount(1);
             rack.ampEnabled.store(1.0f);
@@ -38745,7 +39420,7 @@ juce::var AudioEngine::runNAMRackRegression()
     auto runNAMTonePresetContractProbe = [&] ()
     {
         auto* value = new juce::DynamicObject();
-        S13NAMRack source;
+        OpenStudioNAMRack source;
         source.prepareToPlay(
             fixtureSampleRate,
             fixtureBlockSize);
@@ -38830,10 +39505,6 @@ juce::var AudioEngine::runNAMRackRegression()
         source.cabHPFHz.store(91.0f);
         source.cabLPFHz.store(11200.0f);
         source.cabPhaseInvert.store(1.0f);
-        source.cabMicPosition.store(0.61f);
-        source.cabMicDistance.store(0.29f);
-        source.cabMicBlend.store(0.72f);
-        source.cabRoomSend.store(0.18f);
         source.cabPan.store(-0.23f);
         source.cabRoomEnabled.store(1.0f);
         source.cabRoomAmount.store(0.41f);
@@ -38872,7 +39543,7 @@ juce::var AudioEngine::runNAMRackRegression()
         source.reverbEnabled.store(1.0f);
         source.reverbEngineVersion.store(
             static_cast<float>(
-                S13NAMRack::currentReverbEngineVersion));
+                OpenStudioNAMRack::currentReverbEngineVersion));
         source.outputTrimDb.store(-2.25f);
         source.calibrationReferenceDbu.store(9.25f);
         source.auditionSource.store(1.0f);
@@ -39004,7 +39675,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && exclusionsExact
             && rootPropertySetExact;
 
-        S13NAMRack restored;
+        OpenStudioNAMRack restored;
         restored.prepareToPlay(
             fixtureSampleRate,
             fixtureBlockSize);
@@ -39049,7 +39720,7 @@ juce::var AudioEngine::runNAMRackRegression()
                        .reverbEngineVersion
                        .load()
                    - static_cast<float>(
-                       S13NAMRack::currentReverbEngineVersion))
+                       OpenStudioNAMRack::currentReverbEngineVersion))
                 <= 1.0e-6f
             && restored.reverbPad.load(
                    std::memory_order_relaxed) >= 0.5f;
@@ -39279,15 +39950,12 @@ juce::var AudioEngine::runNAMRackRegression()
             { "pedalOverrideOutputLevelDbu", "Pedal Calibration Output", ControlFamily::pedalCalibration, 10.0f, 14.0f },
             { "pedalCalibrationMode", "Pedal Calibration Mode", ControlFamily::pedalCalibration, 0.0f, 2.0f, true, "selector" },
 
-            // Cabinet IR, shaping, room, and routing.
+            // Cab V3 literal IR operations, room, and routing. Retired Cab
+            // filters migrate into Graphic EQ and are not live controls.
             { "cabLevelDb", "Cab Level", ControlFamily::cab, -3.0f, 3.0f },
-            { "cabHPFHz", "Cab High Pass", ControlFamily::cab, 120.0f, 180.0f },
-            { "cabLPFHz", "Cab Low Pass", ControlFamily::cab, 8000.0f, 6000.0f },
+            { "cabIRStereo", "Cab Stereo IR", ControlFamily::cab, 0.0f, 1.0f, true },
+            { "cabDirectMix", "Cab Bass Direct Mix", ControlFamily::cab, 0.20f, 0.55f },
             { "cabPhaseInvert", "Cab Phase", ControlFamily::cab, 0.0f, 1.0f, true },
-            { "cabMicPosition", "Cab Tone Edge", ControlFamily::cab, 0.30f, 0.70f },
-            { "cabMicDistance", "Cab Tone Damp", ControlFamily::cab, 0.20f, 0.60f },
-            { "cabMicBlend", "Cab Shaper Blend", ControlFamily::cab, 0.30f, 0.70f },
-            { "cabRoomSend", "Cab Low Bloom", ControlFamily::cab, 0.15f, 0.45f },
             { "cabPan", "Cab Pan", ControlFamily::cab, -0.25f, 0.25f },
             { "cabRoomEnabled", "Room Power", ControlFamily::cabSpace, 1.0f, 0.0f, true },
             { "cabRoomAmount", "Room Amount", ControlFamily::cabSpace, 0.25f, 0.70f },
@@ -39368,7 +40036,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto configureForFamily =
-            [&] (S13NAMRack& rack,
+            [&] (OpenStudioNAMRack& rack,
                  ControlFamily family)
         {
             configureNeutralRack(rack);
@@ -39484,15 +40152,14 @@ juce::var AudioEngine::runNAMRackRegression()
                         .store(12.0f);
                     break;
                 case ControlFamily::cab:
+                    rack.instrumentProfile.store(
+                        static_cast<float>(
+                            OpenStudioNAMRack::bassInstrumentProfile));
                     rack.setCabRequestedEnabled(true);
                     rack.cabLevelDb.store(0.0f);
-                    rack.cabHPFHz.store(80.0f);
-                    rack.cabLPFHz.store(8500.0f);
+                    rack.cabIRStereo.store(0.0f);
+                    rack.cabDirectMix.store(0.35f);
                     rack.cabPhaseInvert.store(0.0f);
-                    rack.cabMicPosition.store(0.50f);
-                    rack.cabMicDistance.store(0.25f);
-                    rack.cabMicBlend.store(0.50f);
-                    rack.cabRoomSend.store(0.20f);
                     rack.cabPan.store(0.0f);
                     break;
                 case ControlFamily::cabSpace:
@@ -39542,7 +40209,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto prepareCaseRack =
-            [&] (S13NAMRack& rack,
+            [&] (OpenStudioNAMRack& rack,
                  const ControlCase& controlCase,
                  bool& resourceLoaded)
         {
@@ -39846,8 +40513,8 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
                 };
 
-                S13NAMRack testRack;
-                S13NAMRack referenceRack;
+                OpenStudioNAMRack testRack;
+                OpenStudioNAMRack referenceRack;
                 bool testResourceLoaded = true;
                 bool referenceResourceLoaded = true;
                 const bool testPrepared = prepareCaseRack(
@@ -40328,8 +40995,8 @@ juce::var AudioEngine::runNAMRackRegression()
                 return juce::var(value);
             }
 
-            S13NAMRack testRack;
-            S13NAMRack referenceRack;
+            OpenStudioNAMRack testRack;
+            OpenStudioNAMRack referenceRack;
             bool testResourceLoaded = true;
             bool referenceResourceLoaded = true;
             const bool testPrepared =
@@ -40753,7 +41420,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         const auto setBandGain = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             int band,
             float gainDb)
         {
@@ -40780,7 +41447,7 @@ juce::var AudioEngine::runNAMRackRegression()
             double frequencyHz)
         {
             constexpr int blockSize = 256;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.eqEnabled.store(1.0f);
             rack.eqLevelDb.store(levelDb);
             setBandGain(rack, band, bandGainDb);
@@ -40854,7 +41521,7 @@ juce::var AudioEngine::runNAMRackRegression()
             double frequencyHz)
         {
             constexpr int blockSize = 256;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.eqEnabled.store(1.0f);
             rack.eqHPFHz.store(hpfHz);
             rack.eqLPFHz.store(lpfHz);
@@ -40950,7 +41617,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
         };
 
-        const auto configureCurve = [] (S13NAMRack& rack)
+        const auto configureCurve = [] (OpenStudioNAMRack& rack)
         {
             rack.eqEnabled.store(1.0f);
             rack.eq65Db.store(-4.0f);
@@ -41037,7 +41704,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 source, 0, sampleRate, false, false);
             juce::AudioBuffer<float> bypassed;
             bypassed.makeCopyOf(source, true);
-            S13NAMRack bypassRack;
+            OpenStudioNAMRack bypassRack;
             configureCurve(bypassRack);
             bypassRack.eqEnabled.store(0.0f);
             bypassRack.eqLevelDb.store(12.0f);
@@ -41045,7 +41712,7 @@ juce::var AudioEngine::runNAMRackRegression()
             bypassRack.processGraphicEQ(bypassed);
             juce::AudioBuffer<float> flatEnabled;
             flatEnabled.makeCopyOf(source, true);
-            S13NAMRack flatRack;
+            OpenStudioNAMRack flatRack;
             flatRack.eqEnabled.store(1.0f);
             flatRack.eqLevelDb.store(0.0f);
             flatRack.prepareToPlay(sampleRate, nullSamples);
@@ -41076,7 +41743,7 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::AudioBuffer<float> isolated(2, nullSamples);
             fillDeterministicStereo(
                 isolated, 0, sampleRate, true, false);
-            S13NAMRack isolationRack;
+            OpenStudioNAMRack isolationRack;
             configureCurve(isolationRack);
             isolationRack.prepareToPlay(sampleRate, nullSamples);
             isolationRack.processGraphicEQ(isolated);
@@ -41090,7 +41757,7 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::AudioBuffer<float> identical(2, nullSamples);
             fillDeterministicStereo(
                 identical, 0, sampleRate, false, true);
-            S13NAMRack parityRack;
+            OpenStudioNAMRack parityRack;
             configureCurve(parityRack);
             parityRack.prepareToPlay(sampleRate, nullSamples);
             parityRack.processGraphicEQ(identical);
@@ -41112,7 +41779,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 constexpr int totalSamples = 8192;
                 juce::AudioBuffer<float> capture(2, totalSamples);
                 capture.clear();
-                S13NAMRack rack;
+                OpenStudioNAMRack rack;
                 configureCurve(rack);
                 rack.prepareToPlay(sampleRate, 512);
                 int cursor = 0;
@@ -41162,7 +41829,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
             const bool partitionPass = partitionError <= 1.0e-7f;
 
-            S13NAMRack headroomRack;
+            OpenStudioNAMRack headroomRack;
             headroomRack.inputTrimDb.store(0.0f);
             headroomRack.setRoutedInputChannelCount(1);
             headroomRack.outputTrimDb.store(0.0f);
@@ -41311,7 +41978,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runNAMRackGraphicEqAutomationCurveProbe = [] ()
     {
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         OpenStudioBuiltInAutomationDescriptor hpfDescriptor;
         OpenStudioBuiltInAutomationDescriptor lpfDescriptor;
         const bool descriptorsPresent =
@@ -41463,7 +42130,7 @@ juce::var AudioEngine::runNAMRackRegression()
             120.0f, 250.0f, 500.0f, 1000.0f,
             2500.0f, 5000.0f, 8000.0f, 12000.0f
         };
-        const auto setBand = [] (S13NAMRack& rack, int band, float value)
+        const auto setBand = [] (OpenStudioNAMRack& rack, int band, float value)
         {
             switch (band)
             {
@@ -41486,7 +42153,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float lpfHz)
         {
             constexpr int blockSize = 256;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(1.0f);
             if (activeBand >= 0)
                 setBand(rack, activeBand, 6.0f);
@@ -41638,7 +42305,7 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr double sampleRate = 48000.0;
             constexpr int blockSize = 257;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(enabled ? 1.0f : 0.0f);
             rack.preEq120Db.store(shaped ? 6.0f : 0.0f);
             rack.preEqHPFHz.store(shaped ? 100.0f : 0.0f);
@@ -41666,7 +42333,7 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr double sampleRate = 48000.0;
             constexpr int blockSize = 128;
-            S13NAMRack leakageRack;
+            OpenStudioNAMRack leakageRack;
             leakageRack.preEqEnabled.store(1.0f);
             leakageRack.preEq1kDb.store(6.0f);
             leakageRack.prepareToPlay(sampleRate, blockSize);
@@ -41683,7 +42350,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
             leakageRack.releaseResources();
 
-            S13NAMRack parityRack;
+            OpenStudioNAMRack parityRack;
             parityRack.preEqEnabled.store(1.0f);
             parityRack.preEq1kDb.store(6.0f);
             parityRack.preEqHPFHz.store(70.0f);
@@ -41709,7 +42376,7 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr double sampleRate = 48000.0;
             constexpr int totalSamples = 8192;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(1.0f);
             rack.preEq120Db.store(-3.0f);
             rack.preEq1kDb.store(4.0f);
@@ -41752,7 +42419,7 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr double sampleRate = 48000.0;
             constexpr int blockSize = 128;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(1.0f);
             rack.prepareToPlay(sampleRate, blockSize);
             for (int blockIndex = 0; blockIndex < 96; ++blockIndex)
@@ -41790,7 +42457,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.releaseResources();
         }
 
-        S13NAMRack automationRack;
+        OpenStudioNAMRack automationRack;
         OpenStudioBuiltInAutomationDescriptor hpfDescriptor;
         OpenStudioBuiltInAutomationDescriptor lpfDescriptor;
         const bool descriptorsPresent =
@@ -41902,7 +42569,7 @@ juce::var AudioEngine::runNAMRackRegression()
             17, 511, 3, 229, 41, 128, 7, 383, 61
         };
         const auto setBand = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             int band,
             float value) noexcept
         {
@@ -41919,7 +42586,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 default: break;
             }
         };
-        const auto setTightCurve = [] (S13NAMRack& rack) noexcept
+        const auto setTightCurve = [] (OpenStudioNAMRack& rack) noexcept
         {
             rack.preEqEnabled.store(1.0f);
             rack.preEq120Db.store(-4.0f);
@@ -41945,7 +42612,7 @@ juce::var AudioEngine::runNAMRackRegression()
             constexpr int preparedBlockSize = 512;
             constexpr int totalSamples = 32768;
             constexpr float impulseAmplitude = 0.25f;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(1.0f);
             setBand(rack, activeBand, bandGainDb);
             rack.prepareToPlay(sampleRate, preparedBlockSize);
@@ -42029,7 +42696,7 @@ juce::var AudioEngine::runNAMRackRegression()
             int silenceNonFiniteSamples = 0;
             {
                 constexpr int totalSamples = 8192;
-                S13NAMRack rack;
+                OpenStudioNAMRack rack;
                 rack.preEqEnabled.store(1.0f);
                 for (int band = 0;
                      band < static_cast<int>(bandFrequencies.size());
@@ -42073,7 +42740,7 @@ juce::var AudioEngine::runNAMRackRegression()
             float flatNullError = 0.0f;
             {
                 constexpr int totalSamples = 8192;
-                S13NAMRack rack;
+                OpenStudioNAMRack rack;
                 rack.preEqEnabled.store(1.0f);
                 rack.prepareToPlay(sampleRate, 512);
                 int cursor = 0;
@@ -42130,7 +42797,7 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 constexpr int blockSize = 257;
                 const int totalSamples = juce::roundToInt(sampleRate * 0.50);
-                S13NAMRack shapedRack;
+                OpenStudioNAMRack shapedRack;
                 shapedRack.preEqEnabled.store(1.0f);
                 shapedRack.preEq120Db.store(12.0f);
                 shapedRack.preEq250Db.store(-12.0f);
@@ -42142,7 +42809,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 shapedRack.preEq12kDb.store(-3.0f);
                 shapedRack.prepareToPlay(sampleRate, blockSize);
 
-                S13NAMRack highPassedRack;
+                OpenStudioNAMRack highPassedRack;
                 highPassedRack.preEqEnabled.store(1.0f);
                 highPassedRack.preEqHPFHz.store(80.0f);
                 highPassedRack.prepareToPlay(sampleRate, blockSize);
@@ -42230,7 +42897,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 int& nonFiniteSamples)
         {
             constexpr int totalSamples = 16384;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             setTightCurve(rack);
             rack.prepareToPlay(sampleRate, 512);
             capture.setSize(2, totalSamples, false, true, false);
@@ -42348,7 +43015,7 @@ juce::var AudioEngine::runNAMRackRegression()
             constexpr int sourceSamples = 12288;
             constexpr int automationSamples = 16384;
             constexpr int tailMeasureStart = 28672;
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.preEqEnabled.store(1.0f);
             rack.prepareToPlay(sampleRate, 512);
             int cursor = 0;
@@ -42547,7 +43214,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const std::vector<int>& partitions,
             juce::AudioBuffer<float>& capture)
         {
-            S13NAMRack rack;
+            OpenStudioNAMRack rack;
             rack.eqEnabled.store(1.0f);
             rack.prepareToPlay(sampleRate, preparedBlockSize);
             capture.setSize(2, totalSamples, false, true, false);
@@ -42817,7 +43484,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
             // The standalone instance is configured to the same bounded V3
             // tank used by the rack so pre-delay, wet filtering, and shimmer
-            // transition guards are covered independently of S13NAMRack.
+            // transition guards are covered independently of OpenStudioNAMRack.
             { "wetLevel", "Reverb Wet", StandaloneFamily::reverb, 0.30f, 0.75f },
             { "dryLevel", "Reverb Dry", StandaloneFamily::reverb, 0.75f, 0.35f },
             { "preDelay", "Reverb Pre-delay", StandaloneFamily::reverb, 12.0f, 55.0f },
@@ -42847,21 +43514,21 @@ juce::var AudioEngine::runNAMRackRegression()
             switch (family)
             {
                 case StandaloneFamily::gate:
-                    return std::make_unique<S13Gate>();
+                    return std::make_unique<OpenStudioGate>();
                 case StandaloneFamily::compressor:
-                    return std::make_unique<S13Compressor>();
+                    return std::make_unique<OpenStudioCompressor>();
                 case StandaloneFamily::limiter:
-                    return std::make_unique<S13Limiter>();
+                    return std::make_unique<OpenStudioLimiter>();
                 case StandaloneFamily::delay:
-                    return std::make_unique<S13Delay>();
+                    return std::make_unique<OpenStudioDelay>();
                 case StandaloneFamily::chorus:
-                    return std::make_unique<S13Chorus>();
+                    return std::make_unique<OpenStudioChorus>();
                 case StandaloneFamily::saturator:
-                    return std::make_unique<S13Saturator>(true);
+                    return std::make_unique<OpenStudioSaturator>(true);
                 case StandaloneFamily::reverb:
-                    return std::make_unique<S13Reverb>();
+                    return std::make_unique<OpenStudioReverb>();
                 case StandaloneFamily::eq:
-                    return std::make_unique<S13EQ>();
+                    return std::make_unique<OpenStudioEQ>();
             }
 
             return {};
@@ -42871,7 +43538,7 @@ juce::var AudioEngine::runNAMRackRegression()
             [] (juce::AudioProcessor& processor)
         {
             if (auto* gate =
-                    dynamic_cast<S13Gate*>(&processor))
+                    dynamic_cast<OpenStudioGate*>(&processor))
             {
                 gate->threshold.store(-17.5f);
                 gate->attackMs.store(2.0f);
@@ -42887,7 +43554,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* compressor =
-                    dynamic_cast<S13Compressor*>(
+                    dynamic_cast<OpenStudioCompressor*>(
                         &processor))
             {
                 compressor->threshold.store(-22.0f);
@@ -42905,7 +43572,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* limiter =
-                    dynamic_cast<S13Limiter*>(
+                    dynamic_cast<OpenStudioLimiter*>(
                         &processor))
             {
                 limiter->threshold.store(-8.0f);
@@ -42916,7 +43583,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* delay =
-                    dynamic_cast<S13Delay*>(&processor))
+                    dynamic_cast<OpenStudioDelay*>(&processor))
             {
                 delay->delayTimeL.store(35.0f);
                 delay->delayTimeR.store(47.0f);
@@ -42935,12 +43602,12 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* chorus =
-                    dynamic_cast<S13Chorus*>(
+                    dynamic_cast<OpenStudioChorus*>(
                         &processor))
             {
                 chorus->mode.store(
                     static_cast<float>(
-                        S13Chorus::Mode::Chorus));
+                        OpenStudioChorus::Mode::Chorus));
                 chorus->rate.store(0.35f);
                 chorus->depth.store(0.35f);
                 chorus->fbAmount.store(0.10f);
@@ -42948,7 +43615,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 chorus->voices.store(2.0f);
                 chorus->lfoShape.store(
                     static_cast<float>(
-                        S13Chorus::LFOShape::Sine));
+                        OpenStudioChorus::LFOShape::Sine));
                 chorus->spread.store(0.65f);
                 chorus->highCut.store(14000.0f);
                 chorus->lowCut.store(30.0f);
@@ -42960,12 +43627,12 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* saturator =
-                    dynamic_cast<S13Saturator*>(
+                    dynamic_cast<OpenStudioSaturator*>(
                         &processor))
             {
                 saturator->satType.store(
                     static_cast<float>(
-                        S13Saturator::SatType::Tape));
+                        OpenStudioSaturator::SatType::Tape));
                 saturator->drive.store(8.0f);
                 saturator->mix.store(0.70f);
                 saturator->toneFreq.store(14000.0f);
@@ -42977,13 +43644,13 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* reverb =
-                    dynamic_cast<S13Reverb*>(
+                    dynamic_cast<OpenStudioReverb*>(
                         &processor))
             {
                 reverb->engineVersion.store(3.0f);
                 reverb->algorithm.store(
                     static_cast<float>(
-                        S13Reverb::Algorithm::Plate));
+                        OpenStudioReverb::Algorithm::Plate));
                 reverb->roomSize.store(0.68f);
                 reverb->damping.store(0.48f);
                 reverb->wetLevel.store(0.58f);
@@ -43002,7 +43669,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             if (auto* eq =
-                    dynamic_cast<S13EQ*>(&processor))
+                    dynamic_cast<OpenStudioEQ*>(&processor))
             {
                 for (auto& band : eq->bands)
                     band.enabled.store(0.0f);
@@ -43010,7 +43677,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 eq->bands[0].enabled.store(1.0f);
                 eq->bands[0].type.store(
                     static_cast<float>(
-                        S13EQ::FilterType::LowCut));
+                        OpenStudioEQ::FilterType::LowCut));
                 eq->bands[0].freq.store(55.0f);
                 eq->bands[0].q.store(0.71f);
                 eq->bands[0].slope.store(1.0f);
@@ -43018,7 +43685,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 eq->bands[3].enabled.store(1.0f);
                 eq->bands[3].type.store(
                     static_cast<float>(
-                        S13EQ::FilterType::Bell));
+                        OpenStudioEQ::FilterType::Bell));
                 eq->bands[3].freq.store(850.0f);
                 eq->bands[3].gain.store(3.0f);
                 eq->bands[3].q.store(0.70f);
@@ -43038,7 +43705,7 @@ juce::var AudioEngine::runNAMRackRegression()
             if (parameterId == "shimmerAmount")
             {
                 if (auto* reverb =
-                        dynamic_cast<S13Reverb*>(
+                        dynamic_cast<OpenStudioReverb*>(
                             &processor))
                 {
                     reverb->shimmerAmount.store(
@@ -43051,7 +43718,7 @@ juce::var AudioEngine::runNAMRackRegression()
             if (parameterId == "powerEnabled")
             {
                 if (auto* eq =
-                        dynamic_cast<S13EQ*>(
+                        dynamic_cast<OpenStudioEQ*>(
                             &processor))
                 {
                     eq->setPowerEnabled(
@@ -43631,7 +44298,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack slimRack;
+        OpenStudioNAMRack slimRack;
         slimRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         configureNeutralRack(slimRack);
@@ -43845,7 +44512,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && ! perSlotTree.hasProperty(
                 "namModelSize");
 
-        S13NAMRack emptyStateSource;
+        OpenStudioNAMRack emptyStateSource;
         juce::MemoryBlock currentEmptyState;
         emptyStateSource.getStateInformation(
             currentEmptyState);
@@ -43867,7 +44534,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 legacyState, false);
             legacyTree.writeToStream(stream);
         }
-        S13NAMRack legacyRestoredRack;
+        OpenStudioNAMRack legacyRestoredRack;
         legacyRestoredRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         const bool legacyRestored =
@@ -43899,7 +44566,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 preSlimState, false);
             legacyTree.writeToStream(stream);
         }
-        S13NAMRack preSlimRestoredRack;
+        OpenStudioNAMRack preSlimRestoredRack;
         preSlimRestoredRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         const bool preSlimRestored =
@@ -43973,7 +44640,7 @@ juce::var AudioEngine::runNAMRackRegression()
         requestedBenchmarkModelPath.isNotEmpty();
     const juce::File lowBlockBenchmarkModel = benchmarkModelWasRequested
         ? juce::File(requestedBenchmarkModelPath)
-        : a2ModelFile;
+        : a1ModelFile;
     const auto requestedBenchmarkSampleRateText =
         juce::SystemStats::getEnvironmentVariable(
             "OPENSTUDIO_NAM_BENCHMARK_SAMPLE_RATE", {}).trim();
@@ -44001,7 +44668,7 @@ juce::var AudioEngine::runNAMRackRegression()
             "modelSource",
             benchmarkModelWasRequested
                 ? "OPENSTUDIO_NAM_BENCHMARK_MODEL"
-                : "bundled_A2_fixture");
+                : "bundled_stable_A1_fixture");
         value->setProperty(
             "sampleRate", lowBlockBenchmarkSampleRate);
         value->setProperty(
@@ -44017,12 +44684,12 @@ juce::var AudioEngine::runNAMRackRegression()
                 "reason",
                 benchmarkModelWasRequested
                     ? "OPENSTUDIO_NAM_BENCHMARK_MODEL does not point to a file."
-                    : "The bundled A2 fixture was not found.");
+                    : "The bundled stable A1 fixture was not found.");
             value->setProperty("pass", false);
             return juce::var(value);
         }
 
-        S13NAMRack benchmarkRack;
+        OpenStudioNAMRack benchmarkRack;
         benchmarkRack.prepareToPlay(
             lowBlockBenchmarkSampleRate, 256);
         configureNeutralRack(benchmarkRack);
@@ -44295,7 +44962,7 @@ juce::var AudioEngine::runNAMRackRegression()
         : a1ModelFile;
     const juce::File dualAmpModelFile = dualAmpModelWasRequested
         ? juce::File(requestedDualAmpModelPath)
-        : a2ModelFile;
+        : a1ModelFile;
     auto runDualNAMSerialDiagnostic = [&] ()
     {
         constexpr int benchmarkFrames = 32768;
@@ -44322,7 +44989,7 @@ juce::var AudioEngine::runNAMRackRegression()
             "ampModelSource",
             dualAmpModelWasRequested
                 ? "OPENSTUDIO_NAM_BENCHMARK_AMP_MODEL"
-                : "bundled_A2_fixture");
+                : "bundled_stable_A1_fixture");
         value->setProperty("sampleRate", lowBlockBenchmarkSampleRate);
         const bool modelsAvailable =
             dualPedalModelFile.existsAsFile()
@@ -44337,7 +45004,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack benchmarkRack;
+        OpenStudioNAMRack benchmarkRack;
         benchmarkRack.prepareToPlay(
             lowBlockBenchmarkSampleRate, 256);
         configureNeutralRack(benchmarkRack);
@@ -44722,7 +45389,7 @@ juce::var AudioEngine::runNAMRackRegression()
         if (! fixturesAvailable)
             return juce::var(value);
 
-        S13NAMRack benchmarkRack;
+        OpenStudioNAMRack benchmarkRack;
         benchmarkRack.prepareToPlay(
             benchmarkSampleRate, benchmarkBlockSize);
         configureDrivenRack(benchmarkRack);
@@ -44752,7 +45419,7 @@ juce::var AudioEngine::runNAMRackRegression()
             callbackDeadlineMicroseconds);
 
         const auto configureCompleteRack = [&] (
-            S13NAMRack& target,
+            OpenStudioNAMRack& target,
             int routedChannels)
         {
             configureDrivenRack(target);
@@ -44795,7 +45462,7 @@ juce::var AudioEngine::runNAMRackRegression()
             target.delayFeedback.store(0.24f);
             target.reverbEngineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion));
+                    OpenStudioNAMRack::currentReverbEngineVersion));
             target.reverbEnabled.store(1.0f);
             target.reverbMix.store(0.18f);
             target.reverbDecaySec.store(2.4f);
@@ -45009,7 +45676,7 @@ juce::var AudioEngine::runNAMRackRegression()
         }
 
         const auto settleAmpHandoff =
-            [&] (S13NAMRack& rack)
+            [&] (OpenStudioNAMRack& rack)
             {
                 constexpr double settlingSeconds = 0.06;
                 const int settlingBlocks =
@@ -45041,7 +45708,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 0,
                 R"json("metadata":{"name":"Peavey 5150","gear_make":"Victory","gear_model":"V30 The Countess","gear_type":"amp_cab"},)json"));
 
-        S13NAMRack routingRack;
+        OpenStudioNAMRack routingRack;
         routingRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         routingRack.setCabRequestedEnabled(true);
         const bool embeddedLoaded = fixtureWritten && routingRack.loadAmpModel(embeddedCabModel.getFullPathName());
@@ -45074,7 +45741,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && routingRack.cabEnabled.load() < 0.5f;
         const auto runRequestedCabRecallRoundTrip = [&] (bool requestedEnabled)
         {
-            S13NAMRack recallRack;
+            OpenStudioNAMRack recallRack;
             recallRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
             if (! recallRack.loadCabIR(irFile.getFullPathName()))
                 return false;
@@ -45129,7 +45796,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool requestedOnRecallRoundTrip = runRequestedCabRecallRoundTrip(true);
         const bool requestedOffRecallRoundTrip = runRequestedCabRecallRoundTrip(false);
 
-        S13NAMRack declaredFallbackRack;
+        OpenStudioNAMRack declaredFallbackRack;
         declaredFallbackRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         declaredFallbackRack.setCabRequestedEnabled(true);
         const bool declaredFallbackLoaded =
@@ -45153,7 +45820,7 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::MemoryBlock declaredFallbackState;
         declaredFallbackRack.getTonePresetStateInformation(
             declaredFallbackState);
-        S13NAMRack declaredFallbackRestoredRack;
+        OpenStudioNAMRack declaredFallbackRestoredRack;
         declaredFallbackRestoredRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         const bool declaredFallbackStateLoaded =
@@ -45186,7 +45853,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && ! declaredFallbackRack.ampModelIncludesCab()
             && declaredFallbackRack.cabEnabled.load() >= 0.5f;
 
-        S13NAMRack samePathFallbackRack;
+        OpenStudioNAMRack samePathFallbackRack;
         samePathFallbackRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         samePathFallbackRack.setCabRequestedEnabled(true);
@@ -45212,7 +45879,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && samePathFallbackRack.ampModelIncludesCab()
             && samePathFallbackRack.cabEnabled.load() < 0.5f;
 
-        S13NAMRack metadataPriorityRack;
+        OpenStudioNAMRack metadataPriorityRack;
         metadataPriorityRack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
         metadataPriorityRack.setCabRequestedEnabled(true);
@@ -45280,7 +45947,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(value);
         }
 
-        S13NAMRack calibrationRack;
+        OpenStudioNAMRack calibrationRack;
         calibrationRack.prepareToPlay(48000.0, fixtureBlockSize);
         calibrationRack.inputTrimDb.store(2.5f);
         calibrationRack.outputTrimDb.store(-1.5f);
@@ -45356,7 +46023,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         juce::MemoryBlock calibrationState;
         calibrationRack.getStateInformation(calibrationState);
-        S13NAMRack restoredCalibrationRack;
+        OpenStudioNAMRack restoredCalibrationRack;
         restoredCalibrationRack.prepareToPlay(48000.0, fixtureBlockSize);
         restoredCalibrationRack.setStateInformation(calibrationState.getData(), static_cast<int>(calibrationState.getSize()));
         const bool stateRoundTrip = std::abs(restoredCalibrationRack.calibrationReferenceDbu.load() - 10.0f) < 0.0001f
@@ -45377,18 +46044,18 @@ juce::var AudioEngine::runNAMRackRegression()
             && std::abs(calibrationRack.inputTrimDb.load() - 2.5f) < 0.0001f
             && std::abs(calibrationRack.calibrationReferenceDbu.load() - 7.0f) < 0.0001f;
 
-        juce::ValueTree legacyTree("S13NAMRack");
+        juce::ValueTree legacyTree("OpenStudioNAMRack");
         legacyTree.setProperty("inputTrimDb", 3.0, nullptr);
         juce::MemoryBlock legacyState;
         juce::MemoryOutputStream legacyStream(legacyState, false);
         legacyTree.writeToStream(legacyStream);
-        S13NAMRack legacyRack;
+        OpenStudioNAMRack legacyRack;
         legacyRack.setStateInformation(legacyState.getData(), static_cast<int>(legacyState.getSize()));
         const bool legacyDefaultsOff = legacyRack.pedalCalibrationMode.load() < 0.5f
             && legacyRack.ampCalibrationMode.load() < 0.5f
             && std::abs(legacyRack.inputTrimDb.load() - 3.0f) < 0.0001f;
 
-        S13NAMRack missingCalibrationRack;
+        OpenStudioNAMRack missingCalibrationRack;
         missingCalibrationRack.prepareToPlay(
             48000.0, fixtureBlockSize);
         const bool missingCalibrationModelLoaded =
@@ -45415,7 +46082,7 @@ juce::var AudioEngine::runNAMRackRegression()
             result.audio.setSize(2, totalSamples);
             result.audio.clear();
 
-            S13NAMRack dualRack;
+            OpenStudioNAMRack dualRack;
             configureNeutralRack(dualRack);
             dualRack.calibrationReferenceDbu.store(referenceDbu);
             dualRack.pedalCalibrationMode.store(1.0f);
@@ -45650,7 +46317,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 break;
 
             const auto file = entry.getFile();
-            S13NAMRack localRack;
+            OpenStudioNAMRack localRack;
             localRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
             configureRack(localRack);
             localRack.setCabRequestedEnabled(false);
@@ -45679,7 +46346,7 @@ juce::var AudioEngine::runNAMRackRegression()
             const bool guardTransparent =
                 loaded
                 && maximumRawOutputPeak
-                    < S13NAMRack::
+                    < OpenStudioNAMRack::
                           namOutputSafetyKnee
                 && guardHitCount == 0;
             const bool pass = loaded
@@ -45764,11 +46431,11 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr std::size_t directionProbeBlockSize = 16;
             auto* direction = new juce::DynamicObject();
-            S13NAMRack::NAMResamplerKernel kernel;
+            OpenStudioNAMRack::NAMResamplerKernel kernel;
             kernel.prepare(
                 static_cast<double>(inputRate),
                 static_cast<double>(outputRate));
-            S13NAMRack::NAMResamplerState state;
+            OpenStudioNAMRack::NAMResamplerState state;
             state.reset();
 
             const auto denominator =
@@ -45803,7 +46470,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 static_cast<int>(
                     baseInputSamples
                     % static_cast<std::uint64_t>(
-                        S13NAMRack::
+                        OpenStudioNAMRack::
                             namResamplerHistorySize));
 
             std::array<float, directionProbeBlockSize> input {};
@@ -45895,7 +46562,7 @@ juce::var AudioEngine::runNAMRackRegression()
             constexpr int initialCursor = 3;
             constexpr int expectedCursor =
                 (initialCursor + activeSamples) % delaySamples;
-            S13NAMRack::LoadedNAMModel model;
+            OpenStudioNAMRack::LoadedNAMModel model;
             model.resampledDryDelaySamples = delaySamples;
             model.resampledDryDelayWrite = initialCursor;
             model.ampBypassDryDelayWrite = initialCursor;
@@ -45944,12 +46611,12 @@ juce::var AudioEngine::runNAMRackRegression()
 
             if (ampBypass)
             {
-                S13NAMRack::processAmpBypassDryDelay(
+                OpenStudioNAMRack::processAmpBypassDryDelay(
                     buffer, model, activeSamples);
             }
             else
             {
-                S13NAMRack::processModelDryDelay(
+                OpenStudioNAMRack::processModelDryDelay(
                     buffer, model, activeSamples);
             }
 
@@ -46038,7 +46705,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return juce::var(result);
         }
 
-        S13NAMRack probeRack;
+        OpenStudioNAMRack probeRack;
         probeRack.prepareToPlay(44100.0, 512);
         probeRack.gateThresholdDb.store(-100.0f);
         probeRack.auditionSource.store(1.0f);
@@ -46097,9 +46764,9 @@ juce::var AudioEngine::runNAMRackRegression()
             // independent of how the host partitions it into callbacks. Render
             // the same internal DI source through fixed and deliberately uneven
             // block sequences and compare the resulting samples directly.
-            S13NAMRack fixedBlockRack;
-            S13NAMRack unevenBlockRack;
-            const auto configurePartitionProbe = [&] (S13NAMRack& candidate)
+            OpenStudioNAMRack fixedBlockRack;
+            OpenStudioNAMRack unevenBlockRack;
+            const auto configurePartitionProbe = [&] (OpenStudioNAMRack& candidate)
             {
                 candidate.prepareToPlay(44100.0, 1024);
                 candidate.gateThresholdDb.store(-100.0f);
@@ -46132,7 +46799,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 const std::array<int, 10> unevenPattern {
                     8, 16, 32, 64, 127, 384, 256, 640, 512, 1024
                 };
-                const auto renderPartition = [&] (S13NAMRack& candidate, const auto& pattern)
+                const auto renderPartition = [&] (OpenStudioNAMRack& candidate, const auto& pattern)
                 {
                     juce::AudioBuffer<float> captured(2, comparisonFrames);
                     captured.clear();
@@ -46192,7 +46859,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     partitionedBlockMaxDiff == 0.0f;
 
                 const auto checkDryDelayCursor = [&] (
-                    S13NAMRack& candidate,
+                    OpenStudioNAMRack& candidate,
                     int& delaySampleCount,
                     int& actualCursor,
                     int& expectedCursor)
@@ -46295,7 +46962,7 @@ juce::var AudioEngine::runNAMRackRegression()
         track.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         track.setTrackType(TrackType::Audio);
 
-        const bool fxAdded = track.addTrackFX(std::make_unique<S13NAMRack>(),
+        const bool fxAdded = track.addTrackFX(std::make_unique<OpenStudioNAMRack>(),
                                               fixtureSampleRate,
                                               fixtureBlockSize);
         bool enabled = false;
@@ -46303,7 +46970,7 @@ juce::var AudioEngine::runNAMRackRegression()
         RackProbe probe;
         if (fxAdded)
         {
-            if (auto* rack = dynamic_cast<S13NAMRack*>(track.getTrackFXProcessor(0)))
+            if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(track.getTrackFXProcessor(0)))
             {
                 rack->gateThresholdDb.store(-100.0f);
                 rack->auditionSource.store(1.0f);
@@ -46361,11 +47028,11 @@ juce::var AudioEngine::runNAMRackRegression()
         const auto addConfiguredReverbRack = [&] (TrackProcessor& track)
         {
             const bool added = track.addTrackFX(
-                std::make_unique<S13NAMRack>(),
+                std::make_unique<OpenStudioNAMRack>(),
                 fixtureSampleRate,
                 tailBlockSize);
             auto* rack = added
-                ? dynamic_cast<S13NAMRack*>(
+                ? dynamic_cast<OpenStudioNAMRack*>(
                       track.getTrackFXProcessor(0))
                 : nullptr;
             if (rack == nullptr)
@@ -46375,7 +47042,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack->reverbEnabled.store(1.0f);
             rack->reverbEngineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion));
+                    OpenStudioNAMRack::currentReverbEngineVersion));
             rack->reverbMix.store(0.68f);
             rack->reverbDecaySec.store(1.6f);
             rack->reverbPreDelayMs.store(0.0f);
@@ -46571,7 +47238,7 @@ juce::var AudioEngine::runNAMRackRegression()
             "modelSource",
             benchmarkModelWasRequested
                 ? "OPENSTUDIO_NAM_BENCHMARK_MODEL"
-                : "bundled_A2_fixture");
+                : "bundled_stable_A1_fixture");
 
         if (! modelFile.existsAsFile())
         {
@@ -46581,11 +47248,11 @@ juce::var AudioEngine::runNAMRackRegression()
                 "reason",
                 benchmarkModelWasRequested
                     ? "OPENSTUDIO_NAM_BENCHMARK_MODEL does not point to a file."
-                    : "The bundled A2 fixture was not found.");
+                    : "The bundled stable A1 fixture was not found.");
             return juce::var(result);
         }
 
-        S13NAMRack lowBufferRack;
+        OpenStudioNAMRack lowBufferRack;
         lowBufferRack.prepareToPlay(fixtureSampleRate, 256);
         configureNeutralRack(lowBufferRack);
         lowBufferRack.ampEnabled.store(1.0f);
@@ -46754,11 +47421,11 @@ juce::var AudioEngine::runNAMRackRegression()
         track.setTrackType(TrackType::Audio);
         const bool fxAdded =
             track.addTrackFX(
-                std::make_unique<S13NAMRack>(),
+                std::make_unique<OpenStudioNAMRack>(),
                 fixtureSampleRate,
                 lowBufferBlockSize);
         auto* rack = fxAdded
-            ? dynamic_cast<S13NAMRack*>(
+            ? dynamic_cast<OpenStudioNAMRack*>(
                   track.getTrackFXProcessor(0))
             : nullptr;
         if (rack != nullptr)
@@ -47022,6 +47689,7 @@ juce::var AudioEngine::runNAMRackRegression()
         bool retiredReverbControlsRejected = false;
         bool ampFaceplateApplied = false;
         bool cabMicRoomApplied = false;
+        bool retiredCabFiltersRejected = false;
         bool cabPresentationApplied = false;
         bool auditionApplied = false;
         bool auditionHiddenFromPublicState = false;
@@ -47074,10 +47742,13 @@ juce::var AudioEngine::runNAMRackRegression()
                 graphicEqApplied = graphicEqApplied && setBuiltInPluginParam(trackId, "track", 0, "eqLPFHz", 11800.0f);
                 graphicEqApplied = graphicEqApplied && setBuiltInPluginParam(trackId, "track", 0, "eqLevelDb", -1.25f);
                 graphicEqApplied = graphicEqApplied && setBuiltInPluginParam(trackId, "track", 0, "eqEnabled", 1.0f);
-                cabMicRoomApplied = setBuiltInPluginParam(trackId, "track", 0, "cabMicPosition", 0.72f)
-                    && setBuiltInPluginParam(trackId, "track", 0, "cabMicDistance", 0.38f)
-                    && setBuiltInPluginParam(trackId, "track", 0, "cabMicBlend", 0.61f)
-                    && setBuiltInPluginParam(trackId, "track", 0, "cabRoomSend", 0.29f)
+                retiredCabFiltersRejected =
+                    ! setBuiltInPluginParam(trackId, "track", 0, "cabHPFEnabled", 1.0f)
+                    && ! setBuiltInPluginParam(trackId, "track", 0, "cabLPFEnabled", 1.0f)
+                    && ! setBuiltInPluginParam(trackId, "track", 0, "cabHPFHz", 91.0f)
+                    && ! setBuiltInPluginParam(trackId, "track", 0, "cabLPFHz", 12700.0f);
+                cabMicRoomApplied = setBuiltInPluginParam(trackId, "track", 0, "cabIRStereo", 1.0f)
+                    && setBuiltInPluginParam(trackId, "track", 0, "cabDirectMix", 0.37f)
                     && setBuiltInPluginParam(trackId, "track", 0, "cabPan", -0.32f);
                 cabPresentationApplied =
                     setBuiltInPluginParam(
@@ -47151,12 +47822,12 @@ juce::var AudioEngine::runNAMRackRegression()
                     && ! setBuiltInPluginParam(trackId, "track", 0, "tapeEchoFeedback", 0.81f)
                     && ! setBuiltInPluginParam(trackId, "track", 0, "tapeEchoMod", 0.79f)
                     && ! setBuiltInPluginParam(trackId, "track", 0, "tapeEchoTone", 0.03f);
-                S13NAMRack* bridgeProbeRack = nullptr;
+                OpenStudioNAMRack* bridgeProbeRack = nullptr;
                 const auto bridgeProbeTrack = trackMap.find(trackId);
                 if (bridgeProbeTrack != trackMap.end()
                     && bridgeProbeTrack->second != nullptr)
                 {
-                    bridgeProbeRack = dynamic_cast<S13NAMRack*>(
+                    bridgeProbeRack = dynamic_cast<OpenStudioNAMRack*>(
                         bridgeProbeTrack->second
                             ->getTrackFXProcessor(0));
                 }
@@ -47194,7 +47865,7 @@ juce::var AudioEngine::runNAMRackRegression()
                            bridgeProbeRack->reverbEngineVersion.load(
                                std::memory_order_relaxed)
                            - static_cast<float>(
-                               S13NAMRack::currentReverbEngineVersion))
+                               OpenStudioNAMRack::currentReverbEngineVersion))
                         <= 1.0e-6f;
                 retiredReverbControlsRejected =
                     ! setBuiltInPluginParam(trackId, "track", 0, "reverbCharacter", 2.0f)
@@ -47263,10 +47934,17 @@ juce::var AudioEngine::runNAMRackRegression()
                         && closeEnough(values->getProperty("eqHPFLastActiveHz"), 95.0)
                         && closeEnough(values->getProperty("eqLPFLastActiveHz"), 11800.0)
                         && closeEnough(values->getProperty("eqLevelDb"), -1.25)
-                        && closeEnough(values->getProperty("cabMicPosition"), 0.72)
-                        && closeEnough(values->getProperty("cabMicDistance"), 0.38)
-                        && closeEnough(values->getProperty("cabMicBlend"), 0.61)
-                        && closeEnough(values->getProperty("cabRoomSend"), 0.29)
+                        && closeEnough(values->getProperty("cabEngineVersion"), 3.0)
+                        && closeEnough(values->getProperty("cabHPFEnabled"), 0.0)
+                        && closeEnough(values->getProperty("cabLPFEnabled"), 0.0)
+                        && closeEnough(values->getProperty("cabHPFHz"), 30.0)
+                        && closeEnough(values->getProperty("cabLPFHz"), 16000.0)
+                        && closeEnough(values->getProperty("cabIRStereo"), 1.0)
+                        && closeEnough(values->getProperty("cabDirectMix"), 0.37)
+                        && ! values->hasProperty("cabMicPosition")
+                        && ! values->hasProperty("cabMicDistance")
+                        && ! values->hasProperty("cabMicBlend")
+                        && ! values->hasProperty("cabRoomSend")
                         && closeEnough(values->getProperty("cabPan"), -0.32)
                         && closeEnough(values->getProperty("cabRoomEnabled"), 1.0)
                         && closeEnough(values->getProperty("cabRoomAmount"), 0.47)
@@ -47477,7 +48155,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                    dspState->getProperty(
                                        "reverbEngineVersion"))
                                - static_cast<double>(
-                                   S13NAMRack::currentReverbEngineVersion))
+                                   OpenStudioNAMRack::currentReverbEngineVersion))
                             <= 1.0e-6;
                     portableNAMEffectsDspStateExported =
                         dspState->hasProperty(
@@ -47485,7 +48163,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         && static_cast<int>(
                                dspState->getProperty(
                                    "namEffectsDspVersion"))
-                            == S13NAMRack::currentNAMEffectsDspVersion;
+                            == OpenStudioNAMRack::currentNAMEffectsDspVersion;
                 }
                 const auto portableStateSchema =
                     getBuiltInPluginSchema(
@@ -47530,7 +48208,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                    .load(
                                        std::memory_order_relaxed)
                                - static_cast<float>(
-                                   S13NAMRack::currentReverbEngineVersion))
+                                   OpenStudioNAMRack::currentReverbEngineVersion))
                             <= 1.0e-6f
                         && std::abs(
                                static_cast<double>(
@@ -47538,7 +48216,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                        ->getProperty(
                                            "reverbEngineVersion"))
                                - static_cast<double>(
-                                   S13NAMRack::currentReverbEngineVersion))
+                                   OpenStudioNAMRack::currentReverbEngineVersion))
                             <= 1.0e-6;
                 }
 
@@ -47575,7 +48253,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         markerlessApplied
                         && bridgeProbeRack->namEffectsDspVersion.load(
                                std::memory_order_relaxed)
-                            == S13NAMRack::currentNAMEffectsDspVersion;
+                            == OpenStudioNAMRack::currentNAMEffectsDspVersion;
 
                     bridgeProbeRack->namEffectsDspVersion.store(
                         3, std::memory_order_relaxed);
@@ -47589,7 +48267,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         legacyBundleApplied
                         && bridgeProbeRack->namEffectsDspVersion.load(
                                std::memory_order_relaxed)
-                            == S13NAMRack::currentNAMEffectsDspVersion
+                            == OpenStudioNAMRack::currentNAMEffectsDspVersion
                         && std::abs(
                                bridgeProbeRack
                                    ->precisionDriveVolumeDb.load()
@@ -47695,7 +48373,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             "{\"schemaVersion\":1,\"modelState\":{},"
                             "\"dspState\":{\"namEffectsDspVersion\":"
                             + juce::String(
-                                S13NAMRack::developmentNAMEffectsDspVersionAlias)
+                                OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias)
                             + "},\"values\":{\"delayMode\":4}}");
                     const bool developmentAliasDelayPreserved =
                         developmentAliasDelayBundleApplied
@@ -47710,7 +48388,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             "{\"schemaVersion\":1,\"modelState\":{},"
                             "\"dspState\":{\"namEffectsDspVersion\":"
                             + juce::String(
-                                S13NAMRack::currentNAMEffectsDspVersion + 1)
+                                OpenStudioNAMRack::currentNAMEffectsDspVersion + 1)
                             + "},\"values\":{\"delayMode\":4}}");
                     const bool futureDelayDefaulted =
                         futureDelayBundleApplied
@@ -47738,7 +48416,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
                     portableNAMEffectsVersionsRoundTrip = true;
                     for (int version = 1;
-                         version <= S13NAMRack::currentNAMEffectsDspVersion;
+                         version <= OpenStudioNAMRack::currentNAMEffectsDspVersion;
                          ++version)
                     {
                         const juce::String versionState =
@@ -47764,12 +48442,12 @@ juce::var AudioEngine::runNAMRackRegression()
                             && versionApplied
                             && bridgeProbeRack->namEffectsDspVersion.load(
                                    std::memory_order_relaxed)
-                                == S13NAMRack::currentNAMEffectsDspVersion
+                                == OpenStudioNAMRack::currentNAMEffectsDspVersion
                             && exportedDspState != nullptr
                             && static_cast<int>(
                                    exportedDspState->getProperty(
                                        "namEffectsDspVersion"))
-                                == S13NAMRack::currentNAMEffectsDspVersion;
+                                == OpenStudioNAMRack::currentNAMEffectsDspVersion;
                     }
 
                     const bool rollbackSourceApplied =
@@ -47801,10 +48479,10 @@ juce::var AudioEngine::runNAMRackRegression()
                         && rollbackApplied
                         && bridgeProbeRack->namEffectsDspVersion.load(
                                std::memory_order_relaxed)
-                            == S13NAMRack::currentNAMEffectsDspVersion;
+                            == OpenStudioNAMRack::currentNAMEffectsDspVersion;
 
                     bridgeProbeRack->namEffectsDspVersion.store(
-                        S13NAMRack::currentNAMEffectsDspVersion,
+                        OpenStudioNAMRack::currentNAMEffectsDspVersion,
                         std::memory_order_relaxed);
                     bridgeProbeRack->chaosMode.store(
                         2.0f, std::memory_order_relaxed);
@@ -47833,7 +48511,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     portablePreV5ControlsCanonicalized =
                         completeV4Applied
                         && bridgeProbeRack->namEffectsDspVersion.load()
-                            == S13NAMRack::currentNAMEffectsDspVersion
+                            == OpenStudioNAMRack::currentNAMEffectsDspVersion
                         && std::abs(bridgeProbeRack->chaosMode.load())
                             <= 1.0e-6f
                         && std::abs(
@@ -47952,10 +48630,10 @@ juce::var AudioEngine::runNAMRackRegression()
                                        "cabDoublerMix")) - 0.24) <= 1.0e-6
                             && static_cast<int>(dspState->getProperty(
                                    "namEffectsDspVersion"))
-                                   == S13NAMRack::currentNAMEffectsDspVersion
+                                   == OpenStudioNAMRack::currentNAMEffectsDspVersion
                             && static_cast<int>(dspState->getProperty(
                                    "reverbEngineVersion"))
-                                   == S13NAMRack::currentReverbEngineVersion;
+                                   == OpenStudioNAMRack::currentReverbEngineVersion;
                     };
                     const auto* migratedUiObject =
                         migratedUiState.getDynamicObject();
@@ -48092,6 +48770,7 @@ juce::var AudioEngine::runNAMRackRegression()
                      && bassApplied
                      && graphicEqApplied
                      && cabMicRoomApplied
+                     && retiredCabFiltersRejected
                      && cabPresentationApplied
                      && compressorApplied
             && retiredTapeEchoRejected
@@ -48187,6 +48866,9 @@ juce::var AudioEngine::runNAMRackRegression()
         result->setProperty("invalidRejected", invalidRejected);
         result->setProperty("valuesMatched", valuesMatched);
         result->setProperty(
+            "retiredCabFiltersRejected",
+            retiredCabFiltersRejected);
+        result->setProperty(
             "graphicEqOffRecallRoundTrip",
             graphicEqOffRecallRoundTrip);
         result->setProperty(
@@ -48265,7 +48947,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 "OpenStudio NAM Rack",
                 false);
 
-        S13NAMRack* rack = nullptr;
+        OpenStudioNAMRack* rack = nullptr;
         if (fxAdded)
         {
             const juce::ScopedLock graphLock(
@@ -48276,7 +48958,7 @@ juce::var AudioEngine::runNAMRackRegression()
             if (trackIt != trackMap.end()
                 && trackIt->second != nullptr)
             {
-                rack = dynamic_cast<S13NAMRack*>(
+                rack = dynamic_cast<OpenStudioNAMRack*>(
                     trackIt->second
                         ->getTrackFXProcessor(0));
             }
@@ -48566,7 +49248,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 "OpenStudio NAM Rack",
                 false);
 
-        S13NAMRack* rack = nullptr;
+        OpenStudioNAMRack* rack = nullptr;
         if (fxAdded)
         {
             const juce::ScopedLock graphLock(
@@ -48575,7 +49257,7 @@ juce::var AudioEngine::runNAMRackRegression()
             if (trackIt != trackMap.end()
                 && trackIt->second != nullptr)
             {
-                rack = dynamic_cast<S13NAMRack*>(
+                rack = dynamic_cast<OpenStudioNAMRack*>(
                     trackIt->second
                         ->getTrackFXProcessor(0));
             }
@@ -48656,7 +49338,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                     tree.isValid()
                                     && tree.getType()
                                         == juce::Identifier(
-                                            "S13NAMRack"),
+                                            "OpenStudioNAMRack"),
                                     std::memory_order_release);
                             }
                         }
@@ -48759,7 +49441,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 ? getPublishedBuiltInProcessor(
                       trackId, "track", 0)
                 : PublishedBuiltInProcessorOwner {};
-        auto* eq = dynamic_cast<S13EQ*>(
+        auto* eq = dynamic_cast<OpenStudioEQ*>(
             publishedOwner.processor.get());
 
         juce::WaitableEvent holderOwnsLocks;
@@ -48984,7 +49666,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
         auto renderTrim = [&] (float inputTrimDb, float outputTrimDb)
         {
-            S13NAMRack trimRack;
+            OpenStudioNAMRack trimRack;
             trimRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
             configureRack(trimRack);
             trimRack.inputTrimDb.store(inputTrimDb);
@@ -49144,11 +49826,9 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool nonFiniteClassified =
             isDeviceOutputDiscontinuityCandidate(
                 1, 0.0f, 0.0f);
-        const bool thresholdsCoverRackGuard =
+        const bool rackGuardOwnsSubCeilingProtection =
             kDeviceOutputDiscontinuityPeakThreshold
-                >= S13NAMRack::namOutputSafetyKnee
-            && kDeviceOutputDiscontinuityPeakThreshold
-                < S13NAMRack::namOutputSafetyCeiling;
+                > OpenStudioNAMRack::namOutputSafetyCeiling;
         const bool pass =
             ! normal.candidate
             && normal.peak <= 1.0f + 1.0e-6f
@@ -49159,7 +49839,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 < kDeviceOutputDiscontinuityPeakThreshold
             && deltaOnly.candidate
             && nonFiniteClassified
-            && thresholdsCoverRackGuard;
+            && rackGuardOwnsSubCeilingProtection;
 
         auto* result = new juce::DynamicObject();
         result->setProperty("pass", pass);
@@ -49200,8 +49880,8 @@ juce::var AudioEngine::runNAMRackRegression()
             "nonFiniteClassified",
             nonFiniteClassified);
         result->setProperty(
-            "thresholdsCoverRackGuard",
-            thresholdsCoverRackGuard);
+            "rackGuardOwnsSubCeilingProtection",
+            rackGuardOwnsSubCeilingProtection);
         return juce::var(result);
     };
     const auto outputDiscontinuityClassifierProbe =
@@ -49277,8 +49957,8 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runAuditionSourceIsolationProbe = [&] ()
     {
-        S13NAMRack noisyRack;
-        S13NAMRack quietRack;
+        OpenStudioNAMRack noisyRack;
+        OpenStudioNAMRack quietRack;
         noisyRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         quietRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         noisyRack.gateThresholdDb.store(-100.0f);
@@ -49444,7 +50124,7 @@ juce::var AudioEngine::runNAMRackRegression()
         checks,
         "amp_model_handoff_is_dezippered_at_16_samples",
         stressStatus(lowBufferAmpHandoffProbe),
-        "At 44.1 kHz with exact 16-sample callbacks, first publication and replacement with a fresh graph from the stable A1 fixture must use the zero-boundary handoff, remain finite and bounded, introduce no large adjacent-sample discontinuity, and avoid every process-failure or callback-capacity fallback. The synthetic A2-max architecture stress fixture remains covered by finite/bounded checks but is excluded from this audio-discontinuity oracle because its own steady output contains full-scale single-sample jumps.",
+        "At 44.1 kHz with exact 16-sample callbacks and already-excited Delay/Reverb tails, first publication and replacement with a fresh graph from the stable A1 fixture must cross a complete-rack zero boundary, remain finite and bounded, introduce no large adjacent-sample discontinuity, and avoid every process-failure or callback-capacity fallback. The synthetic A2-max architecture stress fixture remains covered by finite/bounded checks but is excluded from this audio-discontinuity oracle because its own steady output contains full-scale single-sample jumps.",
         lowBufferAmpHandoffProbe);
 
     const bool slimModelQualityAvailable =
@@ -49641,7 +50321,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 .getProperty("pass", false)
             ? "pass"
             : "fail",
-        "Diagnostic-only output classification must ignore a full-scale 6 kHz band-limited signal, but latch both a finite impulse inside the NAM guard range and a sub-peak-threshold adjacent-sample jump.",
+        "Diagnostic-only device output classification must ignore a full-scale 6 kHz band-limited signal, while the rack guard owns sub-ceiling protection and the device diagnostic still latches unguarded finite impulses and adjacent-sample jumps from other host paths.",
         outputDiscontinuityClassifierProbe);
 
     addCheck(checks,
@@ -49657,7 +50337,124 @@ juce::var AudioEngine::runNAMRackRegression()
              "Generated fixture IR should load into the Cab/IR slot.",
              rack.getCabIRPath());
 
-    S13NAMRack irSwapRack;
+    const auto runCabV3LiteralIRProbe = [&] ()
+    {
+        OpenStudioNAMRack neutralCab;
+        OpenStudioNAMRack retiredCabFilters;
+        OpenStudioNAMRack graphicEqLowPass;
+        auto configure = [&] (OpenStudioNAMRack& target)
+        {
+            target.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+            configureNeutralRack(target);
+            target.cabIRStereo.store(0.0f);
+            target.cabDirectMix.store(0.0f);
+            const bool loaded = target.loadCabIR(irFile.getFullPathName());
+            target.setCabRequestedEnabled(true);
+            return loaded && target.hasCabIR();
+        };
+
+        const bool loaded = irWritten
+            && configure(neutralCab)
+            && configure(retiredCabFilters)
+            && configure(graphicEqLowPass);
+        retiredCabFilters.cabHPFEnabled.store(1.0f);
+        retiredCabFilters.cabLPFEnabled.store(1.0f);
+        retiredCabFilters.cabHPFHz.store(500.0f);
+        retiredCabFilters.cabLPFHz.store(1000.0f);
+        graphicEqLowPass.eqEnabled.store(1.0f);
+        graphicEqLowPass.eqLPFHz.store(3000.0f);
+
+        float retiredFilterMaximumError = 0.0f;
+        float graphicEqMaximumDifference = 0.0f;
+        int nonFiniteCount = 0;
+        constexpr int totalSamples = 8192;
+        int cursor = 0;
+        juce::MidiBuffer midi;
+        while (cursor < totalSamples)
+        {
+            const int blockSamples = juce::jmin(
+                fixtureBlockSize, totalSamples - cursor);
+            juce::AudioBuffer<float> neutralBlock(2, blockSamples);
+            juce::AudioBuffer<float> ignoredBlock(2, blockSamples);
+            juce::AudioBuffer<float> filteredBlock(2, blockSamples);
+            for (int sample = 0; sample < blockSamples; ++sample)
+            {
+                const int absoluteSample = cursor + sample;
+                const float input = 0.05f * static_cast<float>(std::sin(
+                    juce::MathConstants<double>::twoPi * 173.0
+                    * static_cast<double>(absoluteSample)
+                    / fixtureSampleRate))
+                    + 0.035f * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi * 6000.0
+                        * static_cast<double>(absoluteSample)
+                        / fixtureSampleRate));
+                for (int channel = 0; channel < 2; ++channel)
+                {
+                    neutralBlock.setSample(channel, sample, input);
+                    ignoredBlock.setSample(channel, sample, input);
+                    filteredBlock.setSample(channel, sample, input);
+                }
+            }
+            if (loaded)
+            {
+                neutralCab.processBlock(neutralBlock, midi);
+                retiredCabFilters.processBlock(ignoredBlock, midi);
+                graphicEqLowPass.processBlock(filteredBlock, midi);
+            }
+            for (int channel = 0; channel < 2; ++channel)
+            {
+                for (int sample = 0; sample < blockSamples; ++sample)
+                {
+                    const float neutral = neutralBlock.getSample(channel, sample);
+                    const float ignored = ignoredBlock.getSample(channel, sample);
+                    const float filtered = filteredBlock.getSample(channel, sample);
+                    if (! std::isfinite(neutral)
+                        || ! std::isfinite(ignored)
+                        || ! std::isfinite(filtered))
+                    {
+                        ++nonFiniteCount;
+                        continue;
+                    }
+                    retiredFilterMaximumError = juce::jmax(
+                        retiredFilterMaximumError,
+                        std::abs(neutral - ignored));
+                    if (cursor + sample >= totalSamples / 2)
+                    {
+                        graphicEqMaximumDifference = juce::jmax(
+                            graphicEqMaximumDifference,
+                            std::abs(neutral - filtered));
+                    }
+                }
+            }
+            cursor += blockSamples;
+        }
+
+        const bool pass = loaded
+            && nonFiniteCount == 0
+            && retiredFilterMaximumError <= 1.0e-6f
+            && graphicEqMaximumDifference > 1.0e-4f;
+        auto* value = new juce::DynamicObject();
+        value->setProperty("loaded", loaded);
+        value->setProperty(
+            "retiredFilterMaximumError",
+            retiredFilterMaximumError);
+        value->setProperty(
+            "graphicEqMaximumDifference",
+            graphicEqMaximumDifference);
+        value->setProperty("nonFiniteCount", nonFiniteCount);
+        value->setProperty("pass", pass);
+        return juce::var(value);
+    };
+    const auto cabV3LiteralIRProbe = runCabV3LiteralIRProbe();
+    addCheck(
+        checks,
+        "cab_v3_literal_ir_and_graphic_eq_filter_owner",
+        cabV3LiteralIRProbe.getProperty("pass", false)
+            ? "pass" : "fail",
+        "Cab V3 must remain sample-identical when retired Cab cutoff fields change, while the visible Graphic EQ LPF measurably alters the deterministic fixture. Perceived cabinet quality remains not_asserted pending user audition.",
+        cabV3LiteralIRProbe);
+
+    OpenStudioNAMRack irSwapRack;
     irSwapRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     irSwapRack.gateThresholdDb.store(-100.0f);
     const bool irSwapLoaded = irWritten
@@ -49728,7 +50525,7 @@ juce::var AudioEngine::runNAMRackRegression()
              "Delay/reverb post-FX should create a deterministic finite tail after the dry signal stops.",
              processed.tailPeak);
 
-    auto configureOrderProbeRack = [&] (S13NAMRack& orderRack, const juce::String& uiState)
+    auto configureOrderProbeRack = [&] (OpenStudioNAMRack& orderRack, const juce::String& uiState)
     {
         orderRack.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         configureRack(orderRack);
@@ -49756,8 +50553,8 @@ juce::var AudioEngine::runNAMRackRegression()
 
     const juce::String defaultOrderUiState = R"json({"namRackSlots":{"schemaVersion":1,"order":["gate","pedal","amp","cab","eq","mod","delay","reverb"]}})json";
     const juce::String reorderedUiState = R"json({"namRackSlots":{"schemaVersion":1,"order":["gate","pedal","amp","cab","reverb","delay","mod","eq"]}})json";
-    S13NAMRack defaultOrderRack;
-    S13NAMRack reorderedRack;
+    OpenStudioNAMRack defaultOrderRack;
+    OpenStudioNAMRack reorderedRack;
     configureOrderProbeRack(defaultOrderRack, defaultOrderUiState);
     configureOrderProbeRack(reorderedRack, reorderedUiState);
     const auto defaultOrderCapture = renderRackCapture(defaultOrderRack);
@@ -49782,15 +50579,15 @@ juce::var AudioEngine::runNAMRackRegression()
         {
             constexpr float expectedRackVersion =
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion);
+                    OpenStudioNAMRack::currentReverbEngineVersion);
             constexpr int expectedRackDspVersion =
-                S13NAMRack::currentReverbEngineVersion;
+                OpenStudioNAMRack::currentReverbEngineVersion;
             const int expectedDspVersion =
                 expectedVersion >= 4.5f
                     ? 5
                     : (expectedVersion >= 3.5f ? 4 : 3);
 
-            S13NAMRack rackSource;
+            OpenStudioNAMRack rackSource;
             rackSource.reverbEngineVersion.store(
                 expectedVersion,
                 std::memory_order_relaxed);
@@ -49801,7 +50598,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 juce::ValueTree::readFromData(
                     rackState.getData(),
                     rackState.getSize());
-            S13NAMRack rackRestored;
+            OpenStudioNAMRack rackRestored;
             const bool rackRestoreAccepted =
                 rackRestored
                     .restoreProjectStateInformation(
@@ -49816,7 +50613,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     rackResavedState.getData(),
                     rackResavedState.getSize());
 
-            S13Reverb standaloneSource;
+            OpenStudioReverb standaloneSource;
             standaloneSource.engineVersion.store(
                 expectedVersion,
                 std::memory_order_relaxed);
@@ -49827,7 +50624,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 juce::ValueTree::readFromData(
                     standaloneState.getData(),
                     standaloneState.getSize());
-            S13Reverb standaloneRestored;
+            OpenStudioReverb standaloneRestored;
             standaloneRestored.setStateInformation(
                 standaloneState.getData(),
                 static_cast<int>(
@@ -49985,19 +50782,19 @@ juce::var AudioEngine::runNAMRackRegression()
                 .getProperty("pass", false)
             ? "pass"
             : "fail",
-        "NAM Rack binary state must canonicalize every recognized old Reverb marker to the current engine, while standalone S13Reverb retains its independent exact round-trip contract.",
+        "NAM Rack binary state must canonicalize every recognized old Reverb marker to the current engine, while standalone OpenStudioReverb retains its independent exact round-trip contract.",
         reverbEngineBinaryStateRoundTripProbe);
 
     auto runCompressorV6StateMigrationProbe = [&] ()
     {
-        juce::ValueTree legacy("S13NAMRack");
+        juce::ValueTree legacy("OpenStudioNAMRack");
         legacy.setProperty("namEffectsDspVersion", 6, nullptr);
         legacy.setProperty("compressorDetail", 0.37, nullptr);
         legacy.setProperty("compressorEnabled", 1.0, nullptr);
         juce::MemoryOutputStream stream;
         legacy.writeToStream(stream);
 
-        S13NAMRack migrated;
+        OpenStudioNAMRack migrated;
         migrated.prepareToPlay(
             fixtureSampleRate,
             fixtureBlockSize);
@@ -50017,7 +50814,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool compressorPass = tree.isValid()
             && static_cast<int>(tree.getProperty(
                    "namEffectsDspVersion", 0))
-                == S13NAMRack::currentNAMEffectsDspVersion
+                == OpenStudioNAMRack::currentNAMEffectsDspVersion
             && ! tree.hasProperty("compressorDetail")
             && std::abs(static_cast<double>(tree.getProperty(
                    "compressorAttackMs", 0.0)) - expectedAttackMs)
@@ -50089,14 +50886,17 @@ juce::var AudioEngine::runNAMRackRegression()
             int version,
             double hpfHz,
             double lpfHz,
-            S13NAMRack& destination,
+            bool currentCab,
+            OpenStudioNAMRack& destination,
             juce::ValueTree& canonicalTree)
         {
-            juce::ValueTree source("S13NAMRack");
+            juce::ValueTree source("OpenStudioNAMRack");
             source.setProperty(
                 "namEffectsDspVersion", version, nullptr);
             source.setProperty("eqHPFHz", hpfHz, nullptr);
             source.setProperty("eqLPFHz", lpfHz, nullptr);
+            if (currentCab)
+                source.setProperty("cabEngineVersion", 3.0, nullptr);
             juce::MemoryBlock state;
             juce::MemoryOutputStream stream(state, false);
             source.writeToStream(stream);
@@ -50111,94 +50911,99 @@ juce::var AudioEngine::runNAMRackRegression()
             return restored && canonicalTree.isValid();
         };
 
-        S13NAMRack fromV12;
+        OpenStudioNAMRack fromV12;
         juce::ValueTree v12Tree;
         const bool v12Restored = restoreCase(
-            12, 180.0, 9000.0, fromV12, v12Tree);
-        S13NAMRack fromV13;
+            12, 180.0, 9000.0, false, fromV12, v12Tree);
+        OpenStudioNAMRack fromV13;
         juce::ValueTree v13Tree;
         const bool v13Restored = restoreCase(
-            S13NAMRack::developmentNAMEffectsDspVersionAlias,
+            OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias,
             180.0,
             9000.0,
+            false,
             fromV13,
             v13Tree);
-        S13NAMRack fromV14;
-        juce::ValueTree v14Tree;
-        const bool v14Restored = restoreCase(
-            S13NAMRack::currentNAMEffectsDspVersion,
+        OpenStudioNAMRack fromCurrent;
+        juce::ValueTree currentTree;
+        const bool currentRestored = restoreCase(
+            OpenStudioNAMRack::currentNAMEffectsDspVersion,
             180.0,
             9000.0,
-            fromV14,
-            v14Tree);
+            true,
+            fromCurrent,
+            currentTree);
 
-        const auto migratedOff = [] (
-            const S13NAMRack& rack,
+        const auto migratedLegacyCabWindow = [] (
+            const OpenStudioNAMRack& rack,
             const juce::ValueTree& tree)
         {
-            return std::abs(rack.eqHPFHz.load()) <= 1.0e-7f
-                && std::abs(rack.eqLPFHz.load() - 24000.0f)
+            return rack.eqEnabled.load() >= 0.5f
+                && std::abs(rack.eqHPFHz.load() - 80.0f) <= 1.0e-4f
+                && std::abs(rack.eqLPFHz.load() - 8500.0f)
                     <= 1.0e-4f
                 && std::abs(rack.eqHPFLastActiveHz.load() - 80.0f)
                     <= 1.0e-4f
-                && std::abs(rack.eqLPFLastActiveHz.load() - 12000.0f)
+                && std::abs(rack.eqLPFLastActiveHz.load() - 8500.0f)
                     <= 1.0e-4f
                 && std::abs(static_cast<double>(
-                       tree.getProperty("eqHPFHz", -1.0)))
+                       tree.getProperty("eqHPFHz", -1.0)) - 80.0)
                     <= 1.0e-7
                 && std::abs(static_cast<double>(
-                       tree.getProperty("eqLPFHz", 0.0)) - 24000.0)
+                       tree.getProperty("eqLPFHz", 0.0)) - 8500.0)
                     <= 1.0e-7
                 && static_cast<int>(tree.getProperty(
                        "namEffectsDspVersion", 0))
-                    == S13NAMRack::currentNAMEffectsDspVersion;
+                    == OpenStudioNAMRack::currentNAMEffectsDspVersion;
         };
-        const bool v12DefaultsOff =
-            v12Restored && migratedOff(fromV12, v12Tree);
-        const bool v13DefaultsOff =
-            v13Restored && migratedOff(fromV13, v13Tree);
-        const bool v14Preserved = v14Restored
-            && std::abs(fromV14.eqHPFHz.load() - 180.0f)
+        const bool v12CabWindowMigrated =
+            v12Restored && migratedLegacyCabWindow(fromV12, v12Tree);
+        const bool v13CabWindowMigrated =
+            v13Restored && migratedLegacyCabWindow(fromV13, v13Tree);
+        const bool currentPreserved = currentRestored
+            && std::abs(fromCurrent.eqHPFHz.load() - 180.0f)
                 <= 1.0e-4f
-            && std::abs(fromV14.eqLPFHz.load() - 9000.0f)
+            && std::abs(fromCurrent.eqLPFHz.load() - 9000.0f)
                 <= 1.0e-4f
-            && std::abs(fromV14.eqHPFLastActiveHz.load() - 180.0f)
+            && std::abs(fromCurrent.eqHPFLastActiveHz.load() - 180.0f)
                 <= 1.0e-4f
-            && std::abs(fromV14.eqLPFLastActiveHz.load() - 9000.0f)
+            && std::abs(fromCurrent.eqLPFLastActiveHz.load() - 9000.0f)
                 <= 1.0e-4f
             && std::abs(static_cast<double>(
-                   v14Tree.getProperty("eqHPFHz", 0.0)) - 180.0)
+                   currentTree.getProperty("eqHPFHz", 0.0)) - 180.0)
                 <= 1.0e-7
             && std::abs(static_cast<double>(
-                   v14Tree.getProperty("eqLPFHz", 0.0)) - 9000.0)
+                   currentTree.getProperty("eqLPFHz", 0.0)) - 9000.0)
                 <= 1.0e-7;
 
         auto* value = new juce::DynamicObject();
-        value->setProperty("v12DefaultsOff", v12DefaultsOff);
-        value->setProperty("v13AliasDefaultsOff", v13DefaultsOff);
-        value->setProperty("v14Preserved", v14Preserved);
+        value->setProperty("v12CabWindowMigrated", v12CabWindowMigrated);
+        value->setProperty("v13AliasCabWindowMigrated", v13CabWindowMigrated);
+        value->setProperty("currentV3Preserved", currentPreserved);
         value->setProperty(
             "pass",
-            v12DefaultsOff && v13DefaultsOff && v14Preserved);
+            v12CabWindowMigrated
+                && v13CabWindowMigrated
+                && currentPreserved);
         return juce::var(value);
     };
     const auto graphicEqEdgeFilterStateMigrationProbe =
         runGraphicEqEdgeFilterStateMigrationProbe();
     addCheck(
         checks,
-        "graphic_eq_edge_filters_migrate_on_v14_contract",
+        "graphic_eq_edge_filters_and_legacy_cab_window_migrate_once",
         graphicEqEdgeFilterStateMigrationProbe.getProperty(
             "pass", false)
             ? "pass"
             : "fail",
-        "V12 and the development-only V13 alias must migrate Graphic EQ HPF/LPF to exact OFF sentinels, while a V14 state preserves active cutoff values and every canonical re-save stamps V14.",
+        "Historical states must move the old implicit Cab filter window into Graphic EQ, while an explicit current Cab V3 state preserves its own Graphic EQ cutoffs and every canonical re-save stamps the current DSP version.",
         graphicEqEdgeFilterStateMigrationProbe);
 
     auto runCabPresentationEnableStateMigrationProbe = [] ()
     {
         const auto restoreTree = [] (
             const juce::ValueTree& tree,
-            S13NAMRack& destination)
+            OpenStudioNAMRack& destination)
         {
             juce::MemoryBlock stateData;
             juce::MemoryOutputStream stream(stateData, false);
@@ -50208,24 +51013,24 @@ juce::var AudioEngine::runNAMRackRegression()
                 static_cast<int>(stateData.getSize()));
         };
 
-        juce::ValueTree legacyAudible("S13NAMRack");
+        juce::ValueTree legacyAudible("OpenStudioNAMRack");
         legacyAudible.setProperty("cabRoomAmount", 0.39, nullptr);
         legacyAudible.setProperty("cabDoublerMix", 0.24, nullptr);
-        S13NAMRack migratedAudible;
+        OpenStudioNAMRack migratedAudible;
         const bool audibleRestored = restoreTree(
             legacyAudible, migratedAudible);
 
-        juce::ValueTree legacyBypassed("S13NAMRack");
-        S13NAMRack migratedBypassed;
+        juce::ValueTree legacyBypassed("OpenStudioNAMRack");
+        OpenStudioNAMRack migratedBypassed;
         const bool bypassedRestored = restoreTree(
             legacyBypassed, migratedBypassed);
 
-        juce::ValueTree explicitBypassed("S13NAMRack");
+        juce::ValueTree explicitBypassed("OpenStudioNAMRack");
         explicitBypassed.setProperty("cabRoomEnabled", 0.0, nullptr);
         explicitBypassed.setProperty("cabRoomAmount", 0.73, nullptr);
         explicitBypassed.setProperty("cabDoublerEnabled", 0.0, nullptr);
         explicitBypassed.setProperty("cabDoublerMix", 0.61, nullptr);
-        S13NAMRack restoredExplicitBypass;
+        OpenStudioNAMRack restoredExplicitBypass;
         const bool explicitBypassRestored = restoreTree(
             explicitBypassed, restoredExplicitBypass);
 
@@ -50295,6 +51100,132 @@ juce::var AudioEngine::runNAMRackRegression()
         "Legacy Room/Doubler Amount and Mix must derive explicit power once, while current bypass preserves useful stored settings and canonical re-save writes both power controls.",
         cabPresentationEnableStateMigrationProbe);
 
+    const auto runCabV3StateMigrationProbe = [] ()
+    {
+        const auto restoreTree = [] (
+            const juce::ValueTree& tree,
+            OpenStudioNAMRack& target)
+        {
+            juce::MemoryBlock stateData;
+            juce::MemoryOutputStream stream(stateData, false);
+            tree.writeToStream(stream);
+            return target.restoreProjectStateInformation(
+                stateData.getData(),
+                static_cast<int>(stateData.getSize()));
+        };
+
+        juce::ValueTree legacy("OpenStudioNAMRack");
+        legacy.setProperty("cabHPFHz", 87.0, nullptr);
+        legacy.setProperty("cabLPFHz", 8300.0, nullptr);
+        legacy.setProperty("cabMicPosition", 0.73, nullptr);
+        legacy.setProperty("cabMicDistance", 0.42, nullptr);
+        legacy.setProperty("cabMicBlend", 0.19, nullptr);
+        legacy.setProperty("cabRoomSend", 0.31, nullptr);
+        OpenStudioNAMRack restoredLegacy;
+        const bool legacyRestored = restoreTree(legacy, restoredLegacy);
+
+        juce::ValueTree current("OpenStudioNAMRack");
+        current.setProperty("cabEngineVersion", 2.0, nullptr);
+        current.setProperty("cabHPFEnabled", 0.0, nullptr);
+        current.setProperty("cabLPFEnabled", 1.0, nullptr);
+        current.setProperty("cabHPFHz", 31.0, nullptr);
+        current.setProperty("cabLPFHz", 15750.0, nullptr);
+        current.setProperty("cabIRStereo", 0.0, nullptr);
+        current.setProperty("cabDirectMix", 0.37, nullptr);
+        OpenStudioNAMRack restoredCurrent;
+        const bool currentRestored = restoreTree(current, restoredCurrent);
+
+        juce::MemoryBlock canonicalState;
+        restoredLegacy.getStateInformation(canonicalState);
+        const auto canonicalTree = juce::ValueTree::readFromData(
+            canonicalState.getData(), canonicalState.getSize());
+        const bool legacyMigrated = legacyRestored
+            && restoredLegacy.cabHPFEnabled.load() < 0.5f
+            && restoredLegacy.cabLPFEnabled.load() < 0.5f
+            && std::abs(restoredLegacy.cabHPFHz.load() - 30.0f)
+                <= 1.0e-6f
+            && std::abs(restoredLegacy.cabLPFHz.load() - 16000.0f)
+                <= 1.0e-6f
+            && restoredLegacy.eqEnabled.load() >= 0.5f
+            && std::abs(restoredLegacy.eqHPFHz.load() - 87.0f)
+                <= 1.0e-6f
+            && std::abs(restoredLegacy.eqLPFHz.load() - 8300.0f)
+                <= 1.0e-6f
+            && restoredLegacy.cabIRStereo.load() >= 0.5f
+            && std::abs(restoredLegacy.cabDirectMix.load()) <= 1.0e-6f
+            && canonicalTree.isValid()
+            && static_cast<int>(canonicalTree.getProperty(
+                   "cabEngineVersion", 0)) == 3
+            && ! canonicalTree.hasProperty("cabMicPosition")
+            && ! canonicalTree.hasProperty("cabMicDistance")
+            && ! canonicalTree.hasProperty("cabMicBlend")
+            && ! canonicalTree.hasProperty("cabRoomSend");
+        const bool currentPreserved = currentRestored
+            && restoredCurrent.cabHPFEnabled.load() < 0.5f
+            && restoredCurrent.cabLPFEnabled.load() < 0.5f
+            && std::abs(restoredCurrent.cabHPFHz.load() - 30.0f)
+                <= 1.0e-6f
+            && std::abs(restoredCurrent.cabLPFHz.load() - 16000.0f)
+                <= 1.0e-6f
+            && restoredCurrent.eqEnabled.load() >= 0.5f
+            && std::abs(restoredCurrent.eqHPFHz.load()) <= 1.0e-6f
+            && std::abs(restoredCurrent.eqLPFHz.load() - 15750.0f)
+                <= 1.0e-6f
+            && restoredCurrent.cabIRStereo.load() < 0.5f
+            && std::abs(restoredCurrent.cabDirectMix.load() - 0.37f)
+                <= 1.0e-6f;
+
+        bool bypassMigration = true;
+        for (const int version : { 1, 2 })
+            for (const bool cabOn : { false, true })
+                for (const bool eqOn : { false, true })
+                {
+                    auto fixture = legacy.createCopy();
+                    fixture.setProperty("namEffectsDspVersion", 19, nullptr);
+                    fixture.setProperty("cabEngineVersion", version, nullptr);
+                    fixture.setProperty("cabEnabled", cabOn ? 1.0 : 0.0, nullptr);
+                    fixture.setProperty("cabRequestedEnabled", cabOn ? 1.0 : 0.0, nullptr);
+                    fixture.setProperty("cabHPFEnabled", 1.0, nullptr);
+                    fixture.setProperty("cabLPFEnabled", 1.0, nullptr);
+                    fixture.setProperty("eqEnabled", eqOn ? 1.0 : 0.0, nullptr);
+                    fixture.setProperty("eq1kDb", 6.0, nullptr);
+                    fixture.setProperty("eqLevelDb", 3.0, nullptr);
+                    fixture.setProperty("eqHPFHz", 120.0, nullptr);
+                    fixture.setProperty("eqLPFHz", 4000.0, nullptr);
+                    OpenStudioNAMRack restored;
+                    const bool restores = restoreTree(fixture, restored);
+                    const bool neutralCurve = cabOn && !eqOn;
+                    const auto matches = [&] (const OpenStudioNAMRack& rack) {
+                        return (rack.eqEnabled.load() >= 0.5f) == (cabOn || eqOn)
+                            && rack.eq1kDb.load() == (neutralCurve ? 0.0f : 6.0f)
+                            && rack.eqLevelDb.load() == (neutralCurve ? 0.0f : 3.0f)
+                            && rack.eqHPFHz.load() == (neutralCurve ? 87.0f : 120.0f)
+                            && rack.eqLPFHz.load() == (neutralCurve ? 8300.0f : 4000.0f);
+                    };
+                    juce::MemoryBlock saved;
+                    restored.getStateInformation(saved);
+                    OpenStudioNAMRack reopened;
+                    const bool reopens = reopened.restoreProjectStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+                    bypassMigration = restores && reopens && matches(restored) && matches(reopened) && bypassMigration;
+                }
+
+        auto* value = new juce::DynamicObject();
+        value->setProperty("legacyMigrated", legacyMigrated);
+        value->setProperty("currentPreserved", currentPreserved);
+        value->setProperty("bypassMigration", bypassMigration);
+        value->setProperty(
+            "pass", legacyMigrated && currentPreserved && bypassMigration);
+        return juce::var(value);
+    };
+    const auto cabV3StateMigrationProbe = runCabV3StateMigrationProbe();
+    addCheck(
+        checks,
+        "cab_single_engine_state_migration",
+        cabV3StateMigrationProbe.getProperty("pass", false)
+            ? "pass" : "fail",
+        "Every historical Cab state must migrate to the one current IR engine, move old cutoff intent into visible Graphic EQ controls, neutralize retired Cab filters, preserve stereo/direct routing, discard retired shapers, and re-save canonically.",
+        cabV3StateMigrationProbe);
+
     const juce::String compareUiState = R"json({"namRackCompare":{"schemaVersion":1,"compareSlot":"B","snapshots":{"B":{"values":{"ampMix":1.0,"trebleDb":2.5},"modelState":{"ampModelPath":"C:/OpenStudio/NAM/compare_fixture.nam"},"presetId":"clean-twin","focusedModule":"amp","capturedAt":1}}},"namRackSlots":{"schemaVersion":1,"order":["gate","pedal","amp","cab","reverb","delay","mod","eq"]}})json";
     rack.setUiStateJSON(compareUiState);
     rack.reverbCharacter.store(2.0f);
@@ -50318,6 +51249,12 @@ juce::var AudioEngine::runNAMRackRegression()
     rack.cabDoublerMix.store(0.24f);
     rack.cabDoublerDelayMs.store(6.5f);
     rack.cabDoublerSpread.store(0.63f);
+    rack.cabHPFEnabled.store(0.0f);
+    rack.cabLPFEnabled.store(1.0f);
+    rack.cabHPFHz.store(31.0f);
+    rack.cabLPFHz.store(15750.0f);
+    rack.cabIRStereo.store(0.0f);
+    rack.cabDirectMix.store(0.37f);
     rack.preEqEnabled.store(1.0f);
     rack.preEq120Db.store(-2.5f);
     rack.preEq250Db.store(-1.0f);
@@ -50334,11 +51271,11 @@ juce::var AudioEngine::runNAMRackRegression()
     rack.eqHPFHz.store(112.0f);
     rack.eqLPFHz.store(13400.0f);
     rack.precisionDriveVoice.store(
-        static_cast<float>(S13NAMRack::screamerDriveVoice));
+        static_cast<float>(OpenStudioNAMRack::screamerDriveVoice));
 
     juce::MemoryBlock state;
     rack.getStateInformation(state);
-    S13NAMRack restored;
+    OpenStudioNAMRack restored;
     restored.prepareToPlay(fixtureSampleRate, fixtureBlockSize);
     restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
     juce::MemoryBlock migratedReverbState;
@@ -50361,14 +51298,14 @@ juce::var AudioEngine::runNAMRackRegression()
         && ! migratedReverbTree.hasProperty("inputMode")
         && ! migratedReverbTree.hasProperty("precisionDriveVoice")
         && static_cast<int>(migratedReverbTree.getProperty(
-               "reverbVoice", -1)) == S13NAMRack::roomReverbVoice
+               "reverbVoice", -1)) == OpenStudioNAMRack::roomReverbVoice
         && static_cast<double>(migratedReverbTree.getProperty(
                "reverbPad", 0.0)) >= 0.5;
     const bool stateRestorePass = restored.hasCabIR()
         && restored.getCabIRPath() == irFile.getFullPathName()
         && retiredReverbStatePruned
         && restored.getInstrumentProfile()
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restored.namEffectsDspVersion.load(
             std::memory_order_relaxed)
             == rack.namEffectsDspVersion.load(
@@ -50401,7 +51338,7 @@ juce::var AudioEngine::runNAMRackRegression()
         && std::abs(restored.preEqLPFLastActiveHz.load() - 12300.0f) <= 0.0001f
         && std::abs(restored.precisionDriveEnabled.load() - rack.precisionDriveEnabled.load()) <= 0.0001f
         && juce::roundToInt(restored.precisionDriveVoice.load())
-            == S13NAMRack::precisionDrivePrecisionVoice
+            == OpenStudioNAMRack::precisionDrivePrecisionVoice
         && std::abs(restored.precisionDriveVolumeDb.load() - rack.precisionDriveVolumeDb.load()) <= 0.0001f
         && std::abs(restored.precisionDriveBright.load() - rack.precisionDriveBright.load()) <= 0.0001f
         && std::abs(restored.precisionDriveAttack.load() - rack.precisionDriveAttack.load()) <= 0.0001f
@@ -50461,12 +51398,14 @@ juce::var AudioEngine::runNAMRackRegression()
         && std::abs(
                restored.reverbEngineVersion.load()
                - static_cast<float>(
-                   S13NAMRack::currentReverbEngineVersion)) <= 0.0001f
+                   OpenStudioNAMRack::currentReverbEngineVersion)) <= 0.0001f
         && std::abs(restored.reverbEnabled.load() - rack.reverbEnabled.load()) <= 0.0001f
-        && std::abs(restored.cabMicPosition.load() - rack.cabMicPosition.load()) <= 0.0001f
-        && std::abs(restored.cabMicDistance.load() - rack.cabMicDistance.load()) <= 0.0001f
-        && std::abs(restored.cabMicBlend.load() - rack.cabMicBlend.load()) <= 0.0001f
-        && std::abs(restored.cabRoomSend.load() - rack.cabRoomSend.load()) <= 0.0001f
+        && restored.cabHPFEnabled.load() < 0.5f
+        && restored.cabLPFEnabled.load() < 0.5f
+        && std::abs(restored.cabHPFHz.load() - 30.0f) <= 0.0001f
+        && std::abs(restored.cabLPFHz.load() - 16000.0f) <= 0.0001f
+        && std::abs(restored.cabIRStereo.load() - rack.cabIRStereo.load()) <= 0.0001f
+        && std::abs(restored.cabDirectMix.load() - rack.cabDirectMix.load()) <= 0.0001f
         && std::abs(restored.cabPan.load() - rack.cabPan.load()) <= 0.0001f
         && std::abs(restored.cabRoomEnabled.load() - rack.cabRoomEnabled.load()) <= 0.0001f
         && std::abs(restored.cabRoomAmount.load() - rack.cabRoomAmount.load()) <= 0.0001f
@@ -50485,7 +51424,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         const auto restoreTree = [] (
             const juce::ValueTree& tree,
-            S13NAMRack& target)
+            OpenStudioNAMRack& target)
         {
             juce::MemoryBlock stateData;
             juce::MemoryOutputStream stream(stateData, false);
@@ -50495,7 +51434,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 static_cast<int>(stateData.getSize()));
         };
 
-        juce::ValueTree v15("S13NAMRack");
+        juce::ValueTree v15("OpenStudioNAMRack");
         v15.setProperty("namEffectsDspVersion", 15, nullptr);
         v15.setProperty("preEqEnabled", 1.0, nullptr);
         v15.setProperty("preEq100Db", 12.0, nullptr);
@@ -50503,7 +51442,7 @@ juce::var AudioEngine::runNAMRackRegression()
         v15.setProperty("preEqLPFHz", 3100.0, nullptr);
         v15.setProperty("preEqHPFLastActiveHz", 175.0, nullptr);
         v15.setProperty("preEqLPFLastActiveHz", 3100.0, nullptr);
-        S13NAMRack migratedV15;
+        OpenStudioNAMRack migratedV15;
         const bool v15Restored = restoreTree(v15, migratedV15);
         const bool v15CollisionRejected = v15Restored
             && migratedV15.preEqEnabled.load() < 0.5f
@@ -50514,7 +51453,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && migratedV15.preEqHPFLastActiveHz.load() == 80.0f
             && migratedV15.preEqLPFLastActiveHz.load() == 12000.0f;
 
-        juce::ValueTree v18("S13NAMRack");
+        juce::ValueTree v18("OpenStudioNAMRack");
         v18.setProperty(
             "namEffectsDspVersion",
             18,
@@ -50532,7 +51471,7 @@ juce::var AudioEngine::runNAMRackRegression()
         v18.setProperty("preEqLPFHz", 24000.0, nullptr);
         v18.setProperty("preEqHPFLastActiveHz", 67.0, nullptr);
         v18.setProperty("preEqLPFLastActiveHz", 12700.0, nullptr);
-        S13NAMRack restoredV18;
+        OpenStudioNAMRack restoredV18;
         const bool v18Restored = restoreTree(v18, restoredV18);
         juce::MemoryBlock roundTripState;
         restoredV18.getStateInformation(roundTripState);
@@ -50555,7 +51494,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && roundTripTree.isValid()
             && static_cast<int>(roundTripTree.getProperty(
                    "namEffectsDspVersion", 0))
-                == S13NAMRack::currentNAMEffectsDspVersion
+                == OpenStudioNAMRack::currentNAMEffectsDspVersion
             && std::abs(static_cast<double>(roundTripTree.getProperty(
                    "preEqHPFLastActiveHz", 0.0)) - 67.0) <= 1.0e-9
             && std::abs(static_cast<double>(roundTripTree.getProperty(
@@ -50586,14 +51525,14 @@ juce::var AudioEngine::runNAMRackRegression()
 
     const auto restoreRetiredPrecisionDriveVoice = [] (int effectsVersion)
     {
-        juce::ValueTree voiceTree("S13NAMRack");
+        juce::ValueTree voiceTree("OpenStudioNAMRack");
         voiceTree.setProperty("namEffectsDspVersion", effectsVersion, nullptr);
         voiceTree.setProperty("precisionDriveVoice", 1.0, nullptr);
         juce::MemoryBlock voiceState;
         juce::MemoryOutputStream voiceStream(voiceState, false);
         voiceTree.writeToStream(voiceStream);
 
-        S13NAMRack voiceRack;
+        OpenStudioNAMRack voiceRack;
         const bool restored = voiceRack.restoreProjectStateInformation(
             voiceState.getData(), static_cast<int>(voiceState.getSize()));
         juce::MemoryBlock canonicalState;
@@ -50603,12 +51542,12 @@ juce::var AudioEngine::runNAMRackRegression()
         return restored
             && juce::roundToInt(voiceRack.precisionDriveVoice.load(
                    std::memory_order_relaxed))
-                == S13NAMRack::precisionDrivePrecisionVoice
+                == OpenStudioNAMRack::precisionDrivePrecisionVoice
             && canonicalTree.isValid()
             && ! canonicalTree.hasProperty("precisionDriveVoice");
     };
 
-    S13NAMRack retiredVoiceProbeRack;
+    OpenStudioNAMRack retiredVoiceProbeRack;
     const float retiredVoiceBefore = retiredVoiceProbeRack.precisionDriveVoice.load(
         std::memory_order_relaxed);
     const bool retiredVoiceSetterRejected =
@@ -50641,7 +51580,7 @@ juce::var AudioEngine::runNAMRackRegression()
     const bool v15RetiredVoicePruned = restoreRetiredPrecisionDriveVoice(15);
     const bool v17RetiredVoicePruned = restoreRetiredPrecisionDriveVoice(17);
     const bool v18RetiredVoicePruned = restoreRetiredPrecisionDriveVoice(
-        S13NAMRack::currentNAMEffectsDspVersion);
+        OpenStudioNAMRack::currentNAMEffectsDspVersion);
     const bool retiredPrecisionDriveVoicePass =
         v14RetiredVoicePruned
         && v15RetiredVoicePruned
@@ -50679,7 +51618,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         constexpr double voiceSampleRate = 48000.0;
         constexpr int voiceRenderSamples = 8192;
-        S13NAMRack voiceRack;
+        OpenStudioNAMRack voiceRack;
         voiceRack.ampEnabled.store(0.0f);
         voiceRack.cabEnabled.store(0.0f);
         voiceRack.gateThresholdDb.store(-100.0f);
@@ -50707,13 +51646,13 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 voiceRack.precisionDriveVoice.store(
                     static_cast<float>(
-                        S13NAMRack::screamerDriveVoice));
+                        OpenStudioNAMRack::screamerDriveVoice));
             }
             else if (automateVoice && absoluteSample == 5120)
             {
                 voiceRack.precisionDriveVoice.store(
                     static_cast<float>(
-                        S13NAMRack::precisionDrivePrecisionVoice));
+                        OpenStudioNAMRack::precisionDrivePrecisionVoice));
             }
             const int requestedBlock = blockPattern.empty()
                 ? 128
@@ -50771,27 +51710,27 @@ juce::var AudioEngine::runNAMRackRegression()
     };
 
     const auto precisionVoiceRender = renderPrecisionDriveVoice(
-        S13NAMRack::precisionDrivePrecisionVoice,
+        OpenStudioNAMRack::precisionDrivePrecisionVoice,
         { 128 },
         false,
         false);
     const auto screamerVoiceRender = renderPrecisionDriveVoice(
-        S13NAMRack::screamerDriveVoice,
+        OpenStudioNAMRack::screamerDriveVoice,
         { 128 },
         false,
         false);
     const auto precisionPartitionRender = renderPrecisionDriveVoice(
-        S13NAMRack::precisionDrivePrecisionVoice,
+        OpenStudioNAMRack::precisionDrivePrecisionVoice,
         { 17, 61, 113, 29 },
         false,
         false);
     const auto automatedVoiceRender = renderPrecisionDriveVoice(
-        S13NAMRack::precisionDrivePrecisionVoice,
+        OpenStudioNAMRack::precisionDrivePrecisionVoice,
         { 64 },
         true,
         false);
     const auto screamerSilenceRender = renderPrecisionDriveVoice(
-        S13NAMRack::screamerDriveVoice,
+        OpenStudioNAMRack::screamerDriveVoice,
         { 31, 97 },
         false,
         true);
@@ -50918,14 +51857,14 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         constexpr int totalSamples = 16384;
         constexpr int preparedBlockSize = 512;
-        S13NAMRack probeRack;
+        OpenStudioNAMRack probeRack;
         configureNeutralRack(probeRack);
         probeRack.setRoutedInputChannelCount(2);
         probeRack.inputTrimDb.store(inputTrimDb);
         probeRack.calibrationReferenceDbu.store(12.0f);
         probeRack.precisionDriveEnabled.store(1.0f);
         probeRack.precisionDriveVoice.store(
-            static_cast<float>(S13NAMRack::screamerDriveVoice));
+            static_cast<float>(OpenStudioNAMRack::screamerDriveVoice));
         probeRack.precisionDriveDrive.store(driveAmount);
         probeRack.precisionDriveBright.store(toneAmount);
         probeRack.precisionDriveAttack.store(bodyTightAmount);
@@ -51326,14 +52265,14 @@ juce::var AudioEngine::runNAMRackRegression()
         const int lateGapWindowEnd = static_cast<int>(
             std::round(sampleRate * lateGapWindowEndSeconds));
 
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         configureNeutralRack(rack);
         rack.setRoutedInputChannelCount(2);
         rack.inputTrimDb.store(1.92f);
         rack.calibrationReferenceDbu.store(12.0f);
         rack.precisionDriveEnabled.store(1.0f);
         rack.precisionDriveVoice.store(
-            static_cast<float>(S13NAMRack::screamerDriveVoice));
+            static_cast<float>(OpenStudioNAMRack::screamerDriveVoice));
         rack.precisionDriveDrive.store(0.0f);
         rack.precisionDriveBright.store(0.598f);
         rack.precisionDriveAttack.store(0.916f);
@@ -51784,12 +52723,12 @@ juce::var AudioEngine::runNAMRackRegression()
         const juce::var& profile,
         bool includeProperty)
     {
-        juce::ValueTree tree("S13NAMRack");
+        juce::ValueTree tree("OpenStudioNAMRack");
         if (includeProperty)
         {
             tree.setProperty(
                 "namEffectsDspVersion",
-                S13NAMRack::currentNAMEffectsDspVersion,
+                OpenStudioNAMRack::currentNAMEffectsDspVersion,
                 nullptr);
             tree.setProperty("instrumentProfile", profile, nullptr);
         }
@@ -51804,7 +52743,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         auto profileState = makeInstrumentProfileState(
             profile, includeProperty);
-        S13NAMRack profileRack;
+        OpenStudioNAMRack profileRack;
         const bool restoredState =
             profileRack.restoreProjectStateInformation(
                 profileState.getData(),
@@ -51814,69 +52753,69 @@ juce::var AudioEngine::runNAMRackRegression()
             : -1;
     };
     const bool instrumentProfileMigrationPassed =
-        S13NAMRack().getInstrumentProfile()
-            == S13NAMRack::guitarInstrumentProfile
+        OpenStudioNAMRack().getInstrumentProfile()
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile({}, false)
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile(
                std::numeric_limits<double>::quiet_NaN(), true)
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile(
                std::numeric_limits<double>::infinity(), true)
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile(-100.0, true)
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile(0.49, true)
-            == S13NAMRack::guitarInstrumentProfile
+            == OpenStudioNAMRack::guitarInstrumentProfile
         && restoreInstrumentProfile(0.5, true)
-            == S13NAMRack::bassInstrumentProfile
+            == OpenStudioNAMRack::bassInstrumentProfile
         && restoreInstrumentProfile(100.0, true)
-            == S13NAMRack::guitarInstrumentProfile;
-    juce::ValueTree preV8CollisionTree("S13NAMRack");
+            == OpenStudioNAMRack::guitarInstrumentProfile;
+    juce::ValueTree preV8CollisionTree("OpenStudioNAMRack");
     preV8CollisionTree.setProperty(
         "namEffectsDspVersion",
         7,
         nullptr);
     preV8CollisionTree.setProperty(
         "instrumentProfile",
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         nullptr);
     juce::MemoryBlock preV8CollisionState;
     juce::MemoryOutputStream preV8CollisionStream(
         preV8CollisionState, false);
     preV8CollisionTree.writeToStream(preV8CollisionStream);
-    S13NAMRack preV8CollisionRack;
+    OpenStudioNAMRack preV8CollisionRack;
     const bool preV8CollisionPassed =
         preV8CollisionRack.restoreProjectStateInformation(
             preV8CollisionState.getData(),
             static_cast<int>(preV8CollisionState.getSize()))
         && preV8CollisionRack.getInstrumentProfile()
-            == S13NAMRack::guitarInstrumentProfile;
-    juce::ValueTree v8ProfileTree("S13NAMRack");
+            == OpenStudioNAMRack::guitarInstrumentProfile;
+    juce::ValueTree v8ProfileTree("OpenStudioNAMRack");
     v8ProfileTree.setProperty(
         "namEffectsDspVersion", 8, nullptr);
     v8ProfileTree.setProperty(
         "instrumentProfile",
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         nullptr);
     juce::MemoryBlock v8ProfileState;
     juce::MemoryOutputStream v8ProfileStream(
         v8ProfileState, false);
     v8ProfileTree.writeToStream(v8ProfileStream);
-    S13NAMRack v8ProfileRack;
+    OpenStudioNAMRack v8ProfileRack;
     const bool v8ProfilePreserved =
         v8ProfileRack.restoreProjectStateInformation(
             v8ProfileState.getData(),
             static_cast<int>(v8ProfileState.getSize()))
         && v8ProfileRack.getInstrumentProfile()
-            == S13NAMRack::bassInstrumentProfile;
-    S13NAMRack bassProfileRoundTripSource;
+            == OpenStudioNAMRack::bassInstrumentProfile;
+    OpenStudioNAMRack bassProfileRoundTripSource;
     bassProfileRoundTripSource.instrumentProfile.store(
-        static_cast<float>(S13NAMRack::bassInstrumentProfile));
+        static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile));
     juce::MemoryBlock bassProfileRoundTripState;
     bassProfileRoundTripSource.getStateInformation(
         bassProfileRoundTripState);
-    S13NAMRack bassProfileRoundTripDestination;
+    OpenStudioNAMRack bassProfileRoundTripDestination;
     const bool bassProfileRoundTripPassed =
         bassProfileRoundTripDestination
             .restoreProjectStateInformation(
@@ -51884,7 +52823,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 static_cast<int>(
                     bassProfileRoundTripState.getSize()))
         && bassProfileRoundTripDestination.getInstrumentProfile()
-            == S13NAMRack::bassInstrumentProfile;
+            == OpenStudioNAMRack::bassInstrumentProfile;
     addCheck(
         checks,
         "instrument_profile_default_and_migration",
@@ -51899,7 +52838,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && v8ProfilePreserved
             && bassProfileRoundTripPassed);
 
-    S13NAMRack instrumentProfileSetterProbe;
+    OpenStudioNAMRack instrumentProfileSetterProbe;
     const auto setProfileForProbe = [&] (float value)
     {
         const bool accepted = setBuiltInProcessorParam(
@@ -51979,17 +52918,17 @@ juce::var AudioEngine::runNAMRackRegression()
         [] (bool matched) { return matched; });
     const bool instrumentProfileSetterPassed =
         setterBass.first
-        && setterBass.second == S13NAMRack::bassInstrumentProfile
+        && setterBass.second == OpenStudioNAMRack::bassInstrumentProfile
         && setterNegative.first
-        && setterNegative.second == S13NAMRack::guitarInstrumentProfile
+        && setterNegative.second == OpenStudioNAMRack::guitarInstrumentProfile
         && setterTooHigh.first
-        && setterTooHigh.second == S13NAMRack::guitarInstrumentProfile
+        && setterTooHigh.second == OpenStudioNAMRack::guitarInstrumentProfile
         && setterHalf.first
-        && setterHalf.second == S13NAMRack::bassInstrumentProfile
+        && setterHalf.second == OpenStudioNAMRack::bassInstrumentProfile
         && setterNan.first
-        && setterNan.second == S13NAMRack::guitarInstrumentProfile
+        && setterNan.second == OpenStudioNAMRack::guitarInstrumentProfile
         && setterBassForSchema.first
-        && setterBassForSchema.second == S13NAMRack::bassInstrumentProfile
+        && setterBassForSchema.second == OpenStudioNAMRack::bassInstrumentProfile
         && profileSchemaNonAutomatable
         && bassPreEqSchemaLabelsPassed;
     auto* instrumentProfileSetterDiagnostics =
@@ -52031,7 +52970,7 @@ juce::var AudioEngine::runNAMRackRegression()
         int effectsVersion,
         bool includeProperty)
     {
-        juce::ValueTree tree("S13NAMRack");
+        juce::ValueTree tree("OpenStudioNAMRack");
         tree.setProperty(
             "namEffectsDspVersion", effectsVersion, nullptr);
         if (includeProperty)
@@ -52039,68 +52978,68 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::MemoryBlock state;
         juce::MemoryOutputStream stream(state, false);
         tree.writeToStream(stream);
-        S13NAMRack rackForState;
+        OpenStudioNAMRack rackForState;
         const bool restoredState =
             rackForState.restoreProjectStateInformation(
                 state.getData(),
                 static_cast<int>(state.getSize()));
         return restoredState
-            ? S13NAMRack::sanitizeReverbVoice(
+            ? OpenStudioNAMRack::sanitizeReverbVoice(
                 rackForState.reverbVoice.load(
                     std::memory_order_relaxed))
             : -1;
     };
     const bool reverbVoiceStateMigrationPassed =
-        S13NAMRack::sanitizeReverbVoice(
-            S13NAMRack().reverbVoice.load(
+        OpenStudioNAMRack::sanitizeReverbVoice(
+            OpenStudioNAMRack().reverbVoice.load(
                 std::memory_order_relaxed))
-            == S13NAMRack::studioReverbVoice
+            == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                {},
-               S13NAMRack::currentNAMEffectsDspVersion,
-               false) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               false) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                3.0,
-               S13NAMRack::reverbVoiceIntroducedNAMEffectsDspVersion,
-               true) == S13NAMRack::roomReverbVoice
+               OpenStudioNAMRack::reverbVoiceIntroducedNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::roomReverbVoice
         && restoreReverbVoiceForProbe(
                3.0,
-               S13NAMRack::reverbVoiceIntroducedNAMEffectsDspVersion - 1,
-               true) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::reverbVoiceIntroducedNAMEffectsDspVersion - 1,
+               true) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                std::numeric_limits<double>::quiet_NaN(),
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                std::numeric_limits<double>::infinity(),
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                -100.0,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                0.49,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::studioReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::studioReverbVoice
         && restoreReverbVoiceForProbe(
                0.5,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::plateReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::plateReverbVoice
         && restoreReverbVoiceForProbe(
                2.49,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::hallReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::hallReverbVoice
         && restoreReverbVoiceForProbe(
                2.5,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::roomReverbVoice
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::roomReverbVoice
         && restoreReverbVoiceForProbe(
                100.0,
-               S13NAMRack::currentNAMEffectsDspVersion,
-               true) == S13NAMRack::roomReverbVoice;
+               OpenStudioNAMRack::currentNAMEffectsDspVersion,
+               true) == OpenStudioNAMRack::roomReverbVoice;
 
-    S13NAMRack reverbVoiceSetterProbe;
+    OpenStudioNAMRack reverbVoiceSetterProbe;
     const auto setReverbVoiceForProbe = [&] (float value)
     {
         const bool accepted = setBuiltInProcessorParam(
@@ -52109,7 +53048,7 @@ juce::var AudioEngine::runNAMRackRegression()
             value);
         return std::pair<bool, int> {
             accepted,
-            S13NAMRack::sanitizeReverbVoice(
+            OpenStudioNAMRack::sanitizeReverbVoice(
                 reverbVoiceSetterProbe.reverbVoice.load(
                     std::memory_order_relaxed))
         };
@@ -52130,22 +53069,22 @@ juce::var AudioEngine::runNAMRackRegression()
     const bool reverbVoiceSetterPassed =
         voiceSetterNegative.first
         && voiceSetterNegative.second
-            == S13NAMRack::studioReverbVoice
+            == OpenStudioNAMRack::studioReverbVoice
         && voiceSetterHalf.first
         && voiceSetterHalf.second
-            == S13NAMRack::plateReverbVoice
+            == OpenStudioNAMRack::plateReverbVoice
         && voiceSetterTwoFortyNine.first
         && voiceSetterTwoFortyNine.second
-            == S13NAMRack::hallReverbVoice
+            == OpenStudioNAMRack::hallReverbVoice
         && voiceSetterTwoFive.first
         && voiceSetterTwoFive.second
-            == S13NAMRack::roomReverbVoice
+            == OpenStudioNAMRack::roomReverbVoice
         && voiceSetterHigh.first
         && voiceSetterHigh.second
-            == S13NAMRack::roomReverbVoice
+            == OpenStudioNAMRack::roomReverbVoice
         && voiceSetterNan.first
         && voiceSetterNan.second
-            == S13NAMRack::studioReverbVoice;
+            == OpenStudioNAMRack::studioReverbVoice;
 
     const auto reverbVoiceSchema = describeBuiltInProcessor(
         &reverbVoiceSetterProbe, "track", 0);
@@ -52202,6 +53141,214 @@ juce::var AudioEngine::runNAMRackRegression()
         reverbVoiceStateAndSchemaPassed ? "pass" : "fail",
         "V9 and newer state must preserve Studio/Plate/Hall/Room through the current V11 migration; pre-V9 collisions force Studio, bridge input uses finite round-then-clamp with non-finite fallback, and the four-option topology enum is explicit and non-automatable.",
         juce::var(reverbVoiceStateDiagnostics));
+
+    auto runNAMRackGlobalGatePlacementProbe = [&] ()
+    {
+        constexpr double sampleRate = 48000.0;
+        constexpr int preparedBlockSize = 64;
+        constexpr int totalSamples = 32768;
+        constexpr int analysisSamples = 8192;
+
+        struct Capture
+        {
+            juce::AudioBuffer<float> preDrive;
+            juce::AudioBuffer<float> finalRack;
+        };
+
+        const auto render = [&] (
+            float thresholdDb,
+            float inputAmplitude,
+            const std::vector<int>& partitions)
+        {
+            Capture capture;
+            capture.preDrive.setSize(2, totalSamples);
+            capture.finalRack.setSize(2, totalSamples);
+            capture.preDrive.clear();
+            capture.finalRack.clear();
+
+            OpenStudioNAMRack rack;
+            configureNeutralRack(rack);
+            rack.gateThresholdDb.store(
+                thresholdDb, std::memory_order_relaxed);
+            rack.gateReleaseMs.store(40.0f, std::memory_order_relaxed);
+            rack.precisionDriveEnabled.store(
+                1.0f, std::memory_order_relaxed);
+            rack.precisionDriveDrive.store(
+                0.35f, std::memory_order_relaxed);
+            rack.precisionDriveAttack.store(
+                0.50f, std::memory_order_relaxed);
+            rack.precisionDriveBright.store(
+                0.55f, std::memory_order_relaxed);
+            rack.precisionDriveGate.store(
+                0.0f, std::memory_order_relaxed);
+            rack.precisionDriveVolumeDb.store(
+                9.0f, std::memory_order_relaxed);
+            rack.prepareToPlay(sampleRate, preparedBlockSize);
+
+            OpenStudioNAMRack::OfflineStageCaptureTarget target;
+            target.destinations[static_cast<size_t>(
+                OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)] =
+                    &capture.preDrive;
+            target.destinations[static_cast<size_t>(
+                OpenStudioNAMRack::OfflineStageCapturePoint::finalRack)] =
+                    &capture.finalRack;
+            target.maximumSamples = totalSamples;
+            rack.offlineStageCaptureTarget = &target;
+
+            const std::vector<int> fallback { preparedBlockSize };
+            const auto& pattern = partitions.empty()
+                ? fallback : partitions;
+            int cursor = 0;
+            size_t partitionIndex = 0;
+            juce::MidiBuffer midi;
+            while (cursor < totalSamples)
+            {
+                const int blockSize = juce::jmin(
+                    preparedBlockSize,
+                    juce::jmax(
+                        1,
+                        pattern[partitionIndex % pattern.size()]),
+                    totalSamples - cursor);
+                juce::AudioBuffer<float> block(2, blockSize);
+                for (int sample = 0; sample < blockSize; ++sample)
+                {
+                    const int absoluteSample = cursor + sample;
+                    const float value = inputAmplitude
+                        * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                            * 97.0
+                            * static_cast<double>(absoluteSample)
+                            / sampleRate));
+                    block.setSample(0, sample, value);
+                    block.setSample(1, sample, value);
+                }
+                rack.processBlock(block, midi);
+                cursor += blockSize;
+                ++partitionIndex;
+            }
+            rack.offlineStageCaptureTarget = nullptr;
+            return capture;
+        };
+
+        const auto tailRms = [=] (
+            const juce::AudioBuffer<float>& audio)
+        {
+            const int start = juce::jmax(
+                0, audio.getNumSamples() - analysisSamples);
+            double sumSquares = 0.0;
+            int count = 0;
+            for (int channel = 0;
+                 channel < audio.getNumChannels();
+                 ++channel)
+            {
+                for (int sample = start;
+                     sample < audio.getNumSamples();
+                     ++sample)
+                {
+                    const double value = audio.getSample(channel, sample);
+                    sumSquares += value * value;
+                    ++count;
+                }
+            }
+            return count > 0
+                ? std::sqrt(sumSquares / static_cast<double>(count))
+                : 0.0;
+        };
+        const auto maximumError = [] (
+            const juce::AudioBuffer<float>& left,
+            const juce::AudioBuffer<float>& right)
+        {
+            float maximum = 0.0f;
+            const int channels = juce::jmin(
+                left.getNumChannels(), right.getNumChannels());
+            const int samples = juce::jmin(
+                left.getNumSamples(), right.getNumSamples());
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                for (int sample = 0; sample < samples; ++sample)
+                {
+                    maximum = juce::jmax(
+                        maximum,
+                        std::abs(
+                            left.getSample(channel, sample)
+                            - right.getSample(channel, sample)));
+                }
+            }
+            return maximum;
+        };
+        const auto maximumTailError = [=] (
+            const juce::AudioBuffer<float>& left,
+            const juce::AudioBuffer<float>& right)
+        {
+            float maximum = 0.0f;
+            const int channels = juce::jmin(
+                left.getNumChannels(), right.getNumChannels());
+            const int samples = juce::jmin(
+                left.getNumSamples(), right.getNumSamples());
+            const int start = juce::jmax(0, samples - analysisSamples);
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                for (int sample = start; sample < samples; ++sample)
+                {
+                    maximum = juce::jmax(
+                        maximum,
+                        std::abs(
+                            left.getSample(channel, sample)
+                            - right.getSample(channel, sample)));
+                }
+            }
+            return maximum;
+        };
+
+        const auto quietUngated = render(-100.0f, 0.0001f, { 64 });
+        const auto quietGated = render(-50.0f, 0.0001f, { 64 });
+        const auto quietGatedUneven = render(
+            -50.0f, 0.0001f, { 7, 31, 5, 64, 11, 47 });
+        const auto openUngated = render(-100.0f, 0.05f, { 64 });
+        const auto openGated = render(-50.0f, 0.05f, { 64 });
+
+        const float quietPreDriveError = maximumError(
+            quietUngated.preDrive, quietGated.preDrive);
+        const double quietUngatedRms = tailRms(quietUngated.finalRack);
+        const double quietGatedRms = tailRms(quietGated.finalRack);
+        const double closedRatio = quietUngatedRms > 1.0e-12
+            ? quietGatedRms / quietUngatedRms
+            : 1.0;
+        // A gate is expected to open from silence with a short attack. Once
+        // the detector is held above threshold, however, it must be exactly
+        // transparent; compare the settled analysis window rather than the
+        // deliberate onset transition.
+        const float openOutputError = maximumTailError(
+            openUngated.finalRack, openGated.finalRack);
+        const float partitionError = maximumError(
+            quietGated.finalRack, quietGatedUneven.finalRack);
+        const bool pass =
+            quietPreDriveError <= 1.0e-8f
+            && quietUngatedRms > 1.0e-7
+            && closedRatio <= 0.01
+            && openOutputError <= 1.0e-6f
+            && partitionError <= 1.0e-5f
+            && std::isfinite(closedRatio);
+
+        auto* value = new juce::DynamicObject();
+        value->setProperty("quietPreDriveMaximumError", quietPreDriveError);
+        value->setProperty("quietUngatedTailRms", quietUngatedRms);
+        value->setProperty("quietGatedTailRms", quietGatedRms);
+        value->setProperty("closedTailRatio", closedRatio);
+        value->setProperty("openOutputMaximumError", openOutputError);
+        value->setProperty("partitionMaximumError", partitionError);
+        value->setProperty("pass", pass);
+        return juce::var(value);
+    };
+    const auto namRackGlobalGatePlacement =
+        runNAMRackGlobalGatePlacementProbe();
+    addCheck(
+        checks,
+        "nam_rack_global_gate_post_nonlinear_placement",
+        namRackGlobalGatePlacement.getProperty("pass", false)
+            ? "pass" : "fail",
+        "The linked detector must leave the clean signal entering Precision Drive unchanged, apply at least 40 dB of settled attenuation after the nonlinear/model slots, remain transparent while open, and retain fixed-versus-uneven callback equivalence. This deterministic topology check does not assert musical sustain or perceived hiss reduction.",
+        namRackGlobalGatePlacement);
 
     // Instrument Profile is intentionally a narrow voicing selector rather
     // than a hidden preset rewrite. Exercise every profile-aware native stage
@@ -52302,6 +53449,10 @@ juce::var AudioEngine::runNAMRackRegression()
         std::numeric_limits<float>::quiet_NaN(),
         std::numeric_limits<float>::quiet_NaN()
     };
+    std::array<float, 2> precisionProfileCleanLowTargets {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN()
+    };
 
     const auto renderProfileResponseStage = [&] (
         int profile,
@@ -52309,7 +53460,7 @@ juce::var AudioEngine::runNAMRackRegression()
         float frequency,
         float amplitude)
     {
-        S13NAMRack profileRack;
+        OpenStudioNAMRack profileRack;
         configureNeutralRack(profileRack);
         profileRack.instrumentProfile.store(
             static_cast<float>(profile), std::memory_order_relaxed);
@@ -52374,10 +53525,16 @@ juce::var AudioEngine::runNAMRackRegression()
         profileRack.prepareToPlay(
             profileMatrixSampleRate,
             profileMatrixMaximumBlock);
-        if (stage == ProfileResponseStage::distortion)
+        const auto profileIndex = static_cast<size_t>(
+            profile == OpenStudioNAMRack::bassInstrumentProfile ? 1 : 0);
+        if (stage == ProfileResponseStage::precision)
         {
-            const auto profileIndex = static_cast<size_t>(
-                profile == S13NAMRack::bassInstrumentProfile ? 1 : 0);
+            precisionProfileCleanLowTargets[profileIndex] =
+                profileRack.smoothedPrecisionDriveBassLowPreservation
+                    .getTargetValue();
+        }
+        else if (stage == ProfileResponseStage::distortion)
+        {
             distortionProfileLowPreservationTargets[profileIndex] =
                 profileRack.smoothedChaosLowPreservation
                     .getTargetValue();
@@ -52431,12 +53588,12 @@ juce::var AudioEngine::runNAMRackRegression()
     };
 
     const auto guitarPrecisionCapture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::precision,
         41.2034f,
         0.008f);
     const auto bassPrecisionCapture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::precision,
         41.2034f,
         0.008f);
@@ -52452,12 +53609,12 @@ juce::var AudioEngine::runNAMRackRegression()
         profileMatrixAnalysisSamples);
 
     const auto guitarDistortionCapture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::distortion,
         41.2034f,
         0.06f);
     const auto bassDistortionCapture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::distortion,
         41.2034f,
         0.06f);
@@ -52502,12 +53659,12 @@ juce::var AudioEngine::runNAMRackRegression()
             > distortionProbeInputFundamental * 0.02f;
 
     const auto guitarAmpCapture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::ampWrapper,
         41.2034f,
         0.08f);
     const auto bassAmpCapture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::ampWrapper,
         41.2034f,
         0.08f);
@@ -52523,22 +53680,22 @@ juce::var AudioEngine::runNAMRackRegression()
         profileMatrixAnalysisSamples);
 
     const auto guitarPreEq50Capture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::preEq,
         50.0f,
         0.08f);
     const auto bassPreEq50Capture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::preEq,
         50.0f,
         0.08f);
     const auto guitarPreEq120Capture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::preEq,
         120.0f,
         0.08f);
     const auto bassPreEq120Capture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::preEq,
         120.0f,
         0.08f);
@@ -52572,32 +53729,32 @@ juce::var AudioEngine::runNAMRackRegression()
         -160.0f);
 
     const auto guitarEq31Capture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::graphicEq,
         31.0f,
         0.08f);
     const auto bassEq31Capture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::graphicEq,
         31.0f,
         0.08f);
     const auto guitarEq65Capture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::graphicEq,
         65.0f,
         0.08f);
     const auto bassEq65Capture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::graphicEq,
         65.0f,
         0.08f);
     const auto guitarEq125Capture = renderProfileResponseStage(
-        S13NAMRack::guitarInstrumentProfile,
+        OpenStudioNAMRack::guitarInstrumentProfile,
         ProfileResponseStage::graphicEq,
         125.0f,
         0.08f);
     const auto bassEq125Capture = renderProfileResponseStage(
-        S13NAMRack::bassInstrumentProfile,
+        OpenStudioNAMRack::bassInstrumentProfile,
         ProfileResponseStage::graphicEq,
         125.0f,
         0.08f);
@@ -52647,8 +53804,19 @@ juce::var AudioEngine::runNAMRackRegression()
     const bool profileResponsePassed =
         std::isfinite(guitarPrecisionFundamental)
         && std::isfinite(bassPrecisionFundamental)
+        // Bass selects a strong unity clean-low replacement without using a
+        // hidden loudness boost as the proof of low-end preservation. Keep
+        // the 41 Hz fundamental level-matched within 1 dB while asserting the
+        // actual profile split endpoints independently.
         && bassPrecisionFundamental
-            > guitarPrecisionFundamental * 1.08f
+            > guitarPrecisionFundamental
+                * juce::Decibels::decibelsToGain(-1.0f)
+        && bassPrecisionFundamental
+            < guitarPrecisionFundamental
+                * juce::Decibels::decibelsToGain(1.0f)
+        && std::abs(precisionProfileCleanLowTargets[0]) <= 1.0e-6f
+        && std::abs(precisionProfileCleanLowTargets[1] - 0.72f)
+            <= 1.0e-6f
         && std::isfinite(guitarDistortionFundamental)
         && std::isfinite(bassDistortionFundamental)
         // Assert the current bounded profile mapping, not the obsolete
@@ -52681,6 +53849,12 @@ juce::var AudioEngine::runNAMRackRegression()
         "precisionGuitarFundamental", guitarPrecisionFundamental);
     profileResponseValue->setProperty(
         "precisionBassFundamental", bassPrecisionFundamental);
+    profileResponseValue->setProperty(
+        "precisionGuitarCleanLowTarget",
+        precisionProfileCleanLowTargets[0]);
+    profileResponseValue->setProperty(
+        "precisionBassCleanLowTarget",
+        precisionProfileCleanLowTargets[1]);
     profileResponseValue->setProperty(
         "distortionGuitarFundamental", guitarDistortionFundamental);
     profileResponseValue->setProperty(
@@ -52746,7 +53920,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     const auto renderInvariantProfile = [&] (int profile)
     {
-        S13NAMRack invariantRack;
+        OpenStudioNAMRack invariantRack;
         configureNeutralRack(invariantRack);
         invariantRack.instrumentProfile.store(
             static_cast<float>(profile), std::memory_order_relaxed);
@@ -52817,9 +53991,9 @@ juce::var AudioEngine::runNAMRackRegression()
     };
 
     const auto invariantGuitarCapture = renderInvariantProfile(
-        S13NAMRack::guitarInstrumentProfile);
+        OpenStudioNAMRack::guitarInstrumentProfile);
     const auto invariantBassCapture = renderInvariantProfile(
-        S13NAMRack::bassInstrumentProfile);
+        OpenStudioNAMRack::bassInstrumentProfile);
     float invariantMaximumDifference = 0.0f;
     for (int channel = 0; channel < 2; ++channel)
     {
@@ -52834,7 +54008,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     - invariantBassCapture.getSample(channel, sample)));
         }
     }
-    S13NAMRack invariantControlRack;
+    OpenStudioNAMRack invariantControlRack;
     invariantControlRack.cabHPFHz.store(37.0f);
     invariantControlRack.cabLPFHz.store(9100.0f);
     invariantControlRack.gateThresholdDb.store(-72.0f);
@@ -52880,7 +54054,7 @@ juce::var AudioEngine::runNAMRackRegression()
         bool chorusEnabled,
         float frequency)
     {
-        S13NAMRack parallelRack;
+        OpenStudioNAMRack parallelRack;
         configureNeutralRack(parallelRack);
         parallelRack.instrumentProfile.store(
             static_cast<float>(profile), std::memory_order_relaxed);
@@ -52941,21 +54115,21 @@ juce::var AudioEngine::runNAMRackRegression()
     };
 
     const auto guitarChorusLowCapture = renderProfileParallelLow(
-        S13NAMRack::guitarInstrumentProfile, true, 41.2034f);
+        OpenStudioNAMRack::guitarInstrumentProfile, true, 41.2034f);
     const auto bassChorusLowCapture = renderProfileParallelLow(
-        S13NAMRack::bassInstrumentProfile, true, 41.2034f);
+        OpenStudioNAMRack::bassInstrumentProfile, true, 41.2034f);
     const auto guitarDelayLowCapture = renderProfileParallelLow(
-        S13NAMRack::guitarInstrumentProfile, false, 41.2034f);
+        OpenStudioNAMRack::guitarInstrumentProfile, false, 41.2034f);
     const auto bassDelayLowCapture = renderProfileParallelLow(
-        S13NAMRack::bassInstrumentProfile, false, 41.2034f);
+        OpenStudioNAMRack::bassInstrumentProfile, false, 41.2034f);
     const auto guitarChorusE1Capture = renderProfileParallelLow(
-        S13NAMRack::guitarInstrumentProfile, true, 82.4069f);
+        OpenStudioNAMRack::guitarInstrumentProfile, true, 82.4069f);
     const auto bassChorusE1Capture = renderProfileParallelLow(
-        S13NAMRack::bassInstrumentProfile, true, 82.4069f);
+        OpenStudioNAMRack::bassInstrumentProfile, true, 82.4069f);
     const auto guitarDelayE1Capture = renderProfileParallelLow(
-        S13NAMRack::guitarInstrumentProfile, false, 82.4069f);
+        OpenStudioNAMRack::guitarInstrumentProfile, false, 82.4069f);
     const auto bassDelayE1Capture = renderProfileParallelLow(
-        S13NAMRack::bassInstrumentProfile, false, 82.4069f);
+        OpenStudioNAMRack::bassInstrumentProfile, false, 82.4069f);
     const float guitarChorusLowGain = measureProfileMatrixTone(
         guitarChorusLowCapture,
         profileMatrixSampleRate,
@@ -53039,47 +54213,47 @@ juce::var AudioEngine::runNAMRackRegression()
     parallelLowValue->setProperty("pass", parallelLowPassed);
 
     const auto guitarDelayProfileMacro =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             420.0f,
             0.32f,
             0.28f,
             0.50f,
             0.10f,
-            static_cast<float>(S13NAMRack::tapeDelayMode),
+            static_cast<float>(OpenStudioNAMRack::tapeDelayMode),
             1.0f,
             0.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto bassDelayProfileMacro =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             420.0f,
             0.32f,
             0.28f,
             0.50f,
             0.10f,
-            static_cast<float>(S13NAMRack::tapeDelayMode),
+            static_cast<float>(OpenStudioNAMRack::tapeDelayMode),
             1.0f,
             0.0f,
-            S13NAMRack::bassInstrumentProfile);
+            OpenStudioNAMRack::bassInstrumentProfile);
     const auto guitarReverbProfileMacro =
-        S13NAMRack::resolveReverbMacroState(
-            static_cast<float>(S13NAMRack::plateReverbVoice),
+        OpenStudioNAMRack::resolveReverbMacroState(
+            static_cast<float>(OpenStudioNAMRack::plateReverbVoice),
             0.24f,
             2.1f,
             0.58f,
             14.0f,
             135.0f,
             0.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto bassReverbProfileMacro =
-        S13NAMRack::resolveReverbMacroState(
-            static_cast<float>(S13NAMRack::plateReverbVoice),
+        OpenStudioNAMRack::resolveReverbMacroState(
+            static_cast<float>(OpenStudioNAMRack::plateReverbVoice),
             0.24f,
             2.1f,
             0.58f,
             14.0f,
             135.0f,
             0.0f,
-            S13NAMRack::bassInstrumentProfile);
+            OpenStudioNAMRack::bassInstrumentProfile);
     const bool ambienceProfileMappingPassed =
         bassDelayProfileMacro.highPassHz
             > guitarDelayProfileMacro.highPassHz
@@ -53126,7 +54300,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int totalSamples = 24576;
         constexpr int bassAtSample = 8192;
         constexpr int guitarAtSample = 16384;
-        S13NAMRack liveRack;
+        OpenStudioNAMRack liveRack;
         configureNeutralRack(liveRack);
         liveRack.instrumentProfile.store(0.0f);
         liveRack.octaverEnabled.store(1.0f);
@@ -53180,7 +54354,7 @@ juce::var AudioEngine::runNAMRackRegression()
         liveRack.delayDucker.store(0.0f);
         liveRack.reverbEnabled.store(1.0f);
         liveRack.reverbVoice.store(
-            static_cast<float>(S13NAMRack::plateReverbVoice));
+            static_cast<float>(OpenStudioNAMRack::plateReverbVoice));
         liveRack.reverbMix.store(0.12f);
         liveRack.reverbDecaySec.store(1.4f);
         liveRack.reverbTone.store(0.55f);
@@ -53277,7 +54451,10 @@ juce::var AudioEngine::runNAMRackRegression()
         && liveProfileAnalysis[0] > 0.001
         && liveProfileAnalysis[0] < 4.0
         && liveProfileAnalysis[1] < 1.0
-        && liveProfilePartitionDifference <= 2.0e-4f;
+        // This composite continues through nonlinear drive, modulation and
+        // reverb, which can amplify one-ULP upstream differences. The stable
+        // biquad matrix separately owns the strict 2e-6 linear-stage bound.
+        && liveProfilePartitionDifference <= 1.0e-3f;
     auto* liveProfileValue = new juce::DynamicObject();
     liveProfileValue->setProperty(
         "switchToBassSample", 8192);
@@ -53291,17 +54468,19 @@ juce::var AudioEngine::runNAMRackRegression()
         "nonFiniteSamples", liveProfileAnalysis[2]);
     liveProfileValue->setProperty(
         "maximumPartitionDifference", liveProfilePartitionDifference);
+    liveProfileValue->setProperty(
+        "acceptedMaximumPartitionDifference", 1.0e-3f);
     liveProfileValue->setProperty("pass", liveProfileMatrixPassed);
 
     const auto runConcurrentInstrumentProfilePublicationProbe = [&] ()
     {
         constexpr int concurrentSamples = 16384;
-        const auto configure = [&] (S13NAMRack& rack)
+        const auto configure = [&] (OpenStudioNAMRack& rack)
         {
             configureNeutralRack(rack);
             rack.instrumentProfile.store(
                 static_cast<float>(
-                    S13NAMRack::guitarInstrumentProfile));
+                    OpenStudioNAMRack::guitarInstrumentProfile));
             rack.octaverEnabled.store(1.0f);
             rack.octaverDownMix.store(0.16f);
             rack.octaverUpMix.store(0.06f);
@@ -53349,7 +54528,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.delayDucker.store(0.0f);
             rack.reverbEnabled.store(1.0f);
             rack.reverbVoice.store(
-                static_cast<float>(S13NAMRack::plateReverbVoice));
+                static_cast<float>(OpenStudioNAMRack::plateReverbVoice));
             rack.reverbMix.store(0.06f);
             rack.reverbDecaySec.store(1.1f);
             rack.reverbTone.store(0.52f);
@@ -53381,7 +54560,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
         };
         const auto processProfileConsumers = [] (
-            S13NAMRack& rack,
+            OpenStudioNAMRack& rack,
             juce::AudioBuffer<float>& block,
             juce::MidiBuffer& midi)
         {
@@ -53396,8 +54575,8 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.processReverbStage(block, midi);
         };
 
-        S13NAMRack publishedRack;
-        S13NAMRack referenceRack;
+        OpenStudioNAMRack publishedRack;
+        OpenStudioNAMRack referenceRack;
         configure(publishedRack);
         configure(referenceRack);
         juce::AudioBuffer<float> publishedBlock(2, concurrentSamples);
@@ -53469,9 +54648,9 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool pass =
             publicationCount.load(std::memory_order_relaxed) >= 32
             && (latchedProfile
-                    == S13NAMRack::guitarInstrumentProfile
+                    == OpenStudioNAMRack::guitarInstrumentProfile
                 || latchedProfile
-                    == S13NAMRack::bassInstrumentProfile)
+                    == OpenStudioNAMRack::bassInstrumentProfile)
             && publishedRack.diagnosticLastBlockInstrumentProfile.load(
                     std::memory_order_relaxed)
                 == latchedProfile
@@ -53523,10 +54702,10 @@ juce::var AudioEngine::runNAMRackRegression()
         checks,
         "instrument_profile_dsp_response_and_live_switch_matrix",
         instrumentProfileDspMatrixPassed ? "pass" : "fail",
-        "At 48 kHz the Bass profile must measurably extend Precision Drive, Distortion, Amp-wrapper, EQ Boost, and 65-Hz EQ low-frequency behavior; invariant Gate/Compressor/Cab controls/Cab Room/Doubler and legacy Studio Reverb must remain identical; Chorus/Delay must retain bounded unity direct low end; every mapped stage, including profile-aware Plate Reverb, must survive exact Guitar-Bass-Guitar switches under fixed 8-sample and uneven callbacks; and concurrent selector publication must still produce one coherent profile for the complete block. Subjective bass tone, feel, and pedal similarity remain not_asserted pending B0/E1 audition.",
+        "At 48 kHz the Bass profile must measurably extend the Precision Drive clean-low split, Distortion, Amp-wrapper, EQ Boost, and 65-Hz EQ low-frequency behavior while reserving native-drive operating headroom without rewriting interface calibration; invariant Gate/Compressor/Cab controls/Cab Room/Doubler and legacy Studio Reverb must remain identical; Chorus/Delay must retain bounded unity direct low end; every mapped stage, including profile-aware Plate Reverb, must survive exact Guitar-Bass-Guitar switches under fixed 8-sample and uneven callbacks; and concurrent selector publication must still produce one coherent profile for the complete block. Subjective bass tone, feel, hiss, and pedal similarity remain not_asserted pending the user's Bass DI audition.",
         juce::var(instrumentProfileDspMatrixValue));
 
-    juce::ValueTree retiredRackBbdStateTree("S13NAMRack");
+    juce::ValueTree retiredRackBbdStateTree("OpenStudioNAMRack");
     retiredRackBbdStateTree.setProperty(
         "chorusCharacter", 2.0, nullptr);
     juce::MemoryBlock retiredRackBbdState;
@@ -53534,7 +54713,7 @@ juce::var AudioEngine::runNAMRackRegression()
         retiredRackBbdState, false);
     retiredRackBbdStateTree.writeToStream(
         retiredRackBbdStream);
-    S13NAMRack retiredRackBbdRack;
+    OpenStudioNAMRack retiredRackBbdRack;
     const bool retiredRackBbdStateLoaded =
         retiredRackBbdRack.restoreProjectStateInformation(
             retiredRackBbdState.getData(),
@@ -53564,7 +54743,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "Legacy NAM Rack BBD character state must migrate to the supported Ensemble character and resave without the retired value.",
         retiredRackBbdRack.chorusCharacter.load());
 
-    juce::ValueTree retiredLaserStateTree("S13NAMRack");
+    juce::ValueTree retiredLaserStateTree("OpenStudioNAMRack");
     retiredLaserStateTree.setProperty("ampMix", 0.42, nullptr);
     retiredLaserStateTree.setProperty("laserEnabled", 1.0, nullptr);
     retiredLaserStateTree.setProperty("laserMode", 4.0, nullptr);
@@ -53581,7 +54760,7 @@ juce::var AudioEngine::runNAMRackRegression()
     juce::MemoryOutputStream retiredLaserStream(
         retiredLaserState, false);
     retiredLaserStateTree.writeToStream(retiredLaserStream);
-    S13NAMRack retiredLaserRack;
+    OpenStudioNAMRack retiredLaserRack;
     const bool retiredLaserStateLoaded =
         retiredLaserRack.restoreProjectStateInformation(
             retiredLaserState.getData(),
@@ -53633,7 +54812,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "Projects written during NAM Rack development may contain retired Laser fields; project restore and direct UI-state updates must preserve current controls while pruning stale Laser state.",
         directlyUpdatedRetiredLaserUiState);
 
-    juce::ValueTree legacyPseudoShimmerTree("S13NAMRack");
+    juce::ValueTree legacyPseudoShimmerTree("OpenStudioNAMRack");
     legacyPseudoShimmerTree.setProperty(
         "reverbShimmer", 1.0, nullptr);
     juce::MemoryBlock legacyPseudoShimmerState;
@@ -53641,7 +54820,7 @@ juce::var AudioEngine::runNAMRackRegression()
         legacyPseudoShimmerState, false);
     legacyPseudoShimmerTree.writeToStream(
         legacyPseudoShimmerStream);
-    S13NAMRack legacyPseudoShimmerRack;
+    OpenStudioNAMRack legacyPseudoShimmerRack;
     legacyPseudoShimmerRack.setStateInformation(
         legacyPseudoShimmerState.getData(),
         static_cast<int>(
@@ -53660,11 +54839,11 @@ juce::var AudioEngine::runNAMRackRegression()
         "legacy_pseudo_shimmer_snapshot_migrates_to_off",
         std::abs(migratedLegacyShimmer) <= 0.0001f
                 && migratedLegacyEffectsVersion
-                    == S13NAMRack::currentNAMEffectsDspVersion
+                    == OpenStudioNAMRack::currentNAMEffectsDspVersion
                 && std::abs(
                        migratedLegacyReverbEngineVersion
                        - static_cast<float>(
-                           S13NAMRack::currentReverbEngineVersion))
+                           OpenStudioNAMRack::currentReverbEngineVersion))
                     <= 0.0001f
             ? "pass"
             : "fail",
@@ -53684,7 +54863,7 @@ juce::var AudioEngine::runNAMRackRegression()
             return value;
         }()));
 
-    juce::ValueTree nativeV1ShimmerTree("S13NAMRack");
+    juce::ValueTree nativeV1ShimmerTree("OpenStudioNAMRack");
     nativeV1ShimmerTree.setProperty(
         "reverbShimmer", 0.64, nullptr);
     nativeV1ShimmerTree.setProperty(
@@ -53696,7 +54875,7 @@ juce::var AudioEngine::runNAMRackRegression()
         nativeV1ShimmerState, false);
     nativeV1ShimmerTree.writeToStream(
         nativeV1ShimmerStream);
-    S13NAMRack nativeV1ShimmerRack;
+    OpenStudioNAMRack nativeV1ShimmerRack;
     nativeV1ShimmerRack.setStateInformation(
         nativeV1ShimmerState.getData(),
         static_cast<int>(
@@ -53710,7 +54889,7 @@ juce::var AudioEngine::runNAMRackRegression()
     juce::MemoryBlock resavedNativeV1State;
     nativeV1ShimmerRack.getStateInformation(
         resavedNativeV1State);
-    S13NAMRack reloadedNativeV1ShimmerRack;
+    OpenStudioNAMRack reloadedNativeV1ShimmerRack;
     reloadedNativeV1ShimmerRack.setStateInformation(
         resavedNativeV1State.getData(),
         static_cast<int>(
@@ -53742,7 +54921,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 && std::abs(
                        restoredNativeV1Engine
                        - static_cast<float>(
-                           S13NAMRack::currentReverbEngineVersion))
+                           OpenStudioNAMRack::currentReverbEngineVersion))
                     <= 0.0001f
                 && std::abs(
                        reloadedNativeV1Shimmer
@@ -53750,7 +54929,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 && std::abs(
                        reloadedNativeV1Engine
                        - static_cast<float>(
-                           S13NAMRack::currentReverbEngineVersion))
+                           OpenStudioNAMRack::currentReverbEngineVersion))
                     <= 0.0001f
             ? "pass"
             : "fail",
@@ -53758,11 +54937,11 @@ juce::var AudioEngine::runNAMRackRegression()
         juce::var(nativeV1ShimmerValue));
 
     juce::ValueTree standaloneV1ReverbTree(
-        "S13Reverb");
+        "OpenStudioReverb");
     standaloneV1ReverbTree.setProperty(
         "algorithm",
         static_cast<int>(
-            S13Reverb::Algorithm::Plate),
+            OpenStudioReverb::Algorithm::Plate),
         nullptr);
     standaloneV1ReverbTree.setProperty(
         "shimmerAmount", 0.61, nullptr);
@@ -53771,7 +54950,7 @@ juce::var AudioEngine::runNAMRackRegression()
         standaloneV1ReverbState, false);
     standaloneV1ReverbTree.writeToStream(
         standaloneV1ReverbStream);
-    S13Reverb standaloneV1Reverb;
+    OpenStudioReverb standaloneV1Reverb;
     standaloneV1Reverb.setStateInformation(
         standaloneV1ReverbState.getData(),
         static_cast<int>(
@@ -53785,7 +54964,7 @@ juce::var AudioEngine::runNAMRackRegression()
     juce::MemoryBlock resavedStandaloneV1State;
     standaloneV1Reverb.getStateInformation(
         resavedStandaloneV1State);
-    S13Reverb reloadedStandaloneV1Reverb;
+    OpenStudioReverb reloadedStandaloneV1Reverb;
     reloadedStandaloneV1Reverb.setStateInformation(
         resavedStandaloneV1State.getData(),
         static_cast<int>(
@@ -53826,7 +55005,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     < 1.5f
             ? "pass"
             : "fail",
-        "A markerless standalone S13Reverb V1 state already stored a real shimmerAmount, so it must preserve that amount and the legacy engine through load and save/reload; only the NAM Rack applies pseudo-Shimmer marker gating.",
+        "A markerless standalone OpenStudioReverb V1 state already stored a real shimmerAmount, so it must preserve that amount and the legacy engine through load and save/reload; only the NAM Rack applies pseudo-Shimmer marker gating.",
         juce::var(standaloneV1ReverbValue));
 
     const auto restoredUiState =
@@ -53869,14 +55048,14 @@ juce::var AudioEngine::runNAMRackRegression()
         && static_cast<int>(
                restoredSnapshotValues->getProperty(
                    "instrumentProfile"))
-               == S13NAMRack::guitarInstrumentProfile
+               == OpenStudioNAMRack::guitarInstrumentProfile
         && ! restoredSnapshotValues->hasProperty("precisionDriveMode")
         && static_cast<int>(restoredSnapshotDsp->getProperty(
                "namEffectsDspVersion"))
-               == S13NAMRack::currentNAMEffectsDspVersion
+               == OpenStudioNAMRack::currentNAMEffectsDspVersion
         && static_cast<int>(restoredSnapshotDsp->getProperty(
                "reverbEngineVersion"))
-               == S13NAMRack::currentReverbEngineVersion;
+               == OpenStudioNAMRack::currentReverbEngineVersion;
     addCheck(checks,
              "state_restore_compare_ui",
              uiStateRestorePass ? "pass" : "fail",
@@ -53888,7 +55067,7 @@ juce::var AudioEngine::runNAMRackRegression()
     // must write the same float-expanded doubles that getStateInformation()
     // emits after restore. This also covers presets already stamped V17 by
     // the earlier, non-idempotent migration.
-    S13NAMRack legacyFloatCanonicalSource;
+    OpenStudioNAMRack legacyFloatCanonicalSource;
     juce::MemoryBlock legacyFloatCanonicalState;
     legacyFloatCanonicalSource.getTonePresetStateInformation(
         legacyFloatCanonicalState);
@@ -53916,13 +55095,13 @@ juce::var AudioEngine::runNAMRackRegression()
         legacyFloatCanonicalStream);
     bool legacyFloatMigrationChanged = false;
     const bool legacyFloatMigrationSucceeded =
-        S13NAMRack::migratePresetStateToCurrent(
+        OpenStudioNAMRack::migratePresetStateToCurrent(
             legacyFloatCanonicalPayload,
             legacyFloatMigrationChanged);
     auto expectedFloatCanonicalTree = juce::ValueTree::readFromData(
         legacyFloatCanonicalPayload.getData(),
         legacyFloatCanonicalPayload.getSize());
-    S13NAMRack legacyFloatCanonicalRestored;
+    OpenStudioNAMRack legacyFloatCanonicalRestored;
     const bool legacyFloatRestoreSucceeded =
         legacyFloatCanonicalRestored.restoreTonePresetStateInformation(
             legacyFloatCanonicalPayload.getData(),
@@ -53932,7 +55111,7 @@ juce::var AudioEngine::runNAMRackRegression()
         legacyFloatRoundTripPayload);
     bool legacyFloatRoundTripMigrationChanged = false;
     const bool legacyFloatRoundTripMigrationSucceeded =
-        S13NAMRack::migratePresetStateToCurrent(
+        OpenStudioNAMRack::migratePresetStateToCurrent(
             legacyFloatRoundTripPayload,
             legacyFloatRoundTripMigrationChanged);
     auto actualFloatCanonicalTree = juce::ValueTree::readFromData(
@@ -53999,7 +55178,7 @@ juce::var AudioEngine::runNAMRackRegression()
              "Restored rack state should process the fixture without NaNs and retain the post-FX tail.",
              makeProbeVar(restoredProcessed));
 
-    S13NAMRack hostConfigurationRetryRack;
+    OpenStudioNAMRack hostConfigurationRetryRack;
     hostConfigurationRetryRack.prepareToPlay(44100.0, 512);
     juce::MemoryBlock hostConfigurationRetryState;
     hostConfigurationRetryRack.getStateInformation(hostConfigurationRetryState);
@@ -54069,7 +55248,7 @@ juce::var AudioEngine::runNAMRackRegression()
     auto runNAMHostPublicationRaceProbe = [&] () -> juce::var
     {
         auto* value = new juce::DynamicObject();
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         rack.prepareToPlay(44100.0, 128);
         const auto fixture = juce::File::getSpecialLocation(
             juce::File::tempDirectory).getChildFile(
@@ -54109,11 +55288,11 @@ juce::var AudioEngine::runNAMRackRegression()
             loader.join();
         }
 
-        S13NAMRack::ModelHostConfigurationSnapshot hostSnapshot;
+        OpenStudioNAMRack::ModelHostConfigurationSnapshot hostSnapshot;
         const bool hostSnapshotRead =
             rack.readStableModelHostConfiguration(hostSnapshot);
         bool publishedForCurrentHost = false;
-        S13NAMRack::LoadedCabIR* cabBeforeFailedRestore = nullptr;
+        OpenStudioNAMRack::LoadedCabIR* cabBeforeFailedRestore = nullptr;
         {
             const juce::ScopedLock lock(rack.cabIRLock);
             cabBeforeFailedRestore = rack.cabIR.get();
@@ -54145,14 +55324,14 @@ juce::var AudioEngine::runNAMRackRegression()
         const auto staleRejects =
             rack.cabPublicationStaleGenerationRejectCount.load(
                 std::memory_order_relaxed);
-        S13NAMRack snapshotRack;
+        OpenStudioNAMRack snapshotRack;
         snapshotRack.prepareToPlay(48000.0, 64);
-        auto oldPedal = std::make_shared<S13NAMRack::LoadedNAMModel>();
-        auto oldAmp = std::make_shared<S13NAMRack::LoadedNAMModel>();
-        auto oldCab = std::make_shared<S13NAMRack::LoadedCabIR>();
-        auto newPedal = std::make_shared<S13NAMRack::LoadedNAMModel>();
-        auto newAmp = std::make_shared<S13NAMRack::LoadedNAMModel>();
-        auto newCab = std::make_shared<S13NAMRack::LoadedCabIR>();
+        auto oldPedal = std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
+        auto oldAmp = std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
+        auto oldCab = std::make_shared<OpenStudioNAMRack::LoadedCabIR>();
+        auto newPedal = std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
+        auto newAmp = std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
+        auto newCab = std::make_shared<OpenStudioNAMRack::LoadedCabIR>();
         snapshotRack.fallbackPedalModel.store(
             oldPedal.get(), std::memory_order_relaxed);
         snapshotRack.fallbackAmpModel.store(
@@ -54245,20 +55424,20 @@ juce::var AudioEngine::runNAMRackRegression()
         // of its new tuple. The callback must never wait, must remain on the
         // complete fallback tuple at zero gain, and must publish the complete
         // second tuple only after that writer releases the lock.
-        S13NAMRack overlappingRestoreRack;
+        OpenStudioNAMRack overlappingRestoreRack;
         overlappingRestoreRack.prepareToPlay(48000.0, 64);
         auto overlapOldPedal =
-            std::make_shared<S13NAMRack::LoadedNAMModel>();
+            std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
         auto overlapOldAmp =
-            std::make_shared<S13NAMRack::LoadedNAMModel>();
+            std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
         auto overlapOldCab =
-            std::make_shared<S13NAMRack::LoadedCabIR>();
+            std::make_shared<OpenStudioNAMRack::LoadedCabIR>();
         auto overlapNewPedal =
-            std::make_shared<S13NAMRack::LoadedNAMModel>();
+            std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
         auto overlapNewAmp =
-            std::make_shared<S13NAMRack::LoadedNAMModel>();
+            std::make_shared<OpenStudioNAMRack::LoadedNAMModel>();
         auto overlapNewCab =
-            std::make_shared<S13NAMRack::LoadedCabIR>();
+            std::make_shared<OpenStudioNAMRack::LoadedCabIR>();
         overlappingRestoreRack.fallbackPedalModel.store(
             overlapOldPedal.get(), std::memory_order_relaxed);
         overlappingRestoreRack.fallbackAmpModel.store(
@@ -54283,7 +55462,7 @@ juce::var AudioEngine::runNAMRackRegression()
             1, std::memory_order_relaxed);
         overlappingRestoreRack.ampModelHandoff.consumedRequestGeneration = 1;
         overlappingRestoreRack.ampModelHandoff.phase =
-            S13NAMRack::AmpModelHandoffPhase::fadeOut;
+            OpenStudioNAMRack::AmpModelHandoffPhase::fadeOut;
         overlappingRestoreRack.ampModelHandoff.currentGain = 0.0f;
         overlappingRestoreRack.ampModelHandoff.phaseStartGain = 0.0f;
         overlappingRestoreRack.ampModelHandoff.phaseSamplePosition = 1;
@@ -54423,6 +55602,51 @@ juce::var AudioEngine::runNAMRackRegression()
              "Cab publication must reject a graph prepared for a superseded host generation, strict preflight failure must leave live resources untouched, and every callback must observe either the complete old or complete new Pedal/Amp/Cab set.",
              namHostPublicationRaceProbe);
 
+    {
+        const int monitorIndex = static_cast<int>(desiredMonitoringStageSpec.slots.size());
+        const bool inserted = addMonitoringFX("OpenStudio NAM Rack");
+        const juce::String presetName("__OpenStudio_monitor_address_regression__");
+        const bool edited = inserted && setBuiltInPluginParam({}, "monitor", monitorIndex, "inputTrimDb", 6.0f);
+        const bool saved = edited && saveBuiltInFXPreset({}, "monitor", monitorIndex, presetName);
+        const bool recalled = saved && setBuiltInPluginParam({}, "monitor", monitorIndex, "inputTrimDb", -6.0f)
+            && loadBuiltInFXPreset({}, "monitor", monitorIndex, presetName);
+        const bool appended = recalled && addMonitoringFX("OpenStudio NAM Rack");
+        const auto owner = getPublishedBuiltInProcessor({}, "monitor", monitorIndex);
+        auto* monitorRack = dynamic_cast<OpenStudioNAMRack*>(owner.processor.get());
+        const bool retained = monitorRack && std::abs(monitorRack->inputTrimDb.load() - 6.0f) < 0.001f;
+        const auto schema = getBuiltInPluginSchema({}, "monitor", monitorIndex);
+        addCheck(checks, "monitor_nam_insert_edit_preset_append", inserted && edited && saved && recalled && appended && retained
+            && schema["name"].toString() == "OpenStudio NAM Rack" ? "pass" : "fail",
+            "Monitoring NAM must resolve its own editor address, recall its preset and retain live state when another effect is appended.");
+        if (monitorRack)
+        {
+            // Keep the hardware callback paused across both counter reads.
+            // renderProject resumes its caller's prior pause state; otherwise
+            // live monitoring can increment this counter immediately after export.
+            const ScopedAudioCallbackProcessingPause monitoringFixturePause(isRendering, deviceManager);
+            juce::AudioBuffer<float> block(2, 64);
+            block.clear();
+            juce::MidiBuffer events;
+            monitorRack->processBlock(block, events);
+            const auto countBefore = static_cast<juce::int64>(monitorRack->getDiagnosticState()["processedBlockCount"]);
+            juce::TemporaryFile renderFile(".wav");
+            const bool rendered = renderProject("master", 0.0, 0.02, renderFile.getFile().getFullPathName(), "wav", 44100.0, 24, 2, false, false, 0.0);
+            const auto countAfter = static_cast<juce::int64>(monitorRack->getDiagnosticState()["processedBlockCount"]);
+            auto* renderEvidence = new juce::DynamicObject();
+            renderEvidence->setProperty("renderSucceeded", rendered);
+            renderEvidence->setProperty("monitorBlocksBefore", countBefore);
+            renderEvidence->setProperty("monitorBlocksAfter", countAfter);
+            addCheck(checks, "monitor_nam_excluded_from_offline_render", rendered && countBefore > 0 && countAfter == countBefore ? "pass" : "fail",
+                "An active monitoring NAM processor must not receive any offline render blocks.", juce::var(renderEvidence));
+        }
+        else addCheck(checks, "monitor_nam_excluded_from_offline_render", "fail", "Monitoring rack did not instantiate.");
+        if (appended) removeMonitoringFX(monitorIndex + 1);
+        if (inserted) removeMonitoringFX(monitorIndex);
+        (void) deleteBuiltInFXPreset("OpenStudio NAM Rack", presetName);
+        addCheck(checks, "monitor_nam_remove_restores_chain", static_cast<int>(desiredMonitoringStageSpec.slots.size()) == monitorIndex ? "pass" : "fail",
+            "Removing the temporary monitoring racks must leave the previous monitoring chain intact.");
+    }
+
     const bool temporaryMasterRackAdded = addMasterBuiltInFX("OpenStudio NAM Rack");
     int masterPublicationLeaseRequestCount = 0;
     bool masterRestoreCommittedAtomically = false;
@@ -54468,6 +55692,18 @@ juce::var AudioEngine::runNAMRackRegression()
         (void) deleteBuiltInFXPreset("OpenStudio NAM Rack", importedPresetName);
         const bool masterValuePrepared = setBuiltInPluginParam(
             {}, "master", temporaryMasterRackIndex, "inputTrimDb", 3.25f);
+        const auto companionFXIndex = static_cast<int>(desiredMasterStageSpec.slots.size());
+        const bool companionAdded = addMasterBuiltInFX("OpenStudio EQ");
+        juce::MemoryBlock retainedRackBytes;
+        const bool retainedRackDecoded = retainedRackBytes.fromBase64Encoding(getMasterPluginState(temporaryMasterRackIndex));
+        const auto retainedRack = retainedRackDecoded
+            ? juce::ValueTree::readFromData(retainedRackBytes.getData(), retainedRackBytes.getSize()) : juce::ValueTree();
+        const bool liveStateRetained = masterValuePrepared && companionAdded && retainedRack.isValid()
+            && std::abs(static_cast<double>(retainedRack.getProperty("inputTrimDb", -100.0)) - 3.25) < 0.001;
+        const bool companionRemoved = companionAdded && removeMasterFX(companionFXIndex);
+        addCheck(checks, "field_master_fx_append_preserves_live_nam_state",
+            liveStateRetained && companionRemoved ? "pass" : "fail",
+            "Adding another master effect must preserve the current NAM Rack controls, and removal must leave the original rack intact.");
         masterPresetSaved = masterValuePrepared
             && saveBuiltInFXPreset({}, "master", temporaryMasterRackIndex, masterPresetName);
         const bool masterValueChanged = setBuiltInPluginParam(
@@ -55118,7 +56354,7 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::AudioChannelSet::stereo(),
             juce::AudioChannelSet::mono());
 
-        S13NAMRack layoutContractRack;
+        OpenStudioNAMRack layoutContractRack;
         const bool monoToMonoSupported =
             layoutContractRack.isBusesLayoutSupported(monoToMono);
         const bool monoToStereoSupported =
@@ -55128,7 +56364,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool stereoToMonoRejected =
             ! layoutContractRack.isBusesLayoutSupported(stereoToMono);
 
-        const auto configureNeutralRack = [] (S13NAMRack& rack)
+        const auto configureNeutralRack = [] (OpenStudioNAMRack& rack)
         {
             rack.gateThresholdDb.store(-100.0f);
             rack.inputTrimDb.store(0.0f);
@@ -55141,7 +56377,7 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.cabDoublerMix.store(0.12f);
         };
 
-        S13NAMRack neutralMonoStereoRack;
+        OpenStudioNAMRack neutralMonoStereoRack;
         configureNeutralRack(neutralMonoStereoRack);
         neutralMonoStereoRack.setRoutedInputChannelCount(1);
         const bool neutralMonoStereoLayoutApplied =
@@ -55201,7 +56437,7 @@ juce::var AudioEngine::runNAMRackRegression()
                    neutralMonoStereoRack.cabDoublerMix.load()
                    - 0.12f) <= 1.0e-6f;
 
-        S13NAMRack activeMonoStereoRack;
+        OpenStudioNAMRack activeMonoStereoRack;
         configureNeutralRack(activeMonoStereoRack);
         activeMonoStereoRack.setRoutedInputChannelCount(1);
         activeMonoStereoRack.cabRoomEnabled.store(1.0f);
@@ -55261,8 +56497,8 @@ juce::var AudioEngine::runNAMRackRegression()
         // Room may remain armed when no speaker-voiced source exists, but it
         // must not record raw DI or alter the mono/stereo route. Compare an
         // enabled Room against its bypassed twin with no Amp NAM and no Cab IR.
-        S13NAMRack noSourceReferenceRack;
-        S13NAMRack noSourceRoomRack;
+        OpenStudioNAMRack noSourceReferenceRack;
+        OpenStudioNAMRack noSourceRoomRack;
         configureNeutralRack(noSourceReferenceRack);
         configureNeutralRack(noSourceRoomRack);
         noSourceReferenceRack.setRoutedInputChannelCount(1);
@@ -55340,7 +56576,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     "cabRoomInputSuppressed", false))
             && noSourceRoomRack.cabRoomEnabled.load() >= 0.5f;
 
-        S13NAMRack monoRack;
+        OpenStudioNAMRack monoRack;
         configureNeutralRack(monoRack);
         monoRack.setRoutedInputChannelCount(1);
         const bool monoLayoutApplied =
@@ -55378,7 +56614,7 @@ juce::var AudioEngine::runNAMRackRegression()
             && monoNonFiniteSamples == 0
             && monoOutputPeak > 1.0e-3f;
 
-        S13NAMRack stereoRack;
+        OpenStudioNAMRack stereoRack;
         configureNeutralRack(stereoRack);
         stereoRack.setRoutedInputChannelCount(2);
         const bool stereoLayoutApplied =
@@ -56197,7 +57433,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         return writeBufferToWavFile(ir, ir.getNumSamples(), sampleRate, irFile);
     };
 
-    auto configureRack = [] (S13NAMRack& rack)
+    auto configureRack = [] (OpenStudioNAMRack& rack)
     {
         rack.inputTrimDb.store(0.0f);
         rack.outputTrimDb.store(-6.0f);
@@ -56341,7 +57577,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         auto canonicalPayload = rawPayload;
         bool requiredMigration = false;
         const bool migratable = readable
-            && S13NAMRack::migratePresetStateToCurrent(
+            && OpenStudioNAMRack::migratePresetStateToCurrent(
                 canonicalPayload, requiredMigration);
         const auto canonicalTree = migratable
             ? juce::ValueTree::readFromData(
@@ -56350,7 +57586,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             : juce::ValueTree();
         const bool canonical = canonicalTree.isValid()
             && canonicalTree.getType()
-                == juce::Identifier("S13NAMRack");
+                == juce::Identifier("OpenStudioNAMRack");
         diagnostic->setProperty("migratable", migratable);
         diagnostic->setProperty("canonical", canonical);
         diagnostic->setProperty(
@@ -56385,7 +57621,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
                         ? "unreadable_or_empty"
                         : (! migratable
                             ? "migration_failed"
-                            : "not_s13_nam_rack_state")));
+                            : "not_openstudio_nam_rack_state")));
         }
         presetCandidateDiagnostics.add(juce::var(diagnostic));
         return selected;
@@ -56437,10 +57673,10 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             ? static_cast<int>(selectedPreset.rawTree.getProperty(
                   "namEffectsDspVersion", 0))
             : 0;
-    S13NAMRack effectsVersionProbe;
+    OpenStudioNAMRack effectsVersionProbe;
     const int currentEffectsDspVersion =
         effectsVersionProbe.getNAMEffectsDspVersion();
-    S13NAMRack rack;
+    OpenStudioNAMRack rack;
     rack.prepareToPlay(sampleRate, fixtureBlockSize);
     configureRack(rack);
 
@@ -56576,7 +57812,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
     };
 
     const auto setVariantToggle = [] (
-        S13NAMRack& auditionRack,
+        OpenStudioNAMRack& auditionRack,
         const juce::String& property,
         float value)
     {
@@ -56594,6 +57830,418 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             auditionRack.precisionDriveEnabled.store(value);
     };
 
+    const auto runSelectedPresetLiveOnsetProbe = [&] ()
+    {
+        auto* value = new juce::DynamicObject();
+        value->setProperty("classification", "objective");
+        value->setProperty("subjectiveQuality", "not_asserted");
+        value->setProperty(
+            "analysisScope",
+            "first non-zero live-monitoring blocks after Guitar-to-Bass preset recall without reset");
+        value->setProperty("available", selectedPreset.available);
+        if (! selectedPreset.available)
+            return juce::var(value);
+
+        constexpr std::array<float, 7> inputPeaks {{
+            0.001f, 0.005f, 0.020f, 0.080f,
+            0.220f, 0.500f, 0.900f
+        }};
+        constexpr double probeSeconds = 1.0;
+        const int probeBlocks = juce::jmax(
+            1,
+            juce::roundToInt(
+                probeSeconds * sampleRate
+                / static_cast<double>(fixtureBlockSize)));
+        juce::Array<juce::var> cases;
+        bool allCasesPass = true;
+        for (const float inputPeak : inputPeaks)
+        {
+            OpenStudioNAMRack liveRack;
+            liveRack.prepareToPlay(sampleRate, fixtureBlockSize);
+            liveRack.setRoutedInputChannelCount(1);
+            // Match the user's sequence: an already-open Guitar rack is
+            // switched to Bass, then the complete user preset is recalled.
+            liveRack.instrumentProfile.store(
+                static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile),
+                std::memory_order_relaxed);
+            const bool restored =
+                liveRack.restoreTonePresetStateInformation(
+                    selectedPreset.canonicalPayload.getData(),
+                    static_cast<int>(
+                        selectedPreset.canonicalPayload.getSize()));
+
+            float maximumOutputPeak = 0.0f;
+            float maximumAdjacentDelta = 0.0f;
+            float previousOutput = 0.0f;
+            int nonFiniteSamples = 0;
+            int audibleBlocks = 0;
+            int lastQuarterAudibleBlocks = 0;
+            juce::AudioBuffer<float> block(2, fixtureBlockSize);
+            juce::MidiBuffer midi;
+            for (int blockIndex = 0;
+                 blockIndex < probeBlocks;
+                 ++blockIndex)
+            {
+                for (int sample = 0;
+                     sample < fixtureBlockSize;
+                     ++sample)
+                {
+                    const auto absoluteSample =
+                        blockIndex * fixtureBlockSize + sample;
+                    const float phase =
+                        juce::MathConstants<float>::twoPi
+                        * 82.4069f
+                        * static_cast<float>(absoluteSample)
+                        / static_cast<float>(sampleRate);
+                    const float source = inputPeak * std::sin(phase);
+                    block.setSample(0, sample, source);
+                    block.setSample(1, sample, source);
+                }
+
+                liveRack.processBlock(block, midi);
+                float blockPeak = 0.0f;
+                for (int channel = 0;
+                     channel < block.getNumChannels();
+                     ++channel)
+                {
+                    const auto* samples = block.getReadPointer(channel);
+                    for (int sample = 0;
+                         sample < fixtureBlockSize;
+                         ++sample)
+                    {
+                        const float output = samples[sample];
+                        if (! std::isfinite(output))
+                            ++nonFiniteSamples;
+                        else
+                        {
+                            blockPeak = juce::jmax(
+                                blockPeak, std::abs(output));
+                            maximumAdjacentDelta = juce::jmax(
+                                maximumAdjacentDelta,
+                                std::abs(output - previousOutput));
+                            previousOutput = output;
+                        }
+                    }
+                }
+                maximumOutputPeak = juce::jmax(
+                    maximumOutputPeak, blockPeak);
+                if (blockPeak > 1.0e-6f)
+                {
+                    ++audibleBlocks;
+                    if (blockIndex >= (probeBlocks * 3) / 4)
+                        ++lastQuarterAudibleBlocks;
+                }
+            }
+
+            const auto diagnostics = liveRack.getDiagnosticState();
+            const bool emergencyMuteActive =
+                static_cast<bool>(diagnostics.getProperty(
+                    "rackOutputEmergencyMuteActive", false));
+            const auto emergencyMuteTripCount =
+                static_cast<juce::int64>(diagnostics.getProperty(
+                    "rackOutputEmergencyMuteTripCount",
+                    static_cast<juce::int64>(0)));
+            const int modelProcessFailCount =
+                static_cast<int>(diagnostics.getProperty(
+                    "modelProcessFailCount", 0));
+            const bool ampModelFaulted =
+                static_cast<bool>(diagnostics.getProperty(
+                    "ampModelFaulted", false));
+            const double ampModelSampleRate =
+                static_cast<double>(diagnostics.getProperty(
+                    "ampModelSampleRate", 0.0));
+            const bool crossRateModel = ampModelSampleRate > 0.0
+                && std::abs(ampModelSampleRate - sampleRate) > 0.5;
+            const bool resamplerUsed =
+                static_cast<bool>(diagnostics.getProperty(
+                    "lastResampled", false));
+            const bool casePass = restored
+                && nonFiniteSamples == 0
+                && maximumOutputPeak <= 1.0f
+                && lastQuarterAudibleBlocks > 0
+                && ! emergencyMuteActive
+                && emergencyMuteTripCount == 0
+                && modelProcessFailCount == 0
+                && ! ampModelFaulted
+                && (! crossRateModel || resamplerUsed);
+            allCasesPass = allCasesPass && casePass;
+            auto* probeCase = new juce::DynamicObject();
+            probeCase->setProperty("inputPeak", inputPeak);
+            probeCase->setProperty("stateRestored", restored);
+            probeCase->setProperty("pass", casePass);
+            probeCase->setProperty(
+                "maximumOutputPeak", maximumOutputPeak);
+            probeCase->setProperty(
+                "maximumAdjacentDelta", maximumAdjacentDelta);
+            probeCase->setProperty(
+                "nonFiniteSamples", nonFiniteSamples);
+            probeCase->setProperty("audibleBlocks", audibleBlocks);
+            probeCase->setProperty(
+                "lastQuarterAudibleBlocks",
+                lastQuarterAudibleBlocks);
+            probeCase->setProperty(
+                "emergencyMuteActive",
+                emergencyMuteActive);
+            probeCase->setProperty(
+                "emergencyMuteTripCount",
+                emergencyMuteTripCount);
+            probeCase->setProperty(
+                "emergencyLastTripPeak",
+                diagnostics.getProperty(
+                    "rackOutputEmergencyLastTripPeakLinear", 0.0));
+            probeCase->setProperty(
+                "emergencyLastTripDelta",
+                diagnostics.getProperty(
+                    "rackOutputEmergencyLastTripDeltaLinear", 0.0));
+            probeCase->setProperty(
+                "modelProcessFailCount",
+                modelProcessFailCount);
+            probeCase->setProperty(
+                "ampModelFaulted",
+                ampModelFaulted);
+            probeCase->setProperty(
+                "precisionDriveOutputPeak",
+                diagnostics.getProperty(
+                    "pedalInputPeakLinear", 0.0));
+            probeCase->setProperty(
+                "ampNAMMaximumRawOutputPeak",
+                diagnostics.getProperty(
+                    "ampNAMMaximumRawOutputPeakLinear", 0.0));
+            probeCase->setProperty(
+                "ampNAMMaximumRawOutputDelta",
+                diagnostics.getProperty(
+                    "ampNAMMaximumRawOutputDeltaLinear", 0.0));
+            probeCase->setProperty(
+                "postCabPeak",
+                diagnostics.getProperty(
+                    "postCabPeakLinear", 0.0));
+            probeCase->setProperty(
+                "reverbMaximumRawInputSendPeak",
+                diagnostics.getProperty(
+                    "reverbMaximumRawInputSendPeakLinear", 0.0));
+            probeCase->setProperty(
+                "reverbMaximumRawTankWritePeak",
+                diagnostics.getProperty(
+                    "reverbMaximumV3RawTankWritePeakLinear", 0.0));
+            probeCase->setProperty(
+                "reverbMaximumRawWetOutputPeak",
+                diagnostics.getProperty(
+                    "reverbMaximumV3RawWetOutputPeakLinear", 0.0));
+            probeCase->setProperty(
+                "reverbPadReturnPeak",
+                diagnostics.getProperty(
+                    "reverbPadReturnPeakLinear", 0.0));
+            probeCase->setProperty(
+                "reverbNonFiniteRecoveryCount",
+                diagnostics.getProperty(
+                    "reverbV3NonFiniteStateHitCount", 0));
+            probeCase->setProperty(
+                "reverbFiniteRunawayRecoveryCount",
+                diagnostics.getProperty(
+                    "reverbV3FiniteRunawayRecoveryCount", 0));
+            probeCase->setProperty(
+                "reportedLatencySamples",
+                diagnostics.getProperty(
+                    "reportedLatencySamples", 0));
+            probeCase->setProperty(
+                "hostSampleRate", sampleRate);
+            probeCase->setProperty(
+                "ampModelSampleRate", ampModelSampleRate);
+            probeCase->setProperty(
+                "crossRateModel", crossRateModel);
+            probeCase->setProperty(
+                "resamplerUsed", resamplerUsed);
+            cases.add(juce::var(probeCase));
+        }
+        value->setProperty("sampleRate", sampleRate);
+        value->setProperty("blockSize", fixtureBlockSize);
+        value->setProperty("probeSeconds", probeSeconds);
+        value->setProperty("cases", juce::var(cases));
+        value->setProperty("pass", allCasesPass);
+        return juce::var(value);
+    };
+    const auto selectedPresetLiveOnsetProbe =
+        runSelectedPresetLiveOnsetProbe();
+    const bool selectedPresetLiveOnsetPass =
+        selectedPreset.available
+        && static_cast<bool>(
+            selectedPresetLiveOnsetProbe.getProperty("pass", false));
+    addCheck(
+        checks,
+        "selected_preset_live_monitoring_first_input_onset",
+        selectedPresetLiveOnsetPass ? "pass" : "fail",
+        "After Guitar-to-Bass switching, the exact preset is recalled without reset and deterministic 82.4 Hz live input begins on the first callback from -60 dBFS through -0.9 dBFS. Every case must restore, remain finite and bounded, keep producing output through the final callbacks, avoid the emergency mute, and report no NAM process fault. Subjective tone quality is not asserted.",
+        selectedPresetLiveOnsetProbe);
+
+    const auto runGraphicEqFilterLiveModulationProbe = [&] ()
+    {
+        struct HostConfiguration
+        {
+            double sampleRate;
+            int blockSize;
+        };
+        constexpr std::array<HostConfiguration, 6> configurations {{
+            { 44100.0, 8 },
+            { 44100.0, 64 },
+            { 44100.0, 512 },
+            { 44100.0, 1024 },
+            { 48000.0, 512 },
+            { 96000.0, 512 }
+        }};
+        constexpr std::array<float, 6> hpfTargets {{
+            34.56f, 500.0f, 20.0f, 260.0f, 45.0f, 120.0f
+        }};
+        constexpr std::array<float, 6> lpfTargets {{
+            19646.0f, 1000.0f, 20000.0f, 4200.0f, 16000.0f, 7800.0f
+        }};
+
+        auto* value = new juce::DynamicObject();
+        value->setProperty("classification", "objective");
+        value->setProperty("subjectiveQuality", "not_asserted");
+        juce::Array<juce::var> cases;
+        bool allCasesPass = irWritten;
+        for (const auto& configuration : configurations)
+        {
+            OpenStudioNAMRack rack;
+            rack.prepareToPlay(
+                configuration.sampleRate,
+                configuration.blockSize);
+            rack.setRoutedInputChannelCount(1);
+            rack.instrumentProfile.store(
+                static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile),
+                std::memory_order_relaxed);
+            rack.eqEnabled.store(1.0f);
+            rack.cabRoomEnabled.store(0.0f);
+            rack.cabDoublerEnabled.store(0.0f);
+            rack.cabLevelDb.store(0.0f);
+            rack.eqHPFHz.store(30.0f);
+            rack.eqLPFHz.store(16000.0f);
+            const bool cabLoaded = irWritten
+                && rack.loadCabIR(irFile.getFullPathName());
+
+            const int probeSamples = juce::roundToInt(
+                configuration.sampleRate * 0.45);
+            const int probeBlocks = juce::jmax(
+                1,
+                (probeSamples + configuration.blockSize - 1)
+                    / configuration.blockSize);
+            const int targetSegmentSamples = juce::jmax(
+                1,
+                juce::roundToInt(configuration.sampleRate * 0.06));
+            float maximumOutputPeak = 0.0f;
+            int nonFiniteSamples = 0;
+            int finalAudibleBlocks = 0;
+            juce::AudioBuffer<float> block(
+                2, configuration.blockSize);
+            juce::MidiBuffer midi;
+            for (int blockIndex = 0;
+                 blockIndex < probeBlocks;
+                 ++blockIndex)
+            {
+                const int absoluteBlockStart =
+                    blockIndex * configuration.blockSize;
+                const auto targetIndex = static_cast<size_t>(
+                    (absoluteBlockStart / targetSegmentSamples)
+                    % static_cast<int>(hpfTargets.size()));
+                rack.eqHPFHz.store(hpfTargets[targetIndex]);
+                rack.eqLPFHz.store(lpfTargets[targetIndex]);
+                for (int sample = 0;
+                     sample < configuration.blockSize;
+                     ++sample)
+                {
+                    const int absoluteSample =
+                        absoluteBlockStart + sample;
+                    const float time = static_cast<float>(absoluteSample)
+                        / static_cast<float>(configuration.sampleRate);
+                    const float source = 0.02f * std::sin(
+                        juce::MathConstants<float>::twoPi
+                        * 82.4069f * time)
+                        + 0.004f * std::sin(
+                            juce::MathConstants<float>::twoPi
+                            * 997.0f * time);
+                    block.setSample(0, sample, source);
+                    block.setSample(1, sample, source);
+                }
+
+                rack.processBlock(block, midi);
+                float blockPeak = 0.0f;
+                for (int channel = 0;
+                     channel < block.getNumChannels();
+                     ++channel)
+                {
+                    const auto* samples = block.getReadPointer(channel);
+                    for (int sample = 0;
+                         sample < configuration.blockSize;
+                         ++sample)
+                    {
+                        const float output = samples[sample];
+                        if (! std::isfinite(output))
+                            ++nonFiniteSamples;
+                        else
+                            blockPeak = juce::jmax(
+                                blockPeak, std::abs(output));
+                    }
+                }
+                maximumOutputPeak = juce::jmax(
+                    maximumOutputPeak, blockPeak);
+                if (blockIndex >= probeBlocks - 3
+                    && blockPeak > 1.0e-6f)
+                {
+                    ++finalAudibleBlocks;
+                }
+            }
+
+            const auto diagnostics = rack.getDiagnosticState();
+            const auto emergencyMuteTripCount =
+                static_cast<juce::int64>(diagnostics.getProperty(
+                    "rackOutputEmergencyMuteTripCount",
+                    static_cast<juce::int64>(0)));
+            const bool emergencyMuteActive =
+                static_cast<bool>(diagnostics.getProperty(
+                    "rackOutputEmergencyMuteActive", false));
+            const bool casePass = cabLoaded
+                && nonFiniteSamples == 0
+                && maximumOutputPeak <= 1.0f
+                && finalAudibleBlocks > 0
+                && emergencyMuteTripCount == 0
+                && ! emergencyMuteActive;
+            allCasesPass = allCasesPass && casePass;
+
+            auto* probeCase = new juce::DynamicObject();
+            probeCase->setProperty(
+                "sampleRate", configuration.sampleRate);
+            probeCase->setProperty(
+                "blockSize", configuration.blockSize);
+            probeCase->setProperty("cabLoaded", cabLoaded);
+            probeCase->setProperty("pass", casePass);
+            probeCase->setProperty(
+                "maximumOutputPeak", maximumOutputPeak);
+            probeCase->setProperty(
+                "nonFiniteSamples", nonFiniteSamples);
+            probeCase->setProperty(
+                "finalAudibleBlocks", finalAudibleBlocks);
+            probeCase->setProperty(
+                "emergencyMuteTripCount", emergencyMuteTripCount);
+            probeCase->setProperty(
+                "emergencyMuteActive", emergencyMuteActive);
+            cases.add(juce::var(probeCase));
+        }
+        value->setProperty("cases", juce::var(cases));
+        value->setProperty("pass", allCasesPass);
+        return juce::var(value);
+    };
+    const auto graphicEqFilterLiveModulationProbe =
+        runGraphicEqFilterLiveModulationProbe();
+    const bool graphicEqFilterLiveModulationPass =
+        static_cast<bool>(
+            graphicEqFilterLiveModulationProbe.getProperty("pass", false));
+    addCheck(
+        checks,
+        "graphic_eq_filter_live_modulation_sample_rate_block_matrix",
+        graphicEqFilterLiveModulationPass ? "pass" : "fail",
+        "From the first synthetic live-input callback, the one visible Graphic EQ HPF/LPF owner sweeps between useful extremes at 44.1, 48, and 96 kHz with 8-to-1024-sample callback sizes. Every case must remain finite, bounded, audible at the end, and avoid the Rack emergency mute. Subjective tone quality is not asserted.",
+        graphicEqFilterLiveModulationProbe);
+
     const auto renderSelectedPreset = [&] (
         const SelectedPresetVariantDefinition& definition)
     {
@@ -56606,7 +58254,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         if (! selectedPreset.available)
             return result;
 
-        S13NAMRack auditionRack;
+        OpenStudioNAMRack auditionRack;
         auditionRack.prepareToPlay(sampleRate, fixtureBlockSize);
         result.stateRestored =
             auditionRack.restoreTonePresetStateInformation(
@@ -56673,7 +58321,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         auditionRack.getTonePresetStateInformation(renderedState);
         bool renderedStateMigrated = false;
         const bool renderedStateCanonical =
-            S13NAMRack::migratePresetStateToCurrent(
+            OpenStudioNAMRack::migratePresetStateToCurrent(
                 renderedState, renderedStateMigrated);
         juce::ignoreUnused(renderedStateMigrated);
         const auto renderedTree = renderedStateCanonical
@@ -57288,7 +58936,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         }
 
         constexpr size_t internalStageCount = static_cast<size_t>(
-            S13NAMRack::OfflineStageCapturePoint::count);
+            OpenStudioNAMRack::OfflineStageCapturePoint::count);
         constexpr size_t reportedStageCount = 6;
         static constexpr std::array<const char*, reportedStageCount>
             reportedStageNames {{
@@ -57308,7 +58956,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             getNAMRackOversamplingFactor();
 
         const auto setPreEqBands = [] (
-            S13NAMRack& target,
+            OpenStudioNAMRack& target,
             const std::array<float, 8>& bandDb)
         {
             target.preEq120Db.store(bandDb[0]);
@@ -57320,7 +58968,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             target.preEq8kDb.store(bandDb[6]);
             target.preEq12kDb.store(bandDb[7]);
         };
-        const auto configureTightPreEq = [&] (S13NAMRack& target)
+        const auto configureTightPreEq = [&] (OpenStudioNAMRack& target)
         {
             target.preEqEnabled.store(1.0f);
             setPreEqBands(target, tightBandDb);
@@ -57349,7 +58997,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
                 stage.clear();
             }
 
-            S13NAMRack auditionRack;
+            OpenStudioNAMRack auditionRack;
             auditionRack.setEmbeddedDriveOversamplingFactor(
                 selectedOversamplingFactor);
             auditionRack.prepareToPlay(sampleRate, fixtureBlockSize);
@@ -57371,7 +59019,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
             auditionRack.precisionDriveEnabled.store(1.0f);
             auditionRack.reset();
 
-            S13NAMRack::OfflineStageCaptureTarget captureTarget;
+            OpenStudioNAMRack::OfflineStageCaptureTarget captureTarget;
             captureTarget.maximumSamples = selectedPresetArtifactSamples;
             for (size_t stage = 0; stage < internalStageCount; ++stage)
                 captureTarget.destinations[stage] = &result.audio[stage];
@@ -57461,7 +59109,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         {
             destination.setSize(2, selectedPresetArtifactSamples);
             destination.clear();
-            S13NAMRack stageRack;
+            OpenStudioNAMRack stageRack;
             stageRack.setEmbeddedDriveOversamplingFactor(
                 selectedOversamplingFactor);
             stageRack.prepareToPlay(sampleRate, fixtureBlockSize);
@@ -57525,19 +59173,19 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         juce::AudioBuffer<float> silentPostPreEq;
         const bool preEqBypassRendered = renderPreEqStage(
             programmeCapture.audio[static_cast<size_t>(
-                S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
             false, false, preEqBypassed);
         const bool preEqFlatRendered = renderPreEqStage(
             programmeCapture.audio[static_cast<size_t>(
-                S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
             true, false, preEqFlat);
         const bool postPreEqRendered = renderPreEqStage(
             programmeCapture.audio[static_cast<size_t>(
-                S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
             true, true, postPreEq);
         const bool silentPostPreEqRendered = renderPreEqStage(
             silenceCapture.audio[static_cast<size_t>(
-                S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
             true, true, silentPostPreEq);
         const float flatBypassMaximumError =
             preEqBypassRendered && preEqFlatRendered
@@ -57554,30 +59202,30 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         std::array<const juce::AudioBuffer<float>*, reportedStageCount>
             programmeStages {{
                 &programmeCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
                 &postPreEq,
                 &programmeCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postEmbeddedDrive)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postEmbeddedDrive)],
                 &programmeCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postAmp)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postAmp)],
                 &programmeCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postCab)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postCab)],
                 &programmeCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::finalRack)]
+                    OpenStudioNAMRack::OfflineStageCapturePoint::finalRack)]
             }};
         std::array<const juce::AudioBuffer<float>*, reportedStageCount>
             silenceStages {{
                 &silenceCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::preDriveInput)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::preDriveInput)],
                 &silentPostPreEq,
                 &silenceCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postEmbeddedDrive)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postEmbeddedDrive)],
                 &silenceCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postAmp)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postAmp)],
                 &silenceCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::postCab)],
+                    OpenStudioNAMRack::OfflineStageCapturePoint::postCab)],
                 &silenceCapture.audio[static_cast<size_t>(
-                    S13NAMRack::OfflineStageCapturePoint::finalRack)]
+                    OpenStudioNAMRack::OfflineStageCapturePoint::finalRack)]
             }};
 
         const auto maximumAbsoluteChannelMean = [] (
@@ -58119,7 +59767,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
                                       juce::AudioBuffer<float>& scenarioOutput,
                                       const juce::File& artifactFile)
     {
-        S13NAMRack scenarioRack;
+        OpenStudioNAMRack scenarioRack;
         scenarioRack.prepareToPlay(sampleRate, fixtureBlockSize);
         configureRack(scenarioRack);
 
@@ -59226,10 +60874,8 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             trackSnapshot != nullptr
             && trackSnapshot->processingOrderCount >= 0
             && trackSnapshot->processingOrderCount
-                <= juce::jmin(
-                    static_cast<int>(
-                        trackSnapshot->tracks.size()),
-                    maxRealtimeTracks);
+                == static_cast<int>(trackSnapshot->tracks.size())
+            && trackSnapshot->processingOrder.size() == trackSnapshot->tracks.size();
 
         addSuite(
             "realtime_startup_snapshot_publication_fixture",
@@ -59344,11 +60990,12 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             routingTracks,
             sidechainBuffers,
             sendBuffers);
+        routingSnapshot.processingOrder.resize(routingTracks.size());
         buildSidechainProcessingOrder(
             routingTracks,
             routingSnapshot.processingOrder.data(),
             routingSnapshot.processingOrderCount,
-            maxRealtimeTracks);
+            static_cast<int>(routingTracks.size()));
 
         const auto& resolvedDestination =
             routingTracks[0];
@@ -59398,7 +61045,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             && resolvedSource.sends[3].destinationBuffer
                 == nullptr;
 
-        std::array<bool, maxRealtimeTracks> orderSeen {};
+        std::vector<bool> orderSeen(routingTracks.size(), false);
         bool orderIndicesValid =
             routingSnapshot.processingOrderCount
                 == static_cast<int>(routingTracks.size());
@@ -59459,6 +61106,110 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                 + ", destinationOrder="
                 + juce::String(
                     destinationOrderPosition));
+    }
+
+    {
+        RealtimeTrackSnapshot largeSnapshot;
+        constexpr int largeTrackCount = 128;
+        largeSnapshot.tracks.resize(largeTrackCount);
+        largeSnapshot.processingOrder.resize(largeTrackCount);
+        TrackProcessor dependencyProbe;
+        for (int index = 0; index < largeTrackCount; ++index)
+        {
+            auto& entry = largeSnapshot.tracks[static_cast<size_t>(index)];
+            entry.id = "capacity-fixture-" + juce::String(index);
+            entry.processor = &dependencyProbe;
+            if (index + 1 < largeTrackCount)
+                entry.sidechainSourceIds.push_back("capacity-fixture-" + juce::String(index + 1));
+        }
+        buildSidechainProcessingOrder(largeSnapshot.tracks, largeSnapshot.processingOrder.data(),
+                                     largeSnapshot.processingOrderCount, largeTrackCount);
+        bool allTracksOrdered = largeSnapshot.processingOrderCount == largeTrackCount;
+        for (int index = 0; index < largeTrackCount; ++index)
+            allTracksOrdered = allTracksOrdered && largeSnapshot.processingOrder[static_cast<size_t>(index)] == largeTrackCount - 1 - index;
+        addSuite("realtime_routing_more_than_64_tracks", allTracksOrdered,
+                 "128 reverse-dependent tracks must each be processed once, source before destination, without a 64-track truncation.");
+    }
+
+    if (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_CAPACITY_BENCHMARK", {}).trim() == "1")
+    {
+        // Opt-in diagnostic only. No device output, disk writer or user tracks.
+        juce::Array<juce::var> measurements;
+        for (const int benchmarkBlockSize : { 128, 512 })
+        {
+            constexpr double benchmarkRate = 48000.0;
+            constexpr int benchmarkTrackCount = 100;
+            constexpr int measuredBlocks = 256;
+            std::vector<std::unique_ptr<TrackProcessor>> processors;
+            std::vector<juce::AudioBuffer<float>> buffers;
+            juce::AudioBuffer<float> source(2, benchmarkBlockSize), mixed(2, benchmarkBlockSize);
+            juce::MidiBuffer midi;
+            bool valid = true;
+            for (int sample = 0; sample < benchmarkBlockSize; ++sample)
+                for (int channel = 0; channel < 2; ++channel)
+                    source.setSample(channel, sample, 0.1f * std::sin(static_cast<float>(
+                        2.0 * juce::MathConstants<double>::pi * sample / benchmarkBlockSize)));
+            for (int trackIndex = 0; trackIndex < benchmarkTrackCount; ++trackIndex)
+            {
+                auto processor = std::make_unique<TrackProcessor>();
+                processor->prepareToPlay(benchmarkRate, benchmarkBlockSize);
+                auto eq = std::make_unique<OpenStudioEQ>();
+                eq->bands[2].gain.store(3.0f);
+                valid = processor->addTrackFX(std::move(eq), benchmarkRate, benchmarkBlockSize) && valid;
+                valid = processor->addTrackFX(std::make_unique<OpenStudioCompressor>(), benchmarkRate, benchmarkBlockSize) && valid;
+                processors.push_back(std::move(processor));
+                buffers.emplace_back(2, benchmarkBlockSize);
+            }
+            std::vector<double> durations;
+            durations.reserve(measuredBlocks);
+            for (int block = -32; block < measuredBlocks; ++block)
+            {
+                const auto start = juce::Time::getMillisecondCounterHiRes();
+                mixed.clear();
+                for (int trackIndex = 0; trackIndex < benchmarkTrackCount; ++trackIndex)
+                {
+                    auto& buffer = buffers[static_cast<size_t>(trackIndex)];
+                    for (int channel = 0; channel < 2; ++channel)
+                        buffer.copyFrom(channel, 0, source, channel, 0, benchmarkBlockSize);
+                    processors[static_cast<size_t>(trackIndex)]->processBlock(buffer, midi);
+                    for (int channel = 0; channel < 2; ++channel)
+                        mixed.addFrom(channel, 0, buffer, channel, 0, benchmarkBlockSize, 0.01f);
+                }
+                const auto elapsed = juce::Time::getMillisecondCounterHiRes() - start;
+                if (block >= 0) durations.push_back(elapsed);
+                if (block >= 0)
+                    for (const auto& buffer : buffers)
+                    {
+                        float peak = 0.0f;
+                        for (int channel = 0; channel < 2; ++channel)
+                            for (int sample = 0; sample < benchmarkBlockSize; ++sample)
+                            {
+                                const float value = buffer.getSample(channel, sample);
+                                valid = valid && std::isfinite(value);
+                                peak = juce::jmax(peak, std::abs(value));
+                            }
+                        valid = valid && peak > 1.0e-7f;
+                    }
+            }
+            std::sort(durations.begin(), durations.end());
+            const double deadlineMs = 1000.0 * benchmarkBlockSize / benchmarkRate;
+            auto* measurement = new juce::DynamicObject();
+            measurement->setProperty("status", "diagnostic_only");
+            measurement->setProperty("trackCount", benchmarkTrackCount);
+            measurement->setProperty("fxPerTrack", 2);
+            measurement->setProperty("blockSize", benchmarkBlockSize);
+            measurement->setProperty("sampleRate", benchmarkRate);
+            measurement->setProperty("deadlineMs", deadlineMs);
+            measurement->setProperty("p99Ms", durations[static_cast<size_t>(measuredBlocks * 99 / 100)]);
+            measurement->setProperty("maximumMs", durations.back());
+            measurement->setProperty("deadlineMisses", static_cast<int>(std::count_if(durations.begin(), durations.end(),
+                [deadlineMs](double value) { return value > deadlineMs; })));
+            measurement->setProperty("allTracksNonzeroAndFinite", valid);
+            measurements.add(juce::var(measurement));
+            addSuite("100_track_eq_compressor_signal_" + juce::String(benchmarkBlockSize), valid,
+                     "100 isolated TrackProcessors with EQ and Compressor produce finite nonzero output. Timing is diagnostic only; disk, device, NAM, UI, routing and master FX are excluded.");
+        }
+        root->setProperty("capacityDiagnostics", measurements);
     }
 
     if (juce::SystemStats::getEnvironmentVariable(
@@ -59537,54 +61288,54 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             processor.releaseResources();
         };
 
-        auto eq = std::make_unique<S13EQ>();
+        auto eq = std::make_unique<OpenStudioEQ>();
         eq->bands[2].dynamicEnabled.store(1.0f);
         eq->bands[2].dynamicRange.store(-4.0f);
         eq->bands[2].dynamicThreshold.store(-36.0f);
         eq->stereoMode.store(1.0f);
         runEffectSmoke("eq_dynamic_mid", *eq);
 
-        auto compressor = std::make_unique<S13Compressor>();
+        auto compressor = std::make_unique<OpenStudioCompressor>();
         compressor->threshold.store(-24.0f);
         compressor->ratio.store(4.0f);
         compressor->detectorMode.store(2.0f);
         runEffectSmoke("compressor", *compressor);
 
-        auto gate = std::make_unique<S13Gate>();
+        auto gate = std::make_unique<OpenStudioGate>();
         gate->threshold.store(-42.0f);
         runEffectSmoke("gate", *gate);
 
-        auto limiter = std::make_unique<S13Limiter>();
+        auto limiter = std::make_unique<OpenStudioLimiter>();
         limiter->threshold.store(-6.0f);
         limiter->ceiling.store(-0.5f);
         runEffectSmoke("limiter", *limiter);
 
-        auto delay = std::make_unique<S13Delay>();
+        auto delay = std::make_unique<OpenStudioDelay>();
         delay->feedback.store(0.32f);
         delay->ducking.store(0.25f);
         runEffectSmoke("delay", *delay);
 
-        auto reverb = std::make_unique<S13Reverb>();
+        auto reverb = std::make_unique<OpenStudioReverb>();
         reverb->algorithm.store(2.0f);
         reverb->decayTime.store(2.4f);
         runEffectSmoke("reverb", *reverb);
 
-        auto chorus = std::make_unique<S13Chorus>();
+        auto chorus = std::make_unique<OpenStudioChorus>();
         chorus->characterMode.store(1.0f);
         runEffectSmoke("chorus_ensemble", *chorus);
 
-        auto saturator = std::make_unique<S13Saturator>();
+        auto saturator = std::make_unique<OpenStudioSaturator>();
         saturator->satType.store(6.0f);
         saturator->oversampleMode.store(2.0f);
         runEffectSmoke("saturator", *saturator);
 
-        auto synth = std::make_unique<S13BasicSynthInstrument>();
+        auto synth = std::make_unique<OpenStudioBasicSynthInstrument>();
         runInstrumentSmoke("basic_synth", *synth, 60);
 
-        auto piano = std::make_unique<S13PianoInstrument>();
+        auto piano = std::make_unique<OpenStudioPianoInstrument>();
         runInstrumentSmoke("piano", *piano, 64);
 
-        auto drums = std::make_unique<S13DrumInstrument>();
+        auto drums = std::make_unique<OpenStudioDrumInstrument>();
         drums->mapPreset.store(1.0f);
         juce::AudioBuffer<float> drumBuffer(2, fixtureBlockSize);
         drumBuffer.clear();
@@ -59608,7 +61359,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         constexpr int fixtureBlockSize = 64;
         const std::array<int, 7> chordNotes { 36, 43, 48, 52, 55, 60, 64 };
 
-        auto piano = std::make_unique<S13PianoInstrument>();
+        auto piano = std::make_unique<OpenStudioPianoInstrument>();
         piano->outputGain.store(-15.0f);
         piano->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
 
@@ -59646,7 +61397,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         auto track = std::make_unique<TrackProcessor>();
         track->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         track->setTrackType(TrackType::Instrument);
-        const bool fxAdded = track->addTrackFX(std::make_unique<S13PianoInstrument>(),
+        const bool fxAdded = track->addTrackFX(std::make_unique<OpenStudioPianoInstrument>(),
                                                fixtureSampleRate,
                                                fixtureBlockSize);
         const bool livenessPass = fxAdded
@@ -59663,7 +61414,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
         auto runCompressorHPFProbe = [&] (float hpfFreq)
         {
-            auto compressor = std::make_unique<S13Compressor>();
+            auto compressor = std::make_unique<OpenStudioCompressor>();
             compressor->threshold.store(-28.0f);
             compressor->ratio.store(8.0f);
             compressor->attack.store(1.0f);
@@ -59704,9 +61455,9 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
 
-        auto eq = std::make_unique<S13EQ>();
+        auto eq = std::make_unique<OpenStudioEQ>();
         eq->bands[1].enabled.store(1.0f);
-        eq->bands[1].type.store(static_cast<float>(S13EQ::FilterType::Bell));
+        eq->bands[1].type.store(static_cast<float>(OpenStudioEQ::FilterType::Bell));
         eq->bands[1].freq.store(1000.0f);
         eq->bands[1].gain.store(6.0f);
         eq->bands[1].q.store(1.0f);
@@ -59725,17 +61476,17 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                      + ", 10kHz=" + juce::String(response.size() > 2 ? response[2] : -999.0f, 4));
         eq->releaseResources();
 
-        auto shelf = std::make_unique<S13EQ>();
+        auto shelf = std::make_unique<OpenStudioEQ>();
         for (auto& band : shelf->bands)
             band.enabled.store(0.0f);
         shelf->bands[0].enabled.store(1.0f);
         shelf->bands[0].type.store(
-            static_cast<float>(S13EQ::FilterType::HighShelf));
+            static_cast<float>(OpenStudioEQ::FilterType::HighShelf));
         shelf->bands[0].freq.store(4000.0f);
         shelf->bands[0].gain.store(8.0f);
         shelf->bands[0].q.store(0.70710678f);
         shelf->bands[0].slope.store(
-            static_cast<float>(S13EQ::FilterSlope::dB12));
+            static_cast<float>(OpenStudioEQ::FilterSlope::dB12));
         shelf->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         const std::vector<float> shelfProbeFrequencies {
             500.0f, 2000.0f, 14000.0f
@@ -59743,7 +61494,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const auto twelveDbShelf =
             shelf->getMagnitudeResponse(shelfProbeFrequencies);
         shelf->bands[0].slope.store(
-            static_cast<float>(S13EQ::FilterSlope::dB48));
+            static_cast<float>(OpenStudioEQ::FilterSlope::dB48));
         const auto fortyEightDbShelf =
             shelf->getMagnitudeResponse(shelfProbeFrequencies);
         const bool shelfSlopePass =
@@ -59784,7 +61535,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             }
         };
 
-        auto compressor = std::make_unique<S13Compressor>();
+        auto compressor = std::make_unique<OpenStudioCompressor>();
         compressor->threshold.store(-24.0f);
         compressor->ratio.store(6.0f);
         compressor->attack.store(1.0f);
@@ -59802,7 +61553,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const float compressorGR = compressor->getCurrentGainReduction();
         compressor->releaseResources();
 
-        auto gate = std::make_unique<S13Gate>();
+        auto gate = std::make_unique<OpenStudioGate>();
         gate->threshold.store(-26.0f);
         gate->range.store(-60.0f);
         gate->attackMs.store(0.1f);
@@ -59815,7 +61566,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         const float gateGR = gate->getGainReductionDB();
         gate->releaseResources();
 
-        auto limiter = std::make_unique<S13Limiter>();
+        auto limiter = std::make_unique<OpenStudioLimiter>();
         limiter->threshold.store(-6.0f);
         limiter->ceiling.store(-1.0f);
         limiter->lookaheadMs.store(5.0f);
@@ -59852,7 +61603,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto limiter = std::make_unique<S13Limiter>();
+        auto limiter = std::make_unique<OpenStudioLimiter>();
         limiter->threshold.store(-3.0f);
         limiter->ceiling.store(-1.0f);
         limiter->lookaheadMs.store(5.0f);
@@ -59880,7 +61631,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto delay = std::make_unique<S13Delay>();
+        auto delay = std::make_unique<OpenStudioDelay>();
         delay->tempoSync.store(1.0f);
         delay->syncNoteL.store(4.0f); // 1/16 at default 120 BPM = 125 ms target
         delay->syncNoteR.store(4.0f);
@@ -59922,7 +61673,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto reverb = std::make_unique<S13Reverb>();
+        auto reverb = std::make_unique<OpenStudioReverb>();
         reverb->dryLevel.store(0.0f);
         reverb->wetLevel.store(1.0f);
         reverb->earlyLevel.store(0.4f);
@@ -59971,7 +61722,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto limiter = std::make_unique<S13Limiter>();
+        auto limiter = std::make_unique<OpenStudioLimiter>();
         limiter->threshold.store(0.0f);
         limiter->ceiling.store(0.0f);
         limiter->lookaheadMs.store(6.0f);
@@ -60014,7 +61765,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto delay = std::make_unique<S13Delay>();
+        auto delay = std::make_unique<OpenStudioDelay>();
         delay->tempoSync.store(0.0f);
         delay->delayTimeL.store(85.0f);
         delay->delayTimeR.store(85.0f);
@@ -60077,7 +61828,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto piano = std::make_unique<S13PianoInstrument>();
+        auto piano = std::make_unique<OpenStudioPianoInstrument>();
         piano->releaseMs.store(160.0f);
         piano->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         juce::MidiBuffer midi;
@@ -60119,7 +61870,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     {
         const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
         const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
-        auto pitch = std::make_unique<S13PitchCorrector>();
+        auto pitch = std::make_unique<OpenStudioPitchCorrector>();
         const bool setOk = setBuiltInProcessorParam(pitch.get(), "mix", 0.42f)
                          && setBuiltInProcessorParam(pitch.get(), "key", 7.0f)
                          && setBuiltInProcessorParam(pitch.get(), "scale", 1.0f)
@@ -60224,7 +61975,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
 
         auto renderSynthProbe = [&] (int pitchWheelValue, int modWheelValue, bool releaseNote)
         {
-            auto synth = std::make_unique<S13BasicSynthInstrument>();
+            auto synth = std::make_unique<OpenStudioBasicSynthInstrument>();
             synth->detuneCents.store(0.0f);
             synth->subLevel.store(0.0f);
             synth->noiseLevel.store(0.0f);
@@ -60543,7 +62294,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     juce::String samplerDetail;
     const double samplerFixtureRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
     juce::File samplerFixtureFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-        .getChildFile("studio13_sampler_fixture_" + juce::Uuid().toString() + ".wav");
+        .getChildFile("openstudio_sampler_fixture_" + juce::Uuid().toString() + ".wav");
     {
         juce::AudioBuffer<float> sampleBuffer(1, static_cast<int>(samplerFixtureRate * 0.1));
         for (int sample = 0; sample < sampleBuffer.getNumSamples(); ++sample)
@@ -60848,19 +62599,19 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
 
         const bool namRackAdded = addTrackBuiltInFX(
             renderFreezeTrackId, "OpenStudio NAM Rack", false);
-        S13NAMRack* renderFreezeRack = nullptr;
+        OpenStudioNAMRack* renderFreezeRack = nullptr;
         if (namRackAdded)
         {
             auto trackIt = trackMap.find(renderFreezeTrackId);
             if (trackIt != trackMap.end() && trackIt->second != nullptr)
             {
-                renderFreezeRack = dynamic_cast<S13NAMRack*>(
+                renderFreezeRack = dynamic_cast<OpenStudioNAMRack*>(
                     trackIt->second->getTrackFXProcessor(0));
             }
         }
         const juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
-        const juce::File renderBaselineFile = tempDir.getChildFile("studio13_midi_render_no_audition_fixture_" + juce::Uuid().toString() + ".wav");
-        const juce::File renderFile = tempDir.getChildFile("studio13_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
+        const juce::File renderBaselineFile = tempDir.getChildFile("openstudio_midi_render_no_audition_fixture_" + juce::Uuid().toString() + ".wav");
+        const juce::File renderFile = tempDir.getChildFile("openstudio_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
         constexpr std::uint64_t auditionDisabledSampleSentinel =
             static_cast<std::uint64_t>(1) << 39U;
         constexpr std::uint64_t auditionEnabledSampleSentinel =
@@ -61081,7 +62832,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     bool midiExportPass = false;
     juce::String midiExportDetail;
     const juce::File midiExportFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-        .getChildFile("studio13_midi_export_fixture_" + juce::Uuid().toString() + ".mid");
+        .getChildFile("openstudio_midi_export_fixture_" + juce::Uuid().toString() + ".mid");
     auto midiExportTracks = juce::JSON::parse(
         R"json([{"name":"Export Fixture","clips":[{"startTime":0.5,"duration":1.0,"events":[{"type":"programChange","timestamp":0.0,"value":7,"channel":3},{"type":"cc","timestamp":0.04,"controller":0,"value":3,"channel":3},{"type":"cc","timestamp":0.05,"controller":32,"value":45,"channel":3},{"type":"noteOn","timestamp":0.1,"note":60,"velocity":101,"channel":3},{"type":"cc","timestamp":0.12,"controller":1,"value":96,"channel":3},{"type":"cc","timestamp":0.12,"controller":33,"value":12,"channel":3},{"type":"pitchBend","timestamp":0.15,"value":12288,"channel":3},{"type":"channelPressure","timestamp":0.18,"value":55,"channel":3},{"type":"polyPressure","timestamp":0.2,"note":60,"value":66,"channel":3},{"type":"noteOn","timestamp":0.25,"note":64,"velocity":0.8,"channel":3},{"type":"noteOff","timestamp":0.35,"note":64,"velocity":0,"channel":3},{"type":"noteOff","timestamp":0.45,"note":60,"releaseVelocity":40,"channel":3}]}]}])json");
     const bool midiExportOk = exportProjectMIDI(midiExportFile.getFullPathName(), midiExportTracks, 120.0);
@@ -61279,7 +63030,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
             }
 
             const juce::File combinedRenderFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                .getChildFile("studio13_combined_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
+                .getChildFile("openstudio_combined_midi_render_fixture_" + juce::Uuid().toString() + ".wav");
             const bool renderOk = renderProject("master", 0.0, 1.35, combinedRenderFile.getFullPathName(),
                                                 "wav", currentSampleRate, 24, 2,
                                                 false, false, 0.0, false);
@@ -61486,7 +63237,8 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
             logToDisk("  Trying ARA init for plugin at index " + juce::String(fxIndex));
             it2->second->initializeARA(fxIndex, currentSampleRate > 0 ? currentSampleRate : 44100.0,
                 getSafeHostedPluginBlockSize(currentBlockSize),
-                [this, trackIdCopy, fxIndexCopy, openEditorCopy] (bool araSuccess, bool pluginSupportsARA, const juce::String& errorMessage) {
+                [this, lifetime = deferredCallbacks.token(), trackIdCopy, fxIndexCopy, openEditorCopy] (bool araSuccess, bool pluginSupportsARA, const juce::String& errorMessage) {
+                    if (!MessageThreadLifetime::accepts(lifetime)) return;
                     if (araSuccess)
                     {
                         logToDisk("  ARA initialized OK for FX " + juce::String(fxIndexCopy)
@@ -61505,7 +63257,8 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
                             + " error=" + errorMessage);
                         if (openEditorCopy && !pluginSupportsARA)
                         {
-                            juce::MessageManager::callAsync([this, trackIdCopy, fxIndexCopy] {
+                            juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), trackIdCopy, fxIndexCopy] {
+                                if (!MessageThreadLifetime::accepts(lifetime)) return;
                                 openPluginEditor(trackIdCopy, fxIndexCopy, false);
                             });
                         }
@@ -61531,20 +63284,20 @@ bool AudioEngine::addTrackFX(const juce::String& trackId, const juce::String& pl
 
 static std::unique_ptr<juce::AudioProcessor> createBuiltInEffect(const juce::String& name)
 {
-    if (name == "Studio13 Basic Synth" || name == "OpenStudio Basic Synth") return std::make_unique<S13BasicSynthInstrument>();
-    if (name == "Studio13 Piano" || name == "OpenStudio Piano")        return std::make_unique<S13PianoInstrument>();
-    if (name == "Studio13 Drums" || name == "OpenStudio Drums")        return std::make_unique<S13DrumInstrument>();
-    if (name == "Studio13 Clean Guitar" || name == "OpenStudio Clean Guitar") return std::make_unique<S13CleanGuitarInstrument>();
-    if (name == "S13 EQ" || name == "OpenStudio EQ")                   return std::make_unique<S13EQ>();
-    if (name == "S13 Compressor" || name == "OpenStudio Compressor")   return std::make_unique<S13Compressor>();
-    if (name == "S13 Gate" || name == "OpenStudio Gate")               return std::make_unique<S13Gate>();
-    if (name == "S13 Limiter" || name == "OpenStudio Limiter")         return std::make_unique<S13Limiter>();
-    if (name == "S13 NAM Rack" || name == "OpenStudio NAM Rack")       return std::make_unique<S13NAMRack>();
-    if (name == "S13 Delay" || name == "OpenStudio Delay")             return std::make_unique<S13Delay>();
-    if (name == "S13 Reverb" || name == "OpenStudio Reverb")           return std::make_unique<S13Reverb>();
-    if (name == "S13 Chorus" || name == "OpenStudio Chorus")           return std::make_unique<S13Chorus>();
-    if (name == "S13 Saturator" || name == "OpenStudio Saturator")     return std::make_unique<S13Saturator>();
-    if (name == "S13 Pitch Correct" || name == "OpenStudio Pitch Correct") return std::make_unique<S13PitchCorrector>();
+    if (name == "OpenStudio Basic Synth") return std::make_unique<OpenStudioBasicSynthInstrument>();
+    if (name == "OpenStudio Piano")        return std::make_unique<OpenStudioPianoInstrument>();
+    if (name == "OpenStudio Drums")        return std::make_unique<OpenStudioDrumInstrument>();
+    if (name == "OpenStudio Clean Guitar") return std::make_unique<OpenStudioCleanGuitarInstrument>();
+    if (name == "OpenStudio EQ")                   return std::make_unique<OpenStudioEQ>();
+    if (name == "OpenStudio Compressor")   return std::make_unique<OpenStudioCompressor>();
+    if (name == "OpenStudio Gate")               return std::make_unique<OpenStudioGate>();
+    if (name == "OpenStudio Limiter")         return std::make_unique<OpenStudioLimiter>();
+    if (name == "OpenStudio NAM Rack")       return std::make_unique<OpenStudioNAMRack>();
+    if (name == "OpenStudio Delay")             return std::make_unique<OpenStudioDelay>();
+    if (name == "OpenStudio Reverb")           return std::make_unique<OpenStudioReverb>();
+    if (name == "OpenStudio Chorus")           return std::make_unique<OpenStudioChorus>();
+    if (name == "OpenStudio Saturator")     return std::make_unique<OpenStudioSaturator>();
+    if (name == "OpenStudio Pitch Correct") return std::make_unique<OpenStudioPitchCorrector>();
     return nullptr;
 }
 
@@ -61621,9 +63374,12 @@ static void addToggleParam(juce::Array<juce::var>& params,
                            const juce::String& label,
                            float value,
                            float defaultValue,
-                           const juce::String& graphRole = {})
+                           const juce::String& graphRole = {},
+                           bool automatable = true)
 {
-    params.add(makeBuiltInParam(id, label, "toggle", value, 0.0f, 1.0f, defaultValue, {}, graphRole));
+    params.add(makeBuiltInParam(
+        id, label, "toggle", value, 0.0f, 1.0f, defaultValue,
+        {}, graphRole, {}, automatable));
 }
 
 static void addContinuousParam(juce::Array<juce::var>& params,
@@ -61715,7 +63471,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
     if (processor == nullptr)
         return makeBuiltInSchemaObject({}, {}, chainType, fxIndex, params);
 
-    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    if (auto* synth = dynamic_cast<OpenStudioBasicSynthInstrument*>(processor))
     {
         addContinuousParam(params, "attackMs", "Attack", synth->attackMs.load(), 0.5f, 2000.0f, 8.0f, "ms", "envelope");
         addContinuousParam(params, "releaseMs", "Release", synth->releaseMs.load(), 5.0f, 5000.0f, 180.0f, "ms", "envelope");
@@ -61727,7 +63483,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(synth->getName(), "Instrument", chainType, fxIndex, params);
     }
 
-    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    if (auto* piano = dynamic_cast<OpenStudioPianoInstrument*>(processor))
     {
         addEnumParam(params, "model", "Model", piano->model.load(), 0.0f, makeEnumOptions({ "Studio Grand", "Bright Upright", "Soft Felt" }), "character");
         addContinuousParam(params, "tone", "Tone", piano->tone.load(), 0.0f, 1.0f, 0.58f, {}, "tone");
@@ -61740,7 +63496,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(piano->getName(), "Instrument", chainType, fxIndex, params);
     }
 
-    if (auto* guitar = dynamic_cast<S13CleanGuitarInstrument*>(processor))
+    if (auto* guitar = dynamic_cast<OpenStudioCleanGuitarInstrument*>(processor))
     {
         addEnumParam(params, "model", "Preset", guitar->model.load(), 0.0f,
                      makeEnumOptions({ "T-Style DI", "S-Style DI", "Clean US Combo", "JC-Style Chorus Clean" }), "character");
@@ -61756,7 +63512,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(guitar->getName(), "Instrument", chainType, fxIndex, params);
     }
 
-    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    if (auto* drums = dynamic_cast<OpenStudioDrumInstrument*>(processor))
     {
         addEnumParam(params, "kit", "Kit", drums->kit.load(), 0.0f, makeEnumOptions({ "Studio", "Rock", "Electronic" }), "drums");
         addEnumParam(params, "mapPreset", "MIDI Map", drums->mapPreset.load(), 0.0f, makeEnumOptions({ "GM", "Roland TD" }), "drums");
@@ -61770,15 +63526,15 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(drums->getName(), "Instrument", chainType, fxIndex, params);
     }
 
-    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    if (auto* eq = dynamic_cast<OpenStudioEQ*>(processor))
     {
         const auto types = makeEnumOptions({ "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Notch", "Band Pass" });
         const auto slopes = makeEnumOptions({ "6 dB/oct", "12 dB/oct", "24 dB/oct", "48 dB/oct" });
-        for (int band = 0; band < S13EQ::numBands; ++band)
+        for (int band = 0; band < OpenStudioEQ::numBands; ++band)
         {
             const auto prefix = "band" + juce::String(band) + ".";
             const auto bandLabel = "Band " + juce::String(band + 1) + " ";
-            addToggleParam(params, prefix + "enabled", bandLabel + "On", eq->bands[band].enabled.load(), band == 0 || band == S13EQ::numBands - 1 ? 0.0f : 1.0f, "eqBand");
+            addToggleParam(params, prefix + "enabled", bandLabel + "On", eq->bands[band].enabled.load(), band == 0 || band == OpenStudioEQ::numBands - 1 ? 0.0f : 1.0f, "eqBand");
             addEnumParam(params, prefix + "type", bandLabel + "Type", eq->bands[band].type.load(), 0.0f, types, "eqBand");
             addContinuousParam(params, prefix + "freq", bandLabel + "Freq", eq->bands[band].freq.load(), 20.0f, 20000.0f, 1000.0f, "Hz", "eqBand");
             addContinuousParam(params, prefix + "gain", bandLabel + "Gain", eq->bands[band].gain.load(), -30.0f, 30.0f, 0.0f, "dB", "eqBand");
@@ -61810,8 +63566,8 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
             auto response = eq->getMagnitudeResponse(frequencies);
             auto spectrum = eq->getSpectrumData();
             std::vector<float> dynamicGains;
-            dynamicGains.reserve(S13EQ::numBands);
-            for (int band = 0; band < S13EQ::numBands; ++band)
+            dynamicGains.reserve(OpenStudioEQ::numBands);
+            for (int band = 0; band < OpenStudioEQ::numBands; ++band)
                 dynamicGains.push_back(eq->getBandDynamicGainDB(band));
             const double sr = eq->getSampleRate() > 0.0 ? eq->getSampleRate() : 44100.0;
             std::vector<float> preSpectrum;
@@ -61820,8 +63576,8 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
             postSpectrum.reserve(frequencies.size());
             for (float freq : frequencies)
             {
-                const int bin = juce::jlimit(0, S13EQ::fftSize / 2 - 1,
-                                             static_cast<int>(std::round((static_cast<double>(freq) / (sr * 0.5)) * static_cast<double>(S13EQ::fftSize / 2 - 1))));
+                const int bin = juce::jlimit(0, OpenStudioEQ::fftSize / 2 - 1,
+                                             static_cast<int>(std::round((static_cast<double>(freq) / (sr * 0.5)) * static_cast<double>(OpenStudioEQ::fftSize / 2 - 1))));
                 preSpectrum.push_back(spectrum.ready ? spectrum.preEQ[static_cast<size_t>(bin)] : -100.0f);
                 postSpectrum.push_back(spectrum.ready ? spectrum.postEQ[static_cast<size_t>(bin)] : -100.0f);
             }
@@ -61838,7 +63594,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return schema;
     }
 
-    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    if (auto* compressor = dynamic_cast<OpenStudioCompressor*>(processor))
     {
         addContinuousParam(params, "threshold", "Threshold", compressor->threshold.load(), -60.0f, 0.0f, 0.0f, "dB", "dynamics");
         addContinuousParam(params, "ratio", "Ratio", compressor->ratio.load(), 1.0f, 20.0f, 1.0f, ":1", "dynamics");
@@ -61866,7 +63622,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return schema;
     }
 
-    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    if (auto* gate = dynamic_cast<OpenStudioGate*>(processor))
     {
         addContinuousParam(params, "threshold", "Threshold", gate->threshold.load(), -80.0f, 0.0f, -40.0f, "dB", "dynamics");
         addContinuousParam(params, "attackMs", "Attack", gate->attackMs.load(), 0.01f, 50.0f, 1.0f, "ms", "dynamics");
@@ -61889,7 +63645,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return schema;
     }
 
-    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    if (auto* limiter = dynamic_cast<OpenStudioLimiter*>(processor))
     {
         addContinuousParam(params, "threshold", "Threshold", limiter->threshold.load(), -20.0f, 0.0f, -1.0f, "dB", "dynamics");
         addContinuousParam(params, "releaseMs", "Release", limiter->releaseMs.load(), 10.0f, 500.0f, 100.0f, "ms", "dynamics");
@@ -61905,7 +63661,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return schema;
     }
 
-    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    if (auto* delay = dynamic_cast<OpenStudioDelay*>(processor))
     {
         addContinuousParam(params, "delayTimeL", "Delay L", delay->delayTimeL.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
         addContinuousParam(params, "delayTimeR", "Delay R", delay->delayTimeR.load(), 1.0f, 2000.0f, 250.0f, "ms", "time");
@@ -61925,7 +63681,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(delay->getName(), "Delay", chainType, fxIndex, params);
     }
 
-    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    if (auto* reverb = dynamic_cast<OpenStudioReverb*>(processor))
     {
         addEnumParam(params, "algorithm", "Algorithm", reverb->algorithm.load(), 0.0f, makeEnumOptions({ "Room", "Hall", "Plate", "Chamber" }), "space");
         addContinuousParam(params, "roomSize", "Size", reverb->roomSize.load(), 0.0f, 1.0f, 0.5f, {}, "space");
@@ -61943,7 +63699,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(reverb->getName(), "Reverb", chainType, fxIndex, params);
     }
 
-    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    if (auto* chorus = dynamic_cast<OpenStudioChorus*>(processor))
     {
         addEnumParam(params, "mode", "Mode", chorus->mode.load(), 0.0f, makeEnumOptions({ "Chorus", "Flanger", "Phaser" }), "modulation");
         addContinuousParam(params, "rate", "Rate", chorus->rate.load(), 0.01f, 20.0f, 1.0f, "Hz", "modulation");
@@ -61960,7 +63716,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(chorus->getName(), "Modulation", chainType, fxIndex, params);
     }
 
-    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    if (auto* saturator = dynamic_cast<OpenStudioSaturator*>(processor))
     {
         addEnumParam(params, "satType", "Type", saturator->satType.load(), 0.0f, makeEnumOptions({ "Tape", "Tube", "Transistor", "Clip", "Crush", "Console", "Transformer", "Foldback" }), "character");
         addContinuousParam(params, "drive", "Drive", saturator->drive.load(), 0.0f, 30.0f, 6.0f, "dB", "drive");
@@ -61982,7 +63738,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return makeBuiltInSchemaObject(saturator->getName(), "Saturation", chainType, fxIndex, params);
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         addEnumParam(
             params,
@@ -61990,7 +63746,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
             "Instrument",
             rack->instrumentProfile.load(),
             static_cast<float>(
-                S13NAMRack::guitarInstrumentProfile),
+                OpenStudioNAMRack::guitarInstrumentProfile),
             makeEnumOptions({ "Guitar", "Bass" }),
             "instrument",
             false);
@@ -62025,7 +63781,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         addContinuousParam(params, "octaverDirectMix", "Direct", rack->octaverDirectMix.load(), 0.0f, 1.25f, 1.0f, {}, "pitch");
         const bool bassPreEqProfile =
             rack->getInstrumentProfile()
-                == S13NAMRack::bassInstrumentProfile;
+                == OpenStudioNAMRack::bassInstrumentProfile;
         addToggleParam(params, "preEqEnabled", "PRE EQ", rack->preEqEnabled.load(), 0.0f, "preEq");
         addContinuousParam(params, "preEq120Db", bassPreEqProfile ? "50 Hz" : "120 Hz", rack->preEq120Db.load(), -12.0f, 12.0f, 0.0f, "dB", "preEq");
         addContinuousParam(params, "preEq250Db", bassPreEqProfile ? "120 Hz" : "250 Hz", rack->preEq250Db.load(), -12.0f, 12.0f, 0.0f, "dB", "preEq");
@@ -62093,13 +63849,14 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         addToggleParam(params, "eqEnabled", "EQ Power", rack->eqEnabled.load(), 0.0f, "graphicEq");
         addToggleParam(params, "cabEnabled", "Cab/IR", rack->cabEnabled.load(), 0.0f, "cab");
         addContinuousParam(params, "cabLevelDb", "Cab Level", rack->cabLevelDb.load(), -24.0f, 12.0f, 0.0f, "dB", "cab");
-        addContinuousParam(params, "cabHPFHz", "Cab HPF", rack->cabHPFHz.load(), 20.0f, 500.0f, 80.0f, "Hz", "cab");
-        addContinuousParam(params, "cabLPFHz", "Cab LPF", rack->cabLPFHz.load(), 1000.0f, 20000.0f, 8500.0f, "Hz", "cab");
+        addContinuousParam(params, "cabEngineVersion", "Cab Engine Version", static_cast<float>(OpenStudioNAMRack::currentCabEngineVersion), 1.0f, 3.0f, 3.0f, {}, "cabInternal", false);
+        addToggleParam(params, "cabHPFEnabled", "Retired Cab HPF Power", 0.0f, 0.0f, "cabInternal", false);
+        addToggleParam(params, "cabLPFEnabled", "Retired Cab LPF Power", 0.0f, 0.0f, "cabInternal", false);
+        addContinuousParam(params, "cabHPFHz", "Retired Cab HPF", 30.0f, 20.0f, 500.0f, 30.0f, "Hz", "cabInternal", false);
+        addContinuousParam(params, "cabLPFHz", "Retired Cab LPF", 16000.0f, 1000.0f, 20000.0f, 16000.0f, "Hz", "cabInternal", false);
+        addToggleParam(params, "cabIRStereo", "Stereo IR", rack->cabIRStereo.load(), 0.0f, "cab");
+        addContinuousParam(params, "cabDirectMix", "Direct Mix", rack->cabDirectMix.load(), 0.0f, 1.0f, 0.0f, {}, "cab");
         addToggleParam(params, "cabPhaseInvert", "Phase", rack->cabPhaseInvert.load(), 0.0f, "cab");
-        addContinuousParam(params, "cabMicPosition", "Tone Edge", rack->cabMicPosition.load(), 0.0f, 1.0f, 0.5f, {}, "cab");
-        addContinuousParam(params, "cabMicDistance", "Tone Damp", rack->cabMicDistance.load(), 0.0f, 1.0f, 0.0f, {}, "cab");
-        addContinuousParam(params, "cabMicBlend", "Shaper Blend", rack->cabMicBlend.load(), 0.0f, 1.0f, 0.5f, {}, "cab");
-        addContinuousParam(params, "cabRoomSend", "Low Bloom", rack->cabRoomSend.load(), 0.0f, 1.0f, 0.0f, {}, "cab");
         addToggleParam(params, "cabRoomEnabled", "Room", rack->cabRoomEnabled.load(), 0.0f, "cabinetSpace");
         addContinuousParam(params, "cabRoomAmount", "Room Amount", rack->cabRoomAmount.load(), 0.0f, 1.0f, 0.22f, {}, "cabinetSpace");
         addContinuousParam(params, "cabRoomWidth", "Room Width", rack->cabRoomWidth.load(), 0.0f, 1.0f, 0.65f, {}, "cabinetSpace");
@@ -62212,7 +63969,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
             modelInfo->setProperty("cabRequestedEnabled", rack->isCabRequestedEnabled());
             modelInfo->setProperty(
                 "namEffectsDspVersion",
-                S13NAMRack::currentNAMEffectsDspVersion);
+                OpenStudioNAMRack::currentNAMEffectsDspVersion);
             modelInfo->setProperty(
                 "inputRoutingMode",
                 rackDiagnostics.getProperty(
@@ -62326,7 +64083,7 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
         return schema;
     }
 
-    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    if (auto* pitch = dynamic_cast<OpenStudioPitchCorrector*>(processor))
     {
         auto& mapper = pitch->getMapper();
         addToggleParam(params, "bypass", "Bypass", pitch->bypass.load(), 0.0f, "mix");
@@ -62391,16 +64148,16 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
     // profile latched. Other parameters retain the shared non-finite reject.
     if (paramId == "instrumentProfile")
     {
-        if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
         {
             const float canonical = std::isfinite(value)
                     && value >= 0.0f
                     && value <= 1.0f
                     && value >= 0.5f
                 ? static_cast<float>(
-                    S13NAMRack::bassInstrumentProfile)
+                    OpenStudioNAMRack::bassInstrumentProfile)
                 : static_cast<float>(
-                    S13NAMRack::guitarInstrumentProfile);
+                    OpenStudioNAMRack::guitarInstrumentProfile);
             rack->instrumentProfile.store(
                 canonical, std::memory_order_relaxed);
             return true;
@@ -62409,16 +64166,16 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
 
     if (paramId == "reverbVoice")
     {
-        if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
         {
             rack->useCurrentNAMEffectsDspVersion();
             rack->reverbEngineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::currentReverbEngineVersion),
                 std::memory_order_relaxed);
             rack->reverbVoice.store(
                 static_cast<float>(
-                    S13NAMRack::sanitizeReverbVoice(value)),
+                    OpenStudioNAMRack::sanitizeReverbVoice(value)),
                 std::memory_order_relaxed);
             return true;
         }
@@ -62427,7 +64184,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
     if (! std::isfinite(value))
         return false;
 
-    if (auto* synth = dynamic_cast<S13BasicSynthInstrument*>(processor))
+    if (auto* synth = dynamic_cast<OpenStudioBasicSynthInstrument*>(processor))
     {
         if (paramId == "attackMs") return storeClamped(synth->attackMs, value, 0.5f, 2000.0f);
         if (paramId == "releaseMs") return storeClamped(synth->releaseMs, value, 5.0f, 5000.0f);
@@ -62439,7 +64196,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* piano = dynamic_cast<S13PianoInstrument*>(processor))
+    if (auto* piano = dynamic_cast<OpenStudioPianoInstrument*>(processor))
     {
         if (paramId == "model") return storeClamped(piano->model, value, 0.0f, 2.0f);
         if (paramId == "tone") return storeClamped(piano->tone, value, 0.0f, 1.0f);
@@ -62452,7 +64209,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* guitar = dynamic_cast<S13CleanGuitarInstrument*>(processor))
+    if (auto* guitar = dynamic_cast<OpenStudioCleanGuitarInstrument*>(processor))
     {
         if (paramId == "model") return storeClamped(guitar->model, value, 0.0f, 3.0f);
         if (paramId == "tone") return storeClamped(guitar->tone, value, 0.0f, 1.0f);
@@ -62466,7 +64223,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* drums = dynamic_cast<S13DrumInstrument*>(processor))
+    if (auto* drums = dynamic_cast<OpenStudioDrumInstrument*>(processor))
     {
         if (paramId == "kit") return storeClamped(drums->kit, value, 0.0f, 2.0f);
         if (paramId == "mapPreset") return storeClamped(drums->mapPreset, value, 0.0f, 1.0f);
@@ -62480,7 +64237,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* eq = dynamic_cast<S13EQ*>(processor))
+    if (auto* eq = dynamic_cast<OpenStudioEQ*>(processor))
     {
         if (paramId == "outputGain") return storeClamped(eq->outputGain, value, -12.0f, 12.0f);
         if (paramId == "autoGain") return storeClamped(eq->autoGain, value, 0.0f, 1.0f);
@@ -62490,7 +64247,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         {
             const int dot = paramId.indexOfChar('.');
             const int band = paramId.substring(4, dot).getIntValue();
-            if (band < 0 || band >= S13EQ::numBands || dot < 0)
+            if (band < 0 || band >= OpenStudioEQ::numBands || dot < 0)
                 return false;
             const auto field = paramId.substring(dot + 1);
             auto& params = eq->bands[band];
@@ -62509,7 +64266,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* compressor = dynamic_cast<S13Compressor*>(processor))
+    if (auto* compressor = dynamic_cast<OpenStudioCompressor*>(processor))
     {
         if (paramId == "threshold") return storeClamped(compressor->threshold, value, -60.0f, 0.0f);
         if (paramId == "ratio") return storeClamped(compressor->ratio, value, 1.0f, 20.0f);
@@ -62528,7 +64285,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* gate = dynamic_cast<S13Gate*>(processor))
+    if (auto* gate = dynamic_cast<OpenStudioGate*>(processor))
     {
         if (paramId == "threshold") return storeClamped(gate->threshold, value, -80.0f, 0.0f);
         if (paramId == "attackMs") return storeClamped(gate->attackMs, value, 0.01f, 50.0f);
@@ -62543,7 +64300,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* limiter = dynamic_cast<S13Limiter*>(processor))
+    if (auto* limiter = dynamic_cast<OpenStudioLimiter*>(processor))
     {
         if (paramId == "threshold") return storeClamped(limiter->threshold, value, -20.0f, 0.0f);
         if (paramId == "releaseMs") return storeClamped(limiter->releaseMs, value, 10.0f, 500.0f);
@@ -62552,7 +64309,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* delay = dynamic_cast<S13Delay*>(processor))
+    if (auto* delay = dynamic_cast<OpenStudioDelay*>(processor))
     {
         if (paramId == "delayTimeL") return storeClamped(delay->delayTimeL, value, 1.0f, 2000.0f);
         if (paramId == "delayTimeR") return storeClamped(delay->delayTimeR, value, 1.0f, 2000.0f);
@@ -62572,7 +64329,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* reverb = dynamic_cast<S13Reverb*>(processor))
+    if (auto* reverb = dynamic_cast<OpenStudioReverb*>(processor))
     {
         if (paramId == "algorithm") return storeClamped(reverb->algorithm, value, 0.0f, 3.0f);
         if (paramId == "roomSize") return storeClamped(reverb->roomSize, value, 0.0f, 1.0f);
@@ -62590,7 +64347,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* chorus = dynamic_cast<S13Chorus*>(processor))
+    if (auto* chorus = dynamic_cast<OpenStudioChorus*>(processor))
     {
         if (paramId == "mode") return storeClamped(chorus->mode, value, 0.0f, 2.0f);
         if (paramId == "rate") return storeClamped(chorus->rate, value, 0.01f, 20.0f);
@@ -62607,7 +64364,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* saturator = dynamic_cast<S13Saturator*>(processor))
+    if (auto* saturator = dynamic_cast<OpenStudioSaturator*>(processor))
     {
         if (paramId == "satType") return storeClamped(saturator->satType, value, 0.0f, 7.0f);
         if (paramId == "drive") return storeClamped(saturator->drive, value, 0.0f, 30.0f);
@@ -62626,7 +64383,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         if (paramId == "inputMode")
         {
@@ -62636,7 +64393,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         }
         rack->useCurrentNAMEffectsDspVersion();
         rack->reverbEngineVersion.store(
-            static_cast<float>(S13NAMRack::currentReverbEngineVersion),
+            static_cast<float>(OpenStudioNAMRack::currentReverbEngineVersion),
             std::memory_order_relaxed);
         if (paramId == "inputTrimDb") return storeClamped(rack->inputTrimDb, value, -24.0f, 24.0f);
         if (paramId == "calibrationReferenceDbu") return storeClamped(rack->calibrationReferenceDbu, value, -20.0f, 30.0f);
@@ -62770,13 +64527,18 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
             return true;
         }
         if (paramId == "cabLevelDb") return storeClamped(rack->cabLevelDb, value, -24.0f, 12.0f);
-        if (paramId == "cabHPFHz") return storeClamped(rack->cabHPFHz, value, 20.0f, 500.0f);
-        if (paramId == "cabLPFHz") return storeClamped(rack->cabLPFHz, value, 1000.0f, 20000.0f);
+        if (paramId == "cabHPFEnabled"
+            || paramId == "cabLPFEnabled"
+            || paramId == "cabHPFHz"
+            || paramId == "cabLPFHz")
+        {
+            // These IDs are restore-only compatibility fields. Accepting live
+            // writes would create state that has no audible or visible owner.
+            return false;
+        }
+        if (paramId == "cabIRStereo") return storeClamped(rack->cabIRStereo, value, 0.0f, 1.0f);
+        if (paramId == "cabDirectMix") return storeClamped(rack->cabDirectMix, value, 0.0f, 1.0f);
         if (paramId == "cabPhaseInvert") return storeClamped(rack->cabPhaseInvert, value, 0.0f, 1.0f);
-        if (paramId == "cabMicPosition") return storeClamped(rack->cabMicPosition, value, 0.0f, 1.0f);
-        if (paramId == "cabMicDistance") return storeClamped(rack->cabMicDistance, value, 0.0f, 1.0f);
-        if (paramId == "cabMicBlend") return storeClamped(rack->cabMicBlend, value, 0.0f, 1.0f);
-        if (paramId == "cabRoomSend") return storeClamped(rack->cabRoomSend, value, 0.0f, 1.0f);
         if (paramId == "cabRoomEnabled") return storeClamped(rack->cabRoomEnabled, value, 0.0f, 1.0f);
         if (paramId == "cabRoomAmount") return storeClamped(rack->cabRoomAmount, value, 0.0f, 1.0f);
         if (paramId == "cabRoomWidth") return storeClamped(rack->cabRoomWidth, value, 0.0f, 1.0f);
@@ -62807,7 +64569,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
                 return false;
             rack->delayMode.store(
                 static_cast<float>(
-                    S13NAMRack::sanitizeDelayMode(value)),
+                    OpenStudioNAMRack::sanitizeDelayMode(value)),
                 std::memory_order_relaxed);
             return true;
         }
@@ -62851,7 +64613,7 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         return false;
     }
 
-    if (auto* pitch = dynamic_cast<S13PitchCorrector*>(processor))
+    if (auto* pitch = dynamic_cast<OpenStudioPitchCorrector*>(processor))
     {
         auto& mapper = pitch->getMapper();
         if (paramId == "bypass") return storeClamped(pitch->bypass, value, 0.0f, 1.0f);
@@ -62879,22 +64641,22 @@ static bool supportsLockFreeBuiltInControlPublication(
     juce::AudioProcessor* processor) noexcept
 {
     // These processors publish editor-facing controls and telemetry through
-    // atomics (S13EQ additionally publishes its analyzer snapshots). Their
+    // atomics (OpenStudioEQ additionally publishes its analyzer snapshots). Their
     // schemas and ordinary scalar writes can therefore use the immutable
     // processor-owner snapshot without making the audio callback skip a block.
-    return dynamic_cast<S13BasicSynthInstrument*>(processor) != nullptr
-        || dynamic_cast<S13PianoInstrument*>(processor) != nullptr
-        || dynamic_cast<S13CleanGuitarInstrument*>(processor) != nullptr
-        || dynamic_cast<S13DrumInstrument*>(processor) != nullptr
-        || dynamic_cast<S13EQ*>(processor) != nullptr
-        || dynamic_cast<S13Compressor*>(processor) != nullptr
-        || dynamic_cast<S13Gate*>(processor) != nullptr
-        || dynamic_cast<S13Limiter*>(processor) != nullptr
-        || dynamic_cast<S13Delay*>(processor) != nullptr
-        || dynamic_cast<S13Reverb*>(processor) != nullptr
-        || dynamic_cast<S13Chorus*>(processor) != nullptr
-        || dynamic_cast<S13Saturator*>(processor) != nullptr
-        || dynamic_cast<S13NAMRack*>(processor) != nullptr;
+    return dynamic_cast<OpenStudioBasicSynthInstrument*>(processor) != nullptr
+        || dynamic_cast<OpenStudioPianoInstrument*>(processor) != nullptr
+        || dynamic_cast<OpenStudioCleanGuitarInstrument*>(processor) != nullptr
+        || dynamic_cast<OpenStudioDrumInstrument*>(processor) != nullptr
+        || dynamic_cast<OpenStudioEQ*>(processor) != nullptr
+        || dynamic_cast<OpenStudioCompressor*>(processor) != nullptr
+        || dynamic_cast<OpenStudioGate*>(processor) != nullptr
+        || dynamic_cast<OpenStudioLimiter*>(processor) != nullptr
+        || dynamic_cast<OpenStudioDelay*>(processor) != nullptr
+        || dynamic_cast<OpenStudioReverb*>(processor) != nullptr
+        || dynamic_cast<OpenStudioChorus*>(processor) != nullptr
+        || dynamic_cast<OpenStudioSaturator*>(processor) != nullptr
+        || dynamic_cast<OpenStudioNAMRack*>(processor) != nullptr;
 }
 
 static bool requiresLockedBuiltInControlMutation(
@@ -62905,7 +64667,7 @@ static bool requiresLockedBuiltInControlMutation(
     // state, and updates reported latency. Keep it on the explicit locked/PDC
     // path; every other exposed control in the processors above is a scalar
     // publication consumed and smoothed by processBlock().
-    return dynamic_cast<S13Saturator*>(processor) != nullptr
+    return dynamic_cast<OpenStudioSaturator*>(processor) != nullptr
         && parameterId == "oversampleMode";
 }
 
@@ -62918,7 +64680,7 @@ static OpenStudioBuiltInParameterCurve getOpenStudioBuiltInParameterCurve(
     juce::AudioProcessor* processor,
     const juce::String& parameterId) noexcept
 {
-    if (dynamic_cast<S13NAMRack*>(processor) == nullptr)
+    if (dynamic_cast<OpenStudioNAMRack*>(processor) == nullptr)
         return OpenStudioBuiltInParameterCurve::linear;
 
     if (parameterId == "chorusRateHz")
@@ -63009,7 +64771,7 @@ bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::Str
         return false;
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(plugin.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(plugin.get()))
     {
         rack->setEmbeddedDriveOversamplingFactor(
             getNAMRackOversamplingFactor());
@@ -63056,7 +64818,7 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
     if (!plugin)
         return false;
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(plugin.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(plugin.get()))
     {
         rack->setEmbeddedDriveOversamplingFactor(
             getNAMRackOversamplingFactor());
@@ -63072,6 +64834,7 @@ bool AudioEngine::addMasterBuiltInFX(const juce::String& effectName)
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         specCopy = desiredMasterStageSpec;
     }
+    syncStageSpecStateFromActive(specCopy, std::atomic_load(&realtimeMasterFXSnapshot));
 
     DesiredFXStageSlot slot;
     slot.slotId = nextMasterStageSlotId++;
@@ -63129,20 +64892,20 @@ juce::var AudioEngine::getAvailableBuiltInFX()
 }
 
 //==============================================================================
-// S13FX (JSFX) Management
+// JSFX (JSFX) Management
 
-bool AudioEngine::addTrackS13FX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX)
+bool AudioEngine::addTrackJSFX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX)
 {
-    // Create S13FXProcessor and load script BEFORE acquiring the lock
-    auto s13fx = std::make_unique<S13FXProcessor>();
-    if (!s13fx->loadScript(scriptPath))
+    // Create JSFXProcessor and load script BEFORE acquiring the lock
+    auto jsfx = std::make_unique<JSFXProcessor>();
+    if (!jsfx->loadScript(scriptPath))
     {
-        juce::Logger::writeToLog("AudioEngine: Failed to load S13FX script: " + scriptPath);
+        juce::Logger::writeToLog("AudioEngine: Failed to load JSFX script: " + scriptPath);
         return false;
     }
 
     // Provide tempo/position info
-    s13fx->setPlayHead(this);
+    jsfx->setPlayHead(this);
 
     double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
     int bs = getSafeHostedPluginBlockSize(currentBlockSize);
@@ -63154,36 +64917,36 @@ bool AudioEngine::addTrackS13FX(const juce::String& trackId, const juce::String&
         if (it != trackMap.end() && it->second)
         {
             if (isInputFX)
-                success = it->second->addInputFX(std::move(s13fx), sr, bs);
+                success = it->second->addInputFX(std::move(jsfx), sr, bs);
             else
-                success = it->second->addTrackFX(std::move(s13fx), sr, bs);
+                success = it->second->addTrackFX(std::move(jsfx), sr, bs);
         }
     }
 
     if (success)
     {
-        juce::Logger::writeToLog("AudioEngine: Added S13FX to " + juce::String(isInputFX ? "input" : "track") + " chain: " + scriptPath);
+        juce::Logger::writeToLog("AudioEngine: Added JSFX to " + juce::String(isInputFX ? "input" : "track") + " chain: " + scriptPath);
         recalculatePDC();
     }
 
     return success;
 }
 
-bool AudioEngine::addMasterS13FX(const juce::String& scriptPath)
+bool AudioEngine::addMasterJSFX(const juce::String& scriptPath)
 {
-    auto s13fx = std::make_unique<S13FXProcessor>();
-    if (!s13fx->loadScript(scriptPath))
+    auto jsfx = std::make_unique<JSFXProcessor>();
+    if (!jsfx->loadScript(scriptPath))
     {
-        juce::Logger::writeToLog("AudioEngine: Failed to load S13FX for master: " + scriptPath);
+        juce::Logger::writeToLog("AudioEngine: Failed to load JSFX for master: " + scriptPath);
         return false;
     }
 
-    s13fx->setPlayHead(this);
+    jsfx->setPlayHead(this);
 
     double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
     int bs = getSafeHostedPluginBlockSize(currentBlockSize);
 
-    prepareHostedProcessorForPrecision(s13fx.get(), sr, bs, processingPrecisionMode);
+    prepareHostedProcessorForPrecision(jsfx.get(), sr, bs, processingPrecisionMode);
 
     DesiredFXStageSpec specCopy;
     {
@@ -63193,21 +64956,21 @@ bool AudioEngine::addMasterS13FX(const juce::String& scriptPath)
 
     DesiredFXStageSlot slot;
     slot.slotId = nextMasterStageSlotId++;
-    slot.name = s13fx->getName();
-    slot.type = "s13fx";
+    slot.name = jsfx->getName();
+    slot.type = "jsfx";
     slot.pluginPath = scriptPath;
-    slot.pluginFormat = "S13FX";
-    slot.serializedState = serialiseProcessorStateToBase64(s13fx.get());
+    slot.pluginFormat = "JSFX";
+    slot.serializedState = serialiseProcessorStateToBase64(jsfx.get());
     specCopy.slots.push_back(std::move(slot));
 
     if (!publishMasterStageSpec(specCopy))
         return false;
 
-    juce::Logger::writeToLog("AudioEngine: Added S13FX to master chain: " + scriptPath);
+    juce::Logger::writeToLog("AudioEngine: Added JSFX to master chain: " + scriptPath);
     return true;
 }
 
-juce::var AudioEngine::getS13FXSliders(const juce::String& trackId, int fxIndex, bool isInputFX)
+juce::var AudioEngine::getJSFXSliders(const juce::String& trackId, int fxIndex, bool isInputFX)
 {
     juce::Array<juce::var> sliderList;
 
@@ -63223,11 +64986,11 @@ juce::var AudioEngine::getS13FXSliders(const juce::String& trackId, int fxIndex,
     if (!proc)
         return sliderList;
 
-    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
-    if (!s13fx)
+    auto* jsfx = dynamic_cast<JSFXProcessor*>(proc);
+    if (!jsfx)
         return sliderList;
 
-    auto sliders = s13fx->getSliders();
+    auto sliders = jsfx->getSliders();
     for (const auto& s : sliders)
     {
         auto* obj = new juce::DynamicObject();
@@ -63254,7 +65017,7 @@ juce::var AudioEngine::getS13FXSliders(const juce::String& trackId, int fxIndex,
     return sliderList;
 }
 
-bool AudioEngine::setS13FXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value)
+bool AudioEngine::setJSFXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value)
 {
     auto it = trackMap.find(trackId);
     if (it == trackMap.end() || !it->second)
@@ -63268,14 +65031,14 @@ bool AudioEngine::setS13FXSlider(const juce::String& trackId, int fxIndex, bool 
     if (!proc)
         return false;
 
-    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
-    if (!s13fx)
+    auto* jsfx = dynamic_cast<JSFXProcessor*>(proc);
+    if (!jsfx)
         return false;
 
-    return s13fx->setSliderValue(static_cast<uint32_t>(sliderIndex), value);
+    return jsfx->setSliderValue(static_cast<uint32_t>(sliderIndex), value);
 }
 
-bool AudioEngine::reloadS13FX(const juce::String& trackId, int fxIndex, bool isInputFX)
+bool AudioEngine::reloadJSFX(const juce::String& trackId, int fxIndex, bool isInputFX)
 {
     auto it = trackMap.find(trackId);
     if (it == trackMap.end() || !it->second)
@@ -63289,27 +65052,27 @@ bool AudioEngine::reloadS13FX(const juce::String& trackId, int fxIndex, bool isI
     if (!proc)
         return false;
 
-    auto* s13fx = dynamic_cast<S13FXProcessor*>(proc);
-    if (!s13fx)
+    auto* jsfx = dynamic_cast<JSFXProcessor*>(proc);
+    if (!jsfx)
         return false;
 
     const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
-    return s13fx->reloadScript();
+    return jsfx->reloadScript();
 }
 
-juce::var AudioEngine::getAvailableS13FX()
+juce::var AudioEngine::getAvailableJSFX()
 {
-    pluginManager.scanForS13FX();
+    pluginManager.scanForJSFX();
 
     juce::Array<juce::var> list;
-    for (const auto& info : pluginManager.getAvailableS13FX())
+    for (const auto& info : pluginManager.getAvailableJSFX())
     {
         auto* obj = new juce::DynamicObject();
         obj->setProperty("name", info.name);
         obj->setProperty("filePath", info.filePath);
         obj->setProperty("author", info.author);
         obj->setProperty("isStock", info.isStock);
-        obj->setProperty("type", "s13fx");
+        obj->setProperty("type", "jsfx");
 
         juce::Array<juce::var> tags;
         for (const auto& tag : info.tags)
@@ -63323,7 +65086,7 @@ juce::var AudioEngine::getAvailableS13FX()
 }
 
 //==============================================================================
-// Lua Scripting (S13Script)
+// Lua Scripting (OpenStudioScript)
 
 juce::var AudioEngine::runScript(const juce::String& scriptPath)
 {
@@ -63456,8 +65219,15 @@ void AudioEngine::openPluginEditor(const juce::String& trackId, int fxIndex, boo
         target.fxIndex = fxIndex;
         auto proc = processorOwner;
         auto title = windowTitle;
-        juce::MessageManager::callAsync([this, proc, title, target]()
+        juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), proc, title, target]()
         {
+            if (!MessageThreadLifetime::accepts(lifetime)) return;
+            const auto track = trackMap.find(target.trackId);
+            if (track == trackMap.end()) return;
+            const auto current = target.scope == PluginWindowManager::PluginEditorTarget::Scope::TrackInputFX
+                ? track->second->getInputFXProcessorShared(target.fxIndex)
+                : track->second->getTrackFXProcessorShared(target.fxIndex);
+            if (current != proc) return;
             pluginWindowManager.openEditor(proc, title, target);
         });
     }
@@ -63489,8 +65259,11 @@ void AudioEngine::openInstrumentEditor(const juce::String& trackId)
         PluginWindowManager::PluginEditorTarget target;
         target.scope = PluginWindowManager::PluginEditorTarget::Scope::Instrument;
         target.trackId = trackId;
-        juce::MessageManager::callAsync([this, proc, title, target]()
+        juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), proc, title, target]()
         {
+            if (!MessageThreadLifetime::accepts(lifetime)) return;
+            const auto track = trackMap.find(target.trackId);
+            if (track == trackMap.end() || track->second->getInstrument() != proc.get()) return;
             pluginWindowManager.openEditor(proc, title, target);
         });
     }
@@ -63545,7 +65318,7 @@ static juce::File getPersistentBuiltInPresetsDir(const juce::String& pluginName)
         return builtInPresetPersistentRootOverride
             .getChildFile(getBuiltInPresetDirectoryName(pluginName));
     }
-    return getOpenStudioApplicationDataDirectory()
+    return AppPaths::applicationData()
         .getChildFile("Presets")
         .getChildFile(getBuiltInPresetDirectoryName(pluginName));
 }
@@ -63578,7 +65351,6 @@ static juce::Array<juce::File> getPresetFilesInDirectoryStableFirst(
     const juce::File& directory)
 {
     juce::Array<juce::File> currentFiles;
-    juce::Array<juce::File> legacyFiles;
     if (! directory.isDirectory())
         return currentFiles;
 
@@ -63588,12 +65360,8 @@ static juce::Array<juce::File> getPresetFilesInDirectoryStableFirst(
         const auto extension = file.getFileExtension();
         if (extension.equalsIgnoreCase(".ospreset"))
             currentFiles.add(file);
-        else if (extension.equalsIgnoreCase(".s13preset"))
-            legacyFiles.add(file);
     }
     currentFiles.sort();
-    legacyFiles.sort();
-    currentFiles.addArray(legacyFiles);
     return currentFiles;
 }
 
@@ -63720,7 +65488,7 @@ static bool migrateNAMRackPresetFileToCurrent(
     }
 
     bool stateChanged = false;
-    if (! S13NAMRack::migratePresetStateToCurrent(
+    if (! OpenStudioNAMRack::migratePresetStateToCurrent(
             migration.payload, stateChanged))
     {
         return false;
@@ -63739,7 +65507,7 @@ static bool migrateNAMRackPresetFileToCurrent(
         if (! migration.targetFile.loadFileAsData(migration.payload))
             return false;
         bool targetChanged = false;
-        if (! S13NAMRack::migratePresetStateToCurrent(
+        if (! OpenStudioNAMRack::migratePresetStateToCurrent(
                 migration.payload, targetChanged))
         {
             return false;
@@ -63855,24 +65623,24 @@ juce::var AudioEngine::getBuiltInFXPresets(const juce::String& pluginName)
                 bool migrated = false;
                 if (file.loadFileAsData(presetState)
                     && presetState.getSize() > 0
-                    && S13NAMRack::migratePresetStateToCurrent(
+                    && OpenStudioNAMRack::migratePresetStateToCurrent(
                         presetState, migrated))
                 {
                     juce::ignoreUnused(migrated);
                     const auto ampModelPath =
-                        S13NAMRack::getTonePresetAmpModelPath(
+                        OpenStudioNAMRack::getTonePresetAmpModelPath(
                             presetState.getData(),
                             static_cast<int>(presetState.getSize()));
                     if (ampModelPath.isNotEmpty())
                         preset->setProperty("ampModelPath", ampModelPath);
                     const int instrumentProfile =
-                        S13NAMRack::getTonePresetInstrumentProfile(
+                        OpenStudioNAMRack::getTonePresetInstrumentProfile(
                             presetState.getData(),
                             static_cast<int>(presetState.getSize()));
                     preset->setProperty(
                         "instrumentProfile",
                         instrumentProfile
-                                == S13NAMRack::bassInstrumentProfile
+                                == OpenStudioNAMRack::bassInstrumentProfile
                             ? "bass"
                             : "guitar");
                 }
@@ -63894,16 +65662,16 @@ bool AudioEngine::saveBuiltInFXPreset(const juce::String& trackId, const juce::S
 
     std::shared_ptr<juce::AudioProcessor> processorOwner;
     int masterSlotId = 0;
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         {
             const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
-            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (const auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 masterSlotId = slot->slotId;
         }
 
         const auto activeStage = std::atomic_load_explicit(
-            &realtimeMasterFXSnapshot, std::memory_order_acquire);
+            &(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (const auto* activeSlot = findActiveStageSlot(activeStage, masterSlotId))
             processorOwner = activeSlot->processor;
     }
@@ -63925,7 +65693,7 @@ bool AudioEngine::saveBuiltInFXPreset(const juce::String& trackId, const juce::S
 
     juce::MemoryBlock stateData;
     if (auto* rack =
-            dynamic_cast<S13NAMRack*>(processor))
+            dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         rack->getTonePresetStateInformation(stateData);
     }
@@ -63959,16 +65727,16 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
 
     std::shared_ptr<juce::AudioProcessor> processorOwner;
     int masterSlotId = 0;
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         {
             const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
-            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (const auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 masterSlotId = slot->slotId;
         }
 
         const auto activeStage = std::atomic_load_explicit(
-            &realtimeMasterFXSnapshot, std::memory_order_acquire);
+            &(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (const auto* activeSlot = findActiveStageSlot(activeStage, masterSlotId))
             processorOwner = activeSlot->processor;
     }
@@ -63999,10 +65767,10 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
     int latencyBefore = 0;
     int latencyAfter = 0;
     bool restored = false;
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         bool namRackStateMigrated = false;
-        if (! S13NAMRack::migratePresetStateToCurrent(
+        if (! OpenStudioNAMRack::migratePresetStateToCurrent(
                 stateData, namRackStateMigrated))
         {
             return false;
@@ -64028,13 +65796,14 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
         latencyBefore = processor->getLatencySamples();
         processor->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
         latencyAfter = processor->getLatencySamples();
-        restored = true;
+        const auto* isolated = dynamic_cast<IsolatedPlugin*>(processor);
+        restored = !isolated || isolated->isHealthy();
     }
 
     if (! restored)
         return false;
 
-    if (dynamic_cast<S13NAMRack*>(processor) != nullptr)
+    if (dynamic_cast<OpenStudioNAMRack*>(processor) != nullptr)
     {
         NAMRackPresetFileMigration migration;
         if (! migrateNAMRackPresetFileToCurrent(
@@ -64049,11 +65818,11 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
         }
     }
 
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         const auto serializedState = serialiseProcessorStateToBase64(processor);
         const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
-        if (auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex);
+        if (auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex);
             slot != nullptr && slot->slotId == masterSlotId)
         {
             slot->serializedState = serializedState;
@@ -64122,7 +65891,7 @@ bool AudioEngine::saveBuiltInFXPresetData(const juce::String& pluginName,
         return false;
 
     juce::MemoryBlock storedPayload;
-    if (! storedPayload.fromBase64Encoding(base64Data)
+    if (! PluginStateValidation::decode(base64Data, storedPayload)
         || storedPayload.getSize() == 0)
     {
         return false;
@@ -64132,12 +65901,12 @@ bool AudioEngine::saveBuiltInFXPresetData(const juce::String& pluginName,
         storedPayload.getData(), storedPayload.getSize());
     if (! tree.isValid())
         return false;
-    if (safePluginName == "OpenStudio NAM Rack" && tree.getType() != juce::Identifier("S13NAMRack"))
+    if (safePluginName == "OpenStudio NAM Rack" && tree.getType() != juce::Identifier("OpenStudioNAMRack"))
         return false;
     if (safePluginName == "OpenStudio NAM Rack")
     {
         bool stateMigrated = false;
-        if (! S13NAMRack::migratePresetStateToCurrent(
+        if (! OpenStudioNAMRack::migratePresetStateToCurrent(
                 storedPayload, stateMigrated))
         {
             return false;
@@ -64242,8 +66011,7 @@ bool AudioEngine::deleteBuiltInFXPreset(const juce::String& pluginName, const ju
                  juce::File::findFiles, false))
         {
             const auto extension = file.getFileExtension();
-            const bool isPreset = extension.equalsIgnoreCase(".ospreset")
-                || extension.equalsIgnoreCase(".s13preset");
+            const bool isPreset = extension.equalsIgnoreCase(".ospreset");
             if (isPreset
                 && file.getFileNameWithoutExtension().equalsIgnoreCase(
                     safePresetName))
@@ -64286,39 +66054,40 @@ juce::var AudioEngine::getTrackInputFX(const juce::String& trackId)
         {
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
+            fxInfo->setProperty("runtimeFault", track->getProcessorFault(true, i));
             fxInfo->setProperty("name", processor->getName());
             const bool bypassed = bypassSnapshot != nullptr && bypassSnapshot->count(i) > 0 && bypassSnapshot->at(i);
             const bool forceFloat = precisionSnapshot != nullptr && precisionSnapshot->count(i) > 0 && precisionSnapshot->at(i);
             fxInfo->setProperty("bypassed", bypassed);
             fxInfo->setProperty("precisionOverride", forceFloat ? "float32" : "auto");
 
-            // Check type: built-in > S13FX > VST3
+            // Check type: built-in > JSFX > VST3
             auto* processorPtr = processor.get();
-            if (dynamic_cast<S13BuiltInEffect*>(processorPtr)
-                || dynamic_cast<S13Delay*>(processorPtr)
-                || dynamic_cast<S13Reverb*>(processorPtr)
-                || dynamic_cast<S13Chorus*>(processorPtr)
-                || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13NAMRack*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr)
-                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
-                || dynamic_cast<S13PianoInstrument*>(processorPtr)
-                || dynamic_cast<S13CleanGuitarInstrument*>(processorPtr)
-                || dynamic_cast<S13DrumInstrument*>(processorPtr))
+            if (dynamic_cast<OpenStudioBuiltInEffect*>(processorPtr)
+                || dynamic_cast<OpenStudioDelay*>(processorPtr)
+                || dynamic_cast<OpenStudioReverb*>(processorPtr)
+                || dynamic_cast<OpenStudioChorus*>(processorPtr)
+                || dynamic_cast<OpenStudioSaturator*>(processorPtr)
+                || dynamic_cast<OpenStudioNAMRack*>(processorPtr)
+                || dynamic_cast<OpenStudioPitchCorrector*>(processorPtr)
+                || dynamic_cast<OpenStudioBasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioPianoInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioCleanGuitarInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioDrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
                 fxInfo->setProperty("pluginPath", processor->getName());
             }
-            else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
+            else if (auto* jsfx = dynamic_cast<JSFXProcessor*>(processorPtr))
             {
-                fxInfo->setProperty("type", "s13fx");
-                fxInfo->setProperty("pluginPath", s13fx->getScriptPath());
+                fxInfo->setProperty("type", "jsfx");
+                fxInfo->setProperty("pluginPath", jsfx->getScriptPath());
             }
             else if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processorPtr))
             {
                 auto desc = pluginInstance->getPluginDescription();
                 fxInfo->setProperty("type", desc.pluginFormatName == "CLAP" ? "clap" : "vst3");
-                fxInfo->setProperty("pluginPath", desc.createIdentifierString());
+                fxInfo->setProperty("pluginPath", pluginManager.getPluginIdentifier(desc));
             }
             fxList.add(juce::var(fxInfo.get()));
         }
@@ -64351,39 +66120,40 @@ juce::var AudioEngine::getTrackFX(const juce::String& trackId)
         {
             juce::DynamicObject::Ptr fxInfo = new juce::DynamicObject();
             fxInfo->setProperty("index", i);
+            fxInfo->setProperty("runtimeFault", track->getProcessorFault(false, i));
             fxInfo->setProperty("name", processor->getName());
             const bool bypassed = bypassSnapshot != nullptr && bypassSnapshot->count(i) > 0 && bypassSnapshot->at(i);
             const bool forceFloat = precisionSnapshot != nullptr && precisionSnapshot->count(i) > 0 && precisionSnapshot->at(i);
             fxInfo->setProperty("bypassed", bypassed);
             fxInfo->setProperty("precisionOverride", forceFloat ? "float32" : "auto");
 
-            // Check type: built-in > S13FX > VST3
+            // Check type: built-in > JSFX > VST3
             auto* processorPtr = processor.get();
-            if (dynamic_cast<S13BuiltInEffect*>(processorPtr)
-                || dynamic_cast<S13Delay*>(processorPtr)
-                || dynamic_cast<S13Reverb*>(processorPtr)
-                || dynamic_cast<S13Chorus*>(processorPtr)
-                || dynamic_cast<S13Saturator*>(processorPtr)
-                || dynamic_cast<S13NAMRack*>(processorPtr)
-                || dynamic_cast<S13PitchCorrector*>(processorPtr)
-                || dynamic_cast<S13BasicSynthInstrument*>(processorPtr)
-                || dynamic_cast<S13PianoInstrument*>(processorPtr)
-                || dynamic_cast<S13CleanGuitarInstrument*>(processorPtr)
-                || dynamic_cast<S13DrumInstrument*>(processorPtr))
+            if (dynamic_cast<OpenStudioBuiltInEffect*>(processorPtr)
+                || dynamic_cast<OpenStudioDelay*>(processorPtr)
+                || dynamic_cast<OpenStudioReverb*>(processorPtr)
+                || dynamic_cast<OpenStudioChorus*>(processorPtr)
+                || dynamic_cast<OpenStudioSaturator*>(processorPtr)
+                || dynamic_cast<OpenStudioNAMRack*>(processorPtr)
+                || dynamic_cast<OpenStudioPitchCorrector*>(processorPtr)
+                || dynamic_cast<OpenStudioBasicSynthInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioPianoInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioCleanGuitarInstrument*>(processorPtr)
+                || dynamic_cast<OpenStudioDrumInstrument*>(processorPtr))
             {
                 fxInfo->setProperty("type", "builtin");
                 fxInfo->setProperty("pluginPath", processor->getName());
             }
-            else if (auto* s13fx = dynamic_cast<S13FXProcessor*>(processorPtr))
+            else if (auto* jsfx = dynamic_cast<JSFXProcessor*>(processorPtr))
             {
-                fxInfo->setProperty("type", "s13fx");
-                fxInfo->setProperty("pluginPath", s13fx->getScriptPath());
+                fxInfo->setProperty("type", "jsfx");
+                fxInfo->setProperty("pluginPath", jsfx->getScriptPath());
             }
             else if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(processorPtr))
             {
                 auto desc = pluginInstance->getPluginDescription();
                 fxInfo->setProperty("type", desc.pluginFormatName == "CLAP" ? "clap" : "vst3");
-                fxInfo->setProperty("pluginPath", desc.createIdentifierString());
+                fxInfo->setProperty("pluginPath", pluginManager.getPluginIdentifier(desc));
             }
             fxList.add(juce::var(fxInfo.get()));
         }
@@ -64400,7 +66170,7 @@ static bool isOpenStudioBuiltInParameterEligible(
     if (processor == nullptr || parameter == nullptr || parameterId.isEmpty())
         return false;
 
-    if (dynamic_cast<S13NAMRack*>(processor) == nullptr)
+    if (dynamic_cast<OpenStudioNAMRack*>(processor) == nullptr)
         return false;
 
     static const juce::StringArray excludedNAMParameters {
@@ -64619,7 +66389,7 @@ juce::var AudioEngine::getBuiltInPluginSchema(const juce::String& trackId, const
     // Built-in effects publish ordinary editor controls atomically. Resolve
     // them from immutable realtime snapshots so opening or refreshing an
     // editor never owns either callback lock while its schema is assembled.
-    // S13EQ's analyzer is also a lock-free audio-to-UI publication.
+    // OpenStudioEQ's analyzer is also a lock-free audio-to-UI publication.
     const auto publishedOwner =
         getPublishedBuiltInProcessor(trackId, chainType, fxIndex);
     if (supportsLockFreeBuiltInControlPublication(
@@ -64629,7 +66399,7 @@ juce::var AudioEngine::getBuiltInPluginSchema(const juce::String& trackId, const
             publishedOwner.processor.get(), chainType, fxIndex);
     }
 
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         int slotId = 0;
         {
@@ -64637,11 +66407,11 @@ juce::var AudioEngine::getBuiltInPluginSchema(const juce::String& trackId, const
             if (! sl.isLocked())
                 return describeBuiltInProcessor(nullptr, chainType, fxIndex);
 
-            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (const auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 slotId = slot->slotId;
         }
 
-        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        auto activeStage = std::atomic_load_explicit(&(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
         {
             auto* processor = activeSlot->processor.get();
@@ -64686,7 +66456,7 @@ juce::var AudioEngine::getNAMRackDiagnostics(
     // diagnostic snapshot may briefly serialize non-realtime model metadata,
     // but that lock is never acquired by the audio callback; live UI telemetry
     // therefore cannot make the audio thread skip a NAM block.
-    if (auto* rack = dynamic_cast<S13NAMRack*>(
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(
             processorOwner.processor.get()))
         return rack->getDiagnosticState();
 
@@ -64733,7 +66503,7 @@ juce::var AudioEngine::getBuiltInPluginState(const juce::String& trackId, const 
         getPublishedBuiltInProcessor(
             trackId, chainType, fxIndex);
     if (const auto* rack =
-            dynamic_cast<const S13NAMRack*>(
+            dynamic_cast<const OpenStudioNAMRack*>(
                 processorOwner.processor.get()))
     {
         if (auto* values = root->getProperty(
@@ -64794,10 +66564,10 @@ juce::var AudioEngine::getBuiltInPluginState(const juce::String& trackId, const 
             new juce::DynamicObject();
         dspState->setProperty(
             "namEffectsDspVersion",
-            S13NAMRack::currentNAMEffectsDspVersion);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion);
         dspState->setProperty(
             "reverbEngineVersion",
-            S13NAMRack::currentReverbEngineVersion);
+            OpenStudioNAMRack::currentReverbEngineVersion);
         root->setProperty(
             "dspState",
             juce::var(dspState));
@@ -64839,7 +66609,7 @@ bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce:
             if (applied && paramId == "auditionSource")
             {
                 if (auto* rack =
-                        dynamic_cast<S13NAMRack*>(
+                        dynamic_cast<OpenStudioNAMRack*>(
                             publishedProcessor))
                 {
                     juce::Logger::writeToLog(
@@ -64857,12 +66627,12 @@ bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce:
         }
     }
 
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         int slotId = 0;
         {
             const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
-            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (const auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 slotId = slot->slotId;
         }
 
@@ -64871,7 +66641,7 @@ bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce:
 
         juce::String serializedState;
         bool latencyChanged = false;
-        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        auto activeStage = std::atomic_load_explicit(&(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (const auto* activeSlot = findActiveStageSlot(activeStage, slotId))
         {
             if (!activeSlot->processor)
@@ -64926,7 +66696,7 @@ bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce:
 
         {
             const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
-            if (auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 slot->serializedState = serializedState;
         }
         if (latencyChanged)
@@ -64974,7 +66744,7 @@ bool AudioEngine::setBuiltInPluginParam(const juce::String& trackId, const juce:
                 it->second->invalidatePluginAutomationCache();
             if (applied && paramId == "auditionSource")
             {
-                if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+                if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
                 {
                     juce::Logger::writeToLog("AudioEngine: NAM auditionSource="
                         + juce::String(value)
@@ -65148,15 +66918,15 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
                 && rawEffectsVersion >= 1.0
                 && (rawEffectsVersion
                         <= static_cast<double>(
-                            S13NAMRack::currentNAMEffectsDspVersion)
+                            OpenStudioNAMRack::currentNAMEffectsDspVersion)
                     || rawEffectsVersion
                         == static_cast<double>(
-                            S13NAMRack::developmentNAMEffectsDspVersionAlias)))
+                            OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias)))
             {
                 storedEffectsVersion = rawEffectsVersion
                         == static_cast<double>(
-                            S13NAMRack::developmentNAMEffectsDspVersionAlias)
-                    ? S13NAMRack::developmentNAMEffectsDspVersionAliasSourceVersion
+                            OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias)
+                    ? OpenStudioNAMRack::developmentNAMEffectsDspVersionAliasSourceVersion
                     : juce::roundToInt(rawEffectsVersion);
             }
             else
@@ -65175,7 +66945,7 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
                 || rawReverbVersion < 1.0
                 || rawReverbVersion
                        > static_cast<double>(
-                           S13NAMRack::currentReverbEngineVersion))
+                           OpenStudioNAMRack::currentReverbEngineVersion))
             {
                 invalidDspStateRequested = true;
             }
@@ -65196,7 +66966,7 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
     const bool preV10PortableBundle = completePortableNAMBundle
         && (! effectsVersionPropertyPresent
             || storedEffectsVersion
-                   < S13NAMRack::delayV10IntroducedNAMEffectsDspVersion);
+                   < OpenStudioNAMRack::delayV10IntroducedNAMEffectsDspVersion);
 
     std::vector<std::pair<juce::String, float>> parameterValues;
     const auto appendParameter = [&] (const juce::String& id, const juce::var& rawValue)
@@ -65275,25 +67045,33 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         const bool hasCabDoublerEnabled =
             findParameter("cabDoublerEnabled")
                 != parameterValues.end();
+        const auto cabEngineVersionParameter = findParameter("cabEngineVersion");
+        const bool legacyCabState = cabEngineVersionParameter == parameterValues.end()
+            || ! std::isfinite(cabEngineVersionParameter->second)
+            || cabEngineVersionParameter->second < 1.5f;
+        const bool cabFiltersNeedEqMigration =
+            cabEngineVersionParameter == parameterValues.end()
+            || ! std::isfinite(cabEngineVersionParameter->second)
+            || cabEngineVersionParameter->second < 2.5f;
         const float legacyCabRoomAmount =
             parameterOrDefault("cabRoomAmount", 0.0f);
         const float legacyCabDoublerMix =
             parameterOrDefault("cabDoublerMix", 0.0f);
         const bool hasCurrentGraphicEqFilters =
             storedEffectsVersion
-                    >= S13NAMRack::graphicEqFiltersIntroducedNAMEffectsDspVersion
+                    >= OpenStudioNAMRack::graphicEqFiltersIntroducedNAMEffectsDspVersion
             && storedEffectsVersion
-                    <= S13NAMRack::currentNAMEffectsDspVersion;
+                    <= OpenStudioNAMRack::currentNAMEffectsDspVersion;
         const bool hasCurrentPreEq =
             storedEffectsVersion
-                    >= S13NAMRack::preEqIntroducedNAMEffectsDspVersion
+                    >= OpenStudioNAMRack::preEqIntroducedNAMEffectsDspVersion
             && storedEffectsVersion
-                    <= S13NAMRack::currentNAMEffectsDspVersion;
+                    <= OpenStudioNAMRack::currentNAMEffectsDspVersion;
         const bool hasEightBandPreEq =
             storedEffectsVersion
-                    >= S13NAMRack::eightBandPreEqIntroducedNAMEffectsDspVersion
+                    >= OpenStudioNAMRack::eightBandPreEqIntroducedNAMEffectsDspVersion
             && storedEffectsVersion
-                    <= S13NAMRack::currentNAMEffectsDspVersion;
+                    <= OpenStudioNAMRack::currentNAMEffectsDspVersion;
         const float requestedPreEqHPFHz =
             parameterOrDefault("preEqHPFHz", 0.0f);
         const float requestedPreEqLPFHz =
@@ -65429,6 +67207,34 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         appendDefault("chaosGate", 0.22f);
         appendDefault("chaosMix", 1.0f);
         appendDefault("chaosLevelDb", 0.0f);
+        const bool sourceCabHPFEnabled = legacyCabState
+            || parameterOrDefault("cabHPFEnabled", 0.0f) >= 0.5f;
+        const bool sourceCabLPFEnabled = legacyCabState
+            || parameterOrDefault("cabLPFEnabled", 0.0f) >= 0.5f;
+        const float sourceCabHPFHz = juce::jlimit(
+            20.0f,
+            500.0f,
+            parameterOrDefault("cabHPFHz", legacyCabState ? 80.0f : 30.0f));
+        const float sourceCabLPFHz = juce::jlimit(
+            1000.0f,
+            20000.0f,
+            parameterOrDefault("cabLPFHz", legacyCabState ? 8500.0f : 16000.0f));
+        setOrAppendParameter("cabEngineVersion", 3.0f);
+        setOrAppendParameter("cabHPFEnabled", 0.0f);
+        setOrAppendParameter("cabLPFEnabled", 0.0f);
+        setOrAppendParameter("cabHPFHz", 30.0f);
+        setOrAppendParameter("cabLPFHz", 16000.0f);
+        setOrAppendParameter(
+            "cabIRStereo",
+            legacyCabState
+                ? 1.0f
+                : (parameterOrDefault("cabIRStereo", 0.0f) >= 0.5f ? 1.0f : 0.0f));
+        setOrAppendParameter(
+            "cabDirectMix",
+            juce::jlimit(
+                0.0f,
+                1.0f,
+                parameterOrDefault("cabDirectMix", 0.0f)));
         appendDefault(
             "cabRoomEnabled",
             ! hasCabRoomEnabled
@@ -65448,20 +67254,39 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         appendDefault("cabDoublerMix", 0.12f);
         appendDefault("cabDoublerDelayMs", 4.5f);
         appendDefault("cabDoublerSpread", 0.65f);
-        const float canonicalEqHPFHz = hasCurrentGraphicEqFilters
+        float canonicalEqHPFHz = hasCurrentGraphicEqFilters
             ? (! std::isfinite(requestedEqHPFHz)
                     || requestedEqHPFHz < 20.0f
                 ? 0.0f
                 : juce::jlimit(
                     20.0f, 500.0f, requestedEqHPFHz))
             : 0.0f;
-        const float canonicalEqLPFHz = hasCurrentGraphicEqFilters
+        float canonicalEqLPFHz = hasCurrentGraphicEqFilters
             ? (! std::isfinite(requestedEqLPFHz)
                     || requestedEqLPFHz >= 22000.0f
                 ? 24000.0f
                 : juce::jlimit(
                     3000.0f, 20000.0f, requestedEqLPFHz))
             : 24000.0f;
+        const bool sourceCabEnabled = parameterOrDefault("cabEnabled", 1.0f) >= 0.5f
+            && parameterOrDefault("cabRequestedEnabled", 1.0f) >= 0.5f;
+        if (cabFiltersNeedEqMigration && sourceCabEnabled
+            && (sourceCabHPFEnabled || sourceCabLPFEnabled))
+        {
+            if (parameterOrDefault("eqEnabled", 0.0f) < 0.5f)
+            {
+                for (const auto* id : { "eq65Db", "eq125Db", "eq250Db", "eq500Db", "eq1kDb",
+                                         "eq2kDb", "eq4kDb", "eq8kDb", "eq16kDb", "eqLevelDb" })
+                    setOrAppendParameter(id, 0.0f);
+                canonicalEqHPFHz = 0.0f;
+                canonicalEqLPFHz = 24000.0f;
+            }
+            setOrAppendParameter("eqEnabled", 1.0f);
+            if (sourceCabHPFEnabled)
+                canonicalEqHPFHz = juce::jmax(canonicalEqHPFHz, sourceCabHPFHz);
+            if (sourceCabLPFEnabled)
+                canonicalEqLPFHz = juce::jmin(canonicalEqLPFHz, sourceCabLPFHz);
+        }
         setOrAppendParameter(
             "eqHPFHz",
             canonicalEqHPFHz);
@@ -65507,14 +67332,14 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
             "delayMode", 1.0f);
         float canonicalDelayMode = 1.0f;
         if (storedEffectsVersion
-                >= S13NAMRack::delayV10IntroducedNAMEffectsDspVersion
+                >= OpenStudioNAMRack::delayV10IntroducedNAMEffectsDspVersion
             && storedEffectsVersion
-                <= S13NAMRack::currentNAMEffectsDspVersion)
+                <= OpenStudioNAMRack::currentNAMEffectsDspVersion)
         {
             canonicalDelayMode = std::floor(
                 juce::jlimit(
                     0.0f,
-                    static_cast<float>(S13NAMRack::dualDelayMode),
+                    static_cast<float>(OpenStudioNAMRack::dualDelayMode),
                     std::isfinite(requestedDelayMode)
                         ? requestedDelayMode
                         : 1.0f)
@@ -65522,12 +67347,12 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         }
         else if (storedEffectsVersion >= 1
                  && storedEffectsVersion
-                        < S13NAMRack::currentNAMEffectsDspVersion)
+                        < OpenStudioNAMRack::currentNAMEffectsDspVersion)
         {
             canonicalDelayMode = std::floor(
                 juce::jlimit(
                     0.0f,
-                    static_cast<float>(S13NAMRack::analogDelayMode),
+                    static_cast<float>(OpenStudioNAMRack::analogDelayMode),
                     std::isfinite(requestedDelayMode)
                         ? requestedDelayMode
                         : 1.0f)
@@ -65598,6 +67423,11 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
                     return parameter.first == "compressorDetail"
                         || parameter.first == "precisionDriveMode"
                         || parameter.first == "auditionSource"
+                        || parameter.first == "cabEngineVersion"
+                        || parameter.first == "cabMicPosition"
+                        || parameter.first == "cabMicDistance"
+                        || parameter.first == "cabMicBlend"
+                        || parameter.first == "cabRoomSend"
                         || parameter.first == "preEq100Db"
                         || parameter.first == "preEq200Db"
                         || parameter.first == "preEq400Db"
@@ -65623,15 +67453,15 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
     std::shared_ptr<juce::AudioProcessor> processorOwner;
     TrackProcessor* automationTrack = nullptr;
     int masterSlotId = 0;
-    if (chainType == "master")
+    if ((chainType == "master" || chainType == "monitor"))
     {
         {
             const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
-            if (const auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex))
+            if (const auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex))
                 masterSlotId = slot->slotId;
         }
 
-        auto activeStage = std::atomic_load_explicit(&realtimeMasterFXSnapshot, std::memory_order_acquire);
+        auto activeStage = std::atomic_load_explicit(&(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot), std::memory_order_acquire);
         if (const auto* activeSlot = findActiveStageSlot(activeStage, masterSlotId))
             processorOwner = activeSlot->processor;
     }
@@ -65653,7 +67483,7 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
     if (processor == nullptr)
         return false;
 
-    auto* rack = dynamic_cast<S13NAMRack*>(processor);
+    auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor);
     const bool modelMetadataRequested =
         pedalDeclaredCaptureTypeSpecified || ampDeclaredCaptureTypeSpecified;
     const bool resourcesOrModelMetadataRequested =
@@ -65666,7 +67496,7 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
     auto uiStateVar = stateObject->getProperty("uiState");
     const bool uiStateRequested = ! uiStateVar.isVoid();
     if (uiStateRequested && rack != nullptr)
-        (void) S13NAMRack::migrateUiStateToCurrent(
+        (void) OpenStudioNAMRack::migrateUiStateToCurrent(
             uiStateVar,
             storedEffectsVersion);
     bool scalarOrUiApplied = false;
@@ -65680,19 +67510,19 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
             rack->auditionSource.store(0.0f, std::memory_order_relaxed);
             const bool selectorChanged =
                 rack->getNAMEffectsDspVersion()
-                    != S13NAMRack::currentNAMEffectsDspVersion
+                    != OpenStudioNAMRack::currentNAMEffectsDspVersion
                 || std::abs(
                        rack->reverbEngineVersion.load(
                            std::memory_order_relaxed)
                        - static_cast<float>(
-                           S13NAMRack::currentReverbEngineVersion))
+                           OpenStudioNAMRack::currentReverbEngineVersion))
                        > 1.0e-6f;
             rack->namEffectsDspVersion.store(
-                S13NAMRack::currentNAMEffectsDspVersion,
+                OpenStudioNAMRack::currentNAMEffectsDspVersion,
                 std::memory_order_relaxed);
             rack->reverbEngineVersion.store(
                 static_cast<float>(
-                    S13NAMRack::currentReverbEngineVersion),
+                    OpenStudioNAMRack::currentReverbEngineVersion),
                 std::memory_order_relaxed);
             scalarOrUiApplied = selectorChanged
                 || dspStateRequested
@@ -65770,11 +67600,11 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
     if (processor->getLatencySamples() != latencyBefore)
         recalculatePDC();
 
-    if (chainType == "master" && masterSlotId != 0 && (resourcesApplied || scalarOrUiApplied))
+    if ((chainType == "master" || chainType == "monitor") && masterSlotId != 0 && (resourcesApplied || scalarOrUiApplied))
     {
         const auto activeStage =
             std::atomic_load_explicit(
-                &realtimeMasterFXSnapshot,
+                &(chainType == "monitor" ? realtimeMonitoringFXSnapshot : realtimeMasterFXSnapshot),
                 std::memory_order_acquire);
         if (const auto* activeSlot =
                 findActiveStageSlot(
@@ -65796,7 +67626,7 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         }
         const auto serializedState = serialiseProcessorStateToBase64(processor);
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
-        if (auto* slot = findDesiredStageSlot(desiredMasterStageSpec, fxIndex);
+        if (auto* slot = findDesiredStageSlot((chainType == "monitor" ? desiredMonitoringStageSpec : desiredMasterStageSpec), fxIndex);
             slot != nullptr && slot->slotId == masterSlotId)
         {
             slot->serializedState = serializedState;
@@ -65886,6 +67716,8 @@ bool AudioEngine::removeTrackInputFX(const juce::String& trackId, int fxIndex)
     if (removed)
     {
         juce::Logger::writeToLog("AudioEngine: Removed input FX " + juce::String(fxIndex) + " from track " + trackId);
+        if (onFXSlotsRemoved)
+            onFXSlotsRemoved(trackId, "input", fxIndex);
         recalculatePDC();
     }
     return removed;
@@ -65935,6 +67767,8 @@ bool AudioEngine::removeTrackFX(const juce::String& trackId, int fxIndex)
     if (removed)
     {
         juce::Logger::writeToLog("AudioEngine: Removed track FX " + juce::String(fxIndex) + " from track " + trackId);
+        if (onFXSlotsRemoved)
+            onFXSlotsRemoved(trackId, "track", fxIndex);
         recalculatePDC();
     }
     return removed;
@@ -66039,6 +67873,8 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
         specCopy = desiredMasterStageSpec;
     }
 
+    syncStageSpecStateFromActive(specCopy, std::atomic_load(&realtimeMasterFXSnapshot));
+
     DesiredFXStageSlot slot;
     slot.slotId = nextMasterStageSlotId++;
     slot.name = plugin->getName();
@@ -66046,7 +67882,7 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
     {
         auto desc = pluginInstance->getPluginDescription();
         slot.type = desc.pluginFormatName == "CLAP" ? "clap" : "vst3";
-        slot.pluginPath = desc.createIdentifierString();
+        slot.pluginPath = pluginManager.getPluginIdentifier(desc);
         slot.pluginFormat = desc.pluginFormatName;
     }
     else
@@ -66071,6 +67907,7 @@ bool AudioEngine::addMasterFX(const juce::String& pluginPath)
 juce::var AudioEngine::getMasterFX()
 {
     const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    const auto active = std::atomic_load(&realtimeMasterFXSnapshot);
     juce::Array<juce::var> fxList;
     for (int i = 0; i < static_cast<int>(desiredMasterStageSpec.slots.size()); ++i)
     {
@@ -66081,6 +67918,8 @@ juce::var AudioEngine::getMasterFX()
         fxInfo->setProperty("bypassed", slot.bypassed);
         fxInfo->setProperty("precisionOverride", slot.forceFloat ? "float32" : "auto");
         fxInfo->setProperty("type", slot.type);
+        if (const auto* published = findActiveStageSlot(active, slot.slotId))
+            fxInfo->setProperty("runtimeFault", static_cast<int>(published->safety->failure.load()));
         if (!slot.pluginPath.isEmpty())
             fxInfo->setProperty("pluginPath", slot.pluginPath);
         fxList.add(juce::var(fxInfo.get()));
@@ -66126,6 +67965,8 @@ bool AudioEngine::removeMasterFX(int fxIndex)
             retiringProcessor->releaseResources();
         }
         juce::Logger::writeToLog("AudioEngine: Removed master FX " + juce::String(fxIndex));
+        if (onFXSlotsRemoved)
+            onFXSlotsRemoved({}, "master", fxIndex);
     }
     return published;
 }
@@ -66191,8 +68032,12 @@ void AudioEngine::openMasterFXEditor(int fxIndex)
             PluginWindowManager::PluginEditorTarget target;
             target.scope = PluginWindowManager::PluginEditorTarget::Scope::MasterFX;
             target.fxIndex = fxIndex;
-            juce::MessageManager::callAsync([this, processor, title, target]()
+            juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), processor, title, target]()
             {
+                if (!MessageThreadLifetime::accepts(lifetime)) return;
+                const auto current = std::atomic_load(&realtimeMasterFXSnapshot);
+                if (!current || target.fxIndex < 0 || target.fxIndex >= static_cast<int>(current->slots.size())
+                    || current->slots[static_cast<size_t>(target.fxIndex)].processor != processor) return;
                 if (processor)
                     pluginWindowManager.openEditor(processor, title, target);
             });
@@ -66244,6 +68089,7 @@ void AudioEngine::bypassMasterFX(int fxIndex, bool bypassed)
         const juce::ScopedLock processorGuard(
             currentSlot->processor->getCallbackLock());
         currentSlot->processor->reset();
+        currentSlot->safety->reset();
     }
 
     auto nextStage =
@@ -66313,7 +68159,10 @@ bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
 
     double sr = currentSampleRate > 0 ? currentSampleRate : 44100.0;
     int bs = getSafeHostedPluginBlockSize(currentBlockSize);
-    auto plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
+    const bool builtIn = pluginPath == "OpenStudio NAM Rack";
+    std::unique_ptr<juce::AudioProcessor> plugin;
+    if (builtIn) plugin = createBuiltInEffect(pluginPath);
+    else plugin = pluginManager.loadPluginFromFile(pluginPath, sr, bs);
     if (!plugin)
     {
         juce::Logger::writeToLog("AudioEngine: Failed to load plugin for monitoring FX");
@@ -66337,15 +68186,22 @@ bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
         const juce::ScopedLock lockSl(mainProcessorGraph->getCallbackLock());
         specCopy = desiredMonitoringStageSpec;
     }
+    syncStageSpecStateFromActive(specCopy, std::atomic_load(&realtimeMonitoringFXSnapshot));
 
     DesiredFXStageSlot slot;
     slot.slotId = nextMonitoringStageSlotId++;
     slot.name = plugin->getName();
-    if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(plugin.get()))
+    if (builtIn)
+    {
+        slot.type = "builtin";
+        slot.pluginPath = pluginPath;
+        slot.pluginFormat = "Built-in";
+    }
+    else if (auto* pluginInstance = dynamic_cast<juce::AudioPluginInstance*>(plugin.get()))
     {
         auto desc = pluginInstance->getPluginDescription();
         slot.type = desc.pluginFormatName == "CLAP" ? "clap" : "vst3";
-        slot.pluginPath = desc.createIdentifierString();
+        slot.pluginPath = pluginManager.getPluginIdentifier(desc);
         slot.pluginFormat = desc.pluginFormatName;
     }
     else
@@ -66371,6 +68227,7 @@ bool AudioEngine::addMonitoringFX(const juce::String& pluginPath)
 juce::var AudioEngine::getMonitoringFX()
 {
     const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
+    const auto active = std::atomic_load(&realtimeMonitoringFXSnapshot);
     juce::Array<juce::var> fxList;
     for (int i = 0; i < static_cast<int>(desiredMonitoringStageSpec.slots.size()); ++i)
     {
@@ -66381,6 +68238,8 @@ juce::var AudioEngine::getMonitoringFX()
         fxInfo->setProperty("bypassed", slot.bypassed);
         fxInfo->setProperty("precisionOverride", slot.forceFloat ? "float32" : "auto");
         fxInfo->setProperty("type", slot.type);
+        if (const auto* published = findActiveStageSlot(active, slot.slotId))
+            fxInfo->setProperty("runtimeFault", static_cast<int>(published->safety->failure.load()));
         if (!slot.pluginPath.isEmpty())
             fxInfo->setProperty("pluginPath", slot.pluginPath);
         fxList.add(juce::var(fxInfo.get()));
@@ -66422,6 +68281,8 @@ void AudioEngine::removeMonitoringFX(int fxIndex)
             retiringProcessor->releaseResources();
         }
         juce::Logger::writeToLog("AudioEngine: Removed monitoring FX " + juce::String(fxIndex));
+        if (onFXSlotsRemoved)
+            onFXSlotsRemoved({}, "monitor", fxIndex);
     }
 }
 
@@ -66447,8 +68308,12 @@ void AudioEngine::openMonitoringFXEditor(int fxIndex)
             PluginWindowManager::PluginEditorTarget target;
             target.scope = PluginWindowManager::PluginEditorTarget::Scope::MonitoringFX;
             target.fxIndex = fxIndex;
-            juce::MessageManager::callAsync([this, processor, title, target]()
+            juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token(), processor, title, target]()
             {
+                if (!MessageThreadLifetime::accepts(lifetime)) return;
+                const auto current = std::atomic_load(&realtimeMonitoringFXSnapshot);
+                if (!current || target.fxIndex < 0 || target.fxIndex >= static_cast<int>(current->slots.size())
+                    || current->slots[static_cast<size_t>(target.fxIndex)].processor != processor) return;
                 if (processor)
                     pluginWindowManager.openEditor(processor, title, target);
             });
@@ -66495,6 +68360,7 @@ void AudioEngine::bypassMonitoringFX(int fxIndex, bool bypassed)
         const juce::ScopedLock processorGuard(
             currentSlot->processor->getCallbackLock());
         currentSlot->processor->reset();
+        currentSlot->safety->reset();
     }
 
     auto nextStage =
@@ -66874,6 +68740,13 @@ void AudioEngine::setMetronomeEnabled(bool enabled)
     metronome.setEnabled(enabled);
 }
 
+bool AudioEngine::setMetronomePracticeEnabled(bool enabled)
+{
+    // Availability and the latch share one atomic publication. Device loss
+    // cannot race a start into reviving practice on a closed device.
+    return metronome.setPracticeEnabled(enabled);
+}
+
 void AudioEngine::setMetronomeVolume(float volume)
 {
     metronome.setVolume(volume);
@@ -67148,7 +69021,16 @@ juce::String AudioEngine::getSidechainSource(const juce::String& destTrackId, in
 
 int AudioEngine::addTrackSend(const juce::String& sourceTrackId, const juce::String& destTrackId)
 {
-    if (trackMap.find(sourceTrackId) == trackMap.end()) return -1;
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
+    if (trackMap.find(sourceTrackId) == trackMap.end() || trackMap.find(destTrackId) == trackMap.end()) return -1;
+    if (sendWouldCreateCycle(sourceTrackId, destTrackId, [this](const juce::String& id) {
+        juce::StringArray destinations;
+        const auto found = trackMap.find(id);
+        if (found != trackMap.end() && found->second != nullptr)
+            for (int index = 0; index < found->second->getNumSends(); ++index)
+                destinations.add(found->second->getSendDestination(index));
+        return destinations;
+    })) return -1;
     int sendIndex = trackMap[sourceTrackId]->addSend(destTrackId);
     rebuildRealtimeProcessingSnapshots();
     return sendIndex;
@@ -67156,6 +69038,7 @@ int AudioEngine::addTrackSend(const juce::String& sourceTrackId, const juce::Str
 
 void AudioEngine::removeTrackSend(const juce::String& sourceTrackId, int sendIndex)
 {
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->removeSend(sendIndex);
@@ -67165,6 +69048,8 @@ void AudioEngine::removeTrackSend(const juce::String& sourceTrackId, int sendInd
 
 void AudioEngine::setTrackSendLevel(const juce::String& sourceTrackId, int sendIndex, float level)
 {
+    if (!std::isfinite(level)) return;
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->setSendLevel(sendIndex, level);
@@ -67174,6 +69059,8 @@ void AudioEngine::setTrackSendLevel(const juce::String& sourceTrackId, int sendI
 
 void AudioEngine::setTrackSendPan(const juce::String& sourceTrackId, int sendIndex, float pan)
 {
+    if (!std::isfinite(pan)) return;
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->setSendPan(sendIndex, pan);
@@ -67183,6 +69070,7 @@ void AudioEngine::setTrackSendPan(const juce::String& sourceTrackId, int sendInd
 
 void AudioEngine::setTrackSendEnabled(const juce::String& sourceTrackId, int sendIndex, bool enabled)
 {
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->setSendEnabled(sendIndex, enabled);
@@ -67192,6 +69080,7 @@ void AudioEngine::setTrackSendEnabled(const juce::String& sourceTrackId, int sen
 
 void AudioEngine::setTrackSendPreFader(const juce::String& sourceTrackId, int sendIndex, bool preFader)
 {
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->setSendPreFader(sendIndex, preFader);
@@ -67201,6 +69090,7 @@ void AudioEngine::setTrackSendPreFader(const juce::String& sourceTrackId, int se
 
 void AudioEngine::setTrackSendPhaseInvert(const juce::String& sourceTrackId, int sendIndex, bool invert)
 {
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     if (trackMap.find(sourceTrackId) != trackMap.end())
     {
         trackMap[sourceTrackId]->setSendPhaseInvert(sendIndex, invert);
@@ -67210,6 +69100,7 @@ void AudioEngine::setTrackSendPhaseInvert(const juce::String& sourceTrackId, int
 
 juce::var AudioEngine::getTrackSends(const juce::String& trackId)
 {
+    const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
     juce::Array<juce::var> result;
     if (trackMap.find(trackId) == trackMap.end()) return result;
 
@@ -68595,8 +70486,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
 
 juce::String AudioEngine::renderMetronomeToFile(double startTime, double endTime)
 {
-    // Create output file in the preferred OpenStudio audio directory, while
-    // still following the legacy Studio13 location if an existing install uses it.
+    // Keep user-created audio separate from diagnostic and internal state paths.
     auto audioFolder = getPreferredAppDataDirectory().getChildFile("Audio");
 
     if (!audioFolder.exists())
@@ -68683,7 +70573,7 @@ bool AudioEngine::setPluginState(
 {
     // Decode Base64 to memory block
     juce::MemoryBlock stateData;
-    if (!stateData.fromBase64Encoding(base64State))
+    if (!PluginStateValidation::decode(base64State, stateData))
         return false;
 
     std::shared_ptr<juce::AudioProcessor> processorOwner;
@@ -68705,7 +70595,7 @@ bool AudioEngine::setPluginState(
     int latencyBefore = 0;
     int latencyAfter = 0;
     bool restored = false;
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         latencyBefore = processor->getLatencySamples();
         restored = rack->restoreProjectStateInformation(
@@ -68786,7 +70676,7 @@ bool AudioEngine::isMasterNAMRackPlugin(int fxIndex)
         &realtimeMasterFXSnapshot, std::memory_order_acquire);
     const auto* activeSlot = findActiveStageSlot(activeStage, slotId);
     return activeSlot != nullptr
-        && dynamic_cast<S13NAMRack*>(activeSlot->processor.get()) != nullptr;
+        && dynamic_cast<OpenStudioNAMRack*>(activeSlot->processor.get()) != nullptr;
 }
 
 bool AudioEngine::setMasterPluginState(
@@ -68795,7 +70685,7 @@ bool AudioEngine::setMasterPluginState(
     const std::function<std::shared_ptr<void>()>& publicationLeaseFactory)
 {
     juce::MemoryBlock stateData;
-    if (!stateData.fromBase64Encoding(base64State))
+    if (!PluginStateValidation::decode(base64State, stateData))
         return false;
 
     int slotId = 0;
@@ -68824,7 +70714,7 @@ bool AudioEngine::setMasterPluginState(
     // matching desired stage state has been persisted, so a newer request cannot
     // land between audible publication and persistence.
     std::shared_ptr<void> publicationLease;
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
     {
         restored = rack->restoreProjectStateInformation(
             stateData.getData(),
@@ -68842,7 +70732,8 @@ bool AudioEngine::setMasterPluginState(
         }
         const juce::ScopedLock processorLock(processor->getCallbackLock());
         processor->setStateInformation(stateData.getData(), static_cast<int>(stateData.getSize()));
-        restored = true;
+        const auto* isolated = dynamic_cast<IsolatedPlugin*>(processor);
+        restored = !isolated || isolated->isHealthy();
     }
     if (! restored)
         return false;
@@ -68874,7 +70765,8 @@ juce::File AudioEngine::findFFmpegExe() const
 
 bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
                                      const juce::String& format, double targetSampleRate, int quality,
-                                     int bitDepth, int numChannels) const
+                                     int bitDepth, int numChannels,
+                                     const std::function<bool()>& keepRunning) const
 {
     auto ffmpeg = findFFmpegExe();
     if (!ffmpeg.existsAsFile())
@@ -68985,27 +70877,30 @@ bool AudioEngine::convertWithFFmpeg(const juce::File& inputFile, const juce::Fil
     logToDisk("convertWithFFmpeg: Running: " + args.joinIntoString(" "));
 
     // Run ffmpeg as child process
-    juce::ChildProcess process;
-    if (!process.start(args))
+    OwnedChildProcess process;
+    if ((keepRunning && !keepRunning()) || !process.start(args, 0))
     {
         logToDisk("convertWithFFmpeg: FAIL - could not start ffmpeg process");
         return false;
     }
 
     // Wait for completion (up to 5 minutes for large files)
-    if (!process.waitForProcessToFinish(300000))
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + 300000.0;
+    while (process.isRunning() && (!keepRunning || keepRunning())
+           && juce::Time::getMillisecondCounterHiRes() < deadline)
+        juce::Thread::sleep(10);
+    if (process.isRunning())
     {
-        logToDisk("convertWithFFmpeg: FAIL - ffmpeg timed out after 5 minutes");
+        logToDisk("convertWithFFmpeg: cancelled or exceeded the 5-minute encoding deadline");
         process.kill();
         outputFile.deleteFile();
         return false;
     }
 
-    int exitCode = process.getExitCode();
+    const auto exitCode = process.getExitCode();
     if (exitCode != 0)
     {
-        juce::String errOutput = process.readAllProcessOutput();
-        logToDisk("convertWithFFmpeg: FAIL - ffmpeg exit code " + juce::String(exitCode) + " output: " + errOutput);
+        logToDisk("convertWithFFmpeg: FAIL - ffmpeg exit code " + juce::String(exitCode));
         outputFile.deleteFile();
         return false;
     }
@@ -69030,9 +70925,12 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                                 double renderSampleRate, int bitDepth, int numChannels,
                                 bool normalize, bool addTail, double tailLengthMs,
                                 bool includeMetronome,
-                                const juce::StringArray& includedClipIds)
+                                const juce::StringArray& includedClipIds,
+                                const std::function<bool()>& keepRunning)
 {
+    if (keepRunning && !keepRunning()) return false;
     const juce::ScopedLock offlineRenderTransaction(offlineRenderTransactionLock);
+    if (keepRunning && !keepRunning()) return false;
     // Consume the request at transaction entry so invalid ranges, unsupported
     // formats, and unwritable paths cannot leak dither into the next render.
     const int ditherMode = pendingDitherMode_.exchange(0);
@@ -69504,6 +71402,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         juce::AudioProcessor* processor;
         juce::MemoryBlock savedState;
         bool preparedByTrack = false;
+        bool wasNonRealtime = false;
         bool hasNAMTransientState = false;
         float namAuditionSource = 0.0f;
         std::uint64_t namAuditionSourceSample = 0;
@@ -69525,7 +71424,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         PluginStateBackup backup;
         backup.processor = proc;
         backup.preparedByTrack = preparedByTrack;
-        if (auto* rack = dynamic_cast<S13NAMRack*>(proc))
+        backup.wasNonRealtime = proc->isNonRealtime();
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(proc))
         {
             // auditionSource is deliberately excluded from durable project and
             // preset state. Offline work still has to restore the live monitor
@@ -69536,6 +71436,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             backup.namAuditionSourceSample = rack->auditionSourceSample;
         }
         proc->getStateInformation(backup.savedState);
+        proc->setNonRealtime(true);
         pluginBackups.push_back(std::move(backup));
     };
 
@@ -69557,7 +71458,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         // pre-render state without touching model or IR resources.
         for (auto& backup : pluginBackups)
         {
-            if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+            backup.processor->setNonRealtime(backup.wasNonRealtime);
+            if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
             {
                 rack->restoreRenderPassStateInformation(backup.savedState.getData(),
                                                         static_cast<int>(backup.savedState.getSize()));
@@ -69580,7 +71482,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 // Rendering does not mutate NAM tone/resource identity. A full
                 // state restore would re-probe model files and re-submit the IR
                 // asynchronously just before live playback resumes.
-                if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+                if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
                 {
                     const bool restored = rack->restoreRenderPassStateInformation(
                         backup.savedState.getData(), static_cast<int>(backup.savedState.getSize()));
@@ -69593,7 +71495,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                                                            (int)backup.savedState.getSize());
                 }
                 backup.processor->reset();
-                if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor);
+                if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor);
                     rack != nullptr && backup.hasNAMTransientState)
                 {
                     rack->auditionSource.store(
@@ -70062,7 +71964,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 // each normalization pass can start asynchronous convolution
                 // work and used to arm a model transition. Its reset() now
                 // clears all streaming/effect history without changing state.
-                if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+                if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
                 {
                     const bool restored = rack->restoreRenderPassStateInformation(
                         backup.savedState.getData(), static_cast<int>(backup.savedState.getSize()));
@@ -70160,6 +72062,12 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
         while (samplesRemaining > 0)
         {
+            if (keepRunning && !keepRunning())
+            {
+                writer.reset();
+                restorePreparedTracksForRealtime();
+                return false;
+            }
             int samplesThisBlock = (int)std::min((juce::int64)blockSize, samplesRemaining);
             const juce::int64 renderBlockStartSample = processingTotalSamples - samplesRemaining;
             const auto outputWindow = getOfflineRenderBlockWindow(offlineRenderPlan,
@@ -70807,7 +72715,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         // Let FFmpeg perform the final output SRC/encode step.
         bool ffmpegOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
                                           requestedOutputSampleRate, codecQuality,
-                                          bitDepth, numChannels);
+                                          bitDepth, numChannels, keepRunning);
 
         // Clean up temp file
         renderFile.deleteFile();
@@ -70835,6 +72743,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     restorePreparedTracksForRealtime();
     logToDisk("renderProject: Restored " + juce::String((int)pluginBackups.size()) + " FX plugins for real-time");
 
+    if (keepRunning && !keepRunning()) return false;
     if (! stagedOutput.overwriteTargetFileWithTemporary())
     {
         logToDisk("renderProject: FAIL - could not atomically publish staged output to "
@@ -71094,7 +73003,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         bool normalize = false;
         bool addTail = false;
         double tailMs = 0.0;
-        juce::String ditherType;
+        juce::String ditherType {};
         bool expectDualMono = true;
     };
 
@@ -71551,6 +73460,106 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
              "Selected-item exports must include only the requested clip IDs; empty selections must fail.",
              juce::var(selectedDiagnostic));
 
+    const auto cancelledOutput = outputDirectory.getChildFile("cancel-preserves-output.wav");
+    cancelledOutput.replaceWithText("previous output must survive cancellation");
+    int cancellationChecks = 0;
+    const auto cancelDuringBlocks = [&] { return ++cancellationChecks < 6; };
+    const bool cancelled = !renderProject("stem:" + trackId, 0, fixtureDurationSeconds,
+        cancelledOutput.getFullPathName(), "wav", 48000, 24, 2, true, false, 0, false, {}, cancelDuringBlocks);
+    addCheck("cancel_during_normalization_preserves_previous_output", cancelled && cancellationChecks == 6
+        && cancelledOutput.loadFileAsString() == "previous output must survive cancellation",
+        "Cancellation between render blocks does not publish a partial output.");
+    const auto afterCancel = outputDirectory.getChildFile("after-cancellation.wav");
+    addCheck("render_succeeds_after_cancelled_transaction", renderProject("stem:" + trackId, 0, fixtureDurationSeconds,
+        afterCancel.getFullPathName(), "wav", 48000, 24, 2, false, false, 0),
+        "A cancelled transaction restores processing and leaves the next render usable.");
+
+    if (trackAdded && trackMap.count(trackId))
+    {
+        juce::PluginDescription description;
+        description.name = "Isolation regression probe"; description.pluginFormatName = "OpenStudioIsolationProbe";
+        description.fileOrIdentifier = "openstudio-isolation-regression";
+        description.numInputChannels = description.numOutputChannels = 2;
+        juce::String isolationError;
+        auto isolated = IsolatedPlugin::create(description, 48000, 512, isolationError);
+        auto* remote = isolated.get();
+        const bool mounted = isolated && trackMap[trackId]->addTrackFX(std::move(isolated), 48000, 512);
+        const auto isolatedOutput = outputDirectory.getChildFile("isolated-render.wav");
+        const bool rendered = mounted && renderProject("stem:" + trackId, 0, fixtureDurationSeconds,
+            isolatedOutput.getFullPathName(), "wav", 48000, 24, 2, false, false, 0);
+        juce::AudioBuffer<float> baseline, isolatedAudio;
+        double baselineRate = 0, isolatedRate = 0;
+        bool parity = rendered && readAudioFileForParity(afterCancel, baseline, baselineRate)
+            && readAudioFileForParity(isolatedOutput, isolatedAudio, isolatedRate)
+            && baselineRate == isolatedRate && baseline.getNumSamples() == isolatedAudio.getNumSamples()
+            && baseline.getNumChannels() == isolatedAudio.getNumChannels();
+        double difference = 0;
+        if (parity) for (int ch = 0; ch < baseline.getNumChannels(); ++ch)
+            for (int sample = 0; sample < baseline.getNumSamples(); ++sample)
+                difference = std::max(difference, static_cast<double>(std::abs(baseline.getSample(ch, sample) - isolatedAudio.getSample(ch, sample))));
+        addCheck("isolated_plugin_render_pdc_parity", parity && difference < 0.00001 && remote->isHealthy() && !remote->isNonRealtime(),
+            "A pass-through isolated child must render aligned with the unhosted baseline and restore live mode.", difference);
+        if (mounted) trackMap[trackId]->removeTrackFX(0);
+    }
+    const auto externalPlugin = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_FX_REGRESSION_PLUGIN", "");
+    if (trackAdded && externalPlugin.isNotEmpty())
+    {
+        // Explicit opt-in only: exercise an installed vendor without opening its editor.
+        auto loaded = pluginManager.loadPluginFromFile(externalPlugin, 48000, 512);
+        auto* instance = dynamic_cast<juce::AudioPluginInstance*>(loaded.get());
+        juce::String identifier;
+        if (instance != nullptr)
+            identifier = pluginManager.getPluginIdentifier(instance->getPluginDescription());
+        bool catalogIdentity = false;
+        for (const auto& candidate : pluginManager.getAvailablePlugins())
+            catalogIdentity = catalogIdentity || candidate.createIdentifierString() == identifier;
+        addCheck("external_fx_catalog_identity", instance != nullptr && catalogIdentity,
+                 "Loaded vendor metadata resolves to its scanned class identifier.", identifier);
+        loaded.reset();
+        const auto hasIdentity = [&] (const juce::var& chain) {
+            return chain.size() > 0 && chain[0].getProperty("pluginPath", "").toString() == identifier;
+        };
+        if (catalogIdentity)
+        {
+            const bool monitorAdded = addMonitoringFX(identifier);
+            addCheck("external_monitor_fx_insert", monitorAdded && hasIdentity(getMonitoringFX()),
+                     "Monitor insertion retains a catalog-resolvable identity when rebuilding the stage.");
+            const bool monitorAppended = monitorAdded && addMonitoringFX("OpenStudio NAM Rack");
+            addCheck("external_monitor_fx_append_restores_vendor", monitorAppended && hasIdentity(getMonitoringFX()),
+                     "Appending NAM Rack restores the existing vendor state through the same identity.");
+            if (monitorAppended) removeMonitoringFX(1);
+            if (monitorAdded) removeMonitoringFX(0);
+            addCheck("external_monitor_fx_remove", getMonitoringFX().size() == 0,
+                     "Removal leaves the monitoring stage empty.");
+
+            const bool masterAdded = addMasterFX(identifier);
+            addCheck("external_master_fx_insert", masterAdded && hasIdentity(getMasterFX()),
+                     "Master insertion also uses the scanned class identity.");
+            const bool masterAppended = masterAdded && addMasterBuiltInFX("OpenStudio EQ");
+            addCheck("external_master_fx_append_restores_vendor", masterAppended && hasIdentity(getMasterFX()),
+                     "Appending a built-in restores the existing vendor in the master stage.");
+            if (masterAppended) removeMasterFX(1);
+            if (masterAdded) removeMasterFX(0);
+
+            for (const bool input : { false, true })
+            {
+                const auto add = [&] (const juce::String& id) {
+                    return input ? addTrackInputFX(trackId, id, false) : addTrackFX(trackId, id, false);
+                };
+                const auto remove = [&] { return input ? removeTrackInputFX(trackId, 0) : removeTrackFX(trackId, 0); };
+                const bool inserted = add(identifier);
+                const auto chain = input ? getTrackInputFX(trackId) : getTrackFX(trackId);
+                const auto state = inserted ? getPluginState(trackId, 0, input) : juce::String();
+                const auto savedIdentifier = chain.size() > 0 ? chain[0].getProperty("pluginPath", "").toString() : juce::String();
+                if (inserted) remove();
+                const bool reopened = inserted && hasIdentity(chain) && add(savedIdentifier);
+                const bool restored = reopened && !state.isEmpty() && setPluginState(trackId, 0, input, state);
+                addCheck(input ? "external_input_fx_state_round_trip" : "external_track_fx_state_round_trip",
+                         restored, "Serialized FX identity and opaque state can reopen the same vendor class.");
+                if (reopened) remove();
+            }
+        }
+    }
     if (trackAdded)
         removeTrack(trackId);
 
@@ -72146,6 +74155,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     {
         juce::AudioProcessor* processor = nullptr;
         juce::MemoryBlock state;
+        bool wasNonRealtime = false;
         bool hasNAMTransientState = false;
         float namAuditionSource = 0.0f;
         std::uint64_t namAuditionSourceSample = 0;
@@ -72157,7 +74167,8 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
             return;
         FreezeProcessorBackup backup;
         backup.processor = processor;
-        if (auto* rack = dynamic_cast<S13NAMRack*>(processor))
+        backup.wasNonRealtime = processor->isNonRealtime();
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processor))
         {
             backup.hasNAMTransientState = true;
             backup.namAuditionSource = rack->auditionSource.load(
@@ -72165,6 +74176,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
             backup.namAuditionSourceSample = rack->auditionSourceSample;
         }
         processor->getStateInformation(backup.state);
+        processor->setNonRealtime(true);
         processorBackups.push_back(std::move(backup));
     };
     for (int fx = 0; fx < track->getNumInputFX(); ++fx)
@@ -72184,9 +74196,12 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
         // Seed NAM controls before its embedded processors are prepared, then
         // restore the remaining hosted state once every processor is live-sized.
         for (auto& backup : processorBackups)
-            if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+        {
+            backup.processor->setNonRealtime(backup.wasNonRealtime);
+            if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
                 rack->restoreRenderPassStateInformation(backup.state.getData(),
                                                         static_cast<int>(backup.state.getSize()));
+        }
 
         track->setPDCDelay(realtimePdcDelay);
         track->prepareToPlay(currentSampleRate > 0.0 ? currentSampleRate : renderRate,
@@ -72195,7 +74210,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
         {
             if (backup.processor == nullptr)
                 continue;
-            if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+            if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
             {
                 rack->restoreRenderPassStateInformation(backup.state.getData(),
                                                         static_cast<int>(backup.state.getSize()));
@@ -72204,7 +74219,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
                 backup.processor->setStateInformation(backup.state.getData(),
                                                       static_cast<int>(backup.state.getSize()));
             backup.processor->reset();
-            if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor);
+            if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor);
                 rack != nullptr && backup.hasNAMTransientState)
             {
                 rack->auditionSource.store(
@@ -72224,7 +74239,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     track->prepareToPlay(renderRate, renderBlockSize);
     for (auto& backup : processorBackups)
     {
-        if (auto* rack = dynamic_cast<S13NAMRack*>(backup.processor))
+        if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(backup.processor))
             rack->auditionSource.store(0.0f, std::memory_order_relaxed);
         if (backup.processor != nullptr)
             backup.processor->reset();
@@ -72934,7 +74949,7 @@ static bool migrateXMLNAMRackPresetToCurrent(
     bool persistMigration)
 {
     bool stateMigrated = false;
-    if (! S13NAMRack::migratePresetStateToCurrent(
+    if (! OpenStudioNAMRack::migratePresetStateToCurrent(
             stateData, stateMigrated))
     {
         return false;
@@ -72962,7 +74977,7 @@ bool AudioEngine::isNAMRackPlugin(const juce::String& trackId, int fxIndex, bool
             ? trackIt->second->getInputFXProcessorShared(fxIndex)
             : trackIt->second->getTrackFXProcessorShared(fxIndex);
     }
-    return dynamic_cast<S13NAMRack*>(processorOwner.get()) != nullptr;
+    return dynamic_cast<OpenStudioNAMRack*>(processorOwner.get()) != nullptr;
 }
 
 juce::var AudioEngine::getPluginPresets(const juce::String& trackId, int fxIndex, bool isInputFX)
@@ -72977,7 +74992,6 @@ juce::var AudioEngine::getPluginPresets(const juce::String& trackId, int fxIndex
     if (presetsDir.isDirectory())
     {
         auto files = presetsDir.findChildFiles(juce::File::findFiles, true, "*.ospreset");
-        files.addArray(presetsDir.findChildFiles(juce::File::findFiles, true, "*.s13preset"));
         for (const auto& file : files)
         {
             // The legacy generic preset browser can still encounter XML-wrapped
@@ -72990,13 +75004,13 @@ juce::var AudioEngine::getPluginPresets(const juce::String& trackId, int fxIndex
                 const auto encodedState =
                     xml->getStringAttribute("state");
                 if (encodedState.isNotEmpty()
-                    && stateData.fromBase64Encoding(encodedState))
+                    && PluginStateValidation::decode(encodedState, stateData))
                 {
                     const auto tree = juce::ValueTree::readFromData(
                         stateData.getData(), stateData.getSize());
                     if (tree.isValid()
                         && tree.getType()
-                            == juce::Identifier("S13NAMRack"))
+                            == juce::Identifier("OpenStudioNAMRack"))
                     {
                         (void) migrateXMLNAMRackPresetToCurrent(
                             file, *xml, stateData, true);
@@ -73041,10 +75055,10 @@ bool AudioEngine::loadPluginPreset(const juce::String& trackId, int fxIndex, boo
         }
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processorOwner.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processorOwner.get()))
     {
         juce::MemoryBlock stateData;
-        if (! stateData.fromBase64Encoding(base64State))
+        if (! PluginStateValidation::decode(base64State, stateData))
             return false;
 
         if (! migrateXMLNAMRackPresetToCurrent(
@@ -73090,7 +75104,7 @@ bool AudioEngine::savePluginPreset(const juce::String& trackId, int fxIndex, boo
         }
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processorOwner.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processorOwner.get()))
     {
         juce::MemoryBlock stateData;
         rack->getTonePresetStateInformation(stateData);
@@ -73104,7 +75118,7 @@ bool AudioEngine::savePluginPreset(const juce::String& trackId, int fxIndex, boo
         return false;
 
     // Create XML structure
-    juce::XmlElement xml("S13Preset");
+    juce::XmlElement xml("OpenStudioPreset");
     xml.setAttribute("name", presetName);
     xml.setAttribute("state", base64State);
     xml.setAttribute("version", "1.0");
@@ -73176,7 +75190,7 @@ bool AudioEngine::storePluginABState(const juce::String& trackId, int fxIndex, b
         }
     }
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processorOwner.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processorOwner.get()))
     {
         juce::MemoryBlock stateData;
         rack->getTonePresetStateInformation(stateData);
@@ -73239,10 +75253,10 @@ bool AudioEngine::loadPluginABState(const juce::String& trackId, int fxIndex, bo
 
     bool ok = false;
 
-    if (auto* rack = dynamic_cast<S13NAMRack*>(processorOwner.get()))
+    if (auto* rack = dynamic_cast<OpenStudioNAMRack*>(processorOwner.get()))
     {
         juce::MemoryBlock stateData;
-        if (! stateData.fromBase64Encoding(storedState))
+        if (! PluginStateValidation::decode(storedState, stateData))
             return false;
 
         const int latencyBefore = rack->getLatencySamples();
@@ -73432,13 +75446,13 @@ bool AudioEngine::setBuiltInFXOversampling(const juce::String& trackId, int fxIn
                 processor->getCallbackLock());
             const int latencyBefore = processor->getLatencySamples();
             if (auto* builtIn =
-                    dynamic_cast<S13BuiltInEffect*>(processor))
+                    dynamic_cast<OpenStudioBuiltInEffect*>(processor))
             {
                 builtIn->setOversamplingEnabled(enabled);
                 applied = true;
             }
             else if (auto* saturator =
-                         dynamic_cast<S13Saturator*>(processor))
+                         dynamic_cast<OpenStudioSaturator*>(processor))
             {
                 if (enabled
                     && saturator->oversampleMode.load(
@@ -73517,7 +75531,7 @@ juce::var AudioEngine::getPitchCorrectorData(const juce::String& trackId, int fx
     if (it == trackMap.end() || !it->second) return juce::var();
     juce::AudioProcessor* proc = (fxIndex >= 0 && fxIndex < it->second->getNumTrackFX())
                                   ? it->second->getTrackFXProcessor(fxIndex) : nullptr;
-    auto* pc = dynamic_cast<S13PitchCorrector*>(proc);
+    auto* pc = dynamic_cast<OpenStudioPitchCorrector*>(proc);
     if (!pc) return juce::var();
 
     auto data = pc->getCurrentPitchData();
@@ -73559,7 +75573,7 @@ void AudioEngine::setPitchCorrectorParam(const juce::String& trackId, int fxInde
     if (it == trackMap.end() || !it->second) return;
     juce::AudioProcessor* proc = (fxIndex >= 0 && fxIndex < it->second->getNumTrackFX())
                                   ? it->second->getTrackFXProcessor(fxIndex) : nullptr;
-    auto* pc = dynamic_cast<S13PitchCorrector*>(proc);
+    auto* pc = dynamic_cast<OpenStudioPitchCorrector*>(proc);
     if (!pc) return;
 
     auto& mapper = pc->getMapper();
@@ -73590,7 +75604,7 @@ juce::var AudioEngine::getPitchHistory(const juce::String& trackId, int fxIndex,
     if (it == trackMap.end() || !it->second) return juce::Array<juce::var>();
     juce::AudioProcessor* proc = (fxIndex >= 0 && fxIndex < it->second->getNumTrackFX())
                                   ? it->second->getTrackFXProcessor(fxIndex) : nullptr;
-    auto* pc = dynamic_cast<S13PitchCorrector*>(proc);
+    auto* pc = dynamic_cast<OpenStudioPitchCorrector*>(proc);
     if (!pc) return juce::Array<juce::var>();
 
     auto frames = pc->getPitchHistory(numFrames);
@@ -75524,7 +77538,7 @@ juce::var AudioEngine::getPitchPreviewRoutingStatus(const juce::String& clipId)
 
 bool AudioEngine::isPolyphonicDetectionAvailable() const
 {
-#if S13_HAS_ONNXRUNTIME
+#if OPENSTUDIO_HAS_ONNXRUNTIME
     return true;
 #else
     return false;
@@ -75901,6 +77915,12 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
     }
 
     // If already running, ignore
+    if (aiTrackEngine.isRunning())
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Audio generation is using AI resources. Wait for it to finish or cancel it before separating stems.");
+        return juce::var(result.release());
+    }
     if (stemSeparator.isRunning())
     {
         result->setProperty("started", false);
@@ -75978,6 +77998,12 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
         .getChildFile(audioFile.getFileNameWithoutExtension() + "_stems");
 
     // Start Python subprocess
+    if (! aiTrackEngine.releaseIdleWorker())
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Audio generation started before separation could acquire AI resources.");
+        return juce::var(result.release());
+    }
     if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, accelerationMode))
     {
         juce::Logger::writeToLog("StemSeparator: Failed to start separation.");
@@ -76052,23 +78078,23 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
 
     auto result = std::make_unique<juce::DynamicObject>();
 
-    if (aiTrackEngine.isRunning())
+    if (aiTrackEngine.isRunning() || stemSeparator.isRunning())
     {
         result->setProperty("started", false);
-        result->setProperty("error", "Another AI generation is already in progress.");
+        result->setProperty("error", "Another AI generation or stem separation is already in progress.");
         return juce::var(result.release());
     }
 
     auto aiToolsStatus = stemSeparator.getAiToolsStatus();
     if (auto* statusObject = aiToolsStatus.getDynamicObject())
     {
-        if (modelId == "stable-audio-3-medium")
+        if (modelId == "stable-audio-3-medium" || modelId == "minimax-music-3")
         {
             auto stableReady = false;
-            juce::String stableMessage = "Stable Audio 3 Medium is not set up yet.";
+            juce::String stableMessage = modelId + " is not set up yet.";
             if (auto* musicModels = statusObject->getProperty("musicModels").getDynamicObject())
             {
-                if (auto* stableModel = musicModels->getProperty("stable-audio-3-medium").getDynamicObject())
+                if (auto* stableModel = musicModels->getProperty(modelId).getDynamicObject())
                 {
                     stableReady = static_cast<bool>(stableModel->getProperty("ready"));
                     stableMessage = stableModel->getProperty("message").toString();
@@ -76080,7 +78106,7 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
                 result->setProperty("started", false);
                 result->setProperty("error", stableMessage.isNotEmpty()
                     ? stableMessage
-                    : "Import Stable Audio 3 Medium from AI Tools Setup before generating.");
+                    : "Import the selected Diffusers model from AI Tools Setup before generating.");
                 return juce::var(result.release());
             }
         }
@@ -76130,9 +78156,9 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
         }
     }
 
-    auto outputDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    auto outputDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("OpenStudio")
-        .getChildFile("generated-music");
+        .getChildFile("GeneratedAudio");
 
     if (! aiTrackEngine.startGeneration(modelId, workflowId, paramsJSON, outputDir))
     {
@@ -76145,6 +78171,7 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     }
 
     result->setProperty("started", true);
+    result->setProperty("requestId", aiTrackEngine.pollProgress().requestId);
     return juce::var(result.release());
 }
 
@@ -76166,8 +78193,7 @@ juce::var AudioEngine::getAIGenerationProgress()
         obj->setProperty("sourceClipId", progress.sourceClipId);
     obj->setProperty("elapsedMs", progress.elapsedMs);
     obj->setProperty("heartbeatTs", progress.heartbeatTs);
-    if (progress.phaseProgress >= 0.0)
-        obj->setProperty("phaseProgress", progress.phaseProgress);
+    obj->setProperty("phaseProgress", progress.phaseProgress);
     if (progress.etaMs >= 0.0)
         obj->setProperty("etaMs", progress.etaMs);
     if (progress.runMode.isNotEmpty())
@@ -76178,6 +78204,8 @@ juce::var AudioEngine::getAIGenerationProgress()
         obj->setProperty("lmModel", progress.lmModel);
     if (progress.statusNote.isNotEmpty())
         obj->setProperty("statusNote", progress.statusNote);
+    if (progress.generationDetails.isObject())
+        obj->setProperty("generationDetails", progress.generationDetails);
     if (progress.failureKind.isNotEmpty())
         obj->setProperty("failureKind", progress.failureKind);
     if (progress.sessionMode.isNotEmpty())

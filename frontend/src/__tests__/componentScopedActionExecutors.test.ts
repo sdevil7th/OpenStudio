@@ -45,6 +45,22 @@ describe("component-owned scoped action wiring", () => {
     expect(timelineSource).toContain('matchesActionShortcut(event, "clip.splitAtPointer")');
   });
 
+  it("keeps held-key Timeline nudges repeatable while one-shot edits stay guarded", () => {
+    const shortcutBlock = timelineSource.slice(
+      timelineSource.indexOf('"edit.splitAtCursor",'),
+      timelineSource.indexOf('return "unmatched";', timelineSource.indexOf('"edit.splitAtCursor",')),
+    );
+    expect(shortcutBlock).toContain('if (event.repeat && !actionId.startsWith("edit.nudge"))');
+    for (const actionId of [
+      "edit.nudgeLeft",
+      "edit.nudgeRight",
+      "edit.nudgeLeftFine",
+      "edit.nudgeRightFine",
+    ]) {
+      expect(shortcutBlock).toContain(`"${actionId}"`);
+    }
+  });
+
   it("executes selection-dependent Piano Roll actions inside the exact editor session", () => {
     for (const actionId of [
       "midi.loopFromSelectedNotes",

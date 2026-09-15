@@ -1,4 +1,5 @@
 #pragma once
+#include "ProcessorSafety.h"
 
 #include <JuceHeader.h>
 #include "AutomationList.h"
@@ -263,8 +264,15 @@ public:
     TrackType getTrackType() const { return trackType.load(std::memory_order_acquire); }
     
     // MIDI Configuration (Phase 2)
-    void setMIDIInputDevice(const juce::String& device) { midiInputDevice = device; }
-    juce::String getMIDIInputDevice() const { return midiInputDevice; }
+    void setMIDIInputDevice(const juce::String& device)
+    {
+        std::atomic_store(&midiInputDevice, std::make_shared<const juce::String>(device));
+    }
+    juce::String getMIDIInputDevice() const
+    {
+        const auto device = std::atomic_load(&midiInputDevice);
+        return device ? *device : juce::String();
+    }
     
     void setMIDIChannel(int channel)
     {
@@ -357,13 +365,13 @@ public:
     {
         return channelStripEQEnabled.load(std::memory_order_acquire);
     }
-    S13EQ* getChannelStripEQ() { return &channelStripEQ; }
+    OpenStudioEQ* getChannelStripEQ() { return &channelStripEQ; }
     void setChannelStripEQParam(int paramIndex, float value);
     float getChannelStripEQParam(int paramIndex) const;
 
     // Stable bridge indices used by the six-control Channel Strip EQ surface.
     // These are deliberately independent of AudioProcessor's parameter list so
-    // the inline strip cannot silently become a no-op when S13EQ is hosted
+    // the inline strip cannot silently become a no-op when OpenStudioEQ is hosted
     // directly rather than as a plug-in instance.
     static constexpr int channelStripEQBandCount = 6;
     static constexpr int channelStripEQValuesPerBand = 4;
@@ -438,6 +446,8 @@ public:
     void setForceAutomationReadForProcessing(bool forceRead) { forceAutomationReadDuringProcessing.store(forceRead, std::memory_order_relaxed); }
 
     bool tryProcessBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&);
+    void setDiagnosticsTrackId(const juce::String& id) { diagnosticsTrackId = id; }
+    int getProcessorFault(bool input, int index) const;
 
     // ARA Plugin Hosting (Phase 9)
     // Initialize ARA hosting for an FX plugin at the given index
@@ -473,6 +483,7 @@ private:
     // state machine, including its control-thread timer handoff.
     friend class AudioEngine;
     friend class NAMDelayRegression;
+    friend class RuntimeSafetyRegression;
 
     struct FallbackSamplerSample;
 
@@ -639,6 +650,8 @@ private:
         PrecisionOverrideSnapshot inputFXPrecisionOverrides;
         PrecisionOverrideSnapshot trackFXPrecisionOverrides;
         ProcessorPtr instrument;
+        std::vector<std::shared_ptr<ProcessorSafety>> inputSafety, trackSafety;
+        std::shared_ptr<ProcessorSafety> instrumentSafety;
         SidechainSourceSnapshot sidechainSources;
         SendSnapshot sends;
         std::array<FXBypassDelayStoragePtr,
@@ -659,6 +672,8 @@ private:
     // than our 2-channel track buffer (avoids heap allocation on audio thread)
     juce::AudioBuffer<float> fxProcessBuffer;
     juce::AudioBuffer<double> fxProcessBufferDouble;
+    int preparedRealtimeBlockCapacity = 0; // Changed only while callbacks are quiescent.
+    juce::String diagnosticsTrackId; // Control-thread diagnostics only.
     struct FXContinuityState
     {
         const juce::AudioProcessor* processor = nullptr;
@@ -712,7 +727,7 @@ private:
     
     // Track Type & MIDI (Phase 2)
     std::atomic<TrackType> trackType { TrackType::Audio };
-    juce::String midiInputDevice;
+    std::shared_ptr<const juce::String> midiInputDevice;
     std::atomic<int> midiChannel { 0 };  // 0 = all channels, 1-16 = specific channel
     std::shared_ptr<juce::AudioPluginInstance> instrumentPlugin;
     juce::MidiBuffer midiBuffer;  // For MIDI event storage
@@ -776,7 +791,7 @@ private:
     float dcPrevInputR { 0.0f };
 
     // Channel Strip EQ
-    S13EQ channelStripEQ;
+    OpenStudioEQ channelStripEQ;
     std::atomic<bool> channelStripEQEnabled { false };
 
     // Phase Invert
@@ -820,6 +835,9 @@ private:
     static constexpr int MIDI_QUEUE_CAPACITY = 2048;
     std::array<PendingMIDIEvent, MIDI_QUEUE_CAPACITY> pendingMidiQueue {};
     std::atomic<int> midiQueueReadIndex { 0 };
+    // Hardware devices and the virtual keyboard are concurrent producers.
+    // The audio-thread consumer never takes this lock.
+    juce::CriticalSection midiProducerLock;
     std::atomic<int> midiQueueWriteIndex { 0 };
     std::atomic<int> midiQueueOverflowCount { 0 };
     std::atomic<int> lastBuiltMidiEventCount { 0 };

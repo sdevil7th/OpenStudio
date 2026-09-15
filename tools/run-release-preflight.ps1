@@ -22,7 +22,7 @@ param(
     [string]$NetlifyOutputDir = "dist/netlify-release-site",
 
     [Parameter(Mandatory = $false)]
-    [string]$NotesFile = "packaging/release-notes-template.md",
+    [string]$NotesFile = "",
 
     [Parameter(Mandatory = $false)]
     [string]$RepoSlug = "",
@@ -65,6 +65,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Release content is required even when build/package work is skipped.
+if ([string]::IsNullOrWhiteSpace($NotesFile)) {
+    $NotesFile = Join-Path $PSScriptRoot ("../docs/releases/" + ($Version -replace '^v', '') + ".md")
+}
+& python (Join-Path $PSScriptRoot "validate-release-notes.py") --version $Version --notes-file $NotesFile
+if ($LASTEXITCODE -ne 0) { throw "Release notes failed validation. Write and review the version-specific notes before continuing." }
+
 
 function Invoke-Step {
     param(
@@ -159,6 +167,7 @@ Invoke-Step "Validating Windows runtime bundle" {
 Invoke-Step "Packaging Windows installer" {
     $arguments = @(
         "-Version", $Version,
+        "-NotesFile", $NotesFile,
         "-SourceDir", $windowsBundleDir,
         "-OutputDir", $WindowsOutputDir
     )

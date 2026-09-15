@@ -7,7 +7,7 @@ ARAHostController::~ARAHostController()
     shutdown();
 }
 
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
 
 namespace
 {
@@ -31,7 +31,7 @@ juce::String araContentTypeToString(ARA::ARAContentType type)
 // =============================================================================
 
 ARA::ARAAudioReaderHostRef
-ARAHostController::S13AudioAccessController::createAudioReaderForSource (
+ARAHostController::OpenStudioAudioAccessController::createAudioReaderForSource (
     ARA::ARAAudioSourceHostRef audioSourceHostRef,
     bool use64BitSamples) noexcept
 {
@@ -48,7 +48,7 @@ ARAHostController::S13AudioAccessController::createAudioReaderForSource (
     return ref;
 }
 
-bool ARAHostController::S13AudioAccessController::readAudioSamples (
+bool ARAHostController::OpenStudioAudioAccessController::readAudioSamples (
     ARA::ARAAudioReaderHostRef readerRef,
     ARA::ARASamplePosition samplePosition,
     ARA::ARASampleCount samplesPerChannel,
@@ -177,20 +177,20 @@ bool ARAHostController::S13AudioAccessController::readAudioSamples (
     return true;
 }
 
-void ARAHostController::S13AudioAccessController::destroyAudioReader (
+void ARAHostController::OpenStudioAudioAccessController::destroyAudioReader (
     ARA::ARAAudioReaderHostRef readerRef) noexcept
 {
     audioReaders.erase (ReaderConverter::fromHostRef (readerRef));
 }
 
 // Archiving Controller
-ARA::ARASize ARAHostController::S13ArchivingController::getArchiveSize (
+ARA::ARASize ARAHostController::OpenStudioArchivingController::getArchiveSize (
     ARA::ARAArchiveReaderHostRef archiveReaderHostRef) noexcept
 {
     return static_cast<ARA::ARASize> (ReaderConverter::fromHostRef (archiveReaderHostRef)->getSize());
 }
 
-bool ARAHostController::S13ArchivingController::readBytesFromArchive (
+bool ARAHostController::OpenStudioArchivingController::readBytesFromArchive (
     ARA::ARAArchiveReaderHostRef archiveReaderHostRef,
     ARA::ARASize position, ARA::ARASize length,
     ARA::ARAByte* buffer) noexcept
@@ -204,7 +204,7 @@ bool ARAHostController::S13ArchivingController::readBytesFromArchive (
     return false;
 }
 
-bool ARAHostController::S13ArchivingController::writeBytesToArchive (
+bool ARAHostController::OpenStudioArchivingController::writeBytesToArchive (
     ARA::ARAArchiveWriterHostRef archiveWriterHostRef,
     ARA::ARASize position, ARA::ARASize length,
     const ARA::ARAByte* buffer) noexcept
@@ -215,57 +215,57 @@ bool ARAHostController::S13ArchivingController::writeBytesToArchive (
     return false;
 }
 
-void ARAHostController::S13ArchivingController::notifyDocumentArchivingProgress (float) noexcept {}
-void ARAHostController::S13ArchivingController::notifyDocumentUnarchivingProgress (float) noexcept {}
+void ARAHostController::OpenStudioArchivingController::notifyDocumentArchivingProgress (float) noexcept {}
+void ARAHostController::OpenStudioArchivingController::notifyDocumentUnarchivingProgress (float) noexcept {}
 
-ARA::ARAPersistentID ARAHostController::S13ArchivingController::getDocumentArchiveID (
+ARA::ARAPersistentID ARAHostController::OpenStudioArchivingController::getDocumentArchiveID (
     ARA::ARAArchiveReaderHostRef) noexcept
 {
-    return "studio13-ara-archive-v1";
+    return "openstudio-ara-archive-v1";
 }
 
 // Content Access Controller
-bool ARAHostController::S13ContentAccessController::isMusicalContextContentAvailable (
+bool ARAHostController::OpenStudioContentAccessController::isMusicalContextContentAvailable (
     ARA::ARAMusicalContextHostRef, ARA::ARAContentType type) noexcept
 {
     return type == ARA::kARAContentTypeTempoEntries || type == ARA::kARAContentTypeBarSignatures;
 }
 
-ARA::ARAContentGrade ARAHostController::S13ContentAccessController::getMusicalContextContentGrade (
+ARA::ARAContentGrade ARAHostController::OpenStudioContentAccessController::getMusicalContextContentGrade (
     ARA::ARAMusicalContextHostRef, ARA::ARAContentType) noexcept
 {
     return ARA::kARAContentGradeInitial;
 }
 
 ARA::ARAContentReaderHostRef
-ARAHostController::S13ContentAccessController::createMusicalContextContentReader (
+ARAHostController::OpenStudioContentAccessController::createMusicalContextContentReader (
     ARA::ARAMusicalContextHostRef, ARA::ARAContentType type,
     const ARA::ARAContentTimeRange*) noexcept
 {
     return Converter::toHostRef (type);
 }
 
-bool ARAHostController::S13ContentAccessController::isAudioSourceContentAvailable (
+bool ARAHostController::OpenStudioContentAccessController::isAudioSourceContentAvailable (
     ARA::ARAAudioSourceHostRef, ARA::ARAContentType) noexcept
 {
     return false;
 }
 
-ARA::ARAContentGrade ARAHostController::S13ContentAccessController::getAudioSourceContentGrade (
+ARA::ARAContentGrade ARAHostController::OpenStudioContentAccessController::getAudioSourceContentGrade (
     ARA::ARAAudioSourceHostRef, ARA::ARAContentType) noexcept
 {
     return ARA::kARAContentGradeInitial;
 }
 
 ARA::ARAContentReaderHostRef
-ARAHostController::S13ContentAccessController::createAudioSourceContentReader (
+ARAHostController::OpenStudioContentAccessController::createAudioSourceContentReader (
     ARA::ARAAudioSourceHostRef, ARA::ARAContentType,
     const ARA::ARAContentTimeRange*) noexcept
 {
     return nullptr;
 }
 
-ARA::ARAInt32 ARAHostController::S13ContentAccessController::getContentReaderEventCount (
+ARA::ARAInt32 ARAHostController::OpenStudioContentAccessController::getContentReaderEventCount (
     ARA::ARAContentReaderHostRef contentReaderHostRef) noexcept
 {
     auto contentType = Converter::fromHostRef (contentReaderHostRef);
@@ -274,7 +274,7 @@ ARA::ARAInt32 ARAHostController::S13ContentAccessController::getContentReaderEve
     return 0;
 }
 
-const void* ARAHostController::S13ContentAccessController::getContentReaderDataForEvent (
+const void* ARAHostController::OpenStudioContentAccessController::getContentReaderDataForEvent (
     ARA::ARAContentReaderHostRef contentReaderHostRef,
     ARA::ARAInt32 eventIndex) noexcept
 {
@@ -303,11 +303,11 @@ const void* ARAHostController::S13ContentAccessController::getContentReaderDataF
     return nullptr;
 }
 
-void ARAHostController::S13ContentAccessController::destroyContentReader (
+void ARAHostController::OpenStudioContentAccessController::destroyContentReader (
     ARA::ARAContentReaderHostRef) noexcept {}
 
 // Model Update Controller
-void ARAHostController::S13ModelUpdateController::notifyAudioSourceAnalysisProgress (
+void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceAnalysisProgress (
     ARA::ARAAudioSourceHostRef, ARA::ARAAnalysisProgressState state, float value) noexcept
 {
     analysisProgress.store (value);
@@ -328,21 +328,21 @@ void ARAHostController::S13ModelUpdateController::notifyAudioSourceAnalysisProgr
         analysisComplete.store (true);
 }
 
-void ARAHostController::S13ModelUpdateController::notifyAudioSourceContentChanged (
+void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceContentChanged (
     ARA::ARAAudioSourceHostRef audioSourceHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
     using SrcConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAAudioSourceHostRef>;
     auto* entry = SrcConverter::fromHostRef(audioSourceHostRef);
     owner.noteEditDrivenDebugEvent("notifyAudioSourceContentChanged", entry != nullptr ? entry->clipId : juce::String());
 }
-void ARAHostController::S13ModelUpdateController::notifyAudioModificationContentChanged (
+void ARAHostController::OpenStudioModelUpdateController::notifyAudioModificationContentChanged (
     ARA::ARAAudioModificationHostRef audioModificationHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
     using ModConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAAudioModificationHostRef>;
     auto* entry = ModConverter::fromHostRef(audioModificationHostRef);
     owner.noteEditDrivenDebugEvent("notifyAudioModificationContentChanged", entry != nullptr ? entry->clipId : juce::String());
 }
-void ARAHostController::S13ModelUpdateController::notifyPlaybackRegionContentChanged (
+void ARAHostController::OpenStudioModelUpdateController::notifyPlaybackRegionContentChanged (
     ARA::ARAPlaybackRegionHostRef playbackRegionHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
     using RegConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAPlaybackRegionHostRef>;
@@ -351,29 +351,29 @@ void ARAHostController::S13ModelUpdateController::notifyPlaybackRegionContentCha
 }
 
 // Playback Controller
-void ARAHostController::S13PlaybackController::requestStartPlayback() noexcept
+void ARAHostController::OpenStudioPlaybackController::requestStartPlayback() noexcept
 {
     owner.requestStartPlaybackFromPlugin();
 }
 
-void ARAHostController::S13PlaybackController::requestStopPlayback() noexcept
+void ARAHostController::OpenStudioPlaybackController::requestStopPlayback() noexcept
 {
     owner.requestStopPlaybackFromPlugin();
 }
 
-void ARAHostController::S13PlaybackController::requestSetPlaybackPosition (ARA::ARATimePosition timePosition) noexcept
+void ARAHostController::OpenStudioPlaybackController::requestSetPlaybackPosition (ARA::ARATimePosition timePosition) noexcept
 {
     owner.requestSetPlaybackPositionFromPlugin(static_cast<double> (timePosition));
 }
 
-void ARAHostController::S13PlaybackController::requestSetCycleRange (ARA::ARATimePosition startTime,
+void ARAHostController::OpenStudioPlaybackController::requestSetCycleRange (ARA::ARATimePosition startTime,
                                                                      ARA::ARATimeDuration duration) noexcept
 {
     owner.requestSetCycleRangeFromPlugin(static_cast<double> (startTime),
                                          static_cast<double> (duration));
 }
 
-void ARAHostController::S13PlaybackController::requestEnableCycle (bool enable) noexcept
+void ARAHostController::OpenStudioPlaybackController::requestEnableCycle (bool enable) noexcept
 {
     owner.requestEnableCycleFromPlugin(enable);
 }
@@ -419,11 +419,11 @@ void ARAHostController::completeInitialization (juce::ARAFactoryWrapper factory,
     try
     {
         // Create the host-side controllers (we keep raw pointers before moving ownership)
-        auto audioAccess = std::make_unique<S13AudioAccessController>();
-        auto archiving = std::make_unique<S13ArchivingController>();
-        auto contentAccess = std::make_unique<S13ContentAccessController>();
-        auto modelUpdate = std::make_unique<S13ModelUpdateController>(*this);
-        auto playbackCtrl = std::make_unique<S13PlaybackController>(*this);
+        auto audioAccess = std::make_unique<OpenStudioAudioAccessController>();
+        auto archiving = std::make_unique<OpenStudioArchivingController>();
+        auto contentAccess = std::make_unique<OpenStudioContentAccessController>();
+        auto modelUpdate = std::make_unique<OpenStudioModelUpdateController>(*this);
+        auto playbackCtrl = std::make_unique<OpenStudioPlaybackController>(*this);
         requestedAnalysisContentTypes.clear();
 
         const auto* araFactory = factory.get();
@@ -810,7 +810,7 @@ juce::MemoryBlock ARAHostController::saveState() const
 
     // Use the ARA archiving interface to save document state
     juce::MemoryOutputStream stream (stateData, false);
-    auto writerRef = S13ArchivingController::WriterConverter::toHostRef (&stream);
+    auto writerRef = OpenStudioArchivingController::WriterConverter::toHostRef (&stream);
     dc.storeDocumentToArchive (writerRef);
 
     return stateData;
@@ -823,7 +823,7 @@ bool ARAHostController::restoreState (const juce::MemoryBlock& data)
     auto& dc = araDocController->getDocumentController();
 
     auto dataCopy = data; // Need non-const
-    auto readerRef = S13ArchivingController::ReaderConverter::toHostRef (&dataCopy);
+    auto readerRef = OpenStudioArchivingController::ReaderConverter::toHostRef (&dataCopy);
     bool ok = dc.beginRestoringDocumentFromArchive (readerRef);
     if (ok)
         ok = dc.endRestoringDocumentFromArchive (readerRef);
@@ -906,7 +906,7 @@ void ARAHostController::setPlaybackRequestHandlers(PlaybackRequestHandlers handl
 
 float ARAHostController::getAnalysisProgress() const
 {
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
     return modelUpdateControllerPtr != nullptr
         ? modelUpdateControllerPtr->analysisProgress.load()
         : 0.0f;
@@ -917,7 +917,7 @@ float ARAHostController::getAnalysisProgress() const
 
 bool ARAHostController::isAnalysisComplete() const
 {
-#if S13_HAS_ARA
+#if OpenStudio_HAS_ARA
     return modelUpdateControllerPtr != nullptr
         ? modelUpdateControllerPtr->analysisComplete.load()
         : false;
@@ -1076,7 +1076,7 @@ void ARAHostController::requestEnableCycleFromPlugin(bool enable) const
     juce::MessageManager::callAsync([handler, enable]() { handler(enable); });
 }
 
-#else // !S13_HAS_ARA
+#else // !OpenStudio_HAS_ARA
 
 // Stub implementations when ARA is not available
 
@@ -1120,4 +1120,4 @@ void ARAHostController::notePlaybackStart(double) {}
 
 void ARAHostController::notePlaybackStop(double) {}
 
-#endif // S13_HAS_ARA
+#endif // OpenStudio_HAS_ARA

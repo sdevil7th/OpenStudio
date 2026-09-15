@@ -15,8 +15,8 @@
 
 juce::var NAMDelayRegression::runRackDelaySpilloverProbe()
 {
-    S13NAMRack spillRack;
-    S13NAMRack referenceRack;
+    OpenStudioNAMRack spillRack;
+    OpenStudioNAMRack referenceRack;
     spillRack.prepareToPlay(
         fixtureSampleRate, fixtureBlockSize);
     referenceRack.prepareToPlay(
@@ -125,12 +125,12 @@ juce::var NAMDelayRegression::runRackDelaySpilloverProbe()
 juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
 {
     const auto configureFrozenDualRack = [&] (
-        S13NAMRack& rack)
+        OpenStudioNAMRack& rack)
     {
         configureNeutralRack(rack);
         rack.instrumentProfile.store(
             static_cast<float>(
-                S13NAMRack::guitarInstrumentProfile));
+                OpenStudioNAMRack::guitarInstrumentProfile));
         rack.delayEnabled.store(1.0f);
         rack.delayTimeMs.store(40.0f);
         rack.delayFeedback.store(0.55f);
@@ -138,15 +138,15 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
         rack.delayMod.store(0.72f);
         rack.delayDucker.store(0.30f);
         rack.delayMode.store(static_cast<float>(
-            S13NAMRack::dualDelayMode));
+            OpenStudioNAMRack::dualDelayMode));
         rack.delayPingPong.store(1.0f);
         rack.delayTempoSync.store(0.0f);
         rack.prepareToPlay(
             fixtureSampleRate, fixtureBlockSize);
     };
 
-    S13NAMRack frozenReferenceRack;
-    S13NAMRack frozenEditedRack;
+    OpenStudioNAMRack frozenReferenceRack;
+    OpenStudioNAMRack frozenEditedRack;
     configureFrozenDualRack(frozenReferenceRack);
     configureFrozenDualRack(frozenEditedRack);
     juce::MidiBuffer frozenMidi;
@@ -170,14 +170,14 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
     // after bypass. A partial freeze would now retarget at least one delay
     // history, feedback/filter law, topology, sync route, or dry/wet law.
     frozenEditedRack.instrumentProfile.store(
-        static_cast<float>(S13NAMRack::bassInstrumentProfile));
+        static_cast<float>(OpenStudioNAMRack::bassInstrumentProfile));
     frozenEditedRack.delayTimeMs.store(777.0f);
     frozenEditedRack.delayFeedback.store(0.05f);
     frozenEditedRack.delayMix.store(0.20f);
     frozenEditedRack.delayMod.store(0.02f);
     frozenEditedRack.delayDucker.store(0.90f);
     frozenEditedRack.delayMode.store(static_cast<float>(
-        S13NAMRack::multiDelayMode));
+        OpenStudioNAMRack::multiDelayMode));
     frozenEditedRack.delayPingPong.store(0.0f);
     frozenEditedRack.delayTempoSync.store(1.0f);
 
@@ -268,16 +268,16 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
         float initialMix,
         float loweredMix)
     {
-        S13NAMRack rack;
+        OpenStudioNAMRack rack;
         configureNeutralRack(rack);
         rack.instrumentProfile.store(static_cast<float>(
-            S13NAMRack::guitarInstrumentProfile));
+            OpenStudioNAMRack::guitarInstrumentProfile));
         rack.delayEnabled.store(1.0f);
         rack.delayMix.store(initialMix);
         rack.delayMod.store(0.0f);
         rack.delayDucker.store(0.0f);
         rack.delayMode.store(static_cast<float>(
-            S13NAMRack::digitalDelayMode));
+            OpenStudioNAMRack::digitalDelayMode));
         rack.delayPingPong.store(0.0f);
         rack.delayTempoSync.store(0.0f);
         rack.delayTimeMs.store(initialTimeMs);
@@ -320,17 +320,17 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
                 rack.getTailLengthSeconds()
                 * fixtureSampleRate));
         const auto loweredMacro =
-            S13NAMRack::resolveDelayMacroState(
+            OpenStudioNAMRack::resolveDelayMacroState(
                 loweredTimeMs,
                 loweredFeedback,
                 loweredMix,
                 0.0f,
                 0.0f,
                 static_cast<float>(
-                    S13NAMRack::digitalDelayMode),
+                    OpenStudioNAMRack::digitalDelayMode),
                 0.0f,
                 0.0f,
-                S13NAMRack::guitarInstrumentProfile);
+                OpenStudioNAMRack::guitarInstrumentProfile);
         result.cachedLowerMacro =
             rack.delayTailMacroValid
             && std::abs(
@@ -412,7 +412,7 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
         && downwardTimeBudget.pass
         && downwardMixBudget.pass;
 
-    S13NAMRack sendReleaseHorizonRack;
+    OpenStudioNAMRack sendReleaseHorizonRack;
     configureNeutralRack(sendReleaseHorizonRack);
     sendReleaseHorizonRack.delayEnabled.store(1.0f);
     sendReleaseHorizonRack.delayMix.store(1.0f);
@@ -421,7 +421,7 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
     sendReleaseHorizonRack.delayMod.store(0.0f);
     sendReleaseHorizonRack.delayDucker.store(0.0f);
     sendReleaseHorizonRack.delayMode.store(static_cast<float>(
-        S13NAMRack::digitalDelayMode));
+        OpenStudioNAMRack::digitalDelayMode));
     sendReleaseHorizonRack.delayPingPong.store(0.0f);
     sendReleaseHorizonRack.delayTempoSync.store(0.0f);
     sendReleaseHorizonRack.prepareToPlay(
@@ -491,7 +491,7 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
             == expectedSendReleaseRemainingBudget
         && sendReleaseLateEchoPeak > 1.0e-4f;
 
-    S13NAMRack rapidRetargetRack;
+    OpenStudioNAMRack rapidRetargetRack;
     configureNeutralRack(rapidRetargetRack);
     rapidRetargetRack.delayEnabled.store(1.0f);
     rapidRetargetRack.delayMix.store(1.0f);
@@ -500,7 +500,7 @@ juce::var NAMDelayRegression::runRackDelayV10FrozenTailAndBudgetProbe()
     rapidRetargetRack.delayMod.store(0.0f);
     rapidRetargetRack.delayDucker.store(0.0f);
     rapidRetargetRack.delayMode.store(static_cast<float>(
-        S13NAMRack::digitalDelayMode));
+        OpenStudioNAMRack::digitalDelayMode));
     rapidRetargetRack.delayPingPong.store(0.0f);
     rapidRetargetRack.delayTempoSync.store(0.0f);
     rapidRetargetRack.prepareToPlay(
@@ -662,7 +662,7 @@ juce::var NAMDelayRegression::runRackMinimumDelayBypassProbe()
     constexpr int observationBlocks = 4;
 
     auto configureMinimumDelay =
-        [&] (S13NAMRack& rack)
+        [&] (OpenStudioNAMRack& rack)
     {
         configureNeutralRack(rack);
         rack.delayEnabled.store(1.0f);
@@ -676,7 +676,7 @@ juce::var NAMDelayRegression::runRackMinimumDelayBypassProbe()
         rack.delayTempoSync.store(0.0f);
     };
     auto prepareRack = [&] (
-        S13NAMRack& rack,
+        OpenStudioNAMRack& rack,
         bool withDelay)
     {
         if (withDelay)
@@ -687,7 +687,7 @@ juce::var NAMDelayRegression::runRackMinimumDelayBypassProbe()
             fixtureSampleRate, fixtureBlockSize);
     };
     auto warmSilence = [&] (
-        S13NAMRack& rack,
+        OpenStudioNAMRack& rack,
         juce::MidiBuffer& midi)
     {
         for (int blockIndex = 0;
@@ -701,8 +701,8 @@ juce::var NAMDelayRegression::runRackMinimumDelayBypassProbe()
         }
     };
 
-    S13NAMRack fadeRack;
-    S13NAMRack fadeReferenceRack;
+    OpenStudioNAMRack fadeRack;
+    OpenStudioNAMRack fadeReferenceRack;
     prepareRack(fadeRack, true);
     prepareRack(fadeReferenceRack, false);
     juce::MidiBuffer midi;
@@ -822,8 +822,8 @@ juce::var NAMDelayRegression::runRackMinimumDelayBypassProbe()
         }
     }
 
-    S13NAMRack bypassMarkerRack;
-    S13NAMRack bypassSilenceRack;
+    OpenStudioNAMRack bypassMarkerRack;
+    OpenStudioNAMRack bypassSilenceRack;
     prepareRack(bypassMarkerRack, true);
     prepareRack(bypassSilenceRack, true);
     warmSilence(bypassMarkerRack, midi);
@@ -986,7 +986,7 @@ juce::var NAMDelayRegression::runTrackProcessorSparseTailServiceProbe()
         }
     } playHead;
 
-    auto rack = std::make_unique<S13NAMRack>();
+    auto rack = std::make_unique<OpenStudioNAMRack>();
     auto* const rackPointer = rack.get();
     configureNeutralRack(*rackPointer);
     rackPointer->delayEnabled.store(1.0f);

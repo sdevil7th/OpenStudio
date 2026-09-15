@@ -1,128 +1,104 @@
-# OpenStudio Development Workflows
+# OpenStudio development workflows
 
-## ✨ NEW: Single Command Development
+## Development
 
-```bash
+Run from the app repository root:
+
+```sh
 python build.py dev --run
 ```
 
-**What it does:**
-1. ✅ Installs npm dependencies
-2. ✅ Builds C++ backend (if needed)
-3. ✅ Starts Vite dev server (background)
-4. ✅ Launches OpenStudio.exe
-5. ✅ Auto-cleanup when you close the app
+The helper installs missing frontend dependencies, builds the frontend fallback
+and Debug native app, starts Vite, waits for it to respond, and launches the app.
+It cleans up its child processes on exit. Frontend source edits use Vite HMR;
+C++ changes require a native rebuild.
 
-**No more juggling terminals!**
+For a deterministic dependency install and manual build:
 
-## Manual Testing Handoff
-
-When Codex asks for manual testing, the handoff must be ready for this exact command:
-
-```bash
-python build.py dev --run
-```
-
-Before that handoff:
-- `cmake --build build --config Debug` must have completed after the latest changes.
-- The current frontend must be built/copied so packaged assets are not stale if fallback is ever used.
-- No pre-running Vite/npm/dev server should be required from the user.
-- Any Codex-started Vite/npm/browser harness processes should be stopped first, and port `5183` should not be left occupied by a Codex-started process.
-
-**Run this to rebuild the backend:**
-
-```bash
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build
 cmake --build build --config Debug
 ```
 
----
+CMake must already be configured; `python build.py dev` performs that setup.
+On Windows the Debug executable is
+`build/OpenStudio_artefacts/Debug/OpenStudio.exe`. Its packaged fallback is the
+copied `webui` directory beside the executable.
 
-## Alternative: Manual Development
+## Manual testing handoff
 
-### First Time Setup
-```bash
-python build.py dev --run
+The user-facing command remains `python build.py dev --run`. After frontend or
+native changes, build the latest frontend and run
+`cmake --build build --config Debug` before handing off a candidate. No
+pre-running server should be required. Stop task-owned Vite/npm/browser harness
+processes and do not leave a task-owned process on port 5183.
+
+A Debug build is evidence for that configuration only. Release and installed
+WebView startup are qualified separately; see the
+[release smoke checklist](docs/release-smoke-checklist.md).
+
+## Frontend checks
+
+```sh
+npm --prefix frontend run build
+npm --prefix frontend test
 ```
 
-### Daily Workflow
-```bash
-# Terminal 1
-cd frontend
-npm run dev
+The build runs dependency-notice validation, TypeScript and Vite. For app browser
+flows, run from `frontend` after installing the browser dependencies required
+by its Playwright configuration:
 
-# Terminal 2
-./build/OpenStudio_artefacts/Debug/OpenStudio.exe
+```sh
+npx playwright install chromium
+npm run test:e2e
 ```
 
----
+These are the desktop app's frontend tests. The separate website repository has
+its own build, browser and loading-performance checks. Browser automation is not
+native audio, hardware or installed-package qualification; follow
+[docs/testing.md](docs/testing.md) for those checks.
 
-## Production Build
+## Rebranding
 
-```bash
-python build.py prod
-doppler run -- python build.py dev --run
+The master, consumers and generation command are documented in
+[docs/branding.md](docs/branding.md). After changing the master:
+
+```sh
+node tools/generate-icons.mjs
+npm --prefix frontend run build
+cmake --build build --config Debug
 ```
 
-**Output:** Single executable at `build/OpenStudio_artefacts/Release/OpenStudio.exe`
-**No Vite needed!** Assets are embedded.
+Rebuild the Release configuration before packaging a release. Native package
+icons, frontend/browser icons, README images and website artwork have separate
+consumers; follow the inventory and verify the candidate's visible icons.
 
----
+## Production builds and releases
 
+Production builds require reviewed notes in `docs/releases/<candidate-version>.md`:
 
-## Simple release trigger
-```bash
-git push origin main
-git tag v0.0.2
-git push origin v0.0.2
+```sh
+python tools/validate-release-notes.py --version <candidate-version>
+python build.py prod --version <candidate-version>
 ```
 
-## Release trigger for AI Tools runtime
-```bash
-git tag ai-runtime-v0.0.31
-git push origin ai-runtime-v0.0.31
+Replace the placeholder with the intended version. On Windows the executable is
+under `build/OpenStudio_artefacts/Release/`; it ships with `webui`, runtime
+libraries and supporting files. The frontend is copied into the package, not
+embedded into a standalone executable. No Vite server is needed by the installed
+app. A production build does not by itself create/publish every platform installer.
 
-```
+Follow [the release runbook](docs/release-runbook.md) for the Windows RC gate,
+release notes, CI, runtime pinning, platform packaging and tag-driven publishing.
+An app source push does not publish a release. AI runtime tags are separate;
+rebuild them only when their inputs change. The website release dispatcher then
+publishes the appcasts and manifests used by existing installations.
 
 ## macOS first launch
 
-The normal first-launch path is:
-
-1. Verify the downloaded DMG against the published SHA-256 checksum.
-2. Drag `OpenStudio.app` to `/Applications` and attempt to open it.
-3. If macOS blocks the unsigned build, use **System Settings > Privacy &
-   Security > Open Anyway** for that app, then confirm the launch.
-
-## If that also doesn't work, then run this command to un-quarantine the app and use it
-## Otherwise the app might be shown as damaged or broken in macOS
-```bash
-xattr -dr com.apple.quarantine /Applications/OpenStudio.app
-```
-
-## Comparison with REAPER
-
-| Feature | OpenStudio (Hybrid) | REAPER (Native) |
-|---------|-------------------|-----------------|
-| **Dev Mode** | `python build.py dev --run` | Rebuild for every UI change |
-| **UI Tech** | React + CSS | Win32/Cocoa C++ |
-| **Dev Speed** | ⚡ Instant HMR | 🐌 Full recompile |
-| **Memory** | ~100MB (WebView) | ~20MB (Native) |
-| **Production** | Single .exe | Single .exe |
-| **Cross-Platform UI** | ✅ Same code | ❌ Per-OS code |
-
-**Takeaway:** We sacrifice a bit of memory for **massively** faster UI development.
-
----
-
-## FAQ
-
-**Q: Why does dev mode need Vite?**  
-A: Hot Module Replacement (HMR) - change React → instant update. No C++ rebuild!
-
-**Q: Can I skip Vite?**  
-A: Yes! Use `python build.py prod` for embedded assets. But you lose HMR.
-
-**Q: How does production work?**  
-A: Frontend assets are compiled into the .exe. No server needed!
-
-**Q: Is this slower than REAPER?**  
-A: Slightly higher memory (~80MB overhead), but audio thread is 100% native C++. No performance hit for DSP!
+Follow [the release runbook](docs/release-runbook.md) and the installer notes for
+the downloaded version. Verify its checksum, install to Applications, and use
+**System Settings > Privacy & Security > Open Anyway** if macOS blocks an unsigned
+build. Removing quarantine is a diagnostic action, not the normal installation
+instruction or proof that a package is trustworthy.

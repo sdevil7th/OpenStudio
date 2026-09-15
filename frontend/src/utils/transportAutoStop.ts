@@ -34,6 +34,7 @@ interface ShouldAutoStopPlaybackOptions {
   tracks: readonly TrackWithArrangementClips[];
   transport: TransportAutoStopState;
   metronomeEnabled: boolean;
+  metronomePracticeEnabled?: boolean;
   nextTime: number;
 }
 
@@ -117,6 +118,7 @@ export function shouldAutoStopPlayback({
   tracks,
   transport,
   metronomeEnabled,
+  metronomePracticeEnabled = false,
   nextTime,
 }: ShouldAutoStopPlaybackOptions): AutoStopPlaybackDecision {
   const bounds = getPlaybackContentBounds(tracks, transport);
@@ -127,7 +129,7 @@ export function shouldAutoStopPlayback({
     bounds,
   });
 
-  if (!transport.isPlaying || transport.isRecording || metronomeEnabled || !isFiniteTime(nextTime)) {
+  if (!transport.isPlaying || transport.isRecording || metronomeEnabled || metronomePracticeEnabled || !isFiniteTime(nextTime)) {
     return keepPlaying();
   }
 

@@ -214,6 +214,10 @@ describe("wheel device hints", () => {
 describe("OpenStudio Timeline wheel matrix", () => {
   it.each(modifierCases)("resolves $label with documented precedence", (entry) => {
     const result = resolveOpenStudio(entry.event, "timeline", "content");
+    if (entry.label === "plain") {
+      expect(result).toMatchObject({ ruleId: "trackpad.pan", operation: "scroll", amount: 4, delta: { x: 4, y: 12 } });
+      return;
+    }
     if (entry.primary && entry.shift) {
       expect(result).toMatchObject({
         ruleId: "timeline.waveform-amplitude",
@@ -331,6 +335,10 @@ describe("OpenStudio TCP wheel matrix", () => {
 describe("OpenStudio Piano Roll wheel matrix", () => {
   it.each(modifierCases)("resolves $label in the note grid", (entry) => {
     const result = resolveOpenStudio(entry.event, "piano_roll", "grid");
+    if (entry.label === "plain") {
+      expect(result).toMatchObject({ ruleId: "trackpad.pan", operation: "scroll", amount: 4, delta: { x: 4, y: 12 } });
+      return;
+    }
     if (entry.primary) {
       expect(result).toMatchObject({
         ruleId: "piano-roll.horizontal-zoom",
@@ -376,7 +384,7 @@ describe("OpenStudio Piano Roll wheel matrix", () => {
     expect(resolveOpenStudio({ deltaX: -18, deltaY: 4 }, "piano_roll", "grid"))
       .toMatchObject({ axis: "horizontal", amount: -18 });
     expect(resolveOpenStudio({ deltaX: 8, deltaY: -8 }, "piano_roll", "grid"))
-      .toMatchObject({ axis: "vertical", amount: -8 });
+      .toMatchObject({ ruleId: "trackpad.pan", axis: "horizontal", amount: 8, delta: { x: 8, y: -8 } });
   });
 
   it.each(["grid", "keyboard", "controller_lane"] as const)(
@@ -391,6 +399,10 @@ describe("OpenStudio Piano Roll wheel matrix", () => {
 describe("OpenStudio Pitch Editor wheel matrix", () => {
   it.each(modifierCases)("resolves $label", (entry) => {
     const result = resolveOpenStudio(entry.event, "pitch_editor", "grid");
+    if (entry.label === "plain") {
+      expect(result).toMatchObject({ ruleId: "trackpad.pan", operation: "scroll", amount: 4, delta: { x: 4, y: 12 } });
+      return;
+    }
     if (entry.primary) {
       expect(result).toMatchObject({
         ruleId: "pitch-editor.horizontal-zoom",

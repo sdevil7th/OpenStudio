@@ -70,11 +70,21 @@ describe("external URL safety policy", () => {
     );
   });
 
-  it("mirrors the HTTP(S)-only gate in the native bridge before launch", () => {
+  it.each([
+    "ms-windows-store://downloadsandupdates",
+    "ms-windows-store://downloadsandupdates?extra=1",
+    "ms-windows-store://other",
+  ])("does not forward Store actions to browser-mode window.open: %s", async (url) => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    await expect(nativeBridge.openExternalURL(url)).resolves.toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("checks the external URL policy in the native bridge before launch", () => {
     expect(nativeSource).toContain("bool isAllowedExternalBrowserURL(juce::String rawURL)");
     expect(nativeSource).toContain('rawURL.startsWithIgnoreCase("https://")');
     expect(nativeSource).toContain('rawURL.startsWithIgnoreCase("http://")');
-    expect(nativeSource).toContain("if (! isAllowedExternalBrowserURL(url))");
 
     const registrationStart = nativeSource.indexOf('.withNativeFunction ("openExternalURL"');
     const registrationEnd = nativeSource.indexOf('.withNativeFunction ("revealLocalPath"', registrationStart);

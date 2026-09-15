@@ -223,7 +223,7 @@ describe("NAM tone save metadata", () => {
     }), expect.objectContaining({
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
       },
     }));
     expect(result.savedTone?.title).toBe("My Saved Crunch");
@@ -249,7 +249,7 @@ describe("NAM tone save metadata", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
       },
       slotOrder: ["gate", "pedal", "amp", "cab", "delay", "reverb", "mod", "eq"],
     });

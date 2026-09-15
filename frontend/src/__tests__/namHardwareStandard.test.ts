@@ -38,14 +38,14 @@ describe("NAM physical pedal hardware standard", () => {
 
   it("keeps deliberate console rotaries separate from pedal hardware", async () => {
     expect(NAM_PANEL_ROTARY_VARIANT_PX).toEqual({
-      cabPanel: 42,
+      cabPanel: 32,
       roomHero: 68,
       eqPanel: 44,
     });
 
     const source = (await import("../components/NAMRackDesignPort.tsx?raw")).default as string;
-    expect(source.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(7);
-    expect(source.match(/panelRotaryVariant="roomHero"/g)).toHaveLength(2);
+    expect(source.match(/panelRotaryVariant="cabPanel"/g)).toHaveLength(5);
+    expect(source.match(/panelRotaryVariant="roomHero"/g) ?? []).toHaveLength(0);
     expect(source).toContain('"data-nam-panel-rotary-variant"');
   });
 

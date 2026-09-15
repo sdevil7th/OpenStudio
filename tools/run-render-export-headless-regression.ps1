@@ -5,7 +5,8 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
     [int]$TimeoutSeconds = 180,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$ExternalPlugin = ''
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,7 @@ $startInfo.Arguments = "--render-export-regression-headless --output-dir `"$runD
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
 $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+if ($ExternalPlugin) { $startInfo.EnvironmentVariables['OPENSTUDIO_FX_REGRESSION_PLUGIN'] = $ExternalPlugin }
 
 $process = [System.Diagnostics.Process]::Start($startInfo)
 if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {

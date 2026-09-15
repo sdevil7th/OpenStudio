@@ -2,7 +2,7 @@ import { useMemo, useCallback } from "react";
 import { ParametricGraph } from "./ParametricGraph";
 import type { GraphNode, GraphAxis, GraphNodeConfig } from "./ParametricGraph.types";
 
-interface S13FXSlider {
+interface JSFXSlider {
   index: number;
   name: string;
   min: number;
@@ -15,7 +15,7 @@ interface S13FXSlider {
 }
 
 interface ChorusGraphProps {
-  sliders: S13FXSlider[];
+  sliders: JSFXSlider[];
   onSliderChange: (sliderIndex: number, value: number) => void;
   width?: number;
   height?: number;
@@ -31,7 +31,7 @@ export function ChorusGraph({
   height = 180,
 }: ChorusGraphProps) {
   const sliderMap = useMemo(() => {
-    const map = new Map<number, S13FXSlider>();
+    const map = new Map<number, JSFXSlider>();
     for (const s of sliders) map.set(s.index, s);
     return map;
   }, [sliders]);

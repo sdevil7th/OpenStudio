@@ -1,6 +1,9 @@
 # OpenStudio User Manual
 
-Version 3.0 -- Comprehensive Reference Guide
+Comprehensive reference for the current source checkout. Published installers
+may contain fewer features; consult the [release notes](releases/) for
+your application version. The signed updater and macOS/Linux replacement flow
+below are implemented in this checkout but still need a new application release.
 
 ---
 
@@ -24,13 +27,15 @@ Version 3.0 -- Comprehensive Reference Guide
 16. [Keyboard Shortcuts](#16-keyboard-shortcuts)
 17. [Troubleshooting](#17-troubleshooting)
 18. [AI Music and Assisted Audio](#18-ai-music-and-assisted-audio)
+19. [In-app updates](#in-app-updates)
+20. [File formats and upgrade compatibility](#file-formats-and-upgrade-compatibility)
 
 ---
 
 > **Shortcut notation:** Inline shortcuts in this manual show the OpenStudio
 > default keyboard and mouse profiles. The active profile, operating system,
-> editor scope, and custom overrides can change them. **Help > Keyboard
-> Shortcuts** is authoritative for keys and selected base profiles; the
+> editor scope, and custom overrides can change them. **Help > Keyboard,
+> Mouse & Trackpad** is authoritative for keys and selected base profiles; the
 > fine-grained mouse-gesture overrides are shown in **Preferences > Mouse**.
 
 ## 1. Getting Started
@@ -72,7 +77,9 @@ OpenStudio production releases are distributed as platform-specific install pack
 desktop or terminal. FFmpeg-backed operations use an optional system `ffmpeg`
 on `PATH`; the AppImage does not bundle an arbitrary host FFmpeg binary.
 
-OpenStudio also includes automatic update support. You can trigger a manual update check from **Help > Check for Updates...**.
+OpenStudio also includes automatic update checks. Open **Help > Check for
+Updates...** to check immediately and choose when to download/install. See
+[in-app updates](#in-app-updates) for platform requirements and older-client migration.
 
 Stem separation uses optional AI Tools that are installed separately from the base app. If AI Tools are missing, use the **AI Tools** button beside the Settings button or the **Install AI Tools** button inside the Stem Separation dialog.
 
@@ -112,7 +119,7 @@ After configuring audio, you are ready to begin:
 
 ### 1.5 Project File Format
 
-OpenStudio projects are saved as `.osproj` files. Legacy `.s13` projects continue to load. These contain:
+OpenStudio projects are saved as `.osproj` files. These contain:
 
 - Track layout and properties (names, colors, types, volume, pan, solo, mute, armed state)
 - Clip references (file paths, positions, durations, offsets, fades, volume)
@@ -158,7 +165,7 @@ The Menu Bar runs along the top of the window and doubles as the title bar (drag
 | **View**  | Toggle panels (Mixer, Keyboard, Undo History), zoom, screensets, grid     |
 | **Insert**| Add tracks, media files, markers, regions, empty items, MIDI clips        |
 | **Options**| Record mode, ripple editing, locking, themes, preferences                |
-| **Help**  | Getting Started Guide, Help Reference, Keyboard Shortcuts, updates, About |
+| **Help**  | Getting Started Guide, Help Reference, Keyboard, Mouse & Trackpad, updates, About |
 
 The right side of the Menu Bar contains standard window controls: Minimize, Maximize/Restore, and Close.
 
@@ -241,7 +248,7 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
 - **Alt+Scroll**: track height resize.
 - **Ctrl+Shift+Scroll**: waveform-height zoom for the hovered track.
 - **First-session hotkeys**: `Space`, `Ctrl+R`, `Ctrl+T`, `Ctrl+M`, `S`, `B`, `Delete`, `Ctrl+S`, `F1`, `Ctrl+Shift+P`.
-- **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard Shortcuts** for the full shortcut list and custom scoped rebinding.
+- **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard, Mouse & Trackpad** for the full shortcut list and custom scoped rebinding.
 
 **Zoom and Scroll:**
 - **Horizontal zoom**: `Ctrl+Scroll wheel` (or `Ctrl++` / `Ctrl+-`). Zoom range: 1 to 1000 pixels per second.
@@ -278,6 +285,12 @@ The Transport Bar runs along the bottom of the window and provides:
 - **Metronome Settings** (gear icon): Opens metronome configuration (sound, accent pattern, volume).
 - **BPM** input: Type a new tempo value (range: 10-300 BPM). Press Enter or click away to apply.
 - **TAP** button: Tap repeatedly to set tempo by feel. Also available via `T` key.
+
+**Click-only practice:** in Metronome Settings, enable **Click only** to hear the
+click with live input monitoring while transport is stopped. Clips do not play
+and the playhead stays parked. The click follows Play/Record when transport starts
+and continues when transport stops. Switch **Enable** off to stop both metronome
+modes. Accent, sound, volume, and render-as-track controls share the same settings.
 
 ### 2.6 Mixer Panel
 
@@ -322,7 +335,7 @@ OpenStudio includes several additional panels accessible via the View menu:
 | Toolbar Editor           | View menu               | Customize toolbar layout                        |
 | Command Palette          | `Ctrl+Shift+P`          | Fuzzy search for any action in the application  |
 | Help Reference           | `F1`                    | Searchable in-app reference for controls and features |
-| Keyboard Shortcuts       | Help menu               | Searchable reference, input profiles, and custom scoped rebinding |
+| Keyboard, Mouse & Trackpad | Help menu               | Searchable reference, input profiles, and custom scoped rebinding |
 
 ---
 
@@ -379,7 +392,7 @@ Tracks can be reordered by drag-and-drop in both the Track Control Panel and the
 2. Click and drag the track to the desired position.
 3. Release to drop.
 
-Track reordering can also be done via Lua scripting using `s13.reorderTrack(fromIndex, toIndex)`.
+Track reordering can also be done via Lua scripting using `openstudio.reorderTrack(fromIndex, toIndex)`.
 
 ### 3.6 Track Colors
 
@@ -474,10 +487,10 @@ VCA (Voltage Controlled Amplifier) style grouping allows controlling the volume 
 
 Freezing a track renders all its effects to a temporary audio file, reducing CPU load while preserving the ability to unfreeze later:
 
-1. Right-click a track > "Freeze Track" or use `s13.freezeTrack(trackId)` in Lua.
+1. Right-click a track > "Freeze Track" or use `openstudio.freezeTrack(trackId)` in Lua.
 2. The track's FX chain is rendered offline and the frozen audio replaces live processing.
 3. The frozen indicator appears on the track.
-4. To restore: right-click > "Unfreeze Track" or `s13.unfreezeTrack(trackId)`.
+4. To restore: right-click > "Unfreeze Track" or `openstudio.unfreezeTrack(trackId)`.
 
 ### 3.14 Track Spacers
 
@@ -578,7 +591,7 @@ OpenStudio automatically detects connected MIDI devices:
 
 - MIDI devices are listed in the Track Header's MIDI input selector.
 - Select a MIDI device from the dropdown on a MIDI or Instrument track.
-- Available devices can be queried via Lua: `s13.getMIDIDevices()`.
+- Available devices can be queried via Lua: `openstudio.getMIDIDevices()`.
 
 ### 5.2 Recording MIDI
 
@@ -1062,7 +1075,7 @@ OpenStudio supports three FX chain positions per track:
 
 ### 9.3 Built-in OpenStudio Effects
 
-OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `S13` effect names are still accepted for compatibility in older projects and scripts.
+OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `OpenStudio` effect names are still accepted for compatibility in older projects and scripts.
 
 | Effect           | Description                                    |
 |------------------|------------------------------------------------|
@@ -1099,6 +1112,20 @@ OpenStudio hosts third-party plugins for effects and virtual instruments. VST3 i
 **Plugin editor windows:**
 - Native plugin editors open in separate native windows when the hosted plugin exposes an editor.
 - Parameters can be adjusted in the native editor or via the FX Chain Panel's parameter list.
+
+**Separate process (Windows):** eligible external plugins expose **Separate
+process (crash protection)** in the Plugin Browser. This per-plugin preference
+is saved on this computer and applies on the next load, including reopened
+projects; existing instances keep their current mode. The browser shows the
+added latency. This mode supports up to 32 active audio channels, requires a
+reload after bus-layout changes, and does not support ARA integration. It is
+not currently exposed on macOS/Linux and does not guarantee compatibility with
+every plugin.
+
+An **Audio fault** indicator means processing was stopped after an error. For an
+isolated plugin, open its editor and choose **Restart worker**, or remove/reload
+it. For a processor running inside the app, bypass and re-enable it to retry,
+or remove/reload it. Consult the crash diagnostics log if the fault returns.
 
 ### 9.5 Plugin Presets
 
@@ -1184,6 +1211,10 @@ depends on the partner-approved integration and release configuration. On
 Linux, sign-in also requires `secret-tool` (usually installed by the
 `libsecret-tools` package) and an available Secret Service/keyring.
 
+The mixer's **Monitor FX** chain can also host NAM Rack. Use it for a listening
+or practice rig: monitoring effects are excluded from rendered exports. Put the
+rack on a track FX chain when you want its processing in that track's render.
+
 Audition and Use/Cancel are transactional, and prepared model swaps reject
 stale requests. Perceived click/noise behavior on a real interface is still a
 release audition item, especially at small buffers; automation alone is not a
@@ -1232,7 +1263,7 @@ Each automation lane has a mode that determines how automation interacts with pl
 | **Touch** | Records automation only while the user is actively touching a control. Reverts to existing automation on release. |
 | **Latch** | Like Touch, but after release, continues writing the last value until transport stops. |
 
-Set the automation mode via the lane dropdown or `s13.setAutomationMode()` in Lua.
+Set the automation mode via the lane dropdown or `openstudio.setAutomationMode()` in Lua.
 
 ### 10.5 Automation and Clip Movement
 
@@ -1255,7 +1286,7 @@ The frontend stores normalized values (0-1) which are converted to native units 
 
 - Delete individual points by selecting and pressing Delete.
 - Clear all automation for a parameter: right-click the lane > "Clear Automation".
-- Via Lua: `s13.clearAutomation(trackId, parameterId)`.
+- Via Lua: `openstudio.clearAutomation(trackId, parameterId)`.
 
 ---
 
@@ -1498,10 +1529,14 @@ Configure automatic backups via **Options > Preferences > Backup**:
 
 | Setting             | Description                                          |
 |---------------------|------------------------------------------------------|
-| Enable Auto-Backup  | Toggle automatic backup on/off                       |
+| Enable Auto-Backup  | Toggle periodic recovery snapshots (off by default)  |
 | Backup Interval     | Time between backups (1-60 minutes, default 5 min)   |
 
-Auto-backup saves the project at regular intervals when changes are detected. It requires the project to have been saved at least once (has a file path).
+Auto-backup writes rotating recovery snapshots when changes are detected,
+including for an untitled project. It does not overwrite your saved project or
+mark current edits as saved. Use **Save** or **Save As** for a normal project save.
+See [interrupted-session recovery](#1316-interrupted-session-recovery) to restore
+a snapshot.
 
 ### 13.11 Project Compare
 
@@ -1539,6 +1574,32 @@ Live capture is an experimental plumbing path in the current build. The menu act
 - Go to **File > Capture Output** to toggle live capture.
 - Treat this as a development/diagnostic feature until the backend capture path is fully enabled.
 
+### 13.16 Interrupted-Session Recovery
+
+After an interruption, **Recover an interrupted session** offers available
+project snapshots, recordings, and AI work. Recovery depends on what reached
+disk; it cannot recreate audio lost before it was written.
+
+- **Restore copy** opens a project snapshot as an unsaved copy. Use **Save As**
+  after checking it. **Open without plugins for troubleshooting** avoids loading
+  instruments and effects; their saved states remain in the original recovery file.
+- For an interrupted recording, **Preview copy** repairs complete samples into
+  a separate file. **Import recovered audio** adds it to a new or chosen track
+  with undo support. Original files are retained; incomplete trailing bytes and
+  known dropped samples are reported.
+- For completed AI audio, preview/import it or use **Resume original import**
+  when the original target is still valid. **Restart generation** starts an
+  unfinished request again with its saved settings and seed; it does not resume
+  from a sampling checkpoint.
+- **Later** postpones recovery. **Dismiss reminder** dismisses the entry while
+  retaining files. Recovered recording/AI reminders remain recoverable until an
+  explicit project save containing the imported work or dismissal.
+
+If **Recording storage failed** appears during recording, affected takes stop
+accepting audio while other tracks and monitoring continue. Stop recording to
+finalize the available samples, then check free space and the recording
+destination before starting another take.
+
 ---
 
 ## 14. Scripting
@@ -1554,97 +1615,97 @@ Open the Script Editor via **View > Script Editor**:
 - Write Lua scripts in the editor pane.
 - Click **Run** to execute the script.
 - Output appears in the console pane below.
-- Use `s13.print(...)` to output messages to the console.
+- Use `openstudio.print(...)` to output messages to the console.
 
 ### 14.3 Scripting API Overview
 
-All scripting functions are currently accessed through the legacy `s13.*` namespace. Key categories include:
+All scripting functions are currently accessed through the legacy `openstudio.*` namespace. Key categories include:
 
 **Track Operations:**
 ```lua
-local id = s13.addTrack("Vocals")        -- Create a new track
-s13.setTrackVolume(id, -6.0)             -- Set volume in dB
-s13.setTrackPan(id, -0.5)               -- Pan left 50%
-s13.setTrackMute(id, true)              -- Mute the track
-s13.setTrackSolo(id, true)              -- Solo the track
-s13.setTrackArm(id, true)               -- Arm for recording
-s13.removeTrack(id)                      -- Delete a track
-s13.reorderTrack(0, 3)                  -- Move track from index 0 to index 3
+local id = openstudio.addTrack("Vocals")        -- Create a new track
+openstudio.setTrackVolume(id, -6.0)             -- Set volume in dB
+openstudio.setTrackPan(id, -0.5)               -- Pan left 50%
+openstudio.setTrackMute(id, true)              -- Mute the track
+openstudio.setTrackSolo(id, true)              -- Solo the track
+openstudio.setTrackArm(id, true)               -- Arm for recording
+openstudio.removeTrack(id)                      -- Delete a track
+openstudio.reorderTrack(0, 3)                  -- Move track from index 0 to index 3
 ```
 
 **Transport Control:**
 ```lua
-s13.play()                               -- Start playback
-s13.stop()                               -- Stop
-s13.record()                             -- Start recording
-s13.setPlayhead(10.5)                    -- Jump to 10.5 seconds
-s13.setTempo(120)                        -- Set BPM
-s13.setTimeSignature(3, 4)              -- Set 3/4 time
-s13.setLoop(true, 4, 12)               -- Enable loop from 4s to 12s
+openstudio.play()                               -- Start playback
+openstudio.stop()                               -- Stop
+openstudio.record()                             -- Start recording
+openstudio.setPlayhead(10.5)                    -- Jump to 10.5 seconds
+openstudio.setTempo(120)                        -- Set BPM
+openstudio.setTimeSignature(3, 4)              -- Set 3/4 time
+openstudio.setLoop(true, 4, 12)               -- Enable loop from 4s to 12s
 ```
 
 **FX Chain:**
 ```lua
-s13.addTrackFX(trackId, pluginId)        -- Add VST3 plugin
-s13.addTrackS13FX(trackId, "OpenStudio EQ") -- Add built-in effect
-s13.removeTrackFX(trackId, 0)           -- Remove first FX
-s13.bypassTrackFX(trackId, 0, true)     -- Bypass first FX
-local fx = s13.getAvailableS13FX()       -- List built-in effects
+openstudio.addTrackFX(trackId, pluginId)        -- Add VST3 plugin
+openstudio.addTrackJSFX(trackId, "OpenStudio EQ") -- Add built-in effect
+openstudio.removeTrackFX(trackId, 0)           -- Remove first FX
+openstudio.bypassTrackFX(trackId, 0, true)     -- Bypass first FX
+local fx = openstudio.getAvailableJSFX()       -- List built-in effects
 ```
 
 **Master Bus:**
 ```lua
-s13.setMasterVolume(1.0)                -- Set master volume (linear)
-s13.setMasterPan(0.0)                   -- Set master pan (center)
+openstudio.setMasterVolume(1.0)                -- Set master volume (linear)
+openstudio.setMasterPan(0.0)                   -- Set master pan (center)
 ```
 
 **Sends:**
 ```lua
-local idx = s13.addTrackSend(trackId, busId)  -- Add send
-s13.setTrackSendLevel(trackId, idx, 0.7)      -- Set send level
-s13.removeTrackSend(trackId, idx)              -- Remove send
+local idx = openstudio.addTrackSend(trackId, busId)  -- Add send
+openstudio.setTrackSendLevel(trackId, idx, 0.7)      -- Set send level
+openstudio.removeTrackSend(trackId, idx)              -- Remove send
 ```
 
 **Automation:**
 ```lua
-s13.setAutomationPoints(trackId, "volume", {
+openstudio.setAutomationPoints(trackId, "volume", {
     { time = 0, value = 0.5 },
     { time = 4, value = 1.0 },
     { time = 8, value = 0.3 },
 })
-s13.setAutomationMode(trackId, "volume", "read")
-s13.clearAutomation(trackId, "volume")
+openstudio.setAutomationMode(trackId, "volume", "read")
+openstudio.clearAutomation(trackId, "volume")
 ```
 
 **Audio Analysis:**
 ```lua
-local stats = s13.measureLUFS("C:/audio/mix.wav")
-s13.print("Integrated: " .. stats.integrated .. " LUFS")
-s13.print("True Peak: " .. stats.truePeak .. " dBTP")
+local stats = openstudio.measureLUFS("C:/audio/mix.wav")
+openstudio.print("Integrated: " .. stats.integrated .. " LUFS")
+openstudio.print("True Peak: " .. stats.truePeak .. " dBTP")
 
-local transients = s13.detectTransients("C:/audio/drums.wav", 0.3)
-s13.print("Found " .. #transients .. " transients")
+local transients = openstudio.detectTransients("C:/audio/drums.wav", 0.3)
+openstudio.print("Found " .. #transients .. " transients")
 
-local silences = s13.detectSilentRegions("C:/audio/take.wav", -50, 0.5)
+local silences = openstudio.detectSilentRegions("C:/audio/take.wav", -50, 0.5)
 ```
 
 **Track Freeze:**
 ```lua
-s13.freezeTrack(trackId)                -- Freeze (render FX offline)
-s13.unfreezeTrack(trackId)              -- Unfreeze (restore)
+openstudio.freezeTrack(trackId)                -- Freeze (render FX offline)
+openstudio.unfreezeTrack(trackId)              -- Unfreeze (restore)
 ```
 
 **Rendering:**
 ```lua
-s13.renderProject("C:/output/mix.wav", "wav", 24, 44100, 0, 60)
+openstudio.renderProject("C:/output/mix.wav", "wav", 24, 44100, 0, 60)
 ```
 
 **Utility:**
 ```lua
-s13.print("Hello from OpenStudio!")      -- Console output
-local ver = s13.getAppVersion()          -- Get version string
-s13.showMessage("Alert", "Processing complete!")  -- Dialog
-local file = s13.fileDialog("Open Audio", "*.wav;*.aiff")  -- File picker
+openstudio.print("Hello from OpenStudio!")      -- Console output
+local ver = openstudio.getAppVersion()          -- Get version string
+openstudio.showMessage("Alert", "Processing complete!")  -- Dialog
+local file = openstudio.fileDialog("Open Audio", "*.wav;*.aiff")  -- File picker
 ```
 
 For the complete API reference, see [API.md](API.md).
@@ -1654,35 +1715,35 @@ For the complete API reference, see [API.md](API.md).
 **Set up a recording template:**
 ```lua
 -- Create tracks for a band recording
-local drums = s13.addTrack("Drums OH")
-local bass = s13.addTrack("Bass DI")
-local guitar = s13.addTrack("Guitar")
-local vocal = s13.addTrack("Vocal")
+local drums = openstudio.addTrack("Drums OH")
+local bass = openstudio.addTrack("Bass DI")
+local guitar = openstudio.addTrack("Guitar")
+local vocal = openstudio.addTrack("Vocal")
 
 -- Set levels
-s13.setTrackVolume(drums, -3.0)
-s13.setTrackVolume(bass, -6.0)
-s13.setTrackVolume(guitar, -6.0)
-s13.setTrackVolume(vocal, 0.0)
+openstudio.setTrackVolume(drums, -3.0)
+openstudio.setTrackVolume(bass, -6.0)
+openstudio.setTrackVolume(guitar, -6.0)
+openstudio.setTrackVolume(vocal, 0.0)
 
 -- Pan instruments
-s13.setTrackPan(guitar, -0.3)
+openstudio.setTrackPan(guitar, -0.3)
 
 -- Add EQ to all tracks
 for _, id in ipairs({ drums, bass, guitar, vocal }) do
-    s13.addTrackS13FX(id, "OpenStudio EQ")
+    openstudio.addTrackJSFX(id, "OpenStudio EQ")
 end
 
-s13.setTempo(120)
-s13.print("Band template ready!")
+openstudio.setTempo(120)
+openstudio.print("Band template ready!")
 ```
 
 **Analyze and report loudness for all audio files:**
 ```lua
 local files = { "C:/audio/verse.wav", "C:/audio/chorus.wav", "C:/audio/bridge.wav" }
 for _, file in ipairs(files) do
-    local stats = s13.measureLUFS(file)
-    s13.print(file .. ": " .. stats.integrated .. " LUFS, peak " .. stats.truePeak .. " dBTP")
+    local stats = openstudio.measureLUFS(file)
+    openstudio.print(file .. ": " .. stats.integrated .. " LUFS, peak " .. stats.truePeak .. " dBTP")
 end
 ```
 
@@ -1709,11 +1770,11 @@ For custom theming, open **View > Theme Editor...**. The Theme Editor allows you
 
 ### 15.3 Keyboard Shortcuts
 
-Open **Help > Keyboard Shortcuts** to browse the searchable action reference,
+Open **Help > Keyboard, Mouse & Trackpad** to browse the searchable action reference,
 print a cheat sheet for the current platform, choose input profiles, and rebind
 supported actions.
 
-Press `F1` for the **Help Reference**, which is separate from the Keyboard Shortcuts window.
+Press `F1` for the **Help Reference**, which is separate from the Keyboard, Mouse & Trackpad window.
 
 Use **Help > Getting Started Guide** for the built-in first-session walkthrough covering navigation gestures, essential hotkeys, track creation, recording, and export.
 
@@ -1730,7 +1791,7 @@ checks run before an overlapping key is accepted.
 
 Bindings can be scoped to global, Timeline/ruler, track controls, Mixer, Piano
 Roll, Pitch Editor, automation, browser, plug-in, modal, and contextual
-surfaces. Custom shortcut editing lives in the Keyboard Shortcuts window, not
+surfaces. Custom shortcut editing lives in the Keyboard, Mouse & Trackpad window, not
 in Preferences. See [Keyboard, Hotkey, Mouse, and Scroll
 Profiles](input-profiles.md) for the full behavior and safety rules.
 
@@ -1827,7 +1888,7 @@ If you have 32-bit VST plugins that need to run in the 64-bit OpenStudio environ
 The tables below show the **OpenStudio default keyboard profile**. Other
 built-in profiles, platform-specific bindings, custom overrides, and active
 editor scopes can change or intentionally unassign these keys. Use **Help >
-Keyboard Shortcuts** for the effective map.
+Keyboard, Mouse & Trackpad** for the effective map.
 
 ### 16.1 Transport
 
@@ -1907,7 +1968,7 @@ Keyboard Shortcuts** for the effective map.
 | Toggle Undo History             | `Ctrl+Alt+Z`         |
 | Clip Properties                 | `F2`                 |
 | Help Reference                  | `F1`                 |
-| Keyboard Shortcuts              | Help menu            |
+| Keyboard, Mouse & Trackpad      | Help menu            |
 | Zoom to Time Selection          | `Ctrl+Shift+E`       |
 | Zoom In                         | `Ctrl++`             |
 | Zoom Out                        | `Ctrl+-`             |
@@ -2110,7 +2171,7 @@ microphone permission for every application.
 
 **Solutions**:
 1. This may occur on first load as the peak cache is being built. Wait a moment.
-2. OpenStudio uses `.ospeaks` sidecar files for waveform display. Legacy `.s13peaks` files are still supported and will be regenerated automatically if needed.
+2. OpenStudio uses `.ospeaks` sidecar files for waveform display. Legacy `.ospeaks` files are still supported and will be regenerated automatically if needed.
 3. Ensure the referenced audio file exists and is readable.
 4. Try zooming in or out to trigger a waveform refresh.
 
@@ -2143,7 +2204,7 @@ microphone permission for every application.
 **Solutions**:
 1. Ensure the main OpenStudio window has focus (click on the timeline or a panel).
 2. If a text input field is focused (e.g., renaming a track), keyboard shortcuts are temporarily disabled. Press `Esc` to defocus.
-3. Open **Help > Keyboard Shortcuts**. `F1` opens the separate Help Reference,
+3. Open **Help > Keyboard, Mouse & Trackpad**. `F1` opens the separate Help Reference,
    not the active key map.
 4. Confirm the selected keyboard profile, the current platform override, and
    whether the action is intentionally unassigned.
@@ -2167,6 +2228,15 @@ Use **AI Tools Setup** when a generation or stem workflow reports that its runti
 - Installation can be cancelled, reset, or retried from the setup modal.
 - Generated audio is imported back into the project as normal clips/tracks.
 
+**Downloading models:** BS-Roformer and ACE-Step download automatically when you install their feature. For Stable Audio 3 Medium or MiniMax Music 3, select the model, review and accept its license, then choose **Download and Set Up**. OpenStudio downloads the required files from Hugging Face into managed storage. Stable Audio is converted automatically to Diffusers format; MiniMax downloads its Diffusers components without the duplicate legacy weights. Allow extra disk space and time for downloads and Stable Audio conversion.
+
+Stable Audio requires access approval on its Hugging Face model page, including acceptance of the Stability AI and Gemma terms. Enter a read token from the approved account in setup, or leave it blank to use an existing Hugging Face login or `HF_TOKEN`. The token entered in the app is used only for that setup and is not saved. The app's license checkbox does not grant access to a gated repository. MiniMax's public download does not require a token.
+
+**Setup progress:** the panel above the model list stays visible while you scroll or select another tool. It shows the active model, current step and elapsed time. Hugging Face model setup checks the full download size first, then shows **Downloaded**, **Remaining**, **Download size**, and the percentage. Downloaded bytes include completed cache files, with the reused amount shown separately. Dependency installation, conversion and validation show an active indicator when no byte total is available. Use **Show details** or **Open Install Log** for diagnostics. Closing the panel lets setup continue; keep OpenStudio running and reopen it with the **AI** button. **Cancel Setup** stops the job.
+
+**Import Local Model** remains available for existing downloads. A failed or cancelled setup leaves the previous installed model in place. Retrying a download reuses completed Hugging Face cache files. Generation uses the installed model locally; it does not upload your audio to Hugging Face.
+
+
 ### 18.2 AI Tracks
 
 AI tracks are used for prompt-driven generation workflows:
@@ -2174,14 +2244,17 @@ AI tracks are used for prompt-driven generation workflows:
 | Workflow | Description |
 |----------|-------------|
 | **Text to Music** | Generates a fresh music clip using ACE-Step from style/arrangement prompt, optional lyrics, BPM, duration, time signature, language, key/scale, seed, and generation controls. |
-| **Lyrics + Style** | Generates a song guided by both structured lyrics and a musical prompt. |
+| **Lyrics + Style** | Uses ACE-Step or MiniMax Music 3 with lyrics and a musical prompt. |
+| **Song Sections** | Uses MiniMax Music 3 with separate verse, chorus, bridge, vocal-direction, and arrangement fields. |
 | **Text to Audio** | Generates audio from a prompt using Stable Audio 3 Medium when that runtime/model is installed. |
 
 Create an AI track from the Insert menu, the command palette, or the `Ctrl+Alt+T` shortcut if it is still bound to its default.
 
 ### 18.3 Clip AI Workflows
 
-Right-click an audio clip and open **AI Generation** for source-conditioned workflows:
+Right-click an audio clip and open **AI Generation** for source-conditioned
+workflows using ACE-Step or Stable Audio 3. MiniMax Music 3 does not offer these
+clip workflows.
 
 | Workflow | Description |
 |----------|-------------|
@@ -2204,11 +2277,37 @@ The resulting stems are imported back into the session as editable clips.
 
 The audio-to-MIDI workflow uses Basic Pitch / ONNX plumbing where available to extract MIDI note data from audio. Use it when you want to turn a recorded or imported performance into MIDI material for editing, layering, or replacement.
 
+### 18.6 Model Controls, Progress, and Memory
+
+Choose the model before the workflow; available workflows and controls depend
+on that model. ACE-Step has dedicated musical and diffusion controls. MiniMax
+uses a music description and tagged lyrics or **Song Sections**, a seed, and
+diffusion steps per chunk. Its **Maximum length (seconds)** caps generation;
+the song can finish earlier, and longer requests need more time and memory.
+Stable Audio 3 Medium exposes a sound description, duration, seed, and steps;
+the current distilled workflow uses fixed guidance rather than editable CFG,
+negative-prompt, or LoRA controls.
+
+Generation shows the current stage and elapsed time. Sampling progress uses
+reported denoising steps or MiniMax audio frames; loading, preparation, and
+decoding can remain indeterminate. A stage percentage is not an estimate of
+the entire job's remaining time. Closing and reopening a generation panel
+preserves its active job while the app remains running; use cancellation to
+stop a request.
+
+The current checkout's **Hardware check** estimates available memory for the
+request. Refresh after closing other applications; an unavailable or favorable
+estimate does not guarantee success. The worker makes the final decision.
+Supported workers adapt model placement/offloading to memory availability and
+release idle model caches after about two minutes. Offloading can trade speed
+for memory and does not make every model practical on every GPU or CPU.
+These mechanisms do not establish audio quality or hardware qualification.
+
 ---
 
 ## Appendix A: Project File Location
 
-OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Legacy `.s13` files are still supported. Recorded audio files are stored in a subdirectory alongside the project file.
+OpenStudio project files (`.osproj`) are saved to the location you choose when saving. Recorded audio files are stored in a subdirectory alongside the project file.
 
 ## Appendix B: Audio Format Support
 
@@ -2332,7 +2431,7 @@ OpenStudio uses the following audio-thread safety patterns:
 ### Scripting
 
 1. Use Lua scripts to automate repetitive tasks (e.g., adding the same FX chain to every vocal track).
-2. The `s13.print()` function is useful for debugging scripts.
+2. The `openstudio.print()` function is useful for debugging scripts.
 3. Scripts can access all track, transport, FX, and automation functions.
 4. Save commonly used scripts as files for reuse across projects.
 
@@ -2395,3 +2494,112 @@ OpenStudio uses the following audio-thread safety patterns:
 
 *OpenStudio -- User Manual*
 *For the latest documentation and updates, refer to the project repository.*
+
+## In-app updates
+
+This section describes the current implementation. The signed-download and
+macOS/Linux automatic-replacement changes are not in the published v0.1.01
+application. Existing users need a release containing the new updater first;
+see [migration and qualification](updater-security-and-migration.md).
+
+### Microsoft Store installations
+
+Store MSIX installations retain the in-app check, download, progress, cancellation
+and save-before-install interface. Package identity selects Microsoft's Store
+APIs; they never launch the direct EXE updater. Each new version must be submitted
+to Partner Center. Microsoft may request confirmation and close the app during
+installation. OpenStudio's automatic-check preference does not change Windows'
+own Store automatic-update settings. See [Store qualification](release-runbook.md#microsoft-store-distribution)
+for the implementation, tests and outstanding Store-flight upgrade check.
+
+### Direct-download installations
+
+Debug development builds do not check for, download, or launch release installers.
+The update panel identifies the running development version and explains that the
+checkout must be rebuilt. A separately installed app does not change the version
+of a running development executable.
+
+Release builds offer an update only when its numeric version is strictly newer
+than the running application. Leading zeroes are equivalent (`0.1.01` equals
+`0.1.1`); stale same/older offers are rejected again before download and install.
+
+Release builds check for updates shortly after startup and periodically while the app is
+open, skipping scheduled checks during playback or recording. Successful checks
+are normally limited to once per 24 hours. An available update appears in a
+non-blocking banner. **Help > Check for Updates** opens the update panel and
+checks immediately. The panel also lets users disable automatic checks.
+
+Users choose when to download and install. Downloads run in the background with
+progress and cancellation. The updater verifies Ed25519-signed release metadata,
+checks architecture and minimum OS/glibc requirements, and requires HTTPS, the
+declared size, and a matching SHA-256 checksum. It verifies the staged package
+again before installation. Invalid downloads are rejected. Manifest signatures
+authenticate the update offer; they do not replace platform code signing or
+notarization.
+
+Before installation, playback and recording must stop. Modified projects must
+save successfully; cancelling the save postpones installation. If the project
+changes while saving or preparing the installer, installation is also postponed.
+Cancelling normal app shutdown cancels the pending replacement.
+
+| Platform | Final installation step |
+| --- | --- |
+| Windows | Opens the installer and requests normal app shutdown. Follow the installer and reopen OpenStudio. The installer is explicitly prevented from force-closing the app. |
+| macOS | **Install update & restart** prepares the verified DMG, replaces an eligible user-owned app bundle after shutdown, and relaunches through macOS. Protected/root-owned installations require manual replacement. |
+| Linux | **Install update & restart** replaces an eligible user-owned type-2 AppImage after shutdown and relaunches it. Package-manager or protected installations require their normal manual update path. |
+
+Downloads are staged under the user's OpenStudio application-data `updates`
+directory. A completed staged download and its signed offer persist across
+restart. The app checks them again before restoring **ready to install**, even
+when automatic network checks are off. A partial download is not a ready update.
+The automatic-check preference is saved in the embedded browser's local storage.
+
+### macOS/Linux safeguards and recovery
+
+The helper prepares the replacement before closing the app, verifies the package
+and installed application again, and requires normal save-aware shutdown and
+exclusive access to the installation. It refuses unsafe links/permissions,
+insufficient disk space, unsupported filesystems, root execution, and concurrent
+installers. Use a trusted user-owned location, such as `~/Applications` on macOS;
+do not change system-directory permissions to force an update.
+
+The previous application is retained beside the installation in a private
+`.OpenStudio-update-<transaction-id>` directory. The restarted app must confirm
+that its main interface is ready. An early exit triggers verified rollback and
+relaunch of the previous version. If the process stays alive but confirmation
+does not arrive within two minutes, both versions are retained; the helper
+does not kill a potentially active session. Interrupted transactions retain
+recovery information and do not trigger a blind rollback on the next launch.
+The update panel reports transaction status, package and backup paths. Retained
+files consume disk space; remove them manually only after confirming the new
+version works and no recovery is needed. Project files are not replaced by the
+installer.
+
+**Unsigned macOS builds:** relaunch uses normal macOS security checks. The updater
+does not remove quarantine or bypass Gatekeeper. An unsigned update may require
+approval through macOS before it can open; unattended success is not guaranteed.
+Use the manual package path if replacement is refused. Native helper fixtures
+have passed on Linux and both Mac architectures, but real downloaded packages,
+Gatekeeper, AppImage/FUSE, and old-to-new project upgrades still require release
+qualification.
+
+**Upgrading from v0.1.01:** metadata corrections cannot change the installed
+updater code. For the first macOS upgrade, quit the old app and install the new
+DMG manually. For Linux, make the downloaded AppImage executable (file manager
+permissions or `chmod +x` on that exact file), quit the old app, replace it, and
+launch the new one. Preserve projects and user settings. Subsequent releases
+can use the new flow once it is included in the installed application.
+
+## File formats and upgrade compatibility
+
+Current projects use `.osproj`; rack preset exports use `.ospreset`, themes use
+`.ostheme`, and waveform caches use `.ospeaks`. Scripted effects use standard
+`.jsfx` files and the Lua application API uses `openstudio.*`.
+
+Older product identifiers and file formats are unsupported by the current loader.
+Renaming a file or folder does not convert its serialized processor state. Back up
+projects, recordings and presets before updating; retain the older application if
+you still need to open unconverted sessions. A maintainer's one-time conversion of
+individual NAM presets does not establish automatic project/preset migration for
+other installations. Model and cabinet IR files must remain available separately.
+Waveform caches can be regenerated from the original audio.

@@ -36,6 +36,7 @@ describe("input profile help", () => {
 
   it("describes FL Studio wheel actions only at their exact Playlist hit targets", () => {
     expect(getTimelineWheelHelp("fl_studio", "windows").items).toEqual([
+      { gesture: "Ctrl+Scroll", action: "zoom the timeline" },
       {
         gesture: "Shift+Scroll over a track",
         action: "reorder the hovered track",

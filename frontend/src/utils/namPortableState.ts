@@ -108,7 +108,7 @@ export function normalizeNAMPrecisionDriveVoice(value: unknown): NAMPrecisionDri
   return 0;
 }
 
-export type NAMEffectsDspVersion = 19;
+export type NAMEffectsDspVersion = 20;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -121,10 +121,11 @@ export function normalizeNAMEffectsDspVersion(value: unknown): NAMEffectsDspVers
   // V13 was briefly emitted by a development build for an internal DSP-only
   // refinement. It introduced no portable state fields, so migration treats
   // it as V12; sanitization still canonicalizes every recognized selector to
-  // the one currently shipped V19 engine. V18 retires precisionDriveVoice;
-  // V19 replaces PRE EQ's seven octave bands with eight guitar-focused bands.
-  return Number.isInteger(version) && version >= 1 && version <= 19
-    ? 19
+  // the one currently shipped V20 engine. V18 retires precisionDriveVoice;
+  // V19 replaces PRE EQ's seven octave bands, and V20 retires Cab filters in
+  // favour of the single visible post-cab filter owner in Graphic EQ.
+  return Number.isInteger(version) && version >= 1 && version <= 20
+    ? 20
     : undefined;
 }
 

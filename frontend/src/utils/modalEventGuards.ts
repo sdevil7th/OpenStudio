@@ -66,9 +66,12 @@ function hasClosest(target: EventTarget | null): target is EventTarget & Closest
  * parameter controls, and modal content. This predicate never prevents or
  * stops the event; callers return immediately so the child keeps ownership.
  */
-export function isEditorWheelOwnedTarget(target: EventTarget | null): boolean {
-  return hasClosest(target)
-    && Boolean(target.closest(EDITOR_WHEEL_OWNER_SELECTOR));
+export function isEditorWheelOwnedTarget(target: EventTarget | null, surface?: Element): boolean {
+  if (!hasClosest(target)) return false;
+  const owner = target.closest(EDITOR_WHEEL_OWNER_SELECTOR);
+  // A modal can host the editor itself. Only descendants of that editor own
+  // its wheel input; an enclosing dialog must not disable the entire canvas.
+  return Boolean(owner) && (!surface || (owner instanceof Element && owner !== surface && surface.contains(owner)));
 }
 
 export function hasOpenModalLayer(): boolean {

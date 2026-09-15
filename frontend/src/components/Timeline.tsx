@@ -3405,7 +3405,7 @@ export function Timeline({
     if (!container) return;
 
     const handleWheel = (e: WheelEvent) => {
-      if (isEditorWheelOwnedTarget(e.target)) return;
+      if (isEditorWheelOwnedTarget(e.target, container)) return;
       const rect = container.getBoundingClientRect();
       const stageX = e.clientX - rect.left;
       const stageY = e.clientY - rect.top - (showRuler ? RULER_HEIGHT : 0);
@@ -3805,7 +3805,9 @@ export function Timeline({
           0,
           Math.min(maxTimelineScroll, curScrollX + gesture.amount),
         );
-        scheduleScroll(newScrollX, scrollYRef.current);
+        const workspace = container.closest<HTMLElement>(".workspace");
+        if (gesture.ruleId === "trackpad.pan" && workspace) workspace.scrollTop += gesture.delta.y;
+        scheduleScroll(newScrollX, workspace?.scrollTop ?? scrollYRef.current);
       } else if (gesture.operation === "scroll") {
         // Profiles such as Pro Tools and REAPER use modified, reduced-speed
         // vertical scrolling. Own the workspace scroll so the profile's
@@ -4478,7 +4480,10 @@ export function Timeline({
       "edit.insertSilence",
     ]) {
       if (!matchesActionShortcut(event, actionId)) continue;
-      if (event.repeat) return "claimed_noop";
+      // Nudge is deliberately repeatable in the global dispatcher; keep the
+      // active Timeline owner in parity so holding an arrow key does not stop
+      // after the initial keydown. Split/insert remain one-shot commands.
+      if (event.repeat && !actionId.startsWith("edit.nudge")) return "claimed_noop";
       return executeAvailableRegisteredAction(actionId);
     }
 

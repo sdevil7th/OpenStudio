@@ -1,3 +1,4 @@
+import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Settings2, Sparkles } from "lucide-react";
 import { type AiFeatureId, type AiToolsStatus } from "../services/NativeBridge";
@@ -27,6 +28,7 @@ import {
   Textarea,
 } from "./ui";
 import { NumericWorkflowParamField } from "./AIWorkflowParamField";
+import { AIGenerationHardwareCheck } from "./AIGenerationHardwareCheck";
 
 interface AIWorkflowModalProps {
   track: Track;
@@ -58,9 +60,6 @@ const ADVANCED_SECTIONS = new Set<AIWorkflowSection>([
   "advanced",
 ]);
 
-function formatProgressLabel(progress: number) {
-  return `${Math.max(0, Math.round(progress * 100))}%`;
-}
 
 function formatPhaseLabel(phase?: string) {
   if (!phase) {
@@ -124,9 +123,6 @@ function formatOptionLabel(paramKey: string, option: string) {
   return option;
 }
 
-function progressWidth(progress?: number) {
-  return `${Math.max(4, Math.round((progress ?? 0) * 100))}%`;
-}
 
 function getDetailChips(track: Track) {
   return [
@@ -214,7 +210,7 @@ export function AIWorkflowModal({
     || track.aiGenerationLastStderrLine
     || track.aiGenerationLastStdoutLine,
   );
-  const runningDetails = Boolean(detailChips.length || track.aiGenerationStatusNote);
+  const runningDetails = detailChips.length > 0;
 
   const handleParamChange = (key: string, value: unknown) => {
     const nextParams = {
@@ -345,9 +341,9 @@ export function AIWorkflowModal({
     <Modal isOpen={isOpen} onClose={onClose} size="xl">
       <ModalHeader title="AI Generation" onClose={onClose} />
       <ModalContent ref={contentRef}>
-        <div className="space-y-4">
-          <section className="rounded border border-neutral-800 bg-neutral-950/60 p-4">
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="min-w-0 space-y-4" data-qa="ai-workflow-form">
+          <section className="rounded-lg border border-daw-accent/30 bg-daw-accent/5 p-4">
+            <div className="flex min-w-0 flex-col gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="inline-flex items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
@@ -369,7 +365,7 @@ export function AIWorkflowModal({
                 </p>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Select
                   label="Model"
                   value={modelId}
@@ -432,6 +428,9 @@ export function AIWorkflowModal({
             </div>
           ) : null}
 
+          <AIGenerationHardwareCheck modelId={modelId} workflowId={workflow.id} params={params}
+            enabled={isOpen && isMusicGenerationReady && !isBusy} />
+
           {track.aiGenerationState === "error" && track.aiGenerationError ? (
             <div className="rounded border border-red-700/40 bg-red-950/30 p-4">
               <div className="flex items-start gap-3">
@@ -478,7 +477,7 @@ export function AIWorkflowModal({
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
                   <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
-                    {formatProgressLabel(track.aiGenerationProgress ?? 0)}
+                    {formatGenerationStageProgress(track.aiGenerationPhaseProgress)}
                   </span>
                   {track.aiGenerationElapsedMs ? (
                     <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
@@ -488,12 +487,10 @@ export function AIWorkflowModal({
                 </div>
               </div>
 
-              <div className="mt-3 h-2.5 w-full rounded-full bg-neutral-900">
-                <div
-                  className="h-2.5 rounded-full bg-daw-accent transition-all duration-200"
-                  style={{ width: progressWidth(track.aiGenerationProgress) }}
-                />
-              </div>
+              <AIGenerationProgressBar value={track.aiGenerationPhaseProgress} />
+              {track.aiGenerationStatusNote ? (
+                <p role="status" className="mt-3 text-xs leading-5 text-daw-text-secondary">{track.aiGenerationStatusNote}</p>
+              ) : null}
               {runningDetails ? (
                 <div className="mt-3">
                   <Button
@@ -506,9 +503,6 @@ export function AIWorkflowModal({
                   </Button>
                   {detailsOpen ? (
                     <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-black/30 p-3">
-                      {track.aiGenerationStatusNote ? (
-                        <p className="text-xs leading-5 text-daw-text-secondary">{track.aiGenerationStatusNote}</p>
-                      ) : null}
                       {detailChips.length > 0 ? (
                         <div className="flex flex-wrap gap-2">
                           {detailChips.map((chip) => (

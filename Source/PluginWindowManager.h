@@ -1,4 +1,5 @@
 #pragma once
+#include "MessageThreadLifetime.h"
 
 #include <JuceHeader.h>
 #include <memory>
@@ -58,6 +59,7 @@ public:
     
     // Check if editor is open
     bool isEditorOpen(juce::AudioProcessor* processor) const;
+    bool isEditorVisible(const PluginEditorTarget& target) const;
     std::optional<PluginEditorTarget> getFocusedEditorTarget() const;
 
     void setMainWindowComponent(juce::Component* component);
@@ -70,7 +72,8 @@ public:
     // Public so the Win32 keyboard hook callback (free function) can access these.
     static PluginWindowManager* hookInstance;
     bool isPluginWindowFocused() const;
-    bool handlePluginWindowKeyPress(const juce::KeyPress& key) const;
+    void noteNativeKeyRepeat(bool repeat) noexcept { currentNativeKeyIsRepeat = repeat; }
+    bool handlePluginWindowKeyPress(const juce::KeyPress& key, bool isRepeat = false) const;
 #endif
 
 private:
@@ -92,7 +95,7 @@ private:
     };
 
 #if ! JUCE_WINDOWS
-    bool handlePluginWindowKeyPress(const juce::KeyPress& key) const;
+    bool handlePluginWindowKeyPress(const juce::KeyPress& key, bool isRepeat = false) const;
 #endif
     void positionWindow(PluginWindow& window) const;
     void logWindowEvent(const PluginEditorTarget& target, const juce::String& event, const juce::String& extra = {}) const;
@@ -104,10 +107,10 @@ private:
     std::optional<PluginEditorTarget> focusedEditorTarget;
     mutable juce::String lastForwardedShortcutSignature;
     mutable double lastForwardedShortcutTimestampMs = 0.0;
+    bool currentNativeKeyIsRepeat = false;
 
 #if JUCE_WINDOWS
-    // Win32 thread-local keyboard hook to intercept transport keys (spacebar)
-    // before they reach plugin native HWNDs that may consume them.
+    // Observe repeat state only; never steal native plug-in editing keys.
     // Uses void* to avoid pulling <windows.h> into this header.
     void* keyboardHook = nullptr;  // HHOOK
     void installKeyboardHook();
@@ -115,4 +118,5 @@ private:
 #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginWindowManager)
+    MessageThreadLifetime deferredCallbacks;
 };

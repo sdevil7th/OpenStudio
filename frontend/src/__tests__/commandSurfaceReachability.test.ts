@@ -118,6 +118,24 @@ describe("visible component command reachability", () => {
     expect(getActiveShortcutContext()).toEqual({ kind: "timeline" });
   });
 
+  it("restores the real underlay when nested modals unmount out of order", () => {
+    activateShortcutContext({ kind: "timeline" });
+    const outerClose = vi.fn();
+    const innerClose = vi.fn();
+    const unregisterOuter = registerModalShortcutScope(outerClose);
+    const unregisterInner = registerModalShortcutScope(innerClose);
+    cleanup.push(unregisterOuter, unregisterInner);
+
+    unregisterOuter();
+    expect(getActiveShortcutContext()).toEqual({ kind: "modal" });
+    expect(executeActiveScopedAction("modal.close")).toBe("handled");
+    expect(innerClose).toHaveBeenCalledOnce();
+    expect(outerClose).not.toHaveBeenCalled();
+
+    unregisterInner();
+    expect(getActiveShortcutContext()).toEqual({ kind: "timeline" });
+  });
+
   it("does not leak a blocked top-modal close command to the dialog underneath", () => {
     const outerClose = vi.fn();
     const innerClose = vi.fn();

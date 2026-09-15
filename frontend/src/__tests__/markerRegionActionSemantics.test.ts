@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getRegisteredAction } from "../store/actionRegistry";
 import { commandManager } from "../store/commands";
@@ -53,16 +54,16 @@ describe("marker and region command semantics", () => {
     expect(commandManager.getUndoStack()).toHaveLength(1);
   });
 
-  it("adds only a non-empty named marker and a normalized non-empty region", () => {
+  it("adds only a non-empty named marker and a normalized non-empty region", async () => {
     const prompt = vi.fn()
       .mockReturnValueOnce("   ")
       .mockReturnValueOnce("  Chorus  ");
-    vi.stubGlobal("prompt", prompt);
+    vi.spyOn(appDialogs, "prompt").mockImplementation(async (...args) => prompt(...args));
     const named = getRegisteredAction("insert.markerNamed")!;
-    named.execute();
+    await named.execute();
     expect(useDAWStore.getState().markers).toEqual([]);
     expect(commandManager.getUndoStack()).toHaveLength(0);
-    named.execute();
+    await named.execute();
     expect(useDAWStore.getState().markers[0]).toMatchObject({ name: "Chorus", time: 3.5 });
 
     useDAWStore.setState({ timeSelection: { start: 8, end: 2 } });

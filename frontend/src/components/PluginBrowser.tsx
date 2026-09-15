@@ -46,7 +46,7 @@ import {
 } from "../utils/shortcutContext";
 
 // Persist favorites in localStorage
-const FAVORITES_KEY = "studio13_plugin_favorites";
+const FAVORITES_KEY = "openstudio_plugin_favorites";
 function loadFavorites(): Set<string> {
   try {
     const raw = localStorage.getItem(FAVORITES_KEY);
@@ -67,12 +67,17 @@ interface Plugin {
   snapshot?: string; // base64 data URL from C++ snapshot lookup
   pluginFormat?: string;
   pluginFormatName?: string;
-  pluginType?: "vst3" | "lv2" | "clap" | "s13fx" | "builtin"; // Plugin format type
+  pluginType?: "vst3" | "lv2" | "clap" | "jsfx" | "builtin"; // Plugin format type
   producesMidi?: boolean;
   isMidiEffect?: boolean;
   supportsDoublePrecision?: boolean;
   numInputChannels?: number;
   numOutputChannels?: number;
+  isolatedHosting?: boolean;
+  isolationAvailable?: boolean;
+  isolationLatencySamples?: number;
+  isolationLatencyMs?: number;
+  hasARA?: boolean;
 }
 
 const pluginCatalogCache: {
@@ -92,7 +97,7 @@ function getPluginIdentity(
 }
 
 function getPluginLoadTarget(plugin: Plugin): string {
-  return plugin.pluginType === "s13fx" || plugin.pluginType === "builtin"
+  return plugin.pluginType === "jsfx" || plugin.pluginType === "builtin"
     ? plugin.fileOrIdentifier
     : getPluginIdentity(plugin);
 }
@@ -136,22 +141,22 @@ async function fetchPluginCatalog(): Promise<Plugin[]> {
       return { ...p, pluginType };
     });
 
-    let s13fxPlugins: Plugin[] = [];
+    let jsfxPlugins: Plugin[] = [];
     try {
-      const scripts = await nativeBridge.getAvailableS13FX();
-      s13fxPlugins = scripts.map((s: any) => ({
+      const scripts = await nativeBridge.getAvailableJSFX();
+      jsfxPlugins = scripts.map((s: any) => ({
         name: s.name,
-        manufacturer: s.author || "S13FX",
+        manufacturer: s.author || "JSFX",
         category: s.tags?.[0] || "Script",
         fileOrIdentifier: s.filePath,
         isInstrument: false,
-        pluginType: "s13fx" as const,
+        pluginType: "jsfx" as const,
       }));
     } catch {
-      // S13FX not available, that's OK
+      // JSFX not available, that's OK
     }
 
-    return [...hostPlugins, ...s13fxPlugins];
+    return [...hostPlugins, ...jsfxPlugins];
   })();
   pluginCatalogCache.loadPromise = request;
 
@@ -293,6 +298,8 @@ export function PluginBrowser({
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [categoryGroupFilter, setCategoryGroupFilter] = useState<CategoryGroupId>("all");
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
+  const [hostingBusy, setHostingBusy] = useState(false);
+  const hostingBusyRef = useRef(false);
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [showScanFolders, setShowScanFolders] = useState(false);
@@ -335,6 +342,21 @@ export function PluginBrowser({
     });
   };
 
+  const changeHosting = async (plugin: Plugin, enabled: boolean) => {
+    if (hostingBusyRef.current || addingPlugin) return;
+    hostingBusyRef.current = true; setHostingBusy(true);
+    try {
+      if (!await nativeBridge.setIsolatedPluginHosting(getPluginIdentity(plugin), enabled))
+        throw new Error("The hosting preference could not be saved");
+      setPlugins(current => {
+        const updated = current.map(item => getPluginIdentity(item) === getPluginIdentity(plugin) ? { ...item, isolatedHosting: enabled } : item);
+        pluginCatalogCache.plugins = updated;
+        return updated;
+      });
+    } catch (error) { useDAWStore.getState().showToast(String(error), "error"); }
+    finally { hostingBusyRef.current = false; setHostingBusy(false); }
+  };
+
   const loadPlugins = useCallback(async () => {
     try {
       if (pluginCatalogCache.plugins) {
@@ -345,6 +367,9 @@ export function PluginBrowser({
 
       setLoading(true);
       const catalog = await fetchPluginCatalog();
+      const configuration = await nativeBridge.getPluginScanConfiguration();
+      setScanConfiguration(configuration);
+      setScanError(configuration.settingsError || "");
       setPlugins(catalog);
       setLoading(false);
     } catch (e) {
@@ -562,10 +587,10 @@ export function PluginBrowser({
       let shouldNotifyChain = false;
       const store = useDAWStore.getState();
 
-      if (plugin.pluginType === "s13fx") {
-        // S13FX script — use dedicated bridge
+      if (plugin.pluginType === "jsfx") {
+        // JSFX script — use dedicated bridge
         if (targetChain === "master") {
-          success = await nativeBridge.addMasterS13FX(plugin.fileOrIdentifier);
+          success = await nativeBridge.addMasterJSFX(plugin.fileOrIdentifier);
           shouldNotifyChain = success;
         } else {
           const fxTargetChain =
@@ -577,7 +602,7 @@ export function PluginBrowser({
             fxTargetChain !== null
               ? (await getFXChainSlots(trackId, fxTargetChain)).length + 1
               : null;
-          success = await nativeBridge.addTrackS13FX(
+          success = await nativeBridge.addTrackJSFX(
             trackId,
             plugin.fileOrIdentifier,
             isInputFX,
@@ -1208,7 +1233,7 @@ export function PluginBrowser({
           </div>
         ) : (
           sortedPlugins.map((plugin) => {
-            const isScript = plugin.pluginType === "s13fx";
+            const isScript = plugin.pluginType === "jsfx";
             const pluginIdentity = getPluginIdentity(plugin);
             const isFav = isPluginFavorite(plugin, favorites);
             const { Icon, color } = isScript
@@ -1249,7 +1274,7 @@ export function PluginBrowser({
                     {plugin.name}
                     {isScript && (
                       <span className="ml-2 text-[10px] font-normal text-lime-400 bg-lime-900/30 px-1.5 py-0.5 rounded">
-                        S13FX
+                        JSFX
                       </span>
                     )}
                   </div>
@@ -1259,12 +1284,30 @@ export function PluginBrowser({
                   <div className="text-[11px] text-neutral-500 mt-0.5">
                     {isScript ? "JSFX Script" : plugin.category}
                   </div>
+                  {!isScript && plugin.isolationAvailable && (
+                    <div className="mt-2 flex flex-col gap-1 text-xs">
+                      <label className="flex items-center gap-2 text-neutral-300">
+                        <input type="checkbox" className="accent-daw-accent size-4 shrink-0 focus-visible:outline-2 focus-visible:outline-daw-accent"
+                          checked={Boolean(plugin.isolatedHosting)} disabled={hostingBusy || addingPlugin !== null}
+                          aria-label={`Isolate ${plugin.name}`} onChange={event => void changeHosting(plugin, event.target.checked)} />
+                        Separate process (crash protection)
+                      </label>
+                      {plugin.isolatedHosting && <p className="text-[11px] leading-relaxed text-amber-200/90">
+                        Adds {Math.round(plugin.isolationLatencySamples ?? 1024)} samples
+                        {Number.isFinite(plugin.isolationLatencyMs) ? ` (about ${plugin.isolationLatencyMs!.toFixed(1)} ms)` : ""}.
+                        {" "}Applies on next load, including reopened projects; existing instances are unchanged.
+                        {plugin.hasARA ? " ARA integration is unavailable in this mode." : ""}
+                        {" "}This is a per-plugin preference on this computer.
+                        {" "}Up to 32 active audio channels; bus layout changes require reloading. Generic controls use normalized values.
+                      </p>}
+                    </div>
+                  )}
                 </div>
                 <Button
                   variant="primary"
                   size="sm"
                   onClick={() => handleAddPlugin(plugin)}
-                  disabled={addingPlugin !== null}
+                  disabled={addingPlugin !== null || hostingBusy}
                   className="shrink-0"
                 >
                   {addingPlugin === pluginIdentity ? "Adding..." : "Add"}

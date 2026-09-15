@@ -20,7 +20,7 @@ describe("Channel Strip EQ bridge integration", () => {
     expect(modal).toContain("EQ_BANDS.map((definition, i)");
   });
 
-  it("maps the packed bridge onto real S13EQ band state instead of an empty parameter list", () => {
+  it("maps the packed bridge onto real OpenStudioEQ band state instead of an empty parameter list", () => {
     const processor = read("../../../Source/TrackProcessor.cpp");
     expect(processor).toContain("channelStripEQBandCount * channelStripEQValuesPerBand");
     expect(processor).toContain("channelStripEQ.bands[static_cast<size_t>(surfaceBand)]");
