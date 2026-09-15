@@ -1489,7 +1489,7 @@ void AITrackEngine::resetProcessStateLocked()
     firstOutputLineAtMs_ = 0;
     workerScriptVersion_.clear();
     workerScriptPath_.clear();
-    workerPython_ = {};
+    workerPython_ = juce::File();
 }
 
 void AITrackEngine::stopWorker(bool clearProgress, bool userCancelled)
