@@ -35,10 +35,12 @@ class AceDiffusersGenerationTests(unittest.TestCase):
                 music.output_to_soundfile_array(data)
 
     def test_default_music_generation_cache_root_is_diffusers(self):
-        with mock.patch.object(ai_runtime_probe.Path, "home", return_value=Path("C:/Users/example")):
-            root = ai_runtime_probe.resolve_music_gen_checkpoint_root("")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            with mock.patch.object(ai_runtime_probe.Path, "home", return_value=home):
+                root = ai_runtime_probe.resolve_music_gen_checkpoint_root("")
 
-        self.assertEqual(root.as_posix(), "C:/Users/example/.cache/ace-step/diffusers")
+            self.assertEqual(root, home / ".cache" / "ace-step" / "diffusers")
 
     def test_text_to_music_kwargs_match_reference_pipeline_contract(self):
         spec = music.build_generation_spec(
