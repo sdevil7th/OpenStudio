@@ -17,6 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install audio routing test dependencies
+        run: python -m pip install numpy==2.4.2 soundfile==0.13.1 cryptography==46.0.3
+
       - name: Check first-party product names
         run: python3 tools/check-product-naming.py
 
@@ -24,12 +31,30 @@ jobs:
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_updater_manifest
           tests.test_store_submission
           tests.test_ai_runtime_dependency_pins
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
           tests.test_prepare_diffusers_audio
           tests.test_diffusers_memory_policy
+
+  verify-ai-policy:
+    name: AI execution policy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - name: Install lightweight audio test dependencies
+        run: python -m pip install numpy==2.4.2 soundfile==0.13.1
+      - name: Verify device budgets and model routing without GPU dependencies
+        run: python -m unittest tests.test_ai_execution_policy tests.test_ai_benchmark tests.test_diffusers_memory_policy tests.test_ace_diffusers_generation tests.test_ai_generation_preflight
 
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})
@@ -185,6 +210,14 @@ jobs:
             }
             throw "Windows startup self-test failed."
           }
+
+      - name: Verify signed updater and restart persistence (Windows Release)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "updater-regression"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--updater-self-test", "`"$report`"") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Signed updater regression failed." }
 
       - name: Run render and export regression matrix
         shell: pwsh
@@ -357,6 +390,12 @@ jobs:
             exit 1
           fi
 
+      - name: Verify signed updater and restart persistence (macOS Release)
+        shell: bash
+        run: |
+          "$APP_BUNDLE/Contents/MacOS/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
+          "$APP_BUNDLE/Contents/Helpers/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
+
       - name: Run macOS native-window lifecycle smoke test
         shell: pwsh
         run: |
@@ -446,6 +485,12 @@ jobs:
             fi
             exit 1
           fi
+
+      - name: Verify signed updater and restart persistence (Linux Release)
+        shell: bash
+        run: |
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
+          "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
 
       - name: Package AppImage
         shell: bash

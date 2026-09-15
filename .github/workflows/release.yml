@@ -181,6 +181,14 @@ jobs:
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
 
+      - name: Verify signed updater (Windows Release)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "updater-regression"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--updater-self-test", "`"$report`"") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Signed updater regression failed." }
+
       - name: Validate Windows runtime bundle
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
@@ -557,6 +565,12 @@ jobs:
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
 
+      - name: Verify signed updater (macOS Release)
+        shell: bash
+        run: |
+          "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.app/Contents/MacOS/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
+          "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.app/Contents/Helpers/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
+
       - name: Validate macOS runtime bundle
         shell: pwsh
         run: |
@@ -764,6 +778,12 @@ jobs:
       - name: Build OpenStudio
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
 
+      - name: Verify signed updater (Linux Release)
+        shell: bash
+        run: |
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
+          "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
+
       - name: Validate Linux runtime bundle
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform linux -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
@@ -955,6 +975,20 @@ jobs:
             -LinuxX64AiRuntimeAssetPath "dist/ai-runtime/OpenStudio-AI-Runtime-linux-cpu-x64.zip" `
             -LinuxCudaInstallPlanPath "tools/ai-runtime-install-plan-linux-cuda.json" `
             -LinuxRocmInstallPlanPath "tools/ai-runtime-install-plan-linux-rocm.json"
+
+      - name: Install updater signing dependency
+        run: python3 -m pip install "cryptography==46.0.3"
+
+      - name: Sign application update manifests
+        shell: bash
+        env:
+          OPENSTUDIO_UPDATE_SIGNING_SEED: ${{ secrets.OPENSTUDIO_UPDATE_SIGNING_SEED }}
+        run: |
+          if [ -z "$OPENSTUDIO_UPDATE_SIGNING_SEED" ]; then
+            echo "OPENSTUDIO_UPDATE_SIGNING_SEED is required for authenticated app updates." >&2
+            exit 1
+          fi
+          python3 tools/updater_manifest.py sign --metadata-dir dist/release-metadata
 
       - name: Prepare uniquely named release metadata assets
         shell: pwsh

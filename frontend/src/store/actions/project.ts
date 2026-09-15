@@ -759,7 +759,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       return true;
     },
 
-    requestQuit: async () => {
+    requestQuit: async (installPreparedUpdate = false) => {
+      if (installPreparedUpdate) {
+        const state = get();
+        // Update consent cannot survive a deferred unsaved-changes dialog.
+        if (state.isModified || state.transport.isPlaying || state.transport.isRecording)
+          return false;
+        await nativeBridge.quitApplication(true);
+        return true;
+      }
       const action = { type: "quit" };
       if (!get().isModified)
         return performPendingProjectAction(action, get);

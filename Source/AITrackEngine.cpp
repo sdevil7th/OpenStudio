@@ -103,10 +103,14 @@ juce::String computeScriptVersion(const juce::File& script)
 
     if (script.getFileName() == "stable_audio3_generate.py" || script.getFileName() == "generate_music.py")
     {
-        juce::MemoryBlock adapterBytes;
-        if (! script.getSiblingFile("diffusers_audio_pipeline.py").loadFileAsData(adapterBytes))
-            return {};
-        scriptBytes.append(adapterBytes.getData(), adapterBytes.getSize());
+        for (const auto* module : { "diffusers_audio_pipeline.py", "ai_execution_policy.py",
+                                    "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py" })
+        {
+            juce::MemoryBlock adapterBytes;
+            if (! script.getSiblingFile(module).loadFileAsData(adapterBytes))
+                return {};
+            scriptBytes.append(adapterBytes.getData(), adapterBytes.getSize());
+        }
     }
 
     return juce::MD5(scriptBytes.getData(), scriptBytes.getSize()).toHexString().substring(0, 16);
@@ -341,6 +345,35 @@ juce::File AITrackEngine::findStableAudioPython() const
     return {};
 }
 
+juce::File AITrackEngine::qualifiedMiniMaxPython(const juce::File& candidateRoot)
+{
+    const auto manifest = candidateRoot.getChildFile("minimax-int8-qualified.json");
+    if (! manifest.existsAsFile() || manifest.getSize() > 64 * 1024)
+        return {};
+    const auto profile = juce::JSON::parse(manifest);
+    if (! profile.isObject() || static_cast<int>(profile.getProperty("schemaVersion", 0)) != 1
+        || profile.getProperty("state", "").toString() != "qualified-local"
+        || profile.getProperty("modelId", "").toString() != kMiniMaxModelId
+        || profile.getProperty("policy", "").toString() != "minimax-int8-stage-v1")
+        return {};
+    const auto environment = profile.getProperty("environment", "").toString();
+    if (! environment.startsWith("int8-")
+        || ! environment.containsOnly("abcdefghijklmnopqrstuvwxyz0123456789-"))
+        return {};
+    const auto root = candidateRoot.getChildFile(environment);
+    if (root.isSymbolicLink())
+        return {};
+    // Python revalidates the stack, model, physical adapter and request budget
+    // before enabling quantization. An import-only staging manifest is ignored.
+    return findPythonInRuntimeRoot(root);
+}
+
+juce::File AITrackEngine::findMiniMaxPython() const
+{
+    const auto candidate = qualifiedMiniMaxPython(getUserDataRoot().getChildFile("ai-candidates"));
+    return candidate.existsAsFile() ? candidate : findStableAudioPython();
+}
+
 juce::File AITrackEngine::findScript() const
 {
     const auto runtimeDir = getApplicationRuntimeDirectory();
@@ -379,6 +412,69 @@ juce::File AITrackEngine::findStableAudioScript() const
         return workingCopyScript;
 
     return {};
+}
+
+juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
+    const juce::String& workflowId, const juce::String& paramsJson,
+    const std::function<bool()>& cancelled) const
+{
+    const auto unavailable = [](const juce::String& reason) -> juce::var {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("status", "unavailable");
+        result->setProperty("memory", juce::Array<juce::var>());
+        result->setProperty("notes", juce::Array<juce::var> { reason });
+        return result;
+    };
+    if (modelId != "minimax-music-3" && modelId != "stable-audio-3-medium"
+        && modelId != "ace-step-v15-xl-turbo")
+        return unavailable("Hardware check does not support this model.");
+    const bool stable = modelId != "ace-step-v15-xl-turbo";
+    const auto python = modelId == "minimax-music-3" ? findMiniMaxPython()
+        : stable ? findStableAudioPython() : findPython();
+    const auto worker = stable ? findStableAudioScript() : findScript();
+    const auto script = worker.getSiblingFile("ai_generation_preflight.py");
+    const auto root = stable ? getStableAudioModelRoot(modelId) : getMusicGenerationCheckpointRoot();
+    if (!python.existsAsFile() || !script.existsAsFile())
+        return unavailable("Install the model runtime to check hardware requirements.");
+    const auto params = juce::JSON::parse(paramsJson);
+    if (!params.isObject() || paramsJson.getNumBytesAsUTF8() > 256 * 1024)
+        return unavailable("Invalid generation parameters.");
+    juce::TemporaryFile request(".json");
+    auto* input = new juce::DynamicObject();
+    input->setProperty("workflow", workflowId);
+    input->setProperty("params", params);
+    if (!request.getFile().replaceWithText(juce::JSON::toString(juce::var(input))))
+        return unavailable("Could not prepare the hardware check.");
+    OwnedChildProcess process;
+    juce::StringPairArray environment;
+    environment.set("HF_HUB_OFFLINE", "1");
+    environment.set("TRANSFORMERS_OFFLINE", "1");
+    if (cancelled() || !process.start({ python.getFullPathName(), script.getFullPathName(),
+        "--model-id", modelId, "--model-root", root.getFullPathName(),
+        "--request", request.getFile().getFullPathName() }, 3, environment))
+        return unavailable("Could not start the hardware check.");
+    std::string output;
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + 30000.0;
+    for (;;)
+    {
+        char buffer[4096];
+        const auto count = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
+        if (count > 0) output.append(buffer, static_cast<size_t>(count));
+        if (cancelled() || juce::Time::getMillisecondCounterHiRes() > deadline || output.size() > 256 * 1024)
+        {
+            process.kill();
+            return unavailable("Hardware check was interrupted or timed out. Runtime checks still apply.");
+        }
+        if (count <= 0 && !process.isRunning()) break;
+        if (count <= 0) juce::Thread::sleep(10);
+    }
+    const auto lines = juce::StringArray::fromLines(juce::String::fromUTF8(output.data(), static_cast<int>(output.size())));
+    for (int index = lines.size(); --index >= 0;)
+    {
+        const auto result = juce::JSON::parse(lines[index]);
+        if (result.isObject() && result.hasProperty("status") && result.hasProperty("memory")) return result;
+    }
+    return unavailable("Hardware check could not read this runtime. Generation will validate its own requirements.");
 }
 
 juce::String AITrackEngine::appendProcessDetailsLocked(const juce::String& message) const
@@ -532,6 +628,8 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             && workerPort_ > 0
             && workerProtocolVersion_ == kWorkerProtocolVersion
             && workerScriptVersion_ == expectedScriptVersion
+            && workerPython_ == python
+            && juce::File(workerScriptPath_) == script
             && workerModelId_ == modelId)
             return true;
     }
@@ -572,6 +670,7 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         {
             const juce::ScopedLock sl(lock_);
             resetProcessStateLocked();
+            workerPython_ = python;
             readerShouldExit_ = false;
             expectedProcessExit_ = false;
             workerReady_ = false;
@@ -865,7 +964,8 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         return false;
 
     const auto isStableAudio = isDiffusersAudioModel(modelId);
-    const auto python = isStableAudio ? findStableAudioPython() : findPython();
+    const auto python = modelId == kMiniMaxModelId ? findMiniMaxPython()
+        : isStableAudio ? findStableAudioPython() : findPython();
     const auto script = isStableAudio ? findStableAudioScript() : findScript();
     const auto modelLabel = audioModelLabel(modelId);
 
@@ -922,6 +1022,7 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         currentProgress_.lastStdoutLine.clear();
         currentProgress_.lastStderrLine.clear();
         currentProgress_.statusNote.clear();
+        currentProgress_.generationDetails = juce::var();
         currentProgress_.attemptMode = isStableAudio ? juce::String() : juce::String("lm_dit");
         currentProgress_.attemptIndex = 1;
         currentProgress_.protocolVersion = kWorkerProtocolVersion;
@@ -1139,6 +1240,8 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
         currentProgress_.lmModel = obj->getProperty("lmModel").toString();
     if (obj->hasProperty("statusNote"))
         currentProgress_.statusNote = obj->getProperty("statusNote").toString();
+    if (obj->getProperty("generationDetails").isObject())
+        currentProgress_.generationDetails = obj->getProperty("generationDetails");
     if (obj->hasProperty("failureKind"))
         currentProgress_.failureKind = obj->getProperty("failureKind").toString();
     if (obj->hasProperty("failureDetail"))
@@ -1386,6 +1489,7 @@ void AITrackEngine::resetProcessStateLocked()
     firstOutputLineAtMs_ = 0;
     workerScriptVersion_.clear();
     workerScriptPath_.clear();
+    workerPython_ = {};
 }
 
 void AITrackEngine::stopWorker(bool clearProgress, bool userCancelled)
@@ -1465,8 +1569,9 @@ AIGenerationProgress AITrackEngine::pollProgress()
         currentProgress_.lastStdoutLine = lastStdoutLine_;
         currentProgress_.lastStderrLine = lastStderrLine_;
 
-        const auto inTerminalState = currentProgress_.state == "done"
-            || currentProgress_.state == "error"
+        // Successful sessions retain weights for bounded warm reuse. Python
+        // retires idle weights after two minutes or under host memory pressure.
+        const auto inTerminalState = currentProgress_.state == "error"
             || currentProgress_.state == "cancelled";
         if (inTerminalState
             && ! generationActive_
@@ -1495,4 +1600,12 @@ bool AITrackEngine::isRunning() const
 {
     const juce::ScopedLock sl(lock_);
     return generationActive_;
+}
+
+bool AITrackEngine::releaseIdleWorker()
+{
+    if (isRunning())
+        return false;
+    stopWorker(false, false);
+    return true;
 }

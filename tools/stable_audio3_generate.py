@@ -28,7 +28,8 @@ ORIGINAL_STDOUT = sys.stdout
 WORKER_PROTOCOL_VERSION = 2
 MAX_FRAMED_PAYLOAD_BYTES = 8 * 1024 * 1024
 SCRIPT_PATH = Path(__file__).resolve()
-SCRIPT_VERSION = hashlib.md5(SCRIPT_PATH.read_bytes() + SCRIPT_PATH.with_name("diffusers_audio_pipeline.py").read_bytes()).hexdigest()[:16]
+from ai_execution_policy import worker_version
+SCRIPT_VERSION = worker_version(SCRIPT_PATH)
 MODEL_ID = "stable-audio-3-medium"
 MODEL_LABEL = "Stable Audio 3 Medium"
 STABLE_AUDIO_DEFAULT_STEPS = 8
@@ -617,6 +618,10 @@ def build_generation_request(
     return kwargs, details
 
 
+class ExecutionPolicyError(RuntimeError):
+    """A valid model/request cannot use its qualified execution policy."""
+
+
 class StableAudioWorker:
     def __init__(self, model_root: Path) -> None:
         self.model_root = model_root
@@ -627,15 +632,24 @@ class StableAudioWorker:
         self._phase_lock = threading.Lock()
         self._progress_context = None
         self._request_started = time.monotonic()
+        self._request_duration = None
+        self._request_prompt_tokens = 5000
+        self._selection_note = ""
 
     def unload(self) -> None:
         import gc
+        if self._model is not None and callable(getattr(self._model, "close", None)):
+            self._model.close()
         self._model = None
         gc.collect()
         if "torch" in sys.modules:
             torch = sys.modules["torch"]
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            for kind in ("cuda", "xpu"):
+                api = getattr(torch, kind, None)
+                if api is not None and api.is_available():
+                    api.empty_cache()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
 
     def _phase_update(self, phase, message, fraction):
         with self._phase_lock:
@@ -655,7 +669,7 @@ class StableAudioWorker:
                 "phaseProgress": -1.0,
                 "phase": "loading_model",
                 "message": "Still loading the local Stable Audio 3 Medium snapshot...",
-                "statusNote": "First load can take several minutes while weights move into memory.",
+                "statusNote": self._selection_note or "Checking the execution policy before loading weights.",
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
                 "workflowId": workflow,
@@ -688,17 +702,44 @@ class StableAudioWorker:
 
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
         from diffusers_audio_pipeline import DiffusersAudioSession
-        return DiffusersAudioSession(self.model_root, MODEL_ID, conservative=self._conservative)
+        options, qualification_note = {}, ""
+        if MODEL_ID == "minimax-music-3" and not self._conservative:
+            import torch
+            from ai_execution_policy import qualified_minimax_options
+            options, qualification_note = qualified_minimax_options(torch, self.model_root,
+                self._request_duration, self._request_prompt_tokens)
+            if qualification_note and not options:
+                raise ExecutionPolicyError(qualification_note + " Generation stopped before loading unquantized weights. "
+                                   "Free the required memory or requalify the local INT8 profile for this request/runtime.")
+        self._selection_note = (
+            "INT8 language model; original-precision audio components. " + qualification_note
+            if options else "Unquantized model; standard memory placement.")
+        self._phase_update("loading_model", "Loading the selected model precision.", -1.0)
+        model = DiffusersAudioSession(self.model_root, MODEL_ID, conservative=self._conservative,
+            request_duration=self._request_duration, request_prompt_tokens=self._request_prompt_tokens, **options)
+        if qualification_note:
+            model.execution_details["localQualification"] = qualification_note
+        if options:
+            model.execution_details["quantizedStage"] = "qualified-local"
+        return model
 
     def _execution_note(self) -> str:
         summary = getattr(self._model, "execution_summary", None)
-        return summary() if callable(summary) else "Sampling and decoding can take several minutes for longer durations."
+        if callable(summary):
+            return " ".join(part for part in (summary(), self._selection_note) if part)
+        return self._selection_note or "Checking the execution policy before loading weights."
 
     def _load_model(self, workflow: str, request_id: str) -> Any:
         with self._lock:
-            if self._model is not None and self._model.needs_reload():
+            if (self._model is not None and (getattr(self._model, "_partial", None) is not None
+                                            or getattr(self._model, "_int8_stage", None) is not None)
+                    and (self._request_duration > self._model.request_duration
+                         or self._request_prompt_tokens > self._model.request_prompt_tokens)):
                 self.unload()
-                self._conservative = True
+            if self._model is not None and self._model.needs_reload():
+                was_int8 = getattr(self._model, "quantization", "none") == "int8"
+                self.unload()
+                self._conservative = not was_int8
             if self._model is not None:
                 return self._model
 
@@ -711,6 +752,8 @@ class StableAudioWorker:
             heartbeat.start()
             try:
                 self._model = self._load_local_model(workflow, request_id)
+            except ExecutionPolicyError:
+                raise
             except Exception as exc:
                 raise RuntimeError(
                     "Could not load the imported Stable Audio 3 Medium snapshot from "
@@ -727,6 +770,18 @@ class StableAudioWorker:
             params = json.loads(params_json)
             self._request_started = time.monotonic()
             self._progress_context = {"modelId": MODEL_ID, "workflowId": workflow, "requestId": request_id}
+            self._selection_note = ""
+            self._phase_update("loading_model", "Checking model precision and request memory.", -1.0)
+            # Structured songs expand verse/chorus/bridge and arrangement into
+            # the actual LM input. Budget that normalized text before loading
+            # or deciding whether a warm placement can be reused.
+            budget_params = build_generation_request(workflow, params)[0] if MODEL_ID == "minimax-music-3" else params
+            self._request_duration = clamp_float(normalize_float(budget_params.get("duration"), 60), 5, 300)
+            if MODEL_ID == "minimax-music-3":
+                from ai_execution_policy import minimax_prompt_tokens
+                self._request_prompt_tokens = minimax_prompt_tokens(self.model_root,
+                    normalize_text(budget_params.get("prompt")), normalize_text(budget_params.get("lyrics")),
+                    tokenizer=getattr(getattr(self._model, "pipe", None), "tokenizer", None))
             self._phase_update("generating_audio", "Preparing audio generation.", -1.0)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             emit_payload({
@@ -743,6 +798,9 @@ class StableAudioWorker:
                 "scriptVersion": SCRIPT_VERSION,
             })
             model = self._load_model(workflow, request_id)
+            self._selection_note = (
+                "INT8 language model; original-precision audio components."
+                if getattr(model, "quantization", "none") == "int8" else "Unquantized model; standard memory placement.")
             target_sample_rate, target_channels = get_model_audio_format(model)
 
             segment_path = None
@@ -823,6 +881,10 @@ class StableAudioWorker:
                         audio = model.generate(workflow=workflow, progress_callback=self._phase_update, **kwargs)
                         break
                     except torch.OutOfMemoryError as exc:
+                        if getattr(model, "quantization", "none") == "int8":
+                            raise RuntimeError("Not enough memory for this INT8 request. Generation stopped; "
+                                               "it will not retry with unquantized weights. Close other GPU applications "
+                                               "or reduce the requested duration.") from exc
                         if attempt or self._conservative:
                             raise RuntimeError("Not enough memory for this request even with reduced-memory offloading. Close other GPU applications or choose a smaller model/duration.") from exc
                         # Release traceback tensors before rebuilding hooks. No
@@ -941,7 +1003,8 @@ def run_worker(model_root: Path) -> None:
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
-    server.settimeout(120.0)
+    server.settimeout(1.0)
+    last_request_finished = time.monotonic()
     port = server.getsockname()[1]
     emit_payload({
         "event": "ready",
@@ -959,8 +1022,11 @@ def run_worker(model_root: Path) -> None:
         try:
             connection, _ = server.accept()
         except socket.timeout:
-            worker.unload()
-            worker._conservative = False
+            from ai_execution_policy import release_idle_weights, host_available
+            if worker._model is not None and release_idle_weights(
+                    time.monotonic() - last_request_finished, host_available()):
+                worker.unload()
+                worker._conservative = False
             continue
         with connection:
             request = read_framed_json(connection)
@@ -982,6 +1048,7 @@ def run_worker(model_root: Path) -> None:
                 output_path=Path(normalize_text(request.get("output"))).expanduser(),
                 request_id=request_id,
             )
+            last_request_finished = time.monotonic()
 
 
 def main() -> int:
@@ -992,6 +1059,8 @@ def main() -> int:
     parser.add_argument("--model-root", required=True)
     args = parser.parse_args()
     MODEL_ID = args.model_id
+    from ai_execution_policy import configure_allocator_environment
+    configure_allocator_environment(MODEL_ID)
     MODEL_LABEL = "MiniMax Music 3" if MODEL_ID == "minimax-music-3" else "Stable Audio 3 Medium"
     if not args.worker:
         raise SystemExit("--worker is required")

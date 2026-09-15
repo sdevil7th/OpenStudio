@@ -15,8 +15,23 @@ lives in [Testing](testing.md) and the
   setup reliable on clean systems.
 - Preserve old projects and presets while strengthening audio-thread safety,
   deterministic state migration, and failure recovery.
-- Implement and qualify [AI generation memory and speed improvements](runtime-dependency-contract.md#ai-generation-optimization-research-and-implementation-plan),
-  starting with memory-aware MiniMax placement and truthful execution details.
+- Implement and qualify [AI generation memory and speed improvements](runtime-dependency-contract.md#remaining-implementation-plan-september-12-2026),
+  extending the shared execution policy with qualified optional attention
+  packages and platform testing. MiniMax measures actual input tokens, exposes
+  selected precision, and stops unqualified INT8 requests before silently
+  loading unquantized weights. Request-boundary CUDA cache cleanup is being
+  requalified on the local Windows RTX 4080; the latest full-duration test
+  stopped under system RAM pressure. Full cold/warm capacity and normal-worker
+  validation remain pending, and the old local profile is not promoted to the
+  updated worker. The user's earlier short-sample INT8 audition remains recorded.
+  Unquantized partial residency and disk staging remain experimental. Warm
+  worker reuse and generation/separation resource handoff are implemented.
+  Both generation dialogs now expose request-specific memory estimates and
+  available hardware headroom. Full-song ACE-Step and Stable Audio timings,
+  bounded SAME decoding, and remaining listening/precision limits are recorded
+  in [September 13 qualification](ai-generation-qualification-2026-09-13.md).
+  Investigate the observed PCIe Gen 1 host link; the GPU is directly installed
+  in the motherboard's top slot. Other hardware qualification remains pending.
 
 ## Next: DAW foundations
 

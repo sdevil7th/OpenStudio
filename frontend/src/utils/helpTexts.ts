@@ -59,6 +59,34 @@ function buildHelpTexts(): Record<string, HelpEntry> {
       title: "Windows installation and prerequisites",
       description: "Open Setup normally and approve its Windows elevation request. Setup installs machine-wide VC++ and WebView2 prerequisites when needed. If repair fails, use Retry or the official download link shown in the error. The error includes an exit code and log path. Restart Windows if Setup requests it, then launch OpenStudio from the Start menu.",
     },
+    "settings.updates": {
+      title: "Application Updates",
+      description: "Open Help > Check for Updates to check, download, cancel, or install a release. Automatic checks do not install silently. Signed metadata, platform requirements, and package hashes are checked; completed downloads are verified again after restart. Stop playback/recording and save your project before installing. Debug builds must be rebuilt instead.",
+    },
+    "settings.updateRecovery": {
+      title: "macOS/Linux Update Installation and Recovery",
+      description: "Install update & restart supports eligible user-owned macOS app bundles and Linux AppImages. Protected or package-manager installations need manual updates. The previous application is retained for recovery; an early startup exit triggers verified rollback. Unsigned macOS updates still require Gatekeeper approval when macOS requests it. The update panel shows status and retained paths; keep backups until the new version works. Older releases need a first manual upgrade to gain this flow.",
+    },
+    "transport.clickOnly": {
+      title: "Click-only Metronome Practice",
+      description: "In Metronome Settings, Click only plays the click with live monitoring while transport is stopped, without playing clips or moving the playhead. It follows Play/Record and continues when transport stops. Switch Enable off to stop both metronome modes. Sound, accents, volume, and render-as-track settings are shared.",
+    },
+    "project.recovery": {
+      title: "Recover an Interrupted Session",
+      description: "Restore copy opens a recovery snapshot as an unsaved project; use Save As after reviewing it. Open without plugins for troubleshooting avoids loading effects and instruments. Enable periodic snapshots in Preferences > Backup (off by default); they also cover untitled projects and do not replace a normal Save. Later postpones recovery; Dismiss reminder retains the files.",
+    },
+    "project.workRecovery": {
+      title: "Recover Recordings and AI Work",
+      description: "In Recover an interrupted session, Preview copy and Import recovered audio retain original files and recover complete samples on disk, not audio lost before writing. Completed AI output can resume its original import when valid. Restart generation starts sampling again with the saved request and seed, not from a step checkpoint. Save the project containing recovered work or explicitly dismiss its reminder.",
+    },
+    "project.recordingFailure": {
+      title: "Recording Storage Failed",
+      description: "If storage fails, affected takes stop accepting audio while other tracks and monitoring continue. Stop recording to finalize available samples, then check free space and the recording destination before starting another take. Recovery can only use audio that reached disk.",
+    },
+    "fx.isolation": {
+      title: "Separate Plugin Process (Windows)",
+      description: "Eligible external plugins offer Separate process (crash protection) in the Plugin Browser on Windows. This per-plugin preference applies on next load, adds the displayed latency, supports up to 32 active audio channels, and disables ARA integration. Existing instances are unchanged; reload after bus-layout changes. For an isolated Audio fault, open the editor and choose Restart worker or remove/reload the plugin. Compatibility still depends on the plugin.",
+    },
     "fx.tone3000Login": {
       title: "Connect NAM Rack to TONE3000",
       description: "In the Amp or Cab library, choose Connect TONE3000 beside the connection status in the results panel. Sign in in your browser, then return to OpenStudio. Release builds provide the application configuration; users do not need an API key. Login is remembered for this OS user and computer. Local captures and IR files work without login. A new computer needs its own first login.",
@@ -188,7 +216,7 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "ai.tools": {
       title: "AI Tools Setup",
       description:
-        "AI generation and stem separation use optional local AI Tools. If a workflow says the runtime is missing, open AI Tools Setup, choose the needed feature/model, and let the installer prepare the runtime while the main DAW remains usable.",
+        "AI generation and stem separation use optional local AI Tools. Select a feature/model in AI Tools Setup. Stable Audio 3 and MiniMax offer Download and Set Up from Hugging Face or Import Local Model. Stable Audio requires approved gated-model access and conversion; accepting the license checkbox alone does not grant access. Setup shows download totals, remaining bytes, cache reuse, and logs. Closing the panel keeps setup running while OpenStudio stays open; Cancel Setup stops it.",
     },
     "ai.textToMusic": {
       title: "Text to Music",
@@ -199,12 +227,16 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "ai.lyricsStyle": {
       title: "Lyrics + Style",
       description:
-        "Lyrics + Style combines structured lyrics with a musical prompt so you can guide both song content and arrangement direction before importing the generated clip into the project.",
+        "Lyrics + Style uses ACE-Step or MiniMax Music 3 with lyrics and a musical prompt. MiniMax also offers Song Sections with separate verse, chorus, bridge, vocal-direction, and arrangement fields. Its Maximum length is a limit; songs can finish earlier. MiniMax does not offer clip variation, inpaint, or continuation.",
     },
     "ai.textToAudio": {
       title: "Text to Audio",
       description:
-        "Stable Audio 3 Medium workflows generate audio from a text prompt with optional negative prompt, seed, duration, step, CFG, and LoRA controls when the Stable Audio runtime/model is installed.",
+        "Stable Audio 3 Medium generates audio from a sound description, duration, seed, and steps when its runtime/model is installed. The distilled workflow uses fixed guidance; it does not expose negative-prompt, CFG, or LoRA controls.",
+    },
+    "ai.progress": {
+      title: "AI Generation Progress and Hardware Check",
+      description: "Generation reports its current stage and elapsed time, with actual denoising steps or MiniMax audio frames during sampling. Loading and decoding may be indeterminate; a stage percentage is not a whole-job time estimate. Closing and reopening the panel preserves the running job. Hardware check is advisory: refresh after closing other apps; the worker makes the final memory decision. Supported workers use memory-aware offloading and release idle model caches after about two minutes; longer requests can still exceed available memory.",
     },
     "ai.variation": {
       title: "Create Variation",

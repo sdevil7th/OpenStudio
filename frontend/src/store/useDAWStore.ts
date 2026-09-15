@@ -1774,7 +1774,7 @@ interface DAWActions {
   requestNewProject: () => Promise<boolean>;
   requestOpenProject: (path?: string, options?: { bypassFX?: boolean; recoveryCopy?: boolean }) => Promise<boolean>;
   requestCloseProject: () => Promise<boolean>;
-  requestQuit: () => Promise<boolean>;
+  requestQuit: (installPreparedUpdate?: boolean) => Promise<boolean>;
   requestLoadTemplate: (index: number) => Promise<boolean>;
   resolveUnsavedChanges: (choice: "save" | "discard" | "cancel") => Promise<void>;
   dismissUnsavedChangesDialog: () => void;

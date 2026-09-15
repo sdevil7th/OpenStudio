@@ -24,9 +24,15 @@ public:
     void downloadUpdate(Completion completion = {});
     void cancelDownload();
     void installDownloadedUpdate(Completion completion = {});
+    void authorisePreparedInstallForQuit();
 
 private:
     friend class RuntimeSafetyRegression;
+    friend class UpdaterRegression;
+    explicit AppUpdater(const juce::File& stateDirectory, bool restoreOnStartup = false);
+    juce::var statusFromEnvelope(const juce::var& envelope) const;
+    juce::var restoreDownload();
+    static juce::File stagedFile(const juce::File& root, const juce::String& relativePath);
     juce::var performUpdateCheck();
     juce::var performDownload(const juce::var& offer);
     juce::var performInstall();
@@ -37,11 +43,9 @@ private:
     bool rejectDevelopmentUpdate(const Completion& completion);
     bool shouldSkipAutomaticCheck() const;
     void recordSuccessfulCheck(const juce::String& latestVersion, const juce::String& publishedAt);
-    void savePersistedState() const;
+    bool savePersistedState() const;
 
     static juce::String getManifestUrl();
-    static juce::String getAppcastUrl();
-    static juce::String getFallbackReleasesPageUrl();
     static juce::String getPlatformKey();
     static juce::String getCurrentChannel();
     static int compareVersions(const juce::String& lhs, const juce::String& rhs);
@@ -73,11 +77,16 @@ private:
                                 const juce::String& updateSource = {});
 
     mutable juce::CriticalSection stateLock;
+    juce::File stateDirectory;
+    juce::String trustedPublicKey;
+    std::function<juce::String(const juce::String&)> feedReader;
     juce::var lastStatus;
     juce::var persistedState;
     juce::var availableUpdate;
     juce::var downloadedUpdate;
     juce::File downloadedInstaller;
+    juce::File installTransaction;
+    bool installQuitAuthorised = false;
     StatusCallback statusCallback;
     std::atomic<bool> checkInProgress { false };
     std::atomic<bool> installInProgress { false };

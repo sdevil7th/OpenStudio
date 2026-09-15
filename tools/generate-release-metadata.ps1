@@ -289,12 +289,12 @@ if (-not [string]::IsNullOrWhiteSpace($NotesFile) -and (Test-Path $NotesFile)) {
     $notes = [IO.File]::ReadAllText((Resolve-Path $NotesFile))
 }
 
-$windowsAdditional = @{}
+$windowsAdditional = @{ architectures = @("x86_64"); minimumSystemVersion = "10" }
 if (-not [string]::IsNullOrWhiteSpace($WindowsInstallerArguments)) {
     $windowsAdditional.installerArguments = $WindowsInstallerArguments
 }
 
-$macAdditional = @{}
+$macAdditional = @{ architectures = @("arm64", "x86_64"); minimumSystemVersion = "12.0" }
 if (-not [string]::IsNullOrWhiteSpace($MacEdSignature)) {
     $macAdditional.edSignature = $MacEdSignature
 }
@@ -304,7 +304,9 @@ if (-not [string]::IsNullOrWhiteSpace($MacMinimumSystemVersion)) {
 
 $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAssetUrl -AdditionalProperties $windowsAdditional
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
-$linux = Get-AssetMetadata -AssetPath $LinuxAssetPath -AssetUrl $LinuxAssetUrl
+# Release Linux binaries are built on Ubuntu 24.04. Do not offer them to older
+# glibc hosts merely because both run x86_64; update this contract with the runner.
+$linux = Get-AssetMetadata -AssetPath $LinuxAssetPath -AssetUrl $LinuxAssetUrl -AdditionalProperties @{ architectures = @("x86_64"); minimumGlibcVersion = "2.39" }
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
 $windowsBaseAiRuntime = Get-AssetMetadata -AssetPath $WindowsBaseAiRuntimeAssetPath -AssetUrl $WindowsBaseAiRuntimeAssetUrl
 $windowsDirectmlAiRuntime = Get-AssetMetadata -AssetPath $WindowsDirectmlAiRuntimeAssetPath -AssetUrl $WindowsDirectmlAiRuntimeAssetUrl

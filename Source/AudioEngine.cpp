@@ -77915,6 +77915,12 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
     }
 
     // If already running, ignore
+    if (aiTrackEngine.isRunning())
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Audio generation is using AI resources. Wait for it to finish or cancel it before separating stems.");
+        return juce::var(result.release());
+    }
     if (stemSeparator.isRunning())
     {
         result->setProperty("started", false);
@@ -77992,6 +77998,12 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
         .getChildFile(audioFile.getFileNameWithoutExtension() + "_stems");
 
     // Start Python subprocess
+    if (! aiTrackEngine.releaseIdleWorker())
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Audio generation started before separation could acquire AI resources.");
+        return juce::var(result.release());
+    }
     if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, accelerationMode))
     {
         juce::Logger::writeToLog("StemSeparator: Failed to start separation.");
@@ -78066,10 +78078,10 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
 
     auto result = std::make_unique<juce::DynamicObject>();
 
-    if (aiTrackEngine.isRunning())
+    if (aiTrackEngine.isRunning() || stemSeparator.isRunning())
     {
         result->setProperty("started", false);
-        result->setProperty("error", "Another AI generation is already in progress.");
+        result->setProperty("error", "Another AI generation or stem separation is already in progress.");
         return juce::var(result.release());
     }
 
@@ -78192,6 +78204,8 @@ juce::var AudioEngine::getAIGenerationProgress()
         obj->setProperty("lmModel", progress.lmModel);
     if (progress.statusNote.isNotEmpty())
         obj->setProperty("statusNote", progress.statusNote);
+    if (progress.generationDetails.isObject())
+        obj->setProperty("generationDetails", progress.generationDetails);
     if (progress.failureKind.isNotEmpty())
         obj->setProperty("failureKind", progress.failureKind);
     if (progress.sessionMode.isNotEmpty())

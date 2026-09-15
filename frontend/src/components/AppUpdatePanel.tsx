@@ -37,7 +37,7 @@ export function AppUpdatePanel() {
   const installing = update.status.status === "installing";
   const progress = Math.max(0, Math.min(100, Math.round((update.status.progress ?? 0) * 100)));
   const platform = update.offer?.platform || update.status.platform;
-  const installLabel = storeManaged ? "Install update" : platform === "macos" ? "Open update DMG" : platform === "linux" ? "Show updated AppImage" : "Install update & close";
+  const installLabel = storeManaged ? "Install update" : platform === "macos" || platform === "linux" ? "Install update & restart" : "Install update & close";
   const updateName = update.offer?.version ? `OpenStudio ${update.offer.version}` : "An OpenStudio update";
   const notes = update.offer?.notes?.trim();
   const actions = <div className="flex w-full flex-wrap justify-end gap-2">
@@ -61,6 +61,7 @@ export function AppUpdatePanel() {
         <p className="text-daw-text-muted">Running version: {update.status.currentVersion || "—"}{update.status.status === "development" ? " (development)" : ""}</p>
         {update.status.message !== update.error && <p role="status" aria-live="polite" className="break-words font-medium">{update.status.message}</p>}
         {update.error && <p role="alert" className="break-words text-red-400">{update.error}</p>}
+        {update.status.downloadPath && <p className="break-all text-daw-text-muted">Downloaded package: {update.status.downloadPath}</p>}
         {downloading && <div className="flex flex-col gap-2">
           <progress className="h-3 w-full accent-daw-accent" aria-label="Update download progress" max={100} value={progress} />
           <span className="text-daw-text-muted">{progress}% · You can keep working while the update downloads.</span>
@@ -72,8 +73,8 @@ export function AppUpdatePanel() {
         {update.offer?.releasePageUrl && <Button variant="ghost" onClick={() => { void nativeBridge.openExternalURL(update.offer!.releasePageUrl!); }}>Full release details</Button>}
         {update.downloaded && <p className="text-daw-text-muted">
           {storeManaged ? "Save your work before installing. Microsoft Store installs the update and may close OpenStudio to finish."
-            : platform === "macos" ? "Open the DMG, quit OpenStudio and drag the new app into Applications."
-            : platform === "linux" ? "The verified AppImage will be shown in its download folder. Replace your previous AppImage, then launch it."
+            : platform === "macos" ? "OpenStudio will close, install the verified update and restart. The previous version is kept for recovery. macOS may require approval to open an unsigned app."
+            : platform === "linux" ? "OpenStudio will close, replace its AppImage and restart. The previous version is kept for recovery. Package-managed and protected installations require a manual update."
               : "Save your work, then follow the Windows installer. OpenStudio will close after the installer opens."}
         </p>}
         {update.downloaded && playing && <p role="alert" className="text-amber-400">Stop playback and recording to install.</p>}

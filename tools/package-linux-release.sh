@@ -42,6 +42,11 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+if [ ! -x "$(dirname "$BINARY")/OpenStudioUpdateInstaller" ]; then
+    echo "ERROR: The executable update helper is missing. Rebuild before packaging." >&2
+    exit 1
+fi
+
 # ── Create AppDir skeleton ─────────────────────────────────────────────────────
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$OUT_DIR"

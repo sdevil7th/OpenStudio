@@ -15,7 +15,13 @@ def validate(version: str, path: Path) -> str:
     if "template" in path.name.lower():
         raise ValueError("A release-notes template cannot be published.")
     text = path.read_text(encoding="utf-8-sig").strip()
-    if text.splitlines()[0] != f"# OpenStudio {version}":
+    return validate_text(version, text)
+
+
+def validate_text(version: str, text: str) -> str:
+    version = version.removeprefix("v")
+    text = text.strip()
+    if not text or text.splitlines()[0] != f"# OpenStudio {version}":
         raise ValueError("Release-note title must match the exact release version.")
     if PLACEHOLDERS.search(text):
         raise ValueError("Release notes contain unfinished template text.")

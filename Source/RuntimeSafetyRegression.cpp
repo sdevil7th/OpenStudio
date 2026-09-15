@@ -871,7 +871,54 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         generation.pollProgress();
         check("terminal_ai_poll_joins_launcher_before_retiring_worker", started && retained.load() && !generation.workerProcess_);
     }
+    {
+        AITrackEngine generation;
+        generation.workerProcess_ = std::make_unique<OwnedChildProcess>();
+        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const bool started = generation.workerProcess_->start({ executable.getFullPathName(), "--owned-worker-fixture",
+            directory.getFullPathName(), "--owned-worker-leaf" });
+        generation.currentProgress_.state = "done";
+        generation.pollProgress();
+        check("successful_ai_poll_retains_worker_for_warm_reuse", started
+            && generation.workerProcess_ && generation.workerProcess_->isRunning());
+        generation.generationActive_ = true;
+        check("resource_handoff_does_not_cancel_active_generation", !generation.releaseIdleWorker()
+            && generation.workerProcess_ && generation.workerProcess_->isRunning());
+        generation.generationActive_ = false;
+        check("resource_handoff_releases_idle_ai_worker", generation.releaseIdleWorker()
+            && !generation.workerProcess_ && generation.currentProgress_.state == "done");
+    }
+    {
+        const auto candidates = directory.getChildFile("ai-candidates");
+        const auto interpreter = candidates.getChildFile("int8-fixture/Scripts/python.exe");
+        interpreter.getParentDirectory().createDirectory();
+        interpreter.replaceWithText("fixture only; never executed");
+        const auto manifest = candidates.getChildFile("minimax-int8-qualified.json");
+        juce::ReferenceCountedObjectPtr<juce::DynamicObject> profile = new juce::DynamicObject();
+        profile->setProperty("schemaVersion", 1);
+        profile->setProperty("state", "import_only");
+        profile->setProperty("modelId", "minimax-music-3");
+        profile->setProperty("policy", "minimax-int8-stage-v1");
+        profile->setProperty("environment", "int8-fixture");
+        auto writeProfile = [&] { manifest.replaceWithText(juce::JSON::toString(juce::var(profile.get()))); };
+        writeProfile();
+        check("import_only_ai_runtime_is_not_selected", AITrackEngine::qualifiedMiniMaxPython(candidates) == juce::File());
+        profile->setProperty("state", "qualified-local");
+        writeProfile();
+        check("locally_qualified_ai_runtime_is_selected", AITrackEngine::qualifiedMiniMaxPython(candidates) == interpreter);
+        profile->setProperty("environment", "int8-../../outside");
+        writeProfile();
+        check("ai_runtime_profile_cannot_escape_candidate_root", AITrackEngine::qualifiedMiniMaxPython(candidates) == juce::File());
+        profile->setProperty("environment", "int8-missing");
+        writeProfile();
+        check("missing_ai_candidate_falls_back_to_base", AITrackEngine::qualifiedMiniMaxPython(candidates) == juce::File());
+    }
 #endif
+    {
+        AITrackEngine probe;
+        const auto invalid = probe.getGenerationPreflight("unknown-model", "text-to-audio", "{}", [] { return false; });
+        check("hardware_preflight_rejects_unknown_model_without_inference", invalid["status"].toString() == "unavailable");
+    }
     auto report = std::make_unique<juce::DynamicObject>();
     report->setProperty("passed", passed);
     report->setProperty("checks", checks);

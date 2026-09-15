@@ -213,6 +213,7 @@ private:
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
     OwnedBackgroundTasks mediaOperations;
+    OwnedBackgroundTasks aiPreflightOperations;
     // File jobs must finish before the WebView and completion owner disappear.
     juce::ThreadPool projectFilePool { 1 };
     ProjectFileStore::RecoverySession projectRecovery;

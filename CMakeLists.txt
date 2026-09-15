@@ -370,6 +370,8 @@ target_sources(OpenStudio PRIVATE
     Source/MainComponent.cpp
     Source/MixerWindowManager.cpp
     Source/AppUpdater.cpp
+    Source/UpdateManifest.cpp
+    Source/UpdateInstaller.cpp
     Source/StoreUpdater.cpp
     Source/CrashDiagnostics.cpp
     Source/CrashReportWriter.cpp
@@ -585,9 +587,42 @@ endif()
 # ==============================================================================
 
 # Common updater/release URL defaults (override at configure time for production)
+add_library(openstudio_update_crypto STATIC
+    thirdparty/monocypher/monocypher.c
+    thirdparty/monocypher/monocypher-ed25519.c)
+set_target_properties(openstudio_update_crypto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(openstudio_update_crypto PUBLIC thirdparty/monocypher)
+target_link_libraries(OpenStudio PRIVATE openstudio_update_crypto)
 set(OPENSTUDIO_UPDATE_MANIFEST_URL_VALUE "https://openstudio.org.in/releases/stable/latest.json" CACHE STRING "Updater manifest URL compiled into OpenStudio")
 set(OPENSTUDIO_RELEASES_PAGE_URL_VALUE "https://openstudio.org.in/download" CACHE STRING "Release/download page URL compiled into OpenStudio")
 set(OPENSTUDIO_UPDATE_CHANNEL_VALUE "stable" CACHE STRING "Updater channel compiled into OpenStudio")
+target_compile_definitions(OpenStudio PRIVATE
+    OPENSTUDIO_INSTALLER_VERSION="${PROJECT_VERSION}"
+    OPENSTUDIO_INSTALLER_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}")
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Independent helper stays alive after the DAW and its AppImage mount exit.
+    juce_add_console_app(OpenStudioUpdateInstaller PRODUCT_NAME "OpenStudio Update Installer")
+    target_sources(OpenStudioUpdateInstaller PRIVATE
+        Source/UpdateInstallerMain.cpp Source/UpdateInstaller.cpp Source/UpdateManifest.cpp)
+    target_link_libraries(OpenStudioUpdateInstaller PRIVATE
+        juce::juce_core juce::juce_cryptography openstudio_update_crypto)
+    target_compile_definitions(OpenStudioUpdateInstaller PRIVATE
+        JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
+        OPENSTUDIO_INSTALLER_VERSION="${PROJECT_VERSION}"
+        OPENSTUDIO_INSTALLER_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}")
+    target_compile_features(OpenStudioUpdateInstaller PRIVATE cxx_std_17)
+    target_compile_options(OpenStudioUpdateInstaller PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(OpenStudio OpenStudioUpdateInstaller)
+    if(APPLE)
+        set(updater_helper_destination "$<TARGET_BUNDLE_CONTENT_DIR:OpenStudio>/Helpers")
+    else()
+        set(updater_helper_destination "$<TARGET_FILE_DIR:OpenStudio>")
+    endif()
+    add_custom_command(TARGET OpenStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${updater_helper_destination}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:OpenStudioUpdateInstaller>" "${updater_helper_destination}/OpenStudioUpdateInstaller")
+endif()
 
 if(WIN32)
     set(_OPENSTUDIO_DEFAULT_APPCAST_URL "https://openstudio.org.in/appcast/windows-stable.xml")
@@ -849,6 +884,11 @@ openstudio_copy_runtime_file(
 )
 
 # Ship the application license and third-party notices with every binary
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/monocypher/LICENCE.md"
+    "licenses/Monocypher-LICENCE.md"
+    "Copying Monocypher license to output directory"
+)
 # bundle. On macOS these land in Contents/Resources; on Windows and Linux they
 # sit beside the executable and are consequently included by the packagers.
 openstudio_copy_runtime_file(
@@ -1205,6 +1245,30 @@ if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
 endif()
 
 set(AI_STABLE_AUDIO_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stable_audio3_generate.py")
+foreach(AI_POLICY_MODULE ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store ai_generation_preflight)
+    openstudio_copy_runtime_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_POLICY_MODULE}.py"
+        "scripts/${AI_POLICY_MODULE}.py"
+        "Copying AI execution policy ${AI_POLICY_MODULE}"
+    )
+endforeach()
+# Worker edits must reach a Debug run even when no C++ object needs rebuilding.
+# POST_BUILD copies above/below also cover explicit OpenStudio target builds.
+set(OPENSTUDIO_AI_WORKER_FILES)
+foreach(AI_WORKER_MODULE ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store
+        diffusers_audio_pipeline generate_music stable_audio3_generate stem_separator
+        ai_runtime_probe prepare_diffusers_audio ai_generation_preflight)
+    list(APPEND OPENSTUDIO_AI_WORKER_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_WORKER_MODULE}.py")
+endforeach()
+add_custom_target(OpenStudioAIWorkerAssets ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/scripts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSTUDIO_AI_WORKER_FILES}
+        "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/scripts"
+    DEPENDS OpenStudio
+    COMMENT "Refreshing AI workers and their execution policy dependencies"
+    VERBATIM
+)
 openstudio_copy_runtime_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/prepare_diffusers_audio.py"
     "scripts/prepare_diffusers_audio.py"

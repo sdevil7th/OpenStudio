@@ -2,6 +2,14 @@
 
 OpenStudio uses the following open-source libraries and dependencies.
 
+## Monocypher 4.0.3
+
+- **Website:** https://monocypher.org/
+- **License:** BSD-2-Clause OR CC0-1.0 (upstream dual license)
+- **Usage:** Ed25519 verification of application update manifests
+- Full upstream license is shipped as `licenses/Monocypher-LICENCE.md`.
+- Source and verified upstream archive checksum: `thirdparty/monocypher/PROVENANCE.md`.
+
 ---
 
 ## JUCE 9.0.1

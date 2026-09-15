@@ -6,7 +6,9 @@
 #include "RecordingRecoveryRegression.h"
 #include "MetronomeRegression.h"
 #include "AppUpdater.h"
+#include "UpdateInstaller.h"
 #include "StoreUpdaterRegression.h"
+#include "UpdaterRegression.h"
 #include "WindowsPackage.h"
 #include "CLAPPluginFormat.h"
 #include "MainComponent.h"
@@ -1067,7 +1069,32 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
+        if (!UpdateInstaller::registerRunningApplication(getCommandLineOptionValue(commandLine, "--openstudio-update-receipt")))
+        {
+            juce::Logger::writeToLog("OpenStudio could not acquire its installation lock. Another update may be replacing this application.");
+            setApplicationReturnValue(2);
+            quit(); return;
+        }
         WindowsPackage::configureWebView();
+        const auto updaterFeedTestPath = getCommandLineOptionValue(commandLine, "--updater-feed-self-test");
+        if (updaterFeedTestPath.isNotEmpty())
+        {
+            const auto directory = juce::File(updaterFeedTestPath);
+            const auto result = UpdaterRegression::checkPublishedFeed(directory);
+            const auto status = result["status"].toString();
+            const bool written = directory.createDirectory() && directory.getChildFile("result.json").replaceWithText(juce::JSON::toString(result, true));
+            setApplicationReturnValue(written && (status == "update-available" || status == "up-to-date") ? 0 : 2);
+            quit(); return;
+        }
+        const auto updaterTestPath = getCommandLineOptionValue(commandLine, "--updater-self-test");
+        if (updaterTestPath.isNotEmpty())
+        {
+            const auto directory = juce::File(updaterTestPath);
+            const auto result = UpdaterRegression::run(directory);
+            const bool written = directory.createDirectory() && directory.getChildFile("result.json").replaceWithText(juce::JSON::toString(result, true));
+            setApplicationReturnValue(written && static_cast<bool>(result["pass"]) ? 0 : 2);
+            quit(); return;
+        }
         const auto updateTestPath = getCommandLineOptionValue(commandLine, "--store-update-self-test");
         if (updateTestPath.isNotEmpty())
         {

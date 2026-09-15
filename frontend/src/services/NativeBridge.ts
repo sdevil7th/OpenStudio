@@ -19,12 +19,13 @@ import {
 
 export interface AppUpdateStatus {
   status: "idle" | "development" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
-    | "downloading" | "download-ready" | "installing" | "install-started" | "cancelled" | "error";
+    | "downloading" | "download-ready" | "installing" | "install-started" | "cancelled" | "incompatible" | "error";
   message: string;
   currentVersion?: string;
   version?: string;
   platform?: "windows" | "macos" | "linux" | "unsupported";
   downloadUrl?: string;
+  downloadPath?: string;
   sha256?: string;
   size?: number;
   notes?: string;
@@ -1356,6 +1357,17 @@ export interface AiFeatureStatus {
   detectedGpuBackend?: string;
 }
 
+export interface AIGenerationPreflight {
+  status: "ready" | "warning" | "blocked" | "unavailable";
+  checkedAt?: number;
+  deviceName?: string;
+  precision?: string;
+  placement?: string;
+  estimateBasis?: string;
+  memory: { label: string; availableBytes: number | null; requiredBytes: number | null; shortfallBytes: number | null }[];
+  notes: string[];
+}
+
 export interface AiHardwareStatus {
   schemaVersion?: number;
   platform?: string;
@@ -1507,6 +1519,7 @@ export interface AIGenerationProgress {
   runtimeProfile?: string;
   lmModel?: string;
   statusNote?: string;
+  generationDetails?: Record<string, unknown>;
   sourceStructureConditioning?: boolean;
   sourcePatternWarning?: string;
   failureKind?: string;
@@ -1532,6 +1545,18 @@ export interface InstallAiToolsResponse {
   error?: string;
   message?: string;
   status?: AiToolsStatus;
+}
+
+// Both track and clip generation already display statusNote in Show details.
+// Keep machine-local execution metadata out of portable track/project fields.
+export function withAIExecutionNote(progress: AIGenerationProgress): AIGenerationProgress {
+  const execution = progress.generationDetails?.execution;
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) return progress;
+  const record = execution as Record<string, unknown>;
+  const reason = [record.localQualification, record.fallbackReason]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (!reason || progress.statusNote?.includes(reason)) return progress;
+  return { ...progress, statusNote: [progress.statusNote, reason].filter(Boolean).join(" ") };
 }
 
 export interface InstallAiToolsOptions {
@@ -2761,6 +2786,7 @@ declare global {
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
         cancelAiToolsInstall?: () => Promise<void>;
+        getAIGenerationPreflight?: (modelId: string, workflowId: string, paramsJSON: string) => Promise<AIGenerationPreflight>;
         startAIGeneration?: (
           trackId: string,
           modelIdOrWorkflowId: string,
@@ -2798,7 +2824,7 @@ declare global {
         minimizeWindow?: () => Promise<void>;
         maximizeWindow?: () => Promise<boolean>; // returns new isMaximized state
         closeWindow?: () => Promise<void>;
-        quitApplication?: () => Promise<void>;
+        quitApplication?: (installPreparedUpdate?: boolean) => Promise<void>;
         isWindowMaximized?: () => Promise<boolean>;
         startWindowDrag?: () => Promise<void>;
         openMixerWindow?: (bounds?: Partial<WindowBounds>) => Promise<boolean>;
@@ -8179,9 +8205,9 @@ class NativeBridge {
     }
   }
 
-  async quitApplication(): Promise<void> {
+  async quitApplication(installPreparedUpdate = false): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.quitApplication) {
-      await window.__JUCE__.backend.quitApplication();
+      await window.__JUCE__.backend.quitApplication(installPreparedUpdate);
       return;
     }
 
@@ -8998,6 +9024,14 @@ class NativeBridge {
       return await window.__JUCE__.backend.cancelAiToolsInstall();
   }
 
+  async getAIGenerationPreflight(modelId: string, workflowId: string, params: Record<string, unknown>): Promise<AIGenerationPreflight> {
+    if (this.isNative && window.__JUCE__?.backend.getAIGenerationPreflight) {
+      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(params));
+      if (report?.status && Array.isArray(report.memory) && Array.isArray(report.notes)) return report;
+    }
+    return { status: "unavailable", memory: [], notes: ["Hardware checks are available in the desktop app with an installed model runtime."] };
+  }
+
   async startAIGeneration(
     trackId: string,
     modelIdOrWorkflowId: string,
@@ -9038,7 +9072,7 @@ class NativeBridge {
 
   async getAIGenerationProgress(): Promise<AIGenerationProgress> {
     if (this.isNative && window.__JUCE__?.backend.getAIGenerationProgress) {
-      return await window.__JUCE__.backend.getAIGenerationProgress();
+      return withAIExecutionNote(await window.__JUCE__.backend.getAIGenerationProgress());
     }
     return { state: "idle", progress: 0 };
   }

@@ -11,6 +11,94 @@ from diffusers_audio_pipeline import DiffusersAudioSession, MINIMAX_MODEL, GIB, 
 
 
 class MiniMaxMemoryTests(unittest.TestCase):
+    def test_stage_reuse_rejects_growing_duration_or_prompt_before_forward(self):
+        for stage in ("_partial", "_int8_stage"):
+            session = DiffusersAudioSession.__new__(DiffusersAudioSession)
+            setattr(session, stage, object())
+            session.request_duration = 5
+            session.request_prompt_tokens = 20
+            session.root = Path("unused")
+            session.pipe = types.SimpleNamespace(tokenizer=object())
+            session._replan_stable = Mock()
+            with patch.dict(sys.modules, {"torch": types.SimpleNamespace()}), patch(
+                    "ai_execution_policy.minimax_prompt_tokens", return_value=21):
+                for duration, prompt in ((6, "short"), (5, "long " * 100)):
+                    with self.assertRaisesRegex(ValueError, "budget"):
+                        session.generate(duration=duration, prompt=prompt, lyrics="verse")
+
+    def test_structured_song_budgets_expanded_input_before_loading(self):
+        import json
+        import stable_audio3_generate as worker_module
+        params = {"prompt": "A song", "verse": "Long verse " * 100,
+                  "chorus": "A chorus", "bridge": "A bridge", "arrangement": "Guitars",
+                  "vocals": "Solo voice", "duration": 12}
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                worker_module, "MODEL_ID", MINIMAX_MODEL), patch.object(worker_module, "emit_payload"):
+            worker = worker_module.StableAudioWorker(Path(directory))
+            expected = worker_module.build_generation_request("structured-song", params)[0]
+            observed = {}
+            def inspect_budget(*_):
+                observed.update(duration=worker._request_duration, tokens=worker._request_prompt_tokens)
+                raise RuntimeError("stop before model load")
+            with patch.object(worker, "_load_model", side_effect=inspect_budget), patch.object(worker, "unload"), patch(
+                    "ai_execution_policy.minimax_prompt_tokens", return_value=321) as tokenize:
+                self.assertFalse(worker.generate("structured-song", json.dumps(params),
+                    Path(directory) / "output.wav", "budget-test"))
+            self.assertEqual(observed["duration"], 12)
+            self.assertEqual(observed["tokens"], 321)
+            tokenize.assert_called_once_with(Path(directory), expected["prompt"], expected["lyrics"], tokenizer=None)
+
+    def test_inapplicable_local_int8_stops_before_unquantized_load(self):
+        import stable_audio3_generate as worker_module
+        worker = worker_module.StableAudioWorker(Path("unused"))
+        with patch.object(worker_module, "MODEL_ID", MINIMAX_MODEL), patch.dict(
+                sys.modules, {"torch": types.SimpleNamespace()}), patch(
+                "ai_execution_policy.qualified_minimax_options", return_value=({}, "Qualified INT8 is unavailable: prompt too long.")), patch(
+                "diffusers_audio_pipeline.DiffusersAudioSession") as loader:
+            with self.assertRaisesRegex(RuntimeError, "stopped before loading unquantized"):
+                worker._load_local_model("lyrics-style", "fixture")
+            loader.assert_not_called()
+
+    def test_selected_precision_is_emitted_before_weights_load(self):
+        import stable_audio3_generate as worker_module
+        worker = worker_module.StableAudioWorker(Path("unused"))
+        worker._progress_context = {"requestId": "fixture"}
+        events = []
+        def load(*_, **options):
+            self.assertEqual(options["quantization"], "int8")
+            self.assertIn("INT8 language model", events[-1]["statusNote"])
+            self.assertEqual(events[-1]["phase"], "loading_model")
+            return types.SimpleNamespace(execution_details={})
+        with patch.object(worker_module, "MODEL_ID", MINIMAX_MODEL), patch.dict(
+                sys.modules, {"torch": types.SimpleNamespace()}), patch(
+                "ai_execution_policy.qualified_minimax_options", return_value=({"quantization": "int8"}, "Qualified locally.")), patch(
+                "diffusers_audio_pipeline.DiffusersAudioSession", side_effect=load), patch.object(
+                worker_module, "emit_payload", side_effect=events.append):
+            worker._load_local_model("lyrics-style", "fixture")
+
+    def test_int8_oom_never_retries_unquantized_or_publishes_audio(self):
+        import json
+        import stable_audio3_generate as worker_module
+        class OutOfMemoryError(RuntimeError):
+            pass
+        model = types.SimpleNamespace(quantization="int8", sample_rate=44100, io_channels=2,
+            execution_details={"quantization": "int8"}, generate=Mock(side_effect=OutOfMemoryError("fixture")))
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            worker = worker_module.StableAudioWorker(Path(directory))
+            output = Path(directory) / "output.wav"
+            with patch.object(worker_module, "MODEL_ID", MINIMAX_MODEL), patch.dict(
+                    sys.modules, {"torch": types.SimpleNamespace(OutOfMemoryError=OutOfMemoryError)}), patch(
+                    "ai_execution_policy.minimax_prompt_tokens", return_value=20), patch.object(
+                    worker, "_load_model", return_value=model) as load, patch.object(worker, "unload"), patch.object(
+                    worker_module, "emit_payload", side_effect=events.append):
+                self.assertFalse(worker.generate("lyrics-style", json.dumps({"prompt": "A song",
+                    "lyrics": "[verse]\nA verse", "duration": 5, "seed": 123}), output, "oom-test"))
+                load.assert_called_once()
+                model.generate.assert_called_once()
+                self.assertFalse(output.exists())
+                self.assertIn("will not retry with unquantized", events[-1]["error"])
+
     def test_audio_policy_reserves_memory_for_long_requests(self):
         self.assertEqual(plan_audio_memory(10 * GIB, 6 * GIB, 4 * GIB, 30), "resident")
         self.assertEqual(plan_audio_memory(10 * GIB, 6 * GIB, 4 * GIB, 150), "model-offload")
@@ -56,7 +144,33 @@ class MiniMaxMemoryTests(unittest.TestCase):
 
 
 class MiniMaxPlacementIntegrationTests(unittest.TestCase):
-    def load(self, free_gib):
+    def test_int8_load_keeps_lm_on_gpu_until_cpu_conversion_temporaries_are_released(self):
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            (root / "modular_model_index.json").write_text("{}")
+            order = []
+            pipe = types.SimpleNamespace(sampling_rate=44100,
+                load_components=lambda **kwargs: order.append(tuple(kwargs["names"])))
+            names = ("language_model", "condition_encoder", "rvq_depth_decoder", "transformer", "vocoder", "tokenizer", "scheduler")
+            for name in names:
+                setattr(pipe, name, types.SimpleNamespace())
+            pipe.language_model.config = types.SimpleNamespace(num_hidden_layers=36, num_key_value_heads=8, head_dim=128)
+            torch = types.SimpleNamespace(set_num_threads=Mock(), bfloat16="torch.bfloat16", float32="torch.float32",
+                version=types.SimpleNamespace(hip=None), cuda=types.SimpleNamespace(is_available=lambda: True,
+                    is_bf16_supported=lambda: True, mem_get_info=lambda: (16*GIB, 16*GIB), empty_cache=lambda: order.append("release-cache")))
+            stack.enter_context(patch.dict(sys.modules, {"torch": torch, "diffusers": types.SimpleNamespace(
+                ComponentsManager=Mock(), ModularPipeline=types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: pipe))}))
+            stack.enter_context(patch("ai_execution_policy.quantization_kwargs", return_value={}))
+            stack.enter_context(patch("ai_execution_policy.device_budget", return_value=16*GIB))
+            stack.enter_context(patch("ai_partial_offload.Int8StagePlacement"))
+            stack.enter_context(patch("ai_partial_offload.move_int8_module", side_effect=lambda model, device: order.append((model, device))))
+            session = DiffusersAudioSession(root, MINIMAX_MODEL, request_duration=5,
+                                           quantization="int8", placement="model-offload")
+            self.assertEqual(order, [("language_model",), "release-cache", names[1:], (pipe.language_model, "cpu"), "release-cache"])
+            self.assertEqual(session.execution_details["quantization"], "int8")
+
+    def load(self, free_gib, duration=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -74,7 +188,7 @@ class MiniMaxPlacementIntegrationTests(unittest.TestCase):
             ModularPipeline=types.SimpleNamespace(from_pretrained=Mock(return_value=pipeline))),
             "diffusers.hooks.group_offloading": types.SimpleNamespace(apply_group_offloading=group)}
         with patch.dict(sys.modules, modules), patch("diffusers_audio_pipeline.available_host_memory", return_value=5 * GIB):
-            session = DiffusersAudioSession(root, MINIMAX_MODEL)
+            session = DiffusersAudioSession(root, MINIMAX_MODEL, request_duration=duration)
         return pipeline, manager, group, session
 
     def test_resident_does_not_install_offload_hooks(self):
@@ -83,6 +197,12 @@ class MiniMaxPlacementIntegrationTests(unittest.TestCase):
         manager.enable_auto_cpu_offload.assert_not_called()
         group.assert_not_called()
         self.assertIn("model stays on device", session.execution_summary())
+
+    def test_unqualified_partial_residency_is_never_selected_automatically(self):
+        _, _, group, session = self.load(13, duration=30)
+        group.assert_called_once()
+        self.assertIsNone(session._partial)
+        self.assertIn("qualification incomplete", session.execution_details["partialResidencyQualification"])
 
     def test_intermediate_capacity_uses_only_component_manager(self):
         pipeline, manager, group, session = self.load(25)

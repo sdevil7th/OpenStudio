@@ -28,6 +28,7 @@ import {
   Textarea,
 } from "./ui";
 import { NumericWorkflowParamField } from "./AIWorkflowParamField";
+import { AIGenerationHardwareCheck } from "./AIGenerationHardwareCheck";
 
 interface AIWorkflowModalProps {
   track: Track;
@@ -209,7 +210,7 @@ export function AIWorkflowModal({
     || track.aiGenerationLastStderrLine
     || track.aiGenerationLastStdoutLine,
   );
-  const runningDetails = Boolean(detailChips.length || track.aiGenerationStatusNote);
+  const runningDetails = detailChips.length > 0;
 
   const handleParamChange = (key: string, value: unknown) => {
     const nextParams = {
@@ -427,6 +428,9 @@ export function AIWorkflowModal({
             </div>
           ) : null}
 
+          <AIGenerationHardwareCheck modelId={modelId} workflowId={workflow.id} params={params}
+            enabled={isOpen && isMusicGenerationReady && !isBusy} />
+
           {track.aiGenerationState === "error" && track.aiGenerationError ? (
             <div className="rounded border border-red-700/40 bg-red-950/30 p-4">
               <div className="flex items-start gap-3">
@@ -484,6 +488,9 @@ export function AIWorkflowModal({
               </div>
 
               <AIGenerationProgressBar value={track.aiGenerationPhaseProgress} />
+              {track.aiGenerationStatusNote ? (
+                <p role="status" className="mt-3 text-xs leading-5 text-daw-text-secondary">{track.aiGenerationStatusNote}</p>
+              ) : null}
               {runningDetails ? (
                 <div className="mt-3">
                   <Button
@@ -496,9 +503,6 @@ export function AIWorkflowModal({
                   </Button>
                   {detailsOpen ? (
                     <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-black/30 p-3">
-                      {track.aiGenerationStatusNote ? (
-                        <p className="text-xs leading-5 text-daw-text-secondary">{track.aiGenerationStatusNote}</p>
-                      ) : null}
                       {detailChips.length > 0 ? (
                         <div className="flex flex-wrap gap-2">
                           {detailChips.map((chip) => (

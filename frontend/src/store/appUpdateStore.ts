@@ -43,7 +43,7 @@ export const useAppUpdateStore = create<AppUpdateState>((set, get) => ({
     set({ status, error: status.status === "error" ? status.message : null });
     if (status.status === "update-available") set({ offer: status, downloaded: false });
     if (status.status === "download-ready") set({ offer: status, downloaded: true });
-    if (status.status === "up-to-date" || status.status === "development" || status.status === "install-started") set({ offer: null, downloaded: false });
+    if (status.status === "up-to-date" || status.status === "development" || status.status === "install-started" || status.status === "incompatible") set({ offer: null, downloaded: false });
     if (status.status === "cancelled") set({ downloaded: false });
   },
   check: async (manual) => {
@@ -72,6 +72,8 @@ export const useAppUpdateStore = create<AppUpdateState>((set, get) => ({
   },
   install: async () => {
     if (get().pending || !get().downloaded) return;
+    const downloadedOffer = get().offer;
+    let installAttempted = false;
     set({ pending: true, error: null });
     try {
       const { useDAWStore } = await import("./useDAWStore");
@@ -86,15 +88,36 @@ export const useAppUpdateStore = create<AppUpdateState>((set, get) => ({
       const current = useDAWStore.getState();
       if (epoch !== getProjectEpoch() || current.isModified || current.transport.isPlaying || current.transport.isRecording)
         throw new Error("The session changed while saving. Review and save it before installing.");
+      installAttempted = true;
       const result = await nativeBridge.installDownloadedUpdate();
       get().acceptStatus(result);
       if (result.status === "error") set({ downloaded: false });
-      if (result.status === "install-started" && result.platform === "windows" && result.updateSource !== "microsoft-store") {
-        // The installer cannot force-close the app. Normal quit still protects
-        // any edits made while the native verification/launch was in flight.
-        await useDAWStore.getState().requestQuit();
+      if (result.status === "install-started" && result.updateSource !== "microsoft-store") {
+        if (result.platform === "macos" || result.platform === "linux") {
+          const latest = useDAWStore.getState();
+          if (epoch !== getProjectEpoch() || latest.isModified || latest.transport.isPlaying || latest.transport.isRecording) {
+            await nativeBridge.cancelUpdateDownload();
+            get().acceptStatus({ ...result, status: "download-ready", message: "Installation postponed because the session changed. Save your work and try again." });
+            return;
+          }
+        }
+        const preparedUpdate = result.platform === "macos" || result.platform === "linux";
+        const quit = useDAWStore.getState().requestQuit;
+        if (!await (preparedUpdate ? quit(true) : quit())) {
+          await nativeBridge.cancelUpdateDownload();
+          if (preparedUpdate)
+            get().acceptStatus({ ...result, status: "download-ready", message: "Installation postponed. Save your work and try again." });
+        }
       }
-    } catch (error) { set({ error: errorMessage(error) }); }
+    } catch (error) {
+      if (installAttempted) {
+        // A bridge failure does not imply that the native worker has stopped.
+        await nativeBridge.cancelUpdateDownload().catch(() => undefined);
+        if (downloadedOffer)
+          get().acceptStatus({ ...downloadedOffer, status: "download-ready" });
+      }
+      set({ error: errorMessage(error) });
+    }
     finally { set({ pending: false }); }
   },
 }));

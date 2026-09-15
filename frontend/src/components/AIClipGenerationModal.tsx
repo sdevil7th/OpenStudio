@@ -30,6 +30,7 @@ import {
   Textarea,
 } from "./ui";
 import { NumericWorkflowParamField } from "./AIWorkflowParamField";
+import { AIGenerationHardwareCheck } from "./AIGenerationHardwareCheck";
 
 const SECTION_ORDER: AIWorkflowSection[] = [
   "prompt",
@@ -346,8 +347,7 @@ export default function AIClipGenerationModal() {
     formatRuntimeProfileLabel(progress.runtimeProfile),
   ].filter(Boolean);
   const hasProgressDetails = Boolean(
-    progress.statusNote
-    || progress.sourcePatternWarning
+    progress.sourcePatternWarning
     || progressChips.length
     || progress.lastStderrLine
     || progress.lastStdoutLine,
@@ -597,6 +597,14 @@ export default function AIClipGenerationModal() {
             </div>
           </section>
 
+          <AIGenerationHardwareCheck modelId={aiClipGenerationModelId} workflowId={workflow.id}
+            params={sourceTrack && sourceClip ? buildAIClipGenerationRequestParams({
+              params, modelId: aiClipGenerationModelId, sourceTrack, sourceClip,
+              workflowRange: aiClipGenerationRange, extensionDuration: Number(params.extension_duration ?? 20),
+              transportTempo, timeSignature,
+            }) : params}
+            enabled={showAIClipGeneration && isModelReady && !isGenerating && !!sourceClip} />
+
           {model.attribution ? (
             <div className="rounded border border-neutral-800 bg-neutral-950/50 px-4 py-2 text-xs text-daw-text-secondary">
               {model.attribution}
@@ -659,6 +667,9 @@ export default function AIClipGenerationModal() {
                 </div>
               </div>
               <AIGenerationProgressBar value={progress.phaseProgress} />
+              {progress.statusNote ? (
+                <p role="status" className="mt-3 text-xs leading-5 text-daw-text-secondary">{progress.statusNote}</p>
+              ) : null}
               {hasProgressDetails ? (
                 <div className="mt-3">
                   <Button
@@ -671,9 +682,6 @@ export default function AIClipGenerationModal() {
                   </Button>
                   {detailsOpen ? (
                     <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-black/30 p-3">
-                      {progress.statusNote ? (
-                        <p className="text-xs leading-5 text-daw-text-secondary">{progress.statusNote}</p>
-                      ) : null}
                       {progress.sourcePatternWarning ? (
                         <p className="text-xs leading-5 text-amber-300">{progress.sourcePatternWarning}</p>
                       ) : null}

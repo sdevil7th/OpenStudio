@@ -62,12 +62,17 @@ if [[ "$NOTARY_CREDENTIAL_COUNT" -eq 3 && "$SIGNING_KIND" != "developer-id" ]]; 
 fi
 
 ditto "$APP_PATH" "$STAGED_APP"
+if [[ ! -x "$STAGED_APP/Contents/Helpers/OpenStudioUpdateInstaller" ]]; then
+  echo "The app is missing its executable update helper. Rebuild before packaging." >&2
+  exit 1
+fi
 ln -s /Applications "$STAGING_DIR/Applications"
 
 if [[ -n "${MACOS_CODESIGN_IDENTITY:-}" ]]; then
   # Sign the outer app explicitly.  Do not use --deep while signing: any future
   # nested code must be signed deliberately in its own designated-code slot,
   # and the strict deep verification below will fail closed if it is missed.
+  codesign --force "$TIMESTAMP_OPTION" --options runtime --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP/Contents/Helpers/OpenStudioUpdateInstaller"
   if [[ -f "$ENTITLEMENTS_PATH" ]]; then
     codesign --force "$TIMESTAMP_OPTION" --options runtime --entitlements "$ENTITLEMENTS_PATH" --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP"
   else

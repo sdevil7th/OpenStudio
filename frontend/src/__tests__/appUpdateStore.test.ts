@@ -8,6 +8,19 @@ const initial = useAppUpdateStore.getState();
 const dawInitial = useDAWStore.getState();
 const offer: AppUpdateStatus = { status: "update-available", message: "Version 2 available", version: "2.0.0", platform: "windows" };
 describe("in-app update workflow", () => {
+  it("incompatible updates remove stale download and install actions", () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready" });
+    useAppUpdateStore.getState().acceptStatus({ ...offer, status: "incompatible", message: "A newer OS is required." });
+    expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: false, offer: null, status: { status: "incompatible" } });
+  });
+  it("restored verified downloads are ready without another transfer", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready" });
+    await useAppUpdateStore.getState().check(false);
+    expect(nativeBridge.checkForUpdates).not.toHaveBeenCalled();
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(nativeBridge.installDownloadedUpdate).toHaveBeenCalledOnce();
+  });
   it("Store installations keep in-app checks, downloads and installation without EXE quit handoff", async () => {
     const storeOffer = { ...offer, updateSource: "microsoft-store", version: undefined };
     vi.mocked(nativeBridge.checkForUpdates).mockResolvedValue(storeOffer);
@@ -44,6 +57,7 @@ describe("in-app update workflow", () => {
     vi.spyOn(nativeBridge, "checkForUpdates").mockResolvedValue(offer);
     vi.spyOn(nativeBridge, "downloadUpdate").mockResolvedValue({ ...offer, status: "download-ready" });
     vi.spyOn(nativeBridge, "installDownloadedUpdate").mockResolvedValue({ ...offer, status: "install-started" });
+    vi.spyOn(nativeBridge, "cancelUpdateDownload").mockResolvedValue(undefined);
     useDAWStore.setState({ requestQuit: vi.fn().mockResolvedValue(true) });
   });
   afterEach(() => { vi.restoreAllMocks(); useAppUpdateStore.setState(initial); useDAWStore.setState(dawInitial); });
@@ -127,14 +141,78 @@ describe("in-app update workflow", () => {
     await useAppUpdateStore.getState().install();
     expect(nativeBridge.installDownloadedUpdate).not.toHaveBeenCalled();
   });
-  it("never quits on installer failure or the macOS/Linux package handoff", async () => {
-    for (const result of [{ ...offer, status: "error" as const, message: "Launch cancelled" },
-      { ...offer, status: "install-started" as const, platform: "macos" as const },
-      { ...offer, status: "install-started" as const, platform: "linux" as const }]) {
-      useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready" });
-      vi.mocked(nativeBridge.installDownloadedUpdate).mockResolvedValueOnce(result);
-      await useAppUpdateStore.getState().install();
-    }
+  it("never quits on installer failure", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockResolvedValueOnce({ ...offer, status: "error", message: "Launch cancelled" });
+    await useAppUpdateStore.getState().install();
     expect(useDAWStore.getState().requestQuit).not.toHaveBeenCalled();
+  });
+  it.each(["macos", "linux"] as const)("quits normally after %s preparation", async (platform) => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, platform, status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockResolvedValueOnce({ ...offer, platform, status: "install-started" });
+    await useAppUpdateStore.getState().install();
+    expect(useDAWStore.getState().requestQuit).toHaveBeenCalledOnce();
+    expect(useDAWStore.getState().requestQuit).toHaveBeenCalledWith(true);
+  });
+  it.each(["macos", "linux"] as const)("cancels %s installation when edits arrive during native preparation", async (platform) => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, platform, status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockImplementationOnce(async () => {
+      useDAWStore.setState({ isModified: true });
+      return { ...offer, platform, status: "install-started" };
+    });
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.cancelUpdateDownload).toHaveBeenCalledOnce();
+    expect(useDAWStore.getState().requestQuit).not.toHaveBeenCalled();
+    expect(useAppUpdateStore.getState().downloaded).toBe(true);
+  });
+  it("cancels a prepared installation if normal quit is declined", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, platform: "linux", status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockResolvedValueOnce({ ...offer, platform: "linux", status: "install-started" });
+    useDAWStore.setState({ requestQuit: vi.fn().mockResolvedValue(false) });
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.cancelUpdateDownload).toHaveBeenCalledOnce();
+    expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: true, status: { status: "download-ready" } });
+  });
+  it("cancels native preparation after a bridge timeout and permits retry", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, platform: "linux", status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockRejectedValueOnce(new Error("Native function call timeout"));
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.cancelUpdateDownload).toHaveBeenCalledOnce();
+    expect(useDAWStore.getState().requestQuit).not.toHaveBeenCalled();
+    expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: true, pending: false, error: "Native function call timeout" });
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.installDownloadedUpdate).toHaveBeenCalledTimes(2);
+  });
+  it("cancels a prepared update if the quit bridge rejects", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, platform: "linux", status: "download-ready" });
+    vi.mocked(nativeBridge.installDownloadedUpdate).mockResolvedValueOnce({ ...offer, platform: "linux", status: "install-started" });
+    useDAWStore.setState({ requestQuit: vi.fn().mockRejectedValue(new Error("Quit failed")) });
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.cancelUpdateDownload).toHaveBeenCalledOnce();
+    expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: true, offer: { platform: "linux" }, error: "Quit failed" });
+  });
+});
+
+describe("update-specific quit consent", () => {
+  beforeEach(() => {
+    useDAWStore.setState({ ...dawInitial, isModified: false, showUnsavedChangesDialog: false,
+      transport: { ...dawInitial.transport, isPlaying: false, isRecording: false } });
+    vi.spyOn(nativeBridge, "quitApplication").mockResolvedValue(undefined);
+  });
+  afterEach(() => { vi.restoreAllMocks(); useDAWStore.setState(dawInitial); });
+  it("ordinary quit does not authorize a prepared update", async () => {
+    expect(await useDAWStore.getState().requestQuit()).toBe(true);
+    expect(nativeBridge.quitApplication).toHaveBeenCalledWith();
+  });
+  it("update quit explicitly authorizes installation for a saved stopped session", async () => {
+    expect(await useDAWStore.getState().requestQuit(true)).toBe(true);
+    expect(nativeBridge.quitApplication).toHaveBeenCalledWith(true);
+  });
+  it.each(["modified", "playing", "recording"])("declines update quit when %s without deferring consent", async (reason) => {
+    useDAWStore.setState({ isModified: reason === "modified",
+      transport: { ...dawInitial.transport, isPlaying: reason === "playing", isRecording: reason === "recording" } });
+    expect(await useDAWStore.getState().requestQuit(true)).toBe(false);
+    expect(nativeBridge.quitApplication).not.toHaveBeenCalled();
+    expect(useDAWStore.getState().showUnsavedChangesDialog).toBe(false);
   });
 });

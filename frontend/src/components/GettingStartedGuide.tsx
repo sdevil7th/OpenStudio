@@ -235,8 +235,9 @@ function buildGuideSteps(): GuideStep[] {
       details: [
         "Pitch editing and pitch correction inside the session",
         "Stem separation for remixing, cleanup, practice, and creative extraction",
-        "AI tracks for text-to-music and lyrics+style generation",
-        "Clip AI workflows for variation, inpaint selection, and continuation",
+        "AI tracks: ACE-Step music, MiniMax Music 3 lyrics and Song Sections, Stable Audio 3 text-to-audio",
+        "Optional AI Tools Setup downloads models and shows progress; some models require access approval",
+        "ACE-Step and Stable Audio clip workflows for variation, inpaint selection, and continuation",
         "Routing matrix, buses, sends, and monitoring FX for larger mixes",
         "Theme editing, toolbar customization, scripting, templates, and project utilities",
       ],

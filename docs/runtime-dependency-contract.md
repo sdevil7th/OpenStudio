@@ -252,7 +252,11 @@ prove the FlashAttention kernel runs. Tune supported chunk/batch settings and
 autocast separately, with overlap reconstruction tests and vocal/stem audition;
 Diffusers offload and VAE APIs must not be passed to this engine.
 
-### Implementation sequence and acceptance gates
+### Original implementation sequence and acceptance gates
+
+This sequence records the first implementation slices. Their results and
+exclusions are recorded below; the September 12 remaining-work plan supersedes
+this sequence for new work.
 
 1. **MiniMax placement and reporting — first implementation slice.** Add a pure,
    CI-tested memory planner and apply it after loading CPU components. Select
@@ -408,10 +412,689 @@ production output quality remains `not_asserted` pending listening.
 
 PyTorch wheel selection follows the pinned [PyTorch 2.10.0 installation matrix](https://pytorch.org/get-started/previous-versions/#v2100).
 
+### Remaining implementation plan: September 12, 2026
+
+Status: **implementation in progress; the complete plan is not qualified**.
+The source baseline is `808ccbe`. The working tree now includes shared device
+enumeration, indexed CUDA/XPU operations, WDDM physical-memory budgeting,
+bounded worker thread pools, model-specific placement capability records,
+separate Diffusers/Transformers attention adapters, and a headless benchmark
+runner. Generation details now reach the native bridge, and worker hashes
+include the policy dependencies. Debug builds refresh the worker assets even
+when no C++ source changed. Earlier qualification failures remain valid.
+
+#### September 12 implementation checkpoint
+
+September 13 continuation: native completion polling now preserves successful
+workers for warm reuse. Failed/cancelled workers still retire immediately.
+Both Python servers check available host RAM while idle every second and release
+weights below 3 GiB or after two minutes; unknown RAM availability also releases
+weights. Generation and separation cannot run concurrently through the host,
+and starting separation retires an idle generation worker without clearing its
+completed result. These changes are on the control path, not the audio callback.
+The Debug native regression passed **191 checks**, including warm retention,
+refusal to retire an active generation, and idle resource handoff.
+
+MiniMax now also has an explicit `partial-resident-disk` harness candidate. It
+writes unchanged parameter bytes into a quota-bounded app-owned store (64 GiB
+quota, 3 GiB disk reserve), uses direct file reads into two pinned staging blocks,
+and releases its store on unload or after a terminated benchmark. Shared file
+mapping avoids a model-sized Windows copy-on-write commitment. Mapped reads
+alone failed the RAM floor; direct staging subsequently passed two 0.08-second
+and two 1-second requests. CPU/CUDA toy parity, synchronous/streamed placement,
+warm stage restoration, quota rejection, truncated reads and cleanup tests pass.
+**This remains experimental**: it has not met realistic song-duration, controlled
+speed comparison, and complete model-switch/cancellation qualification gates.
+
+- Stable Audio and ACE use their existing resident/component placement policies
+  with the shared device budget; ACE retains its transformer group adapter.
+  A forced ACE group-offload test exposed full-model pre-pinning exhausting
+  host RAM. Streamed ACE group offload now uses on-demand pinning; all three
+  source workflows subsequently passed both first and warm runs. The original
+  failed report is retained as `ace-group-variation`.
+  MiniMax also uses physical WDDM capacity at load and warm-reuse boundaries.
+  CPU/MPS/XPU routing code is not evidence of model qualification on those devices.
+- MiniMax partial residency has a separate placement owner, immutable CPU weight
+  references, two reusable GPU staging buffers and two reusable pinned CPU
+  buffers. Toy CPU/CUDA parity, repeated-buffer reuse, and failed-transition
+  teardown pass. **It remains excluded from automatic selection**: full-model
+  qualification on this 32-GB Windows host repeatedly violated the RAM reserve.
+  The harness can request `--placement partial-resident` explicitly.
+  The later disk-backed candidate avoids the observed short-run RAM failure;
+  this does not qualify the original in-memory partial placement.
+- BS-Roformer replaces the pinned engine's A100-only SDPA kernel restriction on
+  its 24 eligible, parameter-free attention nodes with Torch automatic SDPA.
+  Explicit non-SDPA model configurations stay unchanged. The pinned Roformer
+  loop ignores `batch_size`; changing that setting is not an optimization.
+  Chunk size and overlap reconstruction remain owned by audio-separator.
+- Optional FlashAttention, xFormers, AITER and Sage adapters report availability
+  separately from qualification. Native SDPA is the automatic default. The ACE
+  runtime's installed FlashAttention distribution is not treated as validated
+  merely because its package metadata exists. The later INT8 experiment uses an
+  isolated, hash-checked bitsandbytes environment; the base runtimes are unchanged.
+- INT8/TorchAO loader configurations and regional compilation have explicit
+  qualification entry points. MiniMax now has a separate INT8 stage owner;
+  other quantization/offload combinations remain excluded. Compilation requires
+  unquantized residency. NF4 remains excluded following the prior failed audition.
+- `tools/run-ai-benchmark.py` covers the three generators and the real one-shot
+  separator worker. It records actual output length, cold/warm timings, policy,
+  phase progress, memory, package versions and optional attention/transfer probes.
+  Timeout/cancellation kills the complete Windows venv process tree. A sustained
+  2-GiB available-RAM floor also stops the benchmark. A native exit cannot silently
+  become a passing report. Separation runs are explicitly one-shot, not warm.
+
+Local evidence under `build/ai-qualification/` (ignored build artifacts):
+
+| Case | Result and scope |
+| --- | --- |
+| `stable-current` | **pass**: three finite stereo 5-second outputs, resident BF16, 5.154 / 0.567 / 1.177 seconds excluding model load. Diffusers audio runtime, Torch 2.10.0+cu128. |
+| `ace-production-runtime` | **pass**: three finite stereo 10-second outputs, resident BF16, 7.327 / 0.871 / 0.789 seconds excluding load. Actual app `stem-runtime`, Torch 2.11.0+cu128. The request's 5-second value was normalized to ACE's 10-second minimum; this is not a 5-second result. |
+| `separator-current` | **pass**: the actual worker returned six finite stereo 8-second stems from a synthetic fixture, with all 24 SDPA nodes adapted. Total one-shot latency 11.075 seconds; separation quality on music is **not_asserted**. |
+| `stable-variation`, `stable-inpaint-selection`, `stable-continue-clip` | **pass**: two real-model runs of each source workflow, using production source normalization, output validation and continuation cropping. |
+| `ace-variation`, `ace-inpaint-selection`, `ace-continue-clip` | **pass**: two real-model runs of each source workflow in the actual ACE runtime and app checkpoint snapshot. |
+| `stable-production-workflows` | **pass**: the real worker completed text, variation, inpainting and continuation in one reused session. Unedited source PCM was bit-exact before/after the inpaint interval; continuation produced the requested two-second tail. |
+| `stable-component-*` | **pass**: forced component offload, two runs each of variation, inpainting and continuation; all returned the requested five-second output. Generation latency 4.43-5.06 seconds. |
+| `ace-group-bounded-*` | **pass**: forced streamed group offload with on-demand pinning, two runs each of variation, inpainting and continuation. Outputs were 10 / 10 / 5 seconds respectively; sampled host RAM remained above 10 GiB. This is a capacity fallback, not faster than residency on this card. |
+| `minimax-disk-1s` | **pass for short forwards only**: two finite 0.99846-second outputs, 78.635 / 76.924 seconds excluding a 61.677-second load/store preparation. Sampled free RAM stayed around 13-14 GiB during inference; worker private commitment was about 16 GiB, versus about 38 GiB in the private-mapping microbenchmark. The first run uploaded 220.731 GB of streamed block weights. Long-song speed and quality remain **not_asserted**. |
+| MiniMax experimental variants | **diagnostic_only**: earlier variants produced finite subsecond audio, but subsequent warm runs exhausted safe host headroom. A separate run exited with Windows access violation `0xc0000005` in `python312.dll`; its cause was not conclusively isolated. `minimax-bounded-host` stopped at the RAM floor before a result. No variant is promoted and no production speed-up is established. |
+| `link-probe` | **diagnostic_only**: median pinned transfers 3.386 GB/s host-to-device and 3.354 GB/s device-to-host. NVIDIA reported GPU maximum Gen 4, host maximum/current Gen 1, width x16. This needs system-level investigation, not more GPU allocation. |
+
+The GPU is an RTX 4080 on an MSI PRO X670-P WIFI / Ryzen 9 7900X system.
+NVIDIA defines its maximum link generation as the limit of the GPU and current
+system configuration, not just the GPU's capability ([NVIDIA SMI reference](https://docs.nvidia.com/deploy/nvidia-smi/)).
+The user confirmed the GPU is connected directly to the motherboard's top long
+slot, without a riser. The installed MSI BIOS reports version 1.10, dated
+August 16, 2022. No BIOS, driver, clock, power-plan or registry settings were changed.
+Windows PnP independently reported current link speed `1`, maximum `4`, width
+`16`, and a direct parent PCI Express Root Port at bus 0/device 1/function 1.
+The installed Windows SDK `pciprop.h` defines current-speed value `1` as 2.5 Gb/s.
+This idle PnP reading supplements the earlier under-load NVIDIA/transfer samples;
+it does not identify whether BIOS configuration, firmware or link training caused
+the limit. The active Balanced plan's PCIe power settings were read only; they
+do not establish the cause of the under-load Gen 1 limit.
+
+These are functional/diagnostic samples, not controlled before/after speed
+comparisons. Some independent build work ran during checks; contention is
+recorded as unmeasured. Subjective generated-audio quality outside the exact
+accepted INT8 artifact below is **not_asserted**.
+Python policy/routing and runtime pins (65 checks), the real Torch disk/hook/attention/source
+tests (20 checks), frontend TypeScript and production assets, and the CMake
+Debug build passed locally. The CI matrix now
+runs pure policy tests on Windows, Linux and macOS; those remote jobs have not
+been executed by this local session.
+Both Python tooling and policy jobs select Python 3.12 and install their
+lightweight NumPy and SoundFile test dependencies explicitly. The policy set passed in a fresh local
+Python 3.12 venv without Torch, rather than relying on development-machine packages.
+The general tooling suite also passed locally: 68 executed checks and two
+platform-specific skips out of 70 discovered checks.
+
+#### September 13 INT8 continuation
+
+The user accepted the exact `minimax-int8-reused-5s/run-0.wav` artifact, SHA-256
+`588a5578c6363c844c2731e1f7a0b97746d26880e862d6cc56d34690feaf8e0d`.
+This is **pass by user audition for that artifact**, not an assertion about all
+prompts, durations, hardware, or future quantizers. NF4 remains excluded.
+
+The MiniMax candidate quantizes only the language model using bitsandbytes
+0.50.2 and retains the other components' original precision. Its stage owner
+keeps the language model and RVQ decoder together throughout token generation,
+then hands device memory to the condition encoder, diffusion model and vocoder.
+There is one owner for weights and quantizer state. Explicit placement restores
+bnb's parameter and scale metadata both before and after the first forward;
+warm offload restores original CPU storage instead of allocating another full
+CPU copy. The loader quantizes the LM first and keeps it on the GPU while
+converting the other CPU checkpoints, then offloads it after releasing conversion
+temporaries. Twelve toy stage cycles validate storage reuse,
+device placement and forward parity. These are deterministic checks, not audio
+quality metrics.
+
+`tools/stage-ai-candidate.py --candidate int8` creates an isolated versioned venv,
+verifies the official Windows wheel against PyPI's SHA-256, and checks that
+Torch/Diffusers/Transformers/Accelerate pins did not change. It atomically
+publishes an **import-only** candidate manifest. Base runtimes and checkpoints
+remain unchanged. A failed stage keeps the previous candidate manifest.
+`tools/qualify-ai-candidate.py` separately requires matching first/warm real
+forwards and explicit audition acceptance before publishing a local profile.
+The native host resolves that profile's app-local interpreter; the Python
+worker revalidates source hash, package versions, local model identity, GPU
+UUID/driver, allocator configuration, tested request bounds and current memory.
+Changing any of these invalidates automatic INT8 selection. The model identity
+uses local file metadata and configuration contents; it is not a cryptographic
+attestation of every checkpoint byte. Profiles are machine-local calibration,
+not portable project settings or universal hardware qualification.
+
+Long requests exposed an allocator issue missed by short forwards: by frame
+1830 of 4875, the default allocator reserved 15.279 GB with only 12.282 GB live.
+That run was stopped before output and is retained as
+`minimax-int8-long-195s` (**cancelled**, no passing song). The revised Windows
+MiniMax worker configures a 90% per-process allocator limit, cache reclamation
+at 80% of that limit and four rounded size divisions before importing Torch,
+preserving either user allocator environment override. Device budgeting also
+honors that limit. Physical free-memory checks and request headroom still apply.
+An intermediate attempt (`minimax-int8-allocator-195s`) improved allocation reuse
+but was stopped after source review showed that reclamation requires an explicit
+fraction below 1.0 in the pinned allocator; that report is **cancelled** too.
+The relevant guard and initialization are in
+[PyTorch 2.10 CUDACachingAllocator](https://github.com/pytorch/pytorch/blob/v2.10.0/c10/cuda/CUDACachingAllocator.cpp#L1340).
+This targets growing KV allocation sizes without clearing the cache per token.
+PyTorch 2.10's expandable segments are unavailable in the
+installed Windows build; an actual allocation probe confirmed that limitation.
+The supported controls and their native-allocator restrictions are documented in
+[PyTorch 2.10 CUDA memory management](https://docs.pytorch.org/docs/2.10/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf).
+The allocator candidate's full-duration qualification is recorded separately
+from the earlier cancelled run.
+
+The reduced-reserve candidate is local-only: a 1.5-GiB allowance beyond stage
+weights and estimated KV storage can be evaluated explicitly, while ordinary
+unqualified loading retains its 3-GiB reserve. Qualification does not assert
+that WDDM never uses shared memory: the first complete 195-second run briefly
+reported zero free VRAM, despite completing without an OOM or RAM-floor stop.
+Allocator memory statistics are diagnostics; successful output alone is not a
+measurement of physical residency throughout every kernel.
+
+Additional evidence, retained with failed attempts rather than overwritten:
+
+| Case | Result and scope |
+| --- | --- |
+| `minimax-int8-reused-5s` | **pass**: two 4.992-second outputs, 29.368 / 32.069 seconds generation, 36.122 seconds load. User accepted only run 0. The earlier unquantized disk-backed 5-second fixture took 306.369 seconds; this is an observational comparison of different placements/precision, with contention unmeasured. |
+| `minimax-int8-reused-30s` | **pass for output, insufficient for a 30-second capacity claim**: EOS ended both outputs around 15.047 seconds. |
+| `minimax-int8-final-30s` | **pass**: both outputs reached 30.023 seconds, 142.731 / 143.202 seconds generation. |
+| `minimax-int8-release-candidate-30s` | **resource_limit**: reduced available host memory exposed a cold-load RAM peak. This led to the LM-first loading change. |
+| `minimax-int8-load-order-30s` | **pass**: two 30.023-second outputs after the load-order fix, 163.933 / 165.680 seconds generation, about 5 GB available host RAM during inference. Different machine load prevents a speed-regression conclusion from these timings alone. |
+| `minimax-int8-bounded-allocator-195s` | **resource_limit during load**: converting the diffusion checkpoint while the quantized LM was already in RAM still exceeded the host reserve. The next candidate retains the LM on GPU during CPU checkpoint conversion. |
+| `minimax-int8-gpu-load-195s` | **budget rejection before inference**: revised loading kept at least 4.895 GiB available RAM in the sampled load tail, but the 195-second request plus a 2-GiB device reserve exceeded current available VRAM. This is a capacity rejection, not an OOM or a completed generation. |
+| `minimax-int8-local-195s` | **pass**: first and warm runs produced 195.245 seconds of finite stereo 44.1-kHz audio in 1086.657 / 1083.745 seconds, excluding 39.141 seconds cold load. Current worker hash `b563a5f0f6ce029e`, native SDPA, INT8 LM, model offload, 1.5-GiB device reserve and the bounded native allocator. Neither run hit an OOM or the sustained 2-GiB host-memory stop. Long-song subjective quality is **not_asserted**. |
+| `minimax-production-int8-workflows` | **pass**: actual IPC worker automatically selected the qualified INT8 profile for lyrics/style and two structured-song requests in PID 10432. All outputs were finite stereo, 4.992 seconds; total request latency was 70.335 / 29.665 / 28.686 seconds (first includes load). Both structured outputs have PCM bit-exact to the user-accepted short artifact; WAV container hashes differ. Wrong-model requests were rejected. Cancellation after 10 positive token frames stopped the owned worker process tree, with no cancelled or wrong-model output published. This harness exercises Python IPC; native ownership is covered separately by the Debug regression. |
+| `ace-compile-operator` | **pass for operator only**: Windows Triton compiled two matrix shapes, profiler-observed compiled regions and output parity. Full ACE model compilation and audio are **not_asserted**. |
+
+The repeated bnb BF16-to-FP16 cast notice is emitted once per dtype; unrelated
+warnings are preserved. Memory reports distinguish allocated, reserved, cached
+and inactive split bytes. CPU/FP32 capacity checks read safetensors headers
+before loading weights: MiniMax alone requires approximately 43.74 GiB for
+FP32 weights, so this 32-GB host receives a capacity explanation before an
+unbounded CPU load. That rejection is not a successful CPU generation test.
+
+The latest native Debug regression passed **195 checks**, including candidate
+manifest validation and resource ownership. No Linux AMD, Apple Silicon, Intel
+GPU or additional NVIDIA machine is currently available (user confirmed).
+Actual model-forward qualification on those devices remains **not_asserted**;
+mocked capability tests and the CI OS matrix cannot replace it.
+
+The successful full-duration report was used to publish
+`%LOCALAPPDATA%/OpenStudio/ai-candidates/minimax-int8-qualified.json`.
+Automatic selection is now active on this exact machine/runtime/checkpoint for
+requests up to 195 seconds and a conservative prompt bound of 980 tokens
+(UTF-8 byte count plus special-token allowance, not a measured tokenizer count).
+Larger prompts, changed identities or insufficient current memory use standard
+placement with an explanation in generation details. This is a local capacity
+qualification, not completion of the hardware matrix or every optional backend.
+
+The full-song token phase took 960.250 / 956.765 seconds; diffusion took
+115.968 / 115.844 seconds. Peak live allocations were 13.839 / 13.952 GiB and
+peak allocator reservations 14.340 / 14.336 GiB. The separate memory sampler
+observed at least 2.481 / 2.397 GiB available host RAM during its sampled
+inference interval; it started after early token generation and does not measure
+the cold-load minimum. Both runs briefly reported zero free VRAM, so physical
+residency and shared-memory spill remain **diagnostic_only**, not a zero-spill
+claim. Contention was not measured. The short 5-second comparison above suggests
+roughly 90% less generation time for that fixture, but it is not a controlled
+universal speed-up or a percentage claim for these full-length songs.
+
+Final local checks: **65** policy/routing/runtime-pin tests, **20** Torch-enabled
+adapter checks (7 placement including real bnb stage cycles, 4 disk storage,
+7 pipeline-contract checks and 2 attention checks), and the **195** native
+Debug checks above passed. The pipeline-contract checks use fake pipelines;
+the separately named benchmark and worker reports establish real-model output.
+The general tooling suite passed 68 checks with two platform skips. Frontend
+TypeScript/Vite build and CMake Debug build passed; all 141 frontend files and
+nine copied worker/helper files matched their source/build inputs. The native
+build log contained no C++ warnings or errors. Existing Vite bundle/import
+notices and third-party Python deprecation notices are not zero-warning claims.
+
+Headless Playwright checked the real generation modal with mock qualified and
+fallback metadata at 390 x 844 and 1280 x 900: note wrapping, horizontal bounds,
+Show details keyboard focus and screenshots passed. Malformed/duplicate bridge
+metadata checks passed. This is browser UI evidence, not a native WebView or
+Release qualification. Screenshots are retained under
+`output/playwright/ai-execution-qa/`. The temporary fixture, browser and owned
+Vite server were removed/stopped, and port 5183 was free at handoff. The app can
+be started with `python build.py dev --run`; no pre-running server is needed.
+
+Remaining work is explicit: actual alternative-hardware model qualification;
+native XPU/Windows ROCm setup routes where supported; optional attention wheels
+and full-model qualification; regional compilation beyond the operator probe;
+broader quantization, conditioning caches and multi-GPU placement; disk/offload
+combinations excluded in the adapter capability records; and controlled speed
+comparisons plus playback/recording contention measurements. These are not
+implicitly passed by local INT8 promotion. The directly installed RTX 4080's
+observed Gen 1 host link also remains unresolved; no firmware or system setting
+was changed as part of this implementation.
+
+Local qualification commands (run after reviewing the reports; the audition
+argument records an actual user decision, not an automated quality score):
+
+```powershell
+$candidateRoot = "$env:LOCALAPPDATA/OpenStudio/ai-candidates"
+$modelRoot = "$env:LOCALAPPDATA/OpenStudio/models/minimax-music-3"
+python tools/stage-ai-candidate.py --candidate int8 `
+  --runtime-python "$env:LOCALAPPDATA/OpenStudio/diffusers-audio-runtime/Scripts/python.exe" `
+  --output-dir $candidateRoot
+$candidatePython = (Get-Content "$candidateRoot/int8.json" -Raw | ConvertFrom-Json).python
+& $candidatePython tools/run-ai-benchmark.py --model minimax-music-3 `
+  --model-root $modelRoot --output-dir build/ai-qualification/minimax-int8-local-195s `
+  --request build/ai-qualification/workflow-requests/minimax-lyrics-195s.json `
+  --placement model-offload --quantization int8 --int8-reserve-gib 1.5 --repeats 2 --timeout 2700
+& $candidatePython tools/qualify-ai-candidate.py `
+  --candidate-manifest "$candidateRoot/int8.json" --model-root $modelRoot `
+  --report build/ai-qualification/minimax-int8-local-195s/report.json `
+  --audition-artifact build/ai-qualification/minimax-int8-reused-5s/run-0.wav --audition-accepted
+```
+
+The JSON requests and audition audio above are local qualification artifacts,
+not downloaded or generated by those commands. Reproducing this on another
+machine requires its own requests, reports and user-accepted audio. Use a fresh
+benchmark output directory for each attempt. Normal generation never runs the
+staging or qualification commands automatically.
+
+Remaining work includes controlled full-duration
+workflow comparisons, staged optional attention packages beyond the INT8 wheel, native XPU
+and Windows ROCm installers, actual non-NVIDIA device qualification, disk
+offload qualification beyond the new MiniMax experiment, multi-GPU sharding,
+persistent calibration beyond the local MiniMax profile, full-model compilation
+and broader quantization qualification, conditioning
+caches, and playback/recording contention tests. Warm worker reuse is now
+implemented and native-tested; it is not a conditioning or approximate diffusion
+cache. The following
+sections retain the full delivery plan; they are requirements, not completion
+claims.
+
+The objective is the lowest measured generation latency on the available
+hardware while preserving the requested audio behavior and responsive DAW
+playback/recording. GPU activity and memory occupancy are diagnostics, not
+optimization targets. Keep measured activation/cache and DAW headroom; never
+reserve all VRAM just to display 100% usage. Hardware coverage means a tested
+capability decision for every model/device combination, with a useful fallback
+or precise unsupported result where necessary. It cannot guarantee every model
+fits or every kernel works on every machine.
+
+The September 12 live MiniMax investigation observed approximately 5.4 GB
+dedicated GPU use, 79-100% NVIDIA kernel activity, 66 W power, 3.8-4.8 GB/s PCIe
+receive traffic, 19 GB worker working set, and 1.5 GB available host RAM. A short
+paging sample did not show heavy disk thrashing. These observations support
+weight-transfer overhead as a major suspect, but are not an isolated profiler
+breakdown. The active streaming setting was not recovered. Capture it in the
+baseline instead of inferring it from utilization. The conversational 2-4x
+speed estimate is an unverified hypothesis conditional on successful residency
+and quantization; the prior NF4 audition failure prevents using it as a delivery
+target or expected quality-preserving improvement.
+
+#### September 13 exact-song selection regression
+
+The user's 195-second, 30-step lyrics/style request exposed a production gap:
+its old UTF-8 prompt bound was 1763, exceeding the locally qualified 980 bound.
+The worker therefore loaded the unquantized model even though the host selected
+the INT8-capable interpreter. The cancelled app request reached 2170 of 4875
+frames after approximately 253 minutes. The earlier 18-minute INT8 benchmark
+was not representative of that selected execution path.
+
+The revised worker runs the pinned `MiniMaxMusic3TokenizeStep` on CPU with the
+local Qwen tokenizer before loading model weights. It uses the same lyric
+normalization and upstream special-token formatting as generation. This exact
+song has **405 actual input tokens**. Worker, benchmark, warm-stage validation,
+and qualification now use that count consistently. A `promptMeasurement`
+identity prevents old byte-bound profiles from being mistaken for actual-token
+profiles. Tokenizer metadata changes also invalidate model calibration.
+
+An existing local INT8 profile that fails identity, request or memory validation
+now stops generation before loading unquantized weights. INT8 OOMs likewise
+stop instead of silently retrying unquantized. Memory errors state required and
+available GPU capacity. Selected precision is emitted before weight loading,
+and both track and clip dialogs show execution status outside collapsed details.
+Other machines without a local INT8 profile retain their standard model policy.
+
+Current evidence (full-length requalification is still pending):
+
+- **pass**: 69 policy/routing/runtime-pin checks, including expanded structured
+  lyrics, byte-profile invalidation, pre-load precision reporting, rejection
+  before unquantized loading, and no unquantized retry/publication on INT8 OOM.
+- **pass**: three CPU tests of the actual pinned tokenizer step, including real
+  maximum-token rejection and lyric normalization with Unicode; seven pipeline
+  contract checks and seven placement checks including real bnb stage cycles.
+  A fourth CPU test verifies that the capacity harness suppresses EOS only in
+  its own process, leaves depth sampling/input tensors unchanged, and restores
+  the upstream sampler even when the test raises an exception.
+- `minimax-user-song-preflight-rejection`: **pass**. The real IPC worker rejected
+  the stale profile in 3.682 seconds before inference/output; worker cleanup and
+  wrong-model rejection passed. This does not qualify a successful long song.
+- `minimax-user-song-int8-smoke`: **pass**. Exact user text, original seed
+  470655306 and 30 steps, but explicitly shortened to five seconds for a smoke
+  test: two 4.992-second outputs in 29.218 / 33.155 seconds, plus 37.319 seconds
+  initial load. Worker `0d8b120bf2b69068`, 405 measured prompt tokens. These are
+  not 195-second results; subjective quality is **not_asserted**.
+- `minimax-user-song-int8-195s`: **budget rejection before inference**, not a
+  passing output. A subsequent read-only budget probe measured 13.640 GiB
+  available versus 13.675 GiB required, approximately 36 MiB short before any
+  additional loading overhead. The user was asked to close unused GPU apps;
+  no unrelated processes were stopped and the reserve was not reduced.
+- `minimax-user-song-int8-full`: **pass after the user closed unused GPU apps**.
+  Both requests used the exact supplied text, seed 470655306, a 195-second
+  maximum and 30 diffusion steps. Generation took 817.379 / 1040.758 seconds,
+  excluding 39.103 seconds initial load. Both outputs ended naturally at
+  129.242 seconds and their decoded PCM was bit-exact across first/warm runs.
+  Token generation took 655.531 / 877.813 seconds; synthesis took
+  153.328 / 153.594 seconds. The logged synthesis loops reached 960 iterations
+  (30 per audio chunk). Peak live allocations were 12.958 / 13.072 GiB;
+  reservations peaked at 13.344 / 13.453 GiB. Whole-process RAM sampling stayed
+  above 5.879 GiB. The first run reached the screenshot's 2170-frame checkpoint
+  at 434.204 seconds excluding load. This is not a completed-baseline speed-up
+  measurement, and the slower warm result is retained rather than hidden.
+  Subjective song quality is **not_asserted**. The directory name denotes the
+  full requested workload, not a 195-second output: separate maximum-length
+  capacity qualification is required because this song ended early.
+- `minimax-token-capacity-195s`: **incomplete capacity qualification**. The normal
+  412-token fixture produced 184.517 seconds in 1213.837 seconds on its first
+  run, then the redundant warm repeat was cancelled. This early EOS cannot
+  qualify a 195-second output. `minimax-forced-capacity-195s` explicitly masks
+  EOS inside the headless benchmark only; production sampling is unchanged.
+  Qualification from this stress test requires both first/warm full-duration
+  outputs plus matching separate normal first/warm generation evidence.
+- `minimax-forced-capacity-195s`: **harness duration-check failure**, retained
+  as failed evidence. The model completed 4876 semantic sampling calls (one
+  initial advance plus 4875 emitted frames) and all 1440 synthesis iterations,
+  producing finite stereo audio lasting 195.245 seconds in 1297.177 seconds.
+  The test incorrectly required duration equality within 0.05 seconds despite
+  upstream window-stitching padding. Capacity validation now requires at least
+  the requested duration, and qualification never expands the duration bound
+  beyond the request. Production code is unchanged.
+- `minimax-forced-capacity-195s-validated`: **fail**. Cold output passed at
+  195.245 seconds in 1289.409 seconds. Warm generation reached approximately
+  4700 frames before a 192 MiB CUDA allocation failed. The initial hypothesis
+  that a retained waveform occupied VRAM was **disproved**: the pinned MiniMax
+  decoder defaults to a CPU NumPy output. GPU allocation instrumentation and
+  inspection of `decoders.py` established that placement. The failed pair
+  remains unqualified; it is not attributed to GPU waveform retention.
+  `minimax-output-lifetime-smoke` passed two exact-text five-second requests
+  after releasing the host waveform (30.698 / 33.648 seconds).
+  `minimax-capacity-output-release-195s` produced a passing cold output in
+  1299.485 seconds, then its warm repeat was cancelled when instrumentation
+  disproved the GPU-waveform hypothesis. It does not qualify warm capacity.
+- Worker `26da0b07c5653b3a` adds garbage collection and unused CUDA allocator
+  cache reclamation once at the INT8 request boundary, after prior stages have
+  been offloaded. It does not flush inside token or diffusion loops or change
+  sampling. Two dedicated checks passed, including a real CUDA allocation test
+  that preserves live tensor values while releasing unused cache. The 69
+  policy checks and seven pipeline contract checks passed; CMake Debug was
+  rebuilt. Earlier `0d8b120bf2b69068` results remain historical evidence and
+  cannot publish this new worker's profile. Real-generation requalification
+  is in progress.
+- `minimax-request-cache-smoke`: **pass** on `26da0b07c5653b3a`. Exact user text,
+  seed and 30 steps, explicitly limited to five seconds: cold/warm outputs took
+  34.674 / 33.695 seconds. Warm request-boundary cleanup released 12,201,230,336
+  bytes of unused CUDA cache. Both decoded outputs are bit-exact to the same
+  five-second fixture before the cleanup change. This is deterministic parity,
+  not subjective audio-quality approval or full-duration qualification.
+- `minimax-request-cache-capacity-195s`: **resource_limit**, not pass. The new
+  worker reached about 2660 frames before whole-system available RAM fell to
+  1,710,899,200 bytes, below the 2 GiB floor. The watchdog stopped its worker
+  tree. After exit, available RAM was 16.149 GiB, below the local model's
+  approximately 18.4 GiB startup requirement and the earlier approximately
+  23 GiB test starting condition. Other applications were left running. Full
+  capacity requalification and the exact full-song normal-worker check remain
+  pending restoration of sufficient system RAM. The old profile is not promoted.
+- **pass**: TypeScript/Vite and CMake Debug builds; all 141 frontend assets and
+  nine worker/helper copies matched. Browser checks exercised visible precision
+  in both dialogs with details collapsed, narrow/wide wrapping, keyboard focus,
+  and the explicit rejection message. Temporary browser/server/fixture resources
+  were cleaned up. No C++ warnings/errors were reported by the Debug build.
+
+The old local profile is deliberately not relabelled with the new worker hash.
+The exact full-length request must pass first/warm qualification before the new
+profile is published, followed by a normal-worker automatic-selection check.
+
+September 13 follow-up: [full-song qualification and hardware warnings](ai-generation-qualification-2026-09-13.md)
+records worker `77d8f16feb593810`, successful 195-second ACE-Step/Stable Audio
+tests, the bounded SAME decoder and its numerical/audition limitations. MiniMax
+full-duration requalification remains pending; the older profile is not promoted.
+
+#### 1. Shared capability contract and reproducible baseline
+
+Extend `tools/ai_runtime_probe.py` and introduce a small shared
+`tools/ai_execution_policy.py`, consumed by both generation workers. Keep model
+adapters in `diffusers_audio_pipeline.py` and `generate_music.py`; separation
+retains its own `stem_separator.py` adapter. Avoid a rewrite of inference loops.
+
+The contract records OS/architecture, physical adapter and device index,
+CUDA/HIP/MPS/XPU/CPU family, driver/runtime/package pins, dtype support, available
+device and host memory, unified-memory topology, CPU cores, supported streams,
+and optional kernel import/forward results. A model capability record adds
+workflow, component lifetime, attention mask/head shapes, placement modes,
+quantizers, and compilation compatibility. Each candidate has one explicit
+state: qualified, available-but-unqualified, unavailable, or excluded with reason.
+An import success or an OS match must never imply model support.
+
+Extend the headless smoke tooling with a benchmark runner that writes a
+structured report and artifacts. Establish cold-load, prompt/prefill, token
+decode, diffusion and waveform-decode baselines separately. Include time to
+first progress, frames/second, complete latency, peak working set/commit and
+VRAM, generated duration, transfers where measurable, and worker reuse. Record
+the actual policy and optionally a bounded profiler trace of representative
+forwards; do not synchronize every production operation for telemetry.
+
+Acceptance: pure policy tests on all CI OS targets, installed-runtime operator
+probes with timeouts, and an uncontended RTX 4080 baseline. Do not stop unrelated
+user workloads automatically. If contention remains, label measurements as
+contended and exclude them from comparative claims.
+
+#### 2. Placement that uses available memory efficiently
+
+Replace MiniMax's fixed 8/22/23 GiB decisions with a component/layer budget using
+actual storage bytes, prompt length, requested duration, concurrent components,
+KV cache growth and measured activation peaks. Keep the conservative policy as
+the fallback when capacity measurements are missing. Count reusable allocator
+memory once; never double-count shared parameters or unified host/device memory.
+
+Implement candidates for full residency, stage/component offload, partial
+residency with offloaded remaining blocks, block group offload, leaf group
+offload, and a bounded disk-capacity fallback. Qualify each candidate separately
+for every model adapter. Sequential offload remains excluded for Stable Audio
+and ACE until the already-recorded warm-output/meta-tensor failures are resolved.
+Disk offload is a capacity feature, evaluated after faster options; give it a
+bounded app-owned cache, free-space checks and cancellation cleanup.
+
+For MiniMax, keep RVQ and a budgeted subset of frequently reused Qwen layers
+resident during autoregression. Include embedding/head direct calls in the
+lifetime analysis. Load later diffusion/vocoder components only when needed if
+the pinned ModularPipeline stage interfaces permit it, then release the LM and
+KV cache before that stage. Measure the cold/warm cost of delayed loading.
+Modular Diffusers supports component loading and stage composition, but the
+exact MiniMax stage-state boundary must be tested against our pin.[^ai-modular]
+
+Partial residency is an OpenStudio implementation task, not a switch that
+ComponentsManager automatically supplies. First prototype supported selective
+group hooks on disjoint modules; only proceed if outer manager hooks do not
+move the full LM or evict its RVQ partner. Retain one placement owner per tensor
+and one teardown path. If the pinned hooks cannot express this safely, isolate
+a minimal upstream-compatible adapter or reviewed upstream change before
+production adoption. Never stack device-map, Accelerate and group hooks on the
+same parameters. Reset maps/remove hooks or rebuild between policies.
+
+Benchmark synchronous versus streamed transfers, block versus leaf groups,
+pre-pinned versus on-demand pinned memory, and `record_stream`. Streamed block
+groups require size one in the documented implementation. Budget pinned host
+memory and prefetch buffers; avoid a full extra LM copy on a constrained host.
+Do not assume that larger groups retain more weights between token steps.
+These choices affect transfer overhead differently.[^ai-memory]
+
+Acceptance: fewer measured weight-transfer bytes or shorter stage latency,
+bounded peak RAM/VRAM, no regression on already-resident configurations, and
+cold/warm/model-switch/OOM/cancel tests. Preserve one bounded retry, resolved
+seed, duration, steps, source audio and atomic clip publication. Replan at safe
+request boundaries rather than migrating live tensors during a forward.
+
+#### 3. Attention dispatch and optional runtime packages
+
+Add `tools/ai_attention_policy.py` with component-specific adapters. For
+Diffusers models use their supported attention dispatcher; for Qwen and other
+Transformers encoders use their attention implementation interface. MiniMax's
+RVQ decoder and BS-Roformer require their own audited paths. A top-level flag
+must not claim to configure all of these implementations.[^ai-transformers-attn]
+
+Qualify native automatic SDPA, native fused/efficient/cuDNN variants,
+FlashAttention versions supported by the exact wheel/device, xFormers and AMD
+AITER. Treat SageAttention and FP8/INT8 attention as numerical-change candidates
+with a separate audio gate. Test actual causal/noncausal masks, padding, head
+dimensions, dtype, long prompts and one-token decode. Benchmark prefill and
+decode independently: a prefill win need not improve autoregressive decoding.
+Do not combine attention slicing with an already-efficient backend without
+evidence, or assume every custom attention layer uses the dispatcher.[^ai-attention]
+
+Extend setup manifests and `tools/install_ai_tools.py` plus
+`Source/StemSeparator.cpp` where setup is owned there. Stage exact optional
+wheel/dependency sets in app-local runtimes, validate imports and real forwards,
+then publish atomically. Keep the working environment on failure. Do not build
+flash-attn at ordinary app startup or download executable Hub kernels during
+generation. Windows FlashAttention needs separate wheel/ABI qualification;
+upstream still calls out Windows build limitations.[^ai-flash-install]
+
+Acceptance: the fastest qualified backend is selected for a representative
+component workload, unsupported candidates return actionable reasons, and a
+failed optional backend can rebuild onto qualified SDPA without masking a
+model error. Trace actual kernels in the qualification harness; production
+details distinguish selected policy from observed kernel. No broad package
+installation or dependency upgrade just to satisfy a generic recipe.
+
+#### 4. Model coverage and workflow qualification
+
+All models participate in the common policy; unsupported combinations are
+explicit adapter results rather than silently ignored settings.
+
+| Model | Required optimization and validation coverage |
+| --- | --- |
+| MiniMax Music 3 | Lyrics/style and structured songs; separate Qwen prefill/decode, RVQ, condition encoder, diffusion and vocoder; BF16 partial residency first; attention on each applicable component; EOS-aware duration and growing KV memory. |
+| Stable Audio 3 Medium | Text, variation, inpaint and continuation; transformer residency/group candidates, text encoder placement/attention, supported VAE memory controls; preserve deliberately mixed parameter/buffer dtypes and untouched source PCM. Retain FP32 on CPU/MPS: upstream identifies FP16 MPS noise.[^ai-stable] |
+| ACE-Step 1.5 XL Turbo | Text/music, lyrics/style, variation, inpaint and continuation; transformer attention/placement, encoder and VAE lifetimes, existing tiling; remove hardcoded CUDA-only device/generator assumptions only with complete alternative-backend tests. Preserve Turbo's trained inference contract.[^ai-ace-current] |
+| BS-Roformer separation | Effective audio-separator backend, actual SDPA behavior, supported autocast, memory-aware batch/chunk scheduling, overlap reconstruction and cancellation. Implement adapter-specific memory handling; do not call Diffusers offload APIs on this engine. |
+
+No new model formats or export engines are required by this plan. ONNX/TensorRT,
+Core ML, OpenVINO and architecture-specific distributed systems remain separate
+projects until they demonstrate these exact audio workflows.
+
+#### 5. Hardware matrix and resource coordination
+
+Implement device enumeration and explicit device indices instead of assuming
+GPU 0. Select a qualified runtime by accelerator and architecture, then choose
+a policy by current memory and workload. Centralize the device/generator/memory
+operations currently hardcoded to CUDA in ACE. Use adaptive, bounded CPU thread
+counts instead of assuming four threads are optimal for every host.
+
+| Platform/hardware | Implementation and qualification work |
+| --- | --- |
+| Windows/Linux NVIDIA | Qualify current and older supported architectures, BF16 or validated FP16/FP32, native SDPA and available Flash/xFormers kernels; test 4/6/8/12/16/24/32+ GiB capacity classes. Small-capacity results may be unsupported for a model. |
+| Linux AMD discrete GPUs/APUs | Match ROCm wheel/driver/GPU support, distinguish HIP from NVIDIA, evaluate supported SDPA/AITER, and account for discrete versus shared memory. |
+| Windows AMD | Add a native ROCm route only for hardware/runtime combinations in AMD's compatibility matrix and after generation tests. Existing DirectML separation support remains distinct; no implied DirectML generation support.[^ai-amd-windows] |
+| macOS Apple Silicon | Native arm64/MPS with a single unified-memory budget, per-model precision/operator probes, bounded working set and no CUDA pinning assumptions. Qualify small and large memory systems. |
+| Windows/Linux Intel GPU | Add XPU runtime installation, enumeration, generators, memory reporting and model-forward qualification; prefer native XPU attention/compile where demonstrated. PyTorch XPU availability alone does not establish audio-pipeline compatibility.[^ai-xpu] |
+| CPU-only x86/arm64, including Intel Macs/Windows arm64 where dependencies exist | Qualify native wheels and required operators, benchmark thread pools and supported vectorized precision/quantization; report unsupported capacity/package combinations honestly. Preserve the DAW's audio-thread budget. |
+| Multiple GPUs | Select the fastest fitting device first; compare supported layer/component placement with single-device offload using real interconnect measurements. Separate capacity improvements from latency gains; do not claim ordinary device maps parallelize sequential token generation. |
+
+Coordinate generation and separation allocations through the existing host/job
+ownership flow, including still-warm workers. Release idle allocations under
+pressure; preserve bounded warm reuse when it measurably helps. Do not create
+concurrent songs solely to increase utilization. Test playback/recording
+underruns, interface latency and UI responsiveness during generation. A quieter
+audio workload may allow a larger worker budget, but never perform blocking
+resource coordination on the realtime audio callback.
+
+#### 6. Quantization, compilation and caching after the baseline work
+
+Evaluate INT8/weight-only INT8, selective quantization, TorchAO and supported
+lower-precision storage per component and device. Quantization availability is
+determined by the pinned backend and operator, not a general library marketing
+matrix. Use Transformers configs for Qwen and Diffusers configs for Diffusers
+components. Preserve original snapshots; derived artifacts need revision,
+quantizer, excluded-module, dtype and runtime provenance.[^ai-quant][^ai-torchao]
+
+**The previously rejected NF4 result stays excluded.** Revisit it only as a new,
+clearly identified experiment with a concrete explanation for the prior failure
+and fresh audition; a faster finite WAV does not reverse that failure. Keep
+unquantized vocoder/output-sensitive components initially. Load-time RAM peaks,
+dequantization cost and quantizer/offload-hook compatibility are acceptance
+criteria alongside throughput. There is no automatic quality downgrade on OOM.
+
+Qualify regional compilation before full-pipeline compilation; replace the
+global Dynamo disable only for proven component/runtime combinations. Include
+compiler/toolchain setup, cold compile time, amortization across expected warm
+requests, shape changes, cache invalidation and a disk quota. Test compile with
+each enabled attention/placement/quantization combination, not independently
+and then blindly together.[^ai-speed][^ai-combinations]
+
+Preserve MiniMax's existing KV cache. Static/offloaded/quantized caches require
+integration with its custom upstream loop, not unsupported generation kwargs.
+Bound conditioning caches and key them by complete source/prompt/model state.
+Approximate diffusion caches, SageAttention and other numerical changes require
+separate model-specific evidence and audition; do not silently shorten songs,
+reduce steps or change guidance to meet a speed target.
+
+#### 7. Selection, telemetry and delivery gates
+
+Use qualified conservative defaults on first run. A bounded calibration in the
+headless harness can choose among valid execution policies; production can
+reuse that result keyed by hardware, driver, model/runtime revisions, workload
+shape class and policy version. Invalidate stale results and keep calibration
+time separate from generation time. Minimize measured latency subject to memory
+and audio constraints; more than one policy may be appropriate for a device.
+
+Expose effective device, precision, component placement, attention policy,
+transfer mode, phase throughput and fallback reason through `AITrackEngine`,
+`NativeBridge.ts` and the existing generation details. Keep ordinary song
+creation automatic. Availability metadata and tested defaults replace a pile
+of unsupported tuning switches or production feature flags. Keep hardware
+policy outside portable musical project state; any persisted additions require
+old-project/preset/Compare/portable round-trip coverage before schema changes.
+
+Deliver in reviewable slices: (A) baseline/capabilities, (B) BF16 placement and
+transfer tuning across adapters, (C) attention and staged runtime packages,
+(D) platform adapters/resource coordination, (E) individually qualified
+quantization/compile/cache improvements, (F) UI and release qualification.
+Platform test coverage starts with A rather than being bolted on after E.
+
+For each slice run meaningful policy/adapter and worker lifecycle tests, then
+real short cold/warm requests and every supported workflow. Compare identical
+inputs/parameters under matched resource conditions, with warm-up separated
+and at least three timed repetitions where practical. Report medians, range,
+actual generated length and timeouts. Follow with realistic 30/60-second and
+maximum-duration capacity tests on representative hardware. EOS differences
+must not be counted as speed improvements; report token throughput as well.
+
+Promotion requires functional checks, a repeatable latency or capacity benefit,
+acceptable peak resources, and no regression beyond measured noise on existing
+fast paths. Subjective audio reports remain `diagnostic_only` or `not_asserted`
+until audition; a rejected artifact is `fail`. Simulated device tests cover
+selection logic only. Real NVIDIA, AMD, Apple and Intel machines are required
+before claiming those execution configurations are qualified.
+
+Frontend changes require TypeScript checks and browser geometry/accessibility
+QA. Before a manual app handoff build `frontend/dist`, complete
+`cmake --build build --config Debug`, stop agent-owned harness/dev processes and
+verify no agent-owned listener remains on 5183. The user should need only
+`python build.py dev --run`. Published performance claims additionally require
+the normal release-notes and packaged-platform gates. The implementation
+checkpoint above records which local checks have actually run.
+
 ### Research sources
 
 The links below were reviewed on 2026-09-11; Hugging Face publishes these as
-living documentation. Resolve implementation details against the pinned source.
+living documentation. Core memory, attention, Modular Diffusers, hardware and
+quantization guidance was rechecked for the September 12 plan; the additional
+references below identify that review. Resolve implementation details against
+the pinned source rather than assuming a main-branch API exists locally.
+
+[^ai-modular]: Hugging Face, [ModularPipeline component loading and stage composition](https://huggingface.co/docs/diffusers/main/en/modular_diffusers/modular_pipeline) and [ComponentsManager](https://huggingface.co/docs/diffusers/main/en/modular_diffusers/components_manager), reviewed 2026-09-12.
+[^ai-transformers-attn]: Hugging Face, [Transformers attention interfaces](https://huggingface.co/docs/transformers/main/en/attention_interface), reviewed 2026-09-12.
+[^ai-flash-install]: Dao-AILab, [FlashAttention installation and hardware requirements](https://github.com/Dao-AILab/flash-attention), reviewed 2026-09-12.
+[^ai-amd-windows]: AMD, [Windows ROCm compatibility matrices](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html), reviewed 2026-09-12.
+[^ai-xpu]: PyTorch, [Getting started on Intel GPU](https://github.com/pytorch/pytorch/blob/main/docs/source/notes/get_start_xpu.md), reviewed 2026-09-12.
+[^ai-ace-current]: Hugging Face, [ACE-Step 1.5](https://huggingface.co/docs/diffusers/api/pipelines/ace_step), reviewed 2026-09-12.
 
 [^ai-minimax]: Hugging Face, [MiniMax Music 3](https://huggingface.co/docs/diffusers/main/en/api/pipelines/minimax_music3).
 [^ai-stable]: Hugging Face, [Stable Audio 3](https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_audio_3).

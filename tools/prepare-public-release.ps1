@@ -409,6 +409,8 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath) `
 }
 
 & $generateMetadataScript @generateMetadataArgs
+& python (Join-RepoPath "tools/updater_manifest.py") sign --metadata-dir $MetadataOutputDir
+if ($LASTEXITCODE -ne 0) { throw "Application update metadata signing failed." }
 
 Write-Step "Validating release metadata"
 $validateMetadataArgs = @(

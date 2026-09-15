@@ -7,6 +7,7 @@
 
 #include "MainComponent.h"
 #include "WindowsPackage.h"
+#include "UpdateInstaller.h"
 #include "CrashDiagnostics.h"
 #include "ProjectFileStore.h"
 #include "ApplicationLaunchState.h"
@@ -8878,11 +8879,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                    // aggregate browser timeout that can expire while a healthy scan is still running.
                                    // Offline renders are duration-dependent and continue on a native worker thread;
                                    // a browser deadline would report failure while the valid output is still being written.
-                                   // Use a 5-minute timeout for file choosers and AI generation startup, 15 seconds for everything else.
+                                   // Update deadlines include native preparation/download limits and verification time.
                                     const DIALOG_FUNCTIONS = ['showRenderSaveDialog', 'showSaveDialog', 'showOpenDialog', 'showOpenFileDialog', 'showDirectoryDialog', 'openAudioDeviceControlPanel'];
-                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'refreshNAMCatalog'];
+                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'refreshNAMCatalog', 'installDownloadedUpdate'];
                                    const NO_TIMEOUT_FUNCTIONS = ['scanForPlugins', 'renderProject', 'renderProjectWithDither'];
-                                   const timeoutMs = (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
+                                    const timeoutMs = name === 'getAIGenerationPreflight' ? 45000
+                                       : name === 'downloadUpdate' ? 900000
+                                       : name === 'checkForUpdates' ? 60000
+                                       : (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
                                    const timeout = NO_TIMEOUT_FUNCTIONS.indexOf(name) >= 0
                                        ? null
                                        : setTimeout(() => {
@@ -13040,10 +13044,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("quitApplication", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(args);
                         completion(juce::var());
                         if (isMainWindow())
                         {
+                            if (args.size() == 1 && args[0].isBool() && static_cast<bool>(args[0]))
+                                appUpdater.authorisePreparedInstallForQuit();
                             if (windowCallbacks.requestAppClose)
                                 windowCallbacks.requestAppClose();
                             else
@@ -14936,6 +14941,17 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         audioEngine.cancelAiToolsInstall();
                         completion(juce::var());
                     })
+                    .withNativeFunction ("getAIGenerationPreflight", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 3) { completion(juce::var()); return; }
+                        aiPreflightOperations.addJob([model = args[0].toString(), workflow = args[1].toString(),
+                            params = args[2].toString(), alive = aiPreflightOperations.token(),
+                            reply = aiPreflightOperations.guardCompletion(std::move(completion))] {
+                            AITrackEngine probe;
+                            auto result = probe.getGenerationPreflight(model, workflow, params,
+                                [alive] { return !MessageThreadLifetime::accepts(alive); });
+                            juce::MessageManager::callAsync([reply, result] { (*reply)(result); });
+                        });
+                    })
                     .withNativeFunction ("startAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 4)
                             completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString(), args[3].toString()));
@@ -15453,6 +15469,8 @@ MainComponent::~MainComponent()
     for (const auto& entry : toneSearchRequests) entry.second->cancel();
 
     mediaOperations.cancelPending();
+    aiPreflightOperations.cancelPending();
+    aiPreflightOperations.shutdown();
     const auto drain = [](juce::ThreadPool& pool, const char* stage) {
         OpenStudioCrashDiagnostics::recordBreadcrumb("shutdown_wait", stage);
         pool.removeAllJobs(true, -1);
@@ -15853,6 +15871,7 @@ void MainComponent::markFrontendStartupReady(const juce::String& detail)
         return;
 
     frontendStartupState = FrontendStartupState::ready;
+    if (isMainWindow()) UpdateInstaller::acknowledgeFrontendReady();
     frontendStartupDetail = detail;
     startupWatchdogActive = false;
     startupFallbackVisible = false;
