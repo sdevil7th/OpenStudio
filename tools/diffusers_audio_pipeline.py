@@ -218,12 +218,24 @@ class DiffusersAudioSession:
         self._placement = None
         self._partial = None
         self._int8_stage = None
+        self._int8_disk_store = None
         self.request_duration = request_duration
         self.request_prompt_tokens = request_prompt_tokens
         self.requested_device = requested_device
         self.attention = attention
         self.placement = placement
         self.quantization = quantization
+        from ai_model_variants import MARKER, validate_variant, require_int8_device
+        saved_int8 = (root / MARKER).is_file()
+        if saved_int8:
+            validate_variant(root, model_id)
+            require_int8_device(torch)
+            quantization = self.quantization = "int8"
+            placement = self.placement = "model-offload" if model_id == MINIMAX_MODEL else "resident"
+            # Explicit saved INT8 uses the bounded stage adapter; reserve still
+            # includes cache bytes separately and is checked again at runtime.
+            if model_id == MINIMAX_MODEL:
+                int8_reserve_bytes = 3 * GIB // 2
         int8_stage = model_id == MINIMAX_MODEL and quantization == "int8" and placement == "model-offload"
         if int8_reserve_bytes not in {3 * GIB // 2, 2 * GIB, 3 * GIB} or (int8_reserve_bytes != 3 * GIB and not int8_stage):
             raise ValueError("Only INT8 stage qualification can evaluate a reduced device reserve.")
@@ -234,7 +246,7 @@ class DiffusersAudioSession:
         if quantization != "none" and placement != "resident" and not int8_stage:
             raise ValueError("Quantization evaluation requires explicit resident placement; offload combinations are unqualified.")
         from ai_execution_policy import quantization_kwargs, optimization_candidates
-        quant_kwargs = quantization_kwargs(quantization, modular=model_id == MINIMAX_MODEL)
+        quant_kwargs = {} if saved_int8 else quantization_kwargs(quantization, modular=model_id == MINIMAX_MODEL)
         model_workflows(model_id)
         self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         from ai_execution_policy import select_device, activate_device
@@ -312,6 +324,10 @@ class DiffusersAudioSession:
                 self.pipe.load_components(names=list(required[1:]), **load_kwargs)
                 gc.collect()
                 from ai_partial_offload import move_int8_module
+                if saved_int8:
+                    from ai_disk_store import DiskWeightStore
+                    self._int8_disk_store = DiskWeightStore(
+                        [getattr(self.pipe, name) for name in required[:5]], allow_device=True)
                 move_int8_module(self.pipe.language_model, "cpu")
                 torch.cuda.empty_cache()
             else:
@@ -389,9 +405,12 @@ class DiffusersAudioSession:
                                          f"including the request cache and reserve; {available} is available after loading. "
                                          "Close unused GPU applications and retry.")
                     from ai_partial_offload import Int8StagePlacement
-                    self._int8_stage = Int8StagePlacement(self.pipe, self.execution_device)
+                    self._int8_stage = Int8StagePlacement(self.pipe, self.execution_device,
+                                                         disk_store=self._int8_disk_store)
                     self.execution_details.update(offload="model-offload", quantizedStage="experimental",
                         requiredDeviceBytes=self._int8_minimum, deviceReserveBytes=int8_reserve_bytes)
+                    if self._int8_disk_store is not None:
+                        self.execution_details.update(inactiveWeights="disk-backed", diskCacheBytes=self._int8_disk_store.bytes)
                 elif partial is not None:
                     from dataclasses import asdict
                     from ai_partial_offload import PartialStagePlacement
@@ -433,6 +452,7 @@ class DiffusersAudioSession:
         self.execution_details["weightsBytes"] = module_weight_bytes(components.values())
         self.execution_details["executionDevice"] = self.execution_device
         self.execution_details["quantization"] = quantization
+        self.execution_details["modelVariant"] = "int8" if saved_int8 else "original"
         if model_id == MINIMAX_MODEL:
             from ai_execution_policy import MINIMAX_PROMPT_MEASUREMENT
             self.execution_details.update(promptTokens=request_prompt_tokens,
@@ -447,6 +467,9 @@ class DiffusersAudioSession:
         if self._int8_stage is not None:
             self._int8_stage.close()
             self._int8_stage = None
+        if getattr(self, "_int8_disk_store", None) is not None:
+            self._int8_disk_store.close()
+            self._int8_disk_store = None
         if self._partial is not None:
             self._partial.close()
             self._partial = None
@@ -537,7 +560,9 @@ class DiffusersAudioSession:
             if details.get("lowCpuMemory"):
                 placement += " (lower RAM use)"
         physical = details.get("physicalDevice", details["device"])
-        precision = details['precision'] + (" / INT8 language model" if details.get("quantization") == "int8" else "")
+        precision = details["precision"]
+        if details.get("quantization") == "int8":
+            precision += " / INT8 language model" if self.model_id == "minimax-music-3" else " / INT8 diffusion transformer"
         summary = f"{physical} · {details['device']} · {precision} · {placement} · automatic SDPA"
         if details.get("attention", {}).get("requested", "native") != "native":
             summary = summary.replace("automatic SDPA", details["attention"]["requested"] + " attention")

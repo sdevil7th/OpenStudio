@@ -113,7 +113,7 @@ def main():
                         if selected is not None and selected != args.expect_quantization:
                             raise ValueError("Worker selected the wrong precision before completion.")
                         if (args.expect_quantization == "int8" and event.get("phase") == "loading_model"
-                                and "INT8 language model" in event.get("statusNote", "")):
+                                and "INT8 " in event.get("statusNote", "")):
                             selection_event = event
                     if args.expect_rejection and event.get("phase") in {"generating_tokens", "denoising", "decoding_audio"}:
                         raise ValueError("Expected preflight rejection, but inference started.")

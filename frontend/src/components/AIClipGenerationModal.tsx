@@ -1,3 +1,4 @@
+import { AIModelVariantSelector } from "./AIModelVariantSelector";
 import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Music2, Settings2, WandSparkles } from "lucide-react";
@@ -254,7 +255,7 @@ export default function AIClipGenerationModal() {
   );
   const selectedModelStatus = aiToolsStatus.musicModels?.[aiClipGenerationModelId];
   const isModelReady = Boolean(
-    selectedModelStatus?.ready
+    (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" && selectedModelStatus?.variants?.int8?.ready) ?? false : selectedModelStatus?.ready)
     ?? (
       aiClipGenerationModelId === ACE_STEP_MODEL_ID
         ? (
@@ -268,7 +269,7 @@ export default function AIClipGenerationModal() {
     ),
   );
   const modelBlockedMessage =
-    selectedModelStatus?.message
+    (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" ? "Set up the INT8 version in AI Runtime Setup." : "Choose Original on this device. INT8 requires an NVIDIA GPU.") : selectedModelStatus?.message)
     || selectedModelStatus?.blockReason
     || aiToolsStatus.features?.audioGeneration?.message
     || aiToolsStatus.musicGenerationStatusMessage
@@ -597,6 +598,9 @@ export default function AIClipGenerationModal() {
             </div>
           </section>
 
+          <AIModelVariantSelector modelId={aiClipGenerationModelId} value={params.modelVariant === "int8" ? "int8" : "original"}
+            status={aiToolsStatus} disabled={isGenerating}
+            onChange={(value) => setAIClipGenerationParams({ ...params, modelVariant: value })} />
           <AIGenerationHardwareCheck modelId={aiClipGenerationModelId} workflowId={workflow.id}
             params={sourceTrack && sourceClip ? buildAIClipGenerationRequestParams({
               params, modelId: aiClipGenerationModelId, sourceTrack, sourceClip,

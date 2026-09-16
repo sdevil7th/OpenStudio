@@ -731,7 +731,7 @@ export function normalizeWorkflowParams(
     }),
   );
 
-  return normalized;
+  return { ...normalized, modelVariant: source.modelVariant === "int8" ? "int8" : "original" };
 }
 
 export function mergeWorkflowParams(

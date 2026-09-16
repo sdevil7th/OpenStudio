@@ -3751,7 +3751,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
-        const isStableAudioImport = isDiffusersImportModel(options.modelId);
+        const isStableAudioImport = isDiffusersImportModel(options.modelId) || options.modelVariant === "int8";
         const selectedFeatures = options.selectedFeatures?.length
           ? options.selectedFeatures
           : [options.requestedFeature ?? "stemSeparation"];
@@ -3802,6 +3802,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           selectedFeatures,
           requestedFeatures: selectedFeatures,
           requestedModelId: options.modelId,
+          requestedModelVariant: options.modelVariant ?? "original",
           requestedFeature: options.requestedFeature,
           error: undefined,
           statusWarning: undefined,
@@ -5324,7 +5325,10 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       const workflow = getAIWorkflow(workflowId, modelId, "ai-track");
       const previousWorkflow = track.aiWorkflow ?? "text-to-music";
       const previousParams = { ...(track.aiWorkflowParams ?? {}) };
-      const nextParams = getDefaultWorkflowParams(workflow.id, modelId);
+      const nextParams = {
+        ...getDefaultWorkflowParams(workflow.id, modelId),
+        modelVariant: previousParams.modelVariant === "int8" ? "int8" : "original",
+      };
 
       set((store) => ({
         tracks: store.tracks.map((entry) =>

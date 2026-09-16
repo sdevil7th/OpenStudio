@@ -342,7 +342,9 @@ export const AITrackHeader = React.memo(function AITrackHeader({
   const canStartMusicGeneration =
     workflow.available !== false
     && Boolean(
-      selectedModelStatus?.ready
+      (track.aiWorkflowParams?.modelVariant === "int8"
+        ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" && selectedModelStatus?.variants?.int8?.ready) ?? false
+        : selectedModelStatus?.ready)
       ?? (
         modelId === ACE_STEP_MODEL_ID
           ? (
@@ -356,7 +358,7 @@ export const AITrackHeader = React.memo(function AITrackHeader({
       ),
     );
   const musicGenerationBlockedMessage = sanitizeAiSetupMessage(
-    selectedModelStatus?.message
+    (track.aiWorkflowParams?.modelVariant === "int8" ? "Set up the INT8 version on an NVIDIA GPU, or choose Original." : selectedModelStatus?.message)
     || selectedModelStatus?.blockReason
     || aiToolsStatus.features?.audioGeneration?.message
     || aiToolsStatus.musicGenerationPerformanceStatusMessage

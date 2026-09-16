@@ -25,6 +25,19 @@ function sourceClip(overrides: Partial<AudioClip> = {}): AudioClip {
 }
 
 describe("AI generation store actions", () => {
+  it("undoes and redoes a model version choice without losing the prompt", () => {
+    const track = createDefaultTrack("variant-track", "Variant", "#7c3aed", "ai");
+    track.aiWorkflowParams = { prompt: "Acoustic guitar", modelVariant: "original" };
+    useDAWStore.setState({ tracks: [track] });
+    useDAWStore.getState().setAITrackParams(track.id, { ...track.aiWorkflowParams, modelVariant: "int8" });
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams?.modelVariant).toBe("int8");
+    useDAWStore.getState().undo();
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams).toMatchObject({ prompt: "Acoustic guitar", modelVariant: "original" });
+    useDAWStore.getState().redo();
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams).toMatchObject({ prompt: "Acoustic guitar", modelVariant: "int8" });
+    useDAWStore.getState().setAITrackWorkflow(track.id, "lyrics-style");
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams?.modelVariant).toBe("int8");
+  });
   beforeEach(() => {
     commandManager.clear();
     useDAWStore.setState(initialState);

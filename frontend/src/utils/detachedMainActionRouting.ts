@@ -35,6 +35,8 @@ export const DETACHED_AUTOMATION_ACTION_IDS = new Set<string>([
   "automation.allTracks.mode.latch",
   "automation.allTracks.writeOff",
   "automation.allTracks.toggleRead",
+  "automation.allTracks.toggleWrite",
+  "automation.openPanel",
   "automation.master.mode.off",
   "automation.master.mode.read",
   "automation.master.mode.write",

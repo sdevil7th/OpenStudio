@@ -62,6 +62,26 @@ int runIsolatedPluginRegression(const juce::File& directory, bool exerciseEditor
         plugin->setStateInformation(&gain, sizeof(gain));
         juce::MemoryBlock state; plugin->getStateInformation(state);
         check("opaque_state_round_trip", state.getSize() == sizeof(gain) && memcmp(state.getData(), &gain, sizeof(gain)) == 0);
+        {
+            // Scoped non-owning view; the unique owner outlives this capture.
+            PluginParameterCapture capture(std::shared_ptr<juce::AudioProcessor>(plugin.get(), [](auto*) {}));
+            const bool sent = plugin->sendTestParameterGesture();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+            juce::Array<juce::var> edits;
+            capture.drain("isolated", false, 0, edits);
+            check("worker_editor_gestures_reach_host_automation", sent && edits.size() == 3
+                && edits[0].getProperty("phase", "").toString() == "begin"
+                && edits[1].getProperty("phase", "").toString() == "value"
+                && edits[2].getProperty("phase", "").toString() == "end"
+                && std::abs(static_cast<float>(edits[1].getProperty("value", 0.0)) - 0.42f) < 1.0e-6f);
+            plugin->getParameters()[0]->setValue(0.65f);
+            juce::MemoryBlock saved;
+            plugin->getStateInformation(saved);
+            plugin->setStateInformation(&gain, sizeof(gain));
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+            edits.clear(); capture.drain("isolated", false, 0, edits);
+            check("worker_host_read_and_restore_do_not_echo_as_editor_writes", edits.isEmpty());
+        }
         for (const bool released : { false, true })
         {
             if (released) plugin->releaseResources();

@@ -25,3 +25,21 @@ describe("AI setup terminal results", () => {
     expect(await useDAWStore.getState().refreshAiToolsStatus(true)).toMatchObject(status);
   });
 });
+
+
+it("installs ACE INT8 even when the Original audio-generation feature is ready", async () => {
+  const status = { ...initialState.aiToolsStatus, state: "ready" as const,
+    available: true, installInProgress: false, musicGenerationReady: true,
+    musicGenerationLayoutValid: true, musicGenerationAvailableProfiles: ["ace-diffusers"] };
+  useDAWStore.setState({ aiToolsStatus: status });
+  vi.spyOn(nativeBridge, "installAiTools").mockResolvedValue({ started: true });
+  vi.spyOn(nativeBridge, "refreshAiToolsStatus").mockResolvedValue(status);
+  const result = await useDAWStore.getState().installAiTools({
+    modelId: "ace-step-v15-xl-turbo", modelVariant: "int8", userConfirmedDownload: true,
+    selectedFeatures: ["audioGeneration"], requestedFeature: "audioGeneration",
+  });
+  expect(result?.started).toBe(true);
+  expect(nativeBridge.installAiTools).toHaveBeenCalledWith(expect.objectContaining({
+    modelId: "ace-step-v15-xl-turbo", modelVariant: "int8",
+  }));
+});

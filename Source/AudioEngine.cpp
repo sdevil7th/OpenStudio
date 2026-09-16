@@ -7936,6 +7936,8 @@ bool AudioEngine::setInstrumentState(const juce::String& trackId, const juce::St
     }
 
     juce::Logger::writeToLog("AudioEngine: Restored instrument state for track " + trackId);
+    it->second->invalidatePluginAutomationCache();
+    it->second->discardPluginParameterEdits(processor);
     if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor)) return isolated->isHealthy();
     return true;
 }
@@ -65833,7 +65835,10 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
         const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
         const auto trackIt = trackMap.find(trackId);
         if (trackIt != trackMap.end() && trackIt->second != nullptr)
+        {
             trackIt->second->invalidatePluginAutomationCache();
+            trackIt->second->discardPluginParameterEdits(processor);
+        }
     }
 
     if (latencyAfter != latencyBefore)
@@ -66170,7 +66175,8 @@ static bool isOpenStudioBuiltInParameterEligible(
     if (processor == nullptr || parameter == nullptr || parameterId.isEmpty())
         return false;
 
-    if (dynamic_cast<OpenStudioNAMRack*>(processor) == nullptr)
+    if (!supportsLockFreeBuiltInControlPublication(processor)
+        || requiresLockedBuiltInControlMutation(processor, parameterId))
         return false;
 
     static const juce::StringArray excludedNAMParameters {
@@ -66184,7 +66190,7 @@ static bool isOpenStudioBuiltInParameterEligible(
         "ampOverrideOutputLevelDbu",
         "auditionSource"
     };
-    if (excludedNAMParameters.contains(parameterId))
+    if (dynamic_cast<OpenStudioNAMRack*>(processor) != nullptr && excludedNAMParameters.contains(parameterId))
         return false;
 
     if (parameter->hasProperty("automatable")
@@ -66212,7 +66218,9 @@ juce::var AudioEngine::getPluginParameters(const juce::String& trackId, int fxIn
     auto* track = it->second;
     juce::AudioProcessor* processor = nullptr;
 
-    if (isInputFX)
+    if (!isInputFX && fxIndex == -1)
+        processor = track->getInstrument();
+    else if (isInputFX)
     {
         if (fxIndex >= 0 && fxIndex < track->getNumInputFX())
             processor = track->getInputFXProcessor(fxIndex);
@@ -66233,6 +66241,7 @@ juce::var AudioEngine::getPluginParameters(const juce::String& trackId, int fxIn
     for (int i = 0; i < params.size(); ++i)
     {
         auto* param = params[i];
+        if (!param->isAutomatable()) continue;
         auto name = param->getName(128);
 
         // Filter out MIDI CC / internal mapping parameters (Reaper hides these too)
@@ -67647,7 +67656,9 @@ bool AudioEngine::setPluginParameter(const juce::String& trackId, int fxIndex, b
     auto* track = it->second;
     juce::AudioProcessor* processor = nullptr;
 
-    if (isInputFX)
+    if (!isInputFX && fxIndex == -1)
+        processor = track->getInstrument();
+    else if (isInputFX)
     {
         if (fxIndex >= 0 && fxIndex < track->getNumInputFX())
             processor = track->getInputFXProcessor(fxIndex);
@@ -70627,7 +70638,10 @@ bool AudioEngine::setPluginState(
         const juce::ScopedLock graphLock(mainProcessorGraph->getCallbackLock());
         const auto trackIt = trackMap.find(trackId);
         if (trackIt != trackMap.end() && trackIt->second != nullptr)
+        {
             trackIt->second->invalidatePluginAutomationCache();
+            trackIt->second->discardPluginParameterEdits(processor);
+        }
     }
 
     if (latencyAfter != latencyBefore)
@@ -73549,6 +73563,30 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
                 const auto remove = [&] { return input ? removeTrackInputFX(trackId, 0) : removeTrackFX(trackId, 0); };
                 const bool inserted = add(identifier);
                 const auto chain = input ? getTrackInputFX(trackId) : getTrackFX(trackId);
+                const auto parameters = inserted ? getPluginParameters(trackId, 0, input) : juce::var();
+                outputDirectory.getChildFile(input ? "external-input-parameters.json" : "external-track-parameters.json")
+                    .replaceWithText(juce::JSON::toString(parameters, true));
+                int changedIndex = -1;
+                float changedValue = 0.0f;
+                juce::String changedName;
+                if (const auto* list = parameters.getArray())
+                    for (const auto& parameter : *list)
+                    {
+                        const auto name = parameter.getProperty("name", "").toString();
+                        if (name.containsIgnoreCase("bypass")) continue;
+                        changedIndex = static_cast<int>(parameter.getProperty("index", -1));
+                        auto* processor = input ? trackMap[trackId]->getInputFXProcessor(0) : trackMap[trackId]->getTrackFXProcessor(0);
+                        auto* knob = processor != nullptr && juce::isPositiveAndBelow(changedIndex, processor->getParameters().size())
+                            ? processor->getParameters()[changedIndex] : nullptr;
+                        if (knob == nullptr || knob->getNumSteps() <= 2) { changedIndex = -1; continue; }
+                        const auto oldValue = static_cast<float>(parameter.getProperty("value", 0.0));
+                        changedValue = oldValue < 0.5f ? 0.63f : 0.37f;
+                        changedName = name;
+                        if (!setPluginParameter(trackId, 0, input, changedIndex, changedValue)) changedIndex = -1;
+                        changedValue = knob->getValue();
+                        if (std::abs(changedValue - oldValue) < 0.01f) { changedIndex = -1; continue; }
+                        break;
+                    }
                 const auto state = inserted ? getPluginState(trackId, 0, input) : juce::String();
                 const auto savedIdentifier = chain.size() > 0 ? chain[0].getProperty("pluginPath", "").toString() : juce::String();
                 if (inserted) remove();
@@ -73556,6 +73594,40 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
                 const bool restored = reopened && !state.isEmpty() && setPluginState(trackId, 0, input, state);
                 addCheck(input ? "external_input_fx_state_round_trip" : "external_track_fx_state_round_trip",
                          restored, "Serialized FX identity and opaque state can reopen the same vendor class.");
+                if (changedIndex >= 0)
+                {
+                    bool valueRestored = false;
+                    float restoredValue = -1.0f;
+                    const auto restoredParameters = getPluginParameters(trackId, 0, input);
+                    if (const auto* list = restoredParameters.getArray())
+                        for (const auto& parameter : *list)
+                            if (static_cast<int>(parameter.getProperty("index", -1)) == changedIndex)
+                            {
+                                restoredValue = static_cast<float>(parameter.getProperty("value", -1.0));
+                                valueRestored = std::abs(restoredValue - changedValue) < 0.002f;
+                            }
+                    addCheck(input ? "external_input_fx_changed_knob_round_trip" : "external_track_fx_changed_knob_round_trip",
+                             restored && valueRestored, "Changed host parameter survives a fresh plugin instance: " + changedName
+                                + " expected=" + juce::String(changedValue) + " restored=" + juce::String(restoredValue));
+                    // Compatibility: legacy JUCE chunks without the optional
+                    // host parameter snapshot must still load, followed by the
+                    // same saved state used by project/preset/Compare paths.
+                    juce::MemoryBlock decoded;
+                    bool legacyCompatible = false;
+                    if (PluginStateValidation::decode(state, decoded))
+                        if (auto xml = juce::AudioProcessor::getXmlFromBinary(decoded.getData(), static_cast<int>(decoded.getSize())))
+                        {
+                            const bool hasHostValues = xml->getChildByName("OpenStudioHostParameters") != nullptr;
+                            if (auto* hostValues = xml->getChildByName("OpenStudioHostParameters")) xml->removeChildElement(hostValues, true);
+                            juce::MemoryBlock legacy;
+                            juce::AudioProcessor::copyXmlToBinary(*xml, legacy);
+                            const bool legacyRestored = setPluginState(trackId, 0, input, legacy.toBase64Encoding());
+                            const bool newRestored = setPluginState(trackId, 0, input, state);
+                            legacyCompatible = hasHostValues && legacyRestored && newRestored;
+                        }
+                    addCheck(input ? "external_input_legacy_and_current_state" : "external_track_legacy_and_current_state",
+                             legacyCompatible, "Both old opaque state and the optional stable-ID parameter snapshot remain readable.");
+                }
                 if (reopened) remove();
             }
         }
@@ -73576,6 +73648,37 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
 
 //==============================================================================
 // Automation
+
+juce::var AudioEngine::takePluginParameterEdits()
+{
+    juce::Array<juce::var> edits;
+    for (const auto& [id, track] : trackMap)
+        if (track != nullptr) track->drainPluginParameterEdits(id, edits);
+    return juce::var(edits);
+}
+
+juce::var AudioEngine::builtInParameterEdit(const juce::String& trackId, const juce::String& chain,
+                                          int index, const juce::String& param, const juce::String& phase)
+{
+    auto* event = new juce::DynamicObject();
+    event->setProperty("trackId", trackId);
+    event->setProperty("phase", phase);
+    event->setProperty("param", ""); // Non-automatable edits still dirty the project.
+    auto it = trackMap.find(trackId);
+    if (it != trackMap.end() && it->second && (chain == "track" || chain == "input"))
+    {
+        auto* processor = chain == "input" ? it->second->getInputFXProcessor(index) : it->second->getTrackFXProcessor(index);
+        OpenStudioBuiltInAutomationDescriptor descriptor;
+        if (getOpenStudioBuiltInAutomationDescriptor(processor, param, descriptor))
+        {
+            const auto id = "builtin_" + chain + "_" + juce::String(index) + "_" + param;
+            event->setProperty("param", id);
+            event->setProperty("name", processor->getName() + ": " + param);
+            event->setProperty("value", openStudioBuiltInValueToNormalized(descriptor, descriptor.currentValue));
+        }
+    }
+    return juce::var(event);
+}
 
 static AutomationMode parseAutomationMode(const juce::String& modeStr)
 {
@@ -78088,7 +78191,27 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     auto aiToolsStatus = stemSeparator.getAiToolsStatus();
     if (auto* statusObject = aiToolsStatus.getDynamicObject())
     {
-        if (modelId == "stable-audio-3-medium" || modelId == "minimax-music-3")
+        const auto variant = juce::JSON::parse(paramsJSON).getProperty("modelVariant", "original").toString();
+        if (variant != "original" && variant != "int8")
+        {
+            result->setProperty("started", false);
+            result->setProperty("error", "Unknown model version. Choose Original or INT8.");
+            return juce::var(result.release());
+        }
+        if (variant == "int8")
+        {
+            const auto model = statusObject->getProperty("musicModels").getProperty(modelId, juce::var());
+            const auto quantized = model.getProperty("variants", juce::var()).getProperty("int8", juce::var());
+            const auto hardware = statusObject->getProperty("hardware");
+            if (! static_cast<bool>(quantized.getProperty("ready", false))
+                || hardware.getProperty("gpuBackend", "").toString() != "cuda")
+            {
+                result->setProperty("started", false);
+                result->setProperty("error", "Set up the selected INT8 version in AI Runtime Setup on an NVIDIA CUDA device.");
+                return juce::var(result.release());
+            }
+        }
+        else if (modelId == "stable-audio-3-medium" || modelId == "minimax-music-3")
         {
             auto stableReady = false;
             juce::String stableMessage = modelId + " is not set up yet.";

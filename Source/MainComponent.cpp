@@ -9636,11 +9636,25 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("setBuiltInPluginParam", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 5 && args[0].isString()) {
-                            completion(audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
-                                                                         args[3].toString(), static_cast<float>(static_cast<double>(args[4]))));
+                            const bool applied = audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
+                                                                         args[3].toString(), static_cast<float>(static_cast<double>(args[4])));
+                            if (applied)
+                                broadcastEventToAll("pluginParameterEdit", audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
+                                    static_cast<int>(args[2]), args[3].toString(), "value"));
+                            completion(applied);
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("builtInPluginGesture", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() < 5) { completion(false); return; }
+                        const auto event = audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
+                            static_cast<int>(args[2]), args[3].toString(), static_cast<bool>(args[4]) ? "begin" : "end");
+                        const auto parameter = event.getProperty("param", "").toString();
+                        if (parameter.isNotEmpty() && static_cast<bool>(args[4]))
+                            audioEngine.beginTouchAutomation(args[0].toString(), parameter);
+                        broadcastEventToAll("pluginParameterEdit", event);
+                        completion(true);
                     })
                     .withNativeFunction ("setBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 4 && args[0].isString()) {
@@ -16245,6 +16259,10 @@ void MainComponent::timerCallback()
     const auto faultGeneration = ProcessorSafety::changeGeneration.load(std::memory_order_acquire);
     if (isMainWindow() && webView.isVisible() && frontendStartupState == FrontendStartupState::ready)
     {
+        const auto edits = audioEngine.takePluginParameterEdits();
+        if (const auto* items = edits.getArray())
+            for (const auto& edit : *items)
+                webView.emitEventIfBrowserIsVisible("pluginParameterEdit", edit);
         const auto failures = audioEngine.takeRecordingWriteFailures();
         if (failures.size() > 0)
         {

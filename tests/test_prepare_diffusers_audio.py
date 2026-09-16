@@ -53,7 +53,7 @@ class HubSetupTests(unittest.TestCase):
         self.assertEqual(call.args, ("stabilityai/stable-audio-3-medium",))
         self.assertEqual(len(call.kwargs["revision"]), 40)
         self.assertIn("t5gemma-b-b-ul2/*", call.kwargs["allow_patterns"])
-        convert.assert_called_once_with(self.source, self.destination, self.cache)
+        convert.assert_called_once_with(self.source, self.destination, self.cache, validate_load=True)
         self.assertTrue(self.source.is_dir())
 
     def test_minimax_copies_supported_components_and_validates_before_success(self):

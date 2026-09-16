@@ -25,6 +25,32 @@ class Module(torch.nn.Module):
 
 class PlacementTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available() and importlib.util.find_spec("bitsandbytes"),
+                         "CUDA/BNB unavailable")
+    def test_disk_backed_int8_stage_cycles_preserve_output_and_remove_cache(self):
+        import bitsandbytes as bnb
+        from ai_disk_store import DiskWeightStore
+        names = ("language_model", "rvq_depth_decoder", "condition_encoder", "transformer", "vocoder")
+        pipe = types.SimpleNamespace(**{name: Module().half().eval() for name in names})
+        pipe.language_model.linear = bnb.nn.Linear8bitLt(4, 4, has_fp16_weights=False).half().eval()
+        pipe.language_model.to("cuda:0")
+        source = torch.randn(2, 4, device="cuda:0", dtype=torch.float16)
+        with torch.inference_mode():
+            expected = pipe.language_model(source).clone()
+        with tempfile.TemporaryDirectory() as folder:
+            store = DiskWeightStore([getattr(pipe, name) for name in names], root=Path(folder), allow_device=True)
+            owned = store.directory
+            owner = Int8StagePlacement(pipe, "cuda:0", disk_store=store)
+            try:
+                with torch.inference_mode():
+                    for _ in range(3):
+                        torch.testing.assert_close(pipe.language_model(source), expected, atol=.001, rtol=.001)
+                        pipe.transformer(source)
+                        owner.release()
+            finally:
+                owner.close()
+            self.assertFalse(owned.exists())
+
+    @unittest.skipUnless(torch.cuda.is_available() and importlib.util.find_spec("bitsandbytes"),
                          "Isolated CUDA/BNB candidate unavailable")
     def test_real_int8_stage_restores_cpu_storage_and_output(self):
         import bitsandbytes as bnb

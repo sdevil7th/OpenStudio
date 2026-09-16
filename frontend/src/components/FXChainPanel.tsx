@@ -41,6 +41,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
 import { useShallow } from "zustand/react/shallow";
+import { denormalizeParamValue } from "../utils/builtInParamValue";
 import { guardModalContextMenu } from "../utils/modalEventGuards";
 import {
   activateShortcutContext,
@@ -104,7 +105,7 @@ function formatPluginParameterValue(param: PluginParam, normalizedValue: number)
   if (!param.builtIn) return `${Math.round(normalizedValue * 100)}%`;
   const minimum = Number(param.min ?? 0);
   const maximum = Number(param.max ?? 1);
-  let rawValue = minimum + normalizedValue * (maximum - minimum);
+  let rawValue = denormalizeParamValue({ id: param.paramId ?? "", min: minimum, max: maximum }, normalizedValue);
   if (param.discrete) rawValue = Math.round(rawValue);
   if (param.type === "toggle") return rawValue >= 0.5 ? "On" : "Off";
   if (param.type === "enum") {
@@ -1248,7 +1249,7 @@ export function FXChainPanel({
     if (changedParam.builtIn && changedParam.paramId) {
       const minimum = Number(changedParam.min ?? 0);
       const maximum = Number(changedParam.max ?? 1);
-      let rawValue = minimum + value * (maximum - minimum);
+      let rawValue = denormalizeParamValue({ id: changedParam.paramId, min: minimum, max: maximum }, value);
       if (changedParam.discrete) rawValue = Math.round(rawValue);
       await nativeBridge.setBuiltInPluginParam(
         { trackId, chain: isInputFX ? "input" : "track", fxIndex },

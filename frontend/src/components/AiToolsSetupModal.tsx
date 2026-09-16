@@ -1,3 +1,4 @@
+import { AIModelVariantSelector, type AIModelVariant } from "./AIModelVariantSelector";
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -318,6 +319,7 @@ function getSetupRequirement(item: SetupCatalogItem) {
 }
 
 export default function AiToolsSetupModal() {
+  const [modelVariant, setModelVariant] = useState<AIModelVariant>("original");
   const {
     showAiToolsSetup,
     aiToolsSetupRequestedFeature,
@@ -350,6 +352,8 @@ export default function AiToolsSetupModal() {
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
+    setModelVariant(aiToolsStatus.installInProgress && aiToolsStatus.requestedModelId === selectedItemId
+      && aiToolsStatus.requestedModelVariant === "int8" ? "int8" : "original");
     setStableAudioLicenseAccepted(false);
     setHuggingFaceToken("");
     setStableAudioSelectedFolder("");
@@ -357,7 +361,15 @@ export default function AiToolsSetupModal() {
   }, [selectedItemId, showAiToolsSetup]);
 
   const catalog = useMemo(() => buildSetupCatalog(aiToolsStatus), [aiToolsStatus]);
-  const selectedItem = catalog.find((item) => item.id === selectedItemId) ?? catalog[0];
+  const baseSelectedItem = catalog.find((item) => item.id === selectedItemId) ?? catalog[0];
+  const int8 = modelVariant === "int8" && !!baseSelectedItem.modelId;
+  const int8Ready = !!(baseSelectedItem.modelId && aiToolsStatus.musicModels?.[baseSelectedItem.modelId]?.variants?.int8?.ready);
+  const selectedItem = int8 ? {
+    ...baseSelectedItem, ready: int8Ready, state: int8Ready ? "ready" as const : "available" as const,
+    compatible: aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda",
+    disabledReason: "The INT8 version currently requires an NVIDIA CUDA GPU.",
+    primaryAction: "Download and Prepare INT8",
+  } : baseSelectedItem;
   const installLogPath = aiToolsStatus.detailLogPath;
   const displayActivityLines = (aiToolsStatus.activityLines ?? []).map(sanitizeSetupMessage);
   const activeInstallItem = catalog.find((item) => item.installing);
@@ -403,7 +415,8 @@ export default function AiToolsSetupModal() {
 
   const handleOpenStableAudioPage = async () => {
     await nativeBridge.openExternalURL(selectedItem.id === MINIMAX_MUSIC_3_MODEL_ID
-      ? "https://huggingface.co/MiniMaxAI/MiniMax-Music3" : STABLE_AUDIO_MODEL_URL);
+      ? "https://huggingface.co/MiniMaxAI/MiniMax-Music3" : selectedItem.id === ACE_STEP_MODEL_ID
+        ? "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers" : STABLE_AUDIO_MODEL_URL);
   };
 
   const handleOpenInstallLog = async () => {
@@ -430,6 +443,7 @@ export default function AiToolsSetupModal() {
         selectedFeatures: ["audioGeneration"],
         requestedFeature: "audioGeneration",
         modelId: selectedItem.modelId ?? STABLE_AUDIO_3_MODEL_ID,
+        modelVariant,
         stableAudioModelPath: folder,
         huggingFaceToken: folder ? undefined : huggingFaceToken.trim() || undefined,
         stableAudioLicenseAccepted,
@@ -463,7 +477,7 @@ export default function AiToolsSetupModal() {
   };
 
   const handleInstallSelected = async () => {
-    if (isDiffusersImportModel(selectedItem.id)) {
+    if (int8 || isDiffusersImportModel(selectedItem.id)) {
       await runStableAudioSetup();
       return;
     }
@@ -523,7 +537,7 @@ export default function AiToolsSetupModal() {
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-daw-text">
           <LoaderCircle size={16} aria-hidden="true" className="shrink-0 animate-spin text-daw-accent motion-reduce:animate-none" />
-          <span className="break-words">Setting up {activeInstallItem?.label ?? "AI Tools"}</span>
+          <span className="break-words">Setting up {activeInstallItem?.label ?? "AI Tools"}{aiToolsStatus.requestedModelVariant === "int8" ? " - INT8" : ""}</span>
         </div>
         <span className="text-xs tabular-nums text-daw-text-muted">Elapsed {formatElapsed(aiToolsStatus.elapsedMs)}</span>
       </div>
@@ -567,6 +581,7 @@ export default function AiToolsSetupModal() {
         <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
           {selectedItem.id === STABLE_AUDIO_3_MODEL_ID
             ? "OpenStudio downloads Stable Audio 3 Medium and prepares it for generation automatically. Setup needs extra disk space for conversion and can take several minutes."
+            : selectedItem.id === ACE_STEP_MODEL_ID ? "OpenStudio prepares an INT8 copy of the official ACE-Step model, reusing cached weights when available."
             : "OpenStudio downloads the MiniMax Music 3 components needed for generation. This is a large download and requires substantial system RAM; CPU offload reduces GPU memory use."}
         </p>
         <p className="mt-2 text-sm leading-6 text-daw-text-secondary">
@@ -598,6 +613,7 @@ export default function AiToolsSetupModal() {
         <span className="text-xs leading-5 text-daw-text-secondary">
           {selectedItem.id === STABLE_AUDIO_3_MODEL_ID
             ? "I have read and accepted the Stability AI and Gemma model licenses."
+            : selectedItem.id === ACE_STEP_MODEL_ID ? "I have read and accepted the ACE-Step model license."
             : "I have read and accepted the MiniMax Music 3 model license."}
         </span>
       </label>
@@ -626,7 +642,7 @@ export default function AiToolsSetupModal() {
 
   const renderInstallPane = () => {
     if (!selectedItem.compatible) return renderBlockedPane();
-    if (isDiffusersImportModel(selectedItem.id)) return renderStableAudioPane();
+    if (int8 || isDiffusersImportModel(selectedItem.id)) return renderStableAudioPane();
 
     return (
       <div className="space-y-4">
@@ -734,6 +750,9 @@ export default function AiToolsSetupModal() {
                         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusDotClass(item.state)}`} />
                       </span>
                       <span className="mt-1 block text-xs leading-5 text-daw-text-secondary">{item.description}</span>
+                      {item.modelId ? <span className="mt-1 block text-xs leading-5 text-daw-text-muted">
+                        Original: {item.ready ? "installed" : "not installed"} | INT8: {aiToolsStatus.musicModels?.[item.modelId]?.variants?.int8?.ready ? "installed" : "not installed"}
+                      </span> : null}
                       <span className="mt-2 inline-flex rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-daw-text-muted">
                         {statusLabel(item)}
                       </span>
@@ -755,6 +774,9 @@ export default function AiToolsSetupModal() {
                 {statusLabel(selectedItem)}
               </span>
             </div>
+
+            {selectedItem.modelId ? <AIModelVariantSelector modelId={selectedItem.modelId} value={modelVariant}
+              status={aiToolsStatus} onChange={setModelVariant} disabled={aiToolsStatus.installInProgress} setup /> : null}
 
             {aiToolsStatus.installInProgress
               ? <div className="space-y-3 rounded border border-daw-border bg-daw-dark/50 p-4">
@@ -815,7 +837,7 @@ export default function AiToolsSetupModal() {
           <Button
             variant="primary"
             onClick={() => void handleInstallSelected()}
-            disabled={!selectedItem.compatible || isReconcilingInstallResult || stableAudioSetupBusy || (isDiffusersImportModel(selectedItem.id) && !stableAudioLicenseAccepted)}
+            disabled={!selectedItem.compatible || isReconcilingInstallResult || stableAudioSetupBusy || ((int8 || isDiffusersImportModel(selectedItem.id)) && !stableAudioLicenseAccepted)}
             icon={<Download size={15} />}
           >
             {selectedItem.primaryAction}

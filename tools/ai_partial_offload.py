@@ -71,12 +71,13 @@ def move_int8_module(module, device):
 
 class Int8StagePlacement:
     """Experimental whole-stage residency with quantization-aware CPU moves."""
-    def __init__(self, pipe, device):
+    def __init__(self, pipe, device, *, disk_store=None):
         import torch
         from accelerate.hooks import ModelHook, add_hook_to_module
         log_int8_cast_once()
         self.device = torch.device(device)
         self.stage = None
+        self.disk_store = disk_store
         self.models = {name: getattr(pipe, name) for name in
                        ("language_model", "rvq_depth_decoder", "condition_encoder", "transformer", "vocoder")}
         for model in self.models.values():
@@ -145,6 +146,8 @@ class Int8StagePlacement:
         self.stage = stage  # Record ownership before allocations, including failed moves.
         names = ("language_model", "rvq_depth_decoder") if stage == "ar" else (stage,)
         for name in names:
+            if self.disk_store is not None:
+                self.disk_store.move_module(self.models[name], self.device)
             move_int8_module(self.models[name], self.device)
 
     def close(self):
@@ -154,6 +157,9 @@ class Int8StagePlacement:
             remove_hook_from_module(model)
         self.cpu_weights.clear()
         self.cpu_scales.clear()
+        if self.disk_store is not None:
+            self.disk_store.close()
+            self.disk_store = None
 
 
 class PartialStagePlacement:

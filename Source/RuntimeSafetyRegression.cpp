@@ -2,6 +2,7 @@
 #include "StemSeparator.h"
 #include "FieldTestRegression.h"
 #include "TrackProcessor.h"
+#include "BuiltInEffects2.h"
 #include "AudioRecorder.h"
 #include "ProjectFileStore.h"
 #include "MessageThreadLifetime.h"
@@ -41,11 +42,13 @@ public:
     juce::int64 getPosition() override { return memory.getPosition(); }
     bool setPosition(juce::int64 position) override { return mode != 2 && memory.setPosition(position); }
 };
-class FaultProbe final : public juce::AudioProcessor
+class FaultProbe final : public juce::AudioPluginInstance
 {
 public:
     explicit FaultProbe(int channels = 2, bool sidechain = false, bool auxiliary = false, bool monoInput = false)
-        : AudioProcessor(makeBuses(channels, sidechain, auxiliary, monoInput)) {}
+        : AudioPluginInstance(makeBuses(channels, sidechain, auxiliary, monoInput)) {}
+    void fillInPluginDescription(juce::PluginDescription& description) const override { description.name = getName(); }
+    void addProbeParameter(juce::AudioProcessorParameter* parameter) { juce::AudioProcessor::addParameter(parameter); }
     static BusesProperties makeBuses(int channels, bool sidechain, bool auxiliary, bool monoInput)
     {
         if (channels == 0) return {};
@@ -113,6 +116,100 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     runAudioFileConversionRegression(directory, check);
     runRecordingRecoveryRegression(directory, check);
     {
+        TrackProcessor track;
+        auto plugin = std::make_unique<FaultProbe>();
+        juce::AudioProcessorParameter* knob = new juce::AudioParameterFloat(juce::ParameterID("gain", 1), "Gain", 0.0f, 1.0f, 0.25f);
+        plugin->addProbeParameter(knob);
+        auto* processor = plugin.get();
+        track.addTrackFX(std::move(plugin), 48000, 64);
+        auto route = track.getOrCreatePluginAutomationRoute("plugin_track_0_0");
+        TrackProcessor::PluginAutomationRouteSnapshot routes { route };
+        const auto apply = [&] { track.applyPluginAutomationForProcessor(processor, false, 0, 1.0, &routes); };
+        route->automation->setPoints({ { 0.0, 0.2f } });
+        route->automation->setMode(AutomationMode::Read);
+        apply();
+        check("plugin_automation_read_applies_curve", std::abs(knob->getValue() - 0.2f) < 1.0e-6f);
+        knob->setValueNotifyingHost(0.9f); apply();
+        check("plugin_read_reclaims_a_manually_changed_knob", std::abs(knob->getValue() - 0.2f) < 1.0e-6f);
+        track.discardPluginParameterEdits(processor);
+        route->automation->setMode(AutomationMode::Off);
+        knob->setValue(0.73f); apply();
+        check("plugin_automation_off_preserves_manual_knob", std::abs(knob->getValue() - 0.73f) < 1.0e-6f);
+        route->automation->setMode(AutomationMode::Touch);
+        knob->beginChangeGesture(); knob->setValueNotifyingHost(0.81f); apply();
+        check("plugin_editor_touch_wins_before_frontend_delivery", std::abs(knob->getValue() - 0.81f) < 1.0e-6f);
+        knob->endChangeGesture();
+        juce::Array<juce::var> edits;
+        track.drainPluginParameterEdits("probe", edits);
+        check("plugin_editor_short_gesture_captured_in_order", edits.size() == 3
+            && edits[0].getProperty("phase", "").toString() == "begin"
+            && edits[1].getProperty("phase", "").toString() == "value"
+            && edits[2].getProperty("phase", "").toString() == "end"
+            && edits[1].getProperty("param", "").toString() == "plugin_track_0_0"
+            && std::abs(static_cast<float>(edits[1].getProperty("value", 0.0)) - 0.81f) < 1.0e-6f);
+        apply();
+        check("plugin_touch_release_returns_to_unchanged_read_curve", std::abs(knob->getValue() - 0.2f) < 1.0e-6f);
+        edits.clear(); track.drainPluginParameterEdits("probe", edits);
+        check("plugin_read_does_not_record_itself", edits.isEmpty());
+        route->automation->clear(); knob->setValue(0.64f); apply();
+        check("empty_plugin_lane_preserves_saved_knob", std::abs(knob->getValue() - 0.64f) < 1.0e-6f);
+        knob->setValueNotifyingHost(0.5f);
+        track.discardPluginParameterEdits(processor);
+        track.drainPluginParameterEdits("probe", edits);
+        check("plugin_restore_discards_edit_echoes", edits.isEmpty());
+        track.removeTrackFX(0); edits.clear(); track.drainPluginParameterEdits("probe", edits);
+        check("removed_plugin_cannot_emit_stale_automation", edits.isEmpty() && track.getNumTrackFX() == 0);
+    }
+    {
+        OpenStudioNAMRack rack;
+        OpenStudioBuiltInAutomationDescriptor descriptor;
+        check("nam_gain_is_automatable", getOpenStudioBuiltInAutomationDescriptor(&rack, "ampGainDb", descriptor));
+        setOpenStudioBuiltInParameterValue(&rack, "ampGainDb", 7.5f);
+        setOpenStudioBuiltInParameterValue(&rack, "delayMix", 0.37f);
+        juce::MemoryBlock state;
+        rack.getStateInformation(state);
+        OpenStudioNAMRack reopened;
+        reopened.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        check("nam_changed_knobs_survive_new_instance_state_roundtrip",
+            std::abs(reopened.ampGainDb.load() - 7.5f) < 1.0e-6f
+            && std::abs(reopened.delayMix.load() - 0.37f) < 1.0e-6f);
+        check("nam_configuration_is_not_automation", !getOpenStudioBuiltInAutomationDescriptor(&rack, "instrumentProfile", descriptor));
+        OpenStudioDelay delay;
+        check("built_in_delay_mix_is_automatable", getOpenStudioBuiltInAutomationDescriptor(&delay, "mix", descriptor));
+        OpenStudioSaturator saturator;
+        check("oversampling_topology_is_not_automation", !getOpenStudioBuiltInAutomationDescriptor(&saturator, "oversampleMode", descriptor));
+    }
+    {
+        TrackProcessor track;
+        auto instrument = std::make_unique<FaultProbe>();
+        juce::AudioProcessorParameter* knob = new juce::AudioParameterFloat(juce::ParameterID("gain", 1), "Gain", 0.0f, 1.0f, 0.25f);
+        instrument->addProbeParameter(knob);
+        auto* processor = instrument.get();
+        track.setInstrument(std::move(instrument), 48000, 64);
+        auto route = track.getOrCreatePluginAutomationRoute("plugin_instrument_0_0");
+        check("instrument_automation_route_resolves", route != nullptr);
+        if (route)
+        {
+            TrackProcessor::PluginAutomationRouteSnapshot routes { route };
+            route->automation->setPoints({ { 0.0, 0.6f } });
+            route->automation->setMode(AutomationMode::Read);
+            track.applyPluginAutomationForProcessor(processor, false, -1, 1.0, &routes);
+            check("instrument_automation_read_applies", std::abs(knob->getValue() - 0.6f) < 1.0e-6f);
+            knob->beginChangeGesture(); knob->setValueNotifyingHost(0.4f); knob->endChangeGesture();
+            juce::Array<juce::var> edits;
+            track.drainPluginParameterEdits("probe", edits);
+            check("instrument_editor_gesture_uses_dedicated_identity", edits.size() == 3
+                && edits[1].getProperty("param", "").toString() == "plugin_instrument_0_0");
+            track.addTrackFX(std::make_unique<FaultProbe>(), 48000, 64);
+            track.addTrackFX(std::make_unique<FaultProbe>(), 48000, 64);
+            track.reorderTrackFX(0, 1);
+            check("instrument_automation_unaffected_by_fx_reorder", track.findPluginAutomationRoute("plugin_instrument_0_0") != nullptr);
+            track.clearInstrument();
+            check("instrument_removal_retires_automation", track.findPluginAutomationRoute("plugin_instrument_0_0") == nullptr
+                && track.getNumTrackFX() == 2);
+        }
+    }
+    {
         StemSeparator separator;
         StemSeparator::AiToolsStatus probe;
         probe.state = "ready";
@@ -121,11 +218,13 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         {
             status.state = "installing";
             status.requestedModelId = "minimax-music-3";
+            status.requestedModelVariant = "int8";
             status.stepLabel = "Downloading model";
         });
         separator.publishStatusRefresh(probe, beforeSetup);
         check("ai_status_probe_preserves_new_setup_identity_and_progress",
               separator.lastAiToolsStatus.requestedModelId == "minimax-music-3"
+              && separator.lastAiToolsStatus.requestedModelVariant == "int8"
               && separator.lastAiToolsStatus.stepLabel == "Downloading model");
         separator.updateCachedAiToolsStatus([] (StemSeparator::AiToolsStatus& status)
         {

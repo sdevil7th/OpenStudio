@@ -3,6 +3,7 @@
 
 #include <JuceHeader.h>
 #include "AutomationList.h"
+#include "PluginParameterCapture.h"
 #include "BuiltInParameterSupport.h"
 #include "BuiltInEffects.h"
 #include "ARAHostController.h"
@@ -431,6 +432,8 @@ public:
     const AutomationList& getMIDIPitchBendAutomation() const { return midiPitchBendAutomation; }
     const AutomationList& getMIDIChannelPressureAutomation() const { return midiChannelPressureAutomation; }
     bool hasPluginAutomation() const;
+    void drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events);
+    void discardPluginParameterEdits(juce::AudioProcessor* processor);
     bool hasMIDIAutomation() const;
     std::optional<AutomationTarget> resolveAutomationTarget(const juce::String& parameterId, bool createIfNeeded);
     float getAutomationDefaultValue(const AutomationTarget& target) const;
@@ -498,6 +501,7 @@ private:
         // only; the graph snapshot owns the processor for the reader epoch.
         const juce::AudioProcessor* targetProcessor = nullptr;
         int paramIndex = -1;
+        std::shared_ptr<PluginParameterCapture::State> editorState;
         juce::String builtInParamId;
         float builtInMinimum = 0.0f;
         float builtInMaximum = 1.0f;
@@ -734,6 +738,7 @@ private:
 
     // Automation
     AutomationList volumeAutomation;
+    std::map<juce::AudioProcessor*, std::unique_ptr<PluginParameterCapture>> pluginParameterCaptures;
     AutomationList panAutomation;
     AutomationList widthAutomation;
     AutomationList preFXVolumeAutomation;

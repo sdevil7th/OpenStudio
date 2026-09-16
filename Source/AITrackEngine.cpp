@@ -104,7 +104,7 @@ juce::String computeScriptVersion(const juce::File& script)
     if (script.getFileName() == "stable_audio3_generate.py" || script.getFileName() == "generate_music.py")
     {
         for (const auto* module : { "diffusers_audio_pipeline.py", "ai_execution_policy.py",
-                                    "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py" })
+                                    "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py", "ai_model_variants.py" })
         {
             juce::MemoryBlock adapterBytes;
             if (! script.getSiblingFile(module).loadFileAsData(adapterBytes))
@@ -429,7 +429,8 @@ juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
         && modelId != "ace-step-v15-xl-turbo")
         return unavailable("Hardware check does not support this model.");
     const bool stable = modelId != "ace-step-v15-xl-turbo";
-    const auto python = modelId == "minimax-music-3" ? findMiniMaxPython()
+    const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
+    const auto python = int8 ? findStableAudioPython() : modelId == "minimax-music-3" ? findMiniMaxPython()
         : stable ? findStableAudioPython() : findPython();
     const auto worker = stable ? findStableAudioScript() : findScript();
     const auto script = worker.getSiblingFile("ai_generation_preflight.py");
@@ -964,7 +965,8 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         return false;
 
     const auto isStableAudio = isDiffusersAudioModel(modelId);
-    const auto python = modelId == kMiniMaxModelId ? findMiniMaxPython()
+    const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
+    const auto python = int8 ? findStableAudioPython() : modelId == kMiniMaxModelId ? findMiniMaxPython()
         : isStableAudio ? findStableAudioPython() : findPython();
     const auto script = isStableAudio ? findStableAudioScript() : findScript();
     const auto modelLabel = audioModelLabel(modelId);

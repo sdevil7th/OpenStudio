@@ -233,8 +233,6 @@ export const ChannelStrip = React.memo(function ChannelStrip({
         ? stripMasterAutomationEnabled
         : hasMasterAutomationLane;
   const masterAutomationWriteActive = stripMasterAutomationWriteEnabled === true;
-  const canToggleMasterAutomationRead =
-    hasMasterAutomationLane || masterAutomationWriteActive;
 
   const ALL_LINKED_PARAMS = [
     "volume",
@@ -650,30 +648,22 @@ export const ChannelStrip = React.memo(function ChannelStrip({
                 <button
                   type="button"
                   onClick={toggleMasterAutomationRead}
-                  disabled={!canToggleMasterAutomationRead}
                   title={
-                    canToggleMasterAutomationRead
-                      ? masterAutomationReadActive
+                    masterAutomationReadActive
                         ? "Disable master automation read"
                         : "Enable master automation read"
-                      : "Add a master automation lane or enable write first"
                   }
                   aria-label={
-                    canToggleMasterAutomationRead
-                      ? masterAutomationReadActive
+                    masterAutomationReadActive
                         ? "Disable master automation read"
                         : "Enable master automation read"
-                      : "Master automation read unavailable"
                   }
                   className={classNames(
                     "h-4 w-4 rounded flex items-center justify-center text-[7px] font-bold transition-colors border bg-neutral-800",
-                    canToggleMasterAutomationRead
-                      ? masterAutomationReadActive
+                    masterAutomationReadActive
                         ? "border-teal-500 text-teal-300"
                         : "border-neutral-600 text-neutral-500 hover:border-teal-500 hover:text-teal-300 cursor-pointer"
-                      : masterAutomationReadActive
-                        ? "border-teal-600 text-teal-300 cursor-not-allowed"
-                        : "border-neutral-700 text-neutral-600 cursor-not-allowed opacity-60",
+                    ,
                   )}
                 >
                   R

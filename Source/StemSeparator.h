@@ -86,6 +86,7 @@ public:
         juce::StringArray installedFeatures;
         juce::String requestedFeature;
         juce::String requestedModelId;
+        juce::String requestedModelVariant;
         juce::var hardware;
         juce::var features;
     };
@@ -259,6 +260,7 @@ private:
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
         juce::String modelId;
+        juce::String modelVariant { "original" };
         juce::String stableAudioModelPath;
         juce::String huggingFaceToken;
         bool stableAudioLicenseAccepted = false;

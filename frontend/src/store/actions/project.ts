@@ -858,7 +858,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const inputFXPaths: string[] = [];
           for (let i = 0; i < inputFXList.length; i++) {
             const item = inputFXList[i];
-            if (item.pluginPath) inputFXPaths.push(item.pluginPath);
+            if (!item.pluginPath) throw new Error(`Cannot save input FX ${i + 1} on ${track.name}: missing plugin identity`);
+            inputFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, true);
             inputFXStates.push(fxState || "");
             if (isNAMRackPluginPath(item.pluginPath)) {
@@ -878,7 +879,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const trackFXList = await nativeBridge.getTrackFX(track.id);
           for (let i = 0; i < trackFXList.length; i++) {
             const item = trackFXList[i];
-            if (item.pluginPath) trackFXPaths.push(item.pluginPath);
+            if (!item.pluginPath) throw new Error(`Cannot save track FX ${i + 1} on ${track.name}: missing plugin identity`);
+            trackFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, false);
             trackFXStates.push(fxState || "");
             if (isNAMRackPluginPath(item.pluginPath)) {
@@ -894,7 +896,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           }
 
           const instrumentState = track.instrumentPlugin
-            ? await nativeBridge.getInstrumentState(track.id).catch(() => "")
+            ? await nativeBridge.getInstrumentState(track.id)
             : "";
           const trackAutomationReadEnabled = deriveAutomationReadEnabled(track, track.automationLanes || []);
 
@@ -1108,6 +1110,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
       try {
         const data = parseValidatedProject(json);
         const namProjectStateIssues: NAMProjectStateIssue[] = [];
+        const pluginRestoreIssues: string[] = [];
         const recordNAMProjectStateIssue = (
           phase: NAMProjectStateIssue["phase"],
           location: string,
@@ -1316,10 +1319,12 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               console.log(`[DEBUG LOAD]   loadInstrument result: ${success}`);
               if (success) {
                 if (trackData.instrumentState) {
-                  await nativeBridge.setInstrumentState(trackData.id, trackData.instrumentState)
-                    .catch(logBridgeError("instrument state restore"));
+                  const restored = await nativeBridge.setInstrumentState(trackData.id, trackData.instrumentState).catch(() => false);
+                  if (!restored) pluginRestoreIssues.push(`${trackData.name}: instrument state could not be restored`);
                 }
                 restoredInstrumentPlugin = trackData.instrumentPlugin;
+              } else {
+                pluginRestoreIssues.push(`${trackData.name}: ${trackData.instrumentPlugin} could not be loaded`);
               }
             }
 
@@ -1368,12 +1373,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                   return false;
                 });
                 console.log(`[DEBUG LOAD]   addInputFX result: ${success}`);
+                if (!isNAMRack && !success) pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: ${fxPath} could not be loaded`);
                 if (success) {
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
                     const stateResult = await nativeBridge
                       .setPluginState(trackData.id, restoredFxIndex, true, trackData.inputFXStates[i])
                       .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
+                    if (!isNAMRack && !stateResult) pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: ${fxPath} state could not be restored`);
                     if (isNAMRack && !stateResult) {
                       recordNAMProjectStateIssue(
                         "restore",
@@ -1420,12 +1427,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                   return false;
                 });
                 console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
+                if (!isNAMRack && !success) pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: ${fxPath} could not be loaded`);
                 if (success) {
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
                     const stateResult = await nativeBridge
                       .setPluginState(trackData.id, restoredFxIndex, false, trackData.trackFXStates[i])
                       .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
+                    if (!isNAMRack && !stateResult) pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: ${fxPath} state could not be restored`);
                     if (isNAMRack && !stateResult) {
                       recordNAMProjectStateIssue(
                         "restore",
@@ -1760,7 +1769,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         }
 
         set({ isProjectLoading: false, projectLoadingMessage: "" });
-        if (namProjectStateIssues.length > 0) {
+        if (pluginRestoreIssues.length > 0) {
+          get().showToast(`Project opened with plugin errors: ${pluginRestoreIssues.join("; ")}${namProjectStateIssues.length ? "; " + summarizeNAMProjectStateIssues(namProjectStateIssues) : ""}`, "error");
+        } else if (namProjectStateIssues.length > 0) {
           get().showToast(summarizeNAMProjectStateIssues(namProjectStateIssues), "error");
         } else if (missingNAMAssets.length > 0) {
           get().showToast(

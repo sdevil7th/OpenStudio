@@ -779,6 +779,13 @@ export function getRegisteredActions(): ActionDef[] {
   const selectedTracks = () => selectedTrackIds();
   const allTracks = () => s().tracks.map((track) => track.id);
   const automationActions: ActionDef[] = [
+    automationAction("automation.openPanel", "Open Automation Panel", () => {
+      s().openEnvelopeManager(selectedTracks()[0] ?? allTracks()[0] ?? "master");
+    }, { shortcutScope: "global" }),
+    automationAction("automation.allTracks.toggleWrite", "Toggle Automation Write on All Tracks", () => {
+      const enabled = !s().tracks.some(track => track.automationWriteEnabled);
+      s().setTracksAutomationWrite(allTracks(), enabled);
+    }, { shortcutScope: "global", canHandleShortcut: () => allTracks().length > 0 && canEditAutomationSettings() }),
     automationAction(
       "automation.toggleArrangementView",
       "Show / Hide Arrangement Automation",
@@ -842,9 +849,9 @@ export function getRegisteredActions(): ActionDef[] {
     automationAction(
       "automation.allTracks.toggleRead",
       "Toggle Automation Read on All Tracks",
-      () => s().toggleTracksAutomationRead(allTracks()),
+      () => s().setTracksAutomationRead(allTracks(), !s().tracks.some(track => track.automationReadEnabled)),
       {
-        shortcutScopes: ["automation", "track_control_panel", "mixer"],
+        shortcutScope: "global",
         canHandleShortcut: () => allTracks().length > 0 && canEditAutomationSettings(),
       },
     ),

@@ -517,6 +517,25 @@ function cloneAutomationSuspendSnapshot(snapshot: any) {
   };
 }
 
+function applyInstrumentAutomationLanes(set: SetFn, get: GetFn, trackId: string, lanes: readonly any[]) {
+  const track = get().tracks.find((candidate: any) => candidate.id === trackId);
+  if (!track) return;
+  for (const lane of track.automationLanes.filter((candidate: any) => candidate.param.startsWith("plugin_instrument_"))) {
+    clearAutomationTouchState(trackId, lane.param);
+    nativeBridge.clearAutomation(trackId, lane.param).catch(() => {});
+  }
+  set((state: any) => ({
+    tracks: state.tracks.map((candidate: any) => candidate.id === trackId
+      ? { ...candidate, automationLanes: [
+          ...candidate.automationLanes.filter((lane: any) => !lane.param.startsWith("plugin_instrument_")),
+          ...lanes.map(cloneAutomationLane),
+        ] }
+      : candidate),
+    isModified: true,
+  }));
+  for (const lane of lanes) syncAutomationLaneToBackend(trackId, lane);
+}
+
 export function captureAutomationProjectSnapshot(state: any) {
   return {
     automationWriteBehavior: state.automationWriteBehavior ?? "touch",
@@ -1137,6 +1156,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     loadInstrumentWithUndo: async (trackId, pluginPath) => {
       const track = get().tracks.find((t: any) => t.id === trackId);
       if (!track) return false;
+      const previousLanes = track.automationLanes.filter((lane: any) => lane.param.startsWith("plugin_instrument_")).map(cloneAutomationLane);
 
       const previousPlugin = track.instrumentPlugin || "";
       const previousType = track.type;
@@ -1147,6 +1167,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const success = await nativeBridge.loadInstrument(trackId, pluginPath);
       if (!success) return false;
 
+      applyInstrumentAutomationLanes(set, get, trackId, []);
       get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath, builtInInstrument: undefined });
       await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
       notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
@@ -1157,6 +1178,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: async () => {
           await nativeBridge.loadInstrument(trackId, pluginPath);
+          applyInstrumentAutomationLanes(set, get, trackId, []);
           get().updateTrack(trackId, { type: "instrument", instrumentPlugin: pluginPath, builtInInstrument: undefined });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
           notifyInstrumentChanged({ trackId, instrumentPlugin: pluginPath });
@@ -1165,6 +1187,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           if (previousPlugin) {
             await nativeBridge.loadInstrument(trackId, previousPlugin);
             if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
+            applyInstrumentAutomationLanes(set, get, trackId, previousLanes);
             get().updateTrack(trackId, { type: "instrument", instrumentPlugin: previousPlugin, builtInInstrument: undefined });
             notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
           } else {
@@ -1183,6 +1206,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
     setBuiltInInstrumentWithUndo: async (trackId, instrument) => {
       const track = get().tracks.find((t: any) => t.id === trackId);
       if (!track) return false;
+      const previousLanes = track.automationLanes.filter((lane: any) => lane.param.startsWith("plugin_instrument_")).map(cloneAutomationLane);
 
       const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
       const mode = modeMap[instrument] ?? 0;
@@ -1205,6 +1229,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       );
       if (!success) return false;
 
+      applyInstrumentAutomationLanes(set, get, trackId, []);
       get().updateTrack(trackId, {
         type: "instrument",
         instrumentPlugin: undefined,
@@ -1221,6 +1246,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: async () => {
           await nativeBridge.removeInstrument(trackId).catch(() => false);
+          applyInstrumentAutomationLanes(set, get, trackId, []);
           await nativeBridge.clearTrackSamplerSample(trackId).catch(() => false);
           await nativeBridge.setTrackType(trackId, "instrument").catch(() => false);
           await nativeBridge.setBuiltInPluginParam({ trackId, chain: "instrument", fxIndex: -1 }, "instrumentMode", mode);
@@ -1238,6 +1264,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
           if (previousPlugin) {
             await nativeBridge.loadInstrument(trackId, previousPlugin);
             if (previousPluginState) await nativeBridge.setInstrumentState(trackId, previousPluginState);
+            applyInstrumentAutomationLanes(set, get, trackId, previousLanes);
             get().updateTrack(trackId, {
               type: previousType || "instrument",
               instrumentPlugin: previousPlugin,
@@ -1320,6 +1347,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       }
 
       const previousPlugin = track.instrumentPlugin;
+      const previousLanes = track.automationLanes.filter((lane: any) => lane.param.startsWith("plugin_instrument_")).map(cloneAutomationLane);
       const previousType = track.type;
       const previousState = await nativeBridge.getInstrumentState(trackId).catch(() => "");
       const typeAfterRemoval = (candidate: any) =>
@@ -1327,6 +1355,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       const success = await nativeBridge.removeInstrument(trackId);
       if (!success) return false;
 
+      applyInstrumentAutomationLanes(set, get, trackId, []);
       get().updateTrack(trackId, {
         type: typeAfterRemoval(track),
         instrumentPlugin: undefined,
@@ -1341,6 +1370,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         timestamp: Date.now(),
         execute: async () => {
           await nativeBridge.removeInstrument(trackId);
+          applyInstrumentAutomationLanes(set, get, trackId, []);
           const currentTrack = get().tracks.find((t: any) => t.id === trackId);
           get().updateTrack(trackId, {
             type: typeAfterRemoval(currentTrack),
@@ -1353,6 +1383,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         undo: async () => {
           await nativeBridge.loadInstrument(trackId, previousPlugin);
           if (previousState) await nativeBridge.setInstrumentState(trackId, previousState);
+          applyInstrumentAutomationLanes(set, get, trackId, previousLanes);
           get().updateTrack(trackId, { type: previousType || "instrument", instrumentPlugin: previousPlugin, builtInInstrument: undefined });
           await get().syncMIDITrackToBackend?.(trackId, { debounce: false });
           notifyInstrumentChanged({ trackId, instrumentPlugin: previousPlugin });
@@ -1961,7 +1992,6 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       if (isAutomationEditLocked(get())) return;
       const track = get().tracks.find((t) => t.id === trackId);
       if (!track) return;
-      if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return;
       const behavior = writeBehavior(get);
       const nextRead = Boolean(enabled);
       for (const lane of track.automationLanes) {
@@ -2028,7 +2058,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       set((s) => ({
         tracks: s.tracks.map((t) => {
           if (t.id !== trackId) return t;
-          const keepReadOn = trackReadEnabled(t) && t.automationLanes.length > 0;
+          const keepReadOn = trackReadEnabled(t);
           const nextTrack = {
             ...t,
             automationReadEnabled: nextWrite ? true : keepReadOn,
@@ -3162,7 +3192,6 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       set((state) => ({
         tracks: state.tracks.map((track) => {
           if (!ids.has(track.id)) return track;
-          if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return track;
           const nextRead = Boolean(enabled);
           const nextTrack = {
             ...track,
@@ -3206,7 +3235,6 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
       set((state) => ({
         tracks: state.tracks.map((track) => {
           if (!ids.has(track.id)) return track;
-          if (track.automationLanes.length === 0 && !trackWriteEnabled(track)) return track;
           const nextRead = !trackReadEnabled(track);
           const nextTrack = {
             ...track,
@@ -3244,7 +3272,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         tracks: state.tracks.map((track) => {
           if (!ids.has(track.id)) return track;
           const nextWrite = Boolean(enabled);
-          const keepReadOn = trackReadEnabled(track) && track.automationLanes.length > 0;
+          const keepReadOn = trackReadEnabled(track);
           const nextTrack = {
             ...track,
             automationReadEnabled: nextWrite ? true : keepReadOn,
@@ -3289,7 +3317,7 @@ export const automationActions = (set: SetFn, get: GetFn) => ({
         tracks: state.tracks.map((track) => {
           if (!ids.has(track.id)) return track;
           const nextWrite = !trackWriteEnabled(track);
-          const keepReadOn = trackReadEnabled(track) && track.automationLanes.length > 0;
+          const keepReadOn = trackReadEnabled(track);
           const nextTrack = {
             ...track,
             automationReadEnabled: nextWrite ? true : keepReadOn,

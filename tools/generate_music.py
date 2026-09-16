@@ -966,6 +966,12 @@ class DiffusersAcePipelineManager:
 
             from diffusers import AceStepPipeline
             from ai_execution_policy import quantization_kwargs
+            from ai_model_variants import MARKER, validate_variant, require_int8_device
+            saved_int8 = (Path(self.model_id) / MARKER).is_file()
+            if saved_int8:
+                validate_variant(Path(self.model_id), DEFAULT_UI_MODEL_ID)
+                require_int8_device(torch)
+                self.quantization, self.placement = "int8", "resident"
             dtype = torch.bfloat16 if self.device.startswith("cuda") and torch.cuda.is_bf16_supported() else torch.float32
             if dtype == torch.float32:
                 from ai_execution_policy import check_host_capacity
@@ -982,7 +988,7 @@ class DiffusersAcePipelineManager:
                 torch_dtype=dtype,
                 cache_dir=str(self.cache_root),
                 local_files_only=True,
-                **quantization_kwargs(self.quantization, modular=False),
+                **({} if saved_int8 else quantization_kwargs(self.quantization, modular=False)),
             )
 
             if reporter:
@@ -1054,9 +1060,11 @@ class DiffusersAcePipelineManager:
             "device": self.backend, "offload": mode, "weightsBytes": weights,
             "precision": str(self.pipe.transformer.dtype), "attentionPolicy": "automatic SDPA",
             "streaming": stream, "lowCpuMemory": low_cpu_memory,
-            "attention": self.attention_details, "quantization": self.quantization}
+            "attention": self.attention_details, "quantization": self.quantization,
+            "modelVariant": "int8" if self.quantization == "int8" else "original"}
         from ai_execution_policy import model_execution_capabilities
         self.execution_details["capabilities"] = model_execution_capabilities("ace-step-v15-xl-turbo", self.backend)
+        precision_note = " / INT8 diffusion transformer" if self.quantization == "int8" else ""
         reporter.update("generating", 0, phase="preparing_audio", phaseProgress=-1,
             message="Preparing ACE-Step audio.",
             statusNote=f"{physical} · {self.pipe.transformer.dtype} · {mode} · {self.attention} attention",
@@ -1183,7 +1191,7 @@ class DiffusersAcePipelineManager:
                         result = pipe(**kwargs)
                 break
             except torch.OutOfMemoryError as exc:
-                if attempt or self.conservative:
+                if attempt or self.conservative or self.quantization != "none":
                     raise GenerationFailure("Not enough memory for ACE-Step after reduced-memory retry.", failureKind="out_of_memory") from exc
                 exc.__traceback__ = None
                 pipe = None
@@ -1334,6 +1342,18 @@ class WorkerSession:
                     raise ValueError("params JSON must decode to an object")
             except Exception as exc:
                 raise GenerationFailure(f"Invalid params JSON: {exc}", progress=0.03) from exc
+
+            from ai_model_variants import requested_variant, variant_root, validate_variant
+            variant = requested_variant(raw_params)
+            selected_model = self.diffusers_model_id
+            if variant == "int8":
+                root = variant_root(self.ui_model_id)
+                validate_variant(root, self.ui_model_id)
+                selected_model = str(root)
+            if self.manager.model_id != selected_model:
+                self.manager.unload()
+                self.manager = DiffusersAcePipelineManager(model_id=selected_model,
+                    cache_root=self.cache_root, enable_group_offload=True)
 
             reporter.update(
                 "loading",

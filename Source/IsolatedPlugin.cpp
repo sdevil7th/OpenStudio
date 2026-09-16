@@ -73,7 +73,20 @@ public:
     // plugin's exact units/value parser rather than inventing a linear mapping.
     juce::String getText(float value, int length) const override { return (juce::String(value * 100.0f, 1) + "%").substring(0, length); }
     float getValueForText(const juce::String& text) const override { return juce::jlimit(0.0f, 1.0f, text.getFloatValue() / 100.0f); }
+    void dispatchEditorChanges()
+    {
+        const auto flags = slot.editorEvents.exchange(0, std::memory_order_acq_rel);
+        if ((flags & 1u) && !editorGesture) { beginChangeGesture(); editorGesture = true; }
+        if (flags & 2u) sendValueChangedMessageToListeners(slot.editorValue.load());
+        if ((flags & 4u) && editorGesture) { endChangeGesture(); editorGesture = false; }
+    }
+    void discardEditorChanges()
+    {
+        slot.editorEvents.store(0);
+        if (editorGesture) { endChangeGesture(); editorGesture = false; }
+    }
 private:
+    bool editorGesture = false;
     Shared& shared;
     Parameter& slot;
     juce::var metadata;
@@ -453,6 +466,7 @@ bool IsolatedPlugin::remoteEditorHasFocus() const
 #endif
 }
 bool IsolatedPlugin::setTestFailure(int value) { return impl->transact(testFailure, static_cast<uint32_t>(value)); }
+bool IsolatedPlugin::sendTestParameterGesture() { return impl->transact(testParameterGesture); }
 bool IsolatedPlugin::takeUnhandledKey(juce::KeyPress& key, bool& repeat)
 {
     auto& shared = *impl->shared;
@@ -483,6 +497,8 @@ void IsolatedPlugin::timerCallback()
         return;
     }
     const auto latency = impl->shared->latency.load();
+    for (auto* parameter : getParameters())
+        if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->dispatchEditorChanges();
     if (latency < 0 || latency > 3840000) { impl->fault.store(invalidPacket); return; }
     const auto total = transportLatencySamples() + latency;
     if (getLatencySamples() != total) setLatencySamples(total);
@@ -501,6 +517,8 @@ bool IsolatedPlugin::restart()
     impl->shared->editorVisible.store(0); impl->shared->editorFocused.store(0);
     impl->shared->keyRead.store(0); impl->shared->keyWrite.store(0);
     impl->shared->parameterChanges.store(0); impl->shared->resetRequested.store(0);
+    for (auto* parameter : getParameters())
+        if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->discardEditorChanges();
     for (auto& slot : impl->shared->packets) slot.state.store(0);
     for (auto& parameter : impl->shared->params) { parameter.revision.store(0); parameter.acknowledged.store(0); }
     impl->controlSequence = 0; impl->loggedFault = false;

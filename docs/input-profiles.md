@@ -30,6 +30,8 @@ base profiles.
 
 ## Binding vocabulary
 
+The Cubase profile maps **F6** to the track envelope panel, **Alt+R** to uniform all-track Read and **Alt+W** to uniform all-track Write (**Option** on macOS). Write enables Read; switching Write off leaves Read on, including on empty tracks. Master R/W is controlled separately. These bindings describe the development checkout and remain subject to custom overrides and editor focus.
+
 - **Primary** is Control on Windows/Linux and Command on macOS.
 - The legacy portable **Alt** token means Alt on Windows/Linux and physical
   Control on macOS. Profile definitions use explicit **Option**, **Control**,

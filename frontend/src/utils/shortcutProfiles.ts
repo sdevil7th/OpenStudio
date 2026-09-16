@@ -135,6 +135,9 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Cubase/Nuendo 15 transport, tool, quantize, snap, and window conventions.",
     nativePlatforms: ["macos", "windows"],
     bindings: {
+      "automation.openPanel": keys("F6"),
+      "automation.allTracks.toggleRead": platformKeys([], ["Option+R"], ["Alt+R"], ["Alt+R"]),
+      "automation.allTracks.toggleWrite": platformKeys([], ["Option+W"], ["Alt+W"], ["Alt+W"]),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("NumpadMultiply"),
       "transport.loop": keys("NumpadDivide"),

@@ -12,7 +12,7 @@ constexpr uint32_t magic = 0x4f534950, version = 1;
 constexpr int slots = 4, channels = 32, frames = 8192, parameters = 8192;
 constexpr int midiEvents = 128, midiBytes = 2048, metadataBytes = 2 * 1024 * 1024;
 constexpr int maxStateBytes = 64 * 1024 * 1024;
-enum Command : uint32_t { idle, initialise, prepare, release, getState, setState, showEditor, hideEditor, program, stop, testFailure };
+enum Command : uint32_t { idle, initialise, prepare, release, getState, setState, showEditor, hideEditor, program, stop, testFailure, testParameterGesture };
 enum Fault : uint32_t { healthy, childExited, deadline, invalidPacket, invalidAudio, controlFailure, incompatible };
 struct MidiEvent { uint32_t sample, offset, size; };
 struct MidiPacket
@@ -48,6 +48,8 @@ struct Parameter
 {
     std::atomic<float> desired { 0 }, actual { 0 };
     std::atomic<uint32_t> revision { 0 }, acknowledged { 0 };
+    std::atomic<uint32_t> editorEvents { 0 };
+    std::atomic<float> editorValue { 0 };
 };
 struct UnhandledKey { int code = 0, modifiers = 0; uint32_t character = 0, focusGeneration = 0; uint64_t ticks = 0; bool repeat = false; };
 struct Slot

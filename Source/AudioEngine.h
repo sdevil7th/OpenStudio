@@ -475,6 +475,9 @@ public:
     void clearAutomation(const juce::String& trackId, const juce::String& parameterId);
     // Touch begin/end (for touch/latch recording modes)
     void beginTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
+    juce::var takePluginParameterEdits();
+    juce::var builtInParameterEdit(const juce::String& trackId, const juce::String& chain,
+                                  int index, const juce::String& param, const juce::String& phase);
     void endTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
 
     // Tempo Map (Phase 1.2)

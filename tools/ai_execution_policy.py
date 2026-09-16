@@ -20,7 +20,7 @@ import sys
 GIB = 1024 ** 3
 POLICY_VERSION = 1
 WORKER_MODULES = ("diffusers_audio_pipeline.py", "ai_execution_policy.py",
-                  "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py")
+                  "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py", "ai_model_variants.py")
 
 MINIMAX_ALLOCATOR = "backend:native,per_process_memory_fraction:0.9,garbage_collection_threshold:0.8,roundup_power2_divisions:4"
 MINIMAX_PROMPT_MEASUREMENT = "upstream-tokenize-step-v1"

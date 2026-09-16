@@ -797,6 +797,12 @@ std::optional<TrackProcessor::PluginAutomationParameterRef> TrackProcessor::pars
     auto parts = juce::StringArray::fromTokens(suffix, "_", "");
     PluginAutomationParameterRef ref;
 
+    if (parts.size() == 3 && parts[0] == "instrument" && parts[1] == "0")
+    {
+        ref.fxIndex = -1; // Dedicated instrument slot, separate from track FX.
+        ref.paramIndex = parts[2].getIntValue();
+        return ref.paramIndex >= 0 ? std::optional<PluginAutomationParameterRef>(ref) : std::nullopt;
+    }
     if (parts.size() == 3 && (parts[0] == "input" || parts[0] == "track"))
     {
         ref.isInputFX = parts[0] == "input";
@@ -850,6 +856,7 @@ TrackProcessor::clonePluginAutomationRoute(
     clone->fxIndex = source.fxIndex;
     clone->targetProcessor = source.targetProcessor;
     clone->paramIndex = source.paramIndex;
+    clone->editorState = source.editorState;
     clone->builtInParamId = source.builtInParamId;
     clone->builtInMinimum = source.builtInMinimum;
     clone->builtInMaximum = source.builtInMaximum;
@@ -916,7 +923,7 @@ void TrackProcessor::remapPluginAutomationRoutesForReorder(
         // before changing Strings or indices so the old reader epoch remains
         // race-free until retirement.
         auto nextRoute = clonePluginAutomationRoute(*route);
-        if (route->isInputFX != isInputFX)
+        if (route->fxIndex < 0 || route->isInputFX != isInputFX)
         {
             nextSnapshot->push_back(std::move(nextRoute));
             continue;
@@ -975,7 +982,7 @@ void TrackProcessor::remapPluginAutomationRoutesForRemoval(
 
         auto nextRoute = clonePluginAutomationRoute(*route);
 
-        if (route->isInputFX == isInputFX
+        if (removedIndex >= 0 && route->isInputFX == isInputFX
             && route->fxIndex > removedIndex)
         {
             --nextRoute->fxIndex;
@@ -1013,16 +1020,18 @@ std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCrea
     route->paramIndex = parsedRef.paramIndex;
     route->builtInParamId = parsedRef.builtInParamId;
 
-    const bool validRoute = route->isInputFX
+    const bool validRoute = route->fxIndex < 0 ? instrumentPlugin != nullptr : route->isInputFX
         ? route->fxIndex < getNumInputFX()
         : route->fxIndex < getNumTrackFX();
     if (!validRoute)
         return nullptr;
 
-    auto* processor = route->isInputFX
+    auto* processor = route->fxIndex < 0 ? instrumentPlugin.get() : route->isInputFX
         ? getInputFXProcessor(route->fxIndex)
         : getTrackFXProcessor(route->fxIndex);
     route->targetProcessor = processor;
+    if (auto capture = pluginParameterCaptures.find(processor); capture != pluginParameterCaptures.end())
+        route->editorState = capture->second->stateFor(route->paramIndex);
     if (route->builtInParamId.isNotEmpty())
     {
         OpenStudioBuiltInAutomationDescriptor descriptor;
@@ -1740,15 +1749,25 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
             continue;
         }
 
-        const float automatedValue = shouldApplyAutomation(*route->automation)
-            ? route->automation->eval(blockTimeSeconds)
-            : route->automation->getDefaultValue();
+        const auto mode = route->automation->getMode();
+        const bool editorWriting = !forceAutomationReadDuringProcessing.load(std::memory_order_relaxed)
+            && route->editorState && route->editorState->touching.load()
+            && (mode == AutomationMode::Touch || mode == AutomationMode::Latch);
+        if (!shouldApplyAutomation(*route->automation) || route->automation->getNumPoints() == 0 || editorWriting)
+        {
+            // Off/Touch/Write preserve the actual knob. Never apply a stale
+            // lane default, and force the next Read block to reclaim the knob.
+            route->lastAppliedValue.store(std::numeric_limits<float>::quiet_NaN());
+            continue;
+        }
+        const float automatedValue = route->automation->eval(blockTimeSeconds);
         if (! std::isfinite(automatedValue))
             continue;
 
         const float clampedValue = juce::jlimit(0.0f, 1.0f, automatedValue);
         const float lastValue = route->lastAppliedValue.load(std::memory_order_relaxed);
-        if (std::isfinite(lastValue) && std::abs(lastValue - clampedValue) <= 1.0e-6f)
+        if (std::isfinite(lastValue) && std::abs(lastValue - clampedValue) <= 1.0e-6f
+            && !(route->editorState && route->editorState->touching.load()))
             continue;
 
         if (route->builtInParamId.isNotEmpty())
@@ -4186,6 +4205,25 @@ void TrackProcessor::setInputChannels(int startChannel, int numChannels)
 // This gives us full control over the plugin lifecycle and avoids any graph
 // interference (bus layout changes, re-preparation, etc.).
 
+void TrackProcessor::drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events)
+{
+    const auto drain = [&] (const auto& plugins, bool input) {
+        for (size_t index = 0; index < plugins.size(); ++index)
+            if (auto it = pluginParameterCaptures.find(plugins[index].get()); it != pluginParameterCaptures.end())
+                it->second->drain(trackId, input, static_cast<int>(index), events);
+    };
+    drain(inputFXPlugins, true);
+    drain(trackFXPlugins, false);
+    if (auto it = pluginParameterCaptures.find(instrumentPlugin.get()); it != pluginParameterCaptures.end())
+        it->second->drain(trackId, false, -1, events);
+}
+
+void TrackProcessor::discardPluginParameterEdits(juce::AudioProcessor* processor)
+{
+    if (auto it = pluginParameterCaptures.find(processor); it != pluginParameterCaptures.end())
+        it->second->discard();
+}
+
 bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, double callerSampleRate, int callerBlockSize)
 {
     if (!plugin)
@@ -4225,6 +4263,7 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
                              " outCh=" + juce::String(plugin->getTotalNumOutputChannels()));
 
     inputFXPlugins.push_back(std::shared_ptr<juce::AudioProcessor>(std::move(plugin)));
+    pluginParameterCaptures[inputFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(inputFXPlugins.back());
     publishRealtimeStateSnapshots();
     return true;
 }
@@ -4264,6 +4303,7 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
                              " outCh=" + juce::String(plugin->getTotalNumOutputChannels()));
 
     trackFXPlugins.push_back(std::shared_ptr<juce::AudioProcessor>(std::move(plugin)));
+    pluginParameterCaptures[trackFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(trackFXPlugins.back());
     publishRealtimeStateSnapshots();
     return true;
 }
@@ -4273,6 +4313,7 @@ void TrackProcessor::removeInputFX(int index)
     const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     if (index >= 0 && index < (int)inputFXPlugins.size())
     {
+        pluginParameterCaptures.erase(inputFXPlugins[static_cast<size_t>(index)].get());
         inputFXPlugins.erase(inputFXPlugins.begin() + index);
         std::map<int, bool> updatedOverrides;
         std::map<int, bool> updatedBypass;
@@ -4323,6 +4364,7 @@ void TrackProcessor::removeTrackFX(int index)
             }
         }
 
+        pluginParameterCaptures.erase(trackFXPlugins[static_cast<size_t>(index)].get());
         trackFXPlugins.erase(trackFXPlugins.begin() + index);
         std::map<int, bool> updatedOverrides;
         std::map<int, bool> updatedBypass;
@@ -4860,7 +4902,10 @@ void TrackProcessor::setInstrument(std::unique_ptr<juce::AudioPluginInstance> pl
                                       resolvePluginPrecisionMode(processingPrecisionMode,
                                                                  instrumentForceFloatOverride.load(std::memory_order_acquire)));
         fallbackInstrumentResetRequested.store(true, std::memory_order_release);
+        pluginParameterCaptures.erase(instrumentPlugin.get());
+        remapPluginAutomationRoutesForRemoval(false, -1);
         instrumentPlugin = std::shared_ptr<juce::AudioPluginInstance>(std::move(plugin));
+        pluginParameterCaptures[instrumentPlugin.get()] = std::make_unique<PluginParameterCapture>(instrumentPlugin);
         publishRealtimeStateSnapshots();
         juce::Logger::writeToLog("TrackProcessor: Instrument plugin loaded");
     }
@@ -4871,6 +4916,8 @@ void TrackProcessor::clearInstrument()
     const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     queueAllNotesOff();
     fallbackInstrumentResetRequested.store(true, std::memory_order_release);
+    pluginParameterCaptures.erase(instrumentPlugin.get());
+    remapPluginAutomationRoutesForRemoval(false, -1);
     instrumentPlugin.reset();
     instrumentForceFloatOverride.store(false, std::memory_order_release);
     publishRealtimeStateSnapshots();

@@ -1117,3 +1117,34 @@ the pinned source rather than assuming a main-branch API exists locally.
 [^ai-distributed]: Hugging Face, [Distributed inference](https://huggingface.co/docs/diffusers/main/en/training/distributed_inference).
 [^ai-export]: Hugging Face, [Core ML](https://huggingface.co/docs/diffusers/main/en/optimization/coreml), [OpenVINO](https://huggingface.co/docs/diffusers/main/en/optimization/open_vino).
 [^ai-frameworks]: Hugging Face, [Pruna](https://huggingface.co/docs/diffusers/main/en/optimization/pruna), [CacheDiT](https://huggingface.co/docs/diffusers/main/en/optimization/cache_dit), [xDiT](https://huggingface.co/docs/diffusers/main/en/optimization/xdit), [FreeU](https://huggingface.co/docs/diffusers/main/en/using-diffusers/image_quality).
+
+
+## Explicit saved INT8 variants (development, September 16, 2026)
+
+The generation and AI Tools Setup dialogs now have Original/INT8 version choices
+for all three music models. This opt-in path is separate from the historical
+locally auditioned MiniMax calibration described above. It does not promote or
+rewrite that calibration. The selected version is part of the request and track
+parameters; missing/corrupt INT8 snapshots fail without an Original fallback.
+
+Setup installs bitsandbytes 0.50.2 without replacing the runtime dependency stack.
+It reuses installed originals or downloads the official sources and prepares a
+serialized INT8 component once. There is no smaller hosted download advertised:
+the first transfer still uses the original weights. Prepared OpenStudio INT8
+folders can be imported. Both versions coexist in managed storage. ACE-Step
+uses official Diffusers revision 200ba991ae448051e14b0183157e35c2d27c9fb0; the
+existing Stable Audio and MiniMax source pins remain in prepare_diffusers_audio.py.
+
+The component is the diffusion transformer for ACE-Step/Stable Audio and the
+language model (including output projection) for MiniMax. Other components keep
+normal inference precision. The implementation uses supported save_pretrained /
+from_pretrained serialization: https://huggingface.co/docs/diffusers/quantization/bitsandbytes.
+Current exposure is NVIDIA CUDA only; other physical backends were not qualified.
+
+MiniMax's saved variant backs inactive immutable weights with an app-owned,
+quota-bounded temporary disk cache, uploading once per stage rather than per LM
+token. Quantized aliases and scales move with their parameters; cache cleanup
+covers normal unload and stale workers. Request cache plus a separate 1.5-GiB
+GPU reserve is checked before generation. Initial load can be slower and needs
+about 15 GiB of temporary disk space. Quantization is not a guarantee of speed,
+fit, or equivalent audio quality. See [the dated local evidence](ai-quantization-2026-09-16.md).

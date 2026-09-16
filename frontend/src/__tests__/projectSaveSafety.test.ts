@@ -34,6 +34,57 @@ describe("project save concurrency and recovery", () => {
     expect(await useDAWStore.getState().saveProject()).toBe(true);
     expect(useDAWStore.getState().isModified).toBe(false);
   });
+  it("saves fresh input and track plugin state at the matching slot", async () => {
+    vi.mocked(nativeBridge.getTrackInputFX).mockResolvedValue([
+      { index: 0, name: "Input", pluginPath: "vendor-input.vst3" },
+    ] as any);
+    vi.mocked(nativeBridge.getTrackFX).mockResolvedValue([
+      { index: 0, name: "Delay", pluginPath: "OpenStudio Delay" },
+      { index: 1, name: "Vendor", pluginPath: "vendor.vst3" },
+    ] as any);
+    const states = vi.spyOn(nativeBridge, "getPluginState").mockImplementation(async (_track, slot, input) =>
+      input ? "input-knob-0.8" : [`delay-mix-0.37`, "vendor-gain-0.6"][slot]);
+    expect(await useDAWStore.getState().saveProject()).toBe(true);
+    const saved = JSON.parse(vi.mocked(nativeBridge.saveProjectToFile).mock.calls[0][1]);
+    expect(saved.tracks[0].inputFXStates).toEqual(["input-knob-0.8"]);
+    expect(saved.tracks[0].trackFXPaths).toEqual(["OpenStudio Delay", "vendor.vst3"]);
+    expect(saved.tracks[0].trackFXStates).toEqual(["delay-mix-0.37", "vendor-gain-0.6"]);
+    expect(states).toHaveBeenCalledTimes(3);
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify(saved));
+    vi.spyOn(nativeBridge, "addTrackInputFX").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "addTrackBuiltInFX").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "addTrackFX").mockResolvedValue(true);
+    const restore = vi.spyOn(nativeBridge, "setPluginState").mockResolvedValue(true);
+    expect(await useDAWStore.getState().loadProject("C:/session.osproj")).toBe(true);
+    expect(restore).toHaveBeenCalledWith("track", 0, true, "input-knob-0.8");
+    expect(restore).toHaveBeenCalledWith("track", 0, false, "delay-mix-0.37");
+    expect(restore).toHaveBeenCalledWith("track", 1, false, "vendor-gain-0.6");
+  });
+  it("refuses to shift saved state onto the next plugin when identity is missing", async () => {
+    vi.mocked(nativeBridge.getTrackFX).mockResolvedValue([
+      { index: 0, name: "Unknown" }, { index: 1, name: "Delay", pluginPath: "OpenStudio Delay" },
+    ] as any);
+    expect(await useDAWStore.getState().saveProject()).toBe(false);
+    expect(nativeBridge.saveProjectToFile).not.toHaveBeenCalled();
+    expect(useDAWStore.getState().isModified).toBe(true);
+  });
+  it("does not save an instrument with silently discarded state after a bridge failure", async () => {
+    useDAWStore.setState({ tracks: [{ ...useDAWStore.getState().tracks[0], instrumentPlugin: "Kontakt" }] });
+    vi.spyOn(nativeBridge, "getInstrumentState").mockRejectedValue(new Error("state unavailable"));
+    expect(await useDAWStore.getState().saveProject()).toBe(false);
+    expect(nativeBridge.saveProjectToFile).not.toHaveBeenCalled();
+  });
+  it("reports rejected third-party state instead of claiming a clean load", async () => {
+    const track = useDAWStore.getState().tracks[0];
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify({
+      tracks: [{ ...track, trackFXPaths: ["vendor.vst3"], trackFXStates: ["saved-knobs"] }],
+    }));
+    vi.spyOn(nativeBridge, "addTrackFX").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "setPluginState").mockResolvedValue(false);
+    const toast = vi.spyOn(useDAWStore.getState(), "showToast");
+    expect(await useDAWStore.getState().loadProject("C:/session.osproj")).toBe(true);
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("vendor.vst3 state could not be restored"), "error");
+  });
   it("persists a named mixer snapshot in the project payload", async () => {
     useDAWStore.getState().saveMixerSnapshot("Field mix");
     expect(await useDAWStore.getState().saveProject()).toBe(true);

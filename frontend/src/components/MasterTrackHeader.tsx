@@ -89,12 +89,7 @@ export function MasterTrackHeader() {
         ? masterAutomationEnabled
         : hasAutomationLane;
   const automationWriteActive = masterAutomationWriteEnabled === true;
-  const canToggleAutomationRead = hasAutomationLane || automationWriteActive;
-  const autoReadClass = !canToggleAutomationRead
-    ? automationReadActive
-      ? "text-teal-200! border-teal-600! bg-teal-500/15! disabled:opacity-100!"
-      : "text-neutral-600! border-neutral-700! bg-neutral-800/60!"
-    : automationReadActive
+  const autoReadClass = automationReadActive
     ? "text-teal-200! border-teal-500! bg-teal-500/15!"
     : "hover:text-teal-300 hover:border-teal-500";
   const autoWriteClass = automationWriteActive
@@ -217,16 +212,11 @@ export function MasterTrackHeader() {
               size="icon-sm"
               shape="square"
               onClick={toggleMasterAutomationRead}
-              disabled={!canToggleAutomationRead}
               title={
-                canToggleAutomationRead
-                  ? automationReadActive ? "Disable master automation read" : "Enable master automation read"
-                  : "Add a master automation lane or enable write first"
+                automationReadActive ? "Disable master automation read" : "Enable master automation read"
               }
               aria-label={
-                canToggleAutomationRead
-                  ? automationReadActive ? "Disable master automation read" : "Enable master automation read"
-                  : "Master automation read unavailable"
+                automationReadActive ? "Disable master automation read" : "Enable master automation read"
               }
               className={`${autoReadClass} rounded`}
             >

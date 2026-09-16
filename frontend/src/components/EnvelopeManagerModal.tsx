@@ -125,6 +125,7 @@ export function EnvelopeManagerModal() {
         ]);
 
         const allSlots: FXSlotInfo[] = [
+          ...(!isMaster && track?.instrumentPlugin ? [{ index: -1, name: track.instrumentPlugin, isInputFX: false }] : []),
           ...inputFX.map((fx: any) => ({
             index: fx.index,
             name: fx.name || `Input FX ${fx.index + 1}`,
@@ -163,7 +164,7 @@ export function EnvelopeManagerModal() {
     };
 
     fetchFXData();
-  }, [showEnvelopeManager, envelopeManagerTrackId, isMaster]);
+  }, [showEnvelopeManager, envelopeManagerTrackId, isMaster, track?.instrumentPlugin]);
 
   // Build envelope rows
   const envelopeRows: EnvelopeRow[] = useMemo(() => {
@@ -192,7 +193,7 @@ export function EnvelopeManagerModal() {
     // Per-plugin sections
     for (const fx of fxSlots) {
       const params = pluginParams.get(pluginAutomationParamId(fx.isInputFX, fx.index, -1)) || [];
-      const fxCategory = fx.isInputFX ? `Input FX: ${fx.name}` : `FX: ${fx.name}`;
+      const fxCategory = fx.index < 0 ? `Instrument: ${fx.name}` : fx.isInputFX ? `Input FX: ${fx.name}` : `FX: ${fx.name}`;
 
       for (const param of params) {
         const paramId = param.builtIn && param.paramId

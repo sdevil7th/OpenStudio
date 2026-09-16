@@ -44,6 +44,7 @@ public:
     const std::atomic<uint32_t>* faultFlag() const noexcept;
     // Device-free subprocess fixture uses the exact production transport.
     bool setTestFailure(int);
+    bool sendTestParameterGesture();
 private:
     struct Impl;
     IsolatedPlugin(std::unique_ptr<Impl>, const BusesProperties&);

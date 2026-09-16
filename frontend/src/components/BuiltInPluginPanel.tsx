@@ -1345,29 +1345,44 @@ export function BuiltInPluginPanel({
   }, []);
 
   const flushParamWrites = useCallback(() => paramWriter.flush(), [paramWriter]);
+  const automationGestures = useRef(new Set<string>());
+  const finishAutomationGestures = useCallback(async () => {
+    const params = [...automationGestures.current];
+    automationGestures.current.clear();
+    await flushParamWrites();
+    for (const param of params) {
+      if (!automationGestures.current.has(param))
+        await nativeBridge.builtInPluginGesture(writeAddress, param, false);
+    }
+  }, [flushParamWrites, writeAddress]);
 
   const scheduleParamCommit = useCallback((delayMs = 220) => {
     clearScheduledParamCommit();
     paramCommitTimerRef.current = window.setTimeout(() => {
       paramCommitTimerRef.current = null;
       void paramHistory.commit(flushParamWrites);
+      void finishAutomationGestures();
     }, delayMs);
-  }, [clearScheduledParamCommit, flushParamWrites, paramHistory]);
+  }, [clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
 
   const beginParamEdit = useCallback((paramId: string) => {
     const currentParam = schemaRef.current?.parameters.find((entry) => entry.id === paramId);
     if (!currentParam || currentParam.type === "meter") return false;
-
+    if (!automationGestures.current.has(paramId)) {
+      automationGestures.current.add(paramId);
+      void nativeBridge.builtInPluginGesture(writeAddress, paramId, true);
+    }
     return paramHistory.begin(paramId, currentParam.label, currentParam.value);
-  }, [paramHistory]);
+  }, [paramHistory, writeAddress]);
 
   const beginExclusiveParamGesture = useCallback((paramId: string) => {
     clearScheduledParamCommit();
     if (paramHistory.getActiveParamId() && !paramHistory.hasActiveParam(paramId)) {
       void paramHistory.commit(flushParamWrites);
+      void finishAutomationGestures();
     }
     return beginParamEdit(paramId);
-  }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory]);
+  }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
 
   const replayParamHistory = useCallback(async (
     entry: BuiltInPluginParamHistoryEntry,
@@ -1462,6 +1477,7 @@ export function BuiltInPluginPanel({
 
   useEffect(() => () => clearScheduledParamCommit(), [clearScheduledParamCommit]);
   useEffect(() => () => paramWriter.dispose(true), [paramWriter]);
+  useEffect(() => () => { void finishAutomationGestures(); }, [finishAutomationGestures]);
 
   const pluginKind = useMemo(() => getPluginKind(schema), [schema]);
 
@@ -1544,6 +1560,7 @@ export function BuiltInPluginPanel({
         else if (paramHistory.getActiveParamId()) {
           clearScheduledParamCommit();
           void paramHistory.commit(flushParamWrites);
+          void finishAutomationGestures();
         }
       }}
       onPointerUpCapture={finishPointerParamGesture}

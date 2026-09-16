@@ -1231,10 +1231,14 @@ Guitar/Bass mapping, state migration, TONE3000 connection, and QA contract.
 
 Automation allows parameter values to change over time. OpenStudio supports automation for:
 
-- Track volume
-- Track pan
-- Track mute
-- Plugin parameters (per-parameter automation)
+- Track volume, pan, stereo width, mute and trim volume.
+- Pre-FX volume, pan and width on instrument and bus tracks.
+- MIDI velocity, pitch bend, channel pressure and CC envelopes on MIDI/instrument tracks.
+- Master volume and pan.
+- Host-exposed parameters of track FX, input FX and the dedicated instrument plugin.
+- Eligible built-in effect controls, including NAM Rack gain, EQ, delay, chorus and reverb controls. Model/IR file selection, calibration, presets and processing configuration are not automation parameters.
+
+This describes the development checkout. Native VST3 editor gestures feed the same writer as the generic FX sliders, including plugins running in isolation. A control must be exposed to the host: Kontakt libraries such as One Kit Wonder may need a Kontakt host-automation assignment. Komplete Kontrol exposes its mapped controls, not necessarily every nested instrument control. CLAP editor-event plumbing and JSFX slider envelopes are not supported by this capture path. Master/monitor FX parameters are not track automation targets.
 
 ### 10.2 Showing Automation Lanes
 
@@ -1254,16 +1258,21 @@ Automation points are displayed as connected lines on the lane, with the area be
 
 ### 10.4 Automation Modes
 
-Each automation lane has a mode that determines how automation interacts with playback and recording:
+Use the track's **R** and **W** buttons for Read and Write. They also work before any lanes exist. Enabling Write enables Read; disabling Write leaves Read enabled. Read can be disabled independently. With Write enabled and playback or recording running, moving an eligible control creates its lane and records points. Stopped edits change the saved plugin state without creating automation.
 
 | Mode      | Description                                                                  |
 |-----------|------------------------------------------------------------------------------|
 | **Read**  | Automation plays back. Manual parameter changes are temporary.               |
-| **Write** | During playback, all parameter changes are recorded as new automation data, overwriting existing points. |
+| **Write** | Arms controls for recording while the transport runs, using the project's write behavior below. |
 | **Touch** | Records automation only while the user is actively touching a control. Reverts to existing automation on release. |
 | **Latch** | Like Touch, but after release, continues writing the last value until transport stops. |
+| **Overwrite** | Writes armed lanes continuously while the transport runs, replacing the traversed data. |
 
-Set the automation mode via the lane dropdown or `openstudio.setAutomationMode()` in Lua.
+Choose Touch, Latch or Overwrite in the envelope panel's **Write** selector. An empty plugin lane does not reset its knob. Read reclaims a manually changed knob when a populated curve plays. Plugins without explicit gesture notifications use a short inactivity timeout for Touch. Native editor capture is delivered at control rate; it is not sample-accurate gesture capture. Cubase Cross-over and its advanced fill/trim workflows are not implemented.
+
+With the **Cubase keyboard profile**, **F6** opens the envelope panel for the selected track (first track or master as fallback), **Alt+R** toggles Read for all tracks and **Alt+W** toggles Write for all tracks. On macOS use **Option**. A mixed selection of on/off states is switched uniformly off before the next press enables all. Master R/W has its own controls. Custom overrides and active editor scopes can change the effective shortcuts; see **Options > Keyboard, Mouse & Trackpad**.
+
+Save the project after changing plugin knobs. Saving obtains fresh native state for input FX, track FX and instruments; reopening restores it into the corresponding plugin instance. Missing plugin identities stop a save instead of shifting saved states onto another slot. A failed plugin load or rejected state is reported. Removing an FX closes its open editor and removes its automation; undo restores the FX and its saved state/lanes. Reordering FX keeps lanes with their plugin.
 
 ### 10.5 Automation and Clip Movement
 
@@ -1276,7 +1285,7 @@ The **Move Envelopes with Items** option (Options menu) determines whether autom
 
 | Parameter | Frontend Range | Backend Range          |
 |-----------|---------------|------------------------|
-| Volume    | 0.0 - 1.0    | -60 dB to +6 dB       |
+| Volume    | 0.0 - 1.0    | -60 dB to +12 dB      |
 | Pan       | 0.0 - 1.0    | -1.0 (L) to +1.0 (R)  |
 | Mute      | 0.0 / 1.0    | Off / On               |
 
@@ -2229,6 +2238,12 @@ Use **AI Tools Setup** when a generation or stem workflow reports that its runti
 - Generated audio is imported back into the project as normal clips/tracks.
 
 **Downloading models:** BS-Roformer and ACE-Step download automatically when you install their feature. For Stable Audio 3 Medium or MiniMax Music 3, select the model, review and accept its license, then choose **Download and Set Up**. OpenStudio downloads the required files from Hugging Face into managed storage. Stable Audio is converted automatically to Diffusers format; MiniMax downloads its Diffusers components without the duplicate legacy weights. Allow extra disk space and time for downloads and Stable Audio conversion.
+
+**Model versions (development checkout):** Select a model, then choose **Original** or **INT8** in **Model version**. The suggestion above the selector explains when INT8 may help. AI Tools Setup lists both versions under each model, with separate installed status. Choose INT8 and **Download and Prepare INT8** to install it; select that same version in the generation dialog. The choice is saved with the AI track, supports undo/redo, and is retained when changing workflows within the same model.
+
+INT8 currently requires an NVIDIA CUDA GPU. ACE-Step and Stable Audio quantize the diffusion transformer; MiniMax quantizes its language model, including the output projection. Other audio components keep their normal inference precision. Setup reuses installed original weights when possible, otherwise downloads the official original weights and prepares a separate serialized INT8 copy once. **The initial download is not smaller.** An already prepared OpenStudio INT8 folder can also be imported. Original and INT8 installations coexist; generation stays offline and does not silently fall back to Original if INT8 fails.
+
+INT8 reduces weight memory, but can change audio quality and is not always faster. MiniMax can still take minutes per song on a 16 GB GPU. Its INT8 path uses a temporary, bounded disk cache for inactive stages (about 15 GiB), avoiding a full additional RAM copy; each active stage runs on the GPU. Allow extra free disk space and a longer first load. Other GPUs and CPU-only systems should use Original; selecting INT8 is not a promise that MiniMax fits every small GPU. See [local quantization test evidence](ai-quantization-2026-09-16.md) for actual machine results and limitations.
 
 Stable Audio requires access approval on its Hugging Face model page, including acceptance of the Stability AI and Gemma terms. Enter a read token from the approved account in setup, or leave it blank to use an existing Hugging Face login or `HF_TOKEN`. The token entered in the app is used only for that setup and is not saved. The app's license checkbox does not grant access to a gated repository. MiniMax's public download does not require a token.
 

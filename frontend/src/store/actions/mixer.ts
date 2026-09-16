@@ -289,8 +289,6 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
     setMasterAutomationRead: (enabled) => {
       if (isAutomationEditLocked(get())) return;
       const nextRead = Boolean(enabled);
-      const current = get();
-      if (current.masterAutomationLanes.length === 0 && !masterWriteEnabled(current)) return;
       commitMasterAutomationProjectMutation(
         set,
         get,
@@ -335,7 +333,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
         "SET_MASTER_AUTOMATION_WRITE",
         nextWrite ? "Enable master automation write" : "Disable master automation write",
         () => set((s) => {
-          const keepReadOn = masterReadEnabled(s) && s.masterAutomationLanes.length > 0;
+          const keepReadOn = masterReadEnabled(s);
           const nextState = {
             ...s,
             masterAutomationReadEnabled: nextWrite ? true : keepReadOn,

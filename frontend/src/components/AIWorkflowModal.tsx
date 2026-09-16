@@ -1,3 +1,4 @@
+import { AIModelVariantSelector } from "./AIModelVariantSelector";
 import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Settings2, Sparkles } from "lucide-react";
@@ -165,7 +166,7 @@ export function AIWorkflowModal({
     || track.aiGenerationState === "generating";
   const selectedModelStatus = aiToolsStatus.musicModels?.[modelId];
   const isMusicGenerationReady = Boolean(
-    selectedModelStatus?.ready
+    (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" && selectedModelStatus?.variants?.int8?.ready) ?? false : selectedModelStatus?.ready)
     ?? (
       modelId === ACE_STEP_MODEL_ID
         ? (
@@ -179,7 +180,7 @@ export function AIWorkflowModal({
     ),
   );
   const musicGenerationBlockedMessage = !isMusicGenerationReady
-    ? (selectedModelStatus?.message
+    ? (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" ? "Set up the INT8 version in AI Runtime Setup." : "Choose Original on this device. INT8 requires an NVIDIA GPU.") : selectedModelStatus?.message
       || selectedModelStatus?.blockReason
       || aiToolsStatus.features?.audioGeneration?.message
       || aiToolsStatus.musicGenerationPerformanceStatusMessage
@@ -428,6 +429,8 @@ export function AIWorkflowModal({
             </div>
           ) : null}
 
+          <AIModelVariantSelector modelId={modelId} value={params.modelVariant === "int8" ? "int8" : "original"}
+            status={aiToolsStatus} disabled={isBusy} onChange={(value) => handleParamChange("modelVariant", value)} />
           <AIGenerationHardwareCheck modelId={modelId} workflowId={workflow.id} params={params}
             enabled={isOpen && isMusicGenerationReady && !isBusy} />
 

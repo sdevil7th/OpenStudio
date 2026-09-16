@@ -55,7 +55,8 @@ class DiskWeightStore:
     Closing invalidates the supplied model weights, just like unloading a
     session. No quantization or dtype conversion is performed.
     """
-    def __init__(self, modules, *, root: Path | None = None, quota_bytes: int = 64*GIB):
+    def __init__(self, modules, *, root: Path | None = None, quota_bytes: int = 64*GIB,
+                 allow_device: bool = False):
         import torch
         self.root = (root or cache_root()).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,16 @@ class DiskWeightStore:
         self.reader = None
         self.offsets = {}
         self.directory = None
+        modules = list(modules)
+        # BNB keeps aliases outside registered parameters. Rebind them as each
+        # parameter is archived, otherwise the original GPU allocation survives.
+        self.aliases = {}
+        if allow_device:
+            for module in modules:
+                for child in module.modules():
+                    weight, state = getattr(child, "weight", None), getattr(child, "state", None)
+                    if state is not None and hasattr(weight, "CB"):
+                        self.aliases[id(weight)] = (weight, state)
         seen = set()
         size = 0
         for module in modules:
@@ -72,7 +83,7 @@ class DiskWeightStore:
                 if id(value) in seen:
                     continue
                 seen.add(id(value))
-                if value.device.type != "cpu" or value.is_quantized or not value.is_contiguous():
+                if (value.device.type != "cpu" and not allow_device) or value.is_quantized or not value.is_contiguous():
                     raise ValueError("Disk backing requires contiguous, unquantized CPU parameters.")
                 size = (size + 63) // 64 * 64
                 self.bindings.append((value, size, value.shape, value.dtype, value.numel()))
@@ -95,12 +106,30 @@ class DiskWeightStore:
                 for value, offset, shape, dtype, count in self.bindings:
                     self.offsets[id(value)] = (offset, count * value.element_size())
                     output.seek(offset)
-                    value.detach().view(-1).view(torch.uint8).numpy().tofile(output)
+                    value.detach().cpu().view(-1).view(torch.uint8).numpy().tofile(output)
                     value.data = self.mapping.narrow(0, offset, count * value.element_size()).view(dtype).view(shape)
+                    self._rebind_aliases(value)
             self.reader = (self.directory / "weights.bin").open("rb", buffering=0)
         except BaseException:
             self.close()
             raise
+
+    def _rebind_aliases(self, parameter):
+        if id(parameter) in self.aliases:
+            weight, state = self.aliases[id(parameter)]
+            if weight.CB is not None:
+                weight.CB = weight.data
+            if state.CB is not None:
+                state.CB = weight.data
+
+    def __del__(self):
+        # Constructor failures after archiving must not leave a live-process
+        # cache indefinitely. Quota checks happen before a directory exists.
+        if getattr(self, "directory", None) is not None:
+            try:
+                self.close()
+            except (OSError, RuntimeError, ImportError):
+                pass  # A terminated worker's owned cache is reclaimed next load.
 
     def read_into(self, parameter, destination):
         """Read into a bounded staging tensor without faulting the full mapping.
@@ -131,6 +160,7 @@ class DiskWeightStore:
             source = torch.empty_like(value, device="cpu")
             self.read_into(value, source)
             value.data = source.to(device)
+            self._rebind_aliases(value)
         for child in module.modules():
             for name, value in child._buffers.items():
                 if value is not None:
@@ -143,8 +173,12 @@ class DiskWeightStore:
             self.reader = None
         for value, _, _, dtype, _ in self.bindings:
             value.data = torch.empty(0, dtype=dtype)
+        for weight, state in self.aliases.values():
+            weight.CB = None
+            state.CB = None
         self.bindings.clear()
         self.offsets.clear()
+        self.aliases.clear()
         self.mapping = None
         gc.collect()
         if self.directory is not None:

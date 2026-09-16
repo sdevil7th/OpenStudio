@@ -759,14 +759,19 @@ juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& m
         return missing;
     }
 
-    for (const auto& relativePath : getStableAudioRequiredRelativePaths(modelId))
+    const auto requiredPaths = modelId == kPinnedMusicGenerationModelId
+        ? juce::StringArray { "model_index.json", "transformer/config.json", "vae/config.json", "text_encoder/config.json", "condition_encoder/config.json", "scheduler/scheduler_config.json", "tokenizer/tokenizer_config.json" }
+        : getStableAudioRequiredRelativePaths(modelId);
+    for (const auto& relativePath : requiredPaths)
     {
         if (! modelRoot.getChildFile(relativePath).existsAsFile())
             missing.add(relativePath);
     }
     const juce::StringArray weightedComponents = modelId == kMiniMaxAudioModelId
         ? juce::StringArray { "language_model", "condition_encoder", "rvq_depth_decoder", "transformer", "vocoder" }
-        : juce::StringArray { "vae", "transformer", "text_encoder", "duration_embedder" };
+        : modelId == kPinnedMusicGenerationModelId
+            ? juce::StringArray { "vae", "transformer", "text_encoder", "condition_encoder" }
+            : juce::StringArray { "vae", "transformer", "text_encoder", "duration_embedder" };
     for (const auto& component : weightedComponents)
     {
         const auto directory = modelRoot.getChildFile(component);
@@ -840,6 +845,8 @@ StemSeparator::InstallOptions StemSeparator::parseInstallOptions (const juce::St
     if (parsed.hasProperty("requestedFeature"))
         options.requestedFeature = normaliseFeatureId(parsed["requestedFeature"].toString());
 
+    if (parsed.hasProperty("modelVariant"))
+        options.modelVariant = parsed["modelVariant"].toString();
     if (parsed.hasProperty("modelId"))
         options.modelId = parsed["modelId"].toString().trim();
 
@@ -1399,6 +1406,7 @@ void StemSeparator::scheduleStatusRefresh()
         const auto runtimeInstalled = runtimeCapabilities.baseRuntimeReady || installedPython.existsAsFile();
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
         refreshedStatus.requestedModelId = previousStatus.requestedModelId;
+        refreshedStatus.requestedModelVariant = previousStatus.requestedModelVariant;
         refreshedStatus.supportedBackends = runtimeCapabilities.supportedBackends;
         refreshedStatus.selectedBackend = runtimeCapabilities.selectedBackend;
         refreshedStatus.runtimeVersion = runtimeCapabilities.runtimeVersion;
@@ -1566,6 +1574,7 @@ void StemSeparator::publishStatusRefresh (const AiToolsStatus& status, juce::uin
             lastAiToolsStatus.lastPhase = previous.lastPhase;
             lastAiToolsStatus.installSessionId = previous.installSessionId;
             lastAiToolsStatus.requestedModelId = previous.requestedModelId;
+            lastAiToolsStatus.requestedModelVariant = previous.requestedModelVariant;
             lastAiToolsStatus.selectedFeatures = previous.selectedFeatures;
             lastAiToolsStatus.requestedFeatures = previous.requestedFeatures;
             lastAiToolsStatus.requestedFeature = previous.requestedFeature;
@@ -1904,6 +1913,7 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
     obj->setProperty("installedFeatures", installedFeatures);
     obj->setProperty("requestedFeature", status.requestedFeature);
     obj->setProperty("requestedModelId", status.requestedModelId);
+    obj->setProperty("requestedModelVariant", status.requestedModelVariant);
     obj->setProperty("hardware", status.hardware);
     obj->setProperty("features", status.features);
 
@@ -1969,6 +1979,24 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
     miniModel->setProperty("blocked", ! (miniModelReady && stableRuntimeReady));
     miniModel->setProperty("blockReason", miniModelReady && stableRuntimeReady ? "" : "Import a MiniMax Music 3 Diffusers snapshot and prepare AI Tools.");
     musicModels->setProperty(kMiniMaxAudioModelId, juce::var(miniModel.release()));
+    const bool int8RuntimeReady = stableRuntimeReady
+        && getStableAudioRuntimeRoot().getChildFile(".openstudio-int8-ready-v1").existsAsFile();
+    for (const auto* id : { kPinnedMusicGenerationModelId, kStableAudioModelId, kMiniMaxAudioModelId })
+    {
+        auto* model = musicModels->getProperty(id).getDynamicObject();
+        const auto root = getStableAudioModelRoot(juce::String(id) + "-int8");
+        const auto marker = juce::JSON::parse(root.getChildFile("openstudio-variant.json"));
+        const bool installed = marker.getProperty("modelId", "").toString() == id
+            && marker.getProperty("variant", "").toString() == "int8"
+            && getMissingStableAudioFiles(root, id).isEmpty();
+        auto* variant = new juce::DynamicObject();
+        variant->setProperty("installed", installed);
+        variant->setProperty("ready", installed && int8RuntimeReady);
+        variant->setProperty("modelPath", root.getFullPathName());
+        auto* variants = new juce::DynamicObject();
+        variants->setProperty("int8", juce::var(variant));
+        model->setProperty("variants", juce::var(variants));
+    }
     obj->setProperty("musicModels", juce::var(musicModels.release()));
     return juce::var(obj.release());
 }
@@ -2030,12 +2058,28 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
     auto result = std::make_unique<juce::DynamicObject>();
 
-    const bool stableAudioSetupRequested = (installOptions.modelId == kStableAudioModelId || installOptions.modelId == kMiniMaxAudioModelId)
+    const bool int8Requested = installOptions.modelVariant == "int8";
+    if (installOptions.modelVariant != "original" && ! int8Requested)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Unknown model version.");
+        return juce::var(result.release());
+    }
+    if (int8Requested && (cachedStatus.hardware.getProperty("gpuBackend", "").toString() != "cuda"
+        || (installOptions.modelId != kPinnedMusicGenerationModelId && installOptions.modelId != kStableAudioModelId
+            && installOptions.modelId != kMiniMaxAudioModelId)))
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "INT8 requires a supported model and an NVIDIA CUDA GPU.");
+        return juce::var(result.release());
+    }
+    const bool stableAudioSetupRequested = int8Requested || (installOptions.modelId == kStableAudioModelId || installOptions.modelId == kMiniMaxAudioModelId)
         || installOptions.stableAudioModelPath.isNotEmpty();
 
     if (stableAudioSetupRequested)
     {
-        const juce::String importedModelId = installOptions.modelId == kMiniMaxAudioModelId ? kMiniMaxAudioModelId : kStableAudioModelId;
+        const juce::String importedModelId = int8Requested ? installOptions.modelId
+            : installOptions.modelId == kMiniMaxAudioModelId ? kMiniMaxAudioModelId : kStableAudioModelId;
         const auto stableSessionId = juce::Uuid().toString();
         appendAiToolsLogLine(makeAiLogEvent("host",
                                             "stable_audio_import",
@@ -2088,16 +2132,16 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         }
 
         const juce::File sourceRoot = downloadRequested ? juce::File() : juce::File(installOptions.stableAudioModelPath);
-        const auto managedDestination = getStableAudioModelRoot(importedModelId);
+        const auto managedDestination = getStableAudioModelRoot(importedModelId + (int8Requested ? "-int8" : ""));
         if (! downloadRequested && sourceRoot != managedDestination && managedDestination.isAChildOf(sourceRoot))
         {
             result->setProperty("started", false);
             result->setProperty("error", "Choose the model snapshot itself, not a parent of OpenStudio's managed model directory.");
             return juce::var(result.release());
         }
-        const bool needsConversion = ! downloadRequested && importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
+        const bool needsConversion = ! int8Requested && ! downloadRequested && importedModelId == kStableAudioModelId && isOriginalStableAudioSnapshot(sourceRoot);
         const auto missingFiles = downloadRequested ? juce::StringArray() : getMissingStableAudioFiles(sourceRoot, importedModelId);
-        if (! downloadRequested && ! needsConversion && ! missingFiles.isEmpty())
+        if (! int8Requested && ! downloadRequested && ! needsConversion && ! missingFiles.isEmpty())
         {
             auto status = cachedStatus;
             status.state = "error";
@@ -2159,6 +2203,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.requestedFeatures = status.selectedFeatures;
             status.requestedFeature = kFeatureAudioGeneration;
             status.requestedModelId = importedModelId;
+            status.requestedModelVariant = installOptions.modelVariant;
         });
 
         appendAiToolsLogLine(makeAiLogEvent("host",
@@ -2173,13 +2218,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                             }));
 
         installWorkerActive.store(true);
-        backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion, downloadRequested,
+        backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion, downloadRequested, int8Requested,
                                 accessToken = installOptions.huggingFaceToken]()
         {
             const InstallWorkerLifetime workerLifetime { installWorkerActive };
             const juce::File source = sourcePath.isEmpty() ? juce::File() : juce::File(sourcePath);
-            const auto destination = getStableAudioModelRoot(importedModelId);
-            const auto importRoot = ! downloadRequested && source == destination && ! needsConversion ? destination
+            const auto destination = getStableAudioModelRoot(importedModelId + (int8Requested ? "-int8" : ""));
+            const auto importRoot = ! int8Requested && ! downloadRequested && source == destination && ! needsConversion ? destination
                 : destination.getSiblingFile(destination.getFileName() + ".import-" + stableSessionId);
             const auto runtimeRoot = getStableAudioRuntimeRoot();
             const auto readyMarker = runtimeRoot.getChildFile(".openstudio-diffusers-audio-ready-v1");
@@ -2419,7 +2464,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 success = false;
                 error = "Diffusers audio setup was cancelled.";
             }
-            else if (! downloadRequested && source != destination && ! needsConversion)
+            else if (! int8Requested && ! downloadRequested && source != destination && ! needsConversion)
             {
                 if (! destination.getParentDirectory().createDirectory())
                 {
@@ -2454,7 +2499,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
-            if (success && ! downloadRequested && ! needsConversion)
+            if (success && ! int8Requested && ! downloadRequested && ! needsConversion)
             {
                 const auto missingAfterCopy = getMissingStableAudioFiles(importRoot, importedModelId);
                 if (! missingAfterCopy.isEmpty())
@@ -2525,7 +2570,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     success = runCommand(command, "Updating Diffusers audio runtime package installer...", 15 * 60 * 1000);
                 }
 
-                if (success && downloadRequested)
+                if (success && downloadRequested && ! int8Requested)
                 {
                     success = runCommand({ runtimePython.getFullPathName(), "-m", "pip", "install",
                         "huggingface_hub==1.30.0" }, "Installing Hugging Face downloader...", 15 * 60 * 1000);
@@ -2609,7 +2654,36 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
-            if (success && (downloadRequested || needsConversion) && ! aiToolsCancelRequested.load())
+            if (success && int8Requested && ! aiToolsCancelRequested.load())
+            {
+                success = runCommand({ findStableAudioPython().getFullPathName(), "-m", "pip", "install",
+                    "--only-binary=:all:", "--no-deps", "bitsandbytes==0.50.2" },
+                    "Installing INT8 runtime...", 15 * 60 * 1000);
+                if (success)
+                {
+                    const auto helper = findInstallerScript().getSiblingFile("prepare_diffusers_audio.py");
+                    juce::StringArray command { findStableAudioPython().getFullPathName(), helper.getFullPathName(),
+                        "--download-model", importedModelId, "--variant", "int8",
+                        "--destination", importRoot.getFullPathName(),
+                        "--cache", runtimeRoot.getChildFile("setup-cache").getFullPathName() };
+                    const auto original = downloadRequested ? getStableAudioModelRoot(importedModelId) : source;
+                    if (! downloadRequested || getMissingStableAudioFiles(original, importedModelId).isEmpty())
+                        command.addArray({ "--reuse-root", original.getFullPathName() });
+                    success = helper.existsAsFile() && runCommand(command,
+                        "Downloading and preparing INT8 version...", 12 * 60 * 60 * 1000, downloadRequested);
+                    if (success)
+                    {
+                        const auto missing = getMissingStableAudioFiles(importRoot, importedModelId);
+                        success = missing.isEmpty() && importRoot.getChildFile("openstudio-variant.json").existsAsFile();
+                        if (! success) error = "Prepared INT8 model is incomplete: " + missing.joinIntoString(", ");
+                    }
+                    if (success)
+                        success = runtimeRoot.getChildFile(".openstudio-int8-ready-v1").replaceWithText("bitsandbytes=0.50.2\n");
+                    if (! success && error.isEmpty()) error = "INT8 preparation failed. Previous versions were retained.";
+                }
+            }
+
+            if (success && ! int8Requested && (downloadRequested || needsConversion) && ! aiToolsCancelRequested.load())
             {
                 const auto helper = findInstallerScript().getSiblingFile("prepare_diffusers_audio.py");
                 juce::StringArray command { findStableAudioPython().getFullPathName(), helper.getFullPathName(),
@@ -2652,6 +2726,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 && importRoot.getParentDirectory() == destination.getParentDirectory()
                 && importRoot.getFileName() == destination.getFileName() + ".import-" + stableSessionId)
                 (void) importRoot.deleteRecursively();
+            if (int8Requested && importRoot != destination
+                && importRoot.getParentDirectory() == destination.getParentDirectory()
+                && importRoot.getFileName() == destination.getFileName() + ".import-" + stableSessionId)
+            {
+                const auto originalStaging = importRoot.getSiblingFile(importRoot.getFileName() + "-original");
+                (void) originalStaging.deleteRecursively();
+            }
             aiToolsInstallWorkInProgress = false;
             updateCachedAiToolsStatus([&] (AiToolsStatus& status)
             {
@@ -2866,6 +2947,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.requestedFeatures = requestedFeatures;
                 status.requestedFeature = requestedFeature;
                 status.requestedModelId.clear();
+                status.requestedModelVariant.clear();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
@@ -2929,6 +3011,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.requestedFeatures = requestedFeatures;
                 status.requestedFeature = requestedFeature;
                 status.requestedModelId.clear();
+                status.requestedModelVariant.clear();
                 status.runtimeCandidate = selectedRuntimeCandidate;
                 status.backendRequested = selectedBackendRequested;
                 status.installSessionId = sessionId;
@@ -3370,6 +3453,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                         status.requestedFeatures = requestedFeatures;
                                                         status.requestedFeature = requestedFeature;
                                                         status.requestedModelId.clear();
+                                                        status.requestedModelVariant.clear();
                                                         const auto hardware = probeHardwareStatus();
                                                         status.hardware = hardwareStatusToVar(hardware);
                                                         status.features = buildFeatureStatusVar(status, hardware);
@@ -3639,6 +3723,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             lastAiToolsStatus.requestedFeatures = requestedFeatures;
             lastAiToolsStatus.requestedFeature = requestedFeature;
             lastAiToolsStatus.requestedModelId.clear();
+            lastAiToolsStatus.requestedModelVariant.clear();
             const auto hardware = probeHardwareStatus();
             lastAiToolsStatus.hardware = hardwareStatusToVar(hardware);
             lastAiToolsStatus.features = buildFeatureStatusVar(lastAiToolsStatus, hardware);

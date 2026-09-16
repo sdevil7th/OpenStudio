@@ -59,7 +59,7 @@ def hub_progress_class(total_bytes: int = 0, cached_bytes: int = 0):
     return SetupProgress
 
 
-def download(model_id: str, destination: Path, cache: Path, *, check_access: bool = False):
+def download(model_id: str, destination: Path, cache: Path, *, check_access: bool = False, validate_load: bool = True):
     from huggingface_hub import hf_hub_download, snapshot_download
 
     repo, revision, patterns = HUB_MODELS[model_id]
@@ -87,7 +87,7 @@ def download(model_id: str, destination: Path, cache: Path, *, check_access: boo
     # Never give the converter the access token; no credentials are saved by this helper.
     os.environ.pop("HF_TOKEN", None)
     if model_id == STABLE_MODEL:
-        prepare(source, destination, cache)
+        prepare(source, destination, cache, validate_load=validate_load)
     else:
         report_progress("Preparing downloaded model files")
         destination.mkdir(parents=True)
@@ -101,11 +101,12 @@ def download(model_id: str, destination: Path, cache: Path, *, check_access: boo
             elif item.is_file():
                 shutil.copy2(item, destination / name)
         report_progress("Checking model can load")
-        DiffusersAudioSession(destination, MINIMAX_MODEL)
+        if validate_load:
+            DiffusersAudioSession(destination, MINIMAX_MODEL)
         print("Downloaded Diffusers snapshot loaded successfully.", flush=True)
 
 
-def prepare(source: Path, destination: Path, cache: Path):
+def prepare(source: Path, destination: Path, cache: Path, *, validate_load: bool = True):
     report_progress("Converting Stable Audio model")
     source, destination = source.resolve(), destination.resolve()
     if source == destination or source in destination.parents or destination.exists():
@@ -140,24 +141,78 @@ def prepare(source: Path, destination: Path, cache: Path):
     # tensors alive. Check after conversion locals have been released. Running
     # in one worker process also makes cancellation leave no orphan converter.
     report_progress("Checking model can load")
-    DiffusersAudioSession(destination, STABLE_MODEL)
+    if validate_load:
+        DiffusersAudioSession(destination, STABLE_MODEL)
     for notice in ("LICENSE.md", "LICENSE_GEMMA.md", "NOTICE"):
         if (source / notice).is_file():
             (destination / notice).write_bytes((source / notice).read_bytes())
     print("Converted Diffusers snapshot loaded successfully; source unchanged.", flush=True)
 
 
+def prepare_variant(model, destination, cache, source=None, check_access=False):
+    from ai_model_variants import prepare_int8
+    if model == "ace-step-v15-xl-turbo":
+        from huggingface_hub import snapshot_download, try_to_load_from_cache
+        repo = "ACE-Step/acestep-v15-xl-turbo-diffusers"
+        revision = "200ba991ae448051e14b0183157e35c2d27c9fb0"
+        ace_cache = Path.home() / ".cache/ace-step/diffusers"
+        cached = try_to_load_from_cache(repo, "model_index.json", revision=revision, cache_dir=str(ace_cache))
+        if source is None and isinstance(cached, str):
+            source = Path(cached).parent
+        if source is None:
+            # The source revision is the official Diffusers conversion already
+            # used by the original slot. Never download arbitrary remote code.
+            source = Path(snapshot_download(repo, revision=revision, cache_dir=str(ace_cache),
+                allow_patterns=["*.json", "*.safetensors", "tokenizer/*", "LICENSE*", "NOTICE"],
+                tqdm_class=hub_progress_class()))
+    if check_access:
+        if source is None:
+            download(model, destination, cache, check_access=True)
+        return
+    if source is None:
+        source = destination.with_name(destination.name + "-original")
+        if source.exists():
+            raise ValueError("The original staging folder already exists; choose a new destination.")
+        try:
+            download(model, source, cache, validate_load=False)
+            prepare_int8(source, destination, model)
+        finally:
+            # Only our precisely named staging folder is disposable.
+            if source.exists():
+                shutil.rmtree(source)
+    else:
+        if model == STABLE_MODEL and not (source / "model_index.json").is_file():
+            converted = destination.with_name(destination.name + "-original")
+            if converted.exists():
+                raise ValueError("The conversion staging folder already exists; choose a new destination.")
+            try:
+                prepare(source, converted, cache, validate_load=False)
+                prepare_int8(converted, destination, model)
+            finally:
+                if converted.exists():
+                    shutil.rmtree(converted)
+        else:
+            prepare_int8(source, destination, model)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--source", type=Path)
-    mode.add_argument("--download-model", choices=HUB_MODELS)
+    mode.add_argument("--download-model", choices=[*HUB_MODELS, "ace-step-v15-xl-turbo"])
+    parser.add_argument("--variant", choices=["original", "int8"], default="original")
+    parser.add_argument("--reuse-root", type=Path)
     parser.add_argument("--check-access", action="store_true")
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.download_model:
+        if args.variant == "int8":
+            if not args.download_model:
+                raise ValueError("INT8 preparation requires the selected model ID.")
+            prepare_variant(args.download_model, args.destination, args.cache,
+                            source=args.reuse_root, check_access=args.check_access)
+        elif args.download_model:
             download(args.download_model, args.destination, args.cache, check_access=args.check_access)
         else:
             prepare(args.source, args.destination, args.cache)

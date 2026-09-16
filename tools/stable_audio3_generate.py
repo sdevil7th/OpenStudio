@@ -625,6 +625,7 @@ class ExecutionPolicyError(RuntimeError):
 class StableAudioWorker:
     def __init__(self, model_root: Path) -> None:
         self.model_root = model_root
+        self._variant = "legacy"
         self._model: Any | None = None
         self._lock = threading.Lock()
         self._conservative = False
@@ -703,7 +704,7 @@ class StableAudioWorker:
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
         from diffusers_audio_pipeline import DiffusersAudioSession
         options, qualification_note = {}, ""
-        if MODEL_ID == "minimax-music-3" and not self._conservative:
+        if MODEL_ID == "minimax-music-3" and not self._conservative and self._variant == "legacy":
             import torch
             from ai_execution_policy import qualified_minimax_options
             options, qualification_note = qualified_minimax_options(torch, self.model_root,
@@ -712,10 +713,13 @@ class StableAudioWorker:
                 raise ExecutionPolicyError(qualification_note + " Generation stopped before loading unquantized weights. "
                                    "Free the required memory or requalify the local INT8 profile for this request/runtime.")
         self._selection_note = (
-            "INT8 language model; original-precision audio components. " + qualification_note
-            if options else "Unquantized model; standard memory placement.")
+            ("INT8 language model; original-precision audio components. " if MODEL_ID == "minimax-music-3"
+             else "INT8 diffusion transformer; original-precision audio components. ") + qualification_note
+            if options or self._variant == "int8" else "Unquantized model; standard memory placement.")
         self._phase_update("loading_model", "Loading the selected model precision.", -1.0)
-        model = DiffusersAudioSession(self.model_root, MODEL_ID, conservative=self._conservative,
+        from ai_model_variants import variant_root
+        selected_root = variant_root(MODEL_ID) if self._variant == "int8" else self.model_root
+        model = DiffusersAudioSession(selected_root, MODEL_ID, conservative=self._conservative,
             request_duration=self._request_duration, request_prompt_tokens=self._request_prompt_tokens, **options)
         if qualification_note:
             model.execution_details["localQualification"] = qualification_note
@@ -768,6 +772,14 @@ class StableAudioWorker:
         completed = False
         try:
             params = json.loads(params_json)
+            from ai_model_variants import requested_variant, variant_root, validate_variant
+            variant = requested_variant(params) if "modelVariant" in params else "legacy"
+            if variant == "int8":
+                validate_variant(variant_root(MODEL_ID), MODEL_ID)
+            if variant != self._variant:
+                self.unload()
+                self._conservative = False
+                self._variant = variant
             self._request_started = time.monotonic()
             self._progress_context = {"modelId": MODEL_ID, "workflowId": workflow, "requestId": request_id}
             self._selection_note = ""
@@ -779,7 +791,7 @@ class StableAudioWorker:
             self._request_duration = clamp_float(normalize_float(budget_params.get("duration"), 60), 5, 300)
             if MODEL_ID == "minimax-music-3":
                 from ai_execution_policy import minimax_prompt_tokens
-                self._request_prompt_tokens = minimax_prompt_tokens(self.model_root,
+                self._request_prompt_tokens = minimax_prompt_tokens(variant_root(MODEL_ID) if variant == "int8" else self.model_root,
                     normalize_text(budget_params.get("prompt")), normalize_text(budget_params.get("lyrics")),
                     tokenizer=getattr(getattr(self._model, "pipe", None), "tokenizer", None))
             self._phase_update("generating_audio", "Preparing audio generation.", -1.0)
@@ -799,7 +811,8 @@ class StableAudioWorker:
             })
             model = self._load_model(workflow, request_id)
             self._selection_note = (
-                "INT8 language model; original-precision audio components."
+                ("INT8 language model; original-precision audio components." if MODEL_ID == "minimax-music-3"
+                 else "INT8 diffusion transformer; original-precision audio components.")
                 if getattr(model, "quantization", "none") == "int8" else "Unquantized model; standard memory placement.")
             target_sample_rate, target_channels = get_model_audio_format(model)
 

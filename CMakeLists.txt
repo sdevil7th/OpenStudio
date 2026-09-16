@@ -1245,7 +1245,7 @@ if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
 endif()
 
 set(AI_STABLE_AUDIO_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stable_audio3_generate.py")
-foreach(AI_POLICY_MODULE ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store ai_generation_preflight)
+foreach(AI_POLICY_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store ai_generation_preflight)
     openstudio_copy_runtime_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_POLICY_MODULE}.py"
         "scripts/${AI_POLICY_MODULE}.py"
@@ -1255,7 +1255,7 @@ endforeach()
 # Worker edits must reach a Debug run even when no C++ object needs rebuilding.
 # POST_BUILD copies above/below also cover explicit OpenStudio target builds.
 set(OPENSTUDIO_AI_WORKER_FILES)
-foreach(AI_WORKER_MODULE ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store
+foreach(AI_WORKER_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store
         diffusers_audio_pipeline generate_music stable_audio3_generate stem_separator
         ai_runtime_probe prepare_diffusers_audio ai_generation_preflight)
     list(APPEND OPENSTUDIO_AI_WORKER_FILES

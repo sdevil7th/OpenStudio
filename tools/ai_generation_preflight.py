@@ -60,10 +60,16 @@ def preflight(model, root, request):
     from ai_execution_policy import select_device, activate_device, device_budget, host_available
     selected = select_device(torch)
     activate_device(torch, selected)
-    root = resolve_root(root, model)
     params, workflow = request["params"], request["workflow"]
     if not isinstance(params, dict):
         raise ValueError("Generation parameters must be an object.")
+    from ai_model_variants import requested_variant, variant_root, validate_variant, require_int8_device
+    variant = requested_variant(params)
+    if variant == "int8":
+        root = variant_root(model)
+        validate_variant(root, model)
+        require_int8_device(torch)
+    root = resolve_root(root, model)
     duration = request_duration(model, workflow, params)
     gpu = selected.family in {"cuda", "rocm", "xpu"}
     bf16 = selected.family in {"cuda", "rocm"} and torch.cuda.is_bf16_supported()
@@ -95,7 +101,7 @@ def preflight(model, root, request):
     required_ram = weights + 3 * GIB if weights is not None else None
     qualification_error = ""
     strict = False
-    if model == "minimax-music-3":
+    if model == "minimax-music-3" and "modelVariant" not in params:
         import stable_audio3_generate as worker
         from ai_execution_policy import minimax_prompt_tokens, qualified_minimax_options, minimax_kv_bytes, model_storage_identity
         from types import SimpleNamespace
@@ -122,6 +128,26 @@ def preflight(model, root, request):
         strict = bool(options or qualification_error)
         if qualification_error and not options:
             report["notes"].append(qualification_error)
+    if variant == "int8":
+        strict = True
+        report.update(modelVariant="int8", precision="INT8 / original audio components",
+                      placement="model-offload" if model == "minimax-music-3" else "resident")
+        required_gpu = (weights or 0) + reserve
+        if model == "minimax-music-3":
+            from types import SimpleNamespace
+            from ai_execution_policy import minimax_prompt_tokens, minimax_kv_bytes
+            import stable_audio3_generate as worker
+            worker.MODEL_ID = model
+            normalized, _ = worker.build_generation_request(workflow, params)
+            tokens = minimax_prompt_tokens(root, normalized["prompt"], normalized["lyrics"])
+            config = json.loads((root / "language_model/config.json").read_text(encoding="utf-8"))
+            kv = minimax_kv_bytes(SimpleNamespace(**config), duration=duration, prompt_tokens=tokens, element_size=2)
+            ar = sum(checkpoint_storage_bytes(root / name, 2) or 0 for name in ("language_model", "rvq_depth_decoder"))
+            required_gpu = max(ar, largest) + kv + 3 * GIB // 2
+            required_ram = max(6 * GIB, (weights or 0) - ar + 3 * GIB)
+            report.update(promptTokens=tokens)
+            report["notes"].append("INT8 keeps MiniMax's active stage on the GPU. Inactive weights use a temporary disk cache (about 15 GiB); first load takes longer.")
+        report["notes"].append("INT8 reduces weight memory. Speed and audio quality depend on the model and request.")
     report["memory"].append(memory_row("Unified system memory" if selected.unified_memory else "System RAM", ram, required_ram))
     if gpu:
         report["memory"].append(memory_row("GPU memory", free_gpu, required_gpu))

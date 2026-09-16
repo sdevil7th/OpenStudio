@@ -12,6 +12,14 @@ import {
 } from "../data/aiWorkflows";
 
 describe("AI workflow params", () => {
+  it("preserves INT8 across workflow normalization and defaults old projects to Original", () => {
+    for (const model of [ACE_STEP_MODEL_ID, STABLE_AUDIO_3_MODEL_ID, MINIMAX_MUSIC_3_MODEL_ID]) {
+      const workflow = getAIWorkflowsForSurface("ai-track", model)[0];
+      expect(normalizeWorkflowParams(workflow.id, { modelVariant: "int8" }, model).modelVariant).toBe("int8");
+      expect(normalizeWorkflowParams(workflow.id, {}, model).modelVariant).toBe("original");
+      expect(normalizeWorkflowParams(workflow.id, { modelVariant: "bad" }, model).modelVariant).toBe("original");
+    }
+  });
   it("provides the fixed ACE-Step parameter surface for text-to-music", () => {
     const defaults = getDefaultWorkflowParams("text-to-music");
 
@@ -45,6 +53,7 @@ describe("AI workflow params", () => {
     });
 
     expect(normalized).toEqual({
+      modelVariant: "original",
       prompt: "123",
       lyrics: "",
       seed: 42,

@@ -4,6 +4,7 @@ import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
+import { startPluginAutomationCapture } from "./services/pluginAutomationCapture";
 import {
   getGlobalShortcutConflicts,
   getRegisteredAction,
@@ -423,6 +424,7 @@ function App() {
   const aiToolsVisualProgressPercent = Math.round(aiToolsVisualProgressRatio * 100);
 
   useEffect(() => startMixerUISync(), []);
+  useEffect(() => startPluginAutomationCapture(), []);
   useEffect(() => startMidiEditorUISync(), []);
 
   useEffect(() => {

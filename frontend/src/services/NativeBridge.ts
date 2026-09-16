@@ -1388,6 +1388,7 @@ export interface AiHardwareStatus {
 }
 
 export interface AiMusicModelStatus {
+  variants?: { int8?: { installed: boolean; ready: boolean; modelPath?: string } };
   id: AiMusicModelId;
   label?: string;
   installed: boolean;
@@ -1487,6 +1488,7 @@ export interface AiToolsStatus {
   selectedFeatures?: AiFeatureId[];
   requestedFeatures?: AiFeatureId[];
   requestedModelId?: AiMusicModelId;
+  requestedModelVariant?: "original" | "int8";
   installedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
   hardware?: AiHardwareStatus;
@@ -1560,6 +1562,7 @@ export function withAIExecutionNote(progress: AIGenerationProgress): AIGeneratio
 }
 
 export interface InstallAiToolsOptions {
+  modelVariant?: "original" | "int8";
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
@@ -2650,6 +2653,7 @@ declare global {
         getNAMRackDiagnostics?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<Record<string, unknown> | null>;
         getBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<any>;
         setBuiltInPluginParam?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, value: number) => Promise<boolean>;
+        builtInPluginGesture?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, starting: boolean) => Promise<boolean>;
         setBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, stateJSON: string) => Promise<boolean>;
         getNAMLibraryInfo?: () => Promise<NAMLibraryInfo>;
         inspectNAMAsset?: (filePath: string) => Promise<NAMAssetInspectionResult>;
@@ -7394,6 +7398,11 @@ class NativeBridge {
       return this.mergeDevBuiltInState({ schemaVersion: 1, values: {} }, storedState);
     }
     return { schemaVersion: 1, values: {} };
+  }
+
+  async builtInPluginGesture(address: BuiltInPluginAddress, paramId: string, starting: boolean): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.builtInPluginGesture)
+      await window.__JUCE__.backend.builtInPluginGesture(address.trackId || "", address.chain, address.fxIndex ?? -1, paramId, starting);
   }
 
   async setBuiltInPluginParam(address: BuiltInPluginAddress, paramId: string, value: number): Promise<boolean> {

@@ -186,9 +186,23 @@ private:
     WorkerPlayHead playhead;
     juce::File stateFile;
 
+    inline static thread_local bool applyingHostState = false;
     void parameterValueChanged(int index, float value) override
-    { if (index >= 0 && index < parameters && std::isfinite(value)) shared.params[index].actual.store(juce::jlimit(0.0f, 1.0f, value)); }
-    void parameterGestureChanged(int, bool) override {}
+    {
+        if (index < 0 || index >= parameters || !std::isfinite(value)) return;
+        auto& parameter = shared.params[index];
+        parameter.actual.store(juce::jlimit(0.0f, 1.0f, value));
+        if (!applyingHostState)
+        {
+            parameter.editorValue.store(value);
+            parameter.editorEvents.fetch_or(2u, std::memory_order_release);
+        }
+    }
+    void parameterGestureChanged(int index, bool starting) override
+    {
+        if (!applyingHostState && index >= 0 && index < parameters)
+            shared.params[index].editorEvents.fetch_or(starting ? 1u : 4u, std::memory_order_release);
+    }
     bool textResult(const juce::var& value)
     {
         const auto text = juce::JSON::toString(value, true);
@@ -215,6 +229,7 @@ private:
                 if (revision == parameter.acknowledged.load()) continue;
                 const auto value = parameter.desired.load();
                 if (!std::isfinite(value) || value < 0 || value > 1) { shared.fault.store(invalidPacket); return false; }
+                const juce::ScopedValueSetter<bool> hostWrite(applyingHostState, true);
                 plugin->getParameters()[i]->setValueNotifyingHost(value);
                 parameter.actual.store(value);
                 parameter.acknowledged.store(revision, std::memory_order_release);
@@ -301,6 +316,15 @@ private:
             return true;
         }
         if (!plugin) return false;
+        if (command == testParameterGesture)
+        {
+            if (dynamic_cast<IsolationProbe*>(plugin.get()) == nullptr) return false;
+            auto* parameter = plugin->getParameters()[0];
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(0.42f);
+            parameter->endChangeGesture();
+            return true;
+        }
         if (command == testFailure)
         {
             if (auto* probe = dynamic_cast<IsolationProbe*>(plugin.get()))
@@ -345,6 +369,7 @@ private:
         }
         if (command == setState)
         {
+            const juce::ScopedValueSetter<bool> hostWrite(applyingHostState, true);
             if (!stateFile.existsAsFile() || stateFile.getSize() > maxStateBytes || stateFile.isSymbolicLink()) return false;
             juce::MemoryBlock state;
             if (!stateFile.loadFileAsData(state)) return false;
