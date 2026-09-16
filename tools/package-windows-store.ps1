@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'windows-store-runtime.ps1')
 function Resolve-RepoPath([string]$Path) {
     if ([IO.Path]::IsPathRooted($Path)) { return [IO.Path]::GetFullPath($Path) }
     return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
@@ -107,10 +108,7 @@ foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File) {
     if ($file.Name -match '(?i)(ucrtbased|vcruntime\d+d|msvcp\d+d)\.dll$') { throw "Debug CRT in payload: $($file.Name)" }
     Copy-Item -LiteralPath $file.FullName -Destination $stage
 }
-foreach ($directory in @('webui', 'effects', 'licenses', 'models', 'presets', 'scripts')) {
-    if (!(Test-Path -LiteralPath (Join-Path $source $directory) -PathType Container)) { throw "Missing runtime directory: $directory" }
-    Copy-Item -LiteralPath (Join-Path $source $directory) -Destination $stage -Recurse
-}
+Copy-StoreRuntimeDirectories -SourceDir $source -StageDir $stage
 foreach ($dll in Get-ChildItem -LiteralPath $VCRedistDir -Filter '*.dll' -File) {
     Assert-MicrosoftSignature $dll.FullName
     Copy-Item -LiteralPath $dll.FullName -Destination $stage -Force

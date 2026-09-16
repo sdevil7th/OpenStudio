@@ -547,7 +547,7 @@ release job, so a missing Store artifact cannot silently pass the release gate.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
    version tag on that merged `main` revision.
 2. Before tagging, review `packaging/msix/initial-submission.json`. It permits only
-   draft `1152921505701841400`, tag `v0.1.02`, and replacement of the existing
+   draft `1152921505701841400`, tag `v0.1.03`, and replacement of the existing
    `0.0.1.0` package. The draft must have the approved artwork fully uploaded,
    age ratings and certification details completed, and publishing mode **Manual**.
    Do not publish the old package to establish a baseline.

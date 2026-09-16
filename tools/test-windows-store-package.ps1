@@ -32,3 +32,54 @@ if (!$SourceDir) {
 }
 Expect-Rejection 'stale binary version' @{ Version = '65535.65535.65535.0'; SourceDir = $SourceDir } 'does not match compiled app version'
 Write-Output "$count Store package rejection tests passed."
+
+. (Join-Path $PSScriptRoot 'windows-store-runtime.ps1')
+$required = @('webui', 'effects', 'licenses', 'models', 'scripts')
+function New-RuntimeFixture([string]$Name, [string]$Missing = '') {
+    $root = Join-Path $testRoot $Name
+    $inputDir = Join-Path $root 'source'
+    $stageDir = Join-Path $root 'stage'
+    New-Item -ItemType Directory -Path $inputDir, $stageDir -Force | Out-Null
+    foreach ($directory in $required) {
+        if ($directory -eq $Missing) { continue }
+        $nested = Join-Path $inputDir "$directory/nested"
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $nested 'payload.txt') -Value "$Name/$directory"
+    }
+    return @{ SourceDir = $inputDir; StageDir = $stageDir }
+}
+
+$clean = New-RuntimeFixture 'clean-checkout'
+Copy-StoreRuntimeDirectories @clean
+foreach ($directory in $required) {
+    $relative = "$directory/nested/payload.txt"
+    $expected = (Get-FileHash -LiteralPath (Join-Path $clean.SourceDir $relative)).Hash
+    $actual = (Get-FileHash -LiteralPath (Join-Path $clean.StageDir $relative)).Hash
+    if ($actual -ne $expected) { throw "Runtime payload changed: $relative" }
+}
+if (Test-Path -LiteralPath (Join-Path $clean.StageDir 'presets')) { throw 'Unexpected preset payload in clean fixture.' }
+Write-Output 'PASS clean checkout without presets copies all required runtime payloads'
+
+$withPresets = New-RuntimeFixture 'bundled-presets'
+$presetDir = Join-Path $withPresets.SourceDir 'presets/nested'
+New-Item -ItemType Directory -Path $presetDir -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $presetDir 'factory.ospreset') -Value 'optional factory preset'
+Copy-StoreRuntimeDirectories @withPresets
+$expected = (Get-FileHash -LiteralPath (Join-Path $presetDir 'factory.ospreset')).Hash
+$actual = (Get-FileHash -LiteralPath (Join-Path $withPresets.StageDir 'presets/nested/factory.ospreset')).Hash
+if ($actual -ne $expected) { throw 'Optional preset payload changed.' }
+Write-Output 'PASS optional bundled presets are preserved'
+
+foreach ($directory in $required) {
+    $fixture = New-RuntimeFixture "missing-$directory" $directory
+    $rejected = $false
+    try { Copy-StoreRuntimeDirectories @fixture }
+    catch {
+        if ($_.Exception.Message -ne "Missing runtime directory: $directory") { throw }
+        $rejected = $true
+    }
+    if (!$rejected) { throw "Missing required runtime directory was accepted: $directory" }
+    if (@(Get-ChildItem -LiteralPath $fixture.StageDir).Count -ne 0) { throw 'Invalid runtime fixture was partially staged.' }
+    Write-Output "PASS missing required $directory is rejected before copying"
+}
+Write-Output '7 Store runtime directory tests passed.'
