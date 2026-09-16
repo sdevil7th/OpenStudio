@@ -526,6 +526,8 @@ other listing settings. Publishing a GitHub release does not skip certification.
 3. Authenticate to the Store API using GitHub environment secrets.
 4. Run authenticated read-only preflight: validate package identity, version,
    SHA256, and either the published baseline or the explicitly pinned initial draft.
+   The `preflight-store` job must pass before GitHub publication when Store delivery
+   is enabled. Its sanitized report records observed Store state and blocking errors.
 5. Clone the last published submission, or adopt the configured initial draft;
    replace only the x64 desktop package and English release notes. Refuse to
    overwrite unrelated pending submissions. Keep the initial publishing hold.
@@ -537,11 +539,19 @@ other listing settings. Publishing a GitHub release does not skip certification.
    the first live submission. An older published package is not a prerequisite.
 
 The Windows Release job always builds, validates and retains the
-`microsoft-store-package` artifact. `OPENSTUDIO_STORE_ENABLED` controls only the
-credentialed `submit-store` job. An MSIX packaging or offline validation failure still fails the Windows
+`microsoft-store-package` artifact. `OPENSTUDIO_STORE_ENABLED` controls the
+credentialed `preflight-store` and `submit-store` jobs. An MSIX packaging or offline validation failure still fails the Windows
 release job, so a missing Store artifact cannot silently pass the release gate.
 
 ### First Store release from a tag
+
+The `v0.1.03` initial-draft attempt failed its live state check and was completed
+through the portal using the exact tag-built MSIX. It is not proof that the API
+can adopt this portal draft. Leave its current certification intact; see the
+[current activation status and acceptance criteria](store-release-activation.md)
+before another tag. The initial path below is a guarded capability, not a verified
+live result. Subsequent releases use the published-baseline path once the first
+version is deliberately published.
 
 1. Merge the release and any release-preparation follow-up only after CI passes.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
@@ -552,10 +562,11 @@ release job, so a missing Store artifact cannot silently pass the release gate.
    age ratings and certification details completed, and publishing mode **Manual**.
    Do not publish the old package to establish a baseline.
 3. With the GitHub environment configured and `OPENSTUDIO_STORE_ENABLED=true`,
-   the `submit-store` job follows successful release publication. It downloads
-   the same run's `microsoft-store-package` artifact and first runs `--preflight`:
-   credentials are used only for authentication and Store GET requests. A failed
-   preflight blocks the mutation step and retains a sanitized diagnostic report.
+   `preflight-store` downloads the same run's `microsoft-store-package` and runs
+   `--preflight` before publication: credentials are used only for authentication
+   and Store GET requests. A failed check blocks GitHub publication and retains
+   a sanitized diagnostic report. After publication, `submit-store` repeats the
+   check before any mutation to detect intervening Store changes.
 4. The subsequent `--submit` step revalidates current state, adopts only the pinned
    draft, preserves saved listing/artwork/audience/settings, replaces the package
    and English release notes, and commits it for certification. The initial draft

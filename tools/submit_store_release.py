@@ -32,6 +32,13 @@ FAILED = {"CommitFailed", "PreProcessingFailed", "CertificationFailed", "Publish
 ACCEPTED = {"PreProcessing", "Certification", "PendingPublication", "Publishing", "Published", "Release"}
 MARKER_PREFIX = "OpenStudio release automation: "
 INITIAL_MARKER_PREFIX = "OpenStudio initial draft: "
+KNOWN_STATUSES = FAILED | ACCEPTED | {"PendingCommit", "CommitStarted", "None"}
+
+
+def safe_status(submission: dict) -> str:
+    # Do not echo arbitrary API response strings into logs or Markdown reports.
+    value = submission.get("status")
+    return value if isinstance(value, str) and value in KNOWN_STATUSES else "Unknown"
 
 
 class StoreError(RuntimeError):
@@ -196,7 +203,8 @@ def prepare_initial_submission(pending: dict, config: dict, package: Path, versi
     if pending.get("id") != config["submissionId"] or pending.get("targetPublishMode") != "Manual":
         raise StoreError("Initial draft identity or manual publishing hold does not match.")
     if pending.get("status") != "PendingCommit":
-        raise StoreError("The initial draft is not editable; automation will not cancel certification.")
+        raise StoreError(f"The initial draft is not editable (Store status: {safe_status(pending)}; "
+                         "required: PendingCommit); automation will not cancel certification.")
     if any(line.startswith((MARKER_PREFIX, INITIAL_MARKER_PREFIX))
            for line in pending.get("notesForCertification", "").splitlines()):
         raise StoreError("Initial draft belongs to another artifact or release; refusing to overwrite it.")
@@ -317,12 +325,15 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
     published_id = (app.get("lastPublishedApplicationSubmission") or {}).get("id")
     pending_id = (app.get("pendingApplicationSubmission") or {}).get("id")
     initial = not published_id
+    record(initialSubmission=initial)
     if not published_id:
+        pending = api.request("GET", submission_path(pending_id)) if pending_id else None
+        if pending is not None:
+            record(submissionId=pending_id, observedStoreStatus=safe_status(pending))
         if (not initial_config or pending_id != initial_config["submissionId"]
                 or release_tag != initial_config["releaseTag"]
                 or version != package_version(initial_config["releaseTag"])):
             raise StoreError("No published baseline: an exact initial draft and release tag must be explicitly configured.")
-        pending = api.request("GET", submission_path(pending_id))
         if owns(pending, expected):
             validate_initial_resume(pending, initial_config, package, notes, expected)
         else:
@@ -343,6 +354,7 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
             validate_initial_resume(pending, initial_config, package, notes, expected)
     else:
         published = api.request("GET", submission_path(published_id))
+        record(publishedSubmissionId=published_id, observedStoreStatus=safe_status(published))
         if owns(published, expected):
             record(submissionId=published_id, status="Published", alreadySubmitted=True)
             return
@@ -351,6 +363,7 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
                 raise StoreError("The Store already has this version or a newer version. Publish a higher version.")
         if pending_id:
             pending = api.request("GET", submission_path(pending_id))
+            record(submissionId=pending_id, observedStoreStatus=safe_status(pending))
             if not owns(pending, expected):
                 raise StoreError("An unrelated or unmarked submission is pending. Resolve it manually; automation will not overwrite or delete it.")
         else:
@@ -443,7 +456,7 @@ def main():
         # Only StoreError is authored/sanitized; parser/file/API internals may
         # contain untrusted content or secrets. Do not print their raw values.
         message = str(error) if isinstance(error, StoreError) else "Input or API response validation failed. Check package/report/notes and Partner Center."
-        record(error=message)
+        record(status="Failed", error=message)
         print(message, file=sys.stderr)
         return 1
     finally:
@@ -451,6 +464,8 @@ def main():
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
                 summary.write(f"### Microsoft Store\n\nStatus: {report.get('status', 'Validation failed')}\n\n"
                               f"Submission ID: {report.get('submissionId', 'Not created')}\n\n"
+                              f"Observed Store state: {report.get('observedStoreStatus', 'Not observed')}\n\n"
+                              f"Error: {report.get('error', 'None')}\n\n"
                               "This is submission status, not proof of certification or a Store-delivered upgrade.\n")
 
 

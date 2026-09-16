@@ -317,6 +317,53 @@ class StoreSubmissionTests(unittest.TestCase):
         self.assertFalse(api.uploads)
         self.assertEqual(self.report["status"], "PreflightPassed")
 
+    def test_blocked_initial_preflight_reports_state_without_mutating(self):
+        for status in ("Canceled", "Certification", "PendingPublication", "unexpected SECRET"):
+            api = self.initial_api()
+            api.pending["status"] = status
+            before = copy.deepcopy(api.pending)
+            with self.subTest(status=status), self.assertRaises(store.StoreError) as failure:
+                self.run_initial(api, preflight_only=True)
+            self.assertEqual(api.pending, before)
+            self.assertFalse(api.uploads)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+            self.assertEqual(self.report["submissionId"], "200")
+            self.assertEqual(self.report["observedStoreStatus"],
+                             "Unknown" if status == "unexpected SECRET" else status)
+            self.assertNotIn("SECRET", str(failure.exception) + json.dumps(self.report))
+
+    def test_next_tag_reports_current_certification_without_adopting_it(self):
+        api = self.initial_api()
+        api.pending["status"] = "Certification"
+        with self.assertRaisesRegex(store.StoreError, "No published baseline"):
+            self.run_initial(api, release_tag="v0.1.03", preflight_only=True)
+        self.assertEqual(self.report["observedStoreStatus"], "Certification")
+        self.assertFalse(api.uploads)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_failed_live_cli_does_not_leave_a_validated_success_summary(self):
+        self.create_package()
+        api = self.initial_api()
+        api.pending["status"] = "Canceled"
+        config = self.directory / "initial.json"
+        config.write_text(json.dumps(self.initial_config()))
+        report_path = self.directory / "report.json"
+        summary_path = self.directory / "summary.md"
+        with patch.object(store, "StoreApi", return_value=api), \
+                patch.dict(store.os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}), \
+                patch("sys.argv", ["submit_store_release.py", "--version", "v0.1.02",
+                    "--package-dir", str(self.directory), "--notes-file",
+                    str(store.ROOT / "docs/releases/0.1.02.md"), "--initial-submission-config",
+                    str(config), "--report", str(report_path), "--preflight"]):
+            self.assertEqual(store.main(), 1)
+        report = json.loads(report_path.read_text())
+        self.assertEqual(report["status"], "Failed")
+        self.assertEqual(report["observedStoreStatus"], "Canceled")
+        self.assertIn("Status: Failed", summary_path.read_text())
+        self.assertIn("required: PendingCommit", summary_path.read_text())
+        self.assertNotIn("SECRET", report_path.read_text() + summary_path.read_text())
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
     def test_published_preflight_never_creates_a_submission(self):
         api = FakeApi()
         self.run_submit(api, preflight_only=True)
