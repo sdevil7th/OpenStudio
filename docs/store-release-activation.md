@@ -8,10 +8,10 @@ The owner explicitly does **not** want the old code or old branding published.
 The old Submission 1 had passed certification with a manual publishing hold.
 Its certification was cancelled to replace the old code and artwork, and Partner
 Center now shows **In draft** (submission `1152921505701841400`). Nothing was
-published. Do not publish the old package to satisfy the automation's
-published-baseline requirement. Release PR #17 passed its PR checks and was
+published. Do not publish the old package to establish a baseline. Release PR #17 passed its PR checks and was
 merged into `main` at `196707f`. Follow-up PR #18 contains corrected
-release notes and unconditional MSIX packaging/artifact retention; its CI is
+release notes, unconditional MSIX packaging/artifact retention, and explicit
+first-submission support for the existing draft; its CI is
 pending. Merge that preparation only after CI passes, then tag the final merged
 revision. Use only the MSIX built by that tag's Release workflow.
 The local candidate upload was cancelled, removed, and the removal saved and
@@ -57,16 +57,23 @@ September 16, 2028. Tenant/client identifiers and the key value are kept in the
 GitHub environment secrets rather than this document. Credential provisioning
 is complete, but live Store API authentication remains unverified.
 
-The local package checks below are supporting evidence only. PR #18 documents
-the first-release path: passing CI, merge, tag, successful tagged Release run,
-then upload its exact MSIX into the prepared manual draft for certification.
-Its workflow change builds the MSIX while `OPENSTUDIO_STORE_ENABLED=false`;
-the credentialed submission job remains gated. The script still requires a
-published baseline and refuses an unrelated pending draft. Keep the manual
-publishing hold and enable subsequent automatic submissions only after the new
-first package is qualified and published. Never publish an older candidate to
-work around this prerequisite. The pinned `ai-runtime-v0.0.13` release and all
-three platform runtime assets were confirmed available.
+The local package checks below are supporting evidence only. PR #18 implements
+the first-release path: passing CI, merge, enable submission, tag, successful
+tagged Release run, authenticated read-only preflight, then submit that run's
+exact MSIX into the prepared draft for certification. The new config in
+`packaging/msix/initial-submission.json` permits only draft `1152921505701841400`
+for `v0.1.02`, replacing the existing `0.0.1.0` package. It requires saved artwork
+and the manual publishing hold, preserves listing/settings, and binds retries
+to the artifact, notes and settings. Other unpublished drafts remain blocked.
+The existing published-baseline path remains in use for subsequent versions.
+
+MSIX building works while `OPENSTUDIO_STORE_ENABLED=false`. The flag is still
+false during PR review; enable it after passing CI/merge and before the release
+tag. Live API access has not yet been tested: the GitHub secrets are restricted
+to `v*` tags and are not readable back from GitHub. The tagged job now performs
+mandatory live preflight before any Store mutation and stops on failure. Keep
+the manual publishing hold through certification. The pinned `ai-runtime-v0.0.13`
+release and all three platform runtime assets were confirmed available.
 
 September 16 local checks: 35 passed and 2 skipped across Store submission,
 release-note and model-variant tests; all 5 Store package rejection tests passed.

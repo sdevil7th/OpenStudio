@@ -524,19 +524,21 @@ other listing settings. Publishing a GitHub release does not skip certification.
 2. Build the MSIX from the Windows release payload using the existing pinned
    WebView2/CRT packaging checks; retain the MSIX as a workflow artifact.
 3. Authenticate to the Store API using GitHub environment secrets.
-4. Validate package identity, version, SHA256, and the last published Store version.
-5. Clone the last published submission; replace only the x64 desktop package and
-   English release notes. Refuse to overwrite unrelated pending submissions.
+4. Run authenticated read-only preflight: validate package identity, version,
+   SHA256, and either the published baseline or the explicitly pinned initial draft.
+5. Clone the last published submission, or adopt the configured initial draft;
+   replace only the x64 desktop package and English release notes. Refuse to
+   overwrite unrelated pending submissions. Keep the initial publishing hold.
 6. Upload a ZIP containing the MSIX, commit for certification, and report status.
    Resume the same tagged/hash-bound submission on retry; never blindly retry
    an ambiguous create/commit request or delete a pending submission.
-7. Test with fake HTTP/API responses and the actual local MSIX. Run the first live
-   submission only after the initial manual Store submission and account setup.
+7. Test with fake HTTP/API responses and the actual local MSIX. Complete the
+   initial Partner Center draft (including age ratings) and account setup before
+   the first live submission. An older published package is not a prerequisite.
 
 The Windows Release job always builds, validates and retains the
 `microsoft-store-package` artifact. `OPENSTUDIO_STORE_ENABLED` controls only the
-credentialed `submit-store` job; keep it `false` while preparing the first Store
-release. An MSIX packaging or offline validation failure still fails the Windows
+credentialed `submit-store` job. An MSIX packaging or offline validation failure still fails the Windows
 release job, so a missing Store artifact cannot silently pass the release gate.
 
 ### First Store release from a tag
@@ -544,29 +546,49 @@ release job, so a missing Store artifact cannot silently pass the release gate.
 1. Merge the release and any release-preparation follow-up only after CI passes.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
    version tag on that merged `main` revision.
-2. Wait for the tag's Release workflow to succeed. Download its
-   `microsoft-store-package` artifact, retaining `package-report.json` and
-   `validation.json` alongside the MSIX. Confirm the run's tag/commit, package
-   version and SHA256 against the reports before uploading.
-3. Replace the old package in the existing manual Partner Center draft with this
-   exact MSIX. Verify the approved listing artwork, release notes, age ratings,
-   restricted-capability explanation and manual publishing hold. Submit the new
-   package for certification; do not publish the old package as a prerequisite.
-4. After certification, publish the qualified new version deliberately. Only
-   then enable automatic submissions for subsequent tags as described below.
+2. Before tagging, review `packaging/msix/initial-submission.json`. It permits only
+   draft `1152921505701841400`, tag `v0.1.02`, and replacement of the existing
+   `0.0.1.0` package. The draft must have the approved artwork fully uploaded,
+   age ratings and certification details completed, and publishing mode **Manual**.
+   Do not publish the old package to establish a baseline.
+3. With the GitHub environment configured and `OPENSTUDIO_STORE_ENABLED=true`,
+   the `submit-store` job follows successful release publication. It downloads
+   the same run's `microsoft-store-package` artifact and first runs `--preflight`:
+   credentials are used only for authentication and Store GET requests. A failed
+   preflight blocks the mutation step and retains a sanitized diagnostic report.
+4. The subsequent `--submit` step revalidates current state, adopts only the pinned
+   draft, preserves saved listing/artwork/audience/settings, replaces the package
+   and English release notes, and commits it for certification. The initial draft
+   is never deleted or recreated. Check the retained reports and Partner Center.
+5. After certification, publish the qualified new version deliberately. The manual
+   hold prevents certification from automatically making it public. Later tags
+   use the normal published-baseline path; the initial pin cannot adopt other drafts.
 
-The submission script requires a published baseline and deliberately refuses to
-overwrite an unrelated manual draft. The first release therefore uses the portal
-for submission; creating a tag alone does not queue this first certification.
+The config is an explicit one-release opt-in, not permission to adopt arbitrary
+pending submissions. The initial path requires exactly one uploaded x64 Desktop
+package at the pinned old version, saved English artwork and no unfinished assets.
+Retry markers bind the package hash, notes, config and preserved settings. A changed
+artifact, draft, hold or listing stops the retry; investigate instead of removing
+the marker or repinning blindly. After an ambiguous PUT/upload/commit failure,
+rerun the failed job using the same artifact. Already committed submissions are
+polled without another upload or commit. No path publishes an older version.
+
+For a credentialed read-only check against a validated tagged artifact, use
+`python tools/submit_store_release.py --version v0.1.02 --package-dir dist/store
+--notes-file docs/releases/0.1.02.md --initial-submission-config
+packaging/msix/initial-submission.json --preflight` (as one command).
+Without `--preflight` or `--submit`, validation remains entirely offline. Credentials
+stay in environment secrets; never pass them as arguments. Live preflight is not
+evidence of certification, API update success, or Store-delivered installation.
 
 ### One-time enablement
 
 This repository implements the automation; it cannot provision the owner's
 Microsoft tenant or approve the initial Store listing. It stays inactive until:
 
-1. Complete the initial manual Store submission, including age ratings and the
-   `runFullTrust` explanation, and publish a qualified first package. The current
-   `0.0.1.0` candidate is not the selected public release.
+1. Complete the initial Partner Center draft, including age ratings, approved
+   artwork, `runFullTrust` explanation and manual publishing hold, and review the
+   initial-submission pin above. The `0.0.1.0` candidate is not the public release.
 2. Link a Microsoft Entra application to Partner Center, assign the required
    Manager role, and obtain tenant ID, client ID and client secret. See Microsoft's
    [API prerequisites](https://learn.microsoft.com/en-us/windows/uwp/monetize/create-and-manage-submissions-using-windows-store-services).
@@ -574,14 +596,19 @@ Microsoft tenant or approve the initial Store listing. It stays inactive until:
    Add environment secrets `MS_STORE_TENANT_ID`, `MS_STORE_CLIENT_ID`, and
    `MS_STORE_CLIENT_SECRET`. Add the secret directly in GitHub; never paste it in
    chat, commit it, or place it in workflow inputs. Rotate it before expiration.
-4. Set repository Actions variable `OPENSTUDIO_STORE_ENABLED` to `true` after
-   the code is merged and the Store flight/installed qualification is complete.
-   The app identity is fixed to Store ID `9N3MQ442VXGW` and the reserved publisher.
+4. After the code passes CI and merges and the selected package's release checks
+   are complete, set repository Actions variable `OPENSTUDIO_STORE_ENABLED` to
+   `true` before the release tag. The job's mandatory live preflight must pass
+   before submission can mutate the draft. The app identity is fixed to Store ID
+   `9N3MQ442VXGW` and the reserved publisher. Restrict the `microsoft-store`
+   environment to `v*` tags; branch runs cannot access its credentials. The job
+   also rejects a manually dispatched version that differs from its tag.
 5. Push the normal stable release tag. The `submit-store` job follows `publish`.
    To require a human gate, configure required reviewers on the `microsoft-store`
    environment. With no reviewer gate, submission is automatic. The existing
    Partner Center publish mode remains authoritative after certification.
 
+Once automation adopts the initial draft, make further updates through the API.
 Do not edit an API-created pending submission in Partner Center: Microsoft warns
 that mixing API and portal edits can invalidate it. If another submission is
 pending, resolve it deliberately; automation leaves it intact and fails visibly.
@@ -617,8 +644,8 @@ Only the existing en-us release notes and x64 Desktop package are replaced;
 other architectures and listing settings remain unchanged. An accepted commit can
 still be in preprocessing/certification. Check Partner Center's final result.
 HTTP reports must exclude tokens, response bodies and SAS upload URLs. A new
-artifact hash requires a new package version. Enable the workflow only after the
-first manually published, qualified package and required account setup exist.
+artifact hash requires a new package version. The initial draft exception requires
+the reviewed one-release config; subsequent releases require a published baseline.
 
 ## Windows signing with SignPath
 
