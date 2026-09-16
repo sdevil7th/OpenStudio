@@ -19,14 +19,14 @@ const NODE_COLORS = [
 ];
 
 const GRAPH_COLORS = {
-  surface: "var(--s13-graph-surface, #0a0a0a)",
-  plot: "var(--s13-graph-plot, #111111)",
-  grid: "var(--s13-graph-grid, #222222)",
-  gridZero: "var(--s13-graph-grid-zero, #444444)",
-  label: "var(--s13-graph-label, #737373)",
-  tooltip: "var(--s13-graph-tooltip, #d4d4d4)",
-  response: "var(--s13-graph-response, #38bdf8)",
-  responseFill: "var(--s13-graph-response-fill, rgba(56, 189, 248, 0.08))",
+  surface: "var(--openstudio-graph-surface, #0a0a0a)",
+  plot: "var(--openstudio-graph-plot, #111111)",
+  grid: "var(--openstudio-graph-grid, #222222)",
+  gridZero: "var(--openstudio-graph-grid-zero, #444444)",
+  label: "var(--openstudio-graph-label, #737373)",
+  tooltip: "var(--openstudio-graph-tooltip, #d4d4d4)",
+  response: "var(--openstudio-graph-response, #38bdf8)",
+  responseFill: "var(--openstudio-graph-response-fill, rgba(56, 189, 248, 0.08))",
 };
 
 function valueToPixelX(
@@ -452,7 +452,7 @@ export function ParametricGraph({
                 r={isDragging ? 7 : isHovered ? 6 : 5}
                 fill={color}
                 fillOpacity={0.85}
-                stroke={isHovered || isDragging ? "var(--s13-graph-node-stroke, #ffffff)" : color}
+                stroke={isHovered || isDragging ? "var(--openstudio-graph-node-stroke, #ffffff)" : color}
                 strokeWidth={isHovered || isDragging ? 1.5 : 1}
                 strokeOpacity={0.8}
                 pointerEvents="none"

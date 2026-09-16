@@ -4,6 +4,10 @@ This audit treats the codebase as the source of truth: `CMakeLists.txt`, `Source
 
 Features are sorted by impact first, then complexity.
 
+This inventory describes the current checkout, including working-tree changes.
+It is not a shipped-release checklist; see the [release notes](releases/)
+for a particular installer and the qualification caveats below.
+
 Inventory status rule: a feature belongs in the main tables only when a
 user-facing workflow is mounted and has the necessary state, bridge, or backend
 path. A real but incomplete, hardware-dependent, or code-path-only surface
@@ -28,6 +32,7 @@ Ratings:
 | Transport: play, stop, pause, record, seek, loop, current time | H | M |
 | Tempo, time signature, tap tempo, tempo markers | H | M |
 | Metronome with accenting, volume, custom/reset click sounds, and render inclusion | M | M |
+| Click-only metronome practice with live monitoring, parked playhead, and transport handover | M | M |
 | Background waveform peak cache and recording waveform previews | H | H |
 | MIDI recording preview and completed MIDI clip handoff | H | M |
 | Meter events isolated from the track array to avoid playback-time UI churn | M | M |
@@ -94,8 +99,8 @@ Ratings:
 | NAM Rack A1/A2 pedal, amp, and full-rig capture hosting | H | H |
 | NAM Rack Guitar/Bass voicing, native pedalboard, cabinet IR/Cabinet Space, Graphic EQ, modulation, delay, reverb/shimmer, tuner, calibration, presets, A/B, and project recall | H | H |
 | NAM Rack multi-capture pack selection with per-capture topology, transactional audition/rollback, Use, replace, bypass, unload, and missing-asset recovery | H | H |
-| S13FX / JSFX-style script effects with sliders and reload | H | H |
-| S13FX `@gfx` native editor support | M | H |
+| JSFX / JSFX-style script effects with sliders and reload | H | H |
+| JSFX `@gfx` native editor support | M | H |
 | Lua script execution, script listing/editor, console output, and app-facing API reference | M | H |
 
 ## MIDI / Instruments
@@ -160,6 +165,8 @@ Ratings:
 |---|---:|---:|
 | Project new/open/save/save as/close, unsaved changes flow | H | H |
 | Recent projects and startup recovery/diagnostics | M | M |
+| Interrupted-session recovery: unsaved project copies, complete recording samples, and saved AI requests/results | H | H |
+| Opt-in rotating recovery snapshots, including untitled projects, without overwriting the saved project | H | H |
 | Project tabs | M | M |
 | Project settings, notes, author/revision metadata | M | M |
 | Project templates and save-from-template flow | M | M |
@@ -182,9 +189,11 @@ Ratings:
 | Stem separation result import into new tracks/clips | H | H |
 | AI track type and AI track header controls | M | H |
 | ACE-Step text-to-music and lyrics-plus-style generation | H | H |
-| Stable Audio 3 Medium text-to-audio generation with gated local snapshot import and license acknowledgement | H | H |
-| Source-conditioned variation, inpaint-selection, and continue-clip workflows | H | H |
-| AI generation progress/cancel handling | M | H |
+| Stable Audio 3 Medium text-to-audio generation with gated Hugging Face setup, optional local import and license acknowledgement | H | H |
+| MiniMax Music 3 Lyrics + Style and Song Sections with Hugging Face setup or local import | H | H |
+| ACE-Step/Stable Audio source-conditioned variation, inpaint-selection, and continue-clip workflows | H | H |
+| AI setup totals, remaining bytes, cache reuse, persistent active-job display, and logs | M | H |
+| AI generation stage/step/frame progress and cancellation | M | H |
 
 ## Workflow / UI Customization
 
@@ -203,7 +212,7 @@ Ratings:
 | High-contrast theme, startup recovery surface, modal guards, and top-level error boundary | M | M |
 | Big clock and timecode display settings | M | M |
 | Help overlay and getting started guide | L | M |
-| App updater hooks | M | M |
+| App update checks, background download/cancel, save-before-install UI, and reverified staged-download restoration | M | H |
 | Crash diagnostics source/module present | M | M |
 
 ## Sync / Control / Video / Pro Tools
@@ -226,6 +235,9 @@ These have real code surfaces, but should not be counted as fully delivered DAW 
 
 | Feature | Status |
 |---|---|
+| Signed updates and macOS/Linux replacement | Current checkout authenticates manifests/packages and supports guarded replacement of eligible user-owned app bundles/AppImages with retained backups. Requires a new release; real installed upgrades, unsigned Gatekeeper acceptance, AppImage/FUSE, and Store delivery remain unqualified. See [updater guide](updater-security-and-migration.md) |
+| Separate-process plugin hosting | Windows-only per-plugin opt-in, applied on next load; adds latency, limits audio to 32 active channels, and excludes ARA. Fault reporting/restart exists, but individual vendor compatibility requires qualification |
+| AI hardware check and adaptive memory placement | Current checkout provides advisory request estimates and supported workers adapt placement/offloading; estimates are not admission guarantees, speed or quality claims, or proof of support on every GPU |
 | Polyphonic pitch correction / solo-note resynthesis | Detection and MIDI extraction exist; `PolyResynthesizer` is still stub-like |
 | AAF import | Stubbed in session interchange |
 | LTC output | Bridge stub exists, not a real implementation |

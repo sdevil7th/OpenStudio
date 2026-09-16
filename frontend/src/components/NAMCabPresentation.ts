@@ -41,15 +41,15 @@ export function resolveNAMRackCabPresentation({
       mode: "embedded",
       label: "Cab included in amp capture",
       status: hasCabIR
-        ? "Embedded cab is active. The retained external IR is bypassed and will return with an amp-only Capture."
-        : "Embedded cab is active, so the external Cab/IR stage is bypassed.",
+        ? "Embedded cab is active. The retained external IR is bypassed, but you can replace or unload it before returning to an amp-only Capture."
+        : "Embedded cab is active. You can still prepare an external IR for the next amp-only Capture.",
       recommendedAction: "browse-amp-only-captures",
       recommendedActionLabel: "Browse amp-only captures",
       needsCabIR: false,
       hasRetainedExternalIR: hasCabIR,
-      canBrowseExternalIR: false,
-      canLoadLocalIR: false,
-      canClearExternalIR: false,
+      canBrowseExternalIR: true,
+      canLoadLocalIR: true,
+      canClearExternalIR: hasCabIR,
       canToggleExternalCab: false,
     };
   }

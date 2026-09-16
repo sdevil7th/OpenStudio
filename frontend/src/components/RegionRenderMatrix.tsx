@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { useState } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
@@ -142,7 +143,7 @@ export function RegionRenderMatrix({ isOpen, onClose }: RegionRenderMatrixProps)
         setStatus("");
       }, 500);
     } catch (error) {
-      alert("Render failed: " + error);
+      void appDialogs.alert("Render failed: " + error);
       setIsRendering(false);
       setProgress(0);
       setStatus("");

@@ -181,7 +181,7 @@ type NAMViewMode = "cards" | "list";
 type NAMCatalogMode = "cache" | "live";
 type NAMFeedbackTone = "info" | "success" | "warning" | "error" | "busy";
 export type NAMLibraryAction = "select" | "live-preview" | "save" | "revert";
-type NAMSortMode = "newest" | "trending" | "downloads-all-time" | "favorites-count" | "name-az";
+type NAMSortMode = "best-match" | "newest" | "trending" | "downloads-all-time" | "favorites-count" | "name-az";
 type NAMShelf = "featured" | "latest-a2" | "trending" | "downloaded" | "clean" | "high-gain" | "pedals" | "full-rigs" | "irs" | "installed" | "favorites";
 type NAMCatalogRow = {
   key: string;
@@ -565,11 +565,12 @@ const NAM_LIVE_PAGE_TARGETS: Record<NAMExplorerVariant, number> = {
   full: 24,
 };
 const NAM_SORT_OPTIONS: Array<{ value: NAMSortMode; label: string; local: boolean }> = [
+  { value: "best-match", label: "Relevance", local: false },
   { value: "trending", label: "Trending", local: false },
   { value: "newest", label: "Newest", local: false },
   { value: "downloads-all-time", label: "Most Downloaded", local: false },
-  { value: "favorites-count", label: "Most Liked", local: false },
-  { value: "name-az", label: "Name A-Z", local: true },
+  { value: "favorites-count", label: "Most Liked (loaded results)", local: true },
+  { value: "name-az", label: "Name A-Z (loaded results)", local: true },
 ];
 export const SUPPORTED_TONE3000_PEDAL_CATEGORIES = ["drive", "boost", "fuzz", "distortion", "overdrive"] as const;
 const NAM_SOURCE_FLOW_CONFIGS: Record<NAMLibraryFlowMode, NAMSourceFlowConfig> = {
@@ -2646,6 +2647,8 @@ export function NAMExplorer({
   const pendingRackActionGenerationRef = useRef(0);
   const installedLibraryMutationOwnerRef = useRef<number | null>(null);
   const installedLibraryMutationSequenceRef = useRef(0);
+  const searchOwnerRef = useRef(`nam-search-${crypto.randomUUID()}`);
+  const activeSearchIdRef = useRef<string | null>(null);
   const liveSearchEpochRef = useRef(createTONE3000SearchEpoch());
   const liveSearchIntentSignatureRef = useRef("");
   const lastLiveSearchFailureRef = useRef<TONE3000LiveSearchFailure | null>(null);
@@ -2722,7 +2725,15 @@ export function NAMExplorer({
   const sourceFlowTempo = Number.isFinite(runtimeTempo) ? Number(runtimeTempo) : tempo;
   const sourceFlowTimeSignature = runtimeTimeSignature ?? timeSignature;
 
+  useEffect(() => () => {
+    if (activeSearchIdRef.current) void nativeBridge.cancelTONE3000Search(searchOwnerRef.current, activeSearchIdRef.current);
+  }, []);
+
   const invalidateLiveSearchIntent = () => {
+    const requestId = activeSearchIdRef.current;
+    activeSearchIdRef.current = null;
+    if (requestId) void nativeBridge.cancelTONE3000Search(searchOwnerRef.current, requestId);
+    lastAutomaticLiveSearchSignatureRef.current = "";
     liveSearchEpochRef.current.invalidate();
     lastLiveSearchFailureRef.current = null;
     setLiveBusy(false);
@@ -3205,8 +3216,19 @@ export function NAMExplorer({
   }, [catalog, installed]);
 
   const rows = useMemo<NAMCatalogRow[]>(() => {
-    const needle = query.trim().toLowerCase();
-    const flattened = catalog.flatMap((tone, toneIndex) => {
+    const needle = catalogMode === "live" && tab !== "installed" && tab !== "favorites" ? "" : query.trim().toLowerCase();
+    const flattened = catalog.flatMap((catalogTone, toneIndex) => {
+      // Catalog summaries intentionally omit captures. Reuse fresh detail
+      // already fetched in this session when returning to a pack, instead of
+      // replacing its usable picker with an empty summary on every reopen.
+      const requestedArchitecture = resolveNAMSearchArchitecture(sourceFlow,
+        String(catalogTone.searchArchitecture ?? catalogTone.architecture ?? architecture));
+      const detail = !catalogTone.models?.length
+        ? namToneDetailSession.peekFresh(`${toneIdOf(catalogTone)}:${requestedArchitecture || "all"}`)?.value
+        : undefined;
+      const tone = detail?.success
+        ? { ...catalogTone, models: (detail.models || detail.tone?.models || []).filter((model) => downloadUrlOf(model)) }
+        : catalogTone;
       const models = tone.models?.length ? tone.models : [{} as NAMCatalogModel];
       return models.map((model, modelIndex) => ({
         key: `${toneIdOf(tone)}:${modelIdOf(model)}:${tone.sortBucket ?? ""}:${toneIndex}:${modelIndex}`,
@@ -5325,6 +5347,8 @@ export function NAMExplorer({
     const request = requestOverride ?? buildLiveSearchSnapshot(page);
     if (liveSearchIntentSignatureRef.current !== request.signature) return "stale";
     const requestToken = liveSearchEpochRef.current.begin(request.signature);
+    const requestId = String(requestToken.generation);
+    activeSearchIdRef.current = requestId;
     const isCurrent = () => (
       mountedRef.current
       && liveSearchEpochRef.current.isCurrent(requestToken)
@@ -5344,7 +5368,9 @@ export function NAMExplorer({
       if (!isCurrent()) return "stale";
       const payload = cachedPayload
         ? cachedPayload
-        : await namLiveSearchPageSession.load(request.cacheKey, () => nativeBridge.searchTONE3000NAM({
+        : await nativeBridge.searchTONE3000NAM({
+            requestOwner: searchOwnerRef.current,
+            requestId,
             query: request.query,
             page: request.page,
             page_size: request.pageSize,
@@ -5356,7 +5382,7 @@ export function NAMExplorer({
             // hydrated for the one tone the user previews instead of issuing an N+1
             // burst for every card on every page.
             includeModels: request.includeModels,
-          }));
+          });
       if (!isCurrent()) return "stale";
 
       if (payload.success === false) {
@@ -5374,6 +5400,7 @@ export function NAMExplorer({
         return "error";
       }
 
+      if (!cachedPayload) namLiveSearchPageSession.set(request.cacheKey, payload);
       const bucket = tabBucketForSort(request.tab as NAMTab, request.sortMode as NAMSortMode);
       const liveTones = ((payload.tones || payload.data || []) as NAMCatalogTone[]).map((tone) => ({
         ...tone,
@@ -5438,6 +5465,7 @@ export function NAMExplorer({
       }
       return isCurrent() ? "error" : "stale";
     } finally {
+      if (activeSearchIdRef.current === requestId) activeSearchIdRef.current = null;
       if (isCurrent()) setLiveBusy(false);
     }
   };
@@ -6335,6 +6363,7 @@ export function NAMExplorer({
   const authChecking = !tone3000Session.bootstrapped || authUiBusy;
   const showConnectAction = !authConnected && !authUiBusy && !authRefreshAvailable;
   const canRetryStatus =
+    Boolean(lastLiveSearchFailureRef.current) ||
     status.toLowerCase().includes("rate limit") ||
     status.toLowerCase().includes("search failed") ||
     status.toLowerCase().includes("catalog unavailable") ||
@@ -6342,7 +6371,7 @@ export function NAMExplorer({
 
   useEffect(() => {
     if (sessionKeyTransition) return;
-    if (!authConnected || authChecking || catalogBusy) return;
+    if (!authConnected || authChecking || catalogBusy || queryDraftRef.current !== committedQueryRef.current) return;
     if (sourceFlow === "fx" || sourceFlowCategoryFilter === "local") return;
     if (tab === "installed" || tab === "favorites") return;
     if (lastAutomaticLiveSearchSignatureRef.current === currentLiveSearchSignature) return;
@@ -6350,7 +6379,7 @@ export function NAMExplorer({
     void runLiveSearch(1, "replace", currentLiveSearchSnapshot).catch((error) => {
       console.error("[NAMExplorer] Automatic live search failed:", error);
     });
-  }, [authChecking, authConnected, catalogBusy, currentLiveSearchSignature, sessionKeyTransition, sourceFlow, sourceFlowCategoryFilter, tab]);
+  }, [authChecking, authConnected, catalogBusy, currentLiveSearchSignature, query, sessionKeyTransition, sourceFlow, sourceFlowCategoryFilter, tab]);
 
   useEffect(() => {
     if (persistenceSessionKeyRef.current !== sessionViewKey) {
@@ -6842,10 +6871,15 @@ export function NAMExplorer({
               : "Offline",
     authDetail: sourceFlow === "fx"
       ? "Factory and installed presets"
-      : status || (authConnected ? "TONE3000 session ready" : authRefreshAvailable ? "Saved session can refresh" : "Connect TONE3000 to browse online"),
-    statusAction: sourceFlow !== "fx" && canRetryStatus
-      ? { id: "retry", label: sourceFlowRateLimited ? "Retry search" : "Retry" }
-      : undefined,
+      : tone3000Session.lastError || (authConnected ? status || "TONE3000 session ready" : authRefreshAvailable ? "Reconnect to resume your saved session." : "Connect TONE3000 to browse online. Local files remain available."),
+    statusAction: sourceFlow === "fx" ? undefined
+      : !authConnected ? { id: "connect", label: authUiBusy ? "Connecting..." : "Connect TONE3000" }
+      : canRetryStatus ? { id: "retry", label: sourceFlowRateLimited ? "Retry search" : "Retry" } : undefined,
+    authBusy: authUiBusy,
+    actionBusy: rackActionsBusy,
+    loading: liveBusy || catalogBusy || query !== committedQuery,
+    filterScopeDetail: sourceFlow !== "fx" && catalogMode === "live"
+      ? "Creator, license, instrument and character filters apply to loaded results." : undefined,
     searchLabel: sourceFlow === "fx" ? "Search OpenStudio FX" : sourceFlow === "ir" ? "Search IR sources" : sourceFlowConfig.searchPlaceholder,
     searchText: query.trim() || sourceFlowConfig.defaultQuery || sourceFlowConfig.searchPlaceholder,
     searchAction: sourceFlow === "fx" ? "Search FX" : sourceFlow === "ir" ? "Search IRs" : "Search Live",
@@ -6941,7 +6975,7 @@ export function NAMExplorer({
           : catalogMode === "live"
             ? liveTotal
             : rows.length,
-    busy: sessionKeyTransition || rackActionsBusy || showResultsSkeleton || showResultsRefreshOverlay,
+    busy: sessionKeyTransition || rackActionsBusy || showResultsSkeleton || showResultsRefreshOverlay || query !== committedQuery,
     emptyTitle: sourceFlowCategoryFilter === "local"
       ? sourceFlow === "ir" ? "Choose a local cabinet IR" : "Choose a local NAM capture"
       : sourceFlowConfig.emptyTitle,
@@ -7639,6 +7673,10 @@ export function NAMExplorer({
     if (action === "search") {
       if (sourceFlow !== "fx" && tab !== "installed" && tab !== "favorites") void submitLiveSearch(1);
       else setSelectedKey("");
+      return;
+    }
+    if (action === "connect") {
+      if (!authUiBusy) void startAuth();
       return;
     }
     if (action === "retry") {

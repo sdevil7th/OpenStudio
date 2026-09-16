@@ -309,7 +309,7 @@ export function normalizeParam(param: BuiltInParamDescriptor) {
   return normalizeParamValue(param, param.value);
 }
 
-export function denormalizeParamValue(param: BuiltInParamDescriptor, normalized: number) {
+export function denormalizeParamValue(param: Pick<BuiltInParamDescriptor, "id" | "min" | "max">, normalized: number) {
   if (isChorusRateParam(param)) return chorusRateHzFromNormalized(normalized);
   if (isNAMEqFilterParam(param)) {
     return namGraphicEqFilterHzFromNormalized(param.id, normalized);

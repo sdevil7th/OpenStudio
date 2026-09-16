@@ -10,7 +10,7 @@ Purpose:
 
 ## Current repo truth
 - 2026-04-28 Signalsmith pitch-only formant-contract correction: this is a DSP contract fix, not a renderer-family reopening.
-  - Native pitch-only renders now use `setFormantFactor(1.0f, true)` for every pitch-only block, matching live preview and `S13PitchCorrector`.
+  - Native pitch-only renders now use `setFormantFactor(1.0f, true)` for every pitch-only block, matching live preview and `OpenStudioPitchCorrector`.
   - The active adaptive selector no longer throws away detected F0 on its Signalsmith pitch-only carriers: detected F0 guidance goes through `setFormantBase(...)` when available and is never passed as a formant-ratio curve.
   - Offline pitch-only transpose maps use the same stage-A tonality-limit controls as live preview (`OPENSTUDIO_PITCH_STAGEA_TONALITY_LIMIT_HZ_*`) while keeping the formant factor neutral.
   - Explicit formant edits pass the requested ratio directly with `compensatePitch=true`; the pitch ratio is not divided into the formant factor.

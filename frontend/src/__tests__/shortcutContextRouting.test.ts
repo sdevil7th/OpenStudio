@@ -58,6 +58,41 @@ afterEach(() => {
 });
 
 describe("shortcut edit-context routing", () => {
+  it("claims remapped native-plugin Undo/Redo without touching hidden project history", () => {
+    const executeAction = vi.fn();
+    useDAWStore.setState({ customShortcuts: {
+      "edit.undo": { common: ["Ctrl+U"] },
+      "edit.redo": { common: ["Ctrl+Shift+U"] },
+    } });
+    for (const shiftKey of [false, true]) {
+      expect(dispatchGlobalShortcut({ key: "u", ctrlKey: true, shiftKey, source: "pluginWindow" },
+        "windows", { executeAction })).toBe(true);
+    }
+    expect(executeAction).not.toHaveBeenCalled();
+  });
+  it("preserves typing Space during playback and recording", () => {
+    const original = useDAWStore.getState();
+    const stop = vi.fn();
+    const preventDefault = vi.fn();
+    try {
+      for (const isRecording of [false, true]) {
+        useDAWStore.setState({ stop, transport: { ...original.transport, isPlaying: true, isRecording } });
+        expect(dispatchGlobalShortcut({ key: " ", code: "Space", targetIsEditable: true, preventDefault })).toBe(false);
+      }
+      expect(stop).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+    } finally {
+      useDAWStore.setState({ stop: original.stop, transport: original.transport });
+    }
+  });
+  it("does not dispatch IME or AltGraph chords even after focus leaves a text input", () => {
+    const undo = vi.fn();
+    useDAWStore.setState({ undo });
+    for (const input of [{ isComposing: true }, { getModifierState: (key: string) => key === "AltGraph" }]) {
+      expect(dispatchGlobalShortcut({ key: "z", ...hostPrimaryModifier(), targetIsEditable: false, ...input })).toBe(false);
+    }
+    expect(undo).not.toHaveBeenCalled();
+  });
   it("routes only to the active surface and restores its declared fallback", () => {
     const timelineHandler = vi.fn(() => "handled" as const);
     const pitchHandler = vi.fn(() => "claimed_noop" as const);
@@ -139,7 +174,13 @@ describe("shortcut edit-context routing", () => {
     const range = targetMatching("input[type='range']");
     const button = targetMatching("button");
     const contentEditable = targetMatching("[contenteditable='true']");
+    const plaintextOnly = targetMatching("[contenteditable='plaintext-only']");
     const generic = targetMatching("[data-not-a-control]");
+    const designModeBody = {
+      closest: () => null,
+      ownerDocument: { designMode: "on" },
+    } as unknown as EventTarget;
+    const shadowHost = targetMatching("[data-shadow-host]");
 
     expect(isEditableShortcutTarget(textInput)).toBe(true);
     expect(isNonTextControlShortcutTarget(textInput)).toBe(false);
@@ -150,6 +191,10 @@ describe("shortcut edit-context routing", () => {
     expect(isEditableShortcutTarget(button)).toBe(false);
     expect(isNonTextControlShortcutTarget(button)).toBe(true);
     expect(isEditableShortcutTarget(contentEditable)).toBe(true);
+    expect(isEditableShortcutTarget(plaintextOnly)).toBe(true);
+    expect(isEditableShortcutTarget(designModeBody)).toBe(true);
+    expect(isEditableShortcutTarget(shadowHost, [shadowHost, textInput])).toBe(true);
+    expect(isNonTextControlShortcutTarget(shadowHost, [shadowHost, button])).toBe(true);
     expect(isEditableShortcutTarget(generic)).toBe(false);
     expect(isNonTextControlShortcutTarget(generic)).toBe(false);
     expect(isEditableShortcutTarget(null)).toBe(false);
@@ -248,6 +293,24 @@ describe("shortcut edit-context routing", () => {
     activateShortcutContext({ kind: "pitch_editor" });
 
     expect(dispatchGlobalShortcut({ key: "z", ...hostPrimaryModifier(), source: "browser" })).toBe(true);
+    expect(projectUndo).not.toHaveBeenCalled();
+  });
+
+  it("claims empty detached plugin undo without routing it to the main project", () => {
+    const projectUndo = vi.fn();
+    useDAWStore.setState({ undo: projectUndo });
+    registerShortcutSurface(
+      { kind: "plugin", sessionId: "empty-nam-history" },
+      (event) => matchesActionShortcut(event, "edit.undo") ? "claimed_noop" : "unmatched",
+      { kind: "application" },
+    );
+    activateShortcutContext({ kind: "plugin", sessionId: "empty-nam-history" });
+
+    expect(dispatchGlobalShortcut(
+      { key: "z", ...hostPrimaryModifier(), source: "browser" },
+      getShortcutPlatform(),
+      { role: "pluginEditor" },
+    )).toBe(true);
     expect(projectUndo).not.toHaveBeenCalled();
   });
 

@@ -120,6 +120,40 @@ describe("transport recording", () => {
       .not.toContainEqual([true]);
   });
 
+  it.each([false, true])("restores playback after rejected recording (already playing: %s)", async (isPlaying) => {
+    const showToast = vi.fn();
+    vi.mocked(nativeBridge.setTransportRecording).mockResolvedValue(false);
+    useDAWStore.setState({
+      tracks: [armedInstrumentTrack()],
+      transport: { ...initialState.transport, isPlaying, isRecording: false },
+      syncClipsWithBackend: vi.fn().mockResolvedValue(undefined),
+      showToast,
+    });
+    await useDAWStore.getState().record();
+    expect(useDAWStore.getState().transport).toMatchObject({ isPlaying, isRecording: false });
+    expect(useDAWStore.getState().recordSession).toBeNull();
+    expect(useDAWStore.getState().recordingClips).toEqual([]);
+    expect(showToast).toHaveBeenCalledWith("Failed to start recording", "error");
+    if (isPlaying) expect(nativeBridge.setTransportPlaying).not.toHaveBeenCalled();
+    else expect(nativeBridge.setTransportPlaying).toHaveBeenLastCalledWith(false);
+  });
+
+  it("ignores a late permission rejection after Stop", async () => {
+    let rejectStart!: (accepted: boolean) => void;
+    const start = new Promise<boolean>((resolve) => { rejectStart = resolve; });
+    const showToast = vi.fn();
+    vi.mocked(nativeBridge.setTransportRecording).mockImplementation(async recording => recording ? start : true);
+    useDAWStore.setState({ tracks: [armedInstrumentTrack()], showToast,
+      syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    const pending = useDAWStore.getState().record();
+    await vi.waitFor(() => expect(nativeBridge.setTransportRecording).toHaveBeenCalledWith(true));
+    await useDAWStore.getState().stop();
+    rejectStart(false);
+    await pending;
+    expect(useDAWStore.getState().transport).toMatchObject({ isPlaying: false, isRecording: false });
+    expect(showToast).not.toHaveBeenCalledWith("Failed to start recording", "error");
+  });
+
   it("punches in at the playhead captured when record is pressed", async () => {
     const calls: string[] = [];
     vi.mocked(nativeBridge.setTransportRecording).mockImplementation(async (recording) => {

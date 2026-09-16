@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import React from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -304,8 +305,8 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
           { divider: true, label: "" },
           {
             label: "Save as Track Template...",
-            onClick: () => {
-              const name = prompt("Template name:", track.name);
+            onClick: async () => {
+              const name = (await appDialogs.prompt("Template name:", track.name));
               if (name) useDAWStore.getState().saveTrackTemplate(track.id, name);
             },
           },

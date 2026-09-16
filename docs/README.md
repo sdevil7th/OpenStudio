@@ -1,3 +1,5 @@
+<p align="center"><img src="../frontend/public/icon.png" width="80" height="80" alt="OpenStudio logo" /></p>
+
 # OpenStudio Documentation
 
 OpenStudio keeps documentation task-oriented and close to the code. The goal is
@@ -7,7 +9,13 @@ date-stamped implementation diaries.
 
 ## Start here
 
+Guides describe this source checkout. Consult the [release notes](releases/)
+for shipped behavior; candidate notes and working-tree features are not evidence
+that an existing installer contains those changes.
+
 - [User manual](USER_MANUAL.md) — install, configure, record, edit, mix, and export.
+- [In-app updates](USER_MANUAL.md#in-app-updates) — installation, unsigned macOS behavior, and recovery.
+- [Updater security and migration](updater-security-and-migration.md) — signed metadata, replacement safeguards, older clients, and qualification limits.
 - [Implemented features](implemented_features.md) — current feature inventory and caveats.
 - [NAM Rack](nam-rack.md) — Guitar/Bass capture workflow, multi-capture selection, DSP/state contract, TONE3000 integration, and release acceptance.
 - [Keyboard and mouse profiles](input-profiles.md) — built-in DAW profiles, independent keyboard/mouse selection, scoped bindings, and custom profile import/export.
@@ -18,6 +26,7 @@ date-stamped implementation diaries.
 - [Release smoke checklist](release-smoke-checklist.md) — final build acceptance.
 - [Runtime dependency contract](runtime-dependency-contract.md) — optional runtimes and models.
 - [Lua API](API.md) — scripting reference.
+- [Frontend component map](frontend-components.md) — component ownership, dependencies, styling, and website extraction guidance.
 
 ## Documentation rules
 
@@ -36,3 +45,7 @@ date-stamped implementation diaries.
 Detailed research that remains useful for pitch rendering is consolidated in
 `pitch_renderer_research_notes.md`. It is technical reference material, not an
 active release plan.
+
+## Branding
+
+[Logo sources and icon generation](branding.md) lists the master image and every app icon consumer.

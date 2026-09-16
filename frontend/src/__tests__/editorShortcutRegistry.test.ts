@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getRegisteredAction,
@@ -150,14 +151,14 @@ describe("editor shortcut registry", () => {
     }
   });
 
-  it("executes the formerly empty transpose and velocity actions through undo-aware store APIs", () => {
+  it("executes the formerly empty transpose and velocity actions through undo-aware store APIs", async () => {
     const moveMIDINotes = vi.fn(() => ["moved-note"]);
     const scaleSelectedMIDINoteVelocity = vi.fn();
     const setSelectedNoteIds = vi.fn();
     const promptMock = vi.fn()
       .mockReturnValueOnce("2.6")
       .mockReturnValueOnce("125");
-    vi.stubGlobal("prompt", promptMock);
+    vi.spyOn(appDialogs, "prompt").mockImplementation(async (...args) => promptMock(...args));
     useDAWStore.setState({
       moveMIDINotes,
       scaleSelectedMIDINoteVelocity,
@@ -167,7 +168,7 @@ describe("editor shortcut registry", () => {
       selectedNoteIds: ["note-a"],
     });
 
-    getRegisteredAction("edit.transpose")?.execute();
+    await getRegisteredAction("edit.transpose")?.execute();
     expect(moveMIDINotes).toHaveBeenCalledWith(
       "track-a",
       "clip-a",
@@ -177,7 +178,7 @@ describe("editor shortcut registry", () => {
     );
     expect(setSelectedNoteIds).toHaveBeenCalledWith(["moved-note"]);
 
-    getRegisteredAction("edit.velocityScale")?.execute();
+    await getRegisteredAction("edit.velocityScale")?.execute();
     expect(scaleSelectedMIDINoteVelocity).toHaveBeenCalledWith(
       "track-a",
       "clip-a",

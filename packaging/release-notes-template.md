@@ -13,5 +13,7 @@
 - Document any other launch-day limitations here.
 
 ## Upgrade Notes
-- Project files now save as `.osproj` while legacy `.s13` sessions continue to load.
 - Call out any additional migration details, changed file formats, or compatibility notes here.
+
+## Source review
+- Replace this with the exact release comparison or commit link, and review every claim against that diff.

@@ -8,6 +8,7 @@ import modalSource from "../components/ui/Modal/Modal.tsx?raw";
 import pianoRollSource from "../components/PianoRoll.tsx?raw";
 import timelineSource from "../components/Timeline.tsx?raw";
 import shortcutSource from "../utils/globalShortcutDispatcher.ts?raw";
+import domShortcutEventSource from "../utils/domShortcutEvent.ts?raw";
 import modalGuardSource from "../utils/modalEventGuards.ts?raw";
 import { isEditorWheelOwnedTarget } from "../utils/modalEventGuards";
 import {
@@ -24,16 +25,14 @@ function targetMatching(selectorFragment: string): EventTarget {
 }
 
 describe("interaction safety guards", () => {
-  it("lets Space stop active transport from focused inputs without stealing idle text entry", () => {
+  it("routes editable text through its preservation policy before application dispatch", () => {
     const editableBranchIndex = shortcutSource.indexOf("if (payload.targetIsEditable)");
 
     expect(editableBranchIndex).toBeGreaterThan(-1);
-    expect(shortcutSource).toContain(
+    expect(shortcutSource).not.toContain(
       "matchesTransportPlay && (state.transport.isRecording || state.transport.isPlaying)",
     );
     expect(shortcutSource).toContain("shouldPreserveEditableShortcut(");
-    expect(shortcutSource).toContain('publishDetachedCommand("transport.stop")');
-    expect(shortcutSource).toContain("else state.stop()");
     expect(shortcutSource).toContain("return false;");
   });
 
@@ -44,21 +43,26 @@ describe("interaction safety guards", () => {
       midiWindowSource,
       pluginWindowSource,
     ]) {
-      expect(source).toContain("isEditableShortcutTarget(e.target)");
-      expect(source).toContain("isNonTextControlShortcutTarget(e.target)");
-      expect(source).toContain("stopPropagation: () => e.stopPropagation()");
-      expect(source).toContain("stopImmediatePropagation: () => e.stopImmediatePropagation()");
+      expect(source).toContain("toGlobalShortcutPayload(e)");
       expect(source).toContain('window.addEventListener("keydown", handleKeyDown, true)');
       expect(source).toContain('window.removeEventListener("keydown", handleKeyDown, true)');
     }
+    expect(domShortcutEventSource).toContain(
+      "isEditableShortcutTarget(event.target, composedPath)",
+    );
+    expect(domShortcutEventSource).toContain(
+      "isNonTextControlShortcutTarget(event.target, composedPath)",
+    );
+    expect(domShortcutEventSource).toContain("stopPropagation: () => event.stopPropagation()");
+    expect(domShortcutEventSource).toContain(
+      "stopImmediatePropagation: () => event.stopImmediatePropagation()",
+    );
   });
 
   it("routes shortcuts from plugin controls without stealing native control keys", () => {
     expect(pluginWindowSource).not.toContain("NON_TEXT_PLUGIN_CONTROL_SELECTOR");
-    expect(pluginWindowSource).toContain(
-      "targetIsNonTextControl: isNonTextControlShortcutTarget(e.target)",
-    );
-    expect(pluginWindowSource).toContain("isEditableShortcutTarget(e.target)");
+    expect(pluginWindowSource).toContain("const shortcutEvent = toGlobalShortcutPayload(e)");
+    expect(pluginWindowSource).toContain("targetIsEditable: shortcutEvent.targetIsEditable");
     expect(shortcutSource).toContain("shouldPreserveNonTextControlShortcut(payload)");
   });
 
@@ -187,8 +191,8 @@ describe("interaction safety guards", () => {
     );
 
     for (const [source, guard] of [
-      [timelineWheel, "if (isEditorWheelOwnedTarget(e.target)) return;"],
-      [pianoWheel, "if (isEditorWheelOwnedTarget(event.target)) return;"],
+      [timelineWheel, "if (isEditorWheelOwnedTarget(e.target, container)) return;"],
+      [pianoWheel, "if (isEditorWheelOwnedTarget(event.target, container)"],
     ] as const) {
       const guardIndex = source.indexOf(guard);
       expect(guardIndex).toBeGreaterThan(-1);

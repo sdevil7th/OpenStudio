@@ -1,25 +1,16 @@
 #include "AppUpdater.h"
+#include "WindowsPackage.h"
+#include "UpdateManifest.h"
+#include "UpdateInstaller.h"
 #include <thread>
 
 namespace
 {
-struct ParsedUpdateFeed
-{
-    juce::String version;
-    juce::String downloadUrl;
-    juce::String sha256;
-    juce::String notes;
-    juce::String releasePageUrl;
-    juce::String releaseNotesUrl;
-    juce::String publishedAt;
-    juce::String fileName;
-    juce::String channel;
-    juce::String minimumSupportedVersion;
-    juce::String installerArguments;
-    juce::String source;
-    juce::int64 expectedSize = 0;
-};
-
+#if JUCE_DEBUG
+constexpr bool isDevelopmentBuild = true;
+#else
+constexpr bool isDevelopmentBuild = false;
+#endif
 juce::String getStringProperty(const juce::var& value, const juce::Identifier& property)
 {
     if (auto* obj = value.getDynamicObject())
@@ -40,88 +31,19 @@ juce::int64 getInt64Property(const juce::var& value, const juce::Identifier& pro
     return fallback;
 }
 
-bool getBoolProperty(const juce::var& value, const juce::Identifier& property, bool fallback = false)
-{
-    if (auto* obj = value.getDynamicObject())
-    {
-        const auto prop = obj->getProperty(property);
-        if (prop.isBool())
-            return static_cast<bool>(prop);
-    }
-
-    return fallback;
-}
-
-juce::File getOpenStudioAppDataDirectory()
-{
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("OpenStudio");
-}
-
-juce::File getLegacyStudio13AppDataDirectory()
-{
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("Studio13");
-}
-
-juce::File getPreferredUpdaterStateFile()
-{
-    auto openStudioDir = getOpenStudioAppDataDirectory();
-    auto legacyStateFile = getLegacyStudio13AppDataDirectory().getChildFile("updater-state.json");
-    auto preferredDir = (!openStudioDir.exists() && legacyStateFile.existsAsFile())
-        ? getLegacyStudio13AppDataDirectory()
-        : openStudioDir;
-
-    return preferredDir.getChildFile("updater-state.json");
-}
-
 constexpr juce::int64 kAutomaticUpdateCheckIntervalMs = 24LL * 60LL * 60LL * 1000LL;
-
-bool looksLikeXml(const juce::String& text)
-{
-    const auto trimmed = text.trimStart();
-    return trimmed.startsWithChar('<');
 }
 
-bool xmlNameMatches(const juce::String& actualName, const juce::String& expectedLocalName)
-{
-    return actualName == expectedLocalName || actualName.endsWith(":" + expectedLocalName);
-}
+AppUpdater::AppUpdater() : AppUpdater(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("OpenStudio"), true) {}
 
-juce::String getXmlAttribute(const juce::XmlElement& element, std::initializer_list<const char*> names)
+AppUpdater::AppUpdater(const juce::File& directory, bool restoreOnStartup) : stateDirectory(directory), trustedPublicKey(UpdateManifest::publicKey())
 {
-    for (const auto* name : names)
+    if (WindowsPackage::isStoreManaged())
     {
-        const auto value = element.getStringAttribute(name).trim();
-        if (value.isNotEmpty())
-            return value;
+        storeUpdater = std::make_unique<StoreUpdater>([this](const juce::var& status) { publishStatus(status); });
+        return;
     }
-
-    return {};
-}
-
-juce::String getXmlChildText(const juce::XmlElement& parent, std::initializer_list<const char*> names)
-{
-    for (auto* child = parent.getFirstChildElement(); child != nullptr; child = child->getNextElement())
-    {
-        for (const auto* name : names)
-        {
-            if (xmlNameMatches(child->getTagName(), name))
-            {
-                const auto value = child->getAllSubText().trim();
-                if (value.isNotEmpty())
-                    return value;
-            }
-        }
-    }
-
-    return {};
-}
-}
-
-AppUpdater::AppUpdater()
-{
-    const auto stateFile = getPreferredUpdaterStateFile();
+    const auto stateFile = stateDirectory.getChildFile("updater-state.json");
     if (stateFile.existsAsFile())
     {
         auto parsed = juce::JSON::parse(stateFile.loadFileAsString());
@@ -129,10 +51,65 @@ AppUpdater::AppUpdater()
             persistedState = parsed;
     }
 
-    publishStatus(makeStatus("idle", "Updater ready", {}, {}, {}, {}, {}, {}, {}, 0, {}, getCurrentChannel()));
+    publishStatus(makeStatus(isDevelopmentBuild ? "development" : "idle",
+                            isDevelopmentBuild ? "Development build: update installers are disabled. Build this checkout to update it." : "Updater ready",
+                            {}, {}, {}, {}, {}, {}, {}, 0, {}, getCurrentChannel()));
+    if (restoreOnStartup && !isDevelopmentBuild)
+    {
+        const auto previous = UpdateInstaller::previousResult(stateDirectory);
+        if (previous.isNotEmpty()) publishStatus(makeStatus("idle", previous));
+    }
+    if (restoreOnStartup && !isDevelopmentBuild && persistedState["stagedDownload"].isObject())
+    {
+        checkInProgress = true;
+        publishStatus(makeStatus("checking", "Verifying the previously downloaded update..."));
+        jobs.addJob([this, alive = jobs.token()] {
+            const auto restored = restoreDownload();
+            juce::MessageManager::callAsync([this, alive, restored] {
+                if (!MessageThreadLifetime::accepts(alive)) return;
+                checkInProgress = false;
+                publishStatus(restored.isObject() ? restored : makeStatus("idle", "Check for the latest version of OpenStudio."));
+                const auto previous = UpdateInstaller::previousResult(stateDirectory);
+                if (previous.isNotEmpty())
+                {
+                    auto status = getLastStatus().clone();
+                    status.getDynamicObject()->setProperty("message", previous);
+                    publishStatus(status);
+                }
+            });
+        });
+    }
 }
 
-AppUpdater::~AppUpdater() = default;
+AppUpdater::~AppUpdater() { shutdown(); }
+void AppUpdater::shutdown()
+{
+    if (storeUpdater) storeUpdater->shutdown();
+    jobs.shutdown();
+    // Only the frontend's saved-project quit path may authorise installation.
+    // OS shutdown during preparation must not accidentally commit the update.
+    if (installQuitAuthorised) UpdateInstaller::commit(installTransaction);
+    else UpdateInstaller::cancel(installTransaction);
+    installTransaction = juce::File();
+    installQuitAuthorised = false;
+    setStatusCallback({});
+}
+
+void AppUpdater::authorisePreparedInstallForQuit()
+{
+    const juce::ScopedLock lock(stateLock);
+    installQuitAuthorised = installTransaction != juce::File();
+}
+
+bool AppUpdater::rejectDevelopmentUpdate(const Completion& completion)
+{
+    if (!isDevelopmentBuild) return false;
+    const auto result = makeStatus("development",
+        "Development build: update installers are disabled. Build this checkout to update it.");
+    publishStatus(result);
+    if (completion) completion(result);
+    return true;
+}
 
 juce::String AppUpdater::getCurrentVersion() const
 {
@@ -153,13 +130,20 @@ void AppUpdater::setStatusCallback(StatusCallback callback)
 
 void AppUpdater::checkForUpdates(bool manual, Completion completion)
 {
+    if (!MessageThreadLifetime::accepts(jobs.token())) return;
+    if (storeUpdater) { storeUpdater->check(manual, std::move(completion)); return; }
+    if (rejectDevelopmentUpdate(completion)) return;
+    if (installInProgress.load() || getStringProperty(getLastStatus(), "status") == "download-ready")
+    {
+        if (completion) completion(getLastStatus());
+        return;
+    }
     if (checkInProgress.exchange(true))
     {
         auto busy = makeStatus("busy", "An update check is already running.", {}, {}, {}, {}, {}, {}, {}, 0, {}, getCurrentChannel());
-        publishStatus(busy);
 
         if (completion)
-            juce::MessageManager::callAsync([completion, busy]() { completion(busy); });
+            juce::MessageManager::callAsync([completion, busy, alive = jobs.token()]() { if (MessageThreadLifetime::accepts(alive)) completion(busy); });
 
         return;
     }
@@ -170,10 +154,9 @@ void AppUpdater::checkForUpdates(bool manual, Completion completion)
         auto skipped = makeStatus("skipped",
                                   "Automatic update check skipped until the next scheduled window.",
                                   {}, {}, {}, {}, {}, {}, {}, 0, {}, getCurrentChannel());
-        publishStatus(skipped);
 
         if (completion)
-            juce::MessageManager::callAsync([completion, skipped]() { completion(skipped); });
+            juce::MessageManager::callAsync([completion, skipped, alive = jobs.token()]() { if (MessageThreadLifetime::accepts(alive)) completion(skipped); });
 
         return;
     }
@@ -182,305 +165,391 @@ void AppUpdater::checkForUpdates(bool manual, Completion completion)
                              manual ? "Checking for updates..." : "Checking for updates in the background...",
                              {}, {}, {}, {}, {}, {}, {}, 0, {}, getCurrentChannel()));
 
-    std::thread([this, completion = std::move(completion)]() mutable
+    jobs.addJob([this, alive = jobs.token(), completion = std::move(completion)]() mutable
     {
         auto result = performUpdateCheck();
-        checkInProgress = false;
-
-        juce::MessageManager::callAsync([this, completion = std::move(completion), result]() mutable
+        juce::MessageManager::callAsync([this, alive, completion = std::move(completion), result]() mutable
         {
+            if (!MessageThreadLifetime::accepts(alive)) return;
+            checkInProgress = false;
+            {
+                const juce::ScopedLock lock(stateLock);
+                if (getStringProperty(result, "status") == "update-available") availableUpdate = result.clone();
+                else availableUpdate = juce::var();
+            }
             publishStatus(result);
             if (completion)
                 completion(result);
         });
-    }).detach();
+    });
 }
 
-void AppUpdater::downloadAndInstallUpdate(const juce::String& downloadUrl,
-                                          const juce::String& version,
-                                          const juce::String& expectedSha256,
-                                          const juce::String& releasePageUrl,
-                                          const juce::String& installerArguments,
-                                          juce::int64 expectedSize,
-                                          Completion completion)
+void AppUpdater::downloadUpdate(Completion completion)
 {
-    if (installInProgress.exchange(true))
+    if (!MessageThreadLifetime::accepts(jobs.token())) return;
+    if (storeUpdater) { storeUpdater->download(std::move(completion)); return; }
+    if (rejectDevelopmentUpdate(completion)) return;
+    if (checkInProgress.load() || installInProgress.exchange(true))
     {
-        auto busy = makeStatus("busy", "An update download is already running.", version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, {}, getCurrentChannel(), false, installerArguments);
-        publishStatus(busy);
-
-        if (completion)
-            juce::MessageManager::callAsync([completion, busy]() { completion(busy); });
-
+        if (completion) completion(getLastStatus());
         return;
     }
-
-    publishStatus(makeStatus("downloading", "Downloading update...", version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, {}, getCurrentChannel(), false, installerArguments));
-
-    std::thread([this, completion = std::move(completion), downloadUrl, version, expectedSha256, releasePageUrl, installerArguments, expectedSize]() mutable
+    juce::var offer;
     {
-        auto result = performDownloadAndInstall(downloadUrl, version, expectedSha256, releasePageUrl, installerArguments, expectedSize);
-        installInProgress = false;
-
-        juce::MessageManager::callAsync([this, completion = std::move(completion), result]() mutable
+        const juce::ScopedLock lock(stateLock);
+        offer = availableUpdate.clone();
+    }
+    cancelRequested = false;
+    auto starting = offer.isObject() ? offer.clone() : makeStatus("downloading", "Downloading update...");
+    starting.getDynamicObject()->setProperty("status", "downloading");
+    starting.getDynamicObject()->setProperty("message", "Downloading update...");
+    publishStatus(starting);
+    jobs.addJob([this, alive = jobs.token(), offer, completion = std::move(completion)]() mutable
+    {
+        auto result = performDownload(offer);
+        juce::MessageManager::callAsync([this, alive, completion = std::move(completion), result]() mutable
         {
+            if (!MessageThreadLifetime::accepts(alive)) return;
+            installInProgress = false;
             publishStatus(result);
-            if (completion)
-                completion(result);
+            if (completion) completion(result);
         });
-    }).detach();
+    });
+}
+
+void AppUpdater::cancelDownload()
+{
+    if (storeUpdater) storeUpdater->cancel();
+    else
+    {
+        cancelRequested = true;
+        const juce::ScopedLock lock(stateLock);
+        UpdateInstaller::cancel(installTransaction);
+        installTransaction = juce::File();
+        installQuitAuthorised = false;
+    }
+}
+
+void AppUpdater::installDownloadedUpdate(Completion completion)
+{
+    if (!MessageThreadLifetime::accepts(jobs.token())) return;
+    if (storeUpdater) { storeUpdater->install(std::move(completion)); return; }
+    if (rejectDevelopmentUpdate(completion)) return;
+    if (checkInProgress.load() || installInProgress.exchange(true))
+    {
+        if (completion) completion(getLastStatus());
+        return;
+    }
+    cancelRequested = false;
+    auto status = getLastStatus().clone();
+    status.getDynamicObject()->setProperty("status", "installing");
+    status.getDynamicObject()->setProperty("message", "Verifying update before opening...");
+    publishStatus(status);
+    jobs.addJob([this, alive = jobs.token(), completion = std::move(completion)]() mutable
+    {
+        const auto result = performInstall();
+        juce::MessageManager::callAsync([this, alive, completion = std::move(completion), result]() mutable
+        {
+            if (!MessageThreadLifetime::accepts(alive)) return;
+            installInProgress = false;
+            const auto finalResult = cancelRequested.load() ? makeStatus("cancelled", "Update installation cancelled.") : result;
+            publishStatus(finalResult);
+            if (completion) completion(finalResult);
+        });
+    });
+}
+
+juce::var AppUpdater::statusFromEnvelope(const juce::var& envelope) const
+{
+    juce::String error;
+    const auto manifest = UpdateManifest::verify(envelope, trustedPublicKey, error);
+    if (!manifest.isObject()) return makeStatus("error", error);
+    const auto version = manifest["version"].toString();
+    if (!UpdateManifest::numericVersion(version) || manifest["channel"].toString() != getCurrentChannel())
+        return makeStatus("error", "The signed update version or channel is invalid.");
+    const auto platform = manifest["platforms"][juce::Identifier(getPlatformKey())];
+    const auto releasePage = manifest["releasePageUrl"].toString();
+    if (!UpdateManifest::compatible(platform, UpdateManifest::architecture(), UpdateManifest::systemVersion(), UpdateManifest::libcVersion(), error))
+        return makeStatus("incompatible", error, version, {}, {}, {}, releasePage);
+    const auto url = platform["url"].toString();
+    const auto hash = platform["sha256"].toString();
+    const auto size = getInt64Property(platform, "size");
+    if (!validateUpdateDownload(url, hash, size, error)) return makeStatus("error", error);
+    const auto suffix = getPlatformKey() == "windows" ? ".exe" : getPlatformKey() == "macos" ? ".dmg" : ".AppImage";
+    const auto name = getDownloadFileName(juce::URL(url), version);
+    if (!name.endsWith(suffix)) return makeStatus("error", "The signed update package has the wrong file type.");
+    const bool newer = compareVersions(version, getCurrentVersion()) > 0;
+    auto result = makeStatus(newer ? "update-available" : "up-to-date",
+        newer ? "OpenStudio " + version + " is available." : "OpenStudio is already up to date.",
+        version, url, hash, manifest["notes"].toString(), releasePage, manifest["fullReleaseNotesUrl"].toString(),
+        manifest["publishedAt"].toString(), size, name, getCurrentChannel(), false, {}, "signed-manifest");
+    result.getDynamicObject()->setProperty("signedEnvelope", envelope);
+    return result;
 }
 
 juce::var AppUpdater::performUpdateCheck()
 {
-    const auto manifestUrl = getManifestUrl().trim();
-    const auto appcastUrl = getAppcastUrl().trim();
-    const auto currentChannel = getCurrentChannel();
-
-    if (manifestUrl.isEmpty() && appcastUrl.isEmpty())
-        return makeStatus("error", "No update feed URL is configured.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-    auto buildStatusFromFeed = [this, currentChannel](const ParsedUpdateFeed& feed, const juce::String& invalidFeedMessage)
+    if (WindowsPackage::isStoreManaged()) return makeStatus("error", "This installation uses Microsoft Store package updates.");
+    // GitHub is authoritative. A healthy but stale website must never suppress
+    // the newer release. The website is a signed fallback for GitHub outages.
+    juce::StringArray feeds;
+    if (getCurrentChannel() == "stable")
+        feeds.add("https://github.com/sdevil7th/OpenStudio/releases/latest/download/OpenStudio-release-stable-latest.json");
+    if (getManifestUrl().isNotEmpty()) feeds.addIfNotAlreadyThere(getManifestUrl());
+    auto failure = makeStatus("error", "Could not reach a signed update feed. Please try again later.");
+    const auto readUrl = [&](const juce::String& url, const juce::String& acceptHeader = juce::String())
     {
-        const auto latestVersion = feed.version.trim();
-        if (latestVersion.isEmpty())
-            return makeStatus("error", invalidFeedMessage, {}, {}, {}, {}, feed.releasePageUrl, feed.releaseNotesUrl, feed.publishedAt, 0, {}, currentChannel, false, {}, feed.source);
-
-        const auto feedChannel = feed.channel.trim().isNotEmpty() ? feed.channel.trim() : currentChannel;
-        auto releasePageUrl = feed.releasePageUrl.trim();
-        if (releasePageUrl.isEmpty())
-            releasePageUrl = getFallbackReleasesPageUrl();
-
-        const auto isMandatory = feed.minimumSupportedVersion.isNotEmpty()
-            && compareVersions(getCurrentVersion(), feed.minimumSupportedVersion) < 0;
-
-        if (feedChannel != currentChannel)
-            return makeStatus("error",
-                              "The update feed channel does not match this build.",
-                              latestVersion, {}, feed.sha256, feed.notes, releasePageUrl, feed.releaseNotesUrl, feed.publishedAt,
-                              feed.expectedSize, feed.fileName, feedChannel, isMandatory, feed.installerArguments, feed.source);
-
-        if (feed.downloadUrl.trim().isEmpty())
-            return makeStatus("error",
-                              "The update feed does not include a download for this platform.",
-                              latestVersion, {}, feed.sha256, feed.notes, releasePageUrl, feed.releaseNotesUrl, feed.publishedAt,
-                              feed.expectedSize, feed.fileName, feedChannel, isMandatory, feed.installerArguments, feed.source);
-
-        recordSuccessfulCheck(latestVersion, feed.publishedAt);
-
-        if (compareVersions(latestVersion, getCurrentVersion()) <= 0)
-            return makeStatus("up-to-date", "OpenStudio is already up to date.",
-                              latestVersion, feed.downloadUrl, feed.sha256, feed.notes, releasePageUrl, feed.releaseNotesUrl, feed.publishedAt,
-                              feed.expectedSize, feed.fileName, feedChannel, isMandatory, feed.installerArguments, feed.source);
-
-        return makeStatus("update-available",
-                          isMandatory
-                              ? "A required OpenStudio update is available."
-                              : "OpenStudio " + latestVersion + " is available.",
-                          latestVersion, feed.downloadUrl, feed.sha256, feed.notes, releasePageUrl, feed.releaseNotesUrl, feed.publishedAt,
-                          feed.expectedSize, feed.fileName, feedChannel, isMandatory, feed.installerArguments, feed.source);
-    };
-
-    auto parseJsonManifest = [this, currentChannel, &buildStatusFromFeed](const juce::String& manifestText)
-    {
-        auto parsed = juce::JSON::parse(manifestText);
-        if (!parsed.isObject())
-            return makeStatus("error", "The update manifest is invalid JSON.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        const auto schemaVersion = getInt64Property(parsed, "schemaVersion", 1);
-        if (schemaVersion > 1)
-            return makeStatus("error", "This OpenStudio build cannot read the published update manifest format yet.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        ParsedUpdateFeed feed;
-        feed.source = "json-manifest";
-        feed.version = getStringProperty(parsed, "version").trim();
-        feed.notes = getStringProperty(parsed, "notes");
-        feed.publishedAt = getStringProperty(parsed, "publishedAt");
-        feed.releasePageUrl = getStringProperty(parsed, "releasePageUrl").trim();
-        feed.releaseNotesUrl = getStringProperty(parsed, "fullReleaseNotesUrl").trim();
-        feed.channel = getStringProperty(parsed, "channel").trim();
-        feed.minimumSupportedVersion = getStringProperty(parsed, "minimumSupportedVersion").trim();
-
-        const auto platformKey = getPlatformKey();
-        juce::var platformNode;
-
-        if (auto* manifestObj = parsed.getDynamicObject())
+        int httpStatus = 0;
+        const auto requestUrl = juce::URL(url).withParameter("check", juce::String(juce::Time::currentTimeMillis()));
+        auto stream = requestUrl.createInputStream(juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
+            .withConnectionTimeoutMs(5000).withNumRedirectsToFollow(5).withStatusCode(&httpStatus)
+            .withExtraHeaders("Cache-Control: no-cache\r\nUser-Agent: OpenStudio-Updater\r\n" + acceptHeader));
+        juce::MemoryOutputStream buffer;
+        char chunk[8192];
+        while (stream && httpStatus == 200 && !stream->isExhausted() && MessageThreadLifetime::accepts(jobs.token())
+               && buffer.getDataSize() < 2 * 1024 * 1024)
         {
-            auto platforms = manifestObj->getProperty("platforms");
-            if (auto* platformsObj = platforms.getDynamicObject())
-                platformNode = platformsObj->getProperty(platformKey);
-
-            if (platformNode.isVoid())
-                platformNode = manifestObj->getProperty(platformKey);
+            const auto bytes = stream->read(chunk, sizeof(chunk));
+            if (bytes <= 0) break;
+            buffer.write(chunk, static_cast<size_t>(bytes));
         }
-
-        feed.downloadUrl = getStringProperty(platformNode, "url").trim();
-        feed.sha256 = getStringProperty(platformNode, "sha256").trim();
-        feed.fileName = getStringProperty(platformNode, "fileName").trim();
-        feed.expectedSize = getInt64Property(platformNode, "size", 0);
-        feed.installerArguments = getStringProperty(platformNode, "installerArguments").trim();
-
-        return buildStatusFromFeed(feed, "The update manifest does not include a version.");
+        return buffer.getDataSize() < 2 * 1024 * 1024 ? buffer.toUTF8() : juce::String();
     };
-
-    auto parseAppcast = [this, currentChannel, &buildStatusFromFeed](const juce::String& xmlText)
+    for (const auto& url : feeds)
     {
-        std::unique_ptr<juce::XmlElement> xml(juce::XmlDocument::parse(xmlText));
-        if (xml == nullptr)
-            return makeStatus("error", "The update appcast is invalid XML.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        juce::XmlElement* channel = nullptr;
-        if (xmlNameMatches(xml->getTagName(), "rss"))
-            channel = xml->getChildByName("channel");
-        else if (xmlNameMatches(xml->getTagName(), "channel"))
-            channel = xml.get();
-
-        if (channel == nullptr)
-            return makeStatus("error", "The update appcast does not contain a channel.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        juce::XmlElement* item = nullptr;
-        for (auto* child = channel->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        if (!MessageThreadLifetime::accepts(jobs.token())) return makeStatus("cancelled", "Update check cancelled.");
+        if (juce::URL(url).getScheme() != "https") continue;
+        juce::String contents;
+        if (feedReader) contents = feedReader(url); // Deterministic headless regression injection.
+        else
         {
-            if (xmlNameMatches(child->getTagName(), "item"))
+            if (url.startsWith("https://github.com/sdevil7th/OpenStudio/"))
             {
-                item = child;
-                break;
+                // Resolve the asset's immutable ID. GitHub's human download URL
+                // can keep redirecting to a deleted old asset after a metadata repair.
+                const auto release = juce::JSON::parse(readUrl("https://api.github.com/repos/sdevil7th/OpenStudio/releases/latest"));
+                const auto assets = release["assets"];
+                if (auto* entries = assets.getArray())
+                    for (const auto& asset : *entries)
+                        if (asset["name"].toString() == "OpenStudio-release-stable-latest.json")
+                        {
+                            const auto id = asset["id"].toString();
+                            if (id.isNotEmpty() && id.length() <= 20 && id.containsOnly("0123456789"))
+                                contents = readUrl("https://api.github.com/repos/sdevil7th/OpenStudio/releases/assets/" + id,
+                                                   "Accept: application/octet-stream\r\n");
+                            break;
+                        }
             }
+            else contents = readUrl(url);
         }
-
-        if (item == nullptr)
-            return makeStatus("error", "The update appcast does not contain a release item.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        auto* enclosure = item->getChildByName("enclosure");
-        if (enclosure == nullptr)
-            return makeStatus("error", "The update appcast does not contain a downloadable enclosure.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        ParsedUpdateFeed feed;
-        feed.source = "appcast";
-        feed.version = getXmlAttribute(*enclosure, { "sparkle:shortVersionString", "sparkle:version", "version" }).trim();
-        feed.downloadUrl = getXmlAttribute(*enclosure, { "url" }).trim();
-        feed.sha256 = getXmlAttribute(*enclosure, { "openstudio:sha256", "sha256" }).trim();
-        feed.fileName = getXmlAttribute(*enclosure, { "openstudio:fileName", "fileName" }).trim();
-        feed.channel = getXmlAttribute(*enclosure, { "openstudio:channel", "channel" }).trim();
-        feed.minimumSupportedVersion = getXmlAttribute(*enclosure, { "openstudio:minimumSupportedVersion", "minimumSupportedVersion" }).trim();
-        feed.installerArguments = getXmlAttribute(*enclosure, { "sparkle:installerArguments", "openstudio:installerArguments", "installerArguments" }).trim();
-        feed.expectedSize = getXmlAttribute(*enclosure, { "length" }).getLargeIntValue();
-        feed.notes = getXmlChildText(*item, { "description" });
-        feed.releasePageUrl = getXmlChildText(*channel, { "link" }).trim();
-        feed.releaseNotesUrl = getXmlChildText(*item, { "releaseNotesLink" }).trim();
-        feed.publishedAt = getXmlChildText(*item, { "pubDate" }).trim();
-
-        if (feed.fileName.isEmpty() && feed.downloadUrl.isNotEmpty())
-            feed.fileName = getDownloadFileName(juce::URL(feed.downloadUrl), feed.version);
-
-        return buildStatusFromFeed(feed, "The update appcast does not include a version.");
-    };
-
-    auto tryFeedUrl = [&](const juce::String& feedUrl, bool forceXml)
-    {
-        const auto trimmedUrl = feedUrl.trim();
-        if (trimmedUrl.isEmpty())
-            return makeStatus("error", "No update feed URL is configured.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        auto feedText = juce::URL(trimmedUrl).readEntireTextStream(false).trim();
-        if (feedText.isEmpty())
-            return makeStatus("error", "Could not reach the update server.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-        if (forceXml || looksLikeXml(feedText))
-            return parseAppcast(feedText);
-
-        return parseJsonManifest(feedText);
-    };
-
-    juce::var lastFailure = makeStatus("error", "Could not reach the update server.", {}, {}, {}, {}, {}, {}, {}, 0, {}, currentChannel);
-
-    if (manifestUrl.isNotEmpty())
-    {
-        auto manifestResult = tryFeedUrl(manifestUrl, false);
-        if (getStringProperty(manifestResult, "status") != "error")
-            return manifestResult;
-        lastFailure = manifestResult;
+        if (contents.isEmpty()) continue;
+        const auto status = statusFromEnvelope(juce::JSON::parse(contents));
+        if (status["status"].toString() != "error")
+        {
+            recordSuccessfulCheck(status["version"].toString(), status["publishedAt"].toString());
+            return status;
+        }
+        failure = status;
     }
-
-    if (appcastUrl.isNotEmpty() && appcastUrl != manifestUrl)
-    {
-        auto appcastResult = tryFeedUrl(appcastUrl, true);
-        if (getStringProperty(appcastResult, "status") != "error")
-            return appcastResult;
-        lastFailure = appcastResult;
-    }
-
-    return lastFailure;
+    return failure;
 }
 
-juce::var AppUpdater::performDownloadAndInstall(const juce::String& downloadUrl,
-                                                const juce::String& version,
-                                                const juce::String& expectedSha256,
-                                                const juce::String& releasePageUrl,
-                                                const juce::String& installerArguments,
-                                                juce::int64 expectedSize) const
+bool AppUpdater::validateUpdateDownload(const juce::String& downloadUrl, const juce::String& sha256,
+                                        juce::int64 size, juce::String& error)
 {
-    const auto currentChannel = getCurrentChannel();
-
-    if (downloadUrl.trim().isEmpty())
-    {
-        if (releasePageUrl.isNotEmpty())
-        {
-            juce::URL(releasePageUrl).launchInDefaultBrowser();
-            return makeStatus("release-page-opened",
-                              "Opened the release page in your browser.",
-                              version, {}, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, {}, currentChannel, false, installerArguments);
-        }
-
-        return makeStatus("error", "No download URL was provided for this update.", version, {}, expectedSha256, {}, {}, {}, {}, expectedSize, {}, currentChannel, false, installerArguments);
-    }
-
     const juce::URL url(downloadUrl);
-    const auto fileName = getDownloadFileName(url, version);
-    auto updateDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                         .getChildFile("OpenStudio")
-                         .getChildFile("updates");
-    updateDir.createDirectory();
+    if (url.getScheme().toLowerCase() != "https" || url.getDomain().isEmpty())
+        error = "The update download must use HTTPS.";
+    else if (sha256.length() != 64 || !sha256.containsOnly("0123456789abcdefABCDEF"))
+        error = "The update feed must include a valid SHA-256 checksum.";
+    else if (size <= 0 || size > 2LL * 1024 * 1024 * 1024)
+        error = "The update feed must include a valid download size.";
+    else
+        return true;
+    return false;
+}
 
-    const auto installerFile = updateDir.getChildFile(fileName);
+juce::File AppUpdater::stagedFile(const juce::File& root, const juce::String& relativePath)
+{
+    const auto parts = juce::StringArray::fromTokens(relativePath.replaceCharacter('\\', '/'), "/", "");
+    if (parts.size() != 2 || parts[0].length() != 32 || !parts[0].containsOnly("0123456789abcdef")
+        || parts[1].isEmpty() || parts[1] == "." || parts[1] == ".."
+        || juce::File::createLegalFileName(parts[1]) != parts[1] || root.isSymbolicLink()) return {};
+    const auto directory = root.getChildFile(parts[0]);
+    const auto file = directory.getChildFile(parts[1]);
+    if (directory.isSymbolicLink() || file.isSymbolicLink() || !file.isAChildOf(root)) return {};
+    return file;
+}
+
+juce::var AppUpdater::restoreDownload()
+{
+    juce::var staged;
+    { const juce::ScopedLock lock(stateLock); staged = persistedState["stagedDownload"].clone(); }
+    if (!staged.isObject()) return {};
+    const auto file = stagedFile(stateDirectory.getChildFile("updates"), staged["relativePath"].toString());
+    auto offer = statusFromEnvelope(staged["signedEnvelope"]);
     juce::String error;
-
-    if (!downloadToFile(url, installerFile, error))
+    if (file != juce::File() && offer["status"].toString() == "update-available"
+        && file.getFileName() == offer["fileName"].toString()
+        && verifyDownloadedFileSize(file, getInt64Property(offer, "size"), error)
+        && verifyDownloadedFileSha256(file, offer["sha256"].toString(), error))
     {
-        if (releasePageUrl.isNotEmpty())
-            juce::URL(releasePageUrl).launchInDefaultBrowser();
-
-        return makeStatus("error",
-                          error.isNotEmpty() ? error : "The update download failed.",
-                          version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, installerFile.getFileName(), currentChannel, false, installerArguments);
+        const juce::ScopedLock lock(stateLock);
+        downloadedInstaller = file;
+        availableUpdate = downloadedUpdate = offer.clone();
+        offer.getDynamicObject()->setProperty("status", "download-ready");
+        offer.getDynamicObject()->setProperty("message", "Your downloaded update has been verified and is ready to install.");
+        return offer;
     }
-
-    if (!verifyDownloadedFileSize(installerFile, expectedSize, error))
-        return makeStatus("error",
-                          error.isNotEmpty() ? error : "The downloaded update did not match the published size.",
-                          version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, installerFile.getFileName(), currentChannel, false, installerArguments);
-
-    if (!verifyDownloadedFileSha256(installerFile, expectedSha256, error))
-        return makeStatus("error",
-                          error.isNotEmpty() ? error : "The downloaded update did not match the published checksum.",
-                          version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, installerFile.getFileName(), currentChannel, false, installerArguments);
-
-    if (!launchDownloadedInstaller(installerFile, installerArguments, error))
-        return makeStatus("error",
-                          error.isNotEmpty() ? error : "The update downloaded, but the installer could not be opened.",
-                          version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, installerFile.getFileName(), currentChannel, false, installerArguments);
-
-   #if JUCE_MAC
-    const auto successMessage = "The update DMG has been opened. Drag OpenStudio to Applications, then use right-click > Open if macOS warns about an unidentified developer.";
-   #elif JUCE_WINDOWS
-    const auto successMessage = "The update installer has been opened.";
-   #else
-    const auto successMessage = "The update package has been opened.";
+    // Only delete the exact updater-owned file, never recurse or follow links.
+    bool runningPackage = false;
+   #if JUCE_LINUX
+    const auto appImagePath = juce::SystemStats::getEnvironmentVariable("APPIMAGE", {});
+    runningPackage = appImagePath.isNotEmpty() && file == juce::File(appImagePath);
    #endif
+    if (file != juce::File() && !runningPackage) { file.deleteFile(); file.getParentDirectory().deleteFile(); }
+    const juce::ScopedLock lock(stateLock);
+    persistedState.getDynamicObject()->removeProperty("stagedDownload");
+    savePersistedState();
+    return {};
+}
 
-    return makeStatus("install-started",
-                      successMessage,
-                      version, downloadUrl, expectedSha256, {}, releasePageUrl, {}, {}, expectedSize, installerFile.getFileName(), currentChannel, false, installerArguments);
+juce::var AppUpdater::performDownload(const juce::var& offer)
+{
+    if (WindowsPackage::isStoreManaged()) return makeStatus("error", "This installation uses Microsoft Store package updates.");
+    auto result = offer.isObject() ? offer.clone() : makeStatus("error", "Check for updates before downloading.");
+    auto finish = [&](const juce::String& status, const juce::String& message)
+    {
+        result.getDynamicObject()->setProperty("status", status);
+        result.getDynamicObject()->setProperty("message", message);
+        return result;
+    };
+    if (!offer.isObject()) return result;
+    const auto downloadUrl = getStringProperty(offer, "downloadUrl");
+    const auto version = getStringProperty(offer, "version");
+    if (compareVersions(version, getCurrentVersion()) <= 0)
+        return finish("up-to-date", "OpenStudio is already up to date.");
+    const auto sha256 = getStringProperty(offer, "sha256");
+    const auto size = getInt64Property(offer, "size");
+    juce::String error;
+    const auto authenticated = statusFromEnvelope(offer["signedEnvelope"]);
+    if (authenticated["status"].toString() != "update-available") return authenticated;
+    if (authenticated["downloadUrl"] != offer["downloadUrl"] || authenticated["sha256"] != offer["sha256"]
+        || authenticated["size"] != offer["size"] || authenticated["version"] != offer["version"])
+        return finish("error", "The staged update does not match its signed manifest.");
+    if (!validateUpdateDownload(downloadUrl, sha256, size, error)) return finish("error", error);
+    const juce::URL url(downloadUrl);
+    const auto installerFile = stateDirectory.getChildFile("updates")
+        .getChildFile(juce::Uuid().toString()).getChildFile(getDownloadFileName(url, version));
+    if (installerFile.getParentDirectory().createDirectory().failed())
+        return finish("error", "Could not create the update download folder.");
+    auto progress = [this, alive = jobs.token(), offer, size](juce::int64 bytes)
+    {
+        auto status = offer.clone();
+        auto* obj = status.getDynamicObject();
+        obj->setProperty("status", "downloading");
+        obj->setProperty("message", "Downloading update...");
+        obj->setProperty("downloadedBytes", bytes);
+        obj->setProperty("progress", juce::jlimit(0.0, 1.0, static_cast<double>(bytes) / static_cast<double>(size)));
+        juce::MessageManager::callAsync([this, alive, status]()
+        {
+            if (MessageThreadLifetime::accepts(alive)) publishStatus(status);
+        });
+    };
+    if (!downloadToFile(url, installerFile, error, jobs.token(), &cancelRequested, progress)
+        || !verifyDownloadedFileSize(installerFile, size, error)
+        || !verifyDownloadedFileSha256(installerFile, sha256, error)
+        || cancelRequested.load() || !MessageThreadLifetime::accepts(jobs.token()))
+    {
+        installerFile.deleteFile();
+        installerFile.getParentDirectory().deleteFile(); // Only the empty folder created for this download.
+        return finish(cancelRequested.load() ? "cancelled" : "error", cancelRequested.load() ? "Download cancelled. You can try again later." : error);
+    }
+    {
+        const juce::ScopedLock lock(stateLock);
+        if (downloadedInstaller.existsAsFile())
+        {
+            downloadedInstaller.deleteFile();
+            downloadedInstaller.getParentDirectory().deleteFile(); // Empty updater-owned directory only.
+        }
+        downloadedInstaller = installerFile;
+        downloadedUpdate = offer.clone();
+        if (!persistedState.isObject()) persistedState = juce::var(new juce::DynamicObject());
+        auto* staged = new juce::DynamicObject();
+        staged->setProperty("relativePath", installerFile.getRelativePathFrom(stateDirectory.getChildFile("updates")));
+        staged->setProperty("signedEnvelope", offer["signedEnvelope"]);
+        persistedState.getDynamicObject()->setProperty("stagedDownload", juce::var(staged));
+        if (!savePersistedState()) return finish("error", "Could not save the downloaded update for later. Check available disk space.");
+    }
+    return finish("download-ready", "Update downloaded and verified. Install it when you are ready.");
+}
+
+juce::var AppUpdater::performInstall()
+{
+    if (cancelRequested.load()) return makeStatus("cancelled", "Update installation cancelled.");
+    if (WindowsPackage::isStoreManaged()) return makeStatus("error", "This installation uses Microsoft Store package updates.");
+    juce::File installer;
+    juce::var offer;
+    {
+        const juce::ScopedLock lock(stateLock);
+        installer = downloadedInstaller;
+        offer = downloadedUpdate.clone();
+    }
+    if (!offer.isObject()) return makeStatus("error", "Download the update before installing it.");
+    if (compareVersions(getStringProperty(offer, "version"), getCurrentVersion()) <= 0)
+        return makeStatus("up-to-date", "OpenStudio is already up to date.");
+    const auto authenticated = statusFromEnvelope(offer["signedEnvelope"]);
+    if (authenticated["status"].toString() != "update-available") return authenticated;
+    offer = authenticated;
+    auto result = offer.clone();
+    juce::String error;
+    if (!verifyDownloadedFileSize(installer, getInt64Property(offer, "size"), error)
+        || !verifyDownloadedFileSha256(installer, getStringProperty(offer, "sha256"), error))
+    {
+        result.getDynamicObject()->setProperty("status", "error");
+        result.getDynamicObject()->setProperty("message", error);
+        return result;
+    }
+    if (cancelRequested.load() || !MessageThreadLifetime::accepts(jobs.token()))
+        return makeStatus("cancelled", "Update installation cancelled.");
+   #if JUCE_LINUX || JUCE_MAC
+    juce::File transaction;
+    bool executableReady = true;
+   #if JUCE_LINUX
+    // The verified package remains usable for manual fallback in locations
+    // where automatic replacement is intentionally refused.
+    executableReady = installer.setExecutePermission(true);
+    if (!executableReady) error = "Could not make the verified AppImage executable.";
+   #endif
+    const bool prepared = executableReady && UpdateInstaller::prepare(installer, offer["signedEnvelope"], stateDirectory, transaction, error,
+        [this] { return cancelRequested.load() || !MessageThreadLifetime::accepts(jobs.token()); });
+    {
+        const juce::ScopedLock lock(stateLock);
+        if (prepared && !cancelRequested.load() && MessageThreadLifetime::accepts(jobs.token()))
+        {
+            installTransaction = transaction;
+            installQuitAuthorised = false;
+        }
+        else
+        {
+            UpdateInstaller::cancel(transaction);
+            if (cancelRequested.load() || !MessageThreadLifetime::accepts(jobs.token()))
+                return makeStatus("cancelled", "Update installation cancelled.");
+            if (error.isEmpty()) error = "Could not prepare the update.";
+        }
+    }
+    const auto successMessage = "Update prepared. OpenStudio will close, install the update and restart. The previous version will be retained for recovery.";
+   #else
+    // The Windows installer must not forcibly close a session that changed while
+    // verification was running. The frontend uses the normal saved-project quit path.
+    const auto arguments = getPlatformKey() == "windows" ? "/SP- /NOICONS /NOCLOSEAPPLICATIONS /NORESTARTAPPLICATIONS" : "";
+    launchDownloadedInstaller(installer, arguments, error);
+    const auto successMessage = "The installer is open. Follow its steps to update and reopen OpenStudio.";
+   #endif
+    result.getDynamicObject()->setProperty("downloadPath", installer.getFullPathName());
+    result.getDynamicObject()->setProperty("status", error.isEmpty() ? "install-started" : "error");
+    result.getDynamicObject()->setProperty("message", error.isEmpty() ? successMessage : error);
+    return result;
 }
 
 void AppUpdater::publishStatus(const juce::var& status)
@@ -506,30 +575,14 @@ juce::String AppUpdater::getManifestUrl()
    #endif
 }
 
-juce::String AppUpdater::getAppcastUrl()
-{
-   #ifdef OPENSTUDIO_UPDATE_APPCAST_URL
-    return juce::String(OPENSTUDIO_UPDATE_APPCAST_URL);
-   #else
-    return {};
-   #endif
-}
-
-juce::String AppUpdater::getFallbackReleasesPageUrl()
-{
-   #ifdef OPENSTUDIO_RELEASES_PAGE_URL
-    return juce::String(OPENSTUDIO_RELEASES_PAGE_URL);
-   #else
-    return {};
-   #endif
-}
-
 juce::String AppUpdater::getPlatformKey()
 {
    #if JUCE_WINDOWS
     return "windows";
    #elif JUCE_MAC
     return "macos";
+   #elif JUCE_LINUX
+    return "linux";
    #else
     return "unsupported";
    #endif
@@ -548,6 +601,8 @@ bool AppUpdater::shouldSkipAutomaticCheck() const
 {
     const juce::ScopedLock lock(stateLock);
     const auto lastSuccessfulCheckAtMs = getInt64Property(persistedState, "lastSuccessfulCheckAtMs", 0);
+    if (compareVersions(getStringProperty(persistedState, "lastSeenVersion"), getCurrentVersion()) > 0)
+        return false; // Re-offer an update after relaunch even if it was checked today.
 
     if (lastSuccessfulCheckAtMs <= 0)
         return false;
@@ -574,11 +629,11 @@ void AppUpdater::recordSuccessfulCheck(const juce::String& latestVersion, const 
     savePersistedState();
 }
 
-void AppUpdater::savePersistedState() const
+bool AppUpdater::savePersistedState() const
 {
-    const auto stateFile = getPreferredUpdaterStateFile();
+    const auto stateFile = stateDirectory.getChildFile("updater-state.json");
     stateFile.getParentDirectory().createDirectory();
-    stateFile.replaceWithText(juce::JSON::toString(persistedState));
+    return stateFile.replaceWithText(juce::JSON::toString(persistedState));
 }
 
 int AppUpdater::compareVersions(const juce::String& lhs, const juce::String& rhs)
@@ -627,7 +682,7 @@ juce::String AppUpdater::getDownloadFileName(const juce::URL& url, const juce::S
         candidate = candidate.upToFirstOccurrenceOf("?", false, false);
 
     if (candidate.isNotEmpty())
-        return candidate;
+        return juce::File::createLegalFileName(candidate);
 
    #if JUCE_WINDOWS
     return "OpenStudio-" + version + "-Setup.exe";
@@ -638,14 +693,16 @@ juce::String AppUpdater::getDownloadFileName(const juce::URL& url, const juce::S
    #endif
 }
 
-bool AppUpdater::downloadToFile(const juce::URL& url, const juce::File& targetFile, juce::String& error)
+bool AppUpdater::downloadToFile(const juce::URL& url, const juce::File& targetFile, juce::String& error,
+                                const MessageThreadLifetime::Token& alive,
+                                const std::atomic<bool>* cancelled,
+                                std::function<void(juce::int64)> progress)
 {
-    const auto tempFile = targetFile.getSiblingFile(targetFile.getFileName() + ".download");
-    tempFile.deleteFile();
+    juce::TemporaryFile temporary(targetFile);
 
     auto input = url.createInputStream(
         juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
-            .withConnectionTimeoutMs(15000)
+            .withConnectionTimeoutMs(5000)
             .withNumRedirectsToFollow(5));
 
     if (input == nullptr)
@@ -654,33 +711,40 @@ bool AppUpdater::downloadToFile(const juce::URL& url, const juce::File& targetFi
         return false;
     }
 
-    juce::FileOutputStream output(tempFile);
-    if (!output.openedOk())
+    auto output = temporary.getFile().createOutputStream();
+    if (!output)
     {
         error = "Could not create a temporary installer file.";
         return false;
     }
 
-    if (output.writeFromInputStream(*input, -1) <= 0)
+    const auto started = juce::Time::getMillisecondCounterHiRes();
+    auto lastProgressAt = started - 250.0;
+    char chunk[65536];
+    while (!input->isExhausted())
     {
-        error = "The installer download was incomplete.";
-        tempFile.deleteFile();
-        return false;
+        if (!MessageThreadLifetime::accepts(alive) || (cancelled != nullptr && cancelled->load())
+            || juce::Time::getMillisecondCounterHiRes() - started > 600000)
+        { error = "Update download cancelled or timed out."; return false; }
+        const auto bytes = input->read(chunk, sizeof(chunk));
+        if (bytes <= 0 || output->getPosition() + bytes > 2LL * 1024 * 1024 * 1024
+            || !output->write(chunk, static_cast<size_t>(bytes)))
+        { error = "Update download was incomplete, too large, or could not be written."; return false; }
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (progress && now - lastProgressAt >= 150.0)
+        {
+            progress(output->getPosition());
+            lastProgressAt = now;
+        }
     }
-
-    output.flush();
-
-    if (targetFile.existsAsFile() && !targetFile.deleteFile())
-    {
-        error = "Could not replace the previous downloaded installer.";
-        tempFile.deleteFile();
-        return false;
-    }
-
-    if (!tempFile.moveFileTo(targetFile))
+    output->flush();
+    if (output->getPosition() <= 0 || output->getStatus().failed() || !MessageThreadLifetime::accepts(alive)
+        || (cancelled != nullptr && cancelled->load()))
+    { error = "The installer download was not finalized."; return false; }
+    output.reset();
+    if (!temporary.overwriteTargetFileWithTemporary())
     {
         error = "Could not move the downloaded installer into place.";
-        tempFile.deleteFile();
         return false;
     }
 
@@ -690,7 +754,10 @@ bool AppUpdater::downloadToFile(const juce::URL& url, const juce::File& targetFi
 bool AppUpdater::verifyDownloadedFileSize(const juce::File& targetFile, juce::int64 expectedSize, juce::String& error)
 {
     if (expectedSize <= 0)
-        return true;
+    {
+        error = "The update is missing its published size.";
+        return false;
+    }
 
     if (!targetFile.existsAsFile())
     {
@@ -708,8 +775,11 @@ bool AppUpdater::verifyDownloadedFileSize(const juce::File& targetFile, juce::in
 bool AppUpdater::verifyDownloadedFileSha256(const juce::File& targetFile, const juce::String& expectedSha256, juce::String& error)
 {
     const auto normalizedExpected = expectedSha256.trim().toLowerCase();
-    if (normalizedExpected.isEmpty())
-        return true;
+    if (normalizedExpected.length() != 64 || !normalizedExpected.containsOnly("0123456789abcdef"))
+    {
+        error = "The update is missing a valid SHA-256 checksum.";
+        return false;
+    }
 
     if (!targetFile.existsAsFile())
     {
@@ -743,9 +813,6 @@ bool AppUpdater::launchDownloadedInstaller(const juce::File& installerFile,
     }
 
     if (installerFile.startAsProcess(installerArguments.trim()))
-        return true;
-
-    if (juce::URL(installerFile).launchInDefaultBrowser())
         return true;
 
     error = "The update was downloaded, but OpenStudio could not open it automatically.";

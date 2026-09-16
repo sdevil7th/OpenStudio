@@ -25,6 +25,19 @@ function sourceClip(overrides: Partial<AudioClip> = {}): AudioClip {
 }
 
 describe("AI generation store actions", () => {
+  it("undoes and redoes a model version choice without losing the prompt", () => {
+    const track = createDefaultTrack("variant-track", "Variant", "#7c3aed", "ai");
+    track.aiWorkflowParams = { prompt: "Acoustic guitar", modelVariant: "original" };
+    useDAWStore.setState({ tracks: [track] });
+    useDAWStore.getState().setAITrackParams(track.id, { ...track.aiWorkflowParams, modelVariant: "int8" });
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams?.modelVariant).toBe("int8");
+    useDAWStore.getState().undo();
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams).toMatchObject({ prompt: "Acoustic guitar", modelVariant: "original" });
+    useDAWStore.getState().redo();
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams).toMatchObject({ prompt: "Acoustic guitar", modelVariant: "int8" });
+    useDAWStore.getState().setAITrackWorkflow(track.id, "lyrics-style");
+    expect(useDAWStore.getState().tracks[0].aiWorkflowParams?.modelVariant).toBe("int8");
+  });
   beforeEach(() => {
     commandManager.clear();
     useDAWStore.setState(initialState);
@@ -59,7 +72,6 @@ describe("AI generation store actions", () => {
     expect(updated.aiWorkflow).toBe("text-to-audio");
     expect(updated.aiWorkflowParams).toMatchObject({
       prompt: "",
-      negative_prompt: "",
       duration: 30,
     });
     expect(useDAWStore.getState().canUndo).toBe(true);
@@ -84,7 +96,7 @@ describe("AI generation store actions", () => {
     expect(tracks).toHaveLength(2);
     expect(tracks[1].name).toBe("AI Variation - Source Loop");
     expect(tracks[1].clips[0].startTime).toBe(10);
-    expect(tracks[1].clips[0].duration).toBe(5);
+    expect(tracks[1].clips[0].duration).toBe(3);
     expect(useDAWStore.getState().canUndo).toBe(true);
 
     useDAWStore.getState().undo();
@@ -108,7 +120,7 @@ describe("AI generation store actions", () => {
     expect(tracks).toHaveLength(1);
     expect(tracks[0].clips).toHaveLength(2);
     expect(tracks[0].clips[1].startTime).toBe(15);
-    expect(tracks[0].clips[1].duration).toBe(8);
+    expect(tracks[0].clips[1].duration).toBe(3);
   });
 
   it("places continuation on a new track when the source tail range collides", async () => {

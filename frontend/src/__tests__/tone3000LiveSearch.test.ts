@@ -30,11 +30,11 @@ afterEach(() => {
 });
 
 describe("TONE3000 live search request snapshots", () => {
-  it("trims text and requests best-match for every non-empty query", () => {
+  it("trims text and honors the chosen sort for non-empty queries", () => {
     const request = snapshot({ query: "  mesa lead  ", requestedSort: "newest" });
 
     expect(request.query).toBe("mesa lead");
-    expect(request.sort).toBe("best-match");
+    expect(request.sort).toBe("newest");
     expect(Object.isFrozen(request)).toBe(true);
   });
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "MessageThreadLifetime.h"
 #include <memory>
 #include <map>
 #include <set>
@@ -65,7 +66,7 @@ private:
     static constexpr int LEVEL_STRIDES[NUM_LEVELS] = { 64, 256, 1024, 4096 };
 
     // Peak file magic number and version
-    static constexpr uint32_t MAGIC = 0x53313350;  // "S13P"
+    static constexpr uint32_t MAGIC = 0x4f53504b;  // "OSPK"
     static constexpr uint32_t VERSION = 1;
 
     // File header structure (written to .ospeaks)
@@ -102,7 +103,6 @@ private:
 
     // Get the .ospeaks file path for an audio file
     static juce::File getPeakFilePath(const juce::File& audioFile);
-    static juce::File getLegacyPeakFilePath(const juce::File& audioFile);
 
     // Load peak data from a peak cache file into memory
     bool loadFromFile(const juce::File& peakFile, const juce::File& audioFile, CacheEntry& entry) const;
@@ -112,7 +112,10 @@ private:
                             int64_t sourceFileSize, int64_t sourceModTimeMs);
 
     // Generate all mipmap levels from an audio file
-    static bool buildPeaks(const juce::File& audioFile, CacheEntry& entry);
+    bool buildPeaks(const juce::File& audioFile, CacheEntry& entry);
+    std::atomic<bool> stopping { false };
+    MessageThreadLifetime completions;
+    friend class RuntimeSafetyRegression;
 
     // In-memory cache: audioFilePath -> CacheEntry
     mutable std::map<juce::String, CacheEntry> memoryCache;

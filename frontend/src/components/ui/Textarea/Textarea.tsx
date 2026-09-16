@@ -1,5 +1,5 @@
 import classNames from 'classnames';
-import { forwardRef } from 'react';
+import { forwardRef, useId } from 'react';
 import { TextareaProps, textareaSizeStyles } from './Textarea.types';
 
 /**
@@ -43,6 +43,8 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
     },
     ref
   ) => {
+    const generatedId = useId();
+    const textareaId = rest.id ?? generatedId;
     const textareaClasses = classNames(
       textareaSizeStyles[size],
       'bg-daw-darker border border-daw-border text-daw-text',
@@ -57,7 +59,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
     return (
       <div className={className}>
         {label && (
-          <label className="block text-sm font-medium text-daw-text-muted mb-1">
+          <label htmlFor={textareaId} className="block text-sm font-medium text-daw-text-muted mb-1">
             {label}
             {required && <span className="text-red-500 ml-1">*</span>}
           </label>
@@ -65,6 +67,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
 
         <textarea
           ref={ref}
+          id={textareaId}
           disabled={disabled}
           className={textareaClasses}
           {...rest}

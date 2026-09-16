@@ -32,6 +32,12 @@ set(OPENSTUDIO_APP_VERSION "0.0.1" CACHE STRING "Application version compiled in
 
 project(OpenStudio VERSION ${OPENSTUDIO_APP_VERSION})
 
+# Enable Objective-C++ before adding dependencies so their directory scopes
+# inherit its compile rules as well as the application's macOS sources.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 # Visual Studio's Debug CRT defaults to checked STL iterators. Their
 # construction/destruction is serialized by a process-wide lock, so unrelated
 # UI/background container work can priority-invert a 16-sample ASIO callback.
@@ -41,6 +47,17 @@ if(MSVC)
     add_compile_definitions(
         $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
     )
+    # Opt-in diagnostic configuration, not a production feature switch. Keep
+    # instrumented binaries/objects separate from the user's Debug/Release app.
+    if(CMAKE_CONFIGURATION_TYPES)
+        list(APPEND CMAKE_CONFIGURATION_TYPES ASan)
+        list(REMOVE_DUPLICATES CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_CONFIGURATION_TYPES "${CMAKE_CONFIGURATION_TYPES}" CACHE STRING "Build configurations" FORCE)
+    endif()
+    set(CMAKE_C_FLAGS_ASAN "/Zi /O1 /DNDEBUG" CACHE STRING "ASan C flags")
+    set(CMAKE_CXX_FLAGS_ASAN "/Zi /O1 /DNDEBUG" CACHE STRING "ASan C++ flags")
+    add_compile_options($<$<CONFIG:ASan>:/fsanitize=address>)
+    add_link_options($<$<CONFIG:ASan>:/INCREMENTAL:NO> $<$<CONFIG:ASan>:/DEBUG>)
 endif()
 
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
@@ -311,13 +328,29 @@ endif()
 juce_add_gui_app(OpenStudio
     PRODUCT_NAME "OpenStudio"
     VERSION ${PROJECT_VERSION}
-    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-256x256.png"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-1024x1024.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
     NEEDS_WEB_BROWSER TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
+if(WIN32)
+    # JUCE's RC generator depends on the icon but omits Info.txt. Without this
+    # dependency, reconfiguring an existing build with a new release version
+    # leaves the executable's Windows ProductVersion at the previous value.
+    get_target_property(openstudio_generated_sources OpenStudio JUCE_GENERATED_SOURCES_DIRECTORY)
+    get_target_property(openstudio_resource_info OpenStudio JUCE_INFO_FILE)
+    add_custom_command(
+        OUTPUT "${openstudio_generated_sources}/OpenStudio_resources.rc"
+        APPEND DEPENDS "${openstudio_resource_info}"
+    )
+endif()
 if(MSVC)
+    # C++/WinRT requires standard coroutine library support even though the
+    # Store transport uses callbacks. Keep this C++17 translation unit on the
+    # supported ABI instead of the removed experimental coroutine headers.
+    set_property(SOURCE Source/StoreUpdater.cpp APPEND PROPERTY
+        COMPILE_OPTIONS /await:strict)
     # Realtime audio translation units below are intentionally optimized
     # in Debug. CMP0184 controls runtime checks at target scope, so the target
     # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.
@@ -337,8 +370,18 @@ target_sources(OpenStudio PRIVATE
     Source/MainComponent.cpp
     Source/MixerWindowManager.cpp
     Source/AppUpdater.cpp
+    Source/UpdateManifest.cpp
+    Source/UpdateInstaller.cpp
+    Source/StoreUpdater.cpp
     Source/CrashDiagnostics.cpp
+    Source/CrashReportWriter.cpp
+    Source/RuntimeSafetyRegression.cpp
+    Source/ProjectFileStore.cpp
+    Source/RecoveryJournal.cpp
+    Source/RecordingRecovery.cpp
+    Source/RecordingRecoveryRegression.cpp
     Source/AudioEngine.cpp
+    Source/MetronomeRegression.cpp
     Source/NAMDelayRegression.h
     Source/NAMDelayRegression.cpp
     Source/NAMDelayRegressionLifecycle.cpp
@@ -347,16 +390,21 @@ target_sources(OpenStudio PRIVATE
     Source/PlaybackEngine.cpp
     Source/PeakCache.cpp
     Source/AudioConverter.cpp
+    Source/AudioFileConversion.cpp
+    Source/AudioFileConversionRegression.cpp
     Source/MIDIManager.cpp
     Source/MIDIClip.cpp
     Source/PluginManager.cpp
+    Source/IsolatedPlugin.cpp
+    Source/IsolatedPluginWorker.cpp
+    Source/IsolatedPluginRegression.cpp
     Source/PluginWindowManager.cpp
     Source/TrackProcessor.cpp
     Source/Metronome.cpp
     Source/AudioAnalyzer.cpp
-    Source/S13FXProcessor.cpp
-    Source/S13FXGfxEditor.cpp
-    Source/S13ScriptWindow.cpp
+    Source/JSFXProcessor.cpp
+    Source/JSFXGfxEditor.cpp
+    Source/OpenStudioScriptWindow.cpp
     Source/ScriptEngine.cpp
     Source/AutomationList.cpp
     Source/MIDIRecorder.cpp
@@ -372,11 +420,11 @@ target_sources(OpenStudio PRIVATE
     Source/NAMCabPresentation.cpp
     Source/NAMPolyOctaver.h
     Source/NAMPolyOctaver.cpp
-    Source/S13PluginEditors.cpp
+    Source/OpenStudioPluginEditors.cpp
     Source/TunerPitchTracker.cpp
     Source/PitchDetector.cpp
     Source/PitchMapper.cpp
-    Source/S13PitchCorrector.cpp
+    Source/OpenStudioPitchCorrector.cpp
     Source/PitchAnalyzer.cpp
     Source/PitchResynthesizer.cpp
     Source/LpcEnvelopeTransfer.cpp
@@ -386,8 +434,40 @@ target_sources(OpenStudio PRIVATE
     Source/PolyPitchDetector.cpp
     Source/StemSeparator.cpp
     Source/AITrackEngine.cpp
+    Source/OwnedChildProcess.cpp
     Source/ARAHostController.cpp
 )
+
+target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_BUILD_CONFIGURATION="$<CONFIG>")
+if(WIN32)
+    # Tiny hidden helper: no JUCE, WebView, audio device, plug-in or Python startup.
+    add_executable(OpenStudioCrashReporter Source/CrashReporterMain.cpp Source/CrashReportWriter.cpp)
+    # SignPath enforces the same product name/version on every first-party binary.
+    configure_file(packaging/windows/CrashReporter.rc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenStudioCrashReporter.rc" @ONLY)
+    target_sources(OpenStudioCrashReporter PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenStudioCrashReporter.rc")
+    target_compile_features(OpenStudioCrashReporter PRIVATE cxx_std_17)
+    target_link_libraries(OpenStudioCrashReporter PRIVATE dbghelp)
+    if(MSVC)
+        target_compile_options(OpenStudioCrashReporter PRIVATE /W4)
+    endif()
+    add_dependencies(OpenStudio OpenStudioCrashReporter)
+    foreach(diagnostic_target IN ITEMS OpenStudio OpenStudioCrashReporter)
+        if(MSVC)
+            target_compile_options(${diagnostic_target} PRIVATE $<$<CONFIG:Release>:/Zi>)
+            target_link_options(${diagnostic_target} PRIVATE $<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/INCREMENTAL:NO>)
+        endif()
+        add_custom_command(TARGET ${diagnostic_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} "-DCONFIG=$<CONFIG>" "-DCOMPILER=${CMAKE_CXX_COMPILER}"
+                "-DDESTINATION=$<TARGET_FILE_DIR:${diagnostic_target}>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/copy-asan-runtime.cmake")
+    endforeach()
+    add_custom_command(TARGET OpenStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:OpenStudioCrashReporter> $<TARGET_FILE_DIR:OpenStudio>
+        COMMENT "Copying out-of-process crash reporter")
+endif()
 
 # Keep the complete production audio callback path optimized even in the app's
 # developer build. `build.py dev --run` uses Debug; leaving JUCE's ASIO
@@ -407,7 +487,7 @@ set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     Source/BuiltInEffects2.cpp
     Source/NAMCabPresentation.cpp
     Source/NAMPolyOctaver.cpp
-    Source/S13PitchCorrector.cpp
+    Source/OpenStudioPitchCorrector.cpp
     Source/TunerPitchTracker.cpp
     "${juce_SOURCE_DIR}/modules/juce_audio_basics/juce_audio_basics.cpp"
     "${juce_SOURCE_DIR}/modules/juce_audio_devices/juce_audio_devices.cpp"
@@ -492,14 +572,14 @@ target_link_libraries(OpenStudio PRIVATE
 if(WIN32)
     # AudioEngine registers ASIO callback threads with the Windows Multimedia
     # Class Scheduler Service's "Pro Audio" task.
-    target_link_libraries(OpenStudio PRIVATE avrt)
+    target_link_libraries(OpenStudio PRIVATE avrt windowsapp)
 endif()
 
 # ONNX Runtime link (optional)
 if(HAS_ONNXRUNTIME)
     target_link_directories(OpenStudio PRIVATE "${ONNXRUNTIME_ROOT}/lib")
     target_link_libraries(OpenStudio PRIVATE onnxruntime)
-    target_compile_definitions(OpenStudio PRIVATE S13_HAS_ONNXRUNTIME=1)
+    target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_HAS_ONNXRUNTIME=1)
 endif()
 
 # ==============================================================================
@@ -507,9 +587,42 @@ endif()
 # ==============================================================================
 
 # Common updater/release URL defaults (override at configure time for production)
+add_library(openstudio_update_crypto STATIC
+    thirdparty/monocypher/monocypher.c
+    thirdparty/monocypher/monocypher-ed25519.c)
+set_target_properties(openstudio_update_crypto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(openstudio_update_crypto PUBLIC thirdparty/monocypher)
+target_link_libraries(OpenStudio PRIVATE openstudio_update_crypto)
 set(OPENSTUDIO_UPDATE_MANIFEST_URL_VALUE "https://openstudio.org.in/releases/stable/latest.json" CACHE STRING "Updater manifest URL compiled into OpenStudio")
 set(OPENSTUDIO_RELEASES_PAGE_URL_VALUE "https://openstudio.org.in/download" CACHE STRING "Release/download page URL compiled into OpenStudio")
 set(OPENSTUDIO_UPDATE_CHANNEL_VALUE "stable" CACHE STRING "Updater channel compiled into OpenStudio")
+target_compile_definitions(OpenStudio PRIVATE
+    OPENSTUDIO_INSTALLER_VERSION="${PROJECT_VERSION}"
+    OPENSTUDIO_INSTALLER_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}")
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Independent helper stays alive after the DAW and its AppImage mount exit.
+    juce_add_console_app(OpenStudioUpdateInstaller PRODUCT_NAME "OpenStudio Update Installer")
+    target_sources(OpenStudioUpdateInstaller PRIVATE
+        Source/UpdateInstallerMain.cpp Source/UpdateInstaller.cpp Source/UpdateManifest.cpp)
+    target_link_libraries(OpenStudioUpdateInstaller PRIVATE
+        juce::juce_core juce::juce_cryptography openstudio_update_crypto)
+    target_compile_definitions(OpenStudioUpdateInstaller PRIVATE
+        JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
+        OPENSTUDIO_INSTALLER_VERSION="${PROJECT_VERSION}"
+        OPENSTUDIO_INSTALLER_CHANNEL="${OPENSTUDIO_UPDATE_CHANNEL_VALUE}")
+    target_compile_features(OpenStudioUpdateInstaller PRIVATE cxx_std_17)
+    target_compile_options(OpenStudioUpdateInstaller PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(OpenStudio OpenStudioUpdateInstaller)
+    if(APPLE)
+        set(updater_helper_destination "$<TARGET_BUNDLE_CONTENT_DIR:OpenStudio>/Helpers")
+    else()
+        set(updater_helper_destination "$<TARGET_FILE_DIR:OpenStudio>")
+    endif()
+    add_custom_command(TARGET OpenStudio POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${updater_helper_destination}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:OpenStudioUpdateInstaller>" "${updater_helper_destination}/OpenStudioUpdateInstaller")
+endif()
 
 if(WIN32)
     set(_OPENSTUDIO_DEFAULT_APPCAST_URL "https://openstudio.org.in/appcast/windows-stable.xml")
@@ -604,11 +717,15 @@ endif()
 # macOS-only: Link system frameworks
 # ==============================================================================
 if(APPLE)
+    set_target_properties(OpenStudio PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
+    target_sources(OpenStudio PRIVATE Source/MicrophoneAccess.mm)
+    find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
     find_library(WEBKIT_FRAMEWORK WebKit)
     find_library(COREAUDIO_FRAMEWORK CoreAudio)
     find_library(COREMIDI_FRAMEWORK CoreMIDI)
     find_library(ACCELERATE_FRAMEWORK Accelerate)
     target_link_libraries(OpenStudio PRIVATE
+        ${AVFOUNDATION_FRAMEWORK}
         ${WEBKIT_FRAMEWORK}
         ${COREAUDIO_FRAMEWORK}
         ${COREMIDI_FRAMEWORK}
@@ -767,6 +884,11 @@ openstudio_copy_runtime_file(
 )
 
 # Ship the application license and third-party notices with every binary
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/monocypher/LICENCE.md"
+    "licenses/Monocypher-LICENCE.md"
+    "Copying Monocypher license to output directory"
+)
 # bundle. On macOS these land in Contents/Resources; on Windows and Linux they
 # sit beside the executable and are consequently included by the packagers.
 openstudio_copy_runtime_file(
@@ -1123,6 +1245,40 @@ if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
 endif()
 
 set(AI_STABLE_AUDIO_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stable_audio3_generate.py")
+foreach(AI_POLICY_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store ai_generation_preflight)
+    openstudio_copy_runtime_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_POLICY_MODULE}.py"
+        "scripts/${AI_POLICY_MODULE}.py"
+        "Copying AI execution policy ${AI_POLICY_MODULE}"
+    )
+endforeach()
+# Worker edits must reach a Debug run even when no C++ object needs rebuilding.
+# POST_BUILD copies above/below also cover explicit OpenStudio target builds.
+set(OPENSTUDIO_AI_WORKER_FILES)
+foreach(AI_WORKER_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store
+        diffusers_audio_pipeline generate_music stable_audio3_generate stem_separator
+        ai_runtime_probe prepare_diffusers_audio ai_generation_preflight)
+    list(APPEND OPENSTUDIO_AI_WORKER_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_WORKER_MODULE}.py")
+endforeach()
+add_custom_target(OpenStudioAIWorkerAssets ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/scripts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSTUDIO_AI_WORKER_FILES}
+        "${OPENSTUDIO_RUNTIME_ASSET_ROOT}/scripts"
+    DEPENDS OpenStudio
+    COMMENT "Refreshing AI workers and their execution policy dependencies"
+    VERBATIM
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/prepare_diffusers_audio.py"
+    "scripts/prepare_diffusers_audio.py"
+    "Copying official Diffusers conversion launcher"
+)
+openstudio_copy_runtime_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/diffusers_audio_pipeline.py"
+    "scripts/diffusers_audio_pipeline.py"
+    "Copying Diffusers audio pipeline adapter"
+)
 if(EXISTS "${AI_STABLE_AUDIO_GENERATION_SCRIPT}")
     openstudio_copy_runtime_file(
         "${AI_STABLE_AUDIO_GENERATION_SCRIPT}"

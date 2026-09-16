@@ -10,6 +10,14 @@ judgment. Every result must be reported as:
 
 ## Fast release checks
 
+For metronome small-buffer and click-only clock regressions, run
+`tools/run-metronome-regression.ps1 -Configuration Debug -SkipBuild` (and repeat
+with `Release` after its build). This dedicated fixture runs before audio-device
+creation, produces JSON under `output/review/metronome-*`, and never opens an app
+window. Timing measurements are `diagnostic_only`; the user's live two-plugin
+ASIO crackling remains `not_asserted`. Behavior and remaining live qualification
+are documented in [runtime-hardening.md#metronome-practice-contract](runtime-hardening.md#metronome-practice-contract).
+
 From `frontend/`:
 
 ```bash
@@ -36,12 +44,49 @@ Before a release:
 
 ```powershell
 cmake --build build --config Release
-python build.py prod
+python build.py prod --version 0.1.02
 ```
 
 The three PowerShell regressions are intentionally headless. They must not open
 an OpenStudio window. `tools/nam-rack-visual-harness.mjs` is retained for
 targeted browser/layout capture; generated screenshots and reports are ignored.
+
+## Runtime safety and recovery
+
+`tools/run-runtime-safety-regression.ps1` runs isolated contract, interrupted
+recovery, owned-worker, recording-write fault, crash and hang fixtures. Use
+`-Configuration Debug`, `Release` or `ASan`; `-SkipBuild` requires a current
+binary. It checks child exit codes as well as reports, and never intentionally
+crashes an existing app or fills/disconnects the user's disk. ASan is a dedicated
+test configuration, not a production performance setting.
+
+Run `tools/run-runtime-capacity-diagnostic.ps1 -Configuration Release` after
+other build/test workloads stop. Its isolated 100-track EQ/compressor timings are
+`diagnostic_only`, not full recording/mixing certification. Native WebView
+readiness and close/reopen behavior use `tools/run-window-lifecycle-smoke.ps1`
+  with the desired `-AppPath`; unlike the contract fixtures, it opens test windows.
+  It also verifies that successful input/track/master/monitor FX removals close
+  their detached built-in editors, failed removals keep them open, shifted slots
+  cannot retain stale editors, unrelated editors remain open, and track deletion
+  cancels a queued editor reopen.
+
+Frontend recovery/AI behavior lives in `frontend/e2e/runtime-recovery-ui.spec.ts`,
+`work-recovery-ui.spec.ts`, `plugin-isolation-ui.spec.ts` and
+`ai-workflow-ui.spec.ts`, using explicit mocked bridge boundaries. Native
+isolation transport, state, crash/hang, track-host bypass/PDC and retry tests use
+`tools/run-isolated-plugin-regression.ps1 -Configuration Debug` (also Release/ASan).
+The default is headless. `-ExerciseEditors` explicitly opts into visible native
+windows and requires an idle desktop: concurrent clicks/typing invalidate its
+foreground-switch assumptions. That focus check was deferred by the user.
+`tools/run-render-export-headless-regression.ps1` also checks cancellation and
+isolated pass-through render alignment. Neither fake plugins nor mock AI workers
+qualify arbitrary third-party plugins or real model generation quality.
+Pass `-ExternalPlugin '<catalog identifier or plugin path>'` to explicitly include
+an installed vendor's Monitor/Master insertion, chain rebuild and track/input-FX
+identity/state round trips. This stays headless and does not open vendor editors
+or establish subjective sound quality; the default suite loads no real vendor.
+Current evidence and remaining manual/lab gates are in
+[Runtime safety and recovery](runtime-hardening.md).
 
 ## Frontend visual and interaction QA
 
@@ -241,3 +286,24 @@ inpaint, and continuation with a valid local snapshot. Generated WAVs must
 import at the intended positions, play, persist through save/reopen, and undo
 as one user action. A missing optional model/runtime must not block base-app
 startup.
+
+## Menus, FX feedback and input integration
+
+The repeatable real-component browser checks are
+`tools/fx-menu-browser-regression.js`, `tools/field-test-browser-regression.js`
+and `tools/input-profile-browser-regression.js`. Use disposable browser sessions.
+Check nested template menus, multi-clip Copy/Delete/Undo, keyboard submenu access,
+small-window bounds, loading feedback and stale asynchronous completions. A
+source inventory of menu handlers does not prove every native command works.
+
+Media Pool, LUFS, Phase Correlation and Free Item Positioning menu entries remain
+unavailable until their implementations exist. Monitor FX picker dismissal must
+work outside the picker, on blur, with Close Dialog, with the close button and
+with a second + click; late insertion must not steal focus after dismissal.
+
+For metronome practice, use `tools/run-metronome-regression.ps1`. Check fractional
+BPM, meter changes, 8..512 and irregular blocks, gain ramps, rapid restart and
+transport takeover. Practice alone must leave the playhead and recording state
+unchanged. Timing is diagnostic only: passing generator tests does not prove that
+an arbitrary low-buffer ASIO session or third-party plugin chain is crackle-free.
+See [the runtime contract](runtime-hardening.md#metronome-practice-contract).

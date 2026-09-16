@@ -33,7 +33,11 @@ $arguments = @(
 )
 
 Write-Host "Running native window lifecycle smoke test: $resolvedAppPath"
-$process = Start-Process -FilePath $resolvedAppPath -ArgumentList $arguments -PassThru
+$startOptions = @{ FilePath = $resolvedAppPath; ArgumentList = $arguments; PassThru = $true }
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $startOptions.WindowStyle = 'Hidden'
+}
+$process = Start-Process @startOptions
 
 try {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
@@ -76,20 +80,30 @@ try {
         throw "Window lifecycle smoke test process exited with code $($process.ExitCode) after reporting success."
     }
 
-    $requiredReadyChecks = @(
+    $requiredChecks = @(
         "main_frontend_ready",
         "mixer_frontend_ready",
         "mixer_reopened_frontend_ready",
         "midi_frontend_ready",
         "midi_reopened_frontend_ready",
         "plugin_frontend_ready",
-        "plugin_reopened_frontend_ready"
+        "plugin_reopened_frontend_ready",
+        "plugin_track_failed_removal_keeps_editor",
+        "plugin_input_failed_removal_keeps_editor",
+        "plugin_master_failed_removal_keeps_editor",
+        "plugin_monitor_failed_removal_keeps_editor",
+        "plugin_track_removal_closes_editor",
+        "plugin_input_removal_closes_editor",
+        "plugin_master_removal_closes_editor",
+        "plugin_monitor_removal_closes_editor",
+        "plugin_track_delete_cancels_queued_reopen",
+        "plugin_removed_editor_stays_closed"
     )
 
     $passedIds = @($report.checks | Where-Object { $_.status -eq "pass" } | ForEach-Object { $_.id })
-    $missingReadyChecks = @($requiredReadyChecks | Where-Object { $_ -notin $passedIds })
-    if ($missingReadyChecks.Count -gt 0) {
-        throw "Window lifecycle report omitted successful frontend-ready checks: $($missingReadyChecks -join ', ')."
+    $missingChecks = @($requiredChecks | Where-Object { $_ -notin $passedIds })
+    if ($missingChecks.Count -gt 0) {
+        throw "Window lifecycle report omitted successful required checks: $($missingChecks -join ', ')."
     }
 
     Write-Host "Window lifecycle smoke test passed. Report: $ReportPath"

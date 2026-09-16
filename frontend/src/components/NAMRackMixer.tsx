@@ -64,14 +64,10 @@ export const NAM_RACK_CAB_ADVANCED_CONTROL_GROUPS = [
     label: "Cabinet & IR",
     paramIds: [
       "cabEnabled",
-      "cabMicPosition",
-      "cabMicDistance",
-      "cabMicBlend",
-      "cabRoomSend",
+      "cabDirectMix",
       "cabLevelDb",
       "cabPan",
-      "cabHPFHz",
-      "cabLPFHz",
+      "cabIRStereo",
       "cabPhaseInvert",
     ],
   },
@@ -140,7 +136,7 @@ export const NAM_RACK_ADVANCED_ONLY_CONTROL_IDS = {
   "pedal-capture": ["pedalMix"],
   amp: [],
   cab: [],
-  room: [],
+  room: ["cabRoomEnabled", "cabRoomAmount", "cabRoomWidth"],
   doubler: [],
   eq: [],
   mod: ["modulatorAutoRandom", "modulatorAutoSpeed", "modulatorPedalPosition"],
@@ -190,7 +186,7 @@ export function namRackAdvancedStageForCompactModule(moduleId: string): NAMRackA
 }
 
 /**
- * Mirrors S13NAMRack::processBlock and processPostFX. Keeping the ordering
+ * Mirrors OpenStudioNAMRack::processBlock and processPostFX. Keeping the ordering
  * policy here makes Advanced controls follow the audible route even after the
  * user reorders the four movable post-cab stages.
  */

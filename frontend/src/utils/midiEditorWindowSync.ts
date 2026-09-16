@@ -829,6 +829,57 @@ export function applyMidiEditorUISnapshot(snapshot: MidiEditorUISnapshot): boole
   return true;
 }
 
+// Structural transitions belong to main; edit snapshots remain windowed and
+// continue through the existing authority/lock validation before docking.
+export async function applyMidiEditorDockRequest(snapshot: MidiEditorUISnapshot): Promise<boolean> {
+  if (currentWindowRole !== "main") return false;
+  const parsed = parseMidiEditorUISnapshot(snapshot);
+  if (!parsed || parsed.mode !== "windowed") return false;
+  const session = useDAWStore.getState().midiEditorSessions.find(item => item.sessionId === parsed.sessionId);
+  if (!session || session.trackId !== parsed.trackId || session.clipId !== parsed.clipId) return false;
+  if (session.mode === "windowed") {
+    const state = useDAWStore.getState();
+    const track = state.tracks.find(item => item.id === session.trackId);
+    const clip = track?.midiClips.find(item => item.id === session.clipId);
+    const incoming = parsed.tracks.find(item => item.id === session.trackId)?.midiClips.find(item => item.id === session.clipId);
+    if (!track || !clip || !incoming) return false;
+    // Locking content must not prevent a window-only dock operation. A child
+    // carrying changes to locked content stays open instead of losing its edits.
+    if (track.frozen || isClipEditLocked(state, clip)) {
+      if (snapshotValue(mergeEditableMidiClipContent(clip, incoming)) !== snapshotValue(clip)) return false;
+    } else if (!applyMidiEditorUISnapshot(parsed)) return false;
+    flushPendingMidiRemoteEdits();
+    useDAWStore.getState().dockMidiEditorSession(parsed.sessionId);
+  }
+  await publishMidiEditorSessionSnapshot(parsed.sessionId);
+  await nativeBridge.closeMidiEditorWindow(parsed.sessionId, "dock");
+  return true;
+}
+
+export async function requestMidiEditorDock(sessionId: string): Promise<void> {
+  const payload = extractMidiEditorUISnapshot(useDAWStore.getState(), sessionId);
+  if (!payload || payload.mode !== "windowed") throw new Error("The MIDI session is no longer detached.");
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(new Error("The main window did not complete docking. Your MIDI editor remains open; retry Dock."));
+    }, 5000);
+    const unsubscribe = nativeBridge.subscribe("midiEditorUISync", (value) => {
+      const envelope = normaliseEnvelope(value);
+      if (envelope?.originWindowId !== windowId && envelope?.payload.sessionId === sessionId && envelope.payload.mode === "docked") {
+        clearTimeout(timeout);
+        unsubscribe();
+        resolve();
+      }
+    });
+    void nativeBridge.publishMidiEditorUISnapshot(sessionId, {
+      originWindowId: windowId, revision: ++currentRevision, intent: "dock", payload,
+    }).then(sent => { if (!sent) throw new Error("Unable to contact the main window."); }).catch(error => {
+      clearTimeout(timeout); unsubscribe(); reject(error);
+    });
+  });
+}
+
 export async function publishMidiEditorSessionSnapshot(sessionId: string): Promise<void> {
   const payload = extractMidiEditorUISnapshot(useDAWStore.getState(), sessionId);
   if (!payload) return;
@@ -905,6 +956,10 @@ export function startMidiEditorUISync(sessionId?: string | null): () => void {
       return;
     }
 
+    if (currentWindowRole === "main" && value?.intent === "dock") {
+      void applyMidiEditorDockRequest(envelope.payload);
+      return;
+    }
     currentRevision = Math.max(currentRevision, envelope.revision ?? 0);
     lastPublishedSignatures.set(envelope.payload.sessionId, getSnapshotSignature(envelope.payload));
     remoteApplyDepth += 1;

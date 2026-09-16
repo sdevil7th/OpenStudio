@@ -119,38 +119,39 @@ describe("portable NAM Rack state", () => {
   });
 
   it("canonicalizes recognized portable NAM Rack selectors to the current DSP", () => {
-    expect(normalizeNAMEffectsDspVersion(1)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion("3")).toBe(19);
+    expect(normalizeNAMEffectsDspVersion(1)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion("3")).toBe(20);
     expect(normalizeNAMEffectsDspVersion(0)).toBeUndefined();
-    expect(normalizeNAMEffectsDspVersion(4)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(5)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(6)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(7)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(8)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(9)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(10)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(11)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(12)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(13)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(14)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(15)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(16)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(17)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(18)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(19)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(20)).toBeUndefined();
+    expect(normalizeNAMEffectsDspVersion(4)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(5)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(6)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(7)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(8)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(9)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(10)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(11)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(12)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(13)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(14)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(15)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(16)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(17)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(18)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(19)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(20)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(21)).toBeUndefined();
     expect(sanitizeNAMRackDspState({
       reverbEngineVersion: 5,
-      namEffectsDspVersion: 19,
+      namEffectsDspVersion: 20,
       unknownEngineVersion: 99,
     })).toEqual({
       reverbEngineVersion: 5,
-      namEffectsDspVersion: 19,
+      namEffectsDspVersion: 20,
     });
     expect(sanitizeNAMRackDspState({
       reverbEngineVersion: 2,
       namEffectsDspVersion: 8,
-    })).toEqual({ reverbEngineVersion: 5, namEffectsDspVersion: 19 });
+    })).toEqual({ reverbEngineVersion: 5, namEffectsDspVersion: 20 });
   });
 
   it("keeps legacy PRE EQ bands alive until versioned preset migration runs", () => {
@@ -174,6 +175,6 @@ describe("portable NAM Rack state", () => {
     expect(sanitizeNAMRackPortableDspState({
       values: { ampMix: 0.5 },
       dspState: { namEffectsDspVersion: 9 },
-    })).toEqual({ values: { ampMix: 0.5 }, dspState: { namEffectsDspVersion: 19 } });
+    })).toEqual({ values: { ampMix: 0.5 }, dspState: { namEffectsDspVersion: 20 } });
   });
 });

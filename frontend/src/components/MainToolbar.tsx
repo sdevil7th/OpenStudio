@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Repeat,
@@ -283,22 +284,22 @@ export function MainToolbar({
     }, 450);
   };
 
-  const handleSavePreset = () => {
-    const name = window.prompt("Quantize preset name:", selectedQuantizePreset.name);
+  const handleSavePreset = async () => {
+    const name = (await appDialogs.prompt("Quantize preset name:", selectedQuantizePreset.name));
     if (!name) return;
     saveQuantizePreset(name, selectedQuantizePreset);
   };
 
-  const handleRenamePreset = () => {
+  const handleRenamePreset = async () => {
     if (selectedQuantizePreset.isFactory) return;
-    const name = window.prompt("Rename quantize preset:", selectedQuantizePreset.name);
+    const name = (await appDialogs.prompt("Rename quantize preset:", selectedQuantizePreset.name));
     if (!name) return;
     renameQuantizePreset(selectedQuantizePreset.id, name);
   };
 
-  const handleRemovePreset = () => {
+  const handleRemovePreset = async () => {
     if (selectedQuantizePreset.isFactory) return;
-    if (!window.confirm(`Remove quantize preset "${selectedQuantizePreset.name}"?`)) return;
+    if (!(await appDialogs.confirm(`Remove quantize preset "${selectedQuantizePreset.name}"?`))) return;
     removeQuantizePreset(selectedQuantizePreset.id);
   };
 

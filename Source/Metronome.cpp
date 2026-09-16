@@ -76,12 +76,23 @@ void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
 
     const juce::ScopedLock mutationGuard(
         clickDataMutationLock);
+    // prepareToPlay is called with processing stopped, including same-rate
+    // buffer changes. Do not carry a partially played click into a new device.
+    resetGeneration.fetch_add(1, std::memory_order_release);
+    clickGain.reset(newSampleRate, 0.002);
+    clickGain.setCurrentAndTargetValue(volume.load(std::memory_order_relaxed));
+    transitionLength = juce::jmax(1, static_cast<int>(newSampleRate * 0.001));
+    lastClickOutput = transitionTail = 0.0f;
+    transitionSamplesLeft = 0;
     const double previousSampleRate =
         sampleRate.exchange(
             newSampleRate,
             std::memory_order_acq_rel);
     if (std::abs(previousSampleRate - newSampleRate) <= 1.0e-9)
+    {
+        setPracticePlaybackAvailable(true);
         return;
+    }
 
     // Rebuild all buffers off the audio thread. Custom files are reloaded at
     // the new device rate; if a file has disappeared, retain its previous
@@ -92,6 +103,7 @@ void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
         createDefaultClickData(newSampleRate);
     if (previousData != nullptr)
     {
+        nextData->soundRevision = previousData->soundRevision + 1;
         nextData->accentBeats =
             previousData->accentBeats;
         nextData->usingCustomClick =
@@ -140,6 +152,7 @@ void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
         }
     }
     publishClickData(nextData);
+    setPracticePlaybackAvailable(true);
 }
 
 std::uint64_t Metronome::packTimeSignature(
@@ -206,8 +219,11 @@ void Metronome::generateDefaultClickSounds(
         const double t =
             static_cast<double>(i)
             / safeSampleRate;
-        const double envelope =
-            std::exp(-50.0 * t);
+        // End the finite-length synthesized waveform at zero, rather than
+        // truncate the remaining exponential tail at a non-zero sample.
+        const double tailGain = juce::jlimit(0.0, 1.0,
+            static_cast<double>(samples - 1 - i) / juce::jmax(1.0, safeSampleRate * 0.001));
+        const double envelope = std::exp(-50.0 * t) * tailGain;
         
         highWrite[i] = static_cast<float>(
             std::sin(
@@ -285,8 +301,73 @@ void Metronome::publishClickData(
 
 void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double currentSamplePosition)
 {
-    if (! enabled.load(std::memory_order_acquire))
-        return;
+    renderBlock(buffer, currentSamplePosition, enabled.load(std::memory_order_acquire), false);
+}
+
+bool Metronome::setPracticeEnabled(bool shouldRun)
+{
+    auto previous = practiceState.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (shouldRun && (previous & 2u) == 0) return false;
+        if (((previous & 1u) != 0) == shouldRun) return true;
+        const auto next = ((previous + 4u) & ~std::uint64_t { 1 }) | (shouldRun ? 1u : 0u);
+        if (practiceState.compare_exchange_weak(previous, next, std::memory_order_release, std::memory_order_relaxed))
+            return true;
+    }
+}
+
+void Metronome::setPracticePlaybackAvailable(bool available)
+{
+    auto previous = practiceState.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        const auto next = ((previous + 4u) & ~std::uint64_t { 3 }) | (available ? 2u : 0u);
+        if (practiceState.compare_exchange_weak(previous, next, std::memory_order_release, std::memory_order_relaxed))
+            return;
+    }
+}
+
+void Metronome::getNextTransportBlock(juce::AudioBuffer<float>& buffer, double position, bool transportRunning)
+{
+    const auto practice = practiceState.load(std::memory_order_acquire);
+    const bool practiceOn = (practice & 1u) != 0;
+    const bool active = practiceOn || (transportRunning && isEnabled());
+    const auto generation = resetGeneration.load(std::memory_order_acquire);
+    const bool deviceReset = generation != consumedResetGeneration;
+    const bool practiceStarted = practiceOn && practice != consumedPracticeState;
+    const double currentBpm = getBpm();
+    const bool handover = active && (!clockWasRunning || (transportRunning && !clockWasTransport) || deviceReset);
+    if (!transportRunning)
+    {
+        if (practiceStarted || deviceReset || !clockWasRunning)
+            freeRunSamplePosition = 0.0;
+        else if (freeRunBpm != currentBpm)
+            freeRunSamplePosition *= freeRunBpm / currentBpm;
+        // A malformed host seek/tempo must not poison the independent clock
+        // after transport stops. Re-enter at beat one from an unusable phase.
+        if (!std::isfinite(freeRunSamplePosition) || std::abs(freeRunSamplePosition) > 1.0e12)
+            freeRunSamplePosition = 0.0;
+        position = freeRunSamplePosition;
+    }
+    renderBlock(buffer, position, active, handover || (practiceStarted && !transportRunning));
+    if (active) freeRunSamplePosition = position + buffer.getNumSamples();
+    freeRunBpm = currentBpm;
+    consumedPracticeState = practice;
+    clockWasRunning = active;
+    clockWasTransport = transportRunning;
+}
+
+void Metronome::retireClick() noexcept
+{
+    transitionTail = lastClickOutput;
+    transitionSamplesLeft = transitionTail == 0.0f ? 0 : transitionLength;
+    isClicking = false;
+    clickSampleCounter = 0;
+}
+
+void Metronome::renderBlock(juce::AudioBuffer<float>& buffer, double currentSamplePosition, bool active, bool resetClock)
+{
 
     const int numSamples =
         buffer.getNumSamples();
@@ -310,7 +391,9 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     const int blockDenominator =
         unpackDenominator(blockTimeSignature);
 
-    if (!std::isfinite(blockBpm)
+    if (!std::isfinite(currentSamplePosition)
+        || std::abs(currentSamplePosition) > 1.0e12
+        || !std::isfinite(blockBpm)
         || !std::isfinite(blockSampleRate)
         || !std::isfinite(blockVolume)
         || blockBpm <= 0.0
@@ -318,7 +401,7 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
         || blockNumerator <= 0
         || blockDenominator <= 0)
     {
-        return;
+        active = false;
     }
 
     const double denominatorScale =
@@ -329,9 +412,21 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
         (60.0 / blockBpm)
         * blockSampleRate
         * denominatorScale;
-    if (!std::isfinite(samplesPerBeat)
-        || samplesPerBeat <= 0.0)
+    if (!std::isfinite(samplesPerBeat) || samplesPerBeat < 1.0)
+        active = false;
+
+    const auto generation = resetGeneration.load(std::memory_order_acquire);
+    resetClock = resetClock || generation != consumedResetGeneration;
+    consumedResetGeneration = generation;
+    const bool discontinuity = resetClock || !renderWasActive
+        || std::abs(currentSamplePosition - lastSamplePosition) > 0.5;
+    if ((renderWasActive && !active) || (active && discontinuity)) retireClick();
+    renderWasActive = active;
+    clickGain.setTargetValue(blockVolume);
+    if (!active && transitionSamplesLeft == 0)
     {
+        lastSamplePosition = -1.0;
+        lastClickOutput = 0.0f;
         return;
     }
 
@@ -346,91 +441,75 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
     if (clickData == nullptr)
         return;
 
-    auto* leftConfig = buffer.getWritePointer(0);
-    auto* rightConfig = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
-
-    const bool transportDiscontinuity = lastSamplePosition < 0.0
-                                      || std::abs(currentSamplePosition - lastSamplePosition) > 1.0;
-    if (transportDiscontinuity)
+    if (renderedSoundRevision != clickData->soundRevision)
     {
-        isClicking = false;
-        clickSampleCounter = 0;
-        isHighClick = false;
+        retireClick();
+        renderedSoundRevision = clickData->soundRevision;
     }
-
-    for (int i = 0; i < numSamples; ++i)
+    if (active && (discontinuity || scheduledSamplesPerBeat != samplesPerBeat))
     {
-        double currentPos = currentSamplePosition + i;
-
-        // Use floating-point beat detection to avoid cumulative drift from
-        // integer truncation.  A beat boundary occurs when the beat number
-        // (currentPos / samplesPerBeat) crosses an integer.  We detect this by
-        // comparing the beat index of the current sample with the previous one.
-        double beatPos = currentPos / samplesPerBeat;
-        double prevBeatPos = (currentPos - 1.0) / samplesPerBeat;
-        int currentBeatIdx = static_cast<int>(std::floor(beatPos));
-        int prevBeatIdx    = static_cast<int>(std::floor(prevBeatPos));
-        bool isBeatStart = currentBeatIdx > prevBeatIdx;
-
-        if (isBeatStart && !isClicking)
+        // Schedule absolute boundaries once, not two divisions/floors for every
+        // sample. Multiplication by the beat index avoids cumulative rounding drift.
+        nextBeatIndex = std::floor((currentSamplePosition - 1.0) / samplesPerBeat) + 1.0;
+        nextBeatSample = std::ceil(nextBeatIndex * samplesPerBeat);
+        scheduledSamplesPerBeat = samplesPerBeat;
+    }
+    auto* left = buffer.getWritePointer(0);
+    auto* right = numSamples > 0 && buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
+    int offset = 0;
+    while (offset < numSamples)
+    {
+        const double position = currentSamplePosition + offset;
+        if (active && nextBeatSample <= position)
         {
-            // Beat detected
-            const int beatInBar =
-                ((currentBeatIdx % blockNumerator)
-                    + blockNumerator)
-                % blockNumerator;
-            
+            if (isClicking) retireClick(); // Long custom clicks must not suppress later beats.
+            const auto beat = static_cast<std::int64_t>(nextBeatIndex);
+            const int beatInBar = static_cast<int>((beat % blockNumerator + blockNumerator) % blockNumerator);
+            isHighClick = beatInBar < static_cast<int>(clickData->accentBeats.size())
+                ? clickData->accentBeats[static_cast<size_t>(beatInBar)] : beatInBar == 0;
             isClicking = true;
             clickSampleCounter = 0;
-            // Use accent array to determine if this beat should be high-pitched
-            if (beatInBar
-                < static_cast<int>(
-                    clickData->accentBeats.size()))
-            {
-                isHighClick =
-                    clickData->accentBeats[
-                        static_cast<size_t>(
-                            beatInBar)];
-            }
-            else
-            {
-                // Fallback: only accent beat 0 if array doesn't cover this beat
-                isHighClick = (beatInBar == 0);
-            }
+            nextBeatIndex += 1.0;
+            nextBeatSample = std::ceil(nextBeatIndex * samplesPerBeat);
         }
-        
-        // Mix click if active
-        if (isClicking)
+        int span = numSamples - offset;
+        if (active && nextBeatSample < currentSamplePosition + numSamples)
+            span = juce::jlimit(1, span, static_cast<int>(nextBeatSample - position));
+        const auto& source = isHighClick ? clickData->highClickBuffer : clickData->lowClickBuffer;
+        if (isClicking && (source.getNumChannels() == 0 || clickSampleCounter >= source.getNumSamples()))
+            isClicking = false;
+        if (isClicking) span = juce::jmin(span, source.getNumSamples() - clickSampleCounter);
+
+        if (!isClicking && transitionSamplesLeft == 0)
         {
-            float clickValue = 0.0f;
-            const auto& sourceBuffer =
-                isHighClick
-                    ? clickData->highClickBuffer
-                    : clickData->lowClickBuffer;
-            
-            if (sourceBuffer.getNumChannels() > 0
-                && clickSampleCounter
-                    < sourceBuffer.getNumSamples())
-            {
-                clickValue =
-                    sourceBuffer.getReadPointer(0)[
-                        clickSampleCounter]
-                    * blockVolume;
-                clickSampleCounter++;
-            }
-            else
-            {
-                isClicking = false; // Click finished
-            }
-            
-            // Add to output
-            leftConfig[i] += clickValue;
-            if (rightConfig) rightConfig[i] += clickValue;
+            clickGain.skip(span);
+            lastClickOutput = 0.0f;
         }
+        else if (isClicking && !clickGain.isSmoothing() && transitionSamplesLeft == 0)
+        {
+            const auto* samples = source.getReadPointer(0) + clickSampleCounter;
+            const float gain = clickGain.getCurrentValue();
+            juce::FloatVectorOperations::addWithMultiply(left + offset, samples, gain, span);
+            if (right != nullptr) juce::FloatVectorOperations::addWithMultiply(right + offset, samples, gain, span);
+            lastClickOutput = samples[span - 1] * gain;
+            clickSampleCounter += span;
+        }
+        else
+        {
+            for (int index = 0; index < span; ++index)
+            {
+                const float gain = clickGain.getNextValue();
+                float value = isClicking ? source.getSample(0, clickSampleCounter++) * gain : 0.0f;
+                if (transitionSamplesLeft > 0)
+                    value += transitionTail * static_cast<float>(transitionSamplesLeft--) / static_cast<float>(transitionLength);
+                left[offset + index] += value;
+                if (right != nullptr) right[offset + index] += value;
+                lastClickOutput = value;
+            }
+        }
+        offset += span;
     }
-    
-    // Update last position for restart detection
-    lastSamplePosition = currentSamplePosition + numSamples;
+    lastSamplePosition = active ? currentSamplePosition + numSamples : -1.0;
 }
 
 void Metronome::setBpm(double newBpm)
@@ -469,7 +548,7 @@ void Metronome::setVolume(float newVolume)
     if (std::isfinite(newVolume))
     {
         volume.store(
-            newVolume,
+            juce::jlimit(0.0f, 1.0f, newVolume),
             std::memory_order_relaxed);
     }
 }
@@ -585,21 +664,16 @@ bool Metronome::renderToFile(const juce::File& outputFile, double startTimeSecon
     if (!writer)
         return false;
 
-    // Save and reset playback state for clean offline render
-    int savedClickCounter = clickSampleCounter;
-    bool savedIsClicking = isClicking;
-    bool savedIsHighClick = isHighClick;
-    double savedLastPos = lastSamplePosition;
-    const bool savedEnabled =
-        enabled.load(std::memory_order_acquire);
-
-    clickSampleCounter = 0;
-    isClicking = false;
-    isHighClick = false;
-    lastSamplePosition = -1.0;
-    enabled.store(
-        true,
-        std::memory_order_release); // Force enabled for rendering
+    // Offline export must not reset or resume the live/practice clock. Snapshot
+    // configuration into a separate generator with independent audio state.
+    Metronome renderer;
+    renderer.prepareToPlay(renderSampleRate, 512);
+    renderer.setBpm(getBpm());
+    renderer.packedTimeSignature.store(packedTimeSignature.load(std::memory_order_acquire));
+    renderer.setVolume(getVolume());
+    renderer.clickGain.setCurrentAndTargetValue(getVolume());
+    renderer.publishClickData(getClickDataSnapshot());
+    renderer.setEnabled(true);
 
     // Process in blocks
     const int blockSize = 512;
@@ -617,27 +691,18 @@ bool Metronome::renderToFile(const juce::File& outputFile, double startTimeSecon
         if (samplesToProcess < blockSize)
         {
             juce::AudioBuffer<float> subBuffer(buffer.getArrayOfWritePointers(), 2, samplesToProcess);
-            getNextAudioBlock(subBuffer, currentPos);
-            writer->writeFromAudioSampleBuffer(subBuffer, 0, samplesToProcess);
+            renderer.getNextAudioBlock(subBuffer, currentPos);
+            if (!writer->writeFromAudioSampleBuffer(subBuffer, 0, samplesToProcess)) return false;
         }
         else
         {
-            getNextAudioBlock(buffer, currentPos);
-            writer->writeFromAudioSampleBuffer(buffer, 0, samplesToProcess);
+            renderer.getNextAudioBlock(buffer, currentPos);
+            if (!writer->writeFromAudioSampleBuffer(buffer, 0, samplesToProcess)) return false;
         }
 
         currentPos += samplesToProcess;
         samplesRemaining -= samplesToProcess;
     }
-
-    // Restore playback state
-    clickSampleCounter = savedClickCounter;
-    isClicking = savedIsClicking;
-    isHighClick = savedIsHighClick;
-    lastSamplePosition = savedLastPos;
-    enabled.store(
-        savedEnabled,
-        std::memory_order_release);
 
     return true;
 }
@@ -668,7 +733,7 @@ bool Metronome::loadSoundFromFile(
 
     if (!std::isfinite(reader->sampleRate)
         || reader->sampleRate <= 0.0
-        || reader->numChannels == 0)
+        || reader->numChannels == 0 || reader->numChannels > 64)
     {
         return false;
     }
@@ -759,7 +824,8 @@ bool Metronome::loadSoundFromFile(
                 float s1 = (idx1 < (int)samplesToRead) ? chData[idx1] : 0.0f;
                 val += (float)(s0 + (s1 - s0) * frac);
             }
-            outWrite[i] = val / reader->numChannels;
+            if (!std::isfinite(val)) return false;
+            outWrite[i] = juce::jlimit(-1.0f, 1.0f, val / reader->numChannels);
         }
     }
     else
@@ -770,7 +836,8 @@ bool Metronome::loadSoundFromFile(
             float val = 0.0f;
             for (int ch = 0; ch < (int)reader->numChannels; ++ch)
                 val += fileBuffer.getReadPointer(ch)[i];
-            outWrite[i] = val / reader->numChannels;
+            if (!std::isfinite(val)) return false;
+            outWrite[i] = juce::jlimit(-1.0f, 1.0f, val / reader->numChannels);
         }
     }
 
@@ -811,6 +878,7 @@ bool Metronome::setClickSound(const juce::String& filePath)
                 targetSampleRate);
     nextData->lowClickBuffer =
         std::move(replacementBuffer);
+    ++nextData->soundRevision;
     nextData->usingCustomClick =
         filePath.isNotEmpty();
     nextData->customClickPath =
@@ -853,6 +921,7 @@ bool Metronome::setAccentSound(const juce::String& filePath)
                 targetSampleRate);
     nextData->highClickBuffer =
         std::move(replacementBuffer);
+    ++nextData->soundRevision;
     nextData->usingCustomAccent =
         filePath.isNotEmpty();
     nextData->customAccentPath =
@@ -871,6 +940,7 @@ void Metronome::resetToDefaultSounds()
                 std::memory_order_relaxed));
     const auto currentData =
         getClickDataSnapshot();
+    if (currentData != nullptr) nextData->soundRevision = currentData->soundRevision + 1;
     if (currentData != nullptr)
     {
         nextData->accentBeats =

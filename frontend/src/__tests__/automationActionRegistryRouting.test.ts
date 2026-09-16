@@ -194,12 +194,12 @@ describe("automation action registry", () => {
     const toggleTracksAutomationModes = vi.fn();
     const setTracksAutomationMode = vi.fn();
     const setTracksAutomationWrite = vi.fn();
-    const toggleTracksAutomationRead = vi.fn();
+    const setTracksAutomationRead = vi.fn();
     useDAWStore.setState({
       toggleTracksAutomationModes,
       setTracksAutomationMode,
       setTracksAutomationWrite,
-      toggleTracksAutomationRead,
+      setTracksAutomationRead,
     });
 
     getRegisteredAction("automation.selectedTracks.toggleOffRead")?.execute();
@@ -222,8 +222,8 @@ describe("automation action registry", () => {
     ]);
     expect(setTracksAutomationWrite).toHaveBeenCalledOnce();
     expect(setTracksAutomationWrite).toHaveBeenCalledWith(["track-a", "track-b"], false);
-    expect(toggleTracksAutomationRead).toHaveBeenCalledOnce();
-    expect(toggleTracksAutomationRead).toHaveBeenCalledWith(["track-a", "track-b"]);
+    expect(setTracksAutomationRead).toHaveBeenCalledOnce();
+    expect(setTracksAutomationRead).toHaveBeenCalledWith(["track-a", "track-b"], false);
   });
 
   it("keeps repeated all-track mode and one-way write commands no-op safe", () => {

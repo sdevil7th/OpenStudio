@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "TrackProcessor.h"
+#include "MessageThreadLifetime.h"
 #include "AudioRecorder.h"
 #include "MIDIRecorder.h"
 #include "PlaybackEngine.h"
@@ -34,13 +35,13 @@ class AudioEngine  : public juce::AudioIODeviceCallback,
                      public ControlSurfaceCallback,
                      public juce::Timer
 {
-    static constexpr int maxRealtimeTracks = 64;
     struct RealtimeTrackEntry;
     struct ActiveFXStage;
 
 public:
     AudioEngine();
     ~AudioEngine() override;
+    void reportStageProcessorFaults(); // Control thread; only called after fault/reset generation changes.
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
                                            int numInputChannels,
@@ -95,6 +96,7 @@ public:
     
     // Track control (Phase 1) - ID-based
     void setTrackRecordArm(const juce::String& trackId, bool armed);
+    void setTrackInputMonitoringAsync(const juce::String& trackId, bool enabled, std::function<void(bool)> completion);
     void setTrackInputMonitoring(const juce::String& trackId, bool enabled);
     void setTrackInputChannels(const juce::String& trackId, int startChannel, int numChannels);
     bool setNAMTunerActive(const juce::String& trackId,
@@ -109,7 +111,11 @@ public:
     
     // Transport control (Phase 2)
     void setTransportPlaying(bool playing);
+    void setTransportRecordingAsync(bool recording, std::function<void(bool)> completion);
     void setTransportRecording(bool recording);
+    bool recordingRequiresAudioInput() const;
+    bool trackRequiresAudioInput(const juce::String& trackId) const;
+    void requestAudioInputAccess(std::function<void(bool)> completion);
     bool isTransportPlaying() const { return isPlaying; }
     bool isTransportRecording() const { return isRecordMode; }
     void setLoopMode(bool loop)
@@ -122,11 +128,12 @@ public:
     }
     double getTransportPosition() const
     {
-        return currentSampleRate > 0.0
+        const auto rate = transportSampleRate.load(std::memory_order_acquire);
+        return rate > 0.0
             ? static_cast<double>(
                 currentSamplePosition.load(
                     std::memory_order_acquire))
-                / currentSampleRate
+                / rate
             : 0.0;
     }
     void setTransportPosition(double seconds);
@@ -149,6 +156,8 @@ public:
     void setMetronomeVolume(float volume);
     void setMetronomeAccentBeats(const std::vector<bool>& accents);
     bool isMetronomeEnabled() const;
+    bool setMetronomePracticeEnabled(bool enabled);
+    bool isMetronomePracticeEnabled() const { return metronome.isPracticeEnabled(); }
     void setTimeSignature(int numerator, int denominator);
     void getTimeSignature(int& numerator, int& denominator) const;
 
@@ -162,6 +171,7 @@ public:
 
     // Get clips that were completed in the last recording session
     std::vector<AudioRecorder::CompletedRecording> getLastCompletedClips();
+    juce::var takeRecordingWriteFailures() { return audioRecorder.takeWriteFailures(); }
 
     // Get MIDI clips that were completed in the last recording session
     std::vector<MIDIRecorder::CompletedMIDIRecording> getLastCompletedMIDIClips();
@@ -189,6 +199,7 @@ public:
     
     // FX Management (Phase 3) - ID-based
     juce::var scanForPlugins(bool forceRescan = false);
+    bool setIsolatedPluginHosting(const juce::String& identifier, bool enabled) { return pluginManager.setIsolatedHosting(identifier, enabled); }
     juce::var getPluginScanConfiguration() const;
     bool addPluginScanPath(const juce::String& path);
     bool removePluginScanPath(const juce::String& path);
@@ -202,13 +213,13 @@ public:
     bool addMasterBuiltInFX(const juce::String& effectName);
     juce::var getAvailableBuiltInFX();
 
-    // S13FX (JSFX) Management
-    bool addTrackS13FX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX = false);
-    bool addMasterS13FX(const juce::String& scriptPath);
-    juce::var getS13FXSliders(const juce::String& trackId, int fxIndex, bool isInputFX);
-    bool setS13FXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value);
-    bool reloadS13FX(const juce::String& trackId, int fxIndex, bool isInputFX);
-    juce::var getAvailableS13FX();
+    // JSFX (JSFX) Management
+    bool addTrackJSFX(const juce::String& trackId, const juce::String& scriptPath, bool isInputFX = false);
+    bool addMasterJSFX(const juce::String& scriptPath);
+    juce::var getJSFXSliders(const juce::String& trackId, int fxIndex, bool isInputFX);
+    bool setJSFXSlider(const juce::String& trackId, int fxIndex, bool isInputFX, int sliderIndex, double value);
+    bool reloadJSFX(const juce::String& trackId, int fxIndex, bool isInputFX);
+    juce::var getAvailableJSFX();
     
     // Built-in FX Preset System
     juce::var getBuiltInFXPresets(const juce::String& pluginName);
@@ -232,8 +243,16 @@ public:
     void openInstrumentEditor(const juce::String& trackId);
     void closePluginEditor(const juce::String& trackId, int fxIndex, bool isInputFX);
     void closeAllPluginWindows();
+    // Message-thread notification after successful removal, outside audio locks.
+    // Index-addressed browser editors at/after this slot no longer have a valid target.
+    std::function<void(const juce::String& trackId, const juce::String& chain, int firstIndex)>
+        onFXSlotsRemoved;
     void setPluginWindowOwnerComponent(juce::Component* component);
     void setPluginWindowShortcutForwardCallback(PluginWindowManager::ShortcutForwardCallback callback);
+    bool isPluginEditorVisible(const PluginWindowManager::PluginEditorTarget& target) const
+    {
+        return pluginWindowManager.isEditorVisible(target);
+    }
     
     // MIDI Device Management (Phase 2)
     juce::var getMIDIInputDevices();
@@ -361,7 +380,8 @@ public:
                        double renderSampleRate, int bitDepth, int numChannels,
                        bool normalize, bool addTail, double tailLengthMs,
                        bool includeMetronome = false,
-                       const juce::StringArray& includedClipIds = {});
+                       const juce::StringArray& includedClipIds = {},
+                       const std::function<bool()>& keepRunning = {});
     juce::var capturePitchAuditionPlayback(const juce::String& trackId,
                                            const juce::String& clipId,
                                            double startTime,
@@ -430,7 +450,7 @@ public:
     juce::String getTrackMIDIOutput(const juce::String& trackId) const;
     juce::var getTrackRoutingInfo(const juce::String& trackId);
 
-    // Lua Scripting (S13Script)
+    // Lua Scripting (OpenStudioScript)
     juce::var runScript(const juce::String& scriptPath);
     juce::var runScriptCode(const juce::String& luaCode);
     juce::String getScriptDirectory();
@@ -455,6 +475,9 @@ public:
     void clearAutomation(const juce::String& trackId, const juce::String& parameterId);
     // Touch begin/end (for touch/latch recording modes)
     void beginTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
+    juce::var takePluginParameterEdits();
+    juce::var builtInParameterEdit(const juce::String& trackId, const juce::String& chain,
+                                  int index, const juce::String& param, const juce::String& phase);
     void endTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
 
     // Tempo Map (Phase 1.2)
@@ -715,6 +738,7 @@ private:
         bool forceFloat = false;
         bool supportsDouble = false;
         std::shared_ptr<juce::AudioProcessor> processor;
+        std::shared_ptr<ProcessorSafety> safety = std::make_shared<ProcessorSafety>();
         std::shared_ptr<StageFXBypassDelayStorage>
             bypassDelay;
     };
@@ -782,7 +806,7 @@ private:
     struct RealtimeTrackSnapshot
     {
         std::vector<RealtimeTrackEntry> tracks;
-        std::array<int, maxRealtimeTracks> processingOrder {};
+        std::vector<int> processingOrder; // Sized during control-thread publication, never in the callback.
         int processingOrderCount = 0;
     };
     struct PublishedBuiltInProcessorOwner
@@ -848,8 +872,12 @@ private:
     juce::File findFFmpegExe() const;
     bool convertWithFFmpeg(const juce::File& inputFile, const juce::File& outputFile,
                            const juce::String& format, double targetSampleRate, int quality,
-                           int bitDepth, int numChannels) const;
+                           int bitDepth, int numChannels,
+                           const std::function<bool()>& keepRunning) const;
     // Device settings persistence
+    uint64 recordingRequestGeneration = 0;
+    std::map<juce::String, uint64> monitorRequestGenerations;
+    std::unique_ptr<juce::XmlElement> inputPermissionSavedSettings;
     void saveDeviceSettings();
     void loadDeviceSettings();
     void loadDeviceSettingsWithChannelCounts(int inputChannels, int outputChannels);
@@ -940,11 +968,13 @@ private:
     // seek cannot tear a double or be overwritten by an in-flight callback.
     std::atomic<juce::int64> currentSamplePosition { 0 };
     double currentSampleRate = 44100.0;
+    std::atomic<double> transportSampleRate { 44100.0 };
     int currentBlockSize = 512;  // Device buffer size for re-preparing plugins after render
     std::atomic<int> namRackOversamplingFactor { 4 };
     int inputLatencySamples = 0;  // Device input latency for recording compensation
     std::atomic<double> lastAudioBlockWallTimeMs { 0.0 };
     std::atomic<double> lastAudioBlockDurationMs { 0.0 };
+    std::atomic<int> lastAudioBlockSamples { 0 };
     std::atomic<double> lastAudioCallbackProcessMs { 0.0 };
     std::atomic<double> maxAudioCallbackProcessMs { 0.0 };
     std::atomic<uint64> audioCallbackCounter { 0 };
@@ -1158,6 +1188,7 @@ private:
     juce::AudioBuffer<double> reusableStageFXDryBufferDouble;
     juce::AudioBuffer<float> reusablePitchScrubBuffer;
     juce::MidiBuffer reusableRealtimeMidiBuffer;
+    juce::MidiBuffer reusableMasterMidiBuffer, reusableMonitoringMidiBuffer;
     float stageFXBypassRampStep = 1.0f / 882.0f;
     int stageFXContinuityRampSamples = 353;
     std::array<StageFXContinuityState,
@@ -1254,4 +1285,5 @@ private:
     std::map<juce::String, juce::StringPairArray> stemFileCache;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
+    MessageThreadLifetime deferredCallbacks;
 };

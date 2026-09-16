@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import sys
 import tempfile
@@ -20,11 +21,26 @@ import ai_runtime_probe  # noqa: E402
 
 
 class AceDiffusersGenerationTests(unittest.TestCase):
-    def test_default_music_generation_cache_root_is_diffusers(self):
-        with mock.patch.object(ai_runtime_probe.Path, "home", return_value=Path("C:/Users/example")):
-            root = ai_runtime_probe.resolve_music_gen_checkpoint_root("")
+    def test_unicode_status_round_trips_through_ascii_console(self):
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="ascii")
+        message = "GPU \u00b7 bfloat16 \u2014 preparing"
+        with mock.patch.object(music, "ORIGINAL_STDOUT", stream):
+            music.emit_payload({"message": message})
+        self.assertEqual(json.loads(buffer.getvalue().decode("utf-8"))["message"], message)
 
-        self.assertEqual(root.as_posix(), "C:/Users/example/.cache/ace-step/diffusers")
+    def test_invalid_generated_audio_is_rejected_before_writing(self):
+        for data in (np.empty((0, 2)), np.array([[float("nan"), 0]]), np.array([[float("inf"), 0]])):
+            with self.subTest(data=data), self.assertRaises(music.GenerationFailure):
+                music.output_to_soundfile_array(data)
+
+    def test_default_music_generation_cache_root_is_diffusers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            with mock.patch.object(ai_runtime_probe.Path, "home", return_value=home):
+                root = ai_runtime_probe.resolve_music_gen_checkpoint_root("")
+
+            self.assertEqual(root, home / ".cache" / "ace-step" / "diffusers")
 
     def test_text_to_music_kwargs_match_reference_pipeline_contract(self):
         spec = music.build_generation_spec(

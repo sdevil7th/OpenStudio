@@ -123,7 +123,7 @@ describe("master channel strip controls", () => {
     );
 
     expect(htmlWithoutLanes).not.toContain('title="Master Automation"');
-    expect(getButtonTag(htmlWithoutLanes, "Add a master automation lane or enable write first")).toContain("disabled");
+    expect(getButtonTag(htmlWithoutLanes, "Enable master automation read")).not.toContain("disabled");
     expect(getButtonTag(htmlWithoutLanes, "Enable master automation write")).not.toContain("disabled");
     expect(getButtonTag(htmlWithoutLanes, "Master automation panel")).toContain("w-3");
 

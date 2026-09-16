@@ -1,8 +1,10 @@
+import { usePanelLayout } from "./utils/usePanelLayout";
 import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
+import { startPluginAutomationCapture } from "./services/pluginAutomationCapture";
 import {
   getGlobalShortcutConflicts,
   getRegisteredAction,
@@ -15,11 +17,8 @@ import {
   getMasterTrackHeaderHeight,
 } from "./store/useDAWStore";
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
-import {
-  activateShortcutContext,
-  isEditableShortcutTarget,
-  isNonTextControlShortcutTarget,
-} from "./utils/shortcutContext";
+import { toGlobalShortcutPayload } from "./utils/domShortcutEvent";
+import { activateShortcutContext } from "./utils/shortcutContext";
 import {
   installModalContextMenuLeakGuard,
   shouldSuppressWorkspaceContextMenu,
@@ -63,6 +62,9 @@ import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 import { EssentialControlsCard } from "./components/EssentialControlsCard";
 import { InputProfileOnboardingCard } from "./components/InputProfileOnboardingCard";
 import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
+import { ProjectRecoveryDialog } from "./components/ProjectRecoveryDialog";
+import { RecordingFailureBanner } from "./components/RecordingFailureBanner";
+import { AppUpdatePanel } from "./components/AppUpdatePanel";
 import {
   createMultipleTracks,
   createTrackOfType,
@@ -157,7 +159,6 @@ function App() {
     pianoRollTrackId,
     pianoRollClipId,
     midiEditorSessions,
-    activeMidiEditorSessionId,
     dockedMidiEditorSessionId,
     selectedClipIds,
     closePianoRoll,
@@ -234,7 +235,6 @@ function App() {
       pianoRollTrackId: state.pianoRollTrackId,
       pianoRollClipId: state.pianoRollClipId,
       midiEditorSessions: state.midiEditorSessions,
-      activeMidiEditorSessionId: state.activeMidiEditorSessionId,
       dockedMidiEditorSessionId: state.dockedMidiEditorSessionId,
       selectedClipIds: state.selectedClipIds,
       closePianoRoll: state.closePianoRoll,
@@ -318,10 +318,6 @@ function App() {
     () => midiEditorSessions.find((session) => session.sessionId === dockedMidiEditorSessionId) ?? null,
     [dockedMidiEditorSessionId, midiEditorSessions],
   );
-  const activeMidiEditorSession = useMemo(
-    () => midiEditorSessions.find((session) => session.sessionId === activeMidiEditorSessionId) ?? null,
-    [activeMidiEditorSessionId, midiEditorSessions],
-  );
   const dockedPianoRollTrackId = dockedMidiEditorSession?.trackId ?? pianoRollTrackId;
   const dockedPianoRollClipId = dockedMidiEditorSession?.clipId ?? pianoRollClipId;
   const dockedPianoRollTrack = useMemo(
@@ -345,17 +341,26 @@ function App() {
     return selectedClipIds.filter((id) => id !== dockedPianoRollClipId && midiClipIds.has(id));
   }, [dockedPianoRollClipId, dockedPianoRollTrackId, selectedClipIds, tracks]);
 
+  const isMixerDetached = detachedPanels.includes("mixer");
+  const pitchVisible = Boolean(showPitchEditor && pitchEditorTrackId && pitchEditorClipId);
+  const midiVisible = Boolean(showPianoRoll && dockedMidiEditorSession && dockedPianoRollTrackId && dockedPianoRollClipId);
+  const { rootRef: layoutRootRef, heights: panelHeights, available: panelAvailable } = usePanelLayout({
+    ...(pitchVisible ? { pitch: lowerZoneHeight } : {}),
+    ...(midiVisible ? { midi: lowerZoneHeight } : {}),
+    ...(showMixer && !isMixerDetached ? { mixer: 340 } : {}),
+    ...(showClipLauncher ? { launcher: 256 } : {}),
+  });
+  const panelHeightStyle = (height: number): React.CSSProperties => ({ "--pane-height": `${height}px` } as React.CSSProperties);
+
   const beginLowerZoneResize = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startY = event.clientY;
-    const startHeight = lowerZoneHeight;
+    const startHeight = panelHeights.midi ?? lowerZoneHeight;
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
 
     const onMove = (moveEvent: MouseEvent) => {
-      const workspaceHeight = workspaceRef.current?.getBoundingClientRect().height ?? window.innerHeight;
-      const availableHeight = Math.max(window.innerHeight, workspaceHeight + startHeight);
-      const maxHeight = Math.max(180, Math.round(availableHeight * 0.85));
+      const maxHeight = Math.max(180, panelAvailable - 180);
       const nextHeight = Math.max(180, Math.min(maxHeight, startHeight - (moveEvent.clientY - startY)));
       setLowerZoneHeight(nextHeight);
     };
@@ -368,7 +373,7 @@ function App() {
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [lowerZoneHeight, setLowerZoneHeight]);
+  }, [lowerZoneHeight, setLowerZoneHeight, panelHeights.midi, panelAvailable]);
 
   // OS file drag-drop visual indicator
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -376,7 +381,6 @@ function App() {
   const hideMixerOnCloseRef = useRef(false);
   const openedMidiEditorWindowsRef = useRef<Set<string>>(new Set());
   const prewarmedMidiEditorSessionRef = useRef<string | null>(null);
-  const isMixerDetached = detachedPanels.includes("mixer");
 
   // Project loading state (separate selector to avoid unnecessary re-renders)
   const isProjectLoading = useDAWStore((state) => state.isProjectLoading);
@@ -420,6 +424,7 @@ function App() {
   const aiToolsVisualProgressPercent = Math.round(aiToolsVisualProgressRatio * 100);
 
   useEffect(() => startMixerUISync(), []);
+  useEffect(() => startPluginAutomationCapture(), []);
   useEffect(() => startMidiEditorUISync(), []);
 
   useEffect(() => {
@@ -458,7 +463,7 @@ function App() {
       }
 
       const lowerPath = pendingProjectPath.toLowerCase();
-      if (!lowerPath.endsWith(".osproj") && !lowerPath.endsWith(".s13")) {
+      if (!lowerPath.endsWith(".osproj")) {
         return;
       }
 
@@ -765,12 +770,6 @@ function App() {
       });
   }, [midiEditorSessions]);
 
-  useEffect(() => {
-    if (!activeMidiEditorSession || activeMidiEditorSession.mode !== "windowed") {
-      return;
-    }
-    void nativeBridge.focusMidiEditorWindow(activeMidiEditorSession.sessionId);
-  }, [activeMidiEditorSession]);
 
   useEffect(() => {
     const unsubscribe = nativeBridge.onAppCloseRequested(() => {
@@ -968,6 +967,7 @@ function App() {
           tracks: currentState.tracks,
           transport: currentState.transport,
           metronomeEnabled: currentState.metronomeEnabled,
+          metronomePracticeEnabled: currentState.metronomePracticeEnabled,
           nextTime: newTime,
         });
         if (autoStopDecision.shouldStop) {
@@ -1022,6 +1022,11 @@ function App() {
   useEffect(() => {
     const unsub = nativeBridge.onTransportUpdate((data) => {
       const state = useDAWStore.getState();
+      if (!state.metronomePracticePending
+          && typeof data.metronomePracticeEnabled === "boolean"
+          && data.metronomePracticeEnabled !== state.metronomePracticeEnabled) {
+        useDAWStore.setState({ metronomePracticeEnabled: data.metronomePracticeEnabled });
+      }
       const backendPos = data.position;
       const frontendPos = state.transport.currentTime;
       const drift = Math.abs(backendPos - frontendPos);
@@ -1072,11 +1077,11 @@ function App() {
     const interval = setInterval(async () => {
       const s = useDAWStore.getState();
       if (s.isModified
-          && s.projectPath
+          && !s.isProjectLoading
           && !autoSaveInFlightRef.current) {
         autoSaveInFlightRef.current = true;
         try {
-          await s.saveProject(false);
+          await s.saveProject(false, true);
         } catch {
           // Auto-save failure is non-critical
         } finally {
@@ -1120,21 +1125,7 @@ function App() {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      void dispatchGlobalShortcut({
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        metaKey: e.metaKey,
-        repeat: e.repeat,
-        source: "browser",
-        targetIsEditable: isEditableShortcutTarget(e.target),
-        targetIsNonTextControl: isNonTextControlShortcutTarget(e.target),
-        preventDefault: () => e.preventDefault(),
-        stopPropagation: () => e.stopPropagation(),
-        stopImmediatePropagation: () => e.stopImmediatePropagation(),
-      });
+      void dispatchGlobalShortcut(toGlobalShortcutPayload(e));
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
@@ -1432,7 +1423,7 @@ function App() {
   };
 
   return (
-    <div className="app-container">
+    <div className="app-container" ref={layoutRootRef}>
       {/* Project Tab Bar (Phase 15C) */}
       <ProjectTabBar />
       {/* Menu Bar */}
@@ -1448,9 +1439,10 @@ function App() {
 
       {/* Custom Toolbars (Phase 15D) */}
       <CustomToolbarStrip />
+      <RecordingFailureBanner />
 
       {/* Media Explorer (left panel) + Main Workspace */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div data-layout-pane="timeline" className="flex flex-1 min-h-[180px] overflow-hidden">
       {showMediaExplorer && (
         <Suspense fallback={null}>
           <MediaExplorer
@@ -1676,16 +1668,19 @@ function App() {
       </div>{/* Close Media Explorer + Workspace wrapper */}
 
       {/* Pitch Editor Lower Zone (between workspace and transport) */}
-      {showPitchEditor && pitchEditorTrackId && pitchEditorClipId && (
-        <Suspense fallback={<div className="h-[280px] bg-daw-panel border-t border-daw-border flex items-center justify-center text-neutral-500 text-sm">Loading pitch editor...</div>}>
-          <PitchEditorLowerZone />
-        </Suspense>
+      {pitchVisible && (
+        <div data-layout-pane="pitch" className="shrink-0 h-[var(--pane-height)] min-h-0 overflow-hidden" style={panelHeightStyle(panelHeights.pitch ?? 96)}>
+          <Suspense fallback={<div className="h-full bg-daw-panel flex items-center justify-center text-neutral-500 text-sm">Loading pitch editor...</div>}>
+            <PitchEditorLowerZone height={panelHeights.pitch ?? 96} />
+          </Suspense>
+        </div>
       )}
 
       {showPianoRoll && dockedMidiEditorSession && dockedPianoRollTrackId && dockedPianoRollClipId && (
         <section
-          className="shrink-0 min-h-0 bg-neutral-950 border-t border-neutral-700 flex flex-col"
-          style={{ height: lowerZoneHeight }}
+          className="shrink-0 h-[var(--pane-height)] min-h-0 overflow-auto bg-neutral-950 border-t border-neutral-700 flex flex-col"
+          data-layout-pane="midi"
+          style={panelHeightStyle(panelHeights.midi ?? 96)}
           aria-label="Docked Piano Roll editor"
           data-shortcut-context={`piano_roll:${dockedMidiEditorSession.sessionId}`}
           data-qa="docked-piano-roll"
@@ -1738,7 +1733,7 @@ function App() {
               </Button>
             </div>
           </div>
-          <div className="flex-1 min-h-0 overflow-hidden">
+          <div className="flex-1 min-h-[180px] shrink-0 overflow-hidden">
             <Suspense fallback={<div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading...</div>}>
               <PianoRoll
                 sessionId={dockedMidiEditorSession.sessionId}
@@ -1753,6 +1748,8 @@ function App() {
       )}
 
       <UnsavedChangesDialog />
+      <ProjectRecoveryDialog />
+      <AppUpdatePanel />
 
       {/* Transport Bar (above Mixer like Reaper) */}
       <div role="contentinfo" aria-label="Transport controls">
@@ -1856,15 +1853,16 @@ function App() {
       {/* Clip Launcher / Session View */}
       {showClipLauncher && (
         <Suspense fallback={null}>
-          <div className="h-64 border-t border-neutral-700">
+          <div data-layout-pane="launcher" className="shrink-0 h-[var(--pane-height)] overflow-auto border-t border-neutral-700" style={panelHeightStyle(panelHeights.launcher ?? 96)}>
             <ClipLauncherView />
           </div>
         </Suspense>
       )}
 
       {/* Mixer Panel */}
-      <div role="complementary" aria-label="Mixer panel">
+      <div data-layout-pane="mixer" className="shrink-0" role="complementary" aria-label="Mixer panel">
       <MixerPanel
+        dockedHeight={panelHeights.mixer ?? 0}
         isVisible={showMixer && !isMixerDetached}
         isDetached={false}
         onDetach={() => { void handleDetachMixer(); }}

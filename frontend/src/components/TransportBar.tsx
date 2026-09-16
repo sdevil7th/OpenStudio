@@ -13,7 +13,7 @@ import {
 import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { MetronomeSettings } from "./MetronomeSettings";
-import { MetronomeIcon } from "./icons";
+import { MetronomeControls } from "./MetronomeControls";
 import { Button, Input, TimeSignatureInput } from "./ui";
 import { formatShortcut } from "../utils/platform";
 
@@ -120,8 +120,6 @@ export function TransportBar() {
     setTempo,
     tapTempo,
     seekTo,
-    toggleMetronome,
-    metronomeEnabled,
     timeSignature,
     setTimeSignature,
   } = useDAWStore(
@@ -135,8 +133,6 @@ export function TransportBar() {
       setTempo: state.setTempo,
       tapTempo: state.tapTempo,
       seekTo: state.seekTo,
-      toggleMetronome: state.toggleMetronome,
-      metronomeEnabled: state.metronomeEnabled,
       timeSignature: state.timeSignature,
       setTimeSignature: state.setTimeSignature,
     })),
@@ -312,16 +308,7 @@ export function TransportBar() {
             <Repeat size={16} />
           </Button>
           <div className="w-2" />
-          <Button
-            variant="warning"
-            size="icon-lg"
-            active={metronomeEnabled}
-            onClick={toggleMetronome}
-            title="Toggle Metronome"
-            aria-label={metronomeEnabled ? "Disable Metronome" : "Enable Metronome"}
-          >
-            <MetronomeIcon size={16} />
-          </Button>
+          <MetronomeControls compact />
         </div>
 
         <div className="flex items-center gap-4 text-xs">

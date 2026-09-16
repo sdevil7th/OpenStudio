@@ -75,9 +75,10 @@ describe("raw MIDI input metering", () => {
   it("captures filtered armed input before monitoring and emits it in the batched meter event", () => {
     const normalizedAudioEngineSource = normalizeSourceText(audioEngineSource);
     const inputRouting = normalizedAudioEngineSource.slice(
-      normalizedAudioEngineSource.indexOf("// Route MIDI to appropriate tracks"),
+      normalizedAudioEngineSource.indexOf("// MIDI device callbacks must not walk"),
     );
     expect(inputRouting).toContain("if (track->getRecordArmed())\n            track->registerMIDIInputActivity(message);");
+    expect(inputRouting).toContain("for (const auto& entry : routing->tracks)");
     expect(inputRouting.indexOf("track->registerMIDIInputActivity(message)")).toBeLessThan(
       inputRouting.indexOf("track->getInputMonitoring()"),
     );

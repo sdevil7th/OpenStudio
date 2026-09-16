@@ -1,5 +1,5 @@
 import classNames from 'classnames';
-import { forwardRef } from 'react';
+import { forwardRef, useId } from 'react';
 import { InputProps, inputSizeStyles, inputVariantStyles } from './Input.types';
 
 /**
@@ -72,6 +72,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     },
     ref
   ) => {
+    const generatedId = useId();
+    const inputId = rest.id ?? generatedId;
     const inputClasses = classNames(
       inputSizeStyles[size],
       inputVariantStyles[variant],
@@ -88,7 +90,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     return (
       <WrapperComponent className={className}>
         {label && (
-          <label className="block text-sm font-medium text-daw-text-muted mb-1">
+          <label htmlFor={inputId} className="block text-sm font-medium text-daw-text-muted mb-1">
             {label}
             {required && <span className="text-red-500 ml-1">*</span>}
           </label>
@@ -96,7 +98,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
 
         <div className="relative inline-flex items-center w-full">
           <input
-            ref={ref}
+          ref={ref}
+          id={inputId}
             disabled={disabled}
             className={inputClasses}
             {...rest}

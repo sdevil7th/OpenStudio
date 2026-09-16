@@ -1,6 +1,10 @@
+#include "PluginSettingsMigration.h"
+#include "AppPaths.h"
 #include "PluginManager.h"
-#include "S13FXProcessor.h"
+#include "JSFXProcessor.h"
 #include "CLAPPluginFormat.h"
+#include "IsolatedPlugin.h"
+#include "JsonEnvelope.h"
 
 namespace
 {
@@ -10,11 +14,7 @@ juce::File getOpenStudioDocumentsDirectory()
     return documentsDir.getChildFile("OpenStudio");
 }
 
-juce::File getLegacyStudio13DocumentsDirectory()
-{
-    auto documentsDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    return documentsDir.getChildFile("Studio13");
-}
+
 
 constexpr bool shouldIgnorePathCase()
 {
@@ -274,24 +274,6 @@ juce::var makeStringArrayVar(const juce::StringArray& values)
     for (const auto& value : values)
         result.add(value);
     return juce::var(std::move(result));
-}
-
-void migrateLegacyFile(const juce::File& legacyFile, const juce::File& destinationFile)
-{
-    if (destinationFile.existsAsFile() || !legacyFile.existsAsFile())
-        return;
-
-    destinationFile.getParentDirectory().createDirectory();
-    if (legacyFile.copyFileTo(destinationFile))
-    {
-        juce::Logger::writeToLog("PluginManager: Migrated " + legacyFile.getFullPathName()
-                                 + " to " + destinationFile.getFullPathName());
-    }
-    else
-    {
-        juce::Logger::writeToLog("PluginManager: Failed to migrate " + legacyFile.getFullPathName()
-                                 + " to " + destinationFile.getFullPathName());
-    }
 }
 
 juce::String getCanonicalPluginIdentifier(const juce::String& identifier)
@@ -619,19 +601,50 @@ PluginManager::PluginManager()
         juce::Logger::writeToLog("PluginManager: Format " + juce::String(i) + ": " + format->getName());
     }
 
-    const auto openStudioDirectory = getOpenStudioDocumentsDirectory();
-    const auto legacyStudio13Directory = getLegacyStudio13DocumentsDirectory();
-    openStudioDirectory.createDirectory();
+   #if !JUCE_MAC
+    ensureSettingsLoaded();
+    getUserEffectsDirectory().createDirectory();
+   #endif
+}
 
-    pluginListFile = openStudioDirectory.getChildFile("PluginList.xml");
-    blacklistFile = openStudioDirectory.getChildFile("PluginBlacklist.txt");
-    pluginSearchPathsFile = openStudioDirectory.getChildFile("PluginSearchPaths.xml");
-    pluginScanDeadMansPedalFile = openStudioDirectory.getChildFile("PluginScanDeadMansPedal.txt");
+bool PluginManager::ensureSettingsLoaded() const
+{
+    const juce::ScopedLock managerLock(pluginManagerLock);
+    return const_cast<PluginManager*>(this)->loadSettingsIfNeeded();
+}
 
-    // Copy legacy state once, but never continue reading or writing the legacy
-    // files. This prevents the old Studio13 location from remaining sticky.
-    migrateLegacyFile(legacyStudio13Directory.getChildFile("PluginList.xml"), pluginListFile);
-    migrateLegacyFile(legacyStudio13Directory.getChildFile("PluginBlacklist.txt"), blacklistFile);
+bool PluginManager::loadSettingsIfNeeded()
+{
+    if (settingsLoaded) return true;
+    const auto settingsDirectory = AppPaths::pluginSettings();
+    const auto migrated = migrateOpenStudioPluginSettings(AppPaths::documents(), settingsDirectory);
+    if (migrated.failed())
+    {
+        settingsError = migrated.getErrorMessage();
+        return false;
+    }
+    if (settingsDirectory.createDirectory().failed())
+    {
+        settingsError = "OpenStudio plugin settings are not writable.";
+        return false;
+    }
+    pluginListFile = settingsDirectory.getChildFile("PluginList.xml");
+    hostingPreferencesFile = settingsDirectory.getChildFile("PluginHosting.json");
+    if (hostingPreferencesFile.getSize() <= 1024 * 1024)
+    {
+        const auto text = hostingPreferencesFile.loadFileAsString();
+        if (hasBoundedJsonEnvelope(text, 1024 * 1024))
+        {
+            const auto saved = juce::JSON::parse(text);
+            if (const auto* values = saved.getArray())
+                for (const auto& value : *values)
+                    if (value.isString() && value.toString().length() <= 4096 && isolatedPluginIds.size() < 10000)
+                        isolatedPluginIds.addIfNotAlreadyThere(value.toString());
+        }
+    }
+    blacklistFile = settingsDirectory.getChildFile("PluginBlacklist.txt");
+    pluginSearchPathsFile = settingsDirectory.getChildFile("PluginSearchPaths.xml");
+    pluginScanDeadMansPedalFile = settingsDirectory.getChildFile("PluginScanDeadMansPedal.txt");
 
     if (blacklistFile.existsAsFile())
     {
@@ -650,17 +663,19 @@ PluginManager::PluginManager()
     // Load existing plugin list if available
     loadPluginList();
 
-    // Ensure user effects directory exists
-    getUserEffectsDirectory().createDirectory();
+    settingsError.clear();
+    settingsLoaded = true;
+    return true;
 }
 
 PluginManager::~PluginManager()
 {
-    savePluginList();
+    if (settingsLoaded) savePluginList();
 }
 
 juce::var PluginManager::scanForPlugins(bool forceRescan)
 {
+    if (!ensureSettingsLoaded()) { auto* report = new juce::DynamicObject(); report->setProperty("success", false); report->setProperty("error", settingsError); return juce::var(report); }
     // Only one background scan may run at a time. The main manager lock is
     // deliberately held only for short snapshots and the final commit so UI
     // calls never wait behind third-party probe timeouts.
@@ -682,7 +697,7 @@ juce::var PluginManager::scanForPlugins(bool forceRescan)
     juce::addDefaultFormatsToManager(scanFormatManager);
     scanFormatManager.addFormat(std::make_unique<CLAPPluginFormat>());
 
-    const auto debugLog = getOpenStudioDocumentsDirectory().getChildFile("plugin_scan_debug.txt");
+    const auto debugLog = AppPaths::diagnostics().getChildFile("plugin_scan_debug.txt");
     debugLog.getParentDirectory().createDirectory();
     debugLog.deleteFile();
     debugLog.create();
@@ -963,7 +978,7 @@ juce::var PluginManager::scanForPlugins(bool forceRescan)
         }
     }
 
-    scanForS13FX();
+    scanForJSFX();
 
     int pluginCount = scannedPluginList.getNumTypes();
     if (!committed)
@@ -1003,6 +1018,7 @@ juce::var PluginManager::scanForPlugins(bool forceRescan)
 
 juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
 {
+    if (!ensureSettingsLoaded()) return {};
     const juce::ScopedLock managerLock(pluginManagerLock);
     juce::Array<juce::PluginDescription> plugins;
     
@@ -1014,15 +1030,73 @@ juce::Array<juce::PluginDescription> PluginManager::getAvailablePlugins() const
     return plugins;
 }
 
-std::vector<S13FXInfo> PluginManager::getAvailableS13FX() const
+std::vector<JSFXInfo> PluginManager::getAvailableJSFX() const
 {
     const juce::ScopedLock managerLock(pluginManagerLock);
-    return s13fxList;
+    return jsfxList;
+}
+
+juce::String PluginManager::resolvePluginIdentifier(const juce::PluginDescription& description,
+                                                    const juce::Array<juce::PluginDescription>& catalog)
+{
+    const auto runtimeIdentifier = description.createIdentifierString();
+    for (const auto& candidate : catalog)
+        if (candidate.createIdentifierString() == runtimeIdentifier)
+            return runtimeIdentifier;
+
+    for (const auto& candidate : catalog)
+    {
+        const bool sameClass = candidate.uniqueId != 0 && description.uniqueId != 0
+            ? candidate.uniqueId == description.uniqueId
+            : candidate.deprecatedUid != 0 && candidate.deprecatedUid == description.deprecatedUid;
+        if (sameClass && candidate.pluginFormatName == description.pluginFormatName
+            && identifiersMatch(candidate.fileOrIdentifier, description.fileOrIdentifier))
+            return candidate.createIdentifierString();
+    }
+    // Never select the first class in a bundle or guess from a display name.
+    return runtimeIdentifier;
+}
+
+juce::String PluginManager::getPluginIdentifier(const juce::PluginDescription& description) const
+{
+    return resolvePluginIdentifier(description, getAvailablePlugins());
+}
+
+bool PluginManager::usesIsolatedHosting(const juce::PluginDescription& description) const
+{
+    if (!ensureSettingsLoaded()) return false;
+    const juce::ScopedLock lock(pluginManagerLock);
+    return isolatedPluginIds.contains(description.createIdentifierString());
+}
+bool PluginManager::setIsolatedHosting(const juce::String& identifier, bool enabled)
+{
+    if (!ensureSettingsLoaded()) return false;
+    const juce::ScopedLock lock(pluginManagerLock);
+#if ! JUCE_WINDOWS
+    if (enabled) return false;
+#endif
+    if (!knownPluginList.getTypeForIdentifierString(identifier)) return false;
+    auto updated = isolatedPluginIds;
+    if (enabled) updated.addIfNotAlreadyThere(identifier); else updated.removeString(identifier);
+    juce::Array<juce::var> values;
+    for (const auto& value : updated) values.add(value);
+    const auto text = juce::JSON::toString(values, true);
+    if (text.getNumBytesAsUTF8() > 1024 * 1024) return false;
+    juce::TemporaryFile temporary(hostingPreferencesFile);
+    auto output = temporary.getFile().createOutputStream();
+    if (!output || !output->writeText(text, false, false, nullptr)) return false;
+    output->flush();
+    if (output->getStatus().failed()) return false;
+    output.reset();
+    if (!temporary.overwriteTargetFileWithTemporary()) return false;
+    isolatedPluginIds = std::move(updated);
+    return true;
 }
 
 std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::PluginDescription& description,
                                                                double sampleRate, int blockSize)
 {
+    if (!ensureSettingsLoaded()) return nullptr;
     const juce::ScopedLock managerLock(pluginManagerLock);
 
     // Refuse to load blacklisted plugins (previously crashed)
@@ -1030,6 +1104,14 @@ std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::Plug
     {
         juce::Logger::writeToLog("PluginManager: Refusing to load blacklisted plugin: " + description.name);
         return nullptr;
+    }
+
+    if (usesIsolatedHosting(description))
+    {
+        juce::String error;
+        auto isolated = IsolatedPlugin::create(description, sampleRate, juce::jmax(blockSize, 512), error);
+        if (!isolated) juce::Logger::writeToLog("Isolated plugin load failed: " + description.name + ": " + error);
+        return isolated; // Never silently fall back to loading the binary here.
     }
 
     if (liveLv2PathsNeedPriming && description.pluginFormatName.containsIgnoreCase("LV2"))
@@ -1074,6 +1156,7 @@ std::unique_ptr<juce::AudioProcessor> PluginManager::loadPlugin(const juce::Plug
 std::unique_ptr<juce::AudioProcessor> PluginManager::loadPluginFromFile(const juce::String& filePath,
                                                                        double sampleRate, int blockSize)
 {
+    if (!ensureSettingsLoaded()) return nullptr;
     const juce::ScopedLock managerLock(pluginManagerLock);
     juce::Logger::writeToLog("PluginManager: Loading plugin from: " + filePath);
 
@@ -1244,6 +1327,7 @@ void PluginManager::loadPluginSearchPaths()
 
 juce::var PluginManager::getPluginScanConfiguration() const
 {
+    ensureSettingsLoaded();
     const juce::ScopedLock managerLock(pluginManagerLock);
 
     juce::StringArray supportedFormats;
@@ -1279,6 +1363,8 @@ juce::var PluginManager::getPluginScanConfiguration() const
    #endif
 
     auto* configuration = new juce::DynamicObject();
+    configuration->setProperty("settingsError", settingsError);
+    configuration->setProperty("settingsPath", AppPaths::pluginSettings().getFullPathName());
     configuration->setProperty("customPaths", makeStringArrayVar(customPluginSearchPaths));
     configuration->setProperty("blacklistedPlugins", makeStringArrayVar(blacklistedPlugins));
     configuration->setProperty("effectivePaths", juce::var(std::move(effectivePaths)));
@@ -1286,12 +1372,13 @@ juce::var PluginManager::getPluginScanConfiguration() const
     configuration->setProperty("unsupportedFormats", makeStringArrayVar(unsupportedFormats));
     configuration->setProperty(
         "contentLibraryNote",
-        "Kontakt, Reaktor, and NKS sound libraries or presets load inside their host plug-in and are not scanned as separate plug-ins. S13FX/JSFX scripts use the separate OpenStudio Effects content library.");
+        "Kontakt, Reaktor, and NKS sound libraries or presets load inside their host plug-in and are not scanned as separate plug-ins. JSFX scripts use the separate OpenStudio Effects content library.");
     return juce::var(configuration);
 }
 
 bool PluginManager::addPluginSearchPath(const juce::String& directoryPath)
 {
+    if (!ensureSettingsLoaded()) return false;
     const juce::ScopedLock managerLock(pluginManagerLock);
 
     const auto path = normalisePath(directoryPath);
@@ -1315,6 +1402,7 @@ bool PluginManager::addPluginSearchPath(const juce::String& directoryPath)
 
 bool PluginManager::removePluginSearchPath(const juce::String& directoryPath)
 {
+    if (!ensureSettingsLoaded()) return false;
     const juce::ScopedLock managerLock(pluginManagerLock);
 
     const auto path = normalisePath(directoryPath);
@@ -1335,17 +1423,11 @@ bool PluginManager::removePluginSearchPath(const juce::String& directoryPath)
     return false;
 }
 
-// ---- S13FX / JSFX scanning ----
+// ---- JSFX / JSFX scanning ----
 
 juce::File PluginManager::getUserEffectsDirectory()
 {
-    auto openStudioDir = getOpenStudioDocumentsDirectory().getChildFile("Effects");
-    auto legacyDir = getLegacyStudio13DocumentsDirectory().getChildFile("Effects");
-
-    if (!openStudioDir.isDirectory() && legacyDir.isDirectory())
-        return legacyDir;
-
-    return openStudioDir;
+    return getOpenStudioDocumentsDirectory().getChildFile("Effects");
 }
 
 juce::File PluginManager::getStockEffectsDirectory()
@@ -1362,9 +1444,9 @@ juce::File PluginManager::getStockEffectsDirectory()
     return exeDir.getChildFile("effects");
 }
 
-void PluginManager::scanForS13FX()
+void PluginManager::scanForJSFX()
 {
-    std::vector<S13FXInfo> discoveredEffects;
+    std::vector<JSFXInfo> discoveredEffects;
 
     // Scan stock effects (bundled with app)
     auto stockDir = getStockEffectsDirectory();
@@ -1379,22 +1461,22 @@ void PluginManager::scanForS13FX()
     const auto discoveredCount = discoveredEffects.size();
     {
         const juce::ScopedLock managerLock(pluginManagerLock);
-        s13fxList = std::move(discoveredEffects);
+        jsfxList = std::move(discoveredEffects);
     }
 
-    juce::Logger::writeToLog("PluginManager: Found " + juce::String(discoveredCount) + " S13FX/JSFX scripts");
+    juce::Logger::writeToLog("PluginManager: Found " + juce::String(discoveredCount) + " JSFX scripts");
 }
 
 void PluginManager::scanDirectory(const juce::File& dir,
                                   bool isStock,
-                                  std::vector<S13FXInfo>& destination)
+                                  std::vector<JSFXInfo>& destination)
 {
     juce::Array<juce::File> files;
-    dir.findChildFiles(files, juce::File::findFiles, true, "*.jsfx;*.s13fx");
+    dir.findChildFiles(files, juce::File::findFiles, true, "*.jsfx");
 
     for (const auto& file : files)
     {
-        S13FXInfo info;
+        JSFXInfo info;
         info.filePath = file.getFullPathName();
         info.isStock = isStock;
 
@@ -1419,7 +1501,7 @@ void PluginManager::scanDirectory(const juce::File& dir,
             }
         }
 
-        juce::Logger::writeToLog("PluginManager: Found S13FX: " + info.name +
+        juce::Logger::writeToLog("PluginManager: Found JSFX: " + info.name +
                                  (isStock ? " (stock)" : " (user)"));
         destination.push_back(std::move(info));
     }
@@ -1429,12 +1511,14 @@ void PluginManager::scanDirectory(const juce::File& dir,
 
 bool PluginManager::isPluginBlacklisted(const juce::String& pluginId) const
 {
+    if (!ensureSettingsLoaded()) return true;
     const juce::ScopedLock managerLock(pluginManagerLock);
     return containsPluginIdentifier(blacklistedPlugins, pluginId);
 }
 
 void PluginManager::blacklistPlugin(const juce::String& pluginId)
 {
+    if (!ensureSettingsLoaded()) return;
     const juce::ScopedLock managerLock(pluginManagerLock);
     const auto normalisedPluginId = normaliseCandidateIdentifier(pluginId);
     if (normalisedPluginId.isNotEmpty()
@@ -1450,6 +1534,7 @@ void PluginManager::blacklistPlugin(const juce::String& pluginId)
 
 bool PluginManager::removeFromBlacklist(const juce::String& pluginId)
 {
+    if (!ensureSettingsLoaded()) return false;
     const juce::ScopedLock managerLock(pluginManagerLock);
     const auto normalisedPluginId = normaliseCandidateIdentifier(pluginId);
     int idx = indexOfPluginIdentifier(blacklistedPlugins, normalisedPluginId);
@@ -1472,6 +1557,7 @@ bool PluginManager::removeFromBlacklist(const juce::String& pluginId)
 
 juce::StringArray PluginManager::getBlacklistedPlugins() const
 {
+    if (!ensureSettingsLoaded()) return {};
     const juce::ScopedLock managerLock(pluginManagerLock);
     return blacklistedPlugins;
 }
@@ -1487,6 +1573,7 @@ bool PluginManager::isARAPlugin(const juce::PluginDescription& description) cons
 
 juce::Array<juce::PluginDescription> PluginManager::getARAPlugins() const
 {
+    if (!ensureSettingsLoaded()) return {};
     const juce::ScopedLock managerLock(pluginManagerLock);
     juce::Array<juce::PluginDescription> araPlugins;
     for (const auto& desc : knownPluginList.getTypes())

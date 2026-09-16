@@ -253,7 +253,6 @@ export function namHardwareDisplayName(value: string | undefined | null, fallbac
   return base
     .replace(/\s+\bA[12]\b$/i, "")
     .replace(/\bClean\s+Twin\s+Style\b/i, "Clean Twin-style")
-    .replace(/\bStudio\s+2X12\s+Open\s+IR\b/i, "2x12 Blackface")
     .replace(/\s+/g, " ")
     .trim();
 }

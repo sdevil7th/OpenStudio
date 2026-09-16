@@ -106,7 +106,7 @@ export function Modal({
           }
         }}
         static={!closeOnEscape && !closeOnOverlayClick}
-        aria-label={title ? undefined : 'Dialog'}
+        aria-label={title || 'Dialog'}
       >
         {/* Backdrop */}
         <TransitionChild

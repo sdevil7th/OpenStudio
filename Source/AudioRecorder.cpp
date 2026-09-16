@@ -1,4 +1,5 @@
 #include "AudioRecorder.h"
+#include "CrashDiagnostics.h"
 
 #include <algorithm>
 
@@ -31,7 +32,7 @@ static float peakFromBuffer(const juce::AudioBuffer<float>& buffer, int numSampl
 #endif
 }
 
-AudioRecorder::AudioRecorder()
+AudioRecorder::AudioRecorder(const juce::File& recoveryRoot) : recoveryJournal(recoveryRoot)
 {
     // Start the background I/O thread for ThreadedWriter
     writerThread.startThread(juce::Thread::Priority::normal);
@@ -40,7 +41,8 @@ AudioRecorder::AudioRecorder()
 AudioRecorder::~AudioRecorder()
 {
     stopAllRecordings(44100.0);
-    writerThread.stopThread(2000);
+    writerThread.stopThread(-1); // All clients drained above; never forcibly kill an allocator/disk thread.
+    recoveryJournal.markClean();
 }
 
 bool AudioRecorder::startRecording(const juce::String& trackId, const juce::File& file, double sampleRate, int numChannels)
@@ -71,11 +73,20 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
                                            double initialStartTime,
                                            CompletedRecording* replacedTake)
 {
+    // Reject before opening a file or touching an existing take. A corrupt
+    // device/configuration report must not become an enormous peak allocation.
+    if (trackId.isEmpty() || !std::isfinite(sampleRate)
+        || sampleRate < 8000.0 || sampleRate > 384000.0
+        || numChannels < 1 || numChannels > 64
+        || !std::isfinite(initialStartTime))
+        return false;
     OPENSTUDIO_LOG_AUDIO_RECORD("startRecording track=" + trackId
         + " file=" + file.getFullPathName()
         + " sampleRate=" + juce::String(sampleRate, 2)
         + " channels=" + juce::String(numChannels));
     std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> previousWriter;
+    std::shared_ptr<RecordingWriteStatus> previousWriteStatus;
+    double previousSampleRate = sampleRate;
     // Construct the replacement completely before unpublishing any current
     // take. During loop preparation the callback can continue writing the old
     // writer, so file creation cannot open a no-writer gap.
@@ -87,6 +98,9 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         parentDir.createDirectory();
     }
 
+    // Recording destinations are unique takes, never append to or overwrite an
+    // existing user's file when a caller accidentally reuses a path.
+    if (file.exists()) return false;
     // Create WAV file writer
     std::unique_ptr<juce::OutputStream> fileOutputStream = std::make_unique<juce::FileOutputStream>(file);
     if (static_cast<juce::FileOutputStream&>(*fileOutputStream).failedToOpen())
@@ -95,6 +109,11 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         return false;
     }
 
+    auto writeStatus = std::make_shared<RecordingWriteStatus>();
+    writeStatus->trackId = trackId;
+    writeStatus->file = file;
+    fileOutputStream = std::make_unique<CheckedRecordingStream>(std::move(fileOutputStream), writeStatus);
+    auto* checkedStream = fileOutputStream.get();
     // Create WAV writer (16-bit PCM)
     auto writer = wavFormat.createWriterFor(
         fileOutputStream,
@@ -103,15 +122,46 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
             .withNumChannels(numChannels)
             .withBitsPerSample(16));
 
-    if (!writer)
+    if (!writer || writeStatus->fault.load() != RecordingWriteStatus::none)
     {
         juce::Logger::writeToLog("AudioRecorder: Failed to create WAV writer");
         return false;
     }
 
+    auto journal = std::make_unique<juce::DynamicObject>();
+    journal->setProperty("path", file.getFullPathName());
+    journal->setProperty("trackId", trackId);
+    journal->setProperty("sampleRate", sampleRate);
+    journal->setProperty("channels", numChannels);
+    journal->setProperty("bitDepth", 16);
+    journal->setProperty("startTime", initialStartTime);
+    journal->setProperty("status", "recording");
+    journal->setProperty("writeFault", 0);
+    journal->setProperty("createdAt", juce::Time::currentTimeMillis());
+    journal->setProperty("kind", "recording");
+    journal->setProperty("version", 1);
+    auto metadata = juce::var(journal.release());
+    const auto journalId = recoveryJournal.create("recording", metadata);
+    if (journalId.isEmpty())
+    {
+        juce::Logger::writeToLog("AudioRecorder: Could not create the take recovery journal; recording was not started");
+        return false;
+    }
+    metadata.getDynamicObject()->setProperty("id", journalId);
+    writeStatus->journalMetadata = metadata;
+    writeStatus->journalFile = recoveryJournal.entryFile(journalId);
+    writeStatus->journalStartTime = initialStartTime;
+    // Ensure a parseable zero-length header exists before accepting live input.
+    if (!writer->flush()) return false;
+    checkedStream->flush();
+    if (writeStatus->fault.load() != RecordingWriteStatus::none) return false;
+
     // Wrap in ThreadedWriter - moves disk I/O to background thread
+    auto checkedWriter = std::make_unique<CheckedRecordingWriter>(std::move(writer), writeStatus, checkedStream);
     auto threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(
-        writer.release(), writerThread, 65536);
+        checkedWriter.release(), writerThread, 65536);
+    // Periodic header publication and checked flush, exclusively on disk thread.
+    threadedWriter->setFlushInterval(static_cast<int>(sampleRate * 5.0));
 
     // Pre-allocate incremental peak table for ~120 seconds of recording.
     // Entry layout: [min_ch0, max_ch0, min_ch1, max_ch1] per PEAK_STRIDE samples.
@@ -138,12 +188,16 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
                     / juce::jmax(1.0, previous->second.sampleRate);
             }
             previousWriter = std::move(previous->second.threadedWriter);
+            previousWriteStatus = previous->second.writeStatus;
+            previousSampleRate = previous->second.sampleRate;
             activeRecordings.erase(previous);
         }
 
         ActiveRecording& state = activeRecordings[trackId];
         state.trackId = trackId;
         state.threadedWriter = std::move(threadedWriter);
+        state.writeStatus = writeStatus;
+        pendingWriteStatuses.push_back(writeStatus);
         state.outputFile = file;
         state.isActive = true;
         state.startTime = initialStartTime;
@@ -164,6 +218,8 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         state.accumCount = 0;
     }
     previousWriter.reset();
+    if (replacedTake != nullptr && previousWriteStatus)
+        replacedTake->duration = previousWriteStatus->writtenSamples.load() / juce::jmax(1.0, previousSampleRate);
 
     juce::Logger::writeToLog("AudioRecorder: Started recording track " + trackId +
                            " to " + file.getFullPathName());
@@ -184,6 +240,7 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
     if (!sl.isLocked())
     {
         writeLockMissCount.fetch_add(1, std::memory_order_relaxed);
+        OpenStudioCrashDiagnostics::recordRealtimeFault(OpenStudioCrashDiagnostics::RealtimeFault::recordingLockMiss);
 #if OPENSTUDIO_AUDIO_RECORD_DEBUG
         static std::atomic<int> globalLockMissLogCounter { 0 };
         const int lockMiss = ++globalLockMissLogCounter;
@@ -198,6 +255,17 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
         return;
 
     auto& state = it->second;
+    if (state.writeStatus->fault.load(std::memory_order_relaxed) != RecordingWriteStatus::none)
+        return; // Quarantine this take; monitoring and other writers continue.
+    if (numSamples < 0 || numSamples > buffer.getNumSamples()
+        || buffer.getNumChannels() < state.numChannels)
+    {
+        OpenStudioCrashDiagnostics::recordRealtimeFault(
+            OpenStudioCrashDiagnostics::RealtimeFault::recordingBufferContract);
+        return;
+    }
+    if (numSamples == 0)
+        return;
     const double captureToleranceSeconds = juce::jmax(
         0.25,
         4.0 * static_cast<double>(numSamples) / juce::jmax(1.0, state.sampleRate));
@@ -210,6 +278,7 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
         && plausibleFirstBlock)
     {
         state.startTime = compensatedBlockStartTimeSeconds;
+        state.writeStatus->journalStartTime.store(state.startTime, std::memory_order_relaxed);
         state.captureStartOnFirstWrite = false;
     }
 #if OPENSTUDIO_AUDIO_RECORD_DEBUG
@@ -221,6 +290,8 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
     if (!state.threadedWriter->write(buffer.getArrayOfReadPointers(), numSamples))
     {
         writerBufferOverflowCount.fetch_add(1, std::memory_order_relaxed);
+        state.writeStatus->droppedSamples.fetch_add(numSamples, std::memory_order_relaxed);
+        OpenStudioCrashDiagnostics::recordRealtimeFault(OpenStudioCrashDiagnostics::RealtimeFault::recordingOverflow);
         return;
     }
     state.samplesWritten.fetch_add(numSamples, std::memory_order_relaxed);
@@ -319,13 +390,20 @@ bool AudioRecorder::isRecording(const juce::String& trackId) const
 
 void AudioRecorder::setRecordingStartTime(const juce::String& trackId, double startTime)
 {
-    const juce::ScopedLock lock(writerLock);
-    auto it = activeRecordings.find(trackId);
-    if (it != activeRecordings.end())
+    if (!std::isfinite(startTime) || startTime < 0) return;
+    std::shared_ptr<RecordingWriteStatus> status;
     {
-        it->second.startTime = startTime;
-        it->second.hasStartTimeFallback = true;
+        const juce::ScopedLock lock(writerLock);
+        auto it = activeRecordings.find(trackId);
+        if (it != activeRecordings.end())
+        {
+            it->second.startTime = startTime;
+            it->second.hasStartTimeFallback = true;
+            status = it->second.writeStatus;
+            status->journalStartTime = startTime;
+        }
     }
+    if (status) status->persistRecovery(); // Never perform journal IO under writerLock.
 }
 
 std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(double currentSampleRate)
@@ -342,9 +420,7 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
         recordingsToFinalize.swap(activeRecordings);
     }
 
-    std::vector<std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter>> finalizedWriters;
     std::vector<CompletedRecording> finalizedClips;
-    finalizedWriters.reserve(recordingsToFinalize.size());
     finalizedClips.reserve(recordingsToFinalize.size());
 
     for (auto& [trackId, state] : recordingsToFinalize)
@@ -352,11 +428,15 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
         if (! state.threadedWriter)
             continue;
 
+        // Drain outside the publication lock, then use acknowledged writes,
+        // not the number accepted into the FIFO, for the published clip length.
+        state.threadedWriter.reset();
+
         CompletedRecording clip;
         clip.trackId = trackId;
         clip.file = state.outputFile;
         clip.startTime = state.startTime;
-        clip.duration = state.samplesWritten.load(std::memory_order_relaxed)
+        clip.duration = state.writeStatus->writtenSamples.load(std::memory_order_relaxed)
             / juce::jmax(1.0, state.sampleRate);
         finalizedClips.push_back(clip);
         OPENSTUDIO_LOG_AUDIO_RECORD("stopAllRecordings pending track=" + trackId
@@ -365,16 +445,36 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
             + " samplesWritten=" + juce::String(static_cast<juce::int64>(state.samplesWritten.load()))
             + " duration=" + juce::String(clip.duration, 3)
             + (clip.duration <= 0.0 ? " WARNING_zero_duration" : ""));
-        finalizedWriters.push_back(std::move(state.threadedWriter));
     }
 
-    finalizedWriters.clear();
     juce::Logger::writeToLog("AudioRecorder: Stopped all recordings. Completed "
                              + juce::String(finalizedClips.size()) + " clips.");
     OPENSTUDIO_LOG_AUDIO_RECORD("stopAllRecordings completed clipCount="
         + juce::String(static_cast<int>(finalizedClips.size())));
     return finalizedClips;
 
+}
+
+juce::var AudioRecorder::takeWriteFailures()
+{
+    juce::Array<juce::var> failures;
+    const juce::ScopedLock lock(writerLock);
+    for (const auto& state : pendingWriteStatuses)
+    {
+        const auto fault = state->fault.load(std::memory_order_acquire);
+        if (fault == RecordingWriteStatus::none || state->reported) continue;
+        state->reported = true;
+        auto item = std::make_unique<juce::DynamicObject>();
+        item->setProperty("trackId", state->trackId);
+        item->setProperty("path", state->file.getFullPathName());
+        item->setProperty("reason", fault);
+        failures.add(juce::var(item.release()));
+    }
+    pendingWriteStatuses.erase(std::remove_if(pendingWriteStatuses.begin(), pendingWriteStatuses.end(), [](const auto& state) {
+        return state->finished.load(std::memory_order_acquire)
+            && (state->reported || state->fault.load() == RecordingWriteStatus::none);
+    }), pendingWriteStatuses.end());
+    return failures;
 }
 
 juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId,

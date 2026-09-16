@@ -4,8 +4,8 @@
 #include <memory>
 #include <vector>
 
-// Info for a discovered S13FX/JSFX script
-struct S13FXInfo
+// Info for a discovered JSFX script
+struct JSFXInfo
 {
     juce::String name;
     juce::String filePath;
@@ -14,7 +14,7 @@ struct S13FXInfo
     bool isStock = false;  // true = shipped with app (read-only)
 };
 
-// Manages external plugin scanning and S13FX/JSFX script discovery
+// Manages external plugin scanning and JSFX script discovery
 class PluginManager
 {
 public:
@@ -33,12 +33,19 @@ public:
 
     // Get all discovered external plugins
     juce::Array<juce::PluginDescription> getAvailablePlugins() const;
+    // Runtime VST3 descriptions may name an inner binary; persist the scanned
+    // catalog identity while preserving the exact class in multi-plugin bundles.
+    juce::String getPluginIdentifier(const juce::PluginDescription&) const;
+    static juce::String resolvePluginIdentifier(const juce::PluginDescription&,
+                                                const juce::Array<juce::PluginDescription>& catalog);
+    bool usesIsolatedHosting(const juce::PluginDescription&) const;
+    bool setIsolatedHosting(const juce::String& catalogIdentifier, bool enabled);
 
-    // Get list of available S13FX/JSFX scripts
-    std::vector<S13FXInfo> getAvailableS13FX() const;
+    // Get list of available JSFX scripts
+    std::vector<JSFXInfo> getAvailableJSFX() const;
 
-    // Scan for S13FX/JSFX scripts only
-    void scanForS13FX();
+    // Scan for JSFX scripts only
+    void scanForJSFX();
 
     // Load a plugin by its description (uses actual device sample rate & block size)
     std::unique_ptr<juce::AudioProcessor> loadPlugin(const juce::PluginDescription& description,
@@ -48,7 +55,7 @@ public:
     std::unique_ptr<juce::AudioProcessor> loadPluginFromFile(const juce::String& filePath,
                                                               double sampleRate = 44100.0, int blockSize = 512);
 
-    // Get the user effects directory (Documents/OpenStudio/Effects/, with Studio13 fallback)
+    // Get the user effects directory (Documents/OpenStudio/Effects/)
     static juce::File getUserEffectsDirectory();
 
     // Get the stock effects directory (app bundle Resources/effects on macOS, or <exe>/effects)
@@ -68,24 +75,30 @@ private:
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPluginList;
     juce::File pluginListFile;
+    juce::File hostingPreferencesFile;
+    juce::StringArray isolatedPluginIds;
     juce::File blacklistFile;
     juce::File pluginSearchPathsFile;
     juce::File pluginScanDeadMansPedalFile;
     juce::StringArray blacklistedPlugins;
     juce::StringArray customPluginSearchPaths;
-    std::vector<S13FXInfo> s13fxList;
+    std::vector<JSFXInfo> jsfxList;
     mutable juce::CriticalSection pluginManagerLock;
     juce::CriticalSection pluginScanLock;
     bool liveLv2PathsNeedPriming = true;
     juce::uint64 pluginStateRevision = 0;
 
+    bool settingsLoaded = false;
+    juce::String settingsError;
+    bool ensureSettingsLoaded() const;
+    bool loadSettingsIfNeeded();
     bool savePluginList();
     void loadPluginList();
     bool savePluginSearchPaths() const;
     void loadPluginSearchPaths();
     static void scanDirectory(const juce::File& dir,
                               bool isStock,
-                              std::vector<S13FXInfo>& destination);
+                              std::vector<JSFXInfo>& destination);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginManager)
 };

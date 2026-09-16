@@ -1,15 +1,31 @@
+#if defined(_WIN32)
+#include <winsock2.h>
+#endif
 #include "AITrackEngine.h"
+#include "RecoveryJournal.h"
+#include "JsonEnvelope.h"
 
 namespace
 {
 constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kStableAudioModelId = "stable-audio-3-medium";
+constexpr auto kMiniMaxModelId = "minimax-music-3";
+bool isDiffusersAudioModel(const juce::String& id)
+{
+    return id == kStableAudioModelId || id == kMiniMaxModelId;
+}
+juce::String audioModelLabel(const juce::String& id)
+{
+    return id == kMiniMaxModelId ? "MiniMax Music 3"
+        : id == kStableAudioModelId ? "Stable Audio 3" : "ACE-Step";
+}
 constexpr auto kReaderSleepMs = 50;
 constexpr auto kWorkerStartupTimeoutMs = 45000;
 constexpr auto kWorkerRequestTimeoutMs = 10000;
 constexpr auto kWorkerProtocolVersion = 2;
 constexpr auto kMaxFramedPayloadBytes = 8 * 1024 * 1024;
+constexpr size_t kMaxWorkerLineBytes = 64 * 1024;
 constexpr auto kColdDecodeStallTimeoutMs = 90000;
 
 juce::String createSafeMusicGenerationTimestamp()
@@ -85,47 +101,32 @@ juce::String computeScriptVersion(const juce::File& script)
     if (! script.loadFileAsData(scriptBytes))
         return {};
 
+    if (script.getFileName() == "stable_audio3_generate.py" || script.getFileName() == "generate_music.py")
+    {
+        for (const auto* module : { "diffusers_audio_pipeline.py", "ai_execution_policy.py",
+                                    "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py", "ai_model_variants.py" })
+        {
+            juce::MemoryBlock adapterBytes;
+            if (! script.getSiblingFile(module).loadFileAsData(adapterBytes))
+                return {};
+            scriptBytes.append(adapterBytes.getData(), adapterBytes.getSize());
+        }
+    }
+
     return juce::MD5(scriptBytes.getData(), scriptBytes.getSize()).toHexString().substring(0, 16);
 }
 
-bool killWindowsProcessTree(int pid, juce::String* output = nullptr)
-{
-   #if JUCE_WINDOWS
-    if (pid <= 0)
-        return false;
-
-    juce::StringArray command;
-    command.add("taskkill");
-    command.add("/PID");
-    command.add(juce::String(pid));
-    command.add("/F");
-    command.add("/T");
-
-    juce::ChildProcess killer;
-    if (! killer.start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
-        return false;
-
-    killer.waitForProcessToFinish(5000);
-    if (output != nullptr)
-        *output = killer.readAllProcessOutput().trim();
-    return true;
-   #else
-    juce::ignoreUnused(pid, output);
-    return false;
-   #endif
-}
-
-bool writeSocketFully(juce::StreamingSocket& socket, const char* data, int totalBytes, int timeoutMs)
+bool writeSocketFully(juce::StreamingSocket& socket, const char* data, int totalBytes, int timeoutMs, const std::atomic<bool>& cancelled)
 {
     auto bytesWritten = 0;
     const auto deadline = juce::Time::currentTimeMillis() + timeoutMs;
 
-    while (bytesWritten < totalBytes && juce::Time::currentTimeMillis() < deadline)
+    while (!cancelled.load() && bytesWritten < totalBytes && juce::Time::currentTimeMillis() < deadline)
     {
         if (socket.waitUntilReady(false, 250) <= 0)
             continue;
 
-        const auto chunkBytes = socket.write(data + bytesWritten, totalBytes - bytesWritten);
+        const auto chunkBytes = socket.write(data + bytesWritten, juce::jmin(4096, totalBytes - bytesWritten));
         if (chunkBytes <= 0)
             return false;
 
@@ -135,13 +136,13 @@ bool writeSocketFully(juce::StreamingSocket& socket, const char* data, int total
     return bytesWritten == totalBytes;
 }
 
-bool readSocketFully(juce::StreamingSocket& socket, void* destination, int totalBytes, int timeoutMs)
+bool readSocketFully(juce::StreamingSocket& socket, void* destination, int totalBytes, int timeoutMs, const std::atomic<bool>& cancelled)
 {
     auto* writePtr = static_cast<char*> (destination);
     auto bytesRead = 0;
     const auto deadline = juce::Time::currentTimeMillis() + timeoutMs;
 
-    while (bytesRead < totalBytes && juce::Time::currentTimeMillis() < deadline)
+    while (!cancelled.load() && bytesRead < totalBytes && juce::Time::currentTimeMillis() < deadline)
     {
         if (socket.waitUntilReady(true, 250) <= 0)
             continue;
@@ -156,13 +157,39 @@ bool readSocketFully(juce::StreamingSocket& socket, void* destination, int total
     return bytesRead == totalBytes;
 }
 
+struct RequestSerializationAborted {};
+
+// JUCE's JSON formatter ignores a false write result. An explicit local abort
+// stops formatting as well as allocation when cancellation or the size bound
+// is reached. This runs only on the generation thread, never the audio thread.
+class RequestJSONStream final : public juce::OutputStream
+{
+public:
+    explicit RequestJSONStream(const std::atomic<bool>& stop) : cancelled(stop) {}
+    bool write(const void* data, size_t bytes) override
+    {
+        if (cancelled.load(std::memory_order_relaxed)
+            || bytes > static_cast<size_t>(kMaxFramedPayloadBytes) - memory.getDataSize())
+            throw RequestSerializationAborted {};
+        return memory.write(data, bytes);
+    }
+    void flush() override {}
+    juce::int64 getPosition() override { return memory.getPosition(); }
+    bool setPosition(juce::int64 position) override { return memory.setPosition(position); }
+    juce::MemoryOutputStream memory;
+private:
+    const std::atomic<bool>& cancelled;
+};
+
 bool writeFramedJson(juce::StreamingSocket& socket,
                      const juce::var& payload,
                      int timeoutMs,
-                     int& payloadBytesWritten)
+                     int& payloadBytesWritten, const std::atomic<bool>& cancelled)
 {
-    auto json = juce::JSON::toString(payload, false);
-    payloadBytesWritten = static_cast<int> (json.getNumBytesAsUTF8());
+    RequestJSONStream json(cancelled);
+    try { juce::JSON::writeToStream(json, payload, false); }
+    catch (const RequestSerializationAborted&) { return false; }
+    payloadBytesWritten = static_cast<int> (json.memory.getDataSize());
     if (payloadBytesWritten <= 0 || payloadBytesWritten > kMaxFramedPayloadBytes)
         return false;
 
@@ -172,15 +199,15 @@ bool writeFramedJson(juce::StreamingSocket& socket,
     header[2] = static_cast<char> ((payloadBytesWritten >> 8) & 0xFF);
     header[3] = static_cast<char> (payloadBytesWritten & 0xFF);
 
-    return writeSocketFully(socket, header, 4, timeoutMs)
-        && writeSocketFully(socket, json.toRawUTF8(), payloadBytesWritten, timeoutMs);
+    return writeSocketFully(socket, header, 4, timeoutMs, cancelled)
+        && writeSocketFully(socket, static_cast<const char*>(json.memory.getData()), payloadBytesWritten, timeoutMs, cancelled);
 }
 
-juce::var readFramedJson(juce::StreamingSocket& socket, int timeoutMs, int& payloadBytesRead)
+juce::var readFramedJson(juce::StreamingSocket& socket, int timeoutMs, int& payloadBytesRead, const std::atomic<bool>& cancelled)
 {
     char header[4] {};
     payloadBytesRead = 0;
-    if (! readSocketFully(socket, header, 4, timeoutMs))
+    if (! readSocketFully(socket, header, 4, timeoutMs, cancelled))
         return {};
 
     payloadBytesRead = ((static_cast<unsigned char> (header[0]) << 24)
@@ -193,7 +220,7 @@ juce::var readFramedJson(juce::StreamingSocket& socket, int timeoutMs, int& payl
 
     juce::HeapBlock<char> buffer(static_cast<size_t> (payloadBytesRead + 1));
     zeromem(buffer.get(), static_cast<size_t> (payloadBytesRead + 1));
-    if (! readSocketFully(socket, buffer.get(), payloadBytesRead, timeoutMs))
+    if (! readSocketFully(socket, buffer.get(), payloadBytesRead, timeoutMs, cancelled))
         return {};
 
     return juce::JSON::parse(juce::String::fromUTF8(buffer.get(), payloadBytesRead));
@@ -250,7 +277,7 @@ juce::File AITrackEngine::getUserRuntimeRoot() const
 
 juce::File AITrackEngine::getStableAudioRuntimeRoot() const
 {
-    return getUserDataRoot().getChildFile("stable-audio-runtime");
+    return getUserDataRoot().getChildFile("diffusers-audio-runtime");
 }
 
 juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
@@ -261,11 +288,11 @@ juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
         .getChildFile("diffusers");
 }
 
-juce::File AITrackEngine::getStableAudioModelRoot() const
+juce::File AITrackEngine::getStableAudioModelRoot(const juce::String& modelId) const
 {
     return getUserDataRoot()
         .getChildFile("models")
-        .getChildFile(kStableAudioModelId);
+        .getChildFile(modelId);
 }
 
 juce::File AITrackEngine::findPython() const
@@ -318,6 +345,35 @@ juce::File AITrackEngine::findStableAudioPython() const
     return {};
 }
 
+juce::File AITrackEngine::qualifiedMiniMaxPython(const juce::File& candidateRoot)
+{
+    const auto manifest = candidateRoot.getChildFile("minimax-int8-qualified.json");
+    if (! manifest.existsAsFile() || manifest.getSize() > 64 * 1024)
+        return {};
+    const auto profile = juce::JSON::parse(manifest);
+    if (! profile.isObject() || static_cast<int>(profile.getProperty("schemaVersion", 0)) != 1
+        || profile.getProperty("state", "").toString() != "qualified-local"
+        || profile.getProperty("modelId", "").toString() != kMiniMaxModelId
+        || profile.getProperty("policy", "").toString() != "minimax-int8-stage-v1")
+        return {};
+    const auto environment = profile.getProperty("environment", "").toString();
+    if (! environment.startsWith("int8-")
+        || ! environment.containsOnly("abcdefghijklmnopqrstuvwxyz0123456789-"))
+        return {};
+    const auto root = candidateRoot.getChildFile(environment);
+    if (root.isSymbolicLink())
+        return {};
+    // Python revalidates the stack, model, physical adapter and request budget
+    // before enabling quantization. An import-only staging manifest is ignored.
+    return findPythonInRuntimeRoot(root);
+}
+
+juce::File AITrackEngine::findMiniMaxPython() const
+{
+    const auto candidate = qualifiedMiniMaxPython(getUserDataRoot().getChildFile("ai-candidates"));
+    return candidate.existsAsFile() ? candidate : findStableAudioPython();
+}
+
 juce::File AITrackEngine::findScript() const
 {
     const auto runtimeDir = getApplicationRuntimeDirectory();
@@ -358,40 +414,68 @@ juce::File AITrackEngine::findStableAudioScript() const
     return {};
 }
 
-void AITrackEngine::cleanupLegacyWorkerProcesses(const juce::File& python, const juce::File& script) const
+juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
+    const juce::String& workflowId, const juce::String& paramsJson,
+    const std::function<bool()>& cancelled) const
 {
-   #if JUCE_WINDOWS
-    auto escapedScriptPath = script.getFullPathName().replace("'", "''");
-    auto escapedPythonPath = python.getFullPathName().replace("'", "''");
-    juce::StringArray command;
-    command.add("powershell");
-    command.add("-NoProfile");
-    command.add("-ExecutionPolicy");
-    command.add("Bypass");
-    command.add("-Command");
-    command.add(
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -like '*--worker*' "
-        "  -and $_.CommandLine -like '*" + escapedScriptPath + "*' "
-        "  -and ("
-        "    $_.CommandLine -like '*" + escapedPythonPath + "*' "
-        "    -or $_.CommandLine -like '*stable_audio3_generate.py*' "
-        "    -or $_.CommandLine -like '*generate_music.py*'"
-        "  ) } | "
-        "ForEach-Object { "
-        "  & taskkill /PID $_.ProcessId /F /T 2>$null | Out-Null; "
-        "  Write-Output ('stopped legacy AI generation worker pid ' + $_.ProcessId) "
-        "}");
-
-    juce::ChildProcess cleanup;
-    if (cleanup.start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+    const auto unavailable = [](const juce::String& reason) -> juce::var {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("status", "unavailable");
+        result->setProperty("memory", juce::Array<juce::var>());
+        result->setProperty("notes", juce::Array<juce::var> { reason });
+        return result;
+    };
+    if (modelId != "minimax-music-3" && modelId != "stable-audio-3-medium"
+        && modelId != "ace-step-v15-xl-turbo")
+        return unavailable("Hardware check does not support this model.");
+    const bool stable = modelId != "ace-step-v15-xl-turbo";
+    const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
+    const auto python = int8 ? findStableAudioPython() : modelId == "minimax-music-3" ? findMiniMaxPython()
+        : stable ? findStableAudioPython() : findPython();
+    const auto worker = stable ? findStableAudioScript() : findScript();
+    const auto script = worker.getSiblingFile("ai_generation_preflight.py");
+    const auto root = stable ? getStableAudioModelRoot(modelId) : getMusicGenerationCheckpointRoot();
+    if (!python.existsAsFile() || !script.existsAsFile())
+        return unavailable("Install the model runtime to check hardware requirements.");
+    const auto params = juce::JSON::parse(paramsJson);
+    if (!params.isObject() || paramsJson.getNumBytesAsUTF8() > 256 * 1024)
+        return unavailable("Invalid generation parameters.");
+    juce::TemporaryFile request(".json");
+    auto* input = new juce::DynamicObject();
+    input->setProperty("workflow", workflowId);
+    input->setProperty("params", params);
+    if (!request.getFile().replaceWithText(juce::JSON::toString(juce::var(input))))
+        return unavailable("Could not prepare the hardware check.");
+    OwnedChildProcess process;
+    juce::StringPairArray environment;
+    environment.set("HF_HUB_OFFLINE", "1");
+    environment.set("TRANSFORMERS_OFFLINE", "1");
+    if (cancelled() || !process.start({ python.getFullPathName(), script.getFullPathName(),
+        "--model-id", modelId, "--model-root", root.getFullPathName(),
+        "--request", request.getFile().getFullPathName() }, 3, environment))
+        return unavailable("Could not start the hardware check.");
+    std::string output;
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + 30000.0;
+    for (;;)
     {
-        cleanup.waitForProcessToFinish(5000);
-        auto output = cleanup.readAllProcessOutput().trim();
-        if (output.isNotEmpty())
-            juce::Logger::writeToLog("AITrackEngine: " + output);
+        char buffer[4096];
+        const auto count = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
+        if (count > 0) output.append(buffer, static_cast<size_t>(count));
+        if (cancelled() || juce::Time::getMillisecondCounterHiRes() > deadline || output.size() > 256 * 1024)
+        {
+            process.kill();
+            return unavailable("Hardware check was interrupted or timed out. Runtime checks still apply.");
+        }
+        if (count <= 0 && !process.isRunning()) break;
+        if (count <= 0) juce::Thread::sleep(10);
     }
-   #endif
+    const auto lines = juce::StringArray::fromLines(juce::String::fromUTF8(output.data(), static_cast<int>(output.size())));
+    for (int index = lines.size(); --index >= 0;)
+    {
+        const auto result = juce::JSON::parse(lines[index]);
+        if (result.isObject() && result.hasProperty("status") && result.hasProperty("memory")) return result;
+    }
+    return unavailable("Hardware check could not read this runtime. Generation will validate its own requirements.");
 }
 
 juce::String AITrackEngine::appendProcessDetailsLocked(const juce::String& message) const
@@ -462,9 +546,7 @@ bool AITrackEngine::waitForWorkerReady(int timeoutMs)
 
         if (currentProgress_.error.isEmpty())
         {
-            const auto modelLabel = currentProgress_.modelId == kStableAudioModelId
-                ? juce::String("Stable Audio 3")
-                : juce::String("ACE-Step");
+            const auto modelLabel = audioModelLabel(currentProgress_.modelId);
             const auto message = workerExitedBeforeReady
                 ? appendProcessDetailsLocked(modelLabel + " worker exited before reporting ready.")
                 : appendProcessDetailsLocked(modelLabel + " worker did not become ready in time.");
@@ -492,19 +574,17 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
 {
     std::thread readerThreadToJoin;
     bool shouldKillProcess = false;
-    int workerPidToKill = 0;
-    juce::ChildProcess* processToKill = nullptr;
+    OwnedChildProcess* processToKill = nullptr;
 
     {
         const juce::ScopedLock sl(lock_);
         readerShouldExit_ = true;
         expectedProcessExit_ = true;
-        cancelRequested_ = userCancelled;
+        cancelRequested_ = cancelRequested_ || userCancelled;
         if (! keepGenerationActive)
             generationActive_ = false;
         workerReady_ = false;
         workerPort_ = 0;
-        workerPidToKill = workerPid_;
         processToKill = workerProcess_.get();
 
         if (workerProcess_ != nullptr && workerProcess_->isRunning())
@@ -516,24 +596,8 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
 
     if (shouldKillProcess && processToKill != nullptr && processToKill->isRunning())
     {
-        auto killedTree = false;
-       #if JUCE_WINDOWS
-        if (workerPidToKill > 0)
-        {
-            juce::String killOutput;
-            juce::Logger::writeToLog("AITrackEngine: stopping AI generation child process tree pid="
-                                     + juce::String(workerPidToKill));
-            killedTree = killWindowsProcessTree(workerPidToKill, &killOutput);
-            if (killOutput.isNotEmpty())
-                juce::Logger::writeToLog("AITrackEngine: " + truncateForLog(killOutput, 512));
-        }
-       #endif
-
-        if (! killedTree && processToKill->isRunning())
-        {
-            juce::Logger::writeToLog("AITrackEngine: stopping AI generation child process");
-            processToKill->kill();
-        }
+        if (!processToKill->kill())
+            juce::Logger::writeToLog("AITrackEngine: owned process-tree termination failed.");
     }
 
     if (readerThreadToJoin.joinable())
@@ -553,8 +617,9 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
 
 bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId)
 {
-    const auto isStableAudio = modelId == kStableAudioModelId;
-    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+    if (stopRequested_.load(std::memory_order_acquire)) return false;
+    const auto isStableAudio = isDiffusersAudioModel(modelId);
+    const auto modelLabel = audioModelLabel(modelId);
     const auto expectedScriptVersion = computeScriptVersion(script);
     {
         const juce::ScopedLock sl(lock_);
@@ -563,15 +628,19 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             && workerReady_
             && workerPort_ > 0
             && workerProtocolVersion_ == kWorkerProtocolVersion
-            && workerScriptVersion_ == expectedScriptVersion)
+            && workerScriptVersion_ == expectedScriptVersion
+            && workerPython_ == python
+            && juce::File(workerScriptPath_) == script
+            && workerModelId_ == modelId)
             return true;
     }
 
     stopWorkerSession(false, false, true);
-    cleanupLegacyWorkerProcesses(python, script);
 
     for (int launchAttempt = 0; launchAttempt < 2; ++launchAttempt)
     {
+        if (stopRequested_.load(std::memory_order_acquire)) return false;
+        auto nextWorker = std::make_unique<OwnedChildProcess>();
         juce::StringArray command;
         command.add(python.getFullPathName());
         command.add(script.getFullPathName());
@@ -579,7 +648,9 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         if (isStableAudio)
         {
             command.add("--model-root");
-            command.add(getStableAudioModelRoot().getFullPathName());
+            command.add(getStableAudioModelRoot(modelId).getFullPathName());
+            command.add("--model-id");
+            command.add(modelId);
         }
         else
         {
@@ -599,8 +670,8 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
 
         {
             const juce::ScopedLock sl(lock_);
-            workerProcess_ = std::make_unique<juce::ChildProcess>();
             resetProcessStateLocked();
+            workerPython_ = python;
             readerShouldExit_ = false;
             expectedProcessExit_ = false;
             workerReady_ = false;
@@ -635,7 +706,7 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             currentProgress_.failureDetail.clear();
         }
 
-        if (! workerProcess_->start(command, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+        if (! nextWorker->start(command))
         {
             const juce::ScopedLock sl(lock_);
             workerProcess_.reset();
@@ -645,6 +716,11 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             return false;
         }
 
+        {
+            const juce::ScopedLock sl(lock_);
+            if (stopRequested_.load(std::memory_order_acquire)) return false;
+            workerProcess_ = std::move(nextWorker);
+        }
         readerThread_ = std::thread([this]() { readerLoop(); });
         if (waitForWorkerReady(kWorkerStartupTimeoutMs))
             return true;
@@ -659,7 +735,6 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         if (! shouldRetryLaunch)
             return false;
 
-        cleanupLegacyWorkerProcesses(python, script);
     }
 
     return false;
@@ -670,16 +745,19 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
                                         const juce::String& paramsJson,
                                         const juce::File& outputFile)
 {
-    const auto isStableAudio = modelId == kStableAudioModelId;
-    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+    const auto modelLabel = audioModelLabel(modelId);
     int port = 0;
     juce::String requestId;
+    juce::String scriptVersion;
+    int workerPid = 0;
     {
         const juce::ScopedLock sl(lock_);
         if (cancelRequested_)
             return false;
         port = workerPort_;
         requestId = currentRequestId_;
+        scriptVersion = expectedScriptVersion_;
+        workerPid = workerPid_;
     }
 
     if (port <= 0)
@@ -701,6 +779,15 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
         return false;
     }
 
+   #if JUCE_WINDOWS
+    // Readiness is not a promise that a large blocking send will complete.
+    // Bound individual sends as well as the framing/cancellation loop.
+    const DWORD sendTimeoutMs = 250;
+    if (setsockopt(static_cast<SOCKET>(socket.getRawSocketHandle()), SOL_SOCKET, SO_SNDTIMEO,
+        reinterpret_cast<const char*>(&sendTimeoutMs), sizeof(sendTimeoutMs)) != 0)
+        return false;
+   #endif
+
     auto request = std::make_unique<juce::DynamicObject>();
     request->setProperty("command", "generate");
     request->setProperty("modelId", modelId);
@@ -709,10 +796,10 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
     request->setProperty("output", outputFile.getFullPathName());
     request->setProperty("requestId", requestId);
     request->setProperty("protocolVersion", kWorkerProtocolVersion);
-    request->setProperty("scriptVersion", expectedScriptVersion_);
+    request->setProperty("scriptVersion", scriptVersion);
 
     int payloadBytesWritten = 0;
-    if (! writeFramedJson(socket, juce::var(request.release()), kWorkerRequestTimeoutMs, payloadBytesWritten))
+    if (! writeFramedJson(socket, juce::var(request.release()), kWorkerRequestTimeoutMs, payloadBytesWritten, stopRequested_))
     {
         const juce::ScopedLock sl(lock_);
         if (cancelRequested_)
@@ -726,11 +813,11 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
 
     juce::Logger::writeToLog("AITrackEngine: sent framed worker request"
                              " requestId=" + requestId
-                             + " workerPid=" + juce::String(workerPid_)
+                             + " workerPid=" + juce::String(workerPid)
                              + " payloadBytes=" + juce::String(payloadBytesWritten));
 
     int ackPayloadBytes = 0;
-    auto parsed = readFramedJson(socket, kWorkerRequestTimeoutMs, ackPayloadBytes);
+    auto parsed = readFramedJson(socket, kWorkerRequestTimeoutMs, ackPayloadBytes, stopRequested_);
     if (parsed.isVoid())
     {
         const juce::ScopedLock sl(lock_);
@@ -770,7 +857,7 @@ bool AITrackEngine::sendGenerateRequest(const juce::String& modelId,
     const auto ackScriptVersion = object->getProperty("scriptVersion").toString();
     if (ackRequestId != requestId
         || ackProtocolVersion != kWorkerProtocolVersion
-        || ackScriptVersion != expectedScriptVersion_)
+        || ackScriptVersion != scriptVersion)
     {
         const juce::ScopedLock sl(lock_);
         setProgressErrorLocked("worker_protocol_failed",
@@ -793,8 +880,7 @@ void AITrackEngine::launchGenerationTask(const juce::File& python,
                                          const juce::String& paramsJson,
                                          const juce::File& outputFile)
 {
-    const auto isStableAudio = modelId == kStableAudioModelId;
-    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+    const auto modelLabel = audioModelLabel(modelId);
 
     if (! ensureWorkerAvailable(python, script, modelId))
     {
@@ -860,18 +946,30 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
                                     const juce::String& paramsJson,
                                     const juce::File& outputDir)
 {
-    joinGenerationThread();
-
+    if (!hasBoundedJsonEnvelope(paramsJson, 8 * 1024 * 1024)) return false;
+    auto parameters = juce::JSON::parse(paramsJson);
+    if (!parameters.isObject()) return false;
+    const auto recoveryId = parameters.getProperty("_openStudioRecoveryId", "").toString();
+    parameters.getDynamicObject()->removeProperty("_openStudioRecoveryId");
+    const auto workerParameters = juce::JSON::toString(parameters, true);
     {
         const juce::ScopedLock sl(lock_);
         if (generationActive_)
             return false;
     }
 
-    const auto isStableAudio = modelId == kStableAudioModelId;
-    const auto python = isStableAudio ? findStableAudioPython() : findPython();
+    joinGenerationThread();
+    if (modelId != kPinnedMusicGenerationModelId && ! isDiffusersAudioModel(modelId))
+        return false;
+    if (modelId == kMiniMaxModelId && workflowId != "lyrics-style" && workflowId != "structured-song")
+        return false;
+
+    const auto isStableAudio = isDiffusersAudioModel(modelId);
+    const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
+    const auto python = int8 ? findStableAudioPython() : modelId == kMiniMaxModelId ? findMiniMaxPython()
+        : isStableAudio ? findStableAudioPython() : findPython();
     const auto script = isStableAudio ? findStableAudioScript() : findScript();
-    const auto modelLabel = isStableAudio ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+    const auto modelLabel = audioModelLabel(modelId);
 
     if (! python.existsAsFile() || ! script.existsAsFile())
     {
@@ -900,7 +998,9 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         outputFile = currentOutputFile_;
         generationActive_ = true;
         cancelRequested_ = false;
+        stopRequested_.store(false, std::memory_order_release);
         currentRequestId_ = juce::Uuid().toString();
+        recoveryJournalId_ = recoveryId;
         expectedScriptVersion_ = computeScriptVersion(script);
         generationStartedAtMs_ = juce::Time::currentTimeMillis();
         lastHeartbeatAtMs_ = generationStartedAtMs_;
@@ -924,6 +1024,7 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         currentProgress_.lastStdoutLine.clear();
         currentProgress_.lastStderrLine.clear();
         currentProgress_.statusNote.clear();
+        currentProgress_.generationDetails = juce::var();
         currentProgress_.attemptMode = isStableAudio ? juce::String() : juce::String("lm_dit");
         currentProgress_.attemptIndex = 1;
         currentProgress_.protocolVersion = kWorkerProtocolVersion;
@@ -937,9 +1038,20 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
         currentProgress_.lmStage.clear();
     }
 
-    generationThread_ = std::thread([this, python, script, modelId, workflowId, paramsJson, outputFile]()
+    generationThread_ = std::thread([this, python, script, modelId, workflowId, workerParameters, outputFile]()
     {
-        launchGenerationTask(python, script, modelId, workflowId, paramsJson, outputFile);
+        if (recoveryJournalId_.isNotEmpty()) {
+            auto fields = std::make_unique<juce::DynamicObject>();
+            fields->setProperty("requestId", currentRequestId_);
+            fields->setProperty("expectedOutputFile", outputFile.getFullPathName());
+            if (!RecoveryJournal::updateOwnedAI(recoveryJournalId_, juce::var(fields.release()))) {
+                const juce::ScopedLock sl(lock_);
+                setProgressErrorLocked("journal_failed", "Could not persist the generation request", "storage");
+                generationActive_ = false;
+                return;
+            }
+        }
+        launchGenerationTask(python, script, modelId, workflowId, workerParameters, outputFile);
     });
 
     return true;
@@ -998,9 +1110,7 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
             if (workerProtocolVersion_ != kWorkerProtocolVersion
                 || (! expectedScriptVersion_.isEmpty() && workerScriptVersion_ != expectedScriptVersion_))
             {
-                const auto modelLabel = currentProgress_.modelId == kStableAudioModelId
-                    ? juce::String("Stable Audio 3")
-                    : juce::String("ACE-Step");
+                const auto modelLabel = audioModelLabel(currentProgress_.modelId);
                 workerProtocolRejected_ = true;
                 workerReady_ = false;
                 workerPort_ = 0;
@@ -1016,10 +1126,12 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
                 return;
             }
 
+            workerModelId_ = obj->getProperty("modelId").toString();
+            if (workerModelId_.isEmpty()) workerModelId_ = kPinnedMusicGenerationModelId;
             workerReady_ = true;
             workerPort_ = static_cast<int> (double (obj->getProperty("port")));
             const auto backend = obj->getProperty("backend").toString();
-            const auto readyLabel = backend == "stable-audio-3" ? juce::String("Stable Audio 3") : juce::String("ACE-Step");
+            const auto readyLabel = audioModelLabel(workerModelId_);
             currentProgress_.state = "idle";
             currentProgress_.progress = 0.0f;
             currentProgress_.phase = "worker_ready";
@@ -1040,6 +1152,8 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
         }
     }
 
+    if (obj->getProperty("requestId").toString() != currentRequestId_ || currentRequestId_.isEmpty())
+        return; // Never let stale/foreign progress change ownership or release this worker.
     sawStructuredOutput_ = true;
     lastStdoutLine_ = trimmed;
     if (! loggedFirstStructuredOutput_)
@@ -1057,16 +1171,36 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
     const auto currentStateIsTerminal = currentProgress_.state == "done"
         || currentProgress_.state == "error"
         || currentProgress_.state == "cancelled";
-    const auto incomingStateIsTerminal = incomingState == "done"
-        || incomingState == "error"
-        || incomingState == "cancelled";
-    if (currentStateIsTerminal && ! incomingStateIsTerminal)
+    if (currentStateIsTerminal)
     {
         juce::Logger::writeToLog("AITrackEngine: ignoring late non-terminal progress after terminal state"
                                  " currentState=" + currentProgress_.state
                                  + " incomingState=" + incomingState
                                  + " requestId=" + currentProgress_.requestId);
         return;
+    }
+
+    if (incomingState == "done")
+    {
+        const auto output = obj->getProperty("outputFile").toString();
+        if (!juce::File::isAbsolutePath(output) || juce::File(output) != currentOutputFile_
+            || !currentOutputFile_.existsAsFile())
+        {
+            setProgressErrorLocked("invalid_worker_output", "The generation worker returned an unexpected or missing output file.", "worker_protocol");
+            generationActive_ = false;
+            return;
+        }
+        // A crash between native completion and the next frontend poll must not
+        // discard a finished artifact. This executes on the worker reader thread.
+        if (recoveryJournalId_.isNotEmpty()) {
+            auto fields = std::make_unique<juce::DynamicObject>();
+            fields->setProperty("status", "completed");
+            fields->setProperty("outputFile", output);
+            fields->setProperty("outputBytes", currentOutputFile_.getSize());
+            fields->setProperty("requestId", currentRequestId_);
+            if (!RecoveryJournal::updateOwnedAI(recoveryJournalId_, juce::var(fields.release())))
+                juce::Logger::writeToLog("AI generation completed, but its recovery journal update failed");
+        }
     }
 
     if (obj->hasProperty("state"))
@@ -1108,6 +1242,8 @@ void AITrackEngine::parseOutputLine(const juce::String& line)
         currentProgress_.lmModel = obj->getProperty("lmModel").toString();
     if (obj->hasProperty("statusNote"))
         currentProgress_.statusNote = obj->getProperty("statusNote").toString();
+    if (obj->getProperty("generationDetails").isObject())
+        currentProgress_.generationDetails = obj->getProperty("generationDetails");
     if (obj->hasProperty("failureKind"))
         currentProgress_.failureKind = obj->getProperty("failureKind").toString();
     if (obj->hasProperty("failureDetail"))
@@ -1209,17 +1345,8 @@ void AITrackEngine::handleWorkerExit()
             return;
         }
 
-        if (currentOutputFile_.existsAsFile())
-        {
-            currentProgress_.state = "done";
-            currentProgress_.progress = 1.0f;
-            currentProgress_.outputFile = currentOutputFile_.getFullPathName();
-            currentProgress_.phase = "done";
-            currentProgress_.message = "Music generation completed.";
-            currentProgress_.failureKind.clear();
-            generationActive_ = false;
-            return;
-        }
+        // A partial WAV may exist after a crash. Only a matching terminal
+        // protocol message proves completion; never infer it from existence.
 
         if (! sawStructuredOutput_)
             finalError = appendProcessDetailsLocked("The ACE-Step process exited before reporting progress.");
@@ -1268,6 +1395,13 @@ void AITrackEngine::readerLoop()
                     shouldLogFirstByte = true;
                 }
 
+                if (processOutputBuffer_.size() >= kMaxWorkerLineBytes)
+                {
+                    setProgressErrorLocked("worker_output_overflow", "The worker emitted an oversized diagnostic line.", "worker_protocol");
+                    generationActive_ = false;
+                    readerShouldExit_ = true;
+                    break;
+                }
                 processOutputBuffer_.push_back(byte);
 
                 while (true)
@@ -1357,12 +1491,20 @@ void AITrackEngine::resetProcessStateLocked()
     firstOutputLineAtMs_ = 0;
     workerScriptVersion_.clear();
     workerScriptPath_.clear();
+    workerPython_ = juce::File();
 }
 
 void AITrackEngine::stopWorker(bool clearProgress, bool userCancelled)
 {
-    stopWorkerSession(clearProgress, userCancelled, false);
+    // Cancellation never resets process ownership while launch/request work is
+    // still using it. Handshake and socket loops observe this before joining.
+    stopRequested_.store(true, std::memory_order_release);
+    {
+        const juce::ScopedLock sl(lock_);
+        cancelRequested_ = true;
+    }
     joinGenerationThread();
+    stopWorkerSession(clearProgress, userCancelled, false);
 }
 
 AIGenerationProgress AITrackEngine::pollProgress()
@@ -1429,8 +1571,9 @@ AIGenerationProgress AITrackEngine::pollProgress()
         currentProgress_.lastStdoutLine = lastStdoutLine_;
         currentProgress_.lastStderrLine = lastStderrLine_;
 
-        const auto inTerminalState = currentProgress_.state == "done"
-            || currentProgress_.state == "error"
+        // Successful sessions retain weights for bounded warm reuse. Python
+        // retires idle weights after two minutes or under host memory pressure.
+        const auto inTerminalState = currentProgress_.state == "error"
             || currentProgress_.state == "cancelled";
         if (inTerminalState
             && ! generationActive_
@@ -1442,9 +1585,9 @@ AIGenerationProgress AITrackEngine::pollProgress()
     }
 
     if (shouldStopForDecodeStall)
-        stopWorkerSession(false, false, false);
+        stopWorker(false, false);
     else if (shouldReleaseTerminalWorker)
-        stopWorkerSession(false, false, false);
+        stopWorker(false, false);
 
     const juce::ScopedLock sl(lock_);
     return currentProgress_;
@@ -1459,4 +1602,12 @@ bool AITrackEngine::isRunning() const
 {
     const juce::ScopedLock sl(lock_);
     return generationActive_;
+}
+
+bool AITrackEngine::releaseIdleWorker()
+{
+    if (isRunning())
+        return false;
+    stopWorker(false, false);
+    return true;
 }

@@ -16,14 +16,14 @@ export const macroActions = (set: SetFn, get: GetFn) => ({
           ...s.customActions,
           { id: crypto.randomUUID(), name, steps, shortcut },
         ];
-        localStorage.setItem("s13_customActions", JSON.stringify(customActions));
+        localStorage.setItem("openstudio_customActions", JSON.stringify(customActions));
         return { customActions };
       });
     },
     removeCustomAction: (actionId) => {
       set((s) => {
         const customActions = s.customActions.filter((a) => a.id !== actionId);
-        localStorage.setItem("s13_customActions", JSON.stringify(customActions));
+        localStorage.setItem("openstudio_customActions", JSON.stringify(customActions));
         return { customActions };
       });
     },

@@ -121,7 +121,8 @@ test("remapped Play works from a focused button without reserving Space", async 
   await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"native"');
 });
 
-test("editable Space types while stopped and stops active transport", async ({ page }) => {
+for (const runningState of ["playing", "recording"] as const) {
+test(`editable Space remains text input while stopped and ${runningState}`, async ({ page }) => {
   const input = page.getByRole("textbox", { name: "Text input" });
   await input.focus();
   await input.evaluate((element) => {
@@ -132,7 +133,7 @@ test("editable Space types while stopped and stops active transport", async ({ p
   await expect(input).toHaveValue("select this text ");
   await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"native"');
 
-  await setShortcutState(page, { playing: true });
+  await setShortcutState(page, { [runningState]: true });
   await input.focus();
   await input.evaluate((element) => {
     const textInput = element as HTMLInputElement;
@@ -140,6 +141,12 @@ test("editable Space types while stopped and stops active transport", async ({ p
   });
   await page.keyboard.press("Space");
 
-  await expect(input).toHaveValue("select this text ");
-  await expect(page.getByLabel("Last shortcut result")).toContainText('"actionId":"transport.play"');
+  await expect(input).toHaveValue("select this text  ");
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"native"');
+  expect(await page.evaluate(async () => {
+    const { useDAWStore } = await import("/src/store/useDAWStore.ts");
+    const state = useDAWStore.getState();
+    return { playing: state.transport.isPlaying, recording: state.transport.isRecording };
+  })).toEqual({ playing: true, recording: runningState === "recording" });
 });
+}

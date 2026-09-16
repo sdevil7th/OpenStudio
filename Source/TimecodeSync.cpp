@@ -23,7 +23,7 @@ public:
         connected.store(false, std::memory_order_release);
         generation.fetch_add(1, std::memory_order_acq_rel);
         signalThreadShouldExit();
-        stopThread(2000);
+        stopThread(-1); // Preserve object/driver lifetime until the sender actually exits.
 
         const juce::ScopedLock sl(outputLock);
         output.reset();

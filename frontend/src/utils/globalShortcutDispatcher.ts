@@ -45,6 +45,9 @@ const REPEATABLE_ACTION_IDS = new Set([
 ]);
 
 export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
+  location?: number;
+  isComposing?: boolean;
+  getModifierState?: (keyArg: string) => boolean;
   targetIsEditable?: boolean;
   targetIsNonTextControl?: boolean;
   preventDefault?: () => void;
@@ -342,8 +345,22 @@ export function dispatchGlobalShortcut(
   platform: ShortcutPlatform = getShortcutPlatform(),
   options: GlobalShortcutDispatchOptions = {},
 ): boolean {
-  const state = useDAWStore.getState();
+  // Composition belongs to the OS input method even if focus moved away from
+  // a text field mid-composition. AltGraph often masquerades as Ctrl+Alt.
+  if (payload.isComposing || payload.key === "AltGraph") return false;
+  try {
+    if (payload.getModifierState?.("AltGraph")) return false;
+  } catch {
+    // Some synthetic/native events cannot answer modifier-state queries.
+  }
   const role = options.role ?? windowRole;
+  if (payload.source === "pluginWindow"
+    && (matchesActionShortcut(payload, "edit.undo", platform)
+      || matchesActionShortcut(payload, "edit.redo", platform))) {
+    // Native code recognizes standard Ctrl/Cmd+Z/Y; only this dispatcher knows
+    // the active profile and custom remaps. Never leak those into project history.
+    return markHandled(payload);
+  }
   const matchesTransportPlay = matchesActionShortcut(payload, "transport.play", platform);
   const registeredApplicationAction = findMatchingAction(
     payload,
@@ -365,19 +382,8 @@ export function dispatchGlobalShortcut(
   }
 
   if (payload.targetIsEditable) {
-    if (matchesTransportPlay && (state.transport.isRecording || state.transport.isPlaying)) {
-      markHandled(payload);
-      if (payload.repeat) return true;
-      if (isPlainSpacebar(payload)) {
-        const now = Date.now();
-        if (now - _lastSpacebarMs < 150) return true;
-        _lastSpacebarMs = now;
-      }
-      if (role !== "main") publishDetachedCommand("transport.stop");
-      else state.stop();
-      return true;
-    }
-
+    // Typing a space while naming a track or editing lyrics must not stop an
+    // ongoing recording. Text ownership does not depend on transport state.
     if (shouldPreserveEditableShortcut(
       payload,
       Boolean(registeredApplicationAction),

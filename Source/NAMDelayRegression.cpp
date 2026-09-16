@@ -29,7 +29,7 @@ void NAMDelayRegression::addCheck(
     targetChecks.add(juce::var(object));
 }
 
-void NAMDelayRegression::configureNeutralRack(S13NAMRack& rack)
+void NAMDelayRegression::configureNeutralRack(OpenStudioNAMRack& rack)
 {
     rack.inputTrimDb.store(0.0f);
     rack.outputTrimDb.store(0.0f);
@@ -67,10 +67,10 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
          ++index)
     {
         const auto mono =
-            S13NAMRack::resolveDelaySyncSelection(
+            OpenStudioNAMRack::resolveDelaySyncSelection(
                 modulationBoundaries[index], false);
         const auto pingPong =
-            S13NAMRack::resolveDelaySyncSelection(
+            OpenStudioNAMRack::resolveDelaySyncSelection(
                 modulationBoundaries[index], true);
         const bool casePassed =
             mono.leftNoteIndex == expectedLeft[index]
@@ -92,7 +92,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         syncCases.add(juce::var(value));
     }
     const auto nonFiniteSync =
-        S13NAMRack::resolveDelaySyncSelection(
+        OpenStudioNAMRack::resolveDelaySyncSelection(
             std::numeric_limits<float>::quiet_NaN(), true);
     syncResolverPassed =
         syncResolverPassed
@@ -100,37 +100,37 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && nonFiniteSync.rightNoteIndex == 3;
 
     const auto digital =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             0.0f, 1.0f, 1.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto tape =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             1.0f, 1.0f, 1.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto analog =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             2.0f, 1.0f, 1.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto bassTape =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             1.0f, 1.0f, 1.0f,
-            S13NAMRack::bassInstrumentProfile);
+            OpenStudioNAMRack::bassInstrumentProfile);
     const auto multi =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             3.0f, 1.0f, 1.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto dual =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             360.0f, 0.55f, 0.35f, 0.80f, 0.40f,
             4.0f, 1.0f, 1.0f,
-            S13NAMRack::guitarInstrumentProfile);
+            OpenStudioNAMRack::guitarInstrumentProfile);
     const auto malformed =
-        S13NAMRack::resolveDelayMacroState(
+        OpenStudioNAMRack::resolveDelayMacroState(
             std::numeric_limits<float>::quiet_NaN(),
             std::numeric_limits<float>::infinity(),
             -4.0f,
@@ -141,7 +141,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
             8.0f,
             99);
     const auto macroFinite = [] (
-        const S13NAMRack::DelayMacroState& state)
+        const OpenStudioNAMRack::DelayMacroState& state)
     {
         return std::isfinite(state.timeMsL)
             && std::isfinite(state.timeMsR)
@@ -186,11 +186,11 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && macroFinite(multi)
         && macroFinite(dual)
         && macroFinite(malformed)
-        && digital.mode == S13NAMRack::digitalDelayMode
-        && tape.mode == S13NAMRack::tapeDelayMode
-        && analog.mode == S13NAMRack::analogDelayMode
-        && multi.mode == S13NAMRack::multiDelayMode
-        && dual.mode == S13NAMRack::dualDelayMode
+        && digital.mode == OpenStudioNAMRack::digitalDelayMode
+        && tape.mode == OpenStudioNAMRack::tapeDelayMode
+        && analog.mode == OpenStudioNAMRack::analogDelayMode
+        && multi.mode == OpenStudioNAMRack::multiDelayMode
+        && dual.mode == OpenStudioNAMRack::dualDelayMode
         && digital.lowPassHz > tape.lowPassHz
         && tape.lowPassHz > analog.lowPassHz
         && digital.feedbackGain > tape.feedbackGain
@@ -232,17 +232,17 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && std::abs(dual.dualFeedbackGain - 0.5038f) <= 1.0e-6f
         && std::abs(dual.dualLowPassHz - 6400.0f) <= 1.0e-5f
         && std::abs(dual.dualSaturation - 0.42f) <= 1.0e-6f
-        && malformed.mode == S13NAMRack::tapeDelayMode
+        && malformed.mode == OpenStudioNAMRack::tapeDelayMode
         && std::abs(malformed.timeMsL - 360.0f) <= 1.0e-6f
         && malformed.mix == 0.0f
         && malformed.duckAmount == 1.0f
         && ! malformed.pingPong
         && malformed.tempoSync;
 
-    juce::ValueTree legacyState("S13NAMRack");
+    juce::ValueTree legacyState("OpenStudioNAMRack");
     legacyState.setProperty(
         "namEffectsDspVersion",
-        S13NAMRack::reverbVoiceIntroducedNAMEffectsDspVersion,
+        OpenStudioNAMRack::reverbVoiceIntroducedNAMEffectsDspVersion,
         nullptr);
     legacyState.setProperty("reverbVoice", 3.0, nullptr);
     legacyState.setProperty("delayMix", 4.0, nullptr);
@@ -264,14 +264,14 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     }
     bool firstMigrationChanged = false;
     const bool firstMigrationSucceeded =
-        S13NAMRack::migratePresetStateToCurrent(
+        OpenStudioNAMRack::migratePresetStateToCurrent(
             migratedState, firstMigrationChanged);
     const auto canonicalState =
         juce::ValueTree::readFromData(
             migratedState.getData(), migratedState.getSize());
     bool secondMigrationChanged = true;
     const bool secondMigrationSucceeded =
-        S13NAMRack::migratePresetStateToCurrent(
+        OpenStudioNAMRack::migratePresetStateToCurrent(
             migratedState, secondMigrationChanged);
     const auto closeProperty = [&canonicalState] (
         const char* property,
@@ -291,7 +291,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && canonicalState.isValid()
         && static_cast<int>(canonicalState.getProperty(
                "namEffectsDspVersion", 0))
-            == S13NAMRack::currentNAMEffectsDspVersion
+            == OpenStudioNAMRack::currentNAMEffectsDspVersion
         && closeProperty("delayMix", 1.0)
         && closeProperty("delayTimeMs", 1.0)
         && closeProperty("delayFeedback", 0.85)
@@ -305,10 +305,10 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && ! canonicalState.hasProperty("auditionSource")
         && closeProperty("reverbVoice", 3.0);
 
-    juce::ValueTree currentState("S13NAMRack");
+    juce::ValueTree currentState("OpenStudioNAMRack");
     currentState.setProperty(
         "namEffectsDspVersion",
-        S13NAMRack::currentNAMEffectsDspVersion,
+        OpenStudioNAMRack::currentNAMEffectsDspVersion,
         nullptr);
     currentState.setProperty("delayMode", 99.0, nullptr);
     currentState.setProperty("inputMode", 1.0, nullptr);
@@ -320,7 +320,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     }
     bool currentStateChanged = false;
     const bool currentStateSucceeded =
-        S13NAMRack::migratePresetStateToCurrent(
+        OpenStudioNAMRack::migratePresetStateToCurrent(
             currentStateData,
             currentStateChanged);
     const auto canonicalCurrentState =
@@ -341,7 +341,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         const juce::var& version,
         bool includeVersion)
     {
-        juce::ValueTree tree("S13NAMRack");
+        juce::ValueTree tree("OpenStudioNAMRack");
         if (includeVersion)
         {
             tree.setProperty(
@@ -354,7 +354,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
             tree.writeToStream(stream);
         }
         bool changed = false;
-        if (! S13NAMRack::migratePresetStateToCurrent(
+        if (! OpenStudioNAMRack::migratePresetStateToCurrent(
                 data, changed))
             return -1.0;
         const auto migrated = juce::ValueTree::readFromData(
@@ -367,15 +367,15 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     const double missingVersionMode = migrateModeFixture(
         {}, false);
     const double v10Mode = migrateModeFixture(
-        S13NAMRack::delayV10IntroducedNAMEffectsDspVersion,
+        OpenStudioNAMRack::delayV10IntroducedNAMEffectsDspVersion,
         true);
     const double developmentAliasMode = migrateModeFixture(
-        S13NAMRack::developmentNAMEffectsDspVersionAlias, true);
+        OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias, true);
     const double futureVersionMode = migrateModeFixture(
-        S13NAMRack::currentNAMEffectsDspVersion + 1, true);
+        OpenStudioNAMRack::currentNAMEffectsDspVersion + 1, true);
     const double fractionalVersionMode = migrateModeFixture(
         static_cast<double>(
-            S13NAMRack::currentNAMEffectsDspVersion) + 0.7,
+            OpenStudioNAMRack::currentNAMEffectsDspVersion) + 0.7,
         true);
 
     const auto migrateNestedModeFixture = [] (
@@ -388,7 +388,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         baseline->setProperty("values", juce::var(values));
         ui->setProperty(
             "namPresetBaseline", juce::var(baseline));
-        juce::ValueTree tree("S13NAMRack");
+        juce::ValueTree tree("OpenStudioNAMRack");
         tree.setProperty(
             "namEffectsDspVersion", parentVersion, nullptr);
         tree.setProperty(
@@ -401,7 +401,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
             tree.writeToStream(stream);
         }
         bool changed = false;
-        if (! S13NAMRack::migratePresetStateToCurrent(
+        if (! OpenStudioNAMRack::migratePresetStateToCurrent(
                 data, changed))
             return -1.0;
         const auto migrated = juce::ValueTree::readFromData(
@@ -430,13 +430,13 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         migrateNestedModeFixture(7);
     const double nestedV10Mode =
         migrateNestedModeFixture(
-            S13NAMRack::delayV10IntroducedNAMEffectsDspVersion);
+            OpenStudioNAMRack::delayV10IntroducedNAMEffectsDspVersion);
     const double nestedCurrentMode =
         migrateNestedModeFixture(
-            S13NAMRack::currentNAMEffectsDspVersion);
+            OpenStudioNAMRack::currentNAMEffectsDspVersion);
     const double nestedDevelopmentAliasMode =
         migrateNestedModeFixture(
-            S13NAMRack::developmentNAMEffectsDspVersionAlias);
+            OpenStudioNAMRack::developmentNAMEffectsDspVersionAlias);
     const bool versionMigrationContractPassed =
         std::abs(missingVersionMode - 1.0) <= 1.0e-7
         && std::abs(v10Mode - 4.0) <= 1.0e-7
@@ -448,7 +448,7 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
         && std::abs(nestedCurrentMode - 4.0) <= 1.0e-7
         && std::abs(nestedDevelopmentAliasMode - 4.0) <= 1.0e-7;
 
-    S13NAMRack malformedSaveRack;
+    OpenStudioNAMRack malformedSaveRack;
     const float nonFinite =
         std::numeric_limits<float>::quiet_NaN();
     malformedSaveRack.delayMix.store(nonFinite);
@@ -499,6 +499,14 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
     value->setProperty(
         "stateContractPassed", stateContractPassed);
     value->setProperty(
+        "firstMigrationSucceeded", firstMigrationSucceeded);
+    value->setProperty(
+        "firstMigrationChanged", firstMigrationChanged);
+    value->setProperty(
+        "secondMigrationSucceeded", secondMigrationSucceeded);
+    value->setProperty(
+        "secondMigrationChanged", secondMigrationChanged);
+    value->setProperty(
         "currentStateContractPassed",
         currentStateContractPassed);
     value->setProperty(
@@ -546,8 +554,8 @@ juce::var NAMDelayRegression::runDelayV10ContractProbe()
 juce::var NAMDelayRegression::runDelayV10AudioProbe()
 {
     const auto configureDelay = [] (
-        S13Delay& delay,
-        const S13NAMRack::DelayMacroState& state)
+        OpenStudioDelay& delay,
+        const OpenStudioNAMRack::DelayMacroState& state)
     {
         delay.setExtendedModesEnabled(true);
         delay.delayTimeL.store(state.timeMsL);
@@ -600,13 +608,13 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
             sampleRate
             * static_cast<double>(requestedDelayMs)
             * 0.001);
-        S13Delay delay(0.25f);
+        OpenStudioDelay delay(0.25f);
         const auto state =
-            S13NAMRack::resolveDelayMacroState(
+            OpenStudioNAMRack::resolveDelayMacroState(
                 requestedDelayMs, 0.0f, 1.0f,
                 0.0f, 0.0f, 0.0f,
                 0.0f, 0.0f,
-                S13NAMRack::guitarInstrumentProfile);
+                OpenStudioNAMRack::guitarInstrumentProfile);
         configureDelay(delay, state);
         delay.prepareToPlay(sampleRate, 64);
 
@@ -691,14 +699,14 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
         int mode,
         const std::array<int, 6>& blockPattern)
     {
-        S13Delay delay(1.0f);
+        OpenStudioDelay delay(1.0f);
         const auto state =
-            S13NAMRack::resolveDelayMacroState(
+            OpenStudioNAMRack::resolveDelayMacroState(
                 37.0f, 0.62f, 1.0f,
                 0.80f, 0.0f,
                 static_cast<float>(mode),
                 1.0f, 0.0f,
-                S13NAMRack::guitarInstrumentProfile);
+                OpenStudioNAMRack::guitarInstrumentProfile);
         configureDelay(delay, state);
         delay.prepareToPlay(
             renderSampleRate, maximumBlockSize);
@@ -760,21 +768,21 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
         7, 31, 5, 64, 13, 47
     };
     const auto tapeUniform = renderMode(
-        S13NAMRack::tapeDelayMode, uniformPattern);
+        OpenStudioNAMRack::tapeDelayMode, uniformPattern);
     const auto tapeIrregular = renderMode(
-        S13NAMRack::tapeDelayMode, irregularPattern);
+        OpenStudioNAMRack::tapeDelayMode, irregularPattern);
     const auto digital = renderMode(
-        S13NAMRack::digitalDelayMode, irregularPattern);
+        OpenStudioNAMRack::digitalDelayMode, irregularPattern);
     const auto analog = renderMode(
-        S13NAMRack::analogDelayMode, irregularPattern);
+        OpenStudioNAMRack::analogDelayMode, irregularPattern);
     const auto multiUniform = renderMode(
-        S13NAMRack::multiDelayMode, uniformPattern);
+        OpenStudioNAMRack::multiDelayMode, uniformPattern);
     const auto multiIrregular = renderMode(
-        S13NAMRack::multiDelayMode, irregularPattern);
+        OpenStudioNAMRack::multiDelayMode, irregularPattern);
     const auto dualUniform = renderMode(
-        S13NAMRack::dualDelayMode, uniformPattern);
+        OpenStudioNAMRack::dualDelayMode, uniformPattern);
     const auto dualIrregular = renderMode(
-        S13NAMRack::dualDelayMode, irregularPattern);
+        OpenStudioNAMRack::dualDelayMode, irregularPattern);
     const auto maximumDifference = [] (
         const juce::AudioBuffer<float>& first,
         const juce::AudioBuffer<float>& second)
@@ -866,28 +874,28 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
 
     juce::Array<juce::var> tailCases;
     bool tailContractPassed = true;
-    for (int mode = S13NAMRack::digitalDelayMode;
-         mode <= S13NAMRack::dualDelayMode;
+    for (int mode = OpenStudioNAMRack::digitalDelayMode;
+         mode <= OpenStudioNAMRack::dualDelayMode;
          ++mode)
     {
-        S13Delay delay(3.0f);
+        OpenStudioDelay delay(3.0f);
         const auto state =
-            S13NAMRack::resolveDelayMacroState(
+            OpenStudioNAMRack::resolveDelayMacroState(
                 360.0f, 0.55f, 0.35f,
                 0.80f, 0.0f,
                 static_cast<float>(mode),
                 1.0f, 0.0f,
-                S13NAMRack::guitarInstrumentProfile);
+                OpenStudioNAMRack::guitarInstrumentProfile);
         configureDelay(delay, state);
         delay.prepareToPlay(44100.0, 64);
         double maximumFeedback = static_cast<double>(state.feedbackGain);
-        if (mode == S13NAMRack::multiDelayMode)
+        if (mode == OpenStudioNAMRack::multiDelayMode)
         {
             maximumFeedback = juce::jmax(
                 maximumFeedback,
                 static_cast<double>(state.multiFeedbackGain));
         }
-        else if (mode == S13NAMRack::dualDelayMode)
+        else if (mode == OpenStudioNAMRack::dualDelayMode)
         {
             maximumFeedback = juce::jmax(
                 maximumFeedback,
@@ -902,7 +910,7 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
             / std::log(maximumFeedback);
         double maximumModulationMs = static_cast<double>(
             state.wowDepthMs + state.flutterDepthMs);
-        if (mode == S13NAMRack::dualDelayMode)
+        if (mode == OpenStudioNAMRack::dualDelayMode)
         {
             maximumModulationMs = juce::jmax(
                 maximumModulationMs,
@@ -943,17 +951,17 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
     constexpr int widthTailBlockSize = 64;
     constexpr float widthTailFeedback = 0.80f;
     constexpr float widthTailDelayMs = 1.0f;
-    S13Delay widthTailDelay(3.0f);
-    auto widthTailState = S13NAMRack::resolveDelayMacroState(
+    OpenStudioDelay widthTailDelay(3.0f);
+    auto widthTailState = OpenStudioNAMRack::resolveDelayMacroState(
         widthTailDelayMs,
         widthTailFeedback,
         1.0f,
         0.0f,
         0.0f,
-        static_cast<float>(S13NAMRack::digitalDelayMode),
+        static_cast<float>(OpenStudioNAMRack::digitalDelayMode),
         0.0f,
         0.0f,
-        S13NAMRack::guitarInstrumentProfile);
+        OpenStudioNAMRack::guitarInstrumentProfile);
     widthTailState.stereoWidth = 2.0f;
     widthTailState.lowPassHz = 20000.0f;
     widthTailState.highPassHz = 20.0f;
@@ -1076,7 +1084,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
     };
 
     const auto configureExactDelay = [] (
-        S13Delay& delay,
+        OpenStudioDelay& delay,
         double sampleRate,
         int baseDelaySamples,
         int mode,
@@ -1131,7 +1139,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         int totalSamples)
     {
         constexpr int blockSize = 64;
-        S13Delay delay(0.5f);
+        OpenStudioDelay delay(0.5f);
         configureExactDelay(
             delay,
             sampleRate,
@@ -1243,7 +1251,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         const auto multiStereo = renderImpulse(
             sampleRate,
             baseDelaySamples,
-            S13NAMRack::multiDelayMode,
+            OpenStudioNAMRack::multiDelayMode,
             2,
             -1,
             0.0f,
@@ -1251,7 +1259,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         const auto multiMono = renderImpulse(
             sampleRate,
             baseDelaySamples,
-            S13NAMRack::multiDelayMode,
+            OpenStudioNAMRack::multiDelayMode,
             1,
             -1,
             0.0f,
@@ -1259,7 +1267,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         const auto dualStereo = renderImpulse(
             sampleRate,
             baseDelaySamples,
-            S13NAMRack::dualDelayMode,
+            OpenStudioNAMRack::dualDelayMode,
             2,
             rightImpulseOffset,
             0.0f,
@@ -1423,12 +1431,12 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
     constexpr double primeSampleRate = 48000.0;
     constexpr int primeBaseDelaySamples = 4800;
     constexpr int primeTotalSamples = 7240;
-    S13Delay recursiveDual(0.5f);
+    OpenStudioDelay recursiveDual(0.5f);
     configureExactDelay(
         recursiveDual,
         primeSampleRate,
         primeBaseDelaySamples,
-        S13NAMRack::dualDelayMode,
+        OpenStudioNAMRack::dualDelayMode,
         0.70f);
     recursiveDual.prepareToPlay(
         primeSampleRate, topologyBlockSize);
@@ -1462,12 +1470,12 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         captureIsFinite(recursiveCapture)
         && independentSecondaryRecursionPeak > 0.02f;
 
-    S13Delay continuouslyPrimedDual(0.5f);
+    OpenStudioDelay continuouslyPrimedDual(0.5f);
     configureExactDelay(
         continuouslyPrimedDual,
         primeSampleRate,
         primeBaseDelaySamples,
-        S13NAMRack::digitalDelayMode,
+        OpenStudioNAMRack::digitalDelayMode,
         0.0f);
     continuouslyPrimedDual.prepareToPlay(
         primeSampleRate, topologyBlockSize);
@@ -1488,7 +1496,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         if (primedCursor == topologyBlockSize)
         {
             continuouslyPrimedDual.delayMode.store(
-                static_cast<float>(S13NAMRack::dualDelayMode));
+                static_cast<float>(OpenStudioNAMRack::dualDelayMode));
         }
         continuouslyPrimedDual.processBlock(block, primedMidi);
         primedCapture.copyFrom(
@@ -1516,11 +1524,11 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
             4096, 11264, 19456
         };
         constexpr std::array<int, 3> eventModes {
-            S13NAMRack::multiDelayMode,
-            S13NAMRack::dualDelayMode,
-            S13NAMRack::tapeDelayMode
+            OpenStudioNAMRack::multiDelayMode,
+            OpenStudioNAMRack::dualDelayMode,
+            OpenStudioNAMRack::tapeDelayMode
         };
-        S13Delay delay(1.0f);
+        OpenStudioDelay delay(1.0f);
         delay.setExtendedModesEnabled(true);
         delay.delayTimeL.store(37.0f);
         delay.delayTimeR.store(43.66f);
@@ -1534,7 +1542,7 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         delay.fbSaturation.store(0.22f);
         delay.stereoWidth.store(1.08f);
         delay.delayMode.store(
-            static_cast<float>(S13NAMRack::digitalDelayMode));
+            static_cast<float>(OpenStudioNAMRack::digitalDelayMode));
         delay.ducking.store(0.0f);
         delay.wowDepthMs.store(0.32f);
         delay.wowRateHz.store(0.37f);
@@ -1648,12 +1656,12 @@ juce::var NAMDelayRegression::runDelayV10Stage3TopologyProbe()
         && topologyPartitionDifference <= 2.0e-6f
         && topologyAutomationPeak <= 2.0f;
 
-    S13Delay resetDual(0.5f);
+    OpenStudioDelay resetDual(0.5f);
     configureExactDelay(
         resetDual,
         primeSampleRate,
         primeBaseDelaySamples,
-        S13NAMRack::dualDelayMode,
+        OpenStudioNAMRack::dualDelayMode,
         0.65f);
     resetDual.prepareToPlay(
         primeSampleRate, topologyBlockSize);

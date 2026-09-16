@@ -896,11 +896,11 @@ describe("undo-aware master FX removal", () => {
       precisionOverride: "float32" as const,
     },
     {
-      label: "S13FX",
-      pluginType: "s13fx",
+      label: "JSFX",
+      pluginType: "jsfx",
       pluginName: "Transient Designer",
       pluginReference: "C:/effects/transient.jsfx",
-      addKind: "s13fx" as const,
+      addKind: "jsfx" as const,
       bypassed: false,
       precisionOverride: "auto" as const,
     },
@@ -945,7 +945,7 @@ describe("undo-aware master FX removal", () => {
     const removeSpy = vi.spyOn(nativeBridge, "removeMasterFX").mockResolvedValue(true);
     const addSpies = {
       builtin: vi.spyOn(nativeBridge, "addMasterBuiltInFX").mockResolvedValue(true),
-      s13fx: vi.spyOn(nativeBridge, "addMasterS13FX").mockResolvedValue(true),
+      jsfx: vi.spyOn(nativeBridge, "addMasterJSFX").mockResolvedValue(true),
       hosted: vi.spyOn(nativeBridge, "addMasterFX").mockResolvedValue(true),
     };
     const stateSpy = vi.spyOn(nativeBridge, "setMasterPluginState").mockResolvedValue(true);

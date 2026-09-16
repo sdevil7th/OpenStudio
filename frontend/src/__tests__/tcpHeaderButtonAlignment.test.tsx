@@ -83,15 +83,14 @@ afterEach(() => {
 });
 
 describe("TCP header button alignment", () => {
-  it("disables track automation read when no automation lanes exist", () => {
+  it("allows track automation read before creating lanes", () => {
     const freshTrack = createDefaultTrack("track-fresh", "Fresh", "#14b8a6", "audio", []);
 
     const html = renderToStaticMarkup(
       <TrackHeader track={freshTrack} isSelected={false} />,
     );
 
-    expect(getButtonTag(html, "Add an automation lane or enable write first")).toContain("disabled");
-    expect(getButtonTag(html, "Add an automation lane or enable write first")).toContain("text-neutral-600!");
+    expect(getButtonTag(html, "Enable automation read")).not.toContain("disabled");
     expect(getButtonTag(html, "Enable automation write")).not.toContain("disabled");
   });
 
@@ -166,8 +165,8 @@ describe("TCP header button alignment", () => {
 
     const html = renderToStaticMarkup(<MasterTrackHeader />);
 
-    expect(getButtonTag(html, "Add a master automation lane or enable write first")).toContain("disabled");
-    expect(getButtonTag(html, "Add a master automation lane or enable write first")).toContain("text-neutral-600!");
+    expect(getButtonTag(html, "Enable master automation read")).not.toContain("disabled");
+    expect(getButtonTag(html, "Enable master automation read")).toContain("hover:text-teal-300");
     expect(getButtonTag(html, "Enable master automation write")).toContain(
       "hover:text-red-300 hover:border-red-500",
     );
@@ -281,10 +280,10 @@ describe("TCP header button alignment", () => {
       TCP_HEADER_PRIMARY_BUTTON_CLASS,
     );
     expect(
-      getButtonTag(masterHtml, "Add a master automation lane or enable write first"),
+      getButtonTag(masterHtml, "Enable master automation read"),
     ).toContain(`w-6 h-6 text-[10px]`);
     expect(
-      getButtonTag(masterHtml, "Add a master automation lane or enable write first"),
+      getButtonTag(masterHtml, "Enable master automation read"),
     ).toContain("rounded");
     expect(masterHtml).toMatch(
       new RegExp(

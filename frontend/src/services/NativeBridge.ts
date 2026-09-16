@@ -1,3 +1,4 @@
+import { appDialogs } from "./appDialogs";
 import {
   DEFAULT_AI_MUSIC_MODEL_ID,
   type AiMusicModelId,
@@ -16,7 +17,61 @@ import {
   sanitizeNAMRackDspState,
 } from "../utils/namPortableState";
 
+export interface AppUpdateStatus {
+  status: "idle" | "development" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
+    | "downloading" | "download-ready" | "installing" | "install-started" | "cancelled" | "incompatible" | "error";
+  message: string;
+  currentVersion?: string;
+  version?: string;
+  platform?: "windows" | "macos" | "linux" | "unsupported";
+  downloadUrl?: string;
+  downloadPath?: string;
+  sha256?: string;
+  size?: number;
+  notes?: string;
+  releasePageUrl?: string;
+  releaseNotesUrl?: string;
+  publishedAt?: string;
+  downloadedBytes?: number;
+  progress?: number;
+  updateSource?: string;
+}
+
 // Type definitions for the JUCE backend
+export interface WorkRecoveryEntry {
+  id: string;
+  kind: "recording" | "ai";
+  status: string;
+  updatedAt?: number;
+  path?: string;
+  trackId?: string;
+  projectId?: string;
+  projectPath?: string;
+  projectName?: string;
+  startTime?: number;
+  sampleRate?: number;
+  channels?: number;
+  duration?: number;
+  error?: string;
+  droppedSamples?: number;
+  ignoredTailBytes?: number;
+  repairedPath?: string;
+  outputFile?: string;
+  modelId?: string;
+  workflowId?: string;
+  params?: Record<string, unknown>;
+  sourceClipId?: string;
+  sourceIdentity?: string;
+  extensionDuration?: number;
+}
+
+export interface ProjectRecoveryCandidate {
+  id: string;
+  path: string;
+  projectName: string;
+  sourcePath: string;
+  savedAt: number;
+}
 const FORMANT_LOG_PREFIX = "[pitchEditor.formant]";
 
 export function isAllowedExternalBrowserURL(value: unknown): value is string {
@@ -42,9 +97,9 @@ export function isAllowedExternalBrowserURL(value: unknown): value is string {
 }
 
 function shouldLogPitchEditorFormant() {
-  const win = window as Window & { __S13_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
+  const win = window as Window & { __OpenStudio_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
   const host = win.location?.hostname ?? "";
-  return win.__S13_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
+  return win.__OpenStudio_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
 }
 
 // Pitch Corrector data types
@@ -74,7 +129,7 @@ export interface PitchHistoryFrame {
   confidence: number; // 0-1
 }
 
-export type BuiltInPluginChain = "instrument" | "input" | "track" | "master";
+export type BuiltInPluginChain = "instrument" | "input" | "track" | "master" | "monitor";
 
 export interface BuiltInPluginAddress {
   trackId?: string;
@@ -85,6 +140,8 @@ export interface BuiltInPluginAddress {
 export type NAMModelLoadOptions = {
   /** Explicit new-load quality. Preset/snapshot restore does not use this API. */
   modelSize?: number;
+  /** Catalog topology used only when the NAM file itself lacks usable metadata. */
+  declaredCaptureType?: string;
 };
 
 export interface BuiltInParamDescriptor {
@@ -561,6 +618,8 @@ export interface NAMAssetSearchResult {
 }
 
 export interface TONE3000NAMSearchOptions {
+  requestOwner?: string;
+  requestId?: string;
   query?: string;
   page?: number;
   page_size?: number;
@@ -1298,6 +1357,17 @@ export interface AiFeatureStatus {
   detectedGpuBackend?: string;
 }
 
+export interface AIGenerationPreflight {
+  status: "ready" | "warning" | "blocked" | "unavailable";
+  checkedAt?: number;
+  deviceName?: string;
+  precision?: string;
+  placement?: string;
+  estimateBasis?: string;
+  memory: { label: string; availableBytes: number | null; requiredBytes: number | null; shortfallBytes: number | null }[];
+  notes: string[];
+}
+
 export interface AiHardwareStatus {
   schemaVersion?: number;
   platform?: string;
@@ -1318,6 +1388,7 @@ export interface AiHardwareStatus {
 }
 
 export interface AiMusicModelStatus {
+  variants?: { int8?: { installed: boolean; ready: boolean; modelPath?: string } };
   id: AiMusicModelId;
   label?: string;
   installed: boolean;
@@ -1361,6 +1432,8 @@ export interface AiToolsStatus {
   stepCount?: number;
   elapsedMs?: number;
   bytesDownloaded?: number;
+  bytesCached?: number;
+  setupProgressVersion?: number;
   bytesTotal?: number;
   available: boolean;
   installerAvailable: boolean;
@@ -1414,6 +1487,8 @@ export interface AiToolsStatus {
   musicModels?: Partial<Record<AiMusicModelId, AiMusicModelStatus>>;
   selectedFeatures?: AiFeatureId[];
   requestedFeatures?: AiFeatureId[];
+  requestedModelId?: AiMusicModelId;
+  requestedModelVariant?: "original" | "int8";
   installedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
   hardware?: AiHardwareStatus;
@@ -1446,6 +1521,7 @@ export interface AIGenerationProgress {
   runtimeProfile?: string;
   lmModel?: string;
   statusNote?: string;
+  generationDetails?: Record<string, unknown>;
   sourceStructureConditioning?: boolean;
   sourcePatternWarning?: string;
   failureKind?: string;
@@ -1473,12 +1549,26 @@ export interface InstallAiToolsResponse {
   status?: AiToolsStatus;
 }
 
+// Both track and clip generation already display statusNote in Show details.
+// Keep machine-local execution metadata out of portable track/project fields.
+export function withAIExecutionNote(progress: AIGenerationProgress): AIGenerationProgress {
+  const execution = progress.generationDetails?.execution;
+  if (!execution || typeof execution !== "object" || Array.isArray(execution)) return progress;
+  const record = execution as Record<string, unknown>;
+  const reason = [record.localQualification, record.fallbackReason]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (!reason || progress.statusNote?.includes(reason)) return progress;
+  return { ...progress, statusNote: [progress.statusNote, reason].filter(Boolean).join(" ") };
+}
+
 export interface InstallAiToolsOptions {
+  modelVariant?: "original" | "int8";
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
   requestedFeature?: AiFeatureId;
   modelId?: AiMusicModelId;
   stableAudioModelPath?: string;
+  huggingFaceToken?: string;
   stableAudioLicenseAccepted?: boolean;
 }
 
@@ -1693,6 +1783,8 @@ export interface PluginScanReport {
 }
 
 export interface PluginScanConfiguration {
+  settingsError?: string;
+  settingsPath?: string;
   customPaths: string[];
   effectivePaths: Array<{
     format: string;
@@ -2031,6 +2123,7 @@ declare global {
         setMetronomeEnabled?: (enabled: boolean) => Promise<boolean>;
         setMetronomeVolume?: (volume: number) => Promise<boolean>;
         isMetronomeEnabled?: () => Promise<boolean>;
+        setMetronomePracticeEnabled?: (enabled: boolean) => Promise<boolean>;
         setTimeSignature?: (
           numerator: number,
           denominator: number,
@@ -2086,6 +2179,7 @@ declare global {
         removePluginScanPath?: (path: string) => Promise<boolean>;
         retryBlacklistedPlugin?: (path: string) => Promise<boolean>;
         getAvailablePlugins?: () => Promise<any[]>;
+        setIsolatedPluginHosting?: (identifier: string, enabled: boolean) => Promise<boolean>;
         addTrackInputFX?: (
           trackId: string,
           pluginPath: string,
@@ -2215,31 +2309,31 @@ declare global {
           toIndex: number,
         ) => Promise<boolean>;
 
-        // S13FX (JSFX) Management
-        addTrackS13FX?: (
+        // JSFX (JSFX) Management
+        addTrackJSFX?: (
           trackId: string,
           scriptPath: string,
           isInputFX?: boolean,
         ) => Promise<boolean>;
-        addMasterS13FX?: (scriptPath: string) => Promise<boolean>;
-        getS13FXSliders?: (
+        addMasterJSFX?: (scriptPath: string) => Promise<boolean>;
+        getJSFXSliders?: (
           trackId: string,
           fxIndex: number,
           isInputFX: boolean,
         ) => Promise<any[]>;
-        setS13FXSlider?: (
+        setJSFXSlider?: (
           trackId: string,
           fxIndex: number,
           isInputFX: boolean,
           sliderIndex: number,
           value: number,
         ) => Promise<boolean>;
-        reloadS13FX?: (
+        reloadJSFX?: (
           trackId: string,
           fxIndex: number,
           isInputFX: boolean,
         ) => Promise<boolean>;
-        getAvailableS13FX?: () => Promise<any[]>;
+        getAvailableJSFX?: () => Promise<any[]>;
         openUserEffectsFolder?: () => Promise<boolean>;
 
         // Built-in FX Presets
@@ -2277,7 +2371,7 @@ declare global {
           presetName: string,
         ) => Promise<boolean>;
 
-        // Lua Scripting (S13Script)
+        // Lua Scripting (OpenStudioScript)
         runScript?: (scriptPath: string) => Promise<{ success: boolean; output: string; error?: string }>;
         runScriptCode?: (code: string) => Promise<{ success: boolean; output: string; error?: string }>;
         getScriptDirectory?: () => Promise<string>;
@@ -2320,7 +2414,12 @@ declare global {
         saveProjectToFile?: (
           filePath: string,
           jsonContent: string,
+          recoveryOnly?: boolean,
+          maxVersions?: number,
+          documentId?: string,
         ) => Promise<boolean>;
+        projectRecovery?: (action: string, id?: string) => Promise<unknown>;
+        workRecovery?: (action: string, id?: string, payload?: unknown) => Promise<unknown>;
         loadProjectFromFile?: (filePath: string) => Promise<string>;
         getRecentProjects?: () => Promise<string[]>;
         setRecentProjects?: (projects: string[]) => Promise<boolean>;
@@ -2389,15 +2488,11 @@ declare global {
         runReleaseGuardrails?: () => Promise<GuardrailsReport>;
         runAutomatedRegressionSuite?: () => Promise<GuardrailsReport>;
         getAppVersion?: () => Promise<string>;
-        checkForUpdates?: (manual?: boolean) => Promise<any>;
-        downloadAndInstallUpdate?: (
-          downloadUrl: string,
-          version?: string,
-          sha256?: string,
-          releasePageUrl?: string,
-          installerArguments?: string,
-          size?: number,
-        ) => Promise<any>;
+        checkForUpdates?: (manual?: boolean) => Promise<AppUpdateStatus>;
+        getUpdateStatus?: () => Promise<AppUpdateStatus>;
+        downloadUpdate?: () => Promise<AppUpdateStatus>;
+        cancelUpdateDownload?: () => Promise<boolean>;
+        installDownloadedUpdate?: () => Promise<AppUpdateStatus>;
         openExternalURL?: (url: string) => Promise<boolean>;
         revealLocalPath?: (path: string) => Promise<boolean>;
 
@@ -2558,12 +2653,14 @@ declare global {
         getNAMRackDiagnostics?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<Record<string, unknown> | null>;
         getBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<any>;
         setBuiltInPluginParam?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, value: number) => Promise<boolean>;
+        builtInPluginGesture?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, starting: boolean) => Promise<boolean>;
         setBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, stateJSON: string) => Promise<boolean>;
         getNAMLibraryInfo?: () => Promise<NAMLibraryInfo>;
         inspectNAMAsset?: (filePath: string) => Promise<NAMAssetInspectionResult>;
         findNAMAssetInDirectory?: (directoryPath: string, expectedFileName: string, checksum?: string, fileSizeBytes?: number, slot?: NAMProjectAssetSlot) => Promise<NAMAssetSearchResult>;
         getNAMCatalog?: () => Promise<NAMCatalogPayload>;
         refreshNAMCatalog?: (options?: NAMCatalogRefreshOptions | string) => Promise<NAMCatalogRefreshResult>;
+        cancelTONE3000Search?: (owner: string, requestId: string) => Promise<boolean>;
         searchTONE3000NAM?: (options: TONE3000NAMSearchOptions | string) => Promise<NAMCatalogPayload>;
         runTONE3000AuthenticatedQA?: () => Promise<TONE3000AuthenticatedQAResult>;
         getTONE3000ToneDetail?: (toneId: number, architecture?: string) => Promise<TONE3000ToneDetailResult>;
@@ -2574,7 +2671,7 @@ declare global {
         cleanupNAMPreviews?: (maxAgeHours?: number) => Promise<NAMLibraryActionResult>;
         setNAMModelFavorite?: (modelId: number, localPath: string, favorite: boolean) => Promise<NAMLibraryActionResult>;
         removeNAMModel?: (modelId: number, localPath: string, deleteLocalFile?: boolean) => Promise<NAMLibraryActionResult>;
-        loadNAMModelIntoRack?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, slot: "pedal" | "amp" | "cab", localPath: string) => Promise<boolean>;
+        loadNAMModelIntoRack?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, slot: "pedal" | "amp" | "cab", localPath: string, declaredCaptureType?: string) => Promise<boolean>;
         startTONE3000AuthFlow?: (options?: TONE3000AuthFlowOptions | string) => Promise<TONE3000AuthFlowResult>;
         cancelTONE3000AuthFlow?: () => Promise<TONE3000AuthFlowResult>;
         createTONE3000AuthRequest?: (clientId: string, redirectUri: string, prompt?: string, toneId?: string, loginHint?: string) => Promise<TONE3000AuthRequestResult>;
@@ -2595,8 +2692,6 @@ declare global {
         openVideoFile?: (filePath: string) => Promise<{ width: number; height: number; duration: number; fps: number; filePath: string; audioPath?: string; error?: string }>;
         getVideoFrame?: (time: number, width?: number, height?: number) => Promise<string>; // base64 image data
         closeVideoFile?: () => void;
-        executeScript?: (code: string) => Promise<{ result: string; error: string }>;
-        loadScriptFile?: (filePath: string) => Promise<{ result: string; error: string }>;
         setLTCOutput?: (enabled: boolean, channel: number, frameRate: number) => Promise<boolean>;
 
         // Phase 16: Pro Audio & Compatibility
@@ -2695,6 +2790,7 @@ declare global {
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
         cancelAiToolsInstall?: () => Promise<void>;
+        getAIGenerationPreflight?: (modelId: string, workflowId: string, paramsJSON: string) => Promise<AIGenerationPreflight>;
         startAIGeneration?: (
           trackId: string,
           modelIdOrWorkflowId: string,
@@ -2702,7 +2798,7 @@ declare global {
           paramsJSON?: string,
         ) => Promise<{ started: boolean; error?: string }>;
         getAIGenerationProgress?: () => Promise<AIGenerationProgress>;
-        cancelAIGeneration?: () => Promise<void>;
+        cancelAIGeneration?: (expectedRequestId?: string) => Promise<void>;
 
         // ARA Plugin Hosting (Phase 9)
         initializeARA?: (trackId: string, fxIndex: number) => Promise<{ success: boolean; error?: string }>;
@@ -2732,7 +2828,7 @@ declare global {
         minimizeWindow?: () => Promise<void>;
         maximizeWindow?: () => Promise<boolean>; // returns new isMaximized state
         closeWindow?: () => Promise<void>;
-        quitApplication?: () => Promise<void>;
+        quitApplication?: (installPreparedUpdate?: boolean) => Promise<void>;
         isWindowMaximized?: () => Promise<boolean>;
         startWindowDrag?: () => Promise<void>;
         openMixerWindow?: (bounds?: Partial<WindowBounds>) => Promise<boolean>;
@@ -2748,6 +2844,7 @@ declare global {
         publishMidiEditorUISnapshot?: (sessionId: string, snapshot: any) => Promise<boolean>;
         getMidiEditorUISnapshot?: (sessionId?: string) => Promise<any>;
         openBuiltInPluginEditorWindow?: (sessionId: string, bounds?: Partial<WindowBounds>) => Promise<boolean>;
+        getPluginEditorReadiness?: (target: { sessionId?: string; scope?: string; trackId?: string; fxIndex?: number }) => Promise<string>;
         closeBuiltInPluginEditorWindow?: (sessionId?: string, reason?: string) => Promise<boolean>;
         publishAppCommand?: (payload: any) => Promise<boolean>;
         reportFrontendStartupState?: (state: string, detail?: string) => Promise<boolean>;
@@ -2783,6 +2880,7 @@ class NativeBridge {
   private devNAMReadbackFailurePending = new Set<string>();
   private devNAMReadbackFailureConsumed = new Set<string>();
   private mockNAMRackOversamplingFactor: 2 | 4 | 8 = 4;
+  private mockMetronomeEnabled = false;
 
   private getBackend() {
     return typeof window !== "undefined" ? window.__JUCE__?.backend : undefined;
@@ -2842,7 +2940,7 @@ class NativeBridge {
       ...sanitized,
       dspState: {
         ...dspState,
-        namEffectsDspVersion: dspState.namEffectsDspVersion ?? 19,
+        namEffectsDspVersion: dspState.namEffectsDspVersion ?? 20,
       },
     } as T;
   }
@@ -3770,14 +3868,12 @@ class NativeBridge {
 
         // CRITICAL: If no functions are exposed, alert
         if (!backend.addTrack && !backend.getAudioDeviceSetup) {
-          alert(
-            "CRITICAL: Native functions NOT exposed!\nOnly keys: " +
+          void appDialogs.alert("CRITICAL: Native functions NOT exposed!\nOnly keys: " +
               JSON.stringify(keys) +
-              "\n\nFalling back to MOCK data!",
-          );
+              "\n\nFalling back to MOCK data!");
         }
       } else {
-        alert("CRITICAL ERROR: window.__JUCE__.backend is missing!");
+        void appDialogs.alert("CRITICAL ERROR: window.__JUCE__.backend is missing!");
       }
     } else {
       console.log(
@@ -3844,6 +3940,16 @@ class NativeBridge {
     return () => {};
   }
 
+  onProcessorFaultsChanged(callback: () => void): () => void {
+    return this.subscribeNativeEvent("processorFaultsChanged", callback);
+  }
+
+  onRecordingWriteFailure(callback: (failures: Array<{ trackId: string; path: string; reason: number }>) => void): () => void {
+    return this.subscribeNativeEvent("recordingWriteFailure", data => {
+      if (Array.isArray(data)) callback(data);
+    });
+  }
+
   // Subscribe to pitch analysis completion events from C++ background thread.
   // Returns an unsubscribe function (or no-op in dev mode).
   onPitchAnalysisComplete(callback: (data: PitchContourData) => void): () => void {
@@ -3874,7 +3980,7 @@ class NativeBridge {
 
   // Subscribe to transport position updates from C++ (emitted at 10Hz).
   // Returns an unsubscribe function (or no-op in dev mode).
-  onTransportUpdate(callback: (data: { position: number; isPlaying: boolean }) => void): () => void {
+  onTransportUpdate(callback: (data: { position: number; isPlaying: boolean; metronomePracticeEnabled?: boolean }) => void): () => void {
     const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener("transportUpdate", (data: any) => {
@@ -4165,21 +4271,30 @@ class NativeBridge {
     if (this.isNative && window.__JUCE__?.backend.setMetronomeEnabled) {
       return await window.__JUCE__.backend.setMetronomeEnabled(enabled);
     }
-    return false;
+    if (this.isNative) return false;
+    this.mockMetronomeEnabled = enabled;
+    return true;
+  }
+
+  async setMetronomePracticeEnabled(enabled: boolean): Promise<boolean> {
+    if (this.isNative) {
+      return await window.__JUCE__?.backend.setMetronomePracticeEnabled?.(enabled) ?? false;
+    }
+    return true;
   }
 
   async setMetronomeVolume(volume: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setMetronomeVolume) {
       return await window.__JUCE__.backend.setMetronomeVolume(volume);
     }
-    return false;
+    return !this.isNative;
   }
 
   async isMetronomeEnabled(): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.isMetronomeEnabled) {
       return await window.__JUCE__.backend.isMetronomeEnabled();
     }
-    return false;
+    return this.isNative ? false : this.mockMetronomeEnabled;
   }
 
   async setTimeSignature(
@@ -4660,36 +4775,36 @@ class NativeBridge {
     }
   }
 
-  // S13FX (JSFX) Management
-  async addTrackS13FX(
+  // JSFX (JSFX) Management
+  async addTrackJSFX(
     trackId: string,
     scriptPath: string,
     isInputFX = false,
   ): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.addTrackS13FX) {
-      return await window.__JUCE__.backend.addTrackS13FX(
+    if (this.isNative && window.__JUCE__?.backend.addTrackJSFX) {
+      return await window.__JUCE__.backend.addTrackJSFX(
         trackId,
         scriptPath,
         isInputFX,
       );
     } else {
       console.log(
-        `[NativeBridge] Mock addTrackS13FX: track ${trackId}, script ${scriptPath}`,
+        `[NativeBridge] Mock addTrackJSFX: track ${trackId}, script ${scriptPath}`,
       );
       return true;
     }
   }
 
-  async addMasterS13FX(scriptPath: string): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.addMasterS13FX) {
-      return await window.__JUCE__.backend.addMasterS13FX(scriptPath);
+  async addMasterJSFX(scriptPath: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.addMasterJSFX) {
+      return await window.__JUCE__.backend.addMasterJSFX(scriptPath);
     } else {
-      console.log(`[NativeBridge] Mock addMasterS13FX: ${scriptPath}`);
+      console.log(`[NativeBridge] Mock addMasterJSFX: ${scriptPath}`);
       return true;
     }
   }
 
-  async getS13FXSliders(
+  async getJSFXSliders(
     trackId: string,
     fxIndex: number,
     isInputFX: boolean,
@@ -4706,8 +4821,8 @@ class NativeBridge {
       enumNames?: string[];
     }[]
   > {
-    if (this.isNative && window.__JUCE__?.backend.getS13FXSliders) {
-      return await window.__JUCE__.backend.getS13FXSliders(
+    if (this.isNative && window.__JUCE__?.backend.getJSFXSliders) {
+      return await window.__JUCE__.backend.getJSFXSliders(
         trackId,
         fxIndex,
         isInputFX,
@@ -4717,15 +4832,15 @@ class NativeBridge {
     }
   }
 
-  async setS13FXSlider(
+  async setJSFXSlider(
     trackId: string,
     fxIndex: number,
     isInputFX: boolean,
     sliderIndex: number,
     value: number,
   ): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.setS13FXSlider) {
-      return await window.__JUCE__.backend.setS13FXSlider(
+    if (this.isNative && window.__JUCE__?.backend.setJSFXSlider) {
+      return await window.__JUCE__.backend.setJSFXSlider(
         trackId,
         fxIndex,
         isInputFX,
@@ -4737,13 +4852,13 @@ class NativeBridge {
     }
   }
 
-  async reloadS13FX(
+  async reloadJSFX(
     trackId: string,
     fxIndex: number,
     isInputFX: boolean,
   ): Promise<boolean> {
-    if (this.isNative && window.__JUCE__?.backend.reloadS13FX) {
-      return await window.__JUCE__.backend.reloadS13FX(
+    if (this.isNative && window.__JUCE__?.backend.reloadJSFX) {
+      return await window.__JUCE__.backend.reloadJSFX(
         trackId,
         fxIndex,
         isInputFX,
@@ -4753,7 +4868,7 @@ class NativeBridge {
     }
   }
 
-  async getAvailableS13FX(): Promise<
+  async getAvailableJSFX(): Promise<
     {
       name: string;
       filePath: string;
@@ -4763,8 +4878,8 @@ class NativeBridge {
       tags: string[];
     }[]
   > {
-    if (this.isNative && window.__JUCE__?.backend.getAvailableS13FX) {
-      return await window.__JUCE__.backend.getAvailableS13FX();
+    if (this.isNative && window.__JUCE__?.backend.getAvailableJSFX) {
+      return await window.__JUCE__.backend.getAvailableJSFX();
     } else {
       return [
         {
@@ -4772,7 +4887,7 @@ class NativeBridge {
           filePath: "/mock/gain.jsfx",
           author: "OpenStudio",
           isStock: true,
-          type: "s13fx",
+          type: "jsfx",
           tags: ["utility"],
         },
       ];
@@ -4923,7 +5038,7 @@ class NativeBridge {
     return true;
   }
 
-  // Lua Scripting (S13Script)
+  // Lua Scripting (OpenStudioScript)
   async runScript(
     scriptPath: string,
   ): Promise<{ success: boolean; output: string; error?: string }> {
@@ -5064,7 +5179,7 @@ class NativeBridge {
     return true;
   }
 
-  async getMonitoringFX(): Promise<{ index: number; name: string; pluginPath?: string; bypassed?: boolean }[]> {
+  async getMonitoringFX(): Promise<{ index: number; name: string; type?: string; pluginPath?: string; bypassed?: boolean }[]> {
     if (this.isNative && window.__JUCE__?.backend.getMonitoringFX) {
       return await window.__JUCE__.backend.getMonitoringFX();
     }
@@ -5582,43 +5697,54 @@ class NativeBridge {
     return "0.0.1";
   }
 
-  async checkForUpdates(manual = true): Promise<any> {
-    if (this.isNative && window.__JUCE__?.backend.checkForUpdates) {
+  supportsAppUpdates(): boolean {
+    return this.isNative && !!window.__JUCE__?.backend.getUpdateStatus;
+  }
+
+  onUpdateStatusChanged(callback: (status: AppUpdateStatus) => void): () => void {
+    return this.subscribe("updateStatusChanged", callback);
+  }
+
+  async getUpdateStatus(): Promise<AppUpdateStatus> {
+    if (this.isNative && window.__JUCE__?.backend.getUpdateStatus)
+      return await window.__JUCE__.backend.getUpdateStatus();
+    return { status: "idle", message: "Updates are available in the installed desktop app." };
+  }
+
+  async checkForUpdates(manual = true): Promise<AppUpdateStatus> {
+    if (this.isNative && window.__JUCE__?.backend.checkForUpdates)
       return await window.__JUCE__.backend.checkForUpdates(manual);
-    }
     return { status: "error", message: "Updates are unavailable in the web preview." };
   }
 
-  async downloadAndInstallUpdate(
-    downloadUrl: string,
-    version?: string,
-    sha256?: string,
-    releasePageUrl?: string,
-    installerArguments?: string,
-    size?: number,
-  ): Promise<any> {
-    if (this.isNative && window.__JUCE__?.backend.downloadAndInstallUpdate) {
-      return await window.__JUCE__.backend.downloadAndInstallUpdate(
-        downloadUrl,
-        version,
-        sha256,
-        releasePageUrl,
-        installerArguments,
-        size,
-      );
-    }
-    return { status: "error", message: "Installer downloads are unavailable in the web preview." };
+  async downloadUpdate(): Promise<AppUpdateStatus> {
+    if (this.isNative && window.__JUCE__?.backend.downloadUpdate)
+      return await window.__JUCE__.backend.downloadUpdate();
+    return { status: "error", message: "Update downloads require the installed desktop app." };
+  }
+
+  async cancelUpdateDownload(): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.cancelUpdateDownload)
+      await window.__JUCE__.backend.cancelUpdateDownload();
+  }
+
+  async installDownloadedUpdate(): Promise<AppUpdateStatus> {
+    if (this.isNative && window.__JUCE__?.backend.installDownloadedUpdate)
+      return await window.__JUCE__.backend.installDownloadedUpdate();
+    return { status: "error", message: "Update installation requires the installed desktop app." };
   }
 
   async openExternalURL(url: string): Promise<boolean> {
-    if (!isAllowedExternalBrowserURL(url)) return false;
+    // Native code additionally requires our package identity for this exact URI.
+    const storeUpdates = url === "ms-windows-store://downloadsandupdates";
+    if (!storeUpdates && !isAllowedExternalBrowserURL(url)) return false;
 
     const safeURL = url.trim();
     if (this.isNative && window.__JUCE__?.backend.openExternalURL) {
       return await window.__JUCE__.backend.openExternalURL(safeURL);
     }
 
-    if (typeof window !== "undefined" && typeof window.open === "function") {
+    if (!storeUpdates && typeof window !== "undefined" && typeof window.open === "function") {
       window.open(safeURL, "_blank", "noopener,noreferrer");
       return true;
     }
@@ -5636,11 +5762,17 @@ class NativeBridge {
   async saveProjectToFile(
     filePath: string,
     jsonContent: string,
+    recoveryOnly = false,
+    maxVersions = 3,
+    documentId?: string,
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.saveProjectToFile) {
       return await window.__JUCE__.backend.saveProjectToFile(
         filePath,
         jsonContent,
+        recoveryOnly,
+        maxVersions,
+        documentId,
       );
     }
     console.log(
@@ -5655,6 +5787,41 @@ class NativeBridge {
     }
     console.log(`[NativeBridge] Mock loadProjectFromFile: ${filePath}`);
     return "";
+  }
+
+  async setIsolatedPluginHosting(identifier: string, enabled: boolean): Promise<boolean> {
+    if (this.isNative) {
+      if (!window.__JUCE__?.backend.setIsolatedPluginHosting) throw new Error("Update the native app to configure isolated hosting");
+      return Boolean(await window.__JUCE__.backend.setIsolatedPluginHosting(identifier, enabled));
+    }
+    return true;
+  }
+
+  async discoverProjectRecovery(): Promise<ProjectRecoveryCandidate[]> {
+    if (!this.isNative || typeof window === "undefined") return [];
+    const value = await window.__JUCE__?.backend.projectRecovery?.("discover");
+    return Array.isArray(value) ? value.filter((entry): entry is ProjectRecoveryCandidate =>
+      entry && typeof entry.id === "string" && typeof entry.path === "string"
+      && typeof entry.projectName === "string" && typeof entry.sourcePath === "string"
+      && typeof entry.savedAt === "number") : [];
+  }
+
+  async workRecovery(action: string, id = "", payload?: unknown): Promise<unknown> {
+    if (this.isNative && typeof window !== "undefined") {
+      if (!window.__JUCE__?.backend.workRecovery) throw new Error("Update the native app to use work recovery");
+      return window.__JUCE__.backend.workRecovery(action, id, payload);
+    }
+    // Deterministic frontend-only fallback. Native builds always use durable,
+    // session-owned files; mocks never claim to repair real audio.
+    if (action === "discover") return [];
+    if (action === "createAI") return `mock/${crypto.randomUUID()}`;
+    if (action === "repair") throw new Error("Recording repair requires the native audio engine");
+    return true;
+  }
+
+  async dismissProjectRecovery(id: string, currentDocument = false): Promise<boolean> {
+    if (!this.isNative || typeof window === "undefined" || !window.__JUCE__?.backend.projectRecovery) return true;
+    return (await window.__JUCE__.backend.projectRecovery(currentDocument ? "retire" : "dismiss", id)) === true;
   }
 
   async getRecentProjects(): Promise<string[]> {
@@ -6906,14 +7073,15 @@ class NativeBridge {
           param("eqLevelDb", "Level", 0, -12, 12, "dB", "graphicEq"),
           param("eqEnabled", "EQ Power", 0, 0, 1, "", "graphicEq", "toggle"),
           param("cabEnabled", "Cab/IR", 1, 0, 1, "", "cab", "toggle"),
-          param("cabLevelDb", "Cab Level", -0.5, -24, 12, "dB", "cab"),
-          param("cabHPFHz", "Cab HPF", 80, 20, 500, "Hz", "cab"),
-          param("cabLPFHz", "Cab LPF", 8500, 2500, 14000, "Hz", "cab"),
+          param("cabLevelDb", "Cab Level", 0, -24, 12, "dB", "cab"),
+          param("cabEngineVersion", "Cab Engine Version", 3, 1, 3, "", "cabInternal", "continuous", false),
+          param("cabHPFEnabled", "Retired Cab HPF Power", 0, 0, 1, "", "cabInternal", "toggle", false),
+          param("cabLPFEnabled", "Retired Cab LPF Power", 0, 0, 1, "", "cabInternal", "toggle", false),
+          param("cabHPFHz", "Retired Cab HPF", 30, 20, 500, "Hz", "cabInternal", "continuous", false),
+          param("cabLPFHz", "Retired Cab LPF", 16000, 1000, 20000, "Hz", "cabInternal", "continuous", false),
+          param("cabIRStereo", "Stereo IR", 0, 0, 1, "", "cab", "toggle"),
+          param("cabDirectMix", "Direct Mix", 0, 0, 1, "", "cab"),
           param("cabPhaseInvert", "Phase", 0, 0, 1, "", "cab", "toggle"),
-          param("cabMicPosition", "Tone Edge", 0.5, 0, 1, "", "cab"),
-          param("cabMicDistance", "Tone Damp", 0, 0, 1, "", "cab"),
-          param("cabMicBlend", "Shaper Blend", 0.5, 0, 1, "", "cab"),
-          param("cabRoomSend", "Low Bloom", 0, 0, 1, "", "cab"),
           param("cabRoomEnabled", "Room", 0, 0, 1, "", "cabinetSpace", "toggle"),
           param("cabRoomAmount", "Room Amount", 0.22, 0, 1, "", "cabinetSpace"),
           param("cabRoomWidth", "Room Width", 0.65, 0, 1, "", "cabinetSpace"),
@@ -6978,7 +7146,7 @@ class NativeBridge {
           ampDeclaredCaptureType: "unknown",
           ampCaptureType: "amp",
           ampIncludesCab: false,
-          namEffectsDspVersion: 19,
+          namEffectsDspVersion: 20,
           inputRoutingAutomatic: true,
           automaticInputRoutingMode: 0,
           inputRoutingMode: 0,
@@ -7232,6 +7400,11 @@ class NativeBridge {
     return { schemaVersion: 1, values: {} };
   }
 
+  async builtInPluginGesture(address: BuiltInPluginAddress, paramId: string, starting: boolean): Promise<void> {
+    if (this.isNative && window.__JUCE__?.backend.builtInPluginGesture)
+      await window.__JUCE__.backend.builtInPluginGesture(address.trackId || "", address.chain, address.fxIndex ?? -1, paramId, starting);
+  }
+
   async setBuiltInPluginParam(address: BuiltInPluginAddress, paramId: string, value: number): Promise<boolean> {
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
@@ -7401,6 +7574,10 @@ class NativeBridge {
       error: "NAM catalog refresh is only available in the native app.",
       catalog: { schemaVersion: 1, tones: [] },
     };
+  }
+
+  async cancelTONE3000Search(owner: string, requestId: string): Promise<void> {
+    if (this.isNative) await window.__JUCE__?.backend.cancelTONE3000Search?.(owner, requestId);
   }
 
   async searchTONE3000NAM(options: TONE3000NAMSearchOptions | string): Promise<NAMCatalogPayload> {
@@ -7695,7 +7872,14 @@ class NativeBridge {
       // Native direct-load policy owns the atomic path + Full-quality commit.
       // `modelSize` remains explicit here for the browser mock and call-site
       // contract without adding a second state mutation after native success.
-      return await window.__JUCE__.backend.loadNAMModelIntoRack(trackId, address.chain, fxIndex, slot, localPath);
+      return await window.__JUCE__.backend.loadNAMModelIntoRack(
+        trackId,
+        address.chain,
+        fxIndex,
+        slot,
+        localPath,
+        options.declaredCaptureType ?? "unknown",
+      );
     }
     console.log("[NativeBridge] Mock loadNAMModelIntoRack:", address, slot, localPath);
     if (this.shouldUseDevNAMMock()) {
@@ -7720,9 +7904,9 @@ class NativeBridge {
               ampModelPath: localPath,
               hasAmpModel: Boolean(localPath),
               ampMetadataCaptureType: "amp",
-              ampDeclaredCaptureType: "unknown",
-              ampCaptureType: "amp",
-              ampIncludesCab: false,
+              ampDeclaredCaptureType: options.declaredCaptureType ?? "unknown",
+              ampCaptureType: options.declaredCaptureType ?? "amp",
+              ampIncludesCab: ["amp_cab", "amp_pedal_cab", "full_rig"].includes(options.declaredCaptureType ?? ""),
               ampModelSize: requestedModelSize,
               cabRequestedEnabled: requestedCabEnabled,
             }
@@ -7907,27 +8091,23 @@ class NativeBridge {
   }
 
   async executeScript(code: string): Promise<{ result: string; error: string }> {
-    // Prefer the new Lua backend (runScriptCode) over the legacy stub
+    // Production scripting executes through the native Lua engine.
     if (this.isNative && window.__JUCE__?.backend.runScriptCode) {
       const res = await window.__JUCE__.backend.runScriptCode(code);
       return { result: res.output || (res.success ? "OK" : ""), error: res.error || "" };
     }
-    if (this.isNative && window.__JUCE__?.backend.executeScript) {
-      return await window.__JUCE__.backend.executeScript(code);
-    }
+    if (this.isNative) return { result: "", error: "The native Lua engine is unavailable. Restart OpenStudio and try again." };
     console.log("[NativeBridge] Mock executeScript:", code.substring(0, 100));
     return { result: "Script executed (mock)", error: "" };
   }
 
   async loadScriptFile(filePath: string): Promise<{ result: string; error: string }> {
-    // Prefer the new Lua backend (runScript) over the legacy stub
+    // Production files execute through the native Lua engine.
     if (this.isNative && window.__JUCE__?.backend.runScript) {
       const res = await window.__JUCE__.backend.runScript(filePath);
       return { result: res.output || (res.success ? "OK" : ""), error: res.error || "" };
     }
-    if (this.isNative && window.__JUCE__?.backend.loadScriptFile) {
-      return await window.__JUCE__.backend.loadScriptFile(filePath);
-    }
+    if (this.isNative) return { result: "", error: "The native Lua engine is unavailable. Restart OpenStudio and try again." };
     console.log("[NativeBridge] Mock loadScriptFile:", filePath);
     return { result: "Script loaded (mock)", error: "" };
   }
@@ -7937,7 +8117,7 @@ class NativeBridge {
       return await window.__JUCE__.backend.setLTCOutput(enabled, channel, frameRate);
     }
     console.log("[NativeBridge] Mock setLTCOutput:", enabled, channel, frameRate);
-    return true;
+    throw new Error("LTC output is unavailable in this build.");
   }
 
   // Phase 16: Pro Audio & Compatibility
@@ -7946,7 +8126,7 @@ class NativeBridge {
       return await window.__JUCE__.backend.startLiveCapture(format);
     }
     console.log("[NativeBridge] Mock startLiveCapture:", format);
-    return "mock_capture.wav";
+    throw new Error("Live output capture is unavailable. Use Render to export the mix.");
   }
 
   async stopLiveCapture(): Promise<{ filePath: string; duration: number }> {
@@ -7954,7 +8134,7 @@ class NativeBridge {
       return await window.__JUCE__.backend.stopLiveCapture();
     }
     console.log("[NativeBridge] Mock stopLiveCapture");
-    return { filePath: "mock_capture.wav", duration: 0 };
+    throw new Error("Live output capture is unavailable.");
   }
 
   async exportDDP(sourceWavPath: string, outputDir: string, tracks: any[], catalogNumber?: string): Promise<boolean> {
@@ -8034,9 +8214,9 @@ class NativeBridge {
     }
   }
 
-  async quitApplication(): Promise<void> {
+  async quitApplication(installPreparedUpdate = false): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.quitApplication) {
-      await window.__JUCE__.backend.quitApplication();
+      await window.__JUCE__.backend.quitApplication(installPreparedUpdate);
       return;
     }
 
@@ -8138,6 +8318,15 @@ class NativeBridge {
       return await window.__JUCE__.backend.getMidiEditorUISnapshot(sessionId);
     }
     return null;
+  }
+
+  async getPluginEditorReadiness(target: { sessionId?: string; scope?: string; trackId?: string; fxIndex?: number }): Promise<string> {
+    if (this.isNative) {
+      const query = window.__JUCE__?.backend.getPluginEditorReadiness;
+      if (!query) throw new Error("Restart OpenStudio with the latest build to check editor readiness.");
+      return await query(target);
+    }
+    return "ready";
   }
 
   async openBuiltInPluginEditorWindow(sessionId: string, bounds?: Partial<WindowBounds>): Promise<boolean> {
@@ -8844,12 +9033,20 @@ class NativeBridge {
       return await window.__JUCE__.backend.cancelAiToolsInstall();
   }
 
+  async getAIGenerationPreflight(modelId: string, workflowId: string, params: Record<string, unknown>): Promise<AIGenerationPreflight> {
+    if (this.isNative && window.__JUCE__?.backend.getAIGenerationPreflight) {
+      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(params));
+      if (report?.status && Array.isArray(report.memory) && Array.isArray(report.notes)) return report;
+    }
+    return { status: "unavailable", memory: [], notes: ["Hardware checks are available in the desktop app with an installed model runtime."] };
+  }
+
   async startAIGeneration(
     trackId: string,
     modelIdOrWorkflowId: string,
     workflowIdOrParams: string | Record<string, unknown>,
     paramsMaybe?: Record<string, unknown>,
-  ): Promise<{ started: boolean; error?: string }> {
+  ): Promise<{ started: boolean; error?: string; requestId?: string }> {
     const isNewSignature = typeof workflowIdOrParams === "string";
     const modelId = isNewSignature
       ? resolveAiMusicModelId(modelIdOrWorkflowId)
@@ -8867,6 +9064,8 @@ class NativeBridge {
     const normalizedParams = {
       ...normalizeWorkflowParams(workflowId, params, modelId),
       ...(sourcePayload && typeof sourcePayload === "object" ? { source: sourcePayload } : {}),
+      ...(typeof (params as Record<string, unknown>)._openStudioRecoveryId === "string"
+        ? { _openStudioRecoveryId: (params as Record<string, unknown>)._openStudioRecoveryId } : {}),
     };
     if (this.isNative && window.__JUCE__?.backend.startAIGeneration) {
       return await window.__JUCE__.backend.startAIGeneration(
@@ -8882,14 +9081,14 @@ class NativeBridge {
 
   async getAIGenerationProgress(): Promise<AIGenerationProgress> {
     if (this.isNative && window.__JUCE__?.backend.getAIGenerationProgress) {
-      return await window.__JUCE__.backend.getAIGenerationProgress();
+      return withAIExecutionNote(await window.__JUCE__.backend.getAIGenerationProgress());
     }
     return { state: "idle", progress: 0 };
   }
 
-  async cancelAIGeneration(): Promise<void> {
+  async cancelAIGeneration(expectedRequestId?: string): Promise<void> {
     if (this.isNative && window.__JUCE__?.backend.cancelAIGeneration) {
-      return await window.__JUCE__.backend.cancelAIGeneration();
+      return await window.__JUCE__.backend.cancelAIGeneration(expectedRequestId);
     }
   }
 

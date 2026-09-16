@@ -11,12 +11,19 @@ import type { GraphAxis, GraphNode, GraphNodeConfig } from "./ParametricGraph";
 import { NAMRackPanel } from "./NAMRackPanel";
 import { Button, ProfiledRangeInput } from "./ui";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
 import {
   activateShortcutContext,
   getActiveShortcutContext,
   registerShortcutSurface,
+  type ShortcutSurfaceHandler,
 } from "../utils/shortcutContext";
 import { windowRole } from "../utils/windowEnvironment";
+import {
+  BuiltInPluginParamHistory,
+  type BuiltInPluginHistoryDirection,
+  type BuiltInPluginParamHistoryEntry,
+} from "../utils/builtInPluginParamHistory";
 import {
   clampNumber as clamp,
   formatParamValue,
@@ -58,6 +65,7 @@ function makeFallbackParam(
   graphRole = "controls",
   type: BuiltInParamDescriptor["type"] = "continuous",
   enumOptions?: BuiltInParamDescriptor["enumOptions"],
+  automatable = type !== "meter",
 ): BuiltInParamDescriptor {
   return {
     id,
@@ -68,7 +76,7 @@ function makeFallbackParam(
     max,
     defaultValue,
     unit,
-    automatable: type !== "meter",
+    automatable,
     graphRole,
     enumOptions,
   };
@@ -77,6 +85,70 @@ function makeFallbackParam(
 function isNAMPluginName(name: string) {
   return name.toLowerCase().includes("nam");
 }
+
+export function builtInPluginShortcutFocusIsActive(
+  role: string,
+  documentFocused: boolean,
+): boolean {
+  return role === "main" || (role === "pluginEditor" && documentFocused);
+}
+
+export function dispatchBuiltInPluginHistoryShortcut(
+  event: Parameters<ShortcutSurfaceHandler>[0],
+  options: {
+    active: boolean;
+    canUndo: boolean;
+    canRedo: boolean;
+    undo: () => void;
+    redo: () => void;
+  },
+): ReturnType<ShortcutSurfaceHandler> {
+  if (!options.active) return "unmatched";
+  if (matchesActionShortcut(event, "edit.undo")) {
+    if (event.repeat || !options.canUndo) return "claimed_noop";
+    options.undo();
+    return "handled";
+  }
+  if (matchesActionShortcut(event, "edit.redo")) {
+    if (event.repeat || !options.canRedo) return "claimed_noop";
+    options.redo();
+    return "handled";
+  }
+  return "unmatched";
+}
+
+function currentDocumentHasFocus(): boolean {
+  return typeof document !== "undefined"
+    && typeof document.hasFocus === "function"
+    && document.hasFocus();
+}
+
+function paramIdFromEventTarget(target: EventTarget | null): string | null {
+  const candidate = target as (EventTarget & {
+    closest?: (selector: string) => { getAttribute?: (name: string) => string | null } | null;
+  }) | null;
+  const owner = candidate?.closest?.("[data-param], [data-param-id]");
+  const paramId = (
+    owner?.getAttribute?.("data-param")
+    ?? owner?.getAttribute?.("data-param-id")
+  )?.trim();
+  return paramId || null;
+}
+
+export function isBuiltInPluginParamShortcutTarget(target: EventTarget | null): boolean {
+  return paramIdFromEventTarget(target) !== null;
+}
+
+const PARAM_ADJUSTMENT_KEYS = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+]);
 
 export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
   return {
@@ -152,8 +224,13 @@ export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName:
       makeFallbackParam("eqEnabled", "EQ Power", 0, 0, 1, 0, "", "graphicEq", "toggle"),
       makeFallbackParam("cabEnabled", "Cab/IR", 0, 0, 1, 0, "", "cab", "toggle"),
       makeFallbackParam("cabLevelDb", "Cab Level", 0, -24, 12, 0, "dB", "cab"),
-      makeFallbackParam("cabHPFHz", "Cab HPF", 80, 20, 500, 80, "Hz", "cab"),
-      makeFallbackParam("cabLPFHz", "Cab LPF", 8500, 1000, 20000, 8500, "Hz", "cab"),
+      makeFallbackParam("cabEngineVersion", "Cab Engine Version", 3, 1, 3, 3, "", "cabInternal", "continuous", undefined, false),
+      makeFallbackParam("cabHPFEnabled", "Retired Cab HPF Power", 0, 0, 1, 0, "", "cabInternal", "toggle", undefined, false),
+      makeFallbackParam("cabLPFEnabled", "Retired Cab LPF Power", 0, 0, 1, 0, "", "cabInternal", "toggle", undefined, false),
+      makeFallbackParam("cabHPFHz", "Retired Cab HPF", 30, 20, 500, 30, "Hz", "cabInternal", "continuous", undefined, false),
+      makeFallbackParam("cabLPFHz", "Retired Cab LPF", 16000, 1000, 20000, 16000, "Hz", "cabInternal", "continuous", undefined, false),
+      makeFallbackParam("cabIRStereo", "Stereo IR", 0, 0, 1, 0, "", "cab", "toggle"),
+      makeFallbackParam("cabDirectMix", "Direct Mix", 0, 0, 1, 0, "", "cab"),
       makeFallbackParam("cabPhaseInvert", "Phase", 0, 0, 1, 0, "", "cab", "toggle"),
       makeFallbackParam("chorusMix", "Chorus", 0, 0, 1, 0, "", "modulation"),
       makeFallbackParam("chorusRateHz", "Chorus Rate", 0.75, 0.01, 8, 0.75, "Hz", "modulation"),
@@ -197,7 +274,7 @@ export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName:
       hasAmpModel: false,
       hasSlimmableNAMModel: false,
       hasCabIR: false,
-      namEffectsDspVersion: 19,
+      namEffectsDspVersion: 20,
       lastLoadError: "",
     },
     visualization: {
@@ -643,7 +720,7 @@ export function BuiltInParamControl({
 
   if (param.type === "enum") {
     return (
-      <label className="builtin-control builtin-control-enum" title={param.label}>
+      <label className="builtin-control builtin-control-enum" data-param={param.id} title={param.label}>
         <span className="builtin-control-label">{param.label}</span>
         <select
           value={Math.round(param.value)}
@@ -665,6 +742,7 @@ export function BuiltInParamControl({
       <button
         type="button"
         className="builtin-control builtin-control-toggle"
+        data-param={param.id}
         data-active={active}
         onClick={() => onChange(param, active ? 0 : 1)}
         aria-pressed={active}
@@ -677,7 +755,13 @@ export function BuiltInParamControl({
   }
 
   return (
-    <label className="builtin-control builtin-control-continuous" data-compact={compact} style={style} title={param.label}>
+    <label
+      className="builtin-control builtin-control-continuous"
+      data-compact={compact}
+      data-param={param.id}
+      style={style}
+      title={param.label}
+    >
       <span className="builtin-knob" aria-hidden="true" />
       <span className="builtin-control-main">
         <span className="builtin-control-topline">
@@ -1111,13 +1195,25 @@ export function BuiltInPluginPanel({
   closeRef.current = onClose;
   const pluginShortcutSessionId = shortcutSessionId
     ?? `builtin:${address.chain}:${address.trackId ?? "master"}:${address.fxIndex ?? -1}`;
+  const pluginShortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
+  const paramHistoryOwnerRef = useRef<{
+    instanceId: string;
+    history: BuiltInPluginParamHistory;
+  } | null>(null);
+  if (paramHistoryOwnerRef.current?.instanceId !== pluginShortcutSessionId) {
+    paramHistoryOwnerRef.current = {
+      instanceId: pluginShortcutSessionId,
+      history: new BuiltInPluginParamHistory(pluginShortcutSessionId),
+    };
+  }
+  const paramHistory = paramHistoryOwnerRef.current.history;
 
   useEffect(() => {
     const context = { kind: "plugin", sessionId: pluginShortcutSessionId } as const;
     const fallback = getActiveShortcutContext();
     const unregisterSurface = registerShortcutSurface(
       context,
-      () => "unmatched",
+      (event) => pluginShortcutHandlerRef.current(event),
       fallback,
     );
     const unregisterActions = registerScopedActionExecutor(
@@ -1130,7 +1226,7 @@ export function BuiltInPluginPanel({
       },
       ["fx.close"],
     );
-    if (windowRole !== "main") activateShortcutContext(context);
+    if (windowRole === "pluginEditor") activateShortcutContext(context);
     return () => {
       unregisterActions();
       unregisterSurface();
@@ -1238,6 +1334,108 @@ export function BuiltInPluginPanel({
     [confirmSuccessfulParamWrite, recoverFailedParamWrite, writeAddress],
   );
 
+  const paramCommitTimerRef = useRef<number | null>(null);
+  const pointerParamRef = useRef<string | null>(null);
+  const keyboardParamRef = useRef<string | null>(null);
+
+  const clearScheduledParamCommit = useCallback(() => {
+    if (paramCommitTimerRef.current === null) return;
+    window.clearTimeout(paramCommitTimerRef.current);
+    paramCommitTimerRef.current = null;
+  }, []);
+
+  const flushParamWrites = useCallback(() => paramWriter.flush(), [paramWriter]);
+  const automationGestures = useRef(new Set<string>());
+  const finishAutomationGestures = useCallback(async () => {
+    const params = [...automationGestures.current];
+    automationGestures.current.clear();
+    await flushParamWrites();
+    for (const param of params) {
+      if (!automationGestures.current.has(param))
+        await nativeBridge.builtInPluginGesture(writeAddress, param, false);
+    }
+  }, [flushParamWrites, writeAddress]);
+
+  const scheduleParamCommit = useCallback((delayMs = 220) => {
+    clearScheduledParamCommit();
+    paramCommitTimerRef.current = window.setTimeout(() => {
+      paramCommitTimerRef.current = null;
+      void paramHistory.commit(flushParamWrites);
+      void finishAutomationGestures();
+    }, delayMs);
+  }, [clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
+
+  const beginParamEdit = useCallback((paramId: string) => {
+    const currentParam = schemaRef.current?.parameters.find((entry) => entry.id === paramId);
+    if (!currentParam || currentParam.type === "meter") return false;
+    if (!automationGestures.current.has(paramId)) {
+      automationGestures.current.add(paramId);
+      void nativeBridge.builtInPluginGesture(writeAddress, paramId, true);
+    }
+    return paramHistory.begin(paramId, currentParam.label, currentParam.value);
+  }, [paramHistory, writeAddress]);
+
+  const beginExclusiveParamGesture = useCallback((paramId: string) => {
+    clearScheduledParamCommit();
+    if (paramHistory.getActiveParamId() && !paramHistory.hasActiveParam(paramId)) {
+      void paramHistory.commit(flushParamWrites);
+      void finishAutomationGestures();
+    }
+    return beginParamEdit(paramId);
+  }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
+
+  const replayParamHistory = useCallback(async (
+    entry: BuiltInPluginParamHistoryEntry,
+    direction: BuiltInPluginHistoryDirection,
+  ) => {
+    if (entry.instanceId !== pluginShortcutSessionId) return false;
+    const currentParams = schemaRef.current?.parameters ?? [];
+    const writes = entry.changes.map((change) => {
+      const currentParam = currentParams.find((candidate) => candidate.id === change.paramId);
+      if (!currentParam || currentParam.type === "meter") return null;
+      const requestedValue = change[direction];
+      const value = currentParam.type === "toggle"
+        ? (requestedValue >= 0.5 ? 1 : 0)
+        : quantizeParamValue(
+            currentParam,
+            clamp(requestedValue, currentParam.min, currentParam.max),
+          );
+      return { currentParam, value };
+    });
+    if (writes.some((write) => write === null)) return false;
+
+    for (const write of writes) {
+      if (!write) continue;
+      paramWriteReconcilerRef.current!.beginOptimisticWrite(
+        write.currentParam.id,
+        write.value,
+        write.currentParam.value,
+      );
+      applyLocalParamValue(write.currentParam.id, write.value);
+      paramWriter.writeImmediately(write.currentParam.id, write.value);
+    }
+    const applied = await paramWriter.flush();
+    // A compound replay can partially fail at the bridge. Always read back the
+    // processor so optimistic UI values converge on the native truth; the
+    // history command remains on its original stack when `applied` is false.
+    await loadSchemaRef.current(false);
+    return applied;
+  }, [applyLocalParamValue, paramWriter, pluginShortcutSessionId]);
+
+  pluginShortcutHandlerRef.current = (event) => dispatchBuiltInPluginHistoryShortcut(event, {
+    active: builtInPluginShortcutFocusIsActive(windowRole, currentDocumentHasFocus()),
+    canUndo: paramHistory.canUndo(),
+    canRedo: paramHistory.canRedo(),
+    undo: () => {
+      clearScheduledParamCommit();
+      void paramHistory.undo(flushParamWrites, replayParamHistory);
+    },
+    redo: () => {
+      clearScheduledParamCommit();
+      void paramHistory.redo(flushParamWrites, replayParamHistory);
+    },
+  });
+
   useEffect(() => {
     if (initialSchema) {
       schemaRequestGateRef.current.invalidate();
@@ -1277,7 +1475,9 @@ export function BuiltInPluginPanel({
     schemaRequestGateRef.current.invalidate();
   }, []);
 
+  useEffect(() => () => clearScheduledParamCommit(), [clearScheduledParamCommit]);
   useEffect(() => () => paramWriter.dispose(true), [paramWriter]);
+  useEffect(() => () => { void finishAutomationGestures(); }, [finishAutomationGestures]);
 
   const pluginKind = useMemo(() => getPluginKind(schema), [schema]);
 
@@ -1312,6 +1512,8 @@ export function BuiltInPluginPanel({
     const previousDisplayedValue = schemaRef.current?.parameters.find(
       (entry) => entry.id === param.id,
     )?.value ?? param.value;
+    beginParamEdit(param.id);
+    paramHistory.update(param.id, value);
     paramWriteReconcilerRef.current!.beginOptimisticWrite(
       param.id,
       value,
@@ -1321,10 +1523,24 @@ export function BuiltInPluginPanel({
 
     if (param.type === "continuous") {
       paramWriter.enqueue(param.id, value);
+      if (pointerParamRef.current !== param.id && keyboardParamRef.current !== param.id) {
+        scheduleParamCommit();
+      }
       return;
     }
 
     paramWriter.writeImmediately(param.id, value);
+    scheduleParamCommit(0);
+  };
+
+  const finishPointerParamGesture = () => {
+    const paramId = pointerParamRef.current;
+    pointerParamRef.current = null;
+    if (paramId && paramHistory.hasActiveParam(paramId)) {
+      // Capture runs before the control's own pointer-up handler. Deferring the
+      // commit keeps that handler's final value in the same history gesture.
+      scheduleParamCommit(0);
+    }
   };
 
   const title = schema?.name || fallbackName;
@@ -1336,8 +1552,49 @@ export function BuiltInPluginPanel({
       data-kind={pluginKind}
       data-shortcut-context={`plugin:${pluginShortcutSessionId}`}
       onClick={(event) => event.stopPropagation()}
-      onPointerDownCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+      onPointerDownCapture={(event) => {
+        activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId });
+        const paramId = paramIdFromEventTarget(event.target);
+        pointerParamRef.current = paramId;
+        if (paramId) beginExclusiveParamGesture(paramId);
+        else if (paramHistory.getActiveParamId()) {
+          clearScheduledParamCommit();
+          void paramHistory.commit(flushParamWrites);
+          void finishAutomationGestures();
+        }
+      }}
+      onPointerUpCapture={finishPointerParamGesture}
+      onPointerCancelCapture={finishPointerParamGesture}
+      onLostPointerCaptureCapture={finishPointerParamGesture}
+      onWheelCapture={(event) => {
+        const paramId = paramIdFromEventTarget(event.target);
+        if (!paramId) return;
+        beginExclusiveParamGesture(paramId);
+        scheduleParamCommit();
+      }}
+      onKeyDownCapture={(event) => {
+        if (!PARAM_ADJUSTMENT_KEYS.has(event.key)) return;
+        const paramId = paramIdFromEventTarget(event.target);
+        if (!paramId) return;
+        keyboardParamRef.current = paramId;
+        beginExclusiveParamGesture(paramId);
+      }}
+      onKeyUpCapture={(event) => {
+        if (!PARAM_ADJUSTMENT_KEYS.has(event.key)) return;
+        const paramId = keyboardParamRef.current;
+        keyboardParamRef.current = null;
+        if (paramId && paramHistory.hasActiveParam(paramId)) {
+          scheduleParamCommit(0);
+        }
+      }}
       onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
+      onBlurCapture={(event) => {
+        const paramId = paramIdFromEventTarget(event.target);
+        if (!paramId || !paramHistory.hasActiveParam(paramId)) return;
+        pointerParamRef.current = null;
+        keyboardParamRef.current = null;
+        scheduleParamCommit(0);
+      }}
     >
       <div className="builtin-panel-header">
         <div className="builtin-panel-title">

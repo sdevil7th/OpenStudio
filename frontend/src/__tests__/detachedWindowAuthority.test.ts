@@ -33,6 +33,7 @@ import {
 } from "../utils/mixerWindowSync";
 import {
   applyMidiEditorUISnapshot,
+  applyMidiEditorDockRequest,
   cancelPendingMidiRemoteEdits,
   extractMidiEditorUISnapshot,
   flushPendingMidiRemoteEdits,
@@ -823,5 +824,59 @@ describe("authoritative detached-window project routing", () => {
     })).toBe(true);
     expect(useDAWStore.getState().tracks[0].pan).toBe(0);
     expect(commandManager.getRedoStack()).toHaveLength(1);
+  });
+});
+
+
+describe("MIDI docking authority", () => {
+  it("allows docking an unchanged locked clip without accepting a stale edit", async () => {
+    const track = createDefaultTrack("locked-dock-track", "MIDI", "#222", "midi", []);
+    track.midiClips = [{ ...midiClip("locked-dock-clip"), locked: true }];
+    const session = windowedMidiSession(track.id, "locked-dock-clip");
+    useDAWStore.setState({ tracks: [track], midiEditorSessions: [session] });
+    const packet = extractMidiEditorUISnapshot(useDAWStore.getState(), session.sessionId)!;
+    vi.spyOn(nativeBridge, "publishMidiEditorUISnapshot").mockResolvedValue(true);
+    const close = vi.spyOn(nativeBridge, "closeMidiEditorWindow").mockResolvedValue(true);
+    const staleEdit = structuredClone(packet);
+    staleEdit.tracks[0].midiClips[0].events = noteEvents(99);
+    expect(await applyMidiEditorDockRequest(staleEdit)).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+    expect(await applyMidiEditorDockRequest(packet)).toBe(true);
+    expect(useDAWStore.getState().midiEditorSessions[0].mode).toBe("docked");
+    expect(commandManager.getUndoStack()).toHaveLength(0);
+  });
+
+  it("commits pending child edits once, acknowledges docking, then closes the child", async () => {
+    const track = createDefaultTrack("dock-track", "MIDI", "#222", "midi", []);
+    track.midiClips = [midiClip("dock-clip")];
+    const session = windowedMidiSession(track.id, "dock-clip", "dock-session");
+    useDAWStore.setState({ tracks: [track], midiEditorSessions: [session], activeMidiEditorSessionId: session.sessionId });
+    const packet = structuredClone(extractMidiEditorUISnapshot(useDAWStore.getState(), session.sessionId)!);
+    packet.tracks[0].midiClips[0].events = noteEvents(99);
+    const calls: string[] = [];
+    vi.spyOn(nativeBridge, "publishMidiEditorUISnapshot").mockImplementation(async (_id, value: any) => {
+      expect(value.payload.mode).toBe("docked"); calls.push("ack"); return true;
+    });
+    vi.spyOn(nativeBridge, "closeMidiEditorWindow").mockImplementation(async () => { calls.push("close"); return true; });
+    expect(await applyMidiEditorDockRequest(packet)).toBe(true);
+    expect(calls).toEqual(["ack", "close"]);
+    expect(useDAWStore.getState().midiEditorSessions[0].mode).toBe("docked");
+    expect(currentMidiClip(track.id, "dock-clip").events).toEqual(noteEvents(99));
+    expect(commandManager.getUndoStack()).toHaveLength(1);
+    useDAWStore.getState().undo();
+    expect(currentMidiClip(track.id, "dock-clip").events).toEqual(noteEvents(60));
+    expect(await applyMidiEditorDockRequest(packet)).toBe(true);
+    expect(currentMidiClip(track.id, "dock-clip").events).toEqual(noteEvents(60));
+  });
+  it("rejects a stale or retargeted dock request without closing anything", async () => {
+    const track = createDefaultTrack("dock-track", "MIDI", "#222", "midi", []);
+    track.midiClips = [midiClip("dock-clip")];
+    const session = windowedMidiSession(track.id, "dock-clip");
+    useDAWStore.setState({ tracks: [track], midiEditorSessions: [session] });
+    const packet = extractMidiEditorUISnapshot(useDAWStore.getState(), session.sessionId)!;
+    const close = vi.spyOn(nativeBridge, "closeMidiEditorWindow");
+    useDAWStore.setState({ midiEditorSessions: [] });
+    expect(await applyMidiEditorDockRequest(packet)).toBe(false);
+    expect(close).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,6 @@
     <comment>OpenStudio Project</comment>
     <comment xml:lang="en">OpenStudio Project</comment>
     <glob pattern="*.osproj"/>
-    <glob pattern="*.s13"/>
     <icon name="OpenStudio"/>
   </mime-type>
 </mime-info>

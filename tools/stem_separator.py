@@ -93,7 +93,10 @@ def detect_separator_backend(separator) -> str:
     providers = list(getattr(separator, "onnx_execution_provider", []) or [])
     torch_device = getattr(getattr(separator, "torch_device", None), "type", "")
 
-    if "CUDAExecutionProvider" in providers or torch_device == "cuda":
+    if torch_device == "cuda":
+        import torch
+        return "rocm" if torch.version.hip else "cuda"
+    if "CUDAExecutionProvider" in providers:
         return "cuda"
     if "DmlExecutionProvider" in providers or "privateuseone" in torch_device:
         return "directml"
@@ -203,6 +206,10 @@ def main():
             acceleration_mode=acceleration_mode,
         )
         selected_backend = capability_report.get("selectedBackend", "cpu")
+        import torch
+        from ai_execution_policy import worker_threads, runtime_capabilities, model_execution_capabilities
+        from ai_attention_policy import attention_candidates
+        torch.set_num_threads(worker_threads(cpu=selected_backend == "cpu"))
         thread_cap = 0
         if selected_backend == "cpu":
             thread_cap = apply_cpu_fallback_limits()
@@ -240,7 +247,15 @@ def main():
 
         # Load model
         separator.load_model(model_filename=model_file)
-        emit("loading", 0.2)
+        from ai_attention_policy import configure_roformer_attention
+        loaded = getattr(separator, "model_instance", None)
+        attention_details = configure_roformer_attention(getattr(loaded, "model_run", None))
+        attention_details["candidates"] = attention_candidates(selected_backend)
+        emit("loading", 0.2, executionDetails={
+            "hardware": runtime_capabilities(torch), "effectiveBackend": selected_backend,
+            "capabilities": model_execution_capabilities("bs-roformer", selected_backend),
+            "attention": attention_details,
+            "placement": "audio-separator managed; Diffusers offloading is not applicable"})
 
         # Run separation
         emit("analyzing", 0.2)

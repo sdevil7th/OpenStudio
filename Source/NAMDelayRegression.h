@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 
-class S13NAMRack;
+class OpenStudioNAMRack;
 
 // Kept in dedicated translation units so the deterministic Delay/Tape/host-
 // tail objective matrix never inflates AudioEngine::runNAMRackRegression or
@@ -22,7 +22,7 @@ private:
         const juce::String& status,
         const juce::String& detail,
         const juce::var& value = juce::var());
-    static void configureNeutralRack(S13NAMRack& rack);
+    static void configureNeutralRack(OpenStudioNAMRack& rack);
 
     static juce::Array<juce::var> runCoreChecks();
     static juce::Array<juce::var> runLifecycleChecks();

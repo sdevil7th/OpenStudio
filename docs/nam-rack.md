@@ -9,6 +9,27 @@ OpenStudio does not charge to unlock the rack or its built-in effects. NAM and
 OpenStudio are open source. Third-party captures and impulse responses still
 retain their creators' licenses.
 
+## Sign in and browse
+
+Choose **Connect TONE3000** beside the connection status in the right-hand Amp or
+Cab library results panel. Complete browser sign-in and return to OpenStudio.
+Connecting does not block the rest of the rack. A release build includes the
+publisher's OAuth client configuration; musicians do **not** need an API key.
+A missing publisher configuration is a release/build problem, not an end-user
+setup step. Local captures, cabinet IR files and installed tones work offline.
+
+Authorization is stored for the current OS user and computer and refreshed when
+possible. Relaunching or opening another rack window should not require a new
+login. Each new computer signs in once. Revoked credentials or denied secure-store
+access can require reconnection; errors remain visible beside Connect.
+
+Typing starts a search after 400 ms; Enter submits immediately. Changing the
+query, architecture, source or sort cancels the previous search and prevents its
+results from replacing the latest request. A spinner also appears while updating
+an already populated list. Creator, license, instrument and character filters
+apply to the loaded results, as indicated in the UI. Relevance, newest and other
+provider-supported sorts are sent to TONE3000; local sort choices are labelled.
+
 ## Musician workflow
 
 1. Add the NAM Rack to a track, choose the live instrument input, and select the
@@ -67,7 +88,7 @@ The current audible route is:
 
 ```text
 Input trim
-  -> Gate
+  -> Gate detector key (sidechain only)
   -> Compressor
   -> Stereo Poly Octaver
   -> EQ Boost / pre-EQ
@@ -75,7 +96,8 @@ Input trim
   -> Distortion
   -> optional A1/A2 Pedal NAM capture
   -> A1/A2 Amp or Full-Rig NAM capture
-  -> Cabinet IR and cabinet shaping
+  -> Global Gate gain
+  -> Cabinet IR
   -> Cabinet Space (early Room / optional Doubler)
   -> reorderable EQ / modulation / delay / reverb
   -> Output trim
@@ -97,11 +119,13 @@ exposed or processed by the active rack.
 
 ### Guitar/Bass instrument-profile contract
 
-Instrument Profile is a non-destructive voicing selector. It changes only the
-frequency-, tracking-, and low-end-sensitive behavior that should follow the
-instrument. It never rewrites visible control values or silently replaces a
-loaded NAM capture, cabinet IR, input/output trim, gate threshold, compressor
-settings, time/mix controls, or explicit HPF/LPF choices.
+Instrument Profile is a non-destructive voicing selector. It never replaces or
+unloads a NAM capture or cabinet IR. Its hidden DSP mapping changes the
+frequency-, tracking-, headroom-, and low-end-sensitive behavior that should
+follow the instrument. A direct user switch translates only the recognized
+Guitar/Bass Gate starting pair (`-80/-65 dB`). Cab filter power and cutoff are
+always explicit user choices and never change as a hidden profile side effect;
+preset recall retains their exact saved values.
 
 The current profile-aware components are:
 
@@ -112,8 +136,12 @@ The current profile-aware components are:
   B0/E1 bass fundamentals remain supported without weakening Guitar tracking.
 - Precision Drive, Distortion, the Amp input wrapper, and the Amp tone stack
   move their hidden low-frequency split/weighting and tone centres downward
-  for Bass. Their visible Drive, Attack, Bright, Voice, Bass, Mid, Treble, and
-  Presence values stay untouched.
+  for Bass. Precision Drive also replaces most of its Attack-selected wet low
+  band with a unity clean low band, and the shared native-drive island
+  reserves 3 dB more nonlinear headroom with reciprocal output recovery. Its
+  Bright mapping retains the full control travel but uses a lower Bass maximum
+  cutoff to constrain post-clip fizz. The visible Drive, Attack, Bright, Voice,
+  Bass, Mid, Treble, and Presence values stay untouched.
 - The post-cab Graphic EQ retains its fixed nine labels; in Bass mode its 65 Hz
   band becomes a low shelf instead of a narrow peaking band.
 - Bass modulation keeps a unity direct path while the existing wet-path high
@@ -125,10 +153,18 @@ The current profile-aware components are:
   mode. The visible decay and low-cut values remain exact. Studio retains its
   legacy mapping for old-preset compatibility.
 
-Gate, Compressor, Cabinet/IR, Cabinet Space, calibration, trims, and tuner are
-deliberately profile-invariant. Compressor detector HPF and cabinet/reverb
-cutoffs are explicit creative controls, not hidden selector defaults. The tuner
-already covers 27.5-1320 Hz, so it needs no mode-dependent range change.
+Compressor, the loaded Cabinet/IR asset, Cabinet Space, visible
+trims, and tuner remain profile-invariant. The interface calibration reference
+also remains hardware truth: Bass headroom is applied only inside the native
+drive operating domain and must never rewrite `calibrationReferenceDbu`.
+Compressor detector HPF and non-default Graphic-EQ/reverb cutoffs remain explicit
+creative choices. The tuner already covers 27.5-1320 Hz, so it needs no
+mode-dependent range change.
+
+The global Gate is keyed from the clean calibrated input and applies its linked
+gain after the native pedals and NAM Pedal/Amp slots, before Cabinet/IR. This
+allows it to attenuate noise emitted or amplified by nonlinear models rather
+than merely silencing their input. Gate release remains an explicit control.
 
 Library filtering follows the profile only as a discovery aid. Untagged/shared
 captures remain visible, an explicitly opposite-tagged active capture remains
@@ -278,6 +314,51 @@ Low-buffer timing results are machine/build-specific `diagnostic_only`
 evidence, not proof of ASIO stability. Driver safety and subjective stereo
 presentation still require testing on the target system and exact release build.
 
+### Cabinet/IR parameter ownership
+
+NAM Core supplies the neural model renderer; it does not expose cabinet knobs.
+The official NAM plugin wrapper adds an IR file slot, IR enable, and clear action,
+but no mic-position, mic-distance, blend, bloom, pan, room, or doubler parameters.
+Its current public parameter enum is documented in the upstream
+[`NeuralAmpModeler.h`](https://github.com/sdatkinson/NeuralAmpModelerPlugin/blob/main/NeuralAmpModeler/NeuralAmpModeler.h).
+
+OpenStudio owns the complete external cabinet stage around its IR loader. All
+tones now use Cab V3, whose signal path is deliberately literal:
+
+- **Cab Power** enables the external convolution slot; **Unload** clears the IR
+  resource, while Reset remains a separate parameter operation.
+- **Level** is post-IR gain. Cab has no additional HPF/LPF; the post-cab
+  Graphic EQ is the one visible owner of tone-filter cutoffs.
+- **Stereo IR** chooses native stereo-IR processing. Its off state is dual mono:
+  one mono IR response is applied independently to left and right without
+  cross-channel coloration.
+- **Phase** is polarity inversion.
+- **Pan** uses bounded channel attenuation. Room and Doubler belong to the
+  separate Cabinet Space stage.
+- **Direct** is a Bass-only, latency-aligned clean-DI blend. It is captured after
+  input calibration and compression, before octave/drive/NAM/Amp/Cab, and mixed
+  after the processed rack path. The global Gate still controls it. It remains
+  available for amp-only, full-rig, and external-IR workflows.
+
+The former **Tone Edge**, **Tone Damp**, **Shaper Blend**, and **Low Bloom**
+controls were OpenStudio synthetic shapers, not NAM parameters and not physical
+mic controls. The current Cab neither exposes nor processes them. Every old
+project, preset, Compare snapshot, and portable state migrates to this same
+IR-only implementation. Active historical Cab HPF/LPF filters are merged once
+into the visible Graphic EQ. When EQ was enabled, the stronger active cutoff
+bounds win and its band gains and level remain intact. When EQ was bypassed,
+it starts flat before being enabled to carry the Cab filters, so dormant EQ
+settings do not become audible. A bypassed Cab leaves EQ unchanged. The old
+Cab filter state is then neutralized. Stereo/direct routing is preserved and the
+retired synthetic shaper values are discarded. This intentionally moves both
+guitar and bass tones onto one cabinet engine.
+
+The selected IR remains intentionally tonal. IR import uses uniform gain
+normalisation and trailing-silence trim, which can change level and IR duration
+but do not add a separate frequency-dependent cabinet curve. A dark, phasey, or
+already-processed IR can therefore still sound dark or phasey even with every
+OpenStudio Cab V3 operation neutral.
+
 ### Cabinet Space presentation contract
 
 Cabinet Space is a fixed post-cab presentation stage, before the reorderable EQ,
@@ -318,22 +399,24 @@ component timing. Wall-clock scheduler outliers remain diagnostic-only.
 Perceived externalisation, naturalness, and similarity to a named product are
 still `not_asserted` until a level-matched musician audition.
 
-Cabinet Space is controlled independently from the external Cab/IR switch. In
-the compact chain, its own power control restores the last Room Amount and
-Doubler Mix (or starts at 22% Room / 12% Doubler); switching it off writes both
-amounts to zero. In Cab > Device Controls, Room Amount and Doubler Mix are the
-individual enables: either may be zero while the other remains audible, and
-Width/Spread shape only their corresponding active field.
+Cabinet Space is controlled independently from the external Cab/IR switch. Its
+compact Signal Chain entry owns Room and Doubler access; the Cab faceplate only
+links users to that separate stage. Room and Doubler retain independent power
+and stored controls, so either may be bypassed while the other remains audible,
+and Width/Spread shape only their corresponding active field.
 
 ### Native pre-amp pedal level contract
 
-Precision Drive and Distortion use one current pre-release implementation. They
-share a `+12 dBu` native-pedal operating reference before the Amp NAM stage. If
-the interface/rack calibration reference is `R dBu`, the shared nonlinear island
-receives `R - 12 dB` before the selected shared 2x/4x/8x processing and applies
-the exact reciprocal gain afterward. This keeps the represented analog pedal
-level stable when the interface reference changes and avoids applying the
-conversion twice when both pedals are stacked.
+Precision Drive and Distortion use one current pre-release implementation. The
+Guitar profile uses a `+12 dBu` native-pedal operating reference before the Amp
+NAM stage. If the interface/rack calibration reference is `R dBu`, the shared
+nonlinear island receives `R - 12 dB` before the selected shared 2x/4x/8x
+processing and applies the exact reciprocal gain afterward. Bass subtracts a
+further 3 dB only inside this nonlinear island, with the matching reciprocal
+recovery. This keeps the represented analog pedal level stable when the
+interface reference changes, reserves headroom for hotter bass pickups without
+changing linear loudness, and avoids applying the conversion twice when both
+pedals are stacked.
 
 Precision Drive is a full-wet overdrive circuit, not an EQ-only boost. Attack
 sets a frequency-selective feedback split: low frequencies retain the unity path
@@ -523,7 +606,7 @@ during restore.
   order, and identity after recall, and verifies the rollback independently
   before claiming the prior rack was restored after any false return, exception,
   or readback mismatch.
-- Current `.ospreset` storage is authoritative: a same-name legacy `.s13preset`
+- Current `.ospreset` storage is authoritative: a same-name legacy `.ospreset`
   must never overwrite it. Valid user migrations write the current form
   atomically, while corrupt legacy or user files remain untouched. Runtime
   factory originals are immutable and use migrated AppData shadows instead.

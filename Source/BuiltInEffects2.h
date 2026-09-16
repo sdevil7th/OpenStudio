@@ -27,13 +27,13 @@ class DSP;
 class AudioEngine;
 
 // ============================================================================
-// S13Delay -- Stereo delay with tempo sync, ping-pong, feedback processing
+// OpenStudioDelay -- Stereo delay with tempo sync, ping-pong, feedback processing
 // ============================================================================
-class S13Delay : public juce::AudioProcessor
+class OpenStudioDelay : public juce::AudioProcessor
 {
 public:
-    explicit S13Delay(float maximumSupportedDelaySeconds = 24.1f);
-    ~S13Delay() override = default;
+    explicit OpenStudioDelay(float maximumSupportedDelaySeconds = 24.1f);
+    ~OpenStudioDelay() override = default;
     float getMaximumSupportedDelaySeconds() const noexcept { return maximumDelaySeconds; }
 
     // Parameters
@@ -112,7 +112,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
     void resetTailState() noexcept;
     void resetRackRuntimeMixState(float send, bool preserveUnityDry) noexcept;
     // The host tempo is only legal to query during processBlock(). The outer
@@ -203,16 +203,16 @@ private:
     double cachedSampleRate = 44100.0;
     float lastLPFFreq = 20000.0f;
     float lastHPFFreq = 20.0f;
-    std::vector<S13IIRCoefficientSet> feedbackLPFCoefficientLut;
-    std::vector<S13IIRCoefficientSet> feedbackHPFCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> feedbackLPFCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> feedbackHPFCoefficientLut;
     juce::dsp::IIR::Filter<float>
         alternateFeedbackLPF_L, alternateFeedbackLPF_R;
     juce::dsp::IIR::Filter<float>
         alternateFeedbackHPF_L, alternateFeedbackHPF_R;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedFeedbackFilterMorph;
-    S13IIRCoefficientSet pendingFeedbackLPFCoefficients {};
-    S13IIRCoefficientSet pendingFeedbackHPFCoefficients {};
+    OpenStudioIIRCoefficientSet pendingFeedbackLPFCoefficients {};
+    OpenStudioIIRCoefficientSet pendingFeedbackHPFCoefficients {};
     bool feedbackFiltersUseAlternate = false;
     bool feedbackFilterMorphActive = false;
     bool feedbackFilterChangePending = false;
@@ -229,14 +229,14 @@ private:
     static float syncNoteToMs(float noteIndex, double bpm);
     void publishLiveTailBoundFromAudioState(int processedSamples) noexcept;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Delay)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioDelay)
 };
 
 
 // ============================================================================
-// S13OctaveShimmerShifter -- low-cost dual-grain pitch shifter (+12 default)
+// OpenStudioOctaveShimmerShifter -- low-cost dual-grain pitch shifter (+12 default)
 // ============================================================================
-class S13OctaveShimmerShifter
+class OpenStudioOctaveShimmerShifter
 {
 public:
     void prepare(double sampleRate,
@@ -266,13 +266,13 @@ private:
 
 
 // ============================================================================
-// S13Reverb -- Multi-algorithm reverb
+// OpenStudioReverb -- Multi-algorithm reverb
 // ============================================================================
-class S13Reverb : public juce::AudioProcessor
+class OpenStudioReverb : public juce::AudioProcessor
 {
 public:
-    S13Reverb();
-    ~S13Reverb() override = default;
+    OpenStudioReverb();
+    ~OpenStudioReverb() override = default;
 
     // Algorithm selector
     enum class Algorithm : int { Room = 0, Hall, Plate, Chamber };
@@ -297,7 +297,7 @@ public:
     std::atomic<float> movement      { 0.35f }; // 0-1 late-field modulation
     std::atomic<float> earlyLate     { 0.42f }; // 0=early, 1=late
     std::atomic<float> shimmerRegen  { 0.55f }; // 0-1 shifted feedback
-    // Standalone S13Reverb retains its historical engine selector for existing
+    // Standalone OpenStudioReverb retains its historical engine selector for existing
     // standalone projects. The embedded NAM Rack always pins this processor to
     // its single current V5 engine and never forwards a restored legacy value.
     std::atomic<float> engineVersion { 1.0f };
@@ -442,7 +442,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
     void resetTailState() noexcept;
 
 private:
@@ -461,8 +461,8 @@ private:
     juce::dsp::IIR::Filter<float> wetHighCutL, wetHighCutR;
     float lastLowCut = 20.0f;
     float lastHighCut = 20000.0f;
-    std::vector<S13IIRCoefficientSet> lowCutCoefficientLut;
-    std::vector<S13IIRCoefficientSet> highCutCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> lowCutCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> highCutCoefficientLut;
 
     juce::AudioBuffer<float> dryBuffer;
     juce::AudioBuffer<float> earlyReflectionBuffer;
@@ -472,8 +472,8 @@ private:
     int lateTankWriteIndex = 0;
     std::array<float, lateLineCount> lateDampingState {};
     std::array<float, lateLineCount> lateModPhase {};
-    S13OctaveShimmerShifter shimmerShifter;
-    std::array<S13OctaveShimmerShifter, 2> v2ShimmerShifters;
+    OpenStudioOctaveShimmerShifter shimmerShifter;
+    std::array<OpenStudioOctaveShimmerShifter, 2> v2ShimmerShifters;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedShimmerAmount;
     int validEarlyHistorySamples = 0;
@@ -636,7 +636,7 @@ private:
     static constexpr int v3PadSmearBandCount = 24;
     static constexpr int v3PadSmearCrossoverCount =
         v3PadSmearBandCount - 1;
-    std::array<S13OctaveShimmerShifter, v3PadVoiceCount>
+    std::array<OpenStudioOctaveShimmerShifter, v3PadVoiceCount>
         v3PadShifters;
     std::vector<float> v3PadTankPool;
     std::array<int, v3PadTankLineCount> v3PadTankOffsets {};
@@ -713,8 +713,8 @@ private:
         v3WetHighCutAlternateL, v3WetHighCutAlternateR;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedV3WetFilterMorph;
-    S13IIRCoefficientSet v3PendingLowCutCoefficients {};
-    S13IIRCoefficientSet v3PendingHighCutCoefficients {};
+    OpenStudioIIRCoefficientSet v3PendingLowCutCoefficients {};
+    OpenStudioIIRCoefficientSet v3PendingHighCutCoefficients {};
     bool v3WetFilterUsesAlternate = false;
     bool v3WetFilterMorphActive = false;
     bool v3WetFilterChangePending = false;
@@ -731,18 +731,18 @@ private:
     void invalidateV3PadState() noexcept;
     double cachedSampleRate = 44100.0;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Reverb)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioReverb)
 };
 
 
 // ============================================================================
-// S13Chorus -- Modulation suite: Chorus / Flanger / Phaser
+// OpenStudioChorus -- Modulation suite: Chorus / Flanger / Phaser
 // ============================================================================
-class S13Chorus : public juce::AudioProcessor
+class OpenStudioChorus : public juce::AudioProcessor
 {
 public:
-    S13Chorus();
-    ~S13Chorus() override = default;
+    OpenStudioChorus();
+    ~OpenStudioChorus() override = default;
 
     enum class Mode : int { Chorus = 0, Flanger, Phaser };
     enum class LFOShape : int { Sine = 0, Triangle, Square, SampleAndHold };
@@ -799,7 +799,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
     void resetTailState() noexcept;
 
 private:
@@ -855,16 +855,16 @@ private:
     juce::dsp::IIR::Filter<float> wetHighCutL, wetHighCutR;
     float lastLowCut = 20.0f;
     float lastHighCut = 20000.0f;
-    std::vector<S13IIRCoefficientSet> lowCutCoefficientLut;
-    std::vector<S13IIRCoefficientSet> highCutCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> lowCutCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> highCutCoefficientLut;
     juce::dsp::IIR::Filter<float>
         alternateWetLowCutL, alternateWetLowCutR;
     juce::dsp::IIR::Filter<float>
         alternateWetHighCutL, alternateWetHighCutR;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedWetFilterMorph;
-    S13IIRCoefficientSet pendingLowCutCoefficients {};
-    S13IIRCoefficientSet pendingHighCutCoefficients {};
+    OpenStudioIIRCoefficientSet pendingLowCutCoefficients {};
+    OpenStudioIIRCoefficientSet pendingHighCutCoefficients {};
     bool wetFiltersUseAlternate = false;
     bool wetFilterMorphActive = false;
     bool wetFilterChangePending = false;
@@ -876,18 +876,18 @@ private:
     void advanceLFO(int voice, float phaseIncrement) noexcept;
     float nextSampleAndHoldValue() noexcept;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Chorus)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioChorus)
 };
 
 
 // ============================================================================
-// S13Saturator -- Multi-type saturation / distortion
+// OpenStudioSaturator -- Multi-type saturation / distortion
 // ============================================================================
-class S13Saturator : public juce::AudioProcessor
+class OpenStudioSaturator : public juce::AudioProcessor
 {
 public:
-    explicit S13Saturator(bool useLowLatencyOversampling = false);
-    ~S13Saturator() override = default;
+    explicit OpenStudioSaturator(bool useLowLatencyOversampling = false);
+    ~OpenStudioSaturator() override = default;
 
     enum class SatType : int
     {
@@ -938,7 +938,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
 
     void setOversamplingEnabled(bool enabled);
     bool isOversamplingEnabled() const
@@ -989,10 +989,10 @@ private:
     int cachedBlockSize = 0;
     float lastToneFreq = 20000.0f;
     float lastLowCutFreq = 20.0f;
-    std::vector<S13IIRCoefficientSet> toneCoefficientLut;
-    std::vector<S13IIRCoefficientSet> lowCutCoefficientLut;
-    S13IIRCoefficientSet targetToneCoefficients {};
-    S13IIRCoefficientSet targetLowCutCoefficients {};
+    std::vector<OpenStudioIIRCoefficientSet> toneCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> lowCutCoefficientLut;
+    OpenStudioIIRCoefficientSet targetToneCoefficients {};
+    OpenStudioIIRCoefficientSet targetLowCutCoefficients {};
     bool toneCoefficientsSmoothing = false;
     bool lowCutCoefficientsSmoothing = false;
     bool lowCutBeforeSaturation = false;
@@ -1051,16 +1051,17 @@ private:
         float& sinhValue,
         float& coshValue) const noexcept;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Saturator)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioSaturator)
 };
 
 // ============================================================================
-// S13NAMRack -- Native Neural Amp Modeler rack with OpenStudio wrapper controls
+// OpenStudioNAMRack -- Native Neural Amp Modeler rack with OpenStudio wrapper controls
 // ============================================================================
-class S13NAMRack : public juce::AudioProcessor
+class OpenStudioNAMRack : public juce::AudioProcessor
 {
 public:
-    static constexpr int currentNAMEffectsDspVersion = 19;
+    static constexpr int currentNAMEffectsDspVersion = 20;
+    static constexpr int currentCabEngineVersion = 3;
     // A development build briefly serialized this marker without changing the
     // portable preset schema. Treat it as V12 at every restore boundary.
     static constexpr int developmentNAMEffectsDspVersionAlias = 13;
@@ -1165,13 +1166,13 @@ public:
         int instrumentProfile) noexcept;
 
     // The six faceplate controls remain the source of truth. Reverb V5 derives
-    // every hidden S13Reverb parameter from those values, the selected voice,
+    // every hidden OpenStudioReverb parameter from those values, the selected voice,
     // and the instrument profile in one deterministic mapping shared by
     // prepare, live processing, state tests, and future offline paths.
     struct ReverbMacroState
     {
         int voice = studioReverbVoice;
-        int algorithmIndex = static_cast<int>(S13Reverb::Algorithm::Plate);
+        int algorithmIndex = static_cast<int>(OpenStudioReverb::Algorithm::Plate);
         float roomSize = 0.55f;
         float damping = 0.5f;
         float wetGain = 0.0f;
@@ -1204,8 +1205,8 @@ public:
         int instrumentProfile,
         float padMode = 0.0f) noexcept;
 
-    S13NAMRack();
-    ~S13NAMRack() override = default;
+    OpenStudioNAMRack();
+    ~OpenStudioNAMRack() override = default;
 
     std::atomic<float> inputTrimDb { 0.0f };
     // One current, profile-aware component implementation. The selector never
@@ -1327,17 +1328,19 @@ public:
     std::atomic<bool> cabRequestedEnabled { false };
     std::atomic<float> cabEnabled { 0.0f };
     std::atomic<float> cabLevelDb { 0.0f };
-    std::atomic<float> cabHPFHz { 80.0f };
-    std::atomic<float> cabLPFHz { 8500.0f };
+    // Retired Cab V1/V2 filter fields remain only so old state can migrate its
+    // cutoff intent into Graphic EQ. Cab V3 never processes these values.
+    std::atomic<float> cabHPFEnabled { 0.0f };
+    std::atomic<float> cabLPFEnabled { 0.0f };
+    std::atomic<float> cabHPFHz { 30.0f };
+    std::atomic<float> cabLPFHz { 16000.0f };
+    // 0 = dual mono (one IR response applied independently), 1 = stereo IR.
+    std::atomic<float> cabIRStereo { 0.0f };
+    // Bass-only latency-aligned DI mixed after the processed rack path.
+    std::atomic<float> cabDirectMix { 0.0f };
     std::atomic<float> cabPhaseInvert { 0.0f };
-    std::atomic<float> cabMicPosition { 0.5f };
-    std::atomic<float> cabMicDistance { 0.0f };
-    std::atomic<float> cabMicBlend { 0.5f };
-    std::atomic<float> cabRoomSend { 0.0f };
     // Post-cabinet presentation field. Room and Doubler have explicit power
-    // state so their audible settings survive bypass. The historical
-    // cabRoomSend parameter remains the cabinet Low Bloom shaper and is not
-    // reinterpreted.
+    // state so their audible settings survive bypass.
     std::atomic<float> cabRoomEnabled { 0.0f };
     std::atomic<float> cabRoomAmount { 0.22f };
     std::atomic<float> cabRoomWidth { 0.65f };
@@ -1473,7 +1476,7 @@ public:
     bool restoreRenderPassStateInformation(const void* data, int sizeInBytes);
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
     void resetTailState() noexcept;
 
     void setTransposeSemitones(float legacySemitones) noexcept;
@@ -1583,6 +1586,58 @@ public:
 private:
     friend class AudioEngine;
     friend class NAMDelayRegression;
+
+    // Even stable biquad targets can produce large state transients when
+    // retargeted in place. Install complete targets in a second, preallocated
+    // filter and crossfade its output; do not reuse the old target's state.
+    struct StableStereoBiquad
+    {
+        void prepare(const juce::dsp::ProcessSpec& spec,
+                     double transitionSeconds);
+        void setImmediate(const std::array<float, 5>& coefficients);
+        void requestTarget(const std::array<float, 5>& coefficients) noexcept;
+        void beginBlock();
+        void processFrame(float& left,
+                          float& right,
+                          bool hasRight,
+                          bool& recovered) noexcept;
+        void endBlock() noexcept;
+        void settleRequested();
+        void resetState() noexcept;
+        bool hasTransitionOrPending() const noexcept;
+
+    private:
+        struct StereoBank
+        {
+            juce::dsp::IIR::Filter<float> left;
+            juce::dsp::IIR::Filter<float> right;
+        };
+
+        static void install(StereoBank& bank,
+                            const std::array<float, 5>& coefficients);
+        static float processSafely(juce::dsp::IIR::Filter<float>& filter,
+                                   float input,
+                                   bool& recovered) noexcept;
+
+        std::array<StereoBank, 2> banks;
+        std::array<float, 5> requestedCoefficients {
+            1.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        };
+        std::array<float, 5> activeCoefficients {
+            1.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        };
+        std::array<float, 5> transitionCoefficients {
+            1.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        };
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+            transitionMix;
+        double sampleRate = 44100.0;
+        double transitionSeconds = 0.025;
+        int activeBank = 0;
+        int transitionBank = 1;
+        bool targetPending = false;
+        bool transitionActive = false;
+    };
 
     // The requested profile is published lock-free by the UI. Audio processing
     // must nevertheless use one coherent Guitar/Bass decision for an entire
@@ -1761,6 +1816,7 @@ private:
     struct NAMOutputSafetyGuardResult
     {
         std::uint64_t guardedSampleFrameCount = 0;
+        std::uint64_t invalidSampleFrameCount = 0;
         float maximumRawPeak = 0.0f;
         float maximumRawDelta = 0.0f;
     };
@@ -1824,16 +1880,31 @@ private:
     // A final-rack emergency bound, not a gate or a dynamics envelope.
     // Every finite sample at or below the knee is returned bit-for-bit, so
     // clean sustains and ordinary high-gain attacks cannot pump or recover.
-    static constexpr float namOutputSafetyKnee = 1.5f;
-    static constexpr float namOutputSafetyCeiling = 2.0f;
+    // A preset or model transition must never send an above-full-scale blast
+    // to the device. This guard is bit-transparent below -0.45 dBFS and only
+    // contains the final rack output as it approaches 0 dBFS.
+    static constexpr float namOutputSafetyKnee = 0.95f;
+    static constexpr float namOutputSafetyCeiling = 1.0f;
+    // Finite numerical runaway is not made healthy merely by squeezing it
+    // against a full-scale ceiling. Keep this threshold orders of magnitude
+    // above any intentional control boost: ordinary over-level audio belongs
+    // to the memoryless ceiling above and must never become a timed mute.
+    static constexpr float namOutputEmergencyTripPeak = 4096.0f;
+    static constexpr float namOutputEmergencyTripDelta = 8192.0f;
+    static constexpr double namOutputEmergencyHoldSeconds = 0.25;
+    static constexpr double namOutputEmergencyRecoverySeconds = 0.05;
 
     struct LoadedCabIR
     {
+        bool hasStereoResponse = true;
         // Keep the direct 256-sample head zero-latency, but partition the long
         // tail much more coarsely. Uniform partitioning at a 16-sample ASIO
         // block otherwise walks roughly one IR partition per 48 samples on
         // every callback (hundreds for an ordinary cabinet IR).
-        juce::dsp::Convolution convolution {
+        juce::dsp::Convolution stereoConvolution {
+            juce::dsp::Convolution::NonUniform { 256 }
+        };
+        juce::dsp::Convolution dualMonoConvolution {
             juce::dsp::Convolution::NonUniform { 256 }
         };
         juce::String path;
@@ -1911,6 +1982,8 @@ private:
     juce::AudioBuffer<float> namResampledInputBuffer;
     juce::AudioBuffer<float> namResampledOutputBuffer;
     juce::AudioBuffer<float> namTransitionBuffer;
+    juce::AudioBuffer<float> cabStereoBuffer;
+    juce::AudioBuffer<float> cabStereoTransitionBuffer;
     // Dual-NAM lanes are evaluated sequentially because the Rack shares its
     // prepared NAM scratch. Keep their host output and latency-matched dry
     // blocks separate until both stateful graphs have completed successfully;
@@ -1919,36 +1992,41 @@ private:
     juce::AudioBuffer<float> dualNAMStagingBuffer;
     juce::AudioBuffer<float> dualNAMDelayedDryBuffer;
     juce::AudioBuffer<float> ampBypassBuffer;
+    juce::AudioBuffer<float> cabDirectBuffer;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None>
+        cabDirectDelay { 2048 };
+    int cabDirectDelaySamples = -1;
     juce::AudioBuffer<float> liveTransitionBuffer;
+    // The detector runs on the calibrated rack input, but its linked gain is
+    // consumed after the Pedal/Amp nonlinear stages. This preallocated lane
+    // lets the gate suppress model/pedal self-noise without changing the
+    // signal that excites either nonlinear processor.
+    juce::AudioBuffer<float> globalGateGainBuffer;
     juce::AudioBuffer<float> preEqDryBuffer;
     juce::AudioBuffer<float> graphicEqDryBuffer;
     juce::AudioBuffer<float> postCabDryBuffer;
     std::vector<float*> namInputPtrs;
     std::vector<float*> namOutputPtrs;
 
-    juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
-    juce::dsp::IIR::Filter<float> midPeakL, midPeakR;
-    juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
-    juce::dsp::IIR::Filter<float> presenceShelfL, presenceShelfR;
-    std::array<juce::dsp::IIR::Filter<float>, 8> preEqL;
-    std::array<juce::dsp::IIR::Filter<float>, 8> preEqR;
+    StableStereoBiquad lowShelfFilter;
+    StableStereoBiquad midPeakFilter;
+    StableStereoBiquad highShelfFilter;
+    StableStereoBiquad presenceShelfFilter;
+    std::array<StableStereoBiquad, 8> preEqFilters;
     juce::dsp::StateVariableTPTFilter<float> preEqHPF;
     juce::dsp::StateVariableTPTFilter<float> preEqLPF;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative>
         smoothedPreEqHPFCutoff;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative>
         smoothedPreEqLPFCutoff;
-    std::array<juce::dsp::IIR::Filter<float>, 9> graphicEqL;
-    std::array<juce::dsp::IIR::Filter<float>, 9> graphicEqR;
+    std::array<StableStereoBiquad, 9> graphicEqFilters;
     juce::dsp::StateVariableTPTFilter<float> graphicEqHPF;
     juce::dsp::StateVariableTPTFilter<float> graphicEqLPF;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative>
         smoothedGraphicEqHPFCutoff;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative>
         smoothedGraphicEqLPFCutoff;
-    juce::dsp::IIR::Filter<float> cabHPFL, cabHPFR;
-    juce::dsp::IIR::Filter<float> cabLPFL, cabLPFR;
-    S13Compressor rackCompressor;
+    OpenStudioCompressor rackCompressor;
     std::array<float, 2> compressorToneLowState {};
     float compressorToneLowpassCoefficient = 0.0f;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
@@ -1956,7 +2034,7 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedCompressorToneHighGain;
     NAMPolyOctaver rackPolyOctaver;
-    S13Saturator rackChaos { true };
+    OpenStudioSaturator rackChaos { true };
     static constexpr int maximumEmbeddedDriveLatencySamples = 512;
     // Drain the shared IIR oversampler incrementally after the complete
     // native-drive island reaches dry. This is deliberately spread across
@@ -2015,7 +2093,13 @@ private:
         smoothedPrecisionDriveAttackCoefficient;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedPrecisionDriveBrightCoefficient;
+    // Bass keeps the Attack-selected low band substantially clean after the
+    // nonlinear cell. The profile crossfade is smoothed so Guitar/Bass
+    // changes cannot hard-switch the low-frequency waveform.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        smoothedPrecisionDriveBassLowPreservation;
     std::array<float, 2> precisionDriveAttackLowState {};
+    std::array<float, 2> precisionDriveBassWetLowState {};
     std::array<float, 2> precisionDriveBrightLowState {};
     std::array<float, 2> precisionDriveDcInputState {};
     std::array<float, 2> precisionDriveDcOutputState {};
@@ -2190,7 +2274,7 @@ private:
         smoothedGraphicEqLPFPower;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedGraphicEqLevelGain;
-    S13Chorus rackChorus;
+    OpenStudioChorus rackChorus;
     NAMCabPresentation rackCabPresentation;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedModulatorAutoRandom;
@@ -2198,8 +2282,8 @@ private:
         smoothedModulatorPedalMode;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedModulatorModeBlend;
-    S13Delay rackDelay;
-    S13Reverb rackReverb;
+    OpenStudioDelay rackDelay;
+    OpenStudioReverb rackReverb;
     struct ReverbTailCache
     {
         bool valid = false;
@@ -2264,18 +2348,12 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAmpVoiceLowCoefficient;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAmpVoiceLowMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAmpVoiceHighMix;
-    std::array<float, 2> cabMicLowState {};
-    std::array<float, 2> cabRoomState {};
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabLevelGain;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabPolarity;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabMicPosition;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabMicDistance;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabMicBlend;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabRoomSend;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabStereoMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabDirectMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabPan;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabLowCoefficient;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCabDistanceGain;
     int inputMeterHoldSamplesRemaining = 0;
     int outputMeterHoldSamplesRemaining = 0;
     std::array<int, 2> inputChannelMeterHoldSamplesRemaining {};
@@ -2313,7 +2391,7 @@ private:
     bool instrumentProfileBlockLatched = false;
     // TrackProcessor publishes the physical/routed source width before each
     // process call. Standalone probes default to stereo capability so their
-    // existing direct S13NAMRack contract remains deterministic.
+    // existing direct OpenStudioNAMRack contract remains deterministic.
     std::atomic<int> routedInputChannelCount { 2 };
     float lastBassDb = 999.0f;
     float lastMidDb = 999.0f;
@@ -2328,19 +2406,13 @@ private:
     int lastGraphicEqInstrumentProfile = -1;
     float lastGraphicEqHPFHz = -1.0f;
     float lastGraphicEqLPFHz = -1.0f;
-    float lastCabHPFHz = -1.0f;
-    float lastCabLPFHz = -1.0f;
     std::array<float, 5> lowShelfTarget {};
     std::array<float, 5> midPeakTarget {};
     std::array<float, 5> highShelfTarget {};
     std::array<float, 5> presenceShelfTarget {};
     std::array<std::array<float, 5>, 8> preEqTargets {};
     std::array<std::array<float, 5>, 9> graphicEqTargets {};
-    std::array<float, 5> cabHPFTarget {};
-    std::array<float, 5> cabLPFTarget {};
     static constexpr int filterGainTableSize = 241;
-    static constexpr int cabHPFTableSize = 481;
-    static constexpr int cabLPFTableSize = 1901;
     std::array<
         std::array<std::vector<std::array<float, 5>>, 4>,
         2> toneFilterTables;
@@ -2350,18 +2422,12 @@ private:
     std::array<
         std::array<std::vector<std::array<float, 5>>, 9>,
         2> graphicEqFilterTables;
-    std::vector<std::array<float, 5>> cabHPFFilterTable;
-    std::vector<std::array<float, 5>> cabLPFFilterTable;
     bool filterTargetTablesPrepared = false;
     bool rackFilterCoefficientsInitialised = false;
-    bool toneFilterCoefficientsSmoothing = false;
-    bool preEqCoefficientsSmoothing = false;
     bool preEqHPFWasProcessing = false;
     bool preEqLPFWasProcessing = false;
-    bool graphicEqCoefficientsSmoothing = false;
     bool graphicEqHPFWasProcessing = false;
     bool graphicEqLPFWasProcessing = false;
-    bool cabFilterCoefficientsSmoothing = false;
     float gateEnvelope = 0.0f;
     float gateGain = 1.0f;
     float cachedGateThresholdDb = -101.0f;
@@ -2393,11 +2459,21 @@ private:
     std::atomic<float> diagnosticAmpNAMMaximumRawOutputPeakLinear { 0.0f };
     std::atomic<float> diagnosticPedalNAMMaximumRawOutputDeltaLinear { 0.0f };
     std::atomic<float> diagnosticAmpNAMMaximumRawOutputDeltaLinear { 0.0f };
+    std::atomic<std::uint64_t> diagnosticAmpToneFilterRecoveryCount { 0 };
+    std::atomic<std::uint64_t> diagnosticPreEqFilterRecoveryCount { 0 };
+    std::atomic<std::uint64_t> diagnosticGraphicEqFilterRecoveryCount { 0 };
     std::array<float, 2> previousRackRawOutput {};
     std::array<bool, 2> hasPreviousRackRawOutput {};
+    bool rackOutputEmergencyMuteActive = false;
+    int rackOutputEmergencyHoldSamplesRemaining = 0;
+    float rackOutputEmergencyRecoveryGain = 1.0f;
     std::atomic<float> diagnosticRackMaximumRawOutputPeakLinear { 0.0f };
     std::atomic<float> diagnosticRackMaximumRawOutputDeltaLinear { 0.0f };
     std::atomic<std::uint64_t> diagnosticRackOutputSafetyGuardHitCount { 0 };
+    std::atomic<bool> diagnosticRackOutputEmergencyMuteActive { false };
+    std::atomic<std::uint64_t> diagnosticRackOutputEmergencyMuteTripCount { 0 };
+    std::atomic<float> diagnosticRackOutputEmergencyLastTripPeakLinear { 0.0f };
+    std::atomic<float> diagnosticRackOutputEmergencyLastTripDeltaLinear { 0.0f };
     std::atomic<bool> diagnosticLastAuditionSourceActive { false };
     std::atomic<bool> diagnosticLastAuditionSourceRendered { false };
     std::atomic<bool> diagnosticLastResampled { false };
@@ -2545,7 +2621,6 @@ private:
     void updateToneFiltersIfNeeded();
     void updatePreEQFiltersIfNeeded();
     void updateGraphicEQFiltersIfNeeded();
-    void updateCabFiltersIfNeeded();
     void resetCompressorToneStage(bool active) noexcept;
     void processCompressorToneStage(
         juce::AudioBuffer<float>& buffer,
@@ -2591,7 +2666,6 @@ private:
     void synchroniseChaosTopologyWhileBypassed() noexcept;
     void processPrecisionDriveStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
     void processChaosStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
-    void resetCabMicState() noexcept;
     void processCabStage(juce::AudioBuffer<float>& buffer, LoadedCabIR* cabForBlock);
     void resetPostCabOrder() noexcept;
     void updatePostCabOrderFromUiState(const juce::var& uiState);
@@ -2618,17 +2692,17 @@ private:
     void processReverbStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
     void processPostFX(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13NAMRack)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioNAMRack)
 };
 
 // ============================================================================
-// S13BasicSynthInstrument -- Built-in polyphonic subtractive synth
+// OpenStudioBasicSynthInstrument -- Built-in polyphonic subtractive synth
 // ============================================================================
-class S13BasicSynthInstrument : public juce::AudioProcessor
+class OpenStudioBasicSynthInstrument : public juce::AudioProcessor
 {
 public:
-    S13BasicSynthInstrument();
-    ~S13BasicSynthInstrument() override = default;
+    OpenStudioBasicSynthInstrument();
+    ~OpenStudioBasicSynthInstrument() override = default;
 
     std::atomic<float> attackMs { 8.0f };
     std::atomic<float> releaseMs { 180.0f };
@@ -2660,8 +2734,8 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
-    bool isS13BuiltInInstrument() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
+    bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
     std::array<std::array<bool, 128>, 16> active {};
@@ -2680,17 +2754,17 @@ private:
     void clearVoices();
     void handleMidi(const juce::MidiMessage& message);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13BasicSynthInstrument)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioBasicSynthInstrument)
 };
 
 // ============================================================================
-// S13PianoInstrument -- Built-in MIDI piano instrument
+// OpenStudioPianoInstrument -- Built-in MIDI piano instrument
 // ============================================================================
-class S13PianoInstrument : public juce::AudioProcessor
+class OpenStudioPianoInstrument : public juce::AudioProcessor
 {
 public:
-    S13PianoInstrument();
-    ~S13PianoInstrument() override = default;
+    OpenStudioPianoInstrument();
+    ~OpenStudioPianoInstrument() override = default;
 
     std::atomic<float> tone { 0.58f };
     std::atomic<float> body { 0.72f };
@@ -2723,8 +2797,8 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
-    bool isS13BuiltInInstrument() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
+    bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
     std::array<std::array<bool, 128>, 16> active {};
@@ -2740,17 +2814,17 @@ private:
     void clearVoices();
     void handleMidi(const juce::MidiMessage& message);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13PianoInstrument)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioPianoInstrument)
 };
 
 // ============================================================================
-// S13CleanGuitarInstrument -- Built-in clean electric guitar instrument
+// OpenStudioCleanGuitarInstrument -- Built-in clean electric guitar instrument
 // ============================================================================
-class S13CleanGuitarInstrument : public juce::AudioProcessor
+class OpenStudioCleanGuitarInstrument : public juce::AudioProcessor
 {
 public:
-    S13CleanGuitarInstrument();
-    ~S13CleanGuitarInstrument() override = default;
+    OpenStudioCleanGuitarInstrument();
+    ~OpenStudioCleanGuitarInstrument() override = default;
 
     std::atomic<float> model { 0.0f };      // 0=T-style DI, 1=S-style DI, 2=Clean US Combo, 3=JC-style Chorus Clean
     std::atomic<float> tone { 0.68f };
@@ -2784,8 +2858,8 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
-    bool isS13BuiltInInstrument() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
+    bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
     std::array<std::array<bool, 128>, 16> active {};
@@ -2807,17 +2881,17 @@ private:
     void handleMidi(const juce::MidiMessage& message);
     int chooseStringForNote(int note, int midiChannel) const;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13CleanGuitarInstrument)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioCleanGuitarInstrument)
 };
 
 // ============================================================================
-// S13DrumInstrument -- Built-in MIDI drum instrument with GM/e-drum mapping
+// OpenStudioDrumInstrument -- Built-in MIDI drum instrument with GM/e-drum mapping
 // ============================================================================
-class S13DrumInstrument : public juce::AudioProcessor
+class OpenStudioDrumInstrument : public juce::AudioProcessor
 {
 public:
-    S13DrumInstrument();
-    ~S13DrumInstrument() override = default;
+    OpenStudioDrumInstrument();
+    ~OpenStudioDrumInstrument() override = default;
 
     std::atomic<float> kit { 0.0f };       // 0=Studio, 1=Rock, 2=Electronic
     std::atomic<float> tuning { 0.0f };    // semitones
@@ -2851,8 +2925,8 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    bool isS13BuiltIn() const { return true; }
-    bool isS13BuiltInInstrument() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
+    bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
     std::array<std::array<bool, 128>, 16> active {};
@@ -2866,5 +2940,5 @@ private:
     void handleMidi(const juce::MidiMessage& message);
     int mapIncomingNote(int note) const;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13DrumInstrument)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioDrumInstrument)
 };

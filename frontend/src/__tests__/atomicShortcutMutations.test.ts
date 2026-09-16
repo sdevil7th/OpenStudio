@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getRegisteredAction } from "../store/actionRegistry";
 import { commandManager } from "../store/commands";
@@ -1253,7 +1254,7 @@ describe("atomic selected-track shortcuts", () => {
 });
 
 describe("atomic multi-item catalog actions", () => {
-  it("repeats and recolors mixed selected clips as one undo gesture", () => {
+  it("repeats and recolors mixed selected clips as one undo gesture", async () => {
     const audio = createDefaultTrack("audio", "Audio", "#111", "audio", []);
     audio.clips = [audioClip("audio-source")];
     const midi = createDefaultTrack("midi", "MIDI", "#222", "midi", []);
@@ -1263,9 +1264,9 @@ describe("atomic multi-item catalog actions", () => {
       selectedClipId: "midi-source",
       selectedClipIds: ["audio-source", "midi-source"],
     });
-    vi.stubGlobal("prompt", vi.fn(() => "2"));
+    vi.spyOn(appDialogs, "prompt").mockResolvedValue("2");
 
-    getRegisteredAction("clip.repeatSelected")!.execute();
+    await getRegisteredAction("clip.repeatSelected")!.execute();
     expect(useDAWStore.getState().tracks[0].clips).toHaveLength(3);
     expect(useDAWStore.getState().tracks[1].midiClips).toHaveLength(3);
     expect(commandManager.getUndoStack()).toHaveLength(1);
@@ -1276,8 +1277,8 @@ describe("atomic multi-item catalog actions", () => {
 
     commandManager.clear();
     useDAWStore.setState({ canUndo: false, canRedo: false });
-    vi.stubGlobal("prompt", vi.fn(() => "#abcdef"));
-    getRegisteredAction("clip.setSelectedColor")!.execute();
+    vi.spyOn(appDialogs, "prompt").mockResolvedValue("#abcdef");
+    await getRegisteredAction("clip.setSelectedColor")!.execute();
     expect(useDAWStore.getState().tracks[0].clips[0].color).toBe("#abcdef");
     expect(useDAWStore.getState().tracks[1].midiClips[0].color).toBe("#abcdef");
     expect(commandManager.getUndoStack()).toHaveLength(1);

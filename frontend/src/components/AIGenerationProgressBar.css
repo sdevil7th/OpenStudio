@@ -1,0 +1,16 @@
+.ai-generation-progress-fill {
+  width: var(--ai-stage-progress);
+  transition: width 200ms;
+}
+.ai-generation-progress[data-indeterminate="true"] .ai-generation-progress-fill {
+  width: 30%;
+  animation: ai-generation-working 1.8s ease-in-out infinite;
+}
+@keyframes ai-generation-working {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(334%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-generation-progress-fill { transition: none; }
+  .ai-generation-progress[data-indeterminate="true"] .ai-generation-progress-fill { animation: none; }
+}

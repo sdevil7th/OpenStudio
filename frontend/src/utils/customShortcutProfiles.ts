@@ -11,7 +11,7 @@ import {
 
 export const CUSTOM_KEYBOARD_PROFILE_SCHEMA_VERSION = 2 as const;
 export const CUSTOM_KEYBOARD_PROFILE_STORAGE_KEY = "openstudio.keyboardProfiles.v2";
-export const LEGACY_CUSTOM_SHORTCUTS_STORAGE_KEY = "s13_customShortcuts";
+export const LEGACY_CUSTOM_SHORTCUTS_STORAGE_KEY = "openstudio_customShortcuts";
 
 export const CUSTOM_SHORTCUT_TARGETS = [
   "common",

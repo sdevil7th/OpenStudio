@@ -2,6 +2,14 @@
 
 OpenStudio uses the following open-source libraries and dependencies.
 
+## Monocypher 4.0.3
+
+- **Website:** https://monocypher.org/
+- **License:** BSD-2-Clause OR CC0-1.0 (upstream dual license)
+- **Usage:** Ed25519 verification of application update manifests
+- Full upstream license is shipped as `licenses/Monocypher-LICENCE.md`.
+- Source and verified upstream archive checksum: `thirdparty/monocypher/PROVENANCE.md`.
+
 ---
 
 ## JUCE 9.0.1
@@ -21,7 +29,7 @@ OpenStudio is released under AGPLv3-compatible terms.
 - **Website:** https://github.com/jpcima/ysfx
 - **License:** Apache License 2.0
 - **Copyright:** (c) Jean Pierre Cimalando and contributors
-- **Usage:** JSFX/EEL2 scripting runtime for built-in S13FX audio effects
+- **Usage:** JSFX/EEL2 scripting runtime for built-in JSFX audio effects
 
 Licensed under the Apache License, Version 2.0. You may obtain a copy at:
 http://www.apache.org/licenses/LICENSE-2.0
