@@ -1,8 +1,99 @@
 # Microsoft Store activation plan
 
-Status recorded: September 14, 2026.
+Status recorded: September 16, 2026.
 
-## Latest account-access checkpoint
+## Current release decision and blockers
+
+The owner explicitly does **not** want the old code or old branding published.
+The old Submission 1 had passed certification with a manual publishing hold.
+Its certification was cancelled to replace the old code and artwork, and Partner
+Center now shows **In draft** (submission `1152921505701841400`). Nothing was
+published. Do not publish the old package to satisfy the automation's
+published-baseline requirement. Release PR #17 passed its PR checks and was
+merged into `main` at `196707f`. Follow-up PR #18 contains corrected
+release notes and unconditional MSIX packaging/artifact retention; its CI is
+pending. Merge that preparation only after CI passes, then tag the final merged
+revision. Use only the MSIX built by that tag's Release workflow.
+The local candidate upload was cancelled, removed, and the removal saved and
+verified in Partner Center; the draft currently retains only the old package.
+Do not use the locally built `681fec8` package for submission, even though its
+application source matches the release candidate. Nothing has been resubmitted.
+
+The English Store listing's nine logo/promotional slots were saved using only
+files from the owner-designated directory
+`C:\Users\srvds\OneDrive\Pictures\microsoft-store`: app tiles at 71, 150 and
+300 pixels; poster at 1440x2160; box art at 2160x2160; super hero at 3840x2160;
+branded key art at 584x800; titled hero at 1920x1080; and featured promotional
+square at 1080x1080. Earlier website-export uploads were replaced. Reopening the
+listing confirmed that all nine preview images persisted unchanged after Save.
+Existing desktop screenshots and listing text were not changed. These are draft
+listing updates only; the final tagged MSIX and certification submission remain
+pending. The capability explanation was shortened to a complete 470-character
+statement within the portal's 500-character limit. After saving, Submission
+options now shows Complete. The manual publishing hold remains selected.
+
+The working tree was clean at `681fec8` when release preparation resumed.
+`docs/releases/0.1.02.md` has been reviewed and updated for that candidate,
+including the new branding, saved INT8 variants, plugin automation/state changes
+and recording finalization recovery. Notes validation passed and icons were
+regenerated from the approved master. These notes are preparation changes, not
+evidence of a published release or a qualified installed package.
+
+GitHub's `microsoft-store` environment now contains all three required secrets:
+`MS_STORE_TENANT_ID`, `MS_STORE_CLIENT_ID`, and `MS_STORE_CLIENT_SECRET`.
+Repository variable `OPENSTUDIO_STORE_ENABLED` remains `false`. Deployment access
+is restricted to tags matching `v*`, with zero branches allowed. A manually
+dispatched release must use an eligible tag ref to access these credentials.
+The secret value was transferred directly from Microsoft into GitHub's encrypted
+environment secret; it was not printed or written to local/repository files, and
+temporary in-memory transfer values were cleared afterward.
+
+The owner completed Entra tenant setup, authentication and association with the
+existing Partner Center account. After explicit owner confirmation, the
+`OpenStudio GitHub Store Release` application was created with Manager (Windows)
+access and `https://openstudio.org.in/` as its Reply URL. One API key was generated,
+saved in GitHub, and verified in Microsoft's masked key list; it expires on
+September 16, 2028. Tenant/client identifiers and the key value are kept in the
+GitHub environment secrets rather than this document. Credential provisioning
+is complete, but live Store API authentication remains unverified.
+
+The local package checks below are supporting evidence only. PR #18 documents
+the first-release path: passing CI, merge, tag, successful tagged Release run,
+then upload its exact MSIX into the prepared manual draft for certification.
+Its workflow change builds the MSIX while `OPENSTUDIO_STORE_ENABLED=false`;
+the credentialed submission job remains gated. The script still requires a
+published baseline and refuses an unrelated pending draft. Keep the manual
+publishing hold and enable subsequent automatic submissions only after the new
+first package is qualified and published. Never publish an older candidate to
+work around this prerequisite. The pinned `ai-runtime-v0.0.13` release and all
+three platform runtime assets were confirmed available.
+
+September 16 local checks: 35 passed and 2 skipped across Store submission,
+release-note and model-variant tests; all 5 Store package rejection tests passed.
+These are local deterministic checks, not live certification or Store delivery.
+
+The frontend production build and CMake Release build completed with no reported
+C++ compiler warnings. Runtime-bundle validation and startup prerequisite checks
+passed. The candidate is
+`dist/store/0.1.02-candidate/OpenStudio-0.1.2.0-x64.msix`, with SHA256
+`9e1c248b5cf7833c535e26631e65542605117a098c352c8696d29c2669bc34b5`.
+MakeAppx validation, unpacked payload hash parity and the offline submission
+validator passed. Matching Release binaries/PDBs are retained under
+`output/symbols/Release-D8E61B90F38AFE6966404965F855FDA03A8B62241A8DB0D303B5C17632B60244`.
+
+The pre-existing unsigned development registration (`0.0.1.0`) was updated to
+the candidate (`0.1.2.0`); no Store-signed installation was replaced. Package
+identity/update-routing checks, startup prerequisites and all 42 window-lifecycle
+checks passed in `output/review/store-installed-20260916-112547/`. The fixed
+WebView2 runtime is used and all required browser roles reached frontend readiness.
+The test process exited. This is **development-registration** evidence only:
+Store certification/delivery, private-flight upgrades, clean-machine dependency
+independence, hardware/audio quality and live OAuth remain **not_asserted**.
+
+The September 14 checkpoint and steps below are historical. Where they conflict
+with this section, the current release decision above is authoritative.
+
+## September 14 account-access checkpoint
 
 The owner reports that the privacy URL was changed from the GitHub repository to
 `https://openstudio.org.in/privacy`, reviewer notes were saved, and Submission 1
