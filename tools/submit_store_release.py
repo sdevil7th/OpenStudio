@@ -1,6 +1,7 @@
 """Validate an OpenStudio MSIX and optionally submit it to Microsoft Store.
 
-Default: offline validation only. --submit is the sole network/mutation opt-in.
+Default: offline validation only. --preflight permits authenticated reads;
+--submit permits mutations. Initial drafts require an explicit reviewed config.
 Secrets come from the environment. Reports never contain bearer tokens or SAS URLs.
 """
 from __future__ import annotations
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FAILED = {"CommitFailed", "PreProcessingFailed", "CertificationFailed", "PublishFailed", "Canceled"}
 ACCEPTED = {"PreProcessing", "Certification", "PendingPublication", "Publishing", "Published", "Release"}
 MARKER_PREFIX = "OpenStudio release automation: "
+INITIAL_MARKER_PREFIX = "OpenStudio initial draft: "
 
 
 class StoreError(RuntimeError):
@@ -117,6 +119,99 @@ def marker(version: str, sha256: str, notes: str) -> str:
 
 def owns(submission: dict, expected: str) -> bool:
     return expected in submission.get("notesForCertification", "").splitlines()
+
+
+def load_initial_config(path: Path) -> dict:
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
+    if (not isinstance(config, dict) or set(config) != {
+            "appId", "submissionId", "releaseTag", "previousPackageVersion"}
+            or not all(isinstance(value, str) for value in config.values())
+            or config["appId"] != APP_ID or not re.fullmatch(r"\d+", config["submissionId"])
+            or not config["releaseTag"].startswith("v")):
+        raise StoreError("Invalid initial-submission configuration.")
+    package_version(config["releaseTag"])
+    version_tuple(config["previousPackageVersion"])
+    return config
+
+
+def json_digest(value: dict) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def initial_settings_digest(submission: dict) -> str:
+    # Bind the saved listing/artwork/audience/ratings and other settings to retries.
+    # Only the package, English release notes, markers and server status may change.
+    settings = copy.deepcopy(submission)
+    for key in ("id", "status", "statusDetails", "fileUploadUrl", "applicationPackages"):
+        settings.pop(key, None)
+    settings["notesForCertification"] = "\n".join(
+        line for line in settings.get("notesForCertification", "").splitlines()
+        if not line.startswith((MARKER_PREFIX, INITIAL_MARKER_PREFIX))).strip()
+    for language, listing in settings.get("listings", {}).items():
+        if language.lower() == "en-us":
+            listing.get("baseListing", {}).pop("releaseNotes", None)
+    return json_digest(settings)
+
+
+def require_uploaded_assets(value):
+    if isinstance(value, dict):
+        if "fileStatus" in value and value["fileStatus"] != "Uploaded":
+            raise StoreError("Initial draft contains unfinished or deleted assets; finish reviewing it in Partner Center.")
+        for child in value.values():
+            require_uploaded_assets(child)
+    elif isinstance(value, list):
+        for child in value:
+            require_uploaded_assets(child)
+
+
+def initial_marker(config: dict, submission: dict) -> str:
+    return f"{INITIAL_MARKER_PREFIX}{json_digest(config)}; settings={initial_settings_digest(submission)}"
+
+
+def validate_initial_resume(pending: dict, config: dict, package: Path, notes: str, expected: str):
+    release_markers = [line for line in pending.get("notesForCertification", "").splitlines()
+                       if line.startswith(MARKER_PREFIX)]
+    if (pending.get("id") != config["submissionId"] or pending.get("targetPublishMode") != "Manual"
+            or release_markers != [expected]):
+        raise StoreError("Initial submission identity, release marker or manual publishing hold changed.")
+    markers = [line for line in pending.get("notesForCertification", "").splitlines()
+               if line.startswith(INITIAL_MARKER_PREFIX)]
+    if markers != [initial_marker(config, pending)]:
+        raise StoreError("Initial submission settings/artwork or configuration changed; refusing to resume.")
+    if pending.get("status") == "PendingCommit":
+        packages = pending.get("applicationPackages", [])
+        old = [item for item in packages if item.get("fileStatus") == "PendingDelete"]
+        new = [item for item in packages if item.get("fileStatus") == "PendingUpload"]
+        if (len(packages) != 2 or len(old) != 1 or len(new) != 1
+                or old[0].get("version") != config["previousPackageVersion"]
+                or new[0].get("fileName") != package.name):
+            raise StoreError("Initial submission package replacement changed; refusing to upload or commit.")
+        english = [value for language, value in pending.get("listings", {}).items() if language.lower() == "en-us"]
+        if len(english) != 1 or english[0].get("baseListing", {}).get("releaseNotes") != notes:
+            raise StoreError("Initial submission release notes changed; refusing to commit.")
+
+
+def prepare_initial_submission(pending: dict, config: dict, package: Path, version: str,
+                               notes: str, expected: str) -> dict:
+    if pending.get("id") != config["submissionId"] or pending.get("targetPublishMode") != "Manual":
+        raise StoreError("Initial draft identity or manual publishing hold does not match.")
+    if pending.get("status") != "PendingCommit":
+        raise StoreError("The initial draft is not editable; automation will not cancel certification.")
+    if any(line.startswith((MARKER_PREFIX, INITIAL_MARKER_PREFIX))
+           for line in pending.get("notesForCertification", "").splitlines()):
+        raise StoreError("Initial draft belongs to another artifact or release; refusing to overwrite it.")
+    packages = pending.get("applicationPackages", [])
+    if (len(packages) != 1 or packages[0].get("version") != config["previousPackageVersion"]
+            or version_tuple(version) <= version_tuple(config["previousPackageVersion"])):
+        raise StoreError("Initial draft package version/coverage differs from the reviewed configuration.")
+    require_uploaded_assets(pending)
+    english = [value for language, value in pending.get("listings", {}).items() if language.lower() == "en-us"]
+    if len(english) != 1 or not english[0].get("baseListing", {}).get("images"):
+        raise StoreError("Initial draft must contain the saved English listing artwork.")
+    updated = copy.deepcopy(pending)
+    updated["notesForCertification"] = (updated.get("notesForCertification", "").rstrip()
+                                         + "\n" + initial_marker(config, pending)).strip()
+    return prepare_submission(updated, package, notes, expected)
 
 
 def prepare_submission(submission: dict, package: Path, notes: str, expected: str) -> dict:
@@ -211,40 +306,73 @@ def submission_path(submission_id: str) -> str:
 
 
 def submit(api, package: Path, version: str, sha256: str, notes: str, record,
-           *, max_polls=40, sleep=time.sleep):
+           *, initial_config=None, release_tag=None, preflight_only=False, max_polls=40, sleep=time.sleep):
     base = f"/applications/{APP_ID}"
     expected = marker(version, sha256, notes)
+    if digest(package) != sha256:
+        raise StoreError("Package changed after validation; refusing to contact the Store.")
     app = api.request("GET", base)
     if app.get("id") != APP_ID or app.get("packageIdentityName") != IDENTITY or app.get("publisherName") != PUBLISHER:
         raise StoreError("Partner Center app identity does not match OpenStudio.")
     published_id = (app.get("lastPublishedApplicationSubmission") or {}).get("id")
-    if not published_id:
-        raise StoreError("Complete and publish the first manual Store submission before enabling automation.")
-    published = api.request("GET", submission_path(published_id))
-    if owns(published, expected):
-        record(submissionId=published_id, status="Published", alreadySubmitted=True)
-        return
-    for item in published.get("applicationPackages", []):
-        if item.get("fileStatus") != "PendingDelete" and version_tuple(item.get("version", "")) >= version_tuple(version):
-            raise StoreError("The Store already has this version or a newer version. Publish a higher version.")
     pending_id = (app.get("pendingApplicationSubmission") or {}).get("id")
-    if pending_id:
+    initial = not published_id
+    if not published_id:
+        if (not initial_config or pending_id != initial_config["submissionId"]
+                or release_tag != initial_config["releaseTag"]
+                or version != package_version(initial_config["releaseTag"])):
+            raise StoreError("No published baseline: an exact initial draft and release tag must be explicitly configured.")
         pending = api.request("GET", submission_path(pending_id))
-        if not owns(pending, expected):
-            raise StoreError("An unrelated or unmarked submission is pending. Resolve it manually; automation will not overwrite or delete it.")
+        if owns(pending, expected):
+            validate_initial_resume(pending, initial_config, package, notes, expected)
+        else:
+            prepared = prepare_initial_submission(pending, initial_config, package, version, notes, expected)
+            if preflight_only:
+                record(submissionId=pending_id, status="PreflightPassed", initialSubmission=True)
+                return
+            # Detect edits made since the initial read before adopting the draft.
+            current = api.request("GET", submission_path(pending_id))
+            if (current.get("status") != "PendingCommit" or current.get("id") != pending_id
+                    or initial_settings_digest(current) != initial_settings_digest(pending)
+                    or current.get("applicationPackages") != pending.get("applicationPackages")
+                    or current.get("notesForCertification") != pending.get("notesForCertification")):
+                raise StoreError("Initial draft changed during preflight; no changes were made.")
+            api.request("PUT", submission_path(pending_id), prepared)
+            # Read back the server's state and current upload URL; never assume PUT succeeded.
+            pending = api.request("GET", submission_path(pending_id))
+            validate_initial_resume(pending, initial_config, package, notes, expected)
     else:
-        # Validate preservation/coverage/notes before making the first mutation.
-        prepare_submission(published, package, notes, expected)
-        pending = api.request("POST", base + "/submissions")
-        pending_id = pending["id"]
-        record(submissionId=pending_id, status="Created")
-        pending = prepare_submission(pending, package, notes, expected)
-        api.request("PUT", submission_path(pending_id), pending)
+        published = api.request("GET", submission_path(published_id))
+        if owns(published, expected):
+            record(submissionId=published_id, status="Published", alreadySubmitted=True)
+            return
+        for item in published.get("applicationPackages", []):
+            if item.get("fileStatus") != "PendingDelete" and version_tuple(item.get("version", "")) >= version_tuple(version):
+                raise StoreError("The Store already has this version or a newer version. Publish a higher version.")
+        if pending_id:
+            pending = api.request("GET", submission_path(pending_id))
+            if not owns(pending, expected):
+                raise StoreError("An unrelated or unmarked submission is pending. Resolve it manually; automation will not overwrite or delete it.")
+        else:
+            # Validate preservation/coverage/notes before making the first mutation.
+            prepare_submission(published, package, notes, expected)
+            if preflight_only:
+                record(status="PreflightPassed", initialSubmission=False)
+                return
+            pending = api.request("POST", base + "/submissions")
+            pending_id = pending["id"]
+            record(submissionId=pending_id, status="Created")
+            pending = prepare_submission(pending, package, notes, expected)
+            api.request("PUT", submission_path(pending_id), pending)
     path = submission_path(pending_id)
-    record(submissionId=pending_id, status=pending.get("status", "Unknown"))
     status = pending.get("status")
     if status in FAILED:
         raise StoreError(f"Existing submission is {status}; inspect certification details before retrying.")
+    if status not in ACCEPTED | {"PendingCommit", "CommitStarted"}:
+        raise StoreError("Unexpected submission state; inspect Partner Center before continuing.")
+    record(submissionId=pending_id, status="PreflightPassed" if preflight_only else status, initialSubmission=initial)
+    if preflight_only:
+        return
     if status == "PendingCommit":
         # Safe to re-upload the same hash-bound ZIP after an interrupted upload.
         with tempfile.TemporaryDirectory(prefix="openstudio-store-") as temp:
@@ -281,9 +409,12 @@ def main():
     parser.add_argument("--notes-file", type=Path)
     parser.add_argument("--report", type=Path, default=Path("output/store-submission.json"))
     parser.add_argument("--print-package-version", action="store_true")
-    parser.add_argument("--submit", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--submit", action="store_true")
+    mode.add_argument("--preflight", action="store_true", help="Authenticate and inspect readiness without modifying the Store.")
+    parser.add_argument("--initial-submission-config", type=Path)
     args = parser.parse_args()
-    report = {"appId": APP_ID, "liveSubmission": args.submit}
+    report = {"appId": APP_ID, "liveSubmission": args.submit, "livePreflight": args.preflight}
 
     def record(**values):
         report.update(values)
@@ -302,8 +433,10 @@ def main():
         tag = "v" + args.version.removeprefix("v")
         notes = store_notes(notes, tag)
         record(version=version, sha256=sha256, releaseTag=tag, status="Validated", releaseNotes=notes)
-        if args.submit:
-            submit(StoreApi(), package, version, sha256, notes, record)
+        config = load_initial_config(args.initial_submission_config) if args.initial_submission_config else None
+        if args.submit or args.preflight:
+            submit(StoreApi(), package, version, sha256, notes, record, initial_config=config,
+                   release_tag=tag, preflight_only=args.preflight)
         print(f"Store release: {report['status']}; report: {args.report}")
         return 0
     except (StoreError, OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as error:
