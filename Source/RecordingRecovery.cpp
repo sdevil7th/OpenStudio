@@ -40,9 +40,11 @@ WaveInfo inspectWave(const juce::var& entry)
             if (!foundFormat) return fail("Recording format chunk is missing");
             info.offset = start;
             const auto available = input->getTotalLength() - start;
-            // Finalized files must respect the declared data size; interrupted
-            // writes may have a stale zero/short header but more PCM on disk.
-            const bool finalized = entry.getProperty("status", "").toString() == "finalized";
+            // Only successfully finalized files have an authoritative data
+            // size. Also handle existing journals marked finalized even though
+            // the writer reported a failed header write/flush/seek.
+            const bool finalized = entry.getProperty("status", "").toString() == "finalized"
+                && static_cast<int>(entry.getProperty("writeFault", 0)) == RecordingWriteStatus::none;
             const auto declared = length == 0xffffffffLL ? declaredDataBytes : length;
             info.bytes = finalized ? juce::jmin(available, declared) : available;
             const auto alignment = info.channels * 2;

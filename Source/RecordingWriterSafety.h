@@ -89,7 +89,9 @@ public:
     {
         flush();
         destination.reset(); // Final header writes are also observed by the stream.
-        status->persistRecovery(true);
+        // A failed final header update leaves recoverable PCM behind a stale
+        // length. Only a fault-free close makes that length authoritative.
+        status->persistRecovery(status->fault.load(std::memory_order_relaxed) == RecordingWriteStatus::none);
         status->finished.store(true, std::memory_order_release);
     }
     bool write(const int** data, int samples) override

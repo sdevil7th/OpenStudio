@@ -4,6 +4,106 @@
 #include "OwnedChildProcess.h"
 #include "ProjectFileStore.h"
 
+namespace
+{
+// Let PCM reach a real file, then fail only the final WAV header update.
+class HeaderFaultStream final : public juce::OutputStream
+{
+public:
+    explicit HeaderFaultStream(const juce::File& file) : output(file) {}
+    int failure = 0; // 1: header write, 2: header seek.
+    bool write(const void* data, size_t bytes) override
+    { return failure != 1 && output.write(data, bytes); }
+    void flush() override { output.flush(); }
+    juce::int64 getPosition() override { return output.getPosition(); }
+    bool setPosition(juce::int64 position) override
+    { return failure != 2 && output.setPosition(position); }
+private:
+    juce::FileOutputStream output;
+};
+
+void checkFinalizationRecovery(const juce::File& directory, const std::function<void(const char*, bool)>& check)
+{
+    for (int fixture = 0; fixture < 5; ++fixture)
+    {
+        const bool healthy = fixture == 4;
+        const bool shortHeader = (fixture % 2) != 0;
+        const auto label = juce::String("recording_finalization_") + juce::String(fixture);
+        const auto root = directory.getChildFile(label);
+        root.createDirectory();
+        const auto file = root.getChildFile("take.wav");
+        const auto journals = root.getChildFile("journals");
+        juce::String id;
+        juce::File journalFile;
+        auto status = std::make_shared<RecordingWriteStatus>();
+        {
+            RecoveryJournal journal(journals);
+            auto metadata = juce::JSON::parse("{\"sampleRate\":48000,\"channels\":1,\"status\":\"recording\",\"writeFault\":0}");
+            metadata.getDynamicObject()->setProperty("path", file.getFullPathName());
+            id = journal.create("recording", metadata);
+            journalFile = journal.entryFile(id);
+            status->journalFile = journalFile;
+            status->journalMetadata = juce::JSON::parse(journalFile.loadFileAsString());
+            auto faulty = std::make_unique<HeaderFaultStream>(file);
+            auto* control = faulty.get();
+            std::unique_ptr<juce::OutputStream> stream = std::make_unique<CheckedRecordingStream>(std::move(faulty), status);
+            auto* observed = stream.get();
+            juce::WavAudioFormat format;
+            auto wavWriter = format.createWriterFor(stream, juce::AudioFormatWriterOptions()
+                .withSampleRate(48000).withNumChannels(1).withBitsPerSample(16));
+            if (!wavWriter) { check("recording_finalization_fixture_writer", false); continue; }
+            auto writer = std::make_unique<CheckedRecordingWriter>(std::move(wavWriter), status, observed);
+            juce::AudioBuffer<float> samples(1, 128);
+            for (int sample = 0; sample < 128; ++sample) samples.setSample(0, sample, 0.125f);
+            bool wrote = writer->writeFromAudioSampleBuffer(samples, 0, 128);
+            if (shortHeader) wrote = writer->flush() && wrote;
+            for (int sample = 0; sample < 128; ++sample) samples.setSample(0, sample, 0.25f);
+            wrote = writer->writeFromAudioSampleBuffer(samples, 0, 128) && wrote;
+            control->failure = healthy ? 0 : fixture / 2 + 1;
+            writer.reset();
+            check((label + "_pcm_written").toRawUTF8(), wrote && !id.isEmpty());
+            const auto saved = juce::JSON::parse(journalFile.loadFileAsString());
+            check((label + "_journal_status").toRawUTF8(), status->finished.load()
+                && saved.getProperty("status", "").toString() == (healthy ? "finalized" : "recording")
+                && (status->fault.load() == RecordingWriteStatus::none) == healthy);
+            if (!healthy) journal.markClean(); // Faulted takes must survive even a normal shutdown.
+        }
+        if (healthy)
+        {
+            auto tail = file.createOutputStream();
+            tail->setPosition(file.getSize());
+            tail->writeInt(0); tail->flush(); // A finalized data chunk excludes trailing bytes.
+        }
+        auto entry = RecoveryJournal::readInactive(id, journals);
+        const auto info = RecordingRecovery::inspect(entry);
+        check((label + "_all_frames_recoverable").toRawUTF8(), info.getProperty("error", "").toString().isEmpty()
+            && static_cast<int>(info.getProperty("recoverableFrames", 0)) == 256);
+        if (!healthy)
+        {
+            // Also handle journals already written with the incorrect terminal status.
+            entry.getDynamicObject()->setProperty("status", "finalized");
+            check((label + "_faulted_finalized_journal_written").toRawUTF8(), RecoveryJournal::write(journalFile, entry));
+        }
+        juce::MemoryBlock before, after;
+        file.loadFileAsData(before);
+        const auto repaired = RecordingRecovery::repair(id, [] { return true; }, journals);
+        const auto repairedPath = repaired.getProperty("repairedPath", "").toString();
+        bool exact = repaired.getProperty("error", "").toString().isEmpty() && repairedPath.isNotEmpty();
+        if (exact)
+        {
+            juce::WavAudioFormat format;
+            std::unique_ptr<juce::AudioFormatReader> reader(format.createReaderFor(new juce::FileInputStream(juce::File(repairedPath)), true));
+            juce::AudioBuffer<float> samples(1, 256);
+            exact = reader && reader->lengthInSamples == 256 && reader->read(&samples, 0, 256, 0, true, false);
+            for (int sample = 0; exact && sample < 256; ++sample)
+                exact = samples.getSample(0, sample) == (sample < 128 ? 0.125f : 0.25f);
+        }
+        file.loadFileAsData(after);
+        check((label + "_repair_exact_original_unchanged").toRawUTF8(), exact && before == after);
+    }
+}
+}
+
 int runInterruptedRecordingFixture(const juce::File& root)
 {
     if (!root.isDirectory()) return 2;
@@ -26,6 +126,7 @@ int runInterruptedRecordingFixture(const juce::File& root)
 
 void runRecordingRecoveryRegression(const juce::File& directory, const std::function<void(const char*, bool)>& check)
 {
+    checkFinalizationRecovery(directory, check);
     const auto root = directory.getChildFile("recording-interruption");
     root.createDirectory();
     const auto journals = root.getChildFile("journals");
