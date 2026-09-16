@@ -1,6 +1,6 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import { MenuDropdown, MenuItemProps } from "./MenuDropdown";
-import { getDisplayEffectiveShortcut } from "../../store/actionRegistry";
+import { getDisplayEffectiveShortcut, getRegisteredAction } from "../../store/actionRegistry";
 import { useDAWStore } from "../../store/useDAWStore";
 import { usePitchEditorStore } from "../../store/pitchEditorStore";
 import {
@@ -14,22 +14,16 @@ import { useShallow } from "zustand/shallow";
  * Contains undo/redo, clipboard, and selection operations
  */
 export function EditMenu() {
+  useDAWStore(useShallow(s => [s.clipboard, s.selectedClipIds, s.timeSelection, s.razorEdits, s.globalLocked, s.lockSettings, s.tracks]));
+  const run = (id: string) => { const action = getRegisteredAction(id); if (action && (!action.canHandleShortcut || action.canHandleShortcut())) action.execute(); };
+  const unavailable = (id: string) => getRegisteredAction(id)?.canHandleShortcut?.() === false;
   const {
     canUndo,
     canRedo,
     undo,
     redo,
     selectedClipId,
-    selectedTrackIds,
-    copyClip,
-    cutClip,
-    pasteClip,
-    deleteClip,
-    duplicateClip,
     selectAllTracks,
-    deselectAllTracks,
-    deleteSelectedTracks,
-    transport,
     keyboardShortcutProfileId,
     customShortcuts,
   } = useDAWStore(useShallow((s) => ({
@@ -38,16 +32,7 @@ export function EditMenu() {
     undo: s.undo,
     redo: s.redo,
     selectedClipId: s.selectedClipId,
-    selectedTrackIds: s.selectedTrackIds,
-    copyClip: s.copyClip,
-    cutClip: s.cutClip,
-    pasteClip: s.pasteClip,
-    deleteClip: s.deleteClip,
-    duplicateClip: s.duplicateClip,
     selectAllTracks: s.selectAllTracks,
-    deselectAllTracks: s.deselectAllTracks,
-    deleteSelectedTracks: s.deleteSelectedTracks,
-    transport: s.transport,
     keyboardShortcutProfileId: s.keyboardShortcutProfileId,
     customShortcuts: s.customShortcuts,
   })));
@@ -67,7 +52,9 @@ export function EditMenu() {
     getActiveShortcutContext,
     getActiveShortcutContext,
   );
-  const pitchOwnsHistory = activeShortcutContext.kind === "pitch_editor";
+  const editorContext = useRef(activeShortcutContext);
+  if (activeShortcutContext.kind !== "modal") editorContext.current = activeShortcutContext;
+  const pitchOwnsHistory = editorContext.current.kind === "pitch_editor";
   const effectiveUndo = pitchOwnsHistory ? pitchUndo : undo;
   const effectiveRedo = pitchOwnsHistory ? pitchRedo : redo;
   const effectiveCanUndo = pitchOwnsHistory ? pitchCanUndo : canUndo;
@@ -76,8 +63,8 @@ export function EditMenu() {
     (actionId: string, fallback: string) => getDisplayEffectiveShortcut(actionId) ?? fallback,
     [customShortcuts, keyboardShortcutProfileId],
   );
-  const trackSelectionOwnsDelete = activeShortcutContext.kind === "track_control_panel"
-    || activeShortcutContext.kind === "mixer";
+  const trackSelectionOwnsDelete = editorContext.current.kind === "track_control_panel"
+    || editorContext.current.kind === "mixer";
 
   const menuItems: MenuItemProps[] = [
     {
@@ -96,43 +83,32 @@ export function EditMenu() {
     {
       label: "Cut",
       shortcut: shortcut("edit.cut", "Ctrl+X"),
-      onClick: () => selectedClipId && cutClip(selectedClipId),
-      disabled: !selectedClipId,
+      onClick: () => run("edit.cut"),
+      disabled: unavailable("edit.cut"),
     },
     {
       label: "Copy",
       shortcut: shortcut("edit.copy", "Ctrl+C"),
-      onClick: () => selectedClipId && copyClip(selectedClipId),
-      disabled: !selectedClipId,
+      onClick: () => run("edit.copy"),
+      disabled: unavailable("edit.copy"),
     },
     {
       label: "Paste",
       shortcut: shortcut("edit.paste", "Ctrl+V"),
-      onClick: () => {
-        const clipboard = useDAWStore.getState().clipboard;
-        if (clipboard.clip && selectedTrackIds.length > 0) {
-          pasteClip(selectedTrackIds[0], transport.currentTime);
-        }
-      },
-      disabled: !useDAWStore.getState().clipboard.clip,
+      onClick: () => run("edit.paste"),
+      disabled: unavailable("edit.paste"),
     },
     {
       label: "Duplicate",
       shortcut: shortcut("edit.duplicateClips", "Ctrl+D"),
-      onClick: () => selectedClipId && duplicateClip(selectedClipId),
-      disabled: !selectedClipId,
+      onClick: () => run("edit.duplicateClips"),
+      disabled: unavailable("edit.duplicateClips"),
     },
     {
       label: "Delete",
       shortcut: shortcut(trackSelectionOwnsDelete ? "track.deleteSelected" : "edit.delete", "Delete"),
-      onClick: () => {
-        if (selectedTrackIds.length > 0) {
-          deleteSelectedTracks();
-        } else if (selectedClipId) {
-          deleteClip(selectedClipId);
-        }
-      },
-      disabled: !selectedClipId && selectedTrackIds.length === 0,
+      onClick: () => run(trackSelectionOwnsDelete ? "track.deleteSelected" : "edit.delete"),
+      disabled: unavailable(trackSelectionOwnsDelete ? "track.deleteSelected" : "edit.delete"),
       dividerAfter: true,
     },
     {
@@ -216,7 +192,7 @@ export function EditMenu() {
     {
       label: "Deselect All",
       shortcut: shortcut(trackSelectionOwnsDelete ? "track.deselectAll" : "edit.deselectAll", "Esc"),
-      onClick: deselectAllTracks,
+      onClick: () => run("edit.deselectAll"),
     },
   ];
 

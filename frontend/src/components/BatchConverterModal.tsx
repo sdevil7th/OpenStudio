@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Plus, Play, X } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
@@ -29,6 +29,8 @@ export function BatchConverterModal({
   const [outputDir, setOutputDir] = useState("");
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState("");
+  const running = useRef(false);
+  const stopRequested = useRef(false);
 
   const addFromProject = () => {
     const state = useDAWStore.getState();
@@ -74,24 +76,22 @@ export function BatchConverterModal({
   };
 
   const processAll = async () => {
-    if (jobs.length === 0) return;
+    if (jobs.length === 0 || running.current) return;
+    running.current = true;
+    stopRequested.current = false;
     setProcessing(true);
-
+    try {
     let dir = outputDir;
     if (!dir) {
-      dir = await nativeBridge.showSaveDialog(undefined, "Select output directory");
-      if (!dir) {
-        setProcessing(false);
-        return;
-      }
-      // Use directory part of selected path
-      dir = dir.replace(/[/\\][^/\\]*$/, "");
+      dir = await nativeBridge.browseForFolder("Choose converted audio folder");
+      if (!dir) return;
       setOutputDir(dir);
     }
 
     const ext = outputFormat === "aiff" ? "aiff" : outputFormat;
 
     for (let i = 0; i < jobs.length; i++) {
+      if (stopRequested.current) break;
       const job = jobs[i];
       if (job.status === "done") continue;
 
@@ -104,9 +104,15 @@ export function BatchConverterModal({
 
       // Build output filename
       const baseName = job.fileName.replace(/\.[^.]+$/, "");
-      const outputPath = `${dir}/${baseName}.${ext}`;
-
       try {
+        // Never overwrite an original or another same-named batch item. An
+        // existing file is skipped by finding a bounded, available copy name.
+        let outputPath = `${dir}/${baseName}.${ext}`;
+        let suffix = 1;
+        while (await nativeBridge.fileExists(outputPath)) {
+          if (suffix > 1000) throw new Error("Could not find an unused output name");
+          outputPath = `${dir}/${baseName}-converted-${suffix++}.${ext}`;
+        }
         const success = await nativeBridge.convertAudioFile(
           job.inputPath,
           outputPath,
@@ -134,8 +140,13 @@ export function BatchConverterModal({
       }
     }
 
-    setProcessing(false);
-    setProgress("");
+    } catch (error) {
+      useDAWStore.getState().showToast(`Could not start conversion: ${String(error)}`, "error");
+    } finally {
+      running.current = false;
+      setProcessing(false);
+      setProgress("");
+    }
   };
 
   const pendingCount = jobs.filter(
@@ -146,10 +157,11 @@ export function BatchConverterModal({
   return (
     <Modal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={() => !running.current && onClose()}
       title="Batch File Converter"
+      size="lg"
     >
-      <div className="w-[520px] max-h-[500px] flex flex-col gap-3">
+      <div className="min-w-0 max-h-[70vh] flex flex-col gap-3">
         {/* Output settings */}
         <div className="grid grid-cols-4 gap-2">
           <Select
@@ -157,7 +169,11 @@ export function BatchConverterModal({
             size="xs"
             fullWidth
             value={outputFormat}
-            onChange={(val) => setOutputFormat(String(val))}
+            disabled={processing}
+            onChange={(val) => {
+              setOutputFormat(String(val));
+              if (val === "flac" && outputBitDepth !== 16) setOutputBitDepth(24);
+            }}
             options={[
               { value: "wav", label: "WAV" },
               { value: "aiff", label: "AIFF" },
@@ -169,6 +185,7 @@ export function BatchConverterModal({
             size="xs"
             fullWidth
             value={outputSampleRate}
+            disabled={processing}
             onChange={(val) => setOutputSampleRate(Number(val))}
             options={[
               { value: 0, label: "Keep Original" },
@@ -183,12 +200,13 @@ export function BatchConverterModal({
             size="xs"
             fullWidth
             value={outputBitDepth}
+            disabled={processing}
             onChange={(val) => setOutputBitDepth(Number(val))}
             options={[
-              { value: 0, label: "Keep Original" },
+              ...(outputFormat === "flac" ? [] : [{ value: 0, label: "Keep Original" }]),
               { value: 16, label: "16-bit" },
               { value: 24, label: "24-bit" },
-              { value: 32, label: "32-bit float" },
+              ...(outputFormat === "flac" ? [] : [{ value: 32, label: "32-bit float" }]),
             ]}
           />
           <Select
@@ -196,6 +214,7 @@ export function BatchConverterModal({
             size="xs"
             fullWidth
             value={outputChannels}
+            disabled={processing}
             onChange={(val) => setOutputChannels(Number(val))}
             options={[
               { value: 0, label: "Keep Original" },
@@ -205,16 +224,24 @@ export function BatchConverterModal({
           />
         </div>
 
+        <div className="flex min-w-0 items-center gap-2 text-xs text-daw-text-muted">
+          <Button size="sm" disabled={processing} onClick={() => void nativeBridge.browseForFolder("Choose converted audio folder")
+            .then(path => { if (path) setOutputDir(path); })
+            .catch(error => useDAWStore.getState().showToast(String(error), "error"))}>Output folder</Button>
+          <span className="min-w-0 truncate" title={outputDir}>{outputDir || "Choose when converting"}</span>
+        </div>
+        <p className="text-xs leading-5 text-daw-text-muted">Rate conversion preserves pitch and duration. Existing files are kept; new copies receive a unique name.</p>
+
         {/* Add files */}
         <div className="flex items-center gap-2">
-          <Button variant="default" size="sm" onClick={addFromBrowse}>
+          <Button variant="default" size="sm" disabled={processing} onClick={addFromBrowse}>
             <Plus size={12} /> Browse File
           </Button>
-          <Button variant="default" size="sm" onClick={addFromProject}>
+          <Button variant="default" size="sm" disabled={processing} onClick={addFromProject}>
             <Plus size={12} /> From Project
           </Button>
           {doneCount > 0 && (
-            <Button variant="ghost" size="sm" onClick={clearDone}>
+            <Button variant="ghost" size="sm" disabled={processing} onClick={clearDone}>
               Clear Done
             </Button>
           )}
@@ -250,7 +277,7 @@ export function BatchConverterModal({
                   {job.fileName}
                 </span>
                 {/* Status text */}
-                <span className="shrink-0 text-[8px] text-neutral-500">
+                <span className="max-w-[45%] break-words text-[10px] text-neutral-400" role={job.status === "error" ? "alert" : undefined}>
                   {job.status === "converting"
                     ? "Converting..."
                     : job.status === "done"
@@ -260,10 +287,11 @@ export function BatchConverterModal({
                         : "Pending"}
                 </span>
                 {/* Remove button */}
-                {job.status !== "converting" && (
+                {!processing && (
                   <button
                     className="shrink-0 p-0.5 rounded hover:bg-neutral-700"
                     onClick={() => removeJob(job.id)}
+                    aria-label={`Remove ${job.fileName}`}
                   >
                     <X size={10} className="text-neutral-500" />
                   </button>
@@ -284,7 +312,11 @@ export function BatchConverterModal({
             {jobs.length} files ({pendingCount} pending, {doneCount} done)
           </span>
           <div className="flex gap-2">
-            <Button variant="default" size="sm" onClick={onClose}>
+            {processing && <Button size="sm" onClick={() => {
+              stopRequested.current = true;
+              setProgress("Stopping after the current file finishes...");
+            }}>Stop after current</Button>}
+            <Button variant="default" size="sm" disabled={processing} onClick={onClose}>
               Close
             </Button>
             <Button

@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { MapPin, Square, Trash2, Edit2 } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
@@ -30,13 +31,13 @@ export function RegionMarkerManager() {
   const sortedMarkers = [...markers].sort((a, b) => a.time - b.time);
   const sortedRegions = [...regions].sort((a, b) => a.startTime - b.startTime);
 
-  const handleRenameMarker = (id: string, currentName: string) => {
-    const name = prompt("Rename marker:", currentName);
+  const handleRenameMarker = async (id: string, currentName: string) => {
+    const name = (await appDialogs.prompt("Rename marker:", currentName));
     if (name !== null) updateMarker(id, { name });
   };
 
-  const handleRenameRegion = (id: string, currentName: string) => {
-    const name = prompt("Rename region:", currentName);
+  const handleRenameRegion = async (id: string, currentName: string) => {
+    const name = (await appDialogs.prompt("Rename region:", currentName));
     if (name !== null) updateRegion(id, { name });
   };
 

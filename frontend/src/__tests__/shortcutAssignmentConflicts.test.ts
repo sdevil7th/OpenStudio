@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { useDAWStore } from "../store/useDAWStore";
-import { findShortcutAssignmentConflicts } from "../utils/shortcutAssignmentConflicts";
+import {
+  findCustomKeyboardProfileConflicts,
+  findShortcutAssignmentConflicts,
+} from "../utils/shortcutAssignmentConflicts";
 
 describe("shortcut assignment conflicts", () => {
   const original = {
@@ -19,6 +22,42 @@ describe("shortcut assignment conflicts", () => {
   it("allows the same key in independent editor scopes", () => {
     const conflicts = findShortcutAssignmentConflicts("pitch.tool.select", "V");
     expect(conflicts.some((conflict) => conflict.actionId === "tools.selectTool")).toBe(false);
+  });
+
+  it("reports concrete/global overlap and explains which resolver tier wins", () => {
+    useDAWStore.setState({ keyboardShortcutProfileId: "openstudio", customShortcuts: {} });
+
+    expect(findShortcutAssignmentConflicts("tools.selectTool", "Ctrl+S"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          actionId: "file.save",
+          sharedScopes: ["timeline"],
+          precedence: "target_precedes",
+        }),
+      ]));
+    expect(findShortcutAssignmentConflicts("file.save", "B"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          actionId: "tools.splitTool",
+          sharedScopes: ["timeline"],
+          precedence: "existing_precedes",
+        }),
+      ]));
+  });
+
+  it("reports contextual overlap without conflating unrelated concrete editors", () => {
+    useDAWStore.setState({ keyboardShortcutProfileId: "openstudio", customShortcuts: {} });
+
+    expect(findShortcutAssignmentConflicts("tools.selectTool", "Ctrl+Z"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          actionId: "edit.undo",
+          sharedScopes: ["timeline"],
+          precedence: "target_precedes",
+        }),
+      ]));
+    expect(findShortcutAssignmentConflicts("pitch.tool.select", "B")
+      .some((conflict) => conflict.actionId === "tools.splitTool")).toBe(false);
   });
 
   it("includes active-profile scope additions in conflict reporting", () => {
@@ -90,5 +129,42 @@ describe("shortcut assignment conflicts", () => {
     const conflict = findShortcutAssignmentConflicts("tools.selectTool", "B", "common")
       .find((candidate) => candidate.actionId === "tools.splitTool");
     expect(conflict?.platforms).toEqual(["macos", "linux"]);
+  });
+
+  it("validates imported overrides against their base profile before activation", () => {
+    const conflicts = findCustomKeyboardProfileConflicts({
+      baseProfileId: "openstudio",
+      bindings: {
+        "file.save": { common: ["B"] },
+      },
+    });
+
+    expect(conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetActionId: "file.save",
+        actionId: "tools.splitTool",
+        sharedScopes: ["timeline"],
+        precedence: "existing_precedes",
+        platforms: ["macos", "windows", "linux", "other"],
+      }),
+    ]));
+  });
+
+  it("includes imported base-profile scope additions in collision checks", () => {
+    const conflicts = findCustomKeyboardProfileConflicts({
+      baseProfileId: "garageband",
+      bindings: {
+        "tools.selectTool": { common: ["M"] },
+      },
+    });
+
+    expect(conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        targetActionId: "tools.selectTool",
+        actionId: "track.toggleSelectedMute",
+        sharedScopes: expect.arrayContaining(["timeline"]),
+        precedence: "same_precedence",
+      }),
+    ]));
   });
 });

@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { useState } from "react";
 import { Plus, Trash2, GripVertical } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
@@ -25,8 +26,8 @@ export function ToolbarEditor({ isOpen, onClose }: ToolbarEditorProps) {
 
   const selectedToolbar = customToolbars.find((t) => t.id === selectedToolbarId);
 
-  const handleAddToolbar = () => {
-    const name = prompt("Toolbar name:", "My Toolbar");
+  const handleAddToolbar = async () => {
+    const name = (await appDialogs.prompt("Toolbar name:", "My Toolbar"));
     if (name) {
       useDAWStore.getState().addCustomToolbar(name);
     }

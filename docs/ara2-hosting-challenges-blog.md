@@ -182,4 +182,4 @@ After all of this, our ARA2 hosting does the following:
 
 ---
 
-*We're building Studio13 — a hybrid DAW with JUCE C++ audio backend and React/TypeScript frontend. If you're working on ARA2 hosting and hitting similar issues, I hope this saves you some of the pain we went through.*
+*We're building OpenStudio — a hybrid DAW with JUCE C++ audio backend and React/TypeScript frontend. If you're working on ARA2 hosting and hitting similar issues, I hope this saves you some of the pain we went through.*

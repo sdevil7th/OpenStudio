@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
+    [string]$NotesFile = "",
+
     [Parameter(Mandatory = $false)]
     [string]$BuildDir = "build-release-windows",
 
@@ -50,6 +52,10 @@ function Test-IsElevated {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$notesArguments = @((Join-Path $repoRoot 'tools/validate-release-notes.py'), '--version', $Version)
+if ($NotesFile) { $notesArguments += @('--notes-file', $NotesFile) }
+& python @notesArguments
+if ($LASTEXITCODE -ne 0) { throw 'Release notes must pass before the Windows RC build.' }
 $frontendDir = Join-Path $repoRoot "frontend"
 $resolvedBuildDir = Join-Path $repoRoot $BuildDir
 $resolvedWindowsOutputDir = Join-Path $repoRoot $WindowsOutputDir
@@ -263,6 +269,7 @@ Invoke-Step "Running startup shell self-test on release bundle" {
 Invoke-Step "Packaging local Windows installer" {
     & (Join-Path $repoRoot "tools/package-windows-release.ps1") `
         -Version $Version `
+        -NotesFile $NotesFile `
         -SourceDir $windowsBundleDir `
         -OutputDir $WindowsOutputDir
 }

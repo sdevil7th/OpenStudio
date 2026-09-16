@@ -193,7 +193,8 @@ function Validate-PlatformEntry {
     Assert-True (-not [string]::IsNullOrWhiteSpace($PlatformNode.fileName)) "$PlatformName manifest entry is missing fileName."
     Assert-True ([int64]$PlatformNode.size -gt 0) "$PlatformName manifest entry must include a positive size."
     if (-not [string]::IsNullOrWhiteSpace($PlatformNode.minimumSystemVersion)) {
-        Assert-True ($PlatformName -eq "macos") "$PlatformName minimumSystemVersion is only expected for macOS assets."
+        Assert-True ($PlatformName -in @("macos", "windows")) "$PlatformName minimumSystemVersion is only supported for Windows/macOS application assets."
+        Assert-True ($PlatformNode.minimumSystemVersion -match '^\d+(\.\d+){0,3}$') "$PlatformName minimumSystemVersion must be numeric."
     }
 
     $manifestHash = $PlatformNode.sha256.ToLowerInvariant()

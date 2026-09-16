@@ -301,7 +301,7 @@ async function launchBrowserIfNeeded(args) {
   if (await isCdpReachable(args.cdpUrl)) return null;
   const browserPath = await findBrowserPath(args.edgePath);
   const cdpPort = new URL(args.cdpUrl).port || "9233";
-  const profile = path.join(process.env.TEMP || ".", `studio13-nam-rack-qa-${Date.now()}`);
+  const profile = path.join(process.env.TEMP || ".", `openstudio-nam-rack-qa-${Date.now()}`);
   const child = spawn(browserPath, [
     "--headless=new",
     `--remote-debugging-port=${cdpPort}`,
@@ -1646,7 +1646,7 @@ async function qualityChecks(cdp, scenarioName) {
           'amp-head': { x: 24, y: -2, w: 720, h: 345 },
         },
         cab: {
-          'mic-panel': { x: 54, y: -30, w: 660, h: 402 },
+          cabinet: { x: 24, y: -67, w: 720, h: 475 },
         },
         eq: {
           'eq-rack': { x: 24, y: 50, w: 720, h: 240 },
@@ -2267,7 +2267,7 @@ async function qualityChecks(cdp, scenarioName) {
       const rackExpectedBodyIdsBySection = {
         pre: ['stompbox-body-blue-wide', 'stompbox-body-olive', 'stompbox-body-white-wide', 'stompbox-body-red-wide', 'stompbox-body-stone'],
         amp: ['amp-head-body-v5'],
-        cab: ['cab-room-integrated-body'],
+        cab: ['cabinet-body'],
         eq: ['graphic-eq-body-v6'],
         post: ['wide-pedal-body-copper-tall', 'wide-pedal-body-dark-tall', 'wide-pedal-body-navy-tall'],
       };

@@ -176,7 +176,7 @@ describe("NAM Rack approved-surface implementation contract", () => {
   });
 
   it("keeps EQ Boost state introduced in V16 while migrating its bands to V19", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
 
     const v15 = migrateLegacyNAMRackPresetDspState({
       values: {
@@ -206,7 +206,7 @@ describe("NAM Rack approved-surface implementation contract", () => {
       preEqHPFHz: 0,
       preEqLPFHz: 24000,
     });
-    expect(v15.dspState.namEffectsDspVersion).toBe(19);
+    expect(v15.dspState.namEffectsDspVersion).toBe(20);
     expect(v15.values).not.toHaveProperty("preEq100Db");
 
     const v16 = migrateLegacyNAMRackPresetDspState({

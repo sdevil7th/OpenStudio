@@ -21,6 +21,17 @@ type EnsureResult = {
   message?: string;
 };
 
+// Only an invalidation signal crosses realms; native secure storage owns tokens.
+const sessionChannel = typeof window !== "undefined" && typeof BroadcastChannel !== "undefined"
+  ? new BroadcastChannel("openstudio-tone3000-session") : null;
+const announceSessionChange = () => sessionChannel?.postMessage({ kind: "session-changed" });
+if (sessionChannel) sessionChannel.onmessage = event => {
+  if (event.data?.kind === "session-changed") void refreshTONE3000SessionStatus().catch(() => undefined);
+};
+if (typeof window !== "undefined") window.addEventListener("focus", () => {
+  if (state.bootstrapped && !state.busy) void refreshTONE3000SessionStatus().catch(() => undefined);
+});
+
 const listeners = new Set<() => void>();
 
 let state: TONE3000SessionState = {
@@ -152,6 +163,7 @@ export async function refreshTONE3000Session(clientId = "") {
     }
 
     setState({ status: latest, bootstrapped: true, lastError: "" });
+    announceSessionChange();
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : "TONE3000 token refresh failed.";
@@ -168,6 +180,7 @@ export async function startTONE3000InteractiveAuth(options: TONE3000AuthFlowOpti
     const result: TONE3000AuthFlowResult = await nativeBridge.startTONE3000AuthFlow(options);
     if (result.success || result.status === "connected") {
       await fetchStatus().catch(() => null);
+      announceSessionChange();
     } else {
       setState({ lastError: result.error || "" });
     }
@@ -187,6 +200,7 @@ export async function completeTONE3000ManualAuth(code: string, stateValue = "", 
     const result = await nativeBridge.exchangeTONE3000OAuthCode(code, stateValue, clientId, redirectUri);
     if (result.success) {
       await fetchStatus().catch(() => null);
+      announceSessionChange();
     } else {
       setState({ lastError: result.error || "" });
     }
@@ -205,6 +219,7 @@ export async function clearTONE3000Session() {
   try {
     const status = await nativeBridge.clearTONE3000Auth();
     setState({ status, bootstrapped: true, lastError: status.error || "" });
+    announceSessionChange();
     return status;
   } catch (error) {
     const message = error instanceof Error ? error.message : "TONE3000 session could not be cleared.";

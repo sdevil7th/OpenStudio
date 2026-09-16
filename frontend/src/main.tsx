@@ -1,3 +1,4 @@
+import { AppDialogHost } from "./components/AppDialogHost";
 import React, { useLayoutEffect, useRef } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
@@ -391,6 +392,7 @@ async function bootstrap() {
     >
       <StartupReadySentinel />
       <RootComponent />
+      <AppDialogHost />
     </ErrorBoundary>
   );
 

@@ -6,9 +6,18 @@
 #endif
 
 #include "MainComponent.h"
+#include "WindowsPackage.h"
+#include "UpdateInstaller.h"
+#include "CrashDiagnostics.h"
+#include "ProjectFileStore.h"
 #include "ApplicationLaunchState.h"
 #include "FFmpegLocator.h"
+#include "AudioFileConversion.h"
+#include "RecordingRecovery.h"
+#include "JsonEnvelope.h"
 #include "NAMModelSafety.h"
+#include "OwnedChildProcess.h"
+#include "RecordingWriterSafety.h"
 #include <array>
 #include <atomic>
 #include <set>
@@ -802,6 +811,11 @@ juce::String getMimeTypeForFrontendFile(const juce::File& file)
 #if JUCE_WINDOWS
 juce::String detectWebView2RuntimeVersion()
 {
+    if (WindowsPackage::isStoreManaged())
+    {
+        const auto runtime = WindowsPackage::fixedWebViewDirectory().getChildFile("msedgewebview2.exe");
+        return runtime.existsAsFile() ? runtime.getVersion() : juce::String();
+    }
     const juce::Array<juce::File> roots {
         juce::File("C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application"),
         juce::File("C:\\Program Files\\Microsoft\\EdgeWebView\\Application")
@@ -830,6 +844,12 @@ juce::String detectWebView2RuntimeVersion()
 
 bool isVCRedistInstalled(juce::String* detectedVersion = nullptr)
 {
+    if (WindowsPackage::isStoreManaged())
+    {
+        const auto runtime = getExecutableDirectory().getChildFile("vcruntime140.dll");
+        if (detectedVersion != nullptr) *detectedVersion = runtime.getVersion();
+        return runtime.existsAsFile() && getExecutableDirectory().getChildFile("msvcp140.dll").existsAsFile();
+    }
     if (detectedVersion != nullptr)
         detectedVersion->clear();
 
@@ -934,17 +954,17 @@ juce::String getDefaultFileFilter(const juce::String& defaultPath, const juce::S
 
     const auto lowerPath = defaultPath.toLowerCase();
 
-    if (lowerPath.endsWith(".ospreset") || lowerPath.endsWith(".s13preset") || lowerPath.endsWith(".s13nampreset"))
-        return "*.ospreset;*.s13preset;*.s13nampreset";
+    if (lowerPath.endsWith(".ospreset"))
+        return "*.ospreset";
 
-    if (lowerPath.endsWith(".ostheme") || lowerPath.endsWith(".s13theme"))
-        return "*.ostheme;*.s13theme;*.json";
+    if (lowerPath.endsWith(".ostheme"))
+        return "*.ostheme;*.json";
 
     if (lowerPath.endsWith(".mid") || lowerPath.endsWith(".midi"))
         return "*.mid;*.midi";
 
     if (projectDialog)
-        return "*.osproj;*.s13";
+        return "*.osproj";
 
     return "*";
 }
@@ -953,9 +973,6 @@ juce::String getPreferredExtension(const juce::String& defaultPath, const juce::
 {
     const auto lowerPath = defaultPath.toLowerCase();
     const auto lowerFilter = filter.toLowerCase();
-
-    if (lowerPath.endsWith(".s13nampreset") || lowerFilter.contains(".s13nampreset"))
-        return ".s13nampreset";
 
     if (lowerPath.endsWith(".ospreset") || lowerFilter.contains(".ospreset"))
         return ".ospreset";
@@ -1243,12 +1260,13 @@ juce::InterProcessLock tone3000TokenRefreshProcessLock(
 juce::InterProcessLock tone3000AuthFlowProcessLock(
     "OpenStudio.TONE3000.AuthFlow.v1");
 thread_local const std::atomic<bool>* activeTone3000TaskCancellation = nullptr;
+thread_local ToneSearchRequest* activeToneSearchRequest = nullptr;
 
 bool isTone3000TaskCancelled() noexcept
 {
-    return activeTone3000TaskCancellation != nullptr
-        && activeTone3000TaskCancellation->load(
-            std::memory_order_acquire);
+    return (activeTone3000TaskCancellation != nullptr
+        && activeTone3000TaskCancellation->load(std::memory_order_acquire))
+        || (activeToneSearchRequest != nullptr && activeToneSearchRequest->cancelled.load());
 }
 
 bool sleepForTone3000Task(int milliseconds)
@@ -2646,13 +2664,13 @@ juce::var getTone3000Json(juce::URL url, const juce::String& accessToken, const 
     headers << "Authorization: Bearer " << accessToken << "\r\n"
             << "Content-Type: application/json\r\n";
 
-    auto input = url.createInputStream(
-        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
-            .withExtraHeaders(headers)
-            .withConnectionTimeoutMs(30000)
-            .withNumRedirectsToFollow(2)
-            .withStatusCode(&statusCode)
-            .withResponseHeaders(&responseHeaders));
+    auto input = std::make_shared<juce::WebInputStream>(url, false);
+    input->withExtraHeaders(headers).withConnectionTimeout(30000).withNumRedirectsToFollow(2);
+    if (activeToneSearchRequest != nullptr) activeToneSearchRequest->attach(input);
+    const bool connected = input->connect(nullptr);
+    if (isTone3000TaskCancelled()) return makeTone3000Error(label + " was canceled");
+    statusCode = input->getStatusCode();
+    responseHeaders = input->getResponseHeaders();
 
     const auto attachRateLimitMetadata = [&responseHeaders, &statusCode]
         (juce::var result)
@@ -2680,7 +2698,7 @@ juce::var getTone3000Json(juce::URL url, const juce::String& accessToken, const 
         return result;
     };
 
-    if (input == nullptr)
+    if (!connected)
         return attachRateLimitMetadata(
             makeTone3000Error(label + " failed", statusCode));
 
@@ -8620,8 +8638,8 @@ juce::var MainComponent::discardNAMPreviewIfUnused(juce::var recordPayload,
     const int fxIndex = address->hasProperty("fxIndex")
         ? static_cast<int>(address->getProperty("fxIndex"))
         : -1;
-    const bool supportedChain = chainType == "input" || chainType == "track" || chainType == "master";
-    if (! supportedChain || fxIndex < 0 || (chainType != "master" && trackId.isEmpty()))
+    const bool supportedChain = chainType == "input" || chainType == "track" || chainType == "master" || chainType == "monitor";
+    if (! supportedChain || fxIndex < 0 || (chainType != "master" && chainType != "monitor" && trackId.isEmpty()))
     {
         return makeNAMPreviewRetentionResult(
             "NAM preview discard received an invalid or incomplete target rack address");
@@ -8861,11 +8879,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                    // aggregate browser timeout that can expire while a healthy scan is still running.
                                    // Offline renders are duration-dependent and continue on a native worker thread;
                                    // a browser deadline would report failure while the valid output is still being written.
-                                   // Use a 5-minute timeout for file choosers and AI generation startup, 15 seconds for everything else.
+                                   // Update deadlines include native preparation/download limits and verification time.
                                     const DIALOG_FUNCTIONS = ['showRenderSaveDialog', 'showSaveDialog', 'showOpenDialog', 'showOpenFileDialog', 'showDirectoryDialog', 'openAudioDeviceControlPanel'];
-                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'refreshNAMCatalog'];
+                                   const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'refreshNAMCatalog', 'installDownloadedUpdate'];
                                    const NO_TIMEOUT_FUNCTIONS = ['scanForPlugins', 'renderProject', 'renderProjectWithDither'];
-                                   const timeoutMs = (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
+                                    const timeoutMs = name === 'getAIGenerationPreflight' ? 45000
+                                       : name === 'downloadUpdate' ? 900000
+                                       : name === 'checkForUpdates' ? 60000
+                                       : (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
                                    const timeout = NO_TIMEOUT_FUNCTIONS.indexOf(name) >= 0
                                        ? null
                                        : setTimeout(() => {
@@ -9049,8 +9070,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        if (args.size() == 2) {
                            juce::String trackId = args[0].toString();
                            bool enabled = args[1];
-                           audioEngine.setTrackInputMonitoring(trackId, enabled);
-                           completion(true);
+                           audioEngine.setTrackInputMonitoringAsync(trackId, enabled, std::move(completion));
                        } else {
                            completion(false);
                        }
@@ -9132,8 +9152,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        if (args.size() == 1) {
                            bool recording = args[0];
                            OPENSTUDIO_LOG_AUDIO_BRIDGE("setTransportRecording recording=" + juce::String(recording ? "true" : "false"));
-                           audioEngine.setTransportRecording(recording);
-                           completion(true);
+                           audioEngine.setTransportRecordingAsync(recording, std::move(completion));
                        } else {
                            completion(false);
                        }
@@ -9383,6 +9402,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        juce::ignoreUnused(args);
                        completion(audioEngine.getAvailablePlugins());
                    })
+                   .withNativeFunction ("setIsolatedPluginHosting", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion(args.size() == 2 && args[0].isString() && args[1].isBool()
+                           && audioEngine.setIsolatedPluginHosting(args[0].toString(), static_cast<bool>(args[1])));
+                   })
                    .withNativeFunction ("addTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
@@ -9613,11 +9636,25 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("setBuiltInPluginParam", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 5 && args[0].isString()) {
-                            completion(audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
-                                                                         args[3].toString(), static_cast<float>(static_cast<double>(args[4]))));
+                            const bool applied = audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
+                                                                         args[3].toString(), static_cast<float>(static_cast<double>(args[4])));
+                            if (applied)
+                                broadcastEventToAll("pluginParameterEdit", audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
+                                    static_cast<int>(args[2]), args[3].toString(), "value"));
+                            completion(applied);
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("builtInPluginGesture", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() < 5) { completion(false); return; }
+                        const auto event = audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
+                            static_cast<int>(args[2]), args[3].toString(), static_cast<bool>(args[4]) ? "begin" : "end");
+                        const auto parameter = event.getProperty("param", "").toString();
+                        if (parameter.isNotEmpty() && static_cast<bool>(args[4]))
+                            audioEngine.beginTouchAutomation(args[0].toString(), parameter);
+                        broadcastEventToAll("pluginParameterEdit", event);
+                        completion(true);
                     })
                     .withNativeFunction ("setBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 4 && args[0].isString()) {
@@ -9765,68 +9802,68 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                   // S13FX (JSFX) Management
-                   .withNativeFunction ("addTrackS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   // JSFX (JSFX) Management
+                   .withNativeFunction ("addTrackJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String scriptPath = args[1].toString();
                            bool isInputFX = args.size() >= 3 ? (bool)args[2] : false;
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                            invalidateNAMRackTopology();
-                           bool success = audioEngine.addTrackS13FX(trackId, scriptPath, isInputFX);
+                           bool success = audioEngine.addTrackJSFX(trackId, scriptPath, isInputFX);
                            completion(success);
                        } else {
                            completion(false);
                        }
                    })
-                   .withNativeFunction ("addMasterS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("addMasterJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 1) {
                            juce::String scriptPath = args[0].toString();
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                            invalidateNAMRackTopology();
-                           bool success = audioEngine.addMasterS13FX(scriptPath);
+                           bool success = audioEngine.addMasterJSFX(scriptPath);
                            completion(success);
                        } else {
                            completion(false);
                        }
                    })
-                   .withNativeFunction ("getS13FXSliders", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("getJSFXSliders", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 3) {
                            juce::String trackId = args[0].toString();
                            int fxIndex = args[1];
                            bool isInputFX = args[2];
-                           completion(audioEngine.getS13FXSliders(trackId, fxIndex, isInputFX));
+                           completion(audioEngine.getJSFXSliders(trackId, fxIndex, isInputFX));
                        } else {
                            completion(juce::Array<juce::var>());
                        }
                    })
-                   .withNativeFunction ("setS13FXSlider", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("setJSFXSlider", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 5) {
                            juce::String trackId = args[0].toString();
                            int fxIndex = args[1];
                            bool isInputFX = args[2];
                            int sliderIndex = args[3];
                            double value = args[4];
-                           bool success = audioEngine.setS13FXSlider(trackId, fxIndex, isInputFX, sliderIndex, value);
+                           bool success = audioEngine.setJSFXSlider(trackId, fxIndex, isInputFX, sliderIndex, value);
                            completion(success);
                        } else {
                            completion(false);
                        }
                    })
-                   .withNativeFunction ("reloadS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("reloadJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 3) {
                            juce::String trackId = args[0].toString();
                            int fxIndex = args[1];
                            bool isInputFX = args[2];
-                           bool success = audioEngine.reloadS13FX(trackId, fxIndex, isInputFX);
+                           bool success = audioEngine.reloadJSFX(trackId, fxIndex, isInputFX);
                            completion(success);
                        } else {
                            completion(false);
                        }
                    })
-                   .withNativeFunction ("getAvailableS13FX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("getAvailableJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::ignoreUnused(args);
-                       completion(audioEngine.getAvailableS13FX());
+                       completion(audioEngine.getAvailableJSFX());
                    })
                    .withNativeFunction ("openUserEffectsFolder", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::ignoreUnused(args);
@@ -9835,7 +9872,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        userDir.revealToUser();
                        completion(true);
                    })
-                   // Lua Scripting (S13Script)
+                   // Lua Scripting (OpenStudioScript)
                    .withNativeFunction ("runScript", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 1) {
                            juce::String scriptPath = args[0].toString();
@@ -9898,6 +9935,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        completion(audioEngine.getTempo());
                    })
                     // Metronome & Time Signature (Phase 3)
+                    .withNativeFunction ("setMetronomePracticeEnabled", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 1 && args[0].isBool()
+                            && audioEngine.setMetronomePracticeEnabled(static_cast<bool>(args[0])));
+                    })
                     .withNativeFunction ("setMetronomeEnabled", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 1 && args[0].isBool()) {
                             audioEngine.setMetronomeEnabled(args[0]);
@@ -10411,18 +10452,30 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(status);
                         });
                     })
-                    .withNativeFunction ("downloadAndInstallUpdate", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        const auto downloadUrl = args.size() > 0 ? args[0].toString() : juce::String();
-                        const auto version = args.size() > 1 ? args[1].toString() : juce::String();
-                        const auto expectedSha256 = args.size() > 2 ? args[2].toString() : juce::String();
-                        const auto releasePageUrl = args.size() > 3 ? args[3].toString() : juce::String();
-                        const auto installerArguments = args.size() > 4 ? args[4].toString() : juce::String();
-                        const auto expectedSize = args.size() > 5 ? static_cast<juce::int64>(args[5]) : 0;
-
-                        appUpdater.downloadAndInstallUpdate(downloadUrl, version, expectedSha256, releasePageUrl, installerArguments, expectedSize, [completion](const juce::var& status)
+                    .withNativeFunction ("getUpdateStatus", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        completion(appUpdater.getLastStatus());
+                    })
+                    .withNativeFunction ("downloadUpdate", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        appUpdater.downloadUpdate(std::move(completion));
+                    })
+                    .withNativeFunction ("cancelUpdateDownload", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        appUpdater.cancelDownload();
+                        completion(true);
+                    })
+                    .withNativeFunction ("installDownloadedUpdate", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        if (audioEngine.isTransportPlaying())
                         {
-                            completion(status);
-                        });
+                            auto* status = new juce::DynamicObject();
+                            status->setProperty("status", "error");
+                            status->setProperty("message", "Stop playback and recording before installing an update.");
+                            completion(juce::var(status));
+                            return;
+                        }
+                        appUpdater.installDownloadedUpdate(std::move(completion));
                     })
                     .withNativeFunction ("openExternalURL", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 0 || ! args[0].isString())
@@ -10432,7 +10485,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
 
                         const auto url = args[0].toString().trim();
-                        if (! isAllowedExternalBrowserURL(url))
+                        const bool storeUpdates = WindowsPackage::isStoreManaged()
+                            && url == "ms-windows-store://downloadsandupdates";
+                        if (! storeUpdates && ! isAllowedExternalBrowserURL(url))
                         {
                             completion(false);
                             return;
@@ -10589,17 +10644,42 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             },
                             std::move(completion));
                     })
+                    .withNativeFunction ("cancelTONE3000Search", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 2)
+                        {
+                            const auto found = toneSearchRequests.find(args[0].toString());
+                            if (found != toneSearchRequests.end() && found->second->id == args[1].toString()) found->second->cancel();
+                        }
+                        completion(true);
+                    })
                     .withNativeFunction ("searchTONE3000NAM", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const auto options = args.size() > 0 ? args[0] : juce::var();
-                        runTone3000NativeTask(
-                            [options]
-                            {
-                            juce::Logger::writeToLog("TONE3000 bridge: searchNAM started");
-                            auto result = searchTone3000NAM(options);
-                            juce::Logger::writeToLog("TONE3000 bridge: searchNAM finished");
-                            return result;
-                            },
-                            std::move(completion));
+                        const auto owner = options.getProperty("requestOwner", "default").toString().substring(0, 128);
+                        const auto requestId = options.getProperty("requestId", "default").toString().substring(0, 128);
+                        const auto previous = toneSearchRequests.find(owner);
+                        if (previous != toneSearchRequests.end()) previous->second->cancel();
+                        if (toneSearchRequests.size() >= 64 && previous == toneSearchRequests.end())
+                        {
+                            completion(makeTone3000Error("Too many active searches. Close an unused library and retry."));
+                            return;
+                        }
+                        auto request = std::make_shared<ToneSearchRequest>(requestId);
+                        toneSearchRequests[owner] = request;
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        runTone3000NativeTask([options, request] {
+                            struct Scope {
+                                ToneSearchRequest* previous = activeToneSearchRequest;
+                                explicit Scope(ToneSearchRequest* value) { activeToneSearchRequest = value; }
+                                ~Scope() { activeToneSearchRequest = previous; }
+                            } scope(request.get());
+                            if (request->cancelled.load()) return makeTone3000Error("Search was canceled");
+                            return searchTone3000NAM(options);
+                        }, [safeThis, owner, request, completion = std::move(completion)](juce::var result) mutable {
+                            if (safeThis == nullptr) return;
+                            const auto current = safeThis->toneSearchRequests.find(owner);
+                            if (current != safeThis->toneSearchRequests.end() && current->second == request) safeThis->toneSearchRequests.erase(current);
+                            completion(result);
+                        });
                     })
                     .withNativeFunction ("runTONE3000AuthenticatedQA", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
@@ -10741,6 +10821,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         const int fxIndex = static_cast<int>(args[2]);
                         const auto slot = args[3].toString().trim().toLowerCase();
                         const auto localPath = args[4].toString();
+                        const auto declaredCaptureType = args.size() > 5
+                            ? args[5].toString().trim()
+                            : juce::String("unknown");
                         if (slot != "pedal" && slot != "amp" && slot != "cab")
                         {
                             completion(false);
@@ -10754,7 +10837,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             trackId, chainType, fxIndex, mutationSlots, mutationRequests);
                         const auto requestGeneration = mutationRequests.front().second;
                         juce::Component::SafePointer<MainComponent> safeThis(this);
-                        builtInStateMutationPool.addJob([safeThis, trackId, chainType, fxIndex, slot, localPath, requestGeneration, topologyGeneration, completion]() mutable {
+                        builtInStateMutationPool.addJob([safeThis, trackId, chainType, fxIndex, slot, localPath, declaredCaptureType, requestGeneration, topologyGeneration, completion]() mutable {
                             if (safeThis == nullptr)
                                 return;
 
@@ -10787,6 +10870,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 if (localPath.isNotEmpty())
                                 {
                                     state->setProperty("pedalModelPath", localPath);
+                                    state->setProperty(
+                                        "pedalDeclaredCaptureType",
+                                        declaredCaptureType);
                                     // A fresh user-selected NAM should publish its
                                     // highest-fidelity graph. Explicit preset/project
                                     // recalls still carry and preserve their saved size.
@@ -10807,6 +10893,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 if (localPath.isNotEmpty())
                                 {
                                     state->setProperty("ampModelPath", localPath);
+                                    state->setProperty(
+                                        "ampDeclaredCaptureType",
+                                        declaredCaptureType);
                                     state->setProperty("ampModelSize", 1.0);
                                 }
                                 else
@@ -10924,10 +11013,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 const auto lowerPath = path.toLowerCase();
 
                                 if (!lowerPath.endsWith(preferredExtension)
-                                    && !lowerPath.endsWith(".s13")
-                                    && !lowerPath.endsWith(".s13preset")
-                                    && !lowerPath.endsWith(".s13nampreset")
-                                    && !lowerPath.endsWith(".s13theme"))
+                                    && !lowerPath.endsWith(".osproj")
+                                    && !lowerPath.endsWith(".ospreset")
+                                    && !lowerPath.endsWith(".ostheme"))
                                 {
                                     path += preferredExtension;
                                 }
@@ -10964,44 +11052,97 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             }
                         });
                     })
-                    .withNativeFunction ("saveProjectToFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("saveProjectToFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Save project JSON to file
                         // Args: [filePath, jsonContent]
-                        if (args.size() == 2 && args[0].isString() && args[1].isString()) {
+                        if (args.size() >= 2 && args[0].isString() && args[1].isString()) {
                             const juce::String filePath = args[0].toString();
                             const juce::String jsonContent = args[1].toString();
-                            std::thread(
-                                [filePath, jsonContent, completion]() mutable
+                            const bool recoveryOnly = args.size() > 2 && static_cast<bool>(args[2]);
+                            const int maxVersions = args.size() > 3 ? static_cast<int>(args[3]) : 3;
+                            const auto documentId = args.size() > 4 ? args[4].toString() : juce::String();
+                            if ((!recoveryOnly || documentId.isEmpty()) && !juce::File::isAbsolutePath(filePath))
+                            { completion(false); return; }
+                            auto* recovery = &projectRecovery; // Pool drains before this member dies.
+                            const juce::Component::SafePointer<MainComponent> safeThis(this);
+                            projectFilePool.addJob(
+                                [filePath, jsonContent, completion, recoveryOnly, maxVersions, safeThis, documentId, recovery]() mutable
                                 {
                                    #if JUCE_WINDOWS
                                     ::SetThreadPriority(
                                         ::GetCurrentThread(),
                                         THREAD_PRIORITY_BELOW_NORMAL);
                                    #endif
-                                    const bool success =
-                                        juce::File(filePath)
-                                            .replaceWithText(
-                                                jsonContent);
+                                    const auto result = recoveryOnly && documentId.isNotEmpty()
+                                        ? recovery->write(documentId, filePath, jsonContent, maxVersions)
+                                        : ProjectFileStore::save(juce::File(filePath), jsonContent, recoveryOnly, maxVersions);
+                                    const bool success = result.wasOk();
+                                    if (!success) OpenStudioCrashDiagnostics::recordBreadcrumb("project_save_failed", result.getErrorMessage());
                                     juce::MessageManager::callAsync(
-                                        [completion, success]()
+                                        [completion, success, safeThis]()
                                         {
-                                            completion(success);
+                                            if (safeThis && !safeThis->secondaryWindowClosing) completion(success);
                                         });
-                                })
-                                .detach();
+                                });
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("projectRecovery", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (!isMainWindow() || args.isEmpty()) { completion(juce::Array<juce::var>()); return; }
+                        const auto action = args[0].toString();
+                        const auto id = args.size() > 1 ? args[1].toString() : juce::String();
+                        const juce::Component::SafePointer<MainComponent> safeThis(this);
+                        auto* recovery = &projectRecovery;
+                        projectFilePool.addJob([recovery, action, id, safeThis, completion]() {
+                            juce::var result;
+                            if (action == "discover") result = recovery->discover();
+                            else if (action == "dismiss") result = recovery->dismiss(id).wasOk();
+                            else if (action == "retire") result = recovery->retireDocument(id).wasOk();
+                            else result = false;
+                            juce::MessageManager::callAsync([safeThis, completion, result]() {
+                                if (safeThis && !safeThis->secondaryWindowClosing) completion(result);
+                            });
+                        });
+                    })
+                    .withNativeFunction ("workRecovery", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (!isMainWindow() || args.isEmpty()) { completion(false); return; }
+                        const auto action = args[0].toString();
+                        const auto id = args.size() > 1 ? args[1].toString() : juce::String();
+                        const auto payload = args.size() > 2 ? args[2] : juce::var();
+                        auto* journal = &workRecovery; // mediaOperations joins before member retirement.
+                        mediaOperations.addJob([journal, action, id, payload, alive = mediaOperations.token(),
+                            completion = mediaOperations.guardCompletion(std::move(completion))]() {
+                            juce::var result;
+                            if (action == "discover") {
+                                juce::Array<juce::var> entries;
+                                const auto found = RecoveryJournal::discover();
+                                if (const auto* array = found.getArray()) for (const auto& entry : *array) {
+                                    if (!MessageThreadLifetime::accepts(alive)) break;
+                                    entries.add(entry.getProperty("kind", "").toString() == "recording"
+                                        ? RecordingRecovery::inspect(entry) : entry);
+                                }
+                                result = entries;
+                            }
+                            else if (action == "repair") result = RecordingRecovery::repair(id, [alive] { return MessageThreadLifetime::accepts(alive); });
+                            else if (action == "dismiss") result = RecoveryJournal::dismiss(id);
+                            else if (action == "createAI") result = journal->create("ai", payload);
+                            else if (action == "updateAI") result = journal->update(id, payload);
+                            else result = false;
+                            juce::MessageManager::callAsync([completion, result] { (*completion)(result); });
+                        });
                     })
                     .withNativeFunction ("loadProjectFromFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Load project JSON from file
                         // Args: [filePath]
                         if (args.size() == 1 && args[0].isString()) {
                             juce::String filePath = args[0].toString();
+                            if (!juce::File::isAbsolutePath(filePath)) { completion(""); return; }
                             juce::File file(filePath);
                             
-                            if (file.existsAsFile()) {
+                            if (file.existsAsFile() && file.getSize() <= 256 * 1024 * 1024) {
                                 juce::String jsonContent = file.loadFileAsString();
+                                if (!hasBoundedJsonEnvelope(jsonContent)) { completion(""); return; }
                                 juce::Logger::writeToLog("Project loaded from: " + filePath + " (" + juce::String(jsonContent.length()) + " chars)");
                                 completion(jsonContent);
                             } else {
@@ -11268,7 +11409,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                         completion(false);
                     })
-                    .withNativeFunction ("importMediaFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("importMediaFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.isEmpty() || !args[0].isString() || !juce::File::isAbsolutePath(args[0].toString()))
+                        { completion(juce::var()); return; }
+                        mediaOperations.addJob([args, alive = mediaOperations.token(),
+                            reply = mediaOperations.guardCompletion(std::move(completion))] {
+                        const auto finish = [reply](juce::var value) {
+                            juce::MessageManager::callAsync([reply, value] { (*reply)(value); });
+                        };
                         // Read audio file metadata (duration, sample rate, channels, format).
                         // For video files that JUCE can't read directly, attempts FFmpeg extraction.
                         // Args: [filePath]
@@ -11278,7 +11426,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                             if (!audioFile.existsAsFile()) {
                                 juce::Logger::writeToLog("importMediaFile: File not found: " + filePath);
-                                completion(juce::var());
+                                finish(juce::var());
                                 return;
                             }
 
@@ -11302,14 +11450,17 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                                              .getChildFile("OpenStudio-imports");
                                     tempDir.createDirectory();
-                                    extractedFile = tempDir.getChildFile(audioFile.getFileNameWithoutExtension() + "_audio.wav");
+                                    extractedFile = tempDir.getNonexistentChildFile("video-" + juce::Uuid().toString().substring(0, 12), ".wav", false);
 
                                     const auto ffmpegExecutable =
                                         OpenStudioFFmpeg::findExecutable();
                                     juce::StringArray processArgs;
                                     processArgs.add(
                                         ffmpegExecutable.getFullPathName());
-                                    processArgs.add("-y");
+                                    processArgs.add("-nostdin");
+                                    processArgs.add("-v");
+                                    processArgs.add("error");
+                                    processArgs.add("-n");
                                     processArgs.add("-i");
                                     processArgs.add(filePath);
                                     processArgs.add("-vn");
@@ -11322,15 +11473,15 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     processArgs.add(
                                         extractedFile.getFullPathName());
 
-                                    juce::ChildProcess ffmpeg;
+                                    OwnedChildProcess ffmpeg;
                                     const bool started =
                                         ffmpegExecutable.existsAsFile()
-                                        && ffmpeg.start(processArgs);
+                                        && ffmpeg.start(processArgs, 0);
 
                                     if (started) {
                                         // Wait up to 60 seconds for extraction
                                         const bool finished =
-                                            ffmpeg.waitForProcessToFinish(60000);
+                                            ffmpeg.waitForProcessToFinish(60000, *alive);
                                         if (! finished)
                                             ffmpeg.kill();
                                         const auto exitCode = finished
@@ -11351,7 +11502,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                             if (!reader) {
                                 juce::Logger::writeToLog("importMediaFile: Unsupported format: " + filePath);
-                                completion(juce::var());
+                                finish(juce::var());
                                 return;
                             }
 
@@ -11368,10 +11519,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             result->setProperty("format", audioFile.getFileExtension().toUpperCase().trimCharactersAtStart("."));
 
                             juce::Logger::writeToLog("importMediaFile: " + resultFilePath + " - " + juce::String(duration) + "s, " + juce::String((int)reader->sampleRate) + "Hz, " + juce::String((int)reader->numChannels) + "ch");
-                            completion(juce::var(result.get()));
+                            finish(juce::var(result.get()));
                         } else {
-                            completion(juce::var());
+                            finish(juce::var());
                         }
+                        });
                     })
                     .withNativeFunction ("saveDroppedFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Save a base64-encoded file dropped from the OS to a temp directory.
@@ -11488,21 +11640,23 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             }
 
                             // Run on background thread to avoid blocking message thread
-                            std::thread([this, source, startTime, endTime, filePathArg, format,
+                            mediaOperations.addJob([this, source, startTime, endTime, filePathArg, format,
                                          sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength,
                                          includeMetronome, includedClipIds,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                                         alive = mediaOperations.token(),
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                                 bool success = audioEngine.renderProject(
                                     source, startTime, endTime, filePathArg, format,
                                     sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength,
-                                    includeMetronome, includedClipIds);
+                                    includeMetronome, includedClipIds,
+                                    [alive] { return MessageThreadLifetime::accepts(alive); });
                                 // Call completion on the message thread to avoid crash
                                 // (WebView callbacks must not be invoked from background threads)
                                 juce::MessageManager::callAsync([completion, success]() {
                                     (*completion)(success);
                                 });
-                            }).detach();
+                            });
                         } else {
                             juce::Logger::writeToLog("renderProject: Invalid args count: " + juce::String(args.size()));
                             completion(false);
@@ -11520,14 +11674,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             double sampleRate = args.size() >= 6 ? static_cast<double>(args[5]) : 44100.0;
                             bool offlineRenderMode = args.size() >= 7 ? static_cast<bool>(args[6]) : true;
 
-                            std::thread([this, trackId, clipId, startTime, duration, filePathArg, sampleRate,
+                            mediaOperations.addJob([this, trackId, clipId, startTime, duration, filePathArg, sampleRate,
                                          offlineRenderMode,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 auto result = audioEngine.capturePitchAuditionPlayback(trackId, clipId, startTime, duration, filePathArg, sampleRate, offlineRenderMode);
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(result);
                                 });
-                            }).detach();
+                            });
                         } else {
                             juce::Logger::writeToLog("capturePitchAuditionPlayback: Invalid args count: " + juce::String(args.size()));
                             completion(juce::var());
@@ -11546,8 +11700,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             double sampleRate = args.size() >= 7 ? static_cast<double>(args[6]) : 44100.0;
                             juce::var metadata = args.size() >= 8 ? args[7] : juce::var();
 
-                            std::thread([this, trackId, clipId, startTime, duration, wavPath, routeJsonPath, sampleRate, metadata,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, trackId, clipId, startTime, duration, wavPath, routeJsonPath, sampleRate, metadata,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 const juce::File liveWav(wavPath);
                                 const auto liveStem = liveWav.getFileNameWithoutExtension();
                                 const auto bakedWav = liveWav.getSiblingFile(liveStem + "_baked_corrected.wav");
@@ -11646,7 +11800,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(result);
                                 });
-                            }).detach();
+                            });
                         } else {
                             juce::Logger::writeToLog("capturePitchAppFinalContext: Invalid args count: " + juce::String(args.size()));
                             completion(juce::var());
@@ -11676,10 +11830,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                         includedClipIds.addIfNotAlreadyThere(id.toString());
                             }
 
-                            std::thread([this, source, startTime, endTime, filePathArg, format,
+                            mediaOperations.addJob([this, source, startTime, endTime, filePathArg, format,
                                          sampleRate, bitDepth, channels, normalizeArg, addTail, tailLength, ditherType,
                                          includeMetronome, includedClipIds,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                                 bool success = audioEngine.renderProjectWithDither(
                                     source, startTime, endTime, filePathArg, format,
@@ -11688,7 +11842,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, success]() {
                                     (*completion)(success);
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(false);
                         }
@@ -11699,13 +11853,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         // Args: [filePath] -> returns path to reversed file
                         if (args.size() == 1 && args[0].isString()) {
                             juce::String filePath = args[0].toString();
-                            std::thread([this, filePath,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, filePath,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 juce::String reversedPath = audioEngine.getAudioAnalyzer().reverseAudioFile(filePath);
                                 juce::MessageManager::callAsync([completion, reversedPath]() {
                                     (*completion)(reversedPath);
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::String());
                         }
@@ -11717,8 +11871,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::String filePath = args[0].toString();
                             double sensitivity = (double)args[1];
                             double minGapMs = (double)args[2];
-                            std::thread([this, filePath, sensitivity, minGapMs,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, filePath, sensitivity, minGapMs,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 auto transients = audioEngine.getAudioAnalyzer().detectTransients(filePath, sensitivity, minGapMs);
                                 juce::Array<juce::var> result;
                                 for (double t : transients)
@@ -11726,7 +11880,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(juce::var(result));
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::var(juce::Array<juce::var>()));
                         }
@@ -11905,8 +12059,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::String filePath = args[0].toString();
                             double startTime = args.size() > 1 ? (double)args[1] : 0.0;
                             double endTime = args.size() > 2 ? (double)args[2] : 0.0;
-                            std::thread([this, filePath, startTime, endTime,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, filePath, startTime, endTime,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 auto lufs = audioEngine.getAudioAnalyzer().measureLUFS(filePath, startTime, endTime);
                                 auto* resultObj = new juce::DynamicObject();
                                 resultObj->setProperty("integrated", lufs.integrated);
@@ -11918,7 +12072,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, resultVar]() {
                                     (*completion)(resultVar);
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(false);
                         }
@@ -12020,9 +12174,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                             for (const auto& file : allFiles) {
                                 juce::String normalized = file.getFullPathName().toLowerCase();
-                                // Skip project files (.s13proj, .json)
+                                // Skip project files (.osproj, .json)
                                 juce::String ext = file.getFileExtension().toLowerCase();
-                                if (ext == ".s13proj" || ext == ".json" || ext == ".bak") continue;
+                                if (ext == ".osproj" || ext == ".json" || ext == ".bak") continue;
 
                                 if (referencedPaths.find(normalized) == referencedPaths.end()) {
                                     auto* obj = new juce::DynamicObject();
@@ -12085,9 +12239,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("convertAudioFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
                         // Args: [inputPath, outputPath, format, sampleRate, bitDepth, channels]
-                        if (args.size() >= 6 && args[0].isString() && args[1].isString()) {
+                        if (args.size() >= 6 && args[0].isString() && args[1].isString()
+                            && juce::File::isAbsolutePath(args[0].toString()) && juce::File::isAbsolutePath(args[1].toString())) {
                             juce::String inputPath = args[0].toString();
                             juce::String outputPath = args[1].toString();
                             juce::String format = args[2].toString();
@@ -12095,74 +12249,20 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             int targetBitDepth = (int)args[4];
                             int targetChannels = (int)args[5];
 
-                            std::thread([inputPath, outputPath, format, targetSampleRate, targetBitDepth, targetChannels,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
-                                juce::AudioFormatManager formatMgr;
-                                formatMgr.registerBasicFormats();
-
-                                juce::File inFile(inputPath);
-                                std::unique_ptr<juce::AudioFormatReader> reader(formatMgr.createReaderFor(inFile));
-
-                                if (!reader) {
-                                    juce::MessageManager::callAsync([completion]() { (*completion)(false); });
-                                    return;
-                                }
-
-                                // Choose output format
-                                juce::AudioFormat* outputFormat = nullptr;
-                                if (format == "wav") outputFormat = formatMgr.findFormatForFileExtension("wav");
-                                else if (format == "aiff") outputFormat = formatMgr.findFormatForFileExtension("aiff");
-                                else if (format == "flac") outputFormat = formatMgr.findFormatForFileExtension("flac");
-                                else outputFormat = formatMgr.findFormatForFileExtension("wav"); // Default to WAV
-
-                                if (!outputFormat) {
-                                    juce::MessageManager::callAsync([completion]() { (*completion)(false); });
-                                    return;
-                                }
-
-                                juce::File outFile(outputPath);
-                                outFile.deleteFile();
-                                std::unique_ptr<juce::OutputStream> stream(outFile.createOutputStream());
-
-                                if (!stream) {
-                                    juce::MessageManager::callAsync([completion]() { (*completion)(false); });
-                                    return;
-                                }
-
-                                int outChannels = targetChannels > 0 ? targetChannels : (int)reader->numChannels;
-                                int outSampleRate = targetSampleRate > 0 ? targetSampleRate : (int)reader->sampleRate;
-                                int outBitDepth = targetBitDepth > 0 ? targetBitDepth : (int)reader->bitsPerSample;
-
-                                auto writer = outputFormat->createWriterFor(
-                                    stream,
-                                    juce::AudioFormatWriterOptions()
-                                        .withSampleRate(outSampleRate)
-                                        .withNumChannels(outChannels)
-                                        .withBitsPerSample(outBitDepth));
-
-                                if (!writer) {
-                                    juce::MessageManager::callAsync([completion]() { (*completion)(false); });
-                                    return;
-                                }
-
-                                // Read and write in blocks
-                                const int blockSize = 8192;
-                                juce::AudioBuffer<float> buffer(outChannels, blockSize);
-                                juce::int64 totalSamples = reader->lengthInSamples;
-                                juce::int64 written = 0;
-
-                                while (written < totalSamples) {
-                                    int samplesToRead = (int)std::min((juce::int64)blockSize, totalSamples - written);
-                                    buffer.clear();
-                                    reader->read(&buffer, 0, samplesToRead, written, true, true);
-                                    writer->writeFromAudioSampleBuffer(buffer, 0, samplesToRead);
-                                    written += samplesToRead;
-                                }
-
-                                writer.reset();
-
-                                juce::MessageManager::callAsync([completion]() { (*completion)(true); });
-                            }).detach();
+                            mediaOperations.addJob([inputPath, outputPath, format, targetSampleRate, targetBitDepth, targetChannels,
+                                         alive = mediaOperations.token(),
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
+                                AudioFileConversion::Options options;
+                                options.format = format;
+                                options.sampleRate = targetSampleRate;
+                                options.bitDepth = targetBitDepth;
+                                options.channels = targetChannels;
+                                const auto result = AudioFileConversion::convert(juce::File(inputPath), juce::File(outputPath),
+                                    options, [alive] { return MessageThreadLifetime::accepts(alive); });
+                                const bool success = result.wasOk();
+                                if (!success) juce::Logger::writeToLog("Batch conversion: " + result.getErrorMessage());
+                                juce::MessageManager::callAsync([completion, success]() { (*completion)(success); });
+                            });
                         } else {
                             completion(false);
                         }
@@ -12180,7 +12280,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::String filePath = args[0].toString();
                             double factor = (double)args[1];
 
-                            if (factor <= 0.0 || std::abs(factor - 1.0) < 0.0001) {
+                            if (!std::isfinite(factor) || factor <= 0.0 || std::abs(factor - 1.0) < 0.0001) {
                                 completion(juce::String()); // No change needed
                                 return;
                             }
@@ -12199,8 +12299,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             }
                             juce::String ffmpegPath = ffmpeg.getFullPathName();
 
-                            std::thread([filePath, outputFile, factor, ffmpegPath,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([filePath, outputFile, factor, ffmpegPath, alive = mediaOperations.token(),
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 // Build atempo filter chain — atempo supports [0.5, 100.0]
                                 juce::String atempoFilter;
                                 double remaining = factor;
@@ -12231,9 +12331,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 processArgs.add(atempoFilter);
                                 processArgs.add(outputFile.getFullPathName());
 
-                                juce::ChildProcess process;
+                                OwnedChildProcess process;
                                 bool started = process.start(processArgs);
-                                bool finished = started && process.waitForProcessToFinish(120000);
+                                bool finished = started && process.waitForProcessToFinish(120000, *alive);
                                 int exitCode = finished ? process.getExitCode() : -1;
 
                                 juce::DynamicObject::Ptr result = new juce::DynamicObject();
@@ -12255,7 +12355,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(juce::var(result.get()));
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::String());
                         }
@@ -12268,7 +12368,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::String filePath = args[0].toString();
                             double semitones = (double)args[1];
 
-                            if (std::abs(semitones) < 0.01) {
+                            if (!std::isfinite(semitones) || std::abs(semitones) > 120.0 || std::abs(semitones) < 0.01) {
                                 completion(juce::String()); // No change needed
                                 return;
                             }
@@ -12301,8 +12401,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             juce::String ffmpegPath = ffmpeg.getFullPathName();
                             int srInt = (int)fileSampleRate;
 
-                            std::thread([filePath, outputFile, ratio, ffmpegPath, srInt,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([filePath, outputFile, ratio, ffmpegPath, srInt, alive = mediaOperations.token(),
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 // asetrate changes pitch+speed, aresample restores SR, atempo compensates speed
                                 // Tempo compensation: 1/ratio — need to chain if outside [0.5, 100.0]
                                 double tempoComp = 1.0 / ratio;
@@ -12340,9 +12440,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 processArgs.add(filter);
                                 processArgs.add(outputFile.getFullPathName());
 
-                                juce::ChildProcess process;
+                                OwnedChildProcess process;
                                 bool started = process.start(processArgs);
-                                bool finished = started && process.waitForProcessToFinish(120000);
+                                bool finished = started && process.waitForProcessToFinish(120000, *alive);
                                 int exitCode = finished ? process.getExitCode() : -1;
 
                                 juce::DynamicObject::Ptr result = new juce::DynamicObject();
@@ -12363,7 +12463,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(juce::var(result.get()));
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::String());
                         }
@@ -12556,13 +12656,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             double minSoundMs = (double)args[3];
                             double preAttackMs = (double)args[4];
                             double postReleaseMs = (double)args[5];
-                            std::thread([this, filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 auto result = audioEngine.detectSilentRegions(filePath, thresholdDb, minSilenceMs, minSoundMs, preAttackMs, postReleaseMs);
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(result);
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::Array<juce::var>());
                         }
@@ -12572,14 +12672,14 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         // Args: [trackId] -> returns { success, filePath, duration, sampleRate, startTime }
                         if (args.size() >= 1 && args[0].isString()) {
                             juce::String trackId = args[0].toString();
-                            std::thread([this, trackId,
-                                         completion = std::make_shared<juce::WebBrowserComponent::NativeFunctionCompletion>(std::move(completion))]() {
+                            mediaOperations.addJob([this, trackId,
+                                         completion = mediaOperations.guardCompletion(std::move(completion))]() {
                                 const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                                 auto result = audioEngine.freezeTrack(trackId);
                                 juce::MessageManager::callAsync([completion, result]() {
                                     (*completion)(result);
                                 });
-                            }).detach();
+                            });
                         } else {
                             completion(juce::var());
                         }
@@ -12867,105 +12967,6 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         audioEngine.getVideoReader().closeFile();
                         completion(juce::var(true));
                     })
-                    .withNativeFunction ("executeScript", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        // Args: [code] -> returns JSON { result, error }
-                        // Stub implementation — scripting engine not yet integrated
-                        if (args.size() >= 1 && args[0].isString()) {
-                            juce::String code = args[0].toString();
-                            juce::Logger::writeToLog("executeScript (stub): " + code.substring(0, 100));
-
-                            juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                            result->setProperty("result", juce::String("Not implemented"));
-                            result->setProperty("error", juce::String(""));
-
-                            completion(juce::var(result.get()));
-                        } else {
-                            juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                            result->setProperty("result", juce::String(""));
-                            result->setProperty("error", juce::String("No code provided"));
-
-                            completion(juce::var(result.get()));
-                        }
-                    })
-                    .withNativeFunction ("loadScriptFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        // Args: [filePath] -> loads and executes a script file
-                        // Stub implementation — scripting engine not yet integrated
-                        if (args.size() >= 1 && args[0].isString()) {
-                            juce::String scriptPath = args[0].toString();
-                            juce::Logger::writeToLog("loadScriptFile (stub): " + scriptPath);
-
-                            juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                            result->setProperty("result", juce::String("Not implemented"));
-                            result->setProperty("error", juce::String(""));
-
-                            completion(juce::var(result.get()));
-                        } else {
-                            juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                            result->setProperty("result", juce::String(""));
-                            result->setProperty("error", juce::String("No file path provided"));
-
-                            completion(juce::var(result.get()));
-                        }
-                    })
-                    .withNativeFunction ("setLTCOutput", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        // Args: [enabled, channel, frameRate] -> configures SMPTE LTC output
-                        // Stub implementation — LTC generation not yet integrated
-                        bool enabled = false;
-                        int channel = 0;
-                        double frameRate = 30.0;
-
-                        if (args.size() >= 1)
-                            enabled = (bool)args[0];
-                        if (args.size() >= 2)
-                            channel = (int)args[1];
-                        if (args.size() >= 3)
-                            frameRate = (double)args[2];
-
-                        juce::Logger::writeToLog("setLTCOutput (stub): enabled=" + juce::String(enabled ? "true" : "false")
-                            + " channel=" + juce::String(channel)
-                            + " frameRate=" + juce::String(frameRate));
-
-                        juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                        result->setProperty("enabled", enabled);
-                        result->setProperty("channel", channel);
-                        result->setProperty("frameRate", frameRate);
-                        result->setProperty("stub", true);
-
-                        completion(juce::var(result.get()));
-                    })
-                    // ===== Phase 16: Pro Audio & Compatibility =====
-                    .withNativeFunction ("startLiveCapture", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        // Args: [format] -> starts capturing master output to file
-                        // Stub implementation — live capture not yet integrated
-                        juce::String format = "wav";
-                        if (args.size() >= 1 && args[0].isString())
-                            format = args[0].toString();
-
-                        juce::String filePath = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                            .getChildFile("live_capture_" + juce::String(juce::Time::currentTimeMillis()) + "." + format)
-                            .getFullPathName();
-
-                        juce::Logger::writeToLog("startLiveCapture (stub): format=" + format + " path=" + filePath);
-
-                        completion(juce::var(filePath));
-                    })
-                    .withNativeFunction ("stopLiveCapture", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(this);
-                        juce::ignoreUnused(args);
-                        // Stub implementation — returns mock capture result
-                        juce::Logger::writeToLog("stopLiveCapture (stub)");
-
-                        juce::DynamicObject::Ptr result = new juce::DynamicObject();
-                        result->setProperty("filePath", "");
-                        result->setProperty("duration", 0.0);
-                        result->setProperty("stub", true);
-
-                        completion(juce::var(result.get()));
-                    })
                     .withNativeFunction ("exportDDP", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [sourceWavPath, outputDir, tracksJSON, catalogNumber?]
                         // tracksJSON: array of { startTime, endTime, title, isrc }
@@ -13057,10 +13058,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     .withNativeFunction ("quitApplication", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        juce::ignoreUnused(args);
                         completion(juce::var());
                         if (isMainWindow())
                         {
+                            if (args.size() == 1 && args[0].isBool() && static_cast<bool>(args[0]))
+                                appUpdater.authorisePreparedInstallForQuit();
                             if (windowCallbacks.requestAppClose)
                                 windowCallbacks.requestAppClose();
                             else
@@ -13195,6 +13197,20 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(windowCallbacks.getMidiEditorUISnapshot(sessionId));
                         else
                             completion(juce::var());
+                    })
+                    .withNativeFunction ("getPluginEditorReadiness", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 1 || !args[0].isObject()) { completion("failed"); return; }
+                        const auto sessionId = args[0].getProperty("sessionId", {}).toString();
+                        if (sessionId.isNotEmpty())
+                        {
+                            const auto state = windowCallbacks.getPluginEditorWindowState ? windowCallbacks.getPluginEditorWindowState(sessionId) : juce::var();
+                            const auto startup = state.getProperty("frontendStartupState", {}).toString();
+                            const auto lifecycle = state.getProperty("state", {}).toString();
+                            completion(startup == "failed" ? "failed" : startup == "ready" && lifecycle == "visible" ? "ready" : "opening");
+                            return;
+                        }
+                        const auto target = PluginWindowManager::PluginEditorTarget::fromVar(args[0]);
+                        completion(target && audioEngine.isPluginEditorVisible(*target) ? "ready" : "opening");
                     })
                     .withNativeFunction ("openBuiltInPluginEditorWindow", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::String sessionId = windowInstanceId;
@@ -14939,6 +14955,17 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         audioEngine.cancelAiToolsInstall();
                         completion(juce::var());
                     })
+                    .withNativeFunction ("getAIGenerationPreflight", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 3) { completion(juce::var()); return; }
+                        aiPreflightOperations.addJob([model = args[0].toString(), workflow = args[1].toString(),
+                            params = args[2].toString(), alive = aiPreflightOperations.token(),
+                            reply = aiPreflightOperations.guardCompletion(std::move(completion))] {
+                            AITrackEngine probe;
+                            auto result = probe.getGenerationPreflight(model, workflow, params,
+                                [alive] { return !MessageThreadLifetime::accepts(alive); });
+                            juce::MessageManager::callAsync([reply, result] { (*reply)(result); });
+                        });
+                    })
                     .withNativeFunction ("startAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 4)
                             completion(audioEngine.startAIGeneration(args[0].toString(), args[1].toString(), args[2].toString(), args[3].toString()));
@@ -14950,8 +14977,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("getAIGenerationProgress", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.getAIGenerationProgress());
                     })
-                    .withNativeFunction ("cancelAIGeneration", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        audioEngine.cancelAIGeneration();
+                    .withNativeFunction ("cancelAIGeneration", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        // Native functions run serially on the message thread.
+                        // A late cancel from an old window must not kill a new request.
+                        const auto expected = args.isEmpty() ? juce::String() : args[0].toString();
+                        if (expected.isEmpty() || audioEngine.getAIGenerationProgress().getProperty("requestId", {}).toString() == expected)
+                            audioEngine.cancelAIGeneration();
                         completion(juce::var());
                     })
                     .withNativeFunction ("initializeARA", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
@@ -15176,40 +15207,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
     initializePitchRegressionJob(pitchRegressionJobPathIn);
 
-    if (isMainWindow() && pitchRegressionJob.isVoid())
-        juce::Timer::callAfterDelay(2000, [this]()
-    {
-        appUpdater.checkForUpdates(false, [this](const juce::var& status)
-        {
-            if (getStringProperty(status, "status") != "update-available")
-                return;
+    // The main frontend owns scheduled update checks and the non-blocking update
+    // panel. Native startup must not open a second modal or start an installer.
 
-            const auto version = getStringProperty(status, "version");
-            const auto notes = getStringProperty(status, "notes");
-            const auto downloadUrl = getStringProperty(status, "downloadUrl");
-            const auto sha256 = getStringProperty(status, "sha256");
-            const auto releasePageUrl = getStringProperty(status, "releasePageUrl");
-            const auto installerArguments = getStringProperty(status, "installerArguments");
-            const auto expectedSize = status.hasProperty("size") ? static_cast<juce::int64>(status.getProperty("size", 0)) : 0;
-            const auto mandatory = status.hasProperty("mandatory") ? static_cast<bool>(status.getProperty("mandatory", false)) : false;
-
-            auto prompt = mandatory
-                ? "A required OpenStudio update is available: " + version + "."
-                : "OpenStudio " + version + " is available.";
-            if (notes.isNotEmpty())
-                prompt += "\n\nRelease notes:\n" + notes.substring(0, 600);
-
-            if (juce::AlertWindow::showOkCancelBox(juce::AlertWindow::InfoIcon,
-                                                   "Update Available",
-                                                   prompt,
-                                                   "Download",
-                                                   "Later"))
-            {
-                appUpdater.downloadAndInstallUpdate(downloadUrl, version, sha256, releasePageUrl, installerArguments, expectedSize);
-            }
-        });
-    });
-    
     startTimerHz (10); // Start metering loop at 10 FPS (was 30)
     juce::Logger::writeToLog("MainComponent initialized successfully");
 }
@@ -15480,6 +15480,15 @@ bool MainComponent::completePitchRegressionJob(const juce::var& result)
 
 MainComponent::~MainComponent()
 {
+    for (const auto& entry : toneSearchRequests) entry.second->cancel();
+
+    mediaOperations.cancelPending();
+    aiPreflightOperations.cancelPending();
+    aiPreflightOperations.shutdown();
+    const auto drain = [](juce::ThreadPool& pool, const char* stage) {
+        OpenStudioCrashDiagnostics::recordBreadcrumb("shutdown_wait", stage);
+        pool.removeAllJobs(true, -1);
+    };
     tone3000NativeCompletionsEnabled.store(
         false, std::memory_order_release);
     if (tone3000TaskCancellation != nullptr)
@@ -15489,7 +15498,7 @@ MainComponent::~MainComponent()
     // while the WebView provider, lifetime flag, and macOS Keychain loader are
     // still alive; queued message-thread completions are additionally gated by
     // SafePointer and the flag above.
-    tone3000BridgePool.removeAllJobs(true, -1);
+    drain(tone3000BridgePool, "NAM library workers");
 
     if (! isMainWindow())
         prepareForSecondaryWindowClose();
@@ -15501,13 +15510,25 @@ MainComponent::~MainComponent()
     ++fullClipRenderGeneration;
     pitchAnalysisRunning.store(false);
     pitchNoteHqPriorityActive.store(false);
-    builtInStateMutationPool.removeAllJobs(true, -1);
-    pitchAnalysisPool.removeAllJobs(true, 5000);
-    previewSegmentPool.removeAllJobs(true, 5000);
-    noteRenderPool.removeAllJobs(true, 5000);
-    fullClipHQPool.removeAllJobs(true, 5000);
-    polyAnalysisBridgePool.removeAllJobs(true, 5000);
-    mediaPreviewPool.removeAllJobs(true, 2000);
+    drain(builtInStateMutationPool, "built-in state mutations");
+    // A timeout is not proof that a worker stopped. These jobs still reference
+    // members declared after their pools; allowing member destruction after a
+    // timeout creates a use-after-free window. Cancellation was published above.
+    // Never forcibly terminate a worker inside library/allocator code.
+    drain(pitchAnalysisPool, "pitch analysis");
+    drain(previewSegmentPool, "pitch preview");
+    drain(noteRenderPool, "note rendering");
+    drain(fullClipHQPool, "full-clip rendering");
+    drain(polyAnalysisBridgePool, "polyphonic analysis");
+    drain(mediaPreviewPool, "media preview");
+    OpenStudioCrashDiagnostics::recordBreadcrumb("shutdown_wait", "media render and analysis");
+    mediaOperations.shutdown();
+    drain(projectFilePool, "project file writes");
+    drain(clipPeakAnalysisPool, "peak analysis");
+    drain(pluginScanPool, "plugin scanning");
+    const auto recoveryClosed = projectRecovery.markClean();
+    if (recoveryClosed.failed())
+        OpenStudioCrashDiagnostics::recordBreadcrumb("recovery_close_failed", recoveryClosed.getErrorMessage());
 #if JUCE_WINDOWS
     externalMediaDropTarget.reset();
 #endif
@@ -15864,6 +15885,7 @@ void MainComponent::markFrontendStartupReady(const juce::String& detail)
         return;
 
     frontendStartupState = FrontendStartupState::ready;
+    if (isMainWindow()) UpdateInstaller::acknowledgeFrontendReady();
     frontendStartupDetail = detail;
     startupWatchdogActive = false;
     startupFallbackVisible = false;
@@ -16229,8 +16251,31 @@ void MainComponent::startDesktopWindowDrag()
 //==============================================================================
 void MainComponent::timerCallback()
 {
+    if (isMainWindow() && frontendStartupState == FrontendStartupState::ready)
+        OpenStudioCrashDiagnostics::pulseMessageThread();
+    OpenStudioCrashDiagnostics::flushRealtimeFaults();
     if (secondaryWindowClosing)
         return;
+    const auto faultGeneration = ProcessorSafety::changeGeneration.load(std::memory_order_acquire);
+    if (isMainWindow() && webView.isVisible() && frontendStartupState == FrontendStartupState::ready)
+    {
+        const auto edits = audioEngine.takePluginParameterEdits();
+        if (const auto* items = edits.getArray())
+            for (const auto& edit : *items)
+                webView.emitEventIfBrowserIsVisible("pluginParameterEdit", edit);
+        const auto failures = audioEngine.takeRecordingWriteFailures();
+        if (failures.size() > 0)
+        {
+            OpenStudioCrashDiagnostics::recordBreadcrumb("recording_disk_failure", juce::JSON::toString(failures));
+            webView.emitEventIfBrowserIsVisible("recordingWriteFailure", failures);
+        }
+    }
+    if (faultGeneration != lastProcessorFaultGeneration)
+    {
+        lastProcessorFaultGeneration = faultGeneration;
+        audioEngine.reportStageProcessorFaults();
+        webView.emitEventIfBrowserIsVisible("processorFaultsChanged", {});
+    }
 
     if (startupWatchdogActive && frontendStartupState != FrontendStartupState::ready)
     {
@@ -16316,6 +16361,7 @@ void MainComponent::timerCallback()
         juce::DynamicObject::Ptr transportData = new juce::DynamicObject();
         transportData->setProperty("position", position);
         transportData->setProperty("isPlaying", audioEngine.isTransportPlaying());
+        transportData->setProperty("metronomePracticeEnabled", audioEngine.isMetronomePracticeEnabled());
 
         emitFrontendEvent("transportUpdate", juce::var(transportData.get()));
     }

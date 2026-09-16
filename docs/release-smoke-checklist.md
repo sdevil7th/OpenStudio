@@ -4,12 +4,28 @@ Use this checklist for every release candidate before publishing installers, man
 
 ## Local RC Gate
 
+- Review the exact release diff and write `docs/releases/<version>.md` with concrete
+  changes, known issues, upgrade notes and a source link. Run
+  `python tools/validate-release-notes.py --version <version>`; unfinished templates
+  or notes for another version must block packaging and publishing.
 - Run `./tools/run-windows-rc.ps1 -Version <candidate-version>` before pushing any release tag.
 - Do not tag a release until the local Windows RC installer path has been validated successfully in both normal startup and `--ui-safe-mode`.
 - Treat `--startup-self-test` as dependency/asset preflight only. It does not
   replace a visible `boot-ready` result from the packaged frontend.
 - A Debug pass is not a Windows Release pass. Run the lifecycle checks against
   the installed Release executable.
+
+## Branding and public download consistency
+
+- For branding changes, regenerate from the approved master and rebuild the
+  candidate configuration; see [branding.md](branding.md). Verify the menu mark,
+  native executable/bundle/window icon, taskbar/Dock/launcher and Store tiles as
+  applicable. Reopen/reinstall the candidate when checking OS icon caches.
+- Confirm the main and documentation README images use the current generated
+  PNG. Coordinate the website favicon, web manifest and social card separately.
+- After publishing, compare the website's displayed version, filenames and sizes
+  with the exact GitHub installer assets. Verify the stable redirect/update-feed
+  endpoints separately. A website deploy cannot update an installed app's icon.
 
 ## Window Lifecycle Matrix
 
@@ -63,7 +79,7 @@ release-candidate platform.
 - Import an audio file and confirm waveform peaks appear.
 - Save a new project as `.osproj`.
 - Open the saved `.osproj` by double-clicking it in Explorer.
-- Open a legacy `.s13` project and confirm it loads.
+- Save and reopen a new `.osproj` project and confirm its media and FX state round-trip.
 - Open the mixer, add a built-in OpenStudio effect, and confirm audio still passes.
 - Scan, open, close, and reopen at least one available VST3 editor and one CLAP
   editor while audio is active.
@@ -106,7 +122,7 @@ release-candidate platform.
   `PATH` and confirm an MP3/OGG conversion succeeds; the app bundle itself must
   not contain an unpinned `ffmpeg` binary.
 - Save a new `.osproj` project and reopen it manually from Finder.
-- Open a legacy `.s13` project and confirm it loads.
+- Save and reopen a new `.osproj` project and confirm its media and FX state round-trip.
 - Confirm the base app bundle does not include a bundled `python/` runtime folder.
 - Open Stem Separation and confirm it offers `Install AI Tools` when the optional runtime is missing.
 - Click the toolbar AI Tools button and confirm the optional setup stays in the background with visible toolbar progress and no UI freeze.

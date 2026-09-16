@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include <functional>
+#include "ControlSurfaceMidiInbox.h"
 
 //==============================================================================
 // MIDI CC → DAW parameter mapping
@@ -94,6 +95,8 @@ private:
     // CC Mappings: key = (channel << 8) | cc
     std::map<int, MIDICCMapping> mappings;
     mutable juce::CriticalSection mappingLock;
+    void handleControlMessage(const juce::MidiMessage& message);
+    ControlSurfaceMidiInbox inbox;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GenericMIDIControl)
 };
@@ -186,6 +189,7 @@ private:
     void handleNoteOn(int note, int velocity);
     void handleCC(int cc, int value);
     void handlePitchBend(int channel, int value14bit);
+    void handleControlMessage(const juce::MidiMessage& message);
 
     ControlSurfaceCallback* callback = nullptr;
     std::unique_ptr<juce::MidiInput> midiInput;
@@ -196,6 +200,7 @@ private:
     // Cached track IDs (refreshed on bank change)
     std::vector<juce::String> cachedTrackIds;
 
+    ControlSurfaceMidiInbox inbox;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCUControl)
 };
 

@@ -1,0 +1,42 @@
+name: Updater installer safety
+on:
+  push:
+    paths:
+      - 'Source/UpdateInstaller*'
+      - 'Source/UpdateManifest*'
+      - 'Source/UpdatePublicKey.h'
+      - 'thirdparty/monocypher/**'
+      - 'tests/updater-installer/**'
+      - '.github/workflows/updater-installer.yml'
+  pull_request:
+    paths:
+      - 'Source/UpdateInstaller*'
+      - 'Source/UpdateManifest*'
+      - 'Source/UpdatePublicKey.h'
+      - 'thirdparty/monocypher/**'
+      - 'tests/updater-installer/**'
+      - '.github/workflows/updater-installer.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the actual helper with warnings as errors
+        run: |
+          cmake -S tests/updater-installer -B build-installer -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-installer --parallel 3
+      - name: Exercise native replacement and recovery primitives
+        run: ./build-installer/OpenStudioUpdateInstaller --self-test "$HOME/updater-installer-qualification"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-${{ matrix.os }}
+          path: ~/updater-installer-qualification/installer-result.json

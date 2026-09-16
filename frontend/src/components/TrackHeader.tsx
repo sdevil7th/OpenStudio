@@ -199,7 +199,6 @@ export const TrackHeader = React.memo(function TrackHeader({
         ? track.automationEnabled
         : hasAutomationLane;
   const automationWriteActive = track.automationWriteEnabled === true;
-  const canToggleAutomationRead = hasAutomationLane || automationWriteActive;
 
   const handleRecordArm = () => toggleTrackArmed(track.id);
   const handleMute = () => toggleTrackMute(track.id);
@@ -609,28 +608,19 @@ export const TrackHeader = React.memo(function TrackHeader({
                 size="icon-sm"
                 shape="square"
                 onClick={() => toggleTrackAutomationRead(track.id)}
-                disabled={!canToggleAutomationRead}
                 title={
-                  canToggleAutomationRead
-                    ? automationReadActive
+                  automationReadActive
                       ? "Disable automation read"
                       : "Enable automation read"
-                    : "Add an automation lane or enable write first"
                 }
                 aria-label={
-                  canToggleAutomationRead
-                    ? automationReadActive
+                  automationReadActive
                       ? "Disable automation read"
                       : "Enable automation read"
-                    : "Automation read unavailable"
                 }
                 className={classNames(
                   "h-6! w-6! rounded-none border-0!",
-                  !canToggleAutomationRead
-                    ? automationReadActive
-                      ? "bg-teal-600/20! text-teal-100! disabled:opacity-100!"
-                      : "bg-transparent! text-neutral-600!"
-                    : automationReadActive
+                  automationReadActive
                       ? "bg-teal-600/25! text-teal-100!"
                       : "bg-transparent! hover:text-teal-300 hover:bg-teal-500/10",
                 )}
@@ -702,17 +692,11 @@ export const TrackHeader = React.memo(function TrackHeader({
                       onMouseLeave={() => setShowAutoMenu(false)}
                     >
                       <button
-                        className={`w-full text-left px-3 py-1 text-neutral-300 flex items-center justify-between gap-2 ${
-                          canToggleAutomationRead
-                            ? "hover:bg-neutral-700"
-                            : "opacity-50 cursor-not-allowed"
-                        }`}
+                        className="w-full text-left px-3 py-1 text-neutral-300 flex items-center justify-between gap-2 hover:bg-neutral-700"
                         onClick={() => {
-                          if (!canToggleAutomationRead) return;
                           toggleTrackAutomationRead(track.id);
                           setShowAutoMenu(false);
                         }}
-                        disabled={!canToggleAutomationRead}
                       >
                         <span>
                           {automationReadActive

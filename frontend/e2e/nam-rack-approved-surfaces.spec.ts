@@ -69,7 +69,7 @@ const POST_EQ_PARAM_IDS = [
   "eqLPFHz",
 ] as const;
 
-type RackSection = "pre" | "amp" | "eq";
+type RackSection = "pre" | "amp" | "eq" | "cab";
 
 function rackUrl(section: RackSection) {
   const focus = section === "pre" ? "gate" : section;
@@ -222,6 +222,121 @@ async function surfaceGeometryFailures(page: Page, moduleId: string) {
       }
     }
     return { containment, hitOverlaps, labelOverlaps, textOverflow };
+  });
+}
+
+async function cabinetTextGeometryFailures(page: Page) {
+  return page.locator('[data-module="cabinet"]').evaluate((module) => {
+    const visible = (node: Element) => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0
+        && rect.height > 0
+        && style.display !== "none"
+        && style.visibility !== "hidden";
+    };
+    const overlapArea = (left: DOMRect, right: DOMRect) => (
+      Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left))
+      * Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top))
+    );
+    const textNodes = Array.from(module.querySelectorAll<HTMLElement>([
+      ".cab-controller-heading > *",
+      ".cab-source-copy > *",
+      ".cab-control-zone",
+      ".cab-control-name",
+      ".cab-control-value",
+      ".cab-room-title",
+      ".cab-room-subtitle",
+      ".cab-room-control > strong",
+      ".cab-room-value",
+      ".cab-room-purpose > *",
+    ].join(", "))).filter(visible);
+    const controlNodes = Array.from(module.querySelectorAll<HTMLElement>([
+      ".asset-control",
+      ".cab-source-actions > button",
+      ".cab-room-power-switch",
+    ].join(", "))).filter(visible);
+    const describe = (node: HTMLElement) => (
+      node.dataset.paramId
+      ?? node.textContent?.replace(/\s+/g, " ").trim()
+      ?? node.className
+    );
+    const textControlOverlaps: string[] = [];
+    const textOverlaps: string[] = [];
+    const textOverflow: string[] = [];
+    const captionAlignment: string[] = [];
+    const deck = module.querySelector(".cab-primary-controls");
+    const names = Array.from(deck?.querySelectorAll<HTMLElement>(".cab-control-name") ?? []);
+    const values = Array.from(deck?.querySelectorAll<HTMLElement>(".cab-control-value") ?? []);
+    const columns = [
+      ["POWER", "cabEnabled"],
+      ["BASS DIRECT", "cabDirectMix"],
+      ["LEVEL", "cabLevelDb"],
+      ["PAN", "cabPan"],
+      ["STEREO", "cabIRStereo"],
+      ["PHASE", "cabPhaseInvert"],
+    ];
+    for (const [index, [name, paramId]] of columns.entries()) {
+      const control = deck?.querySelector<HTMLElement>(`.control-hit[data-param-id="${paramId}"]`);
+      const title = names.find(node => node.textContent === name);
+      const value = values[index];
+      if (!control || !title || !value) {
+        captionAlignment.push(`${paramId}:missing-column`);
+        continue;
+      }
+      const controlRect = control.getBoundingClientRect();
+      for (const caption of [title, value]) {
+        // A centered min-width label box can still contain left-aligned text.
+        // Measure the rendered text, not only the CSS box (the original bug).
+        const range = document.createRange();
+        range.selectNodeContents(caption);
+        const textRect = range.getBoundingClientRect();
+        const delta = Math.abs(textRect.left + textRect.width / 2
+          - (controlRect.left + controlRect.width / 2));
+        if (delta > 0.5) captionAlignment.push(`${paramId}:${caption.textContent}:${delta.toFixed(2)}`);
+      }
+    }
+    for (const row of [names, values]) {
+      const centers = row.map(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.top + rect.height / 2;
+      });
+      if (Math.max(...centers) - Math.min(...centers) > 0.5) {
+        captionAlignment.push(`${row === names ? "names" : "values"}:uneven-row`);
+      }
+    }
+
+    for (let textIndex = 0; textIndex < textNodes.length; textIndex += 1) {
+      const textNode = textNodes[textIndex];
+      if (textNode.scrollWidth > textNode.clientWidth + 1
+          || textNode.scrollHeight > textNode.clientHeight + 1) {
+        textOverflow.push(describe(textNode));
+      }
+      for (const controlNode of controlNodes) {
+        if (textNode.contains(controlNode) || controlNode.contains(textNode)) continue;
+        const area = overlapArea(
+          textNode.getBoundingClientRect(),
+          controlNode.getBoundingClientRect(),
+        );
+        if (area > 0.5) {
+          textControlOverlaps.push(
+            `${describe(textNode)}:${describe(controlNode)}:${area.toFixed(2)}`,
+          );
+        }
+      }
+      for (let rightIndex = textIndex + 1; rightIndex < textNodes.length; rightIndex += 1) {
+        const area = overlapArea(
+          textNode.getBoundingClientRect(),
+          textNodes[rightIndex].getBoundingClientRect(),
+        );
+        if (area > 0.5) {
+          textOverlaps.push(
+            `${describe(textNode)}:${describe(textNodes[rightIndex])}:${area.toFixed(2)}`,
+          );
+        }
+      }
+    }
+    return { textControlOverlaps, textOverlaps, textOverflow, captionAlignment };
   });
 }
 
@@ -471,8 +586,52 @@ test("approved post-cab EQ has nine faders and a three-rotary utility tier", asy
   await expect.poll(async () => (await readRackValues(page)).eqHPFHz).toBe(0);
 });
 
-test("Amp, EQ, EQ Boost, and Drive hardware remain inside their painted borders at every supported host size", async ({ page }) => {
-  // This matrix performs 15 full detached-editor navigations (three rack
+test("approved Cabinet keeps IR format and Room ambience as separate control groups", async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  const host = await openRackSection(page, "cab");
+  await host.locator('[data-qa="nam-instrument-profile"]').click();
+
+  const cabinet = host.locator('[data-module="cabinet"]');
+  const speaker = host.locator('[data-module="cabinet-speaker"]');
+  await expect(cabinet.locator('.module-skin[data-rack-design-asset-id="cab-room-integrated-body"]'))
+    .toHaveCount(1);
+  await expect(speaker.locator('.module-skin[data-rack-design-asset-id="cabinet-body"]'))
+    .toHaveCount(1);
+  await expect(cabinet.locator('[data-qa="nam-cab-room-bay"]')).toBeVisible();
+  await expect(cabinet.locator('[data-param-id="cabIRStereo"][role]')).toHaveCount(1);
+  await expect(cabinet.locator('[data-param-id="cabRoomEnabled"]')).toHaveCount(1);
+  await expect(cabinet.locator('[data-param-id="cabRoomAmount"][role="slider"]')).toHaveCount(1);
+  await expect(cabinet.locator('[data-param-id="cabRoomWidth"][role="slider"]')).toHaveCount(1);
+  await expect(cabinet.locator('[data-param-id="cabHPFHz"]')).toHaveCount(0);
+  await expect(cabinet.locator('[data-param-id="cabLPFHz"]')).toHaveCount(0);
+
+  expect(await interactiveParamIds(page, "cabinet")).toEqual([
+    "cabDirectMix",
+    "cabEnabled",
+    "cabIRStereo",
+    "cabLevelDb",
+    "cabPan",
+    "cabPhaseInvert",
+    "cabRoomAmount",
+    "cabRoomEnabled",
+    "cabRoomWidth",
+  ]);
+  expect(await surfaceGeometryFailures(page, "cabinet")).toEqual({
+    containment: [],
+    hitOverlaps: [],
+    labelOverlaps: [],
+    textOverflow: [],
+  });
+  expect(await cabinetTextGeometryFailures(page)).toEqual({
+    textControlOverlaps: [],
+    textOverlaps: [],
+    textOverflow: [],
+    captionAlignment: [],
+  });
+});
+
+test("Amp, Cab, EQ, EQ Boost, and Drive hardware remain inside their painted borders at every supported host size", async ({ page }) => {
+  // This matrix performs 20 full detached-editor navigations (four rack
   // sections at five viewport sizes). Cold Windows CI workers can complete
   // every mount and assertion correctly while exceeding Playwright's 30 s
   // default whole-test budget.
@@ -511,6 +670,26 @@ test("Amp, EQ, EQ Boost, and Drive hardware remain inside their painted borders 
       ),
       `EQ geometry at ${viewport.width}x${viewport.height}`,
     ).toEqual([]);
+
+    await openRackSection(page, "cab");
+    expect(
+      await surfaceGeometryFailures(page, "cabinet"),
+      `Cabinet geometry at ${viewport.width}x${viewport.height}`,
+    ).toEqual({
+      containment: [],
+      hitOverlaps: [],
+      labelOverlaps: [],
+      textOverflow: [],
+    });
+    expect(
+      await cabinetTextGeometryFailures(page),
+      `Cabinet text geometry at ${viewport.width}x${viewport.height}`,
+    ).toEqual({
+      textControlOverlaps: [],
+      textOverlaps: [],
+      textOverflow: [],
+      captionAlignment: [],
+    });
 
     await openRackSection(page, "pre");
     expect(

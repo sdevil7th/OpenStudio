@@ -21,7 +21,7 @@ const FILTER_TYPES = [
   { value: 5, label: "Notch" },
 ];
 
-interface S13FXSlider {
+interface JSFXSlider {
   index: number;
   name: string;
   min: number;
@@ -34,14 +34,14 @@ interface S13FXSlider {
 }
 
 interface EQGraphProps {
-  sliders: S13FXSlider[];
+  sliders: JSFXSlider[];
   onSliderChange: (sliderIndex: number, value: number) => void;
   width?: number;
   height?: number;
 }
 
 function getBandFromSliders(
-  sliderMap: Map<number, S13FXSlider>,
+  sliderMap: Map<number, JSFXSlider>,
   bandIndex: number,
 ): EQBand {
   const base = bandIndex * SLIDERS_PER_BAND;
@@ -62,7 +62,7 @@ export function EQGraph({
 }: EQGraphProps) {
   // Build index-based lookup map for robust slider access
   const sliderMap = useMemo(() => {
-    const map = new Map<number, S13FXSlider>();
+    const map = new Map<number, JSFXSlider>();
     for (const s of sliders) map.set(s.index, s);
     return map;
   }, [sliders]);

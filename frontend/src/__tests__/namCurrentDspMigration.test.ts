@@ -19,25 +19,26 @@ function readFileSync(path: URL, encoding: "utf8"): string {
 
 describe("current-only NAM Rack DSP migration", () => {
   it("canonicalizes every recognized effects and reverb marker to the current engines", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
     expect(CURRENT_NAM_REVERB_ENGINE_VERSION).toBe(5);
     for (const legacyVersion of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]) {
-      expect(normalizeNAMEffectsDspVersion(legacyVersion)).toBe(19);
+      expect(normalizeNAMEffectsDspVersion(legacyVersion)).toBe(20);
       expect(sanitizeNAMRackDspState({
         namEffectsDspVersion: legacyVersion,
         reverbEngineVersion: Math.min(legacyVersion, 5),
       })).toEqual({
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
         reverbEngineVersion: 5,
       });
     }
     expect(normalizeNAMEffectsDspVersion(0)).toBeUndefined();
-    expect(normalizeNAMEffectsDspVersion(15)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(16)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(17)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(18)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(19)).toBe(19);
-    expect(normalizeNAMEffectsDspVersion(20)).toBeUndefined();
+    expect(normalizeNAMEffectsDspVersion(15)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(16)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(17)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(18)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(19)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(20)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(21)).toBeUndefined();
   });
 
   it("migrates a complete legacy tone without retaining obsolete pedal voices", () => {
@@ -75,7 +76,7 @@ describe("current-only NAM Rack DSP migration", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
       },
     });
   });
@@ -91,7 +92,7 @@ describe("current-only NAM Rack DSP migration", () => {
     expect(migrated.values.chaosGate).toBe(0.22);
     expect(migrated.dspState).toMatchObject({
       reverbEngineVersion: 5,
-      namEffectsDspVersion: 19,
+      namEffectsDspVersion: 20,
     });
   });
 
@@ -108,11 +109,11 @@ describe("current-only NAM Rack DSP migration", () => {
     expect(migrated.values.compressorReleaseMs).toBeCloseTo(94.5, 6);
     expect(migrated.values.compressorToneDb).toBe(2);
     expect(migrated.values).not.toHaveProperty("compressorDetail");
-    expect(migrated.dspState.namEffectsDspVersion).toBe(19);
+    expect(migrated.dspState.namEffectsDspVersion).toBe(20);
   });
 
   it("treats missing or unrecognized complete-preset markers as migration inputs", () => {
-    for (const namEffectsDspVersion of [undefined, 0, 20]) {
+    for (const namEffectsDspVersion of [undefined, 0, 21]) {
       const migrated = migrateLegacyNAMRackPresetDspState({
         values: { precisionDriveVolumeDb: 0 },
         dspState: namEffectsDspVersion === undefined
@@ -124,20 +125,20 @@ describe("current-only NAM Rack DSP migration", () => {
       };
       expect(migrated.values.precisionDriveVolumeDb).toBe(9);
       expect(migrated.dspState).toMatchObject({
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
         reverbEngineVersion: 5,
       });
     }
   });
 
-  it("preserves Instrument Profile from V8+ and Reverb Voice from V9+ through V19", () => {
-    for (const sourceVersion of [9, 10, 11, 12, 14, 15, 16, 17, 18, 19]) {
+  it("preserves Instrument Profile from V8+ and Reverb Voice from V9+ through V20", () => {
+    for (const sourceVersion of [9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20]) {
       const migrated = migrateLegacyNAMRackPresetDspState({
         values: { instrumentProfile: 1, reverbVoice: 3, delayMode: 2 },
         dspState: { namEffectsDspVersion: sourceVersion, reverbEngineVersion: 5 },
       }, { completePreset: true }) as { values: Record<string, number>; dspState: Record<string, number> };
       expect(migrated.values).toMatchObject({ instrumentProfile: 1, reverbVoice: 3, delayMode: 2 });
-      expect(migrated.dspState.namEffectsDspVersion).toBe(19);
+      expect(migrated.dspState.namEffectsDspVersion).toBe(20);
     }
 
     const v8 = migrateLegacyNAMRackPresetDspState({
@@ -156,7 +157,7 @@ describe("current-only NAM Rack DSP migration", () => {
       delayMode: 4,
     });
 
-    for (const invalidVersion of [undefined, 7, 20]) {
+    for (const invalidVersion of [undefined, 7, 21]) {
       const migrated = migrateLegacyNAMRackPresetDspState({
         values: { instrumentProfile: 1, reverbVoice: 3, delayMode: 4 },
         dspState: invalidVersion === undefined ? {} : { namEffectsDspVersion: invalidVersion },
@@ -300,7 +301,7 @@ describe("current-only NAM Rack DSP migration", () => {
     })).toEqual({
       values: { cabRoomAmount: 0.41 },
       dspState: {
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
         reverbEngineVersion: 5,
       },
     });
@@ -429,7 +430,7 @@ describe("current-only NAM Rack DSP migration", () => {
     expect(migrated.uiState.namPresetBaseline.values).not.toHaveProperty("auditionSource");
     expect(migrated.uiState.namPresetBaseline.values).not.toHaveProperty("inputMode");
     expect(migrated.uiState.namRackCompare.snapshots.A.dspState).toEqual({
-      namEffectsDspVersion: 19,
+      namEffectsDspVersion: 20,
       reverbEngineVersion: 5,
     });
     expect(migrated.uiState.namRackCompare.snapshots.A.values).toMatchObject({
@@ -569,7 +570,7 @@ describe("current-only NAM Rack DSP migration", () => {
     const setterStart = engineSource.indexOf("bool AudioEngine::setBuiltInPluginState(");
     const setterEnd = engineSource.indexOf("bool AudioEngine::setPluginParameter(", setterStart);
     const setterSource = engineSource.slice(setterStart, setterEnd);
-    expect(setterSource).toContain("S13NAMRack::migrateUiStateToCurrent(");
+    expect(setterSource).toContain("OpenStudioNAMRack::migrateUiStateToCurrent(");
     expect(setterSource).toMatch(
       /migrateUiStateToCurrent\(\s*uiStateVar,\s*storedEffectsVersion\s*\)/,
     );
@@ -579,7 +580,7 @@ describe("current-only NAM Rack DSP migration", () => {
     const xmlMigratorStart = engineSource.indexOf("static bool migrateXMLNAMRackPresetToCurrent");
     const xmlMigratorEnd = engineSource.indexOf("bool AudioEngine::isNAMRackPlugin", xmlMigratorStart);
     const xmlMigratorSource = engineSource.slice(xmlMigratorStart, xmlMigratorEnd);
-    expect(xmlMigratorSource).toContain("S13NAMRack::migratePresetStateToCurrent(");
+    expect(xmlMigratorSource).toContain("OpenStudioNAMRack::migratePresetStateToCurrent(");
     expect(xmlMigratorSource).toContain("juce::TemporaryFile temporaryFile(");
     expect(xmlMigratorSource).toContain("overwriteTargetFileWithTemporary()");
     const genericListStart = engineSource.indexOf("juce::var AudioEngine::getPluginPresets(");
@@ -597,11 +598,11 @@ describe("current-only NAM Rack DSP migration", () => {
       new URL("../../../Source/BuiltInEffects2.cpp", import.meta.url),
       "utf8",
     );
-    const prepareStart = rackSource.indexOf("void S13NAMRack::prepareToPlay");
-    const prepareEnd = rackSource.indexOf("void S13NAMRack::syncEmbeddedProcessorParameters", prepareStart);
-    const processStart = rackSource.indexOf("void S13NAMRack::processBlock");
-    const processEnd = rackSource.indexOf("void S13NAMRack::getStateInformation", processStart);
-    const octaverStart = rackSource.indexOf("void S13NAMRack::processDualOctaverStage");
+    const prepareStart = rackSource.indexOf("void OpenStudioNAMRack::prepareToPlay");
+    const prepareEnd = rackSource.indexOf("void OpenStudioNAMRack::syncEmbeddedProcessorParameters", prepareStart);
+    const processStart = rackSource.indexOf("void OpenStudioNAMRack::processBlock");
+    const processEnd = rackSource.indexOf("void OpenStudioNAMRack::getStateInformation", processStart);
+    const octaverStart = rackSource.indexOf("void OpenStudioNAMRack::processDualOctaverStage");
     const octaverEnd = rackSource.indexOf("static bool captureEmbeddedStageDelayedDry", octaverStart);
     expect(rackSource.slice(prepareStart, prepareEnd)).toContain(
       "namEffectsDspVersion.store(\n        currentNAMEffectsDspVersion",
@@ -695,7 +696,7 @@ describe("current-only NAM Rack DSP migration", () => {
     expect(listSource).toContain("migrateLegacyBuiltInPresetsNonDestructively(safePluginName)");
     expect(listSource).not.toContain("migrateNAMRackPresetFileToCurrent(");
     expect(listSource).toContain('preset->setProperty(\n                        "instrumentProfile"');
-    expect(listSource).toContain("S13NAMRack::getTonePresetInstrumentProfile(");
+    expect(listSource).toContain("OpenStudioNAMRack::getTonePresetInstrumentProfile(");
     expect(engineSource).toContain("but could not persist its migrated payload");
   });
 });

@@ -1,6 +1,6 @@
 # OpenStudio
 
-A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in WebView2.
+A hybrid DAW (Digital Audio Workstation) with a **JUCE C++ backend** for audio processing and a **React/TypeScript frontend** rendered in a platform WebView (WebView2 on Windows).
 
 ## Architecture
 
@@ -21,7 +21,7 @@ C++ (JUCE) Backend          React/TypeScript Frontend
 
 - **C++ backend** handles: audio I/O, recording to disk, clip playback with sample-rate conversion, VST3 plugin hosting, MIDI device management, metering, offline render/export
 - **React frontend** handles: all UI, state management (Zustand), canvas-based timeline (Konva/react-konva), keyboard shortcuts, drag-and-drop, project save/load
-- **Communication**: synchronous bridge via `window.__JUCE__.backend.*` functions (defined in NativeBridge.ts, exposed in MainComponent.cpp)
+- **Communication**: asynchronous bridge via `window.__JUCE__.backend.*` functions (wrapped as Promises in NativeBridge.ts, exposed in MainComponent.cpp)
 
 ## Directory Structure
 
@@ -41,7 +41,7 @@ OpenStudio/
 │   ├── MIDIClip.h/cpp           # MIDI note event storage and time-range queries
 │   ├── Metronome.h/cpp          # Click track generation (BPM, time sig, accent patterns)
 │   ├── AudioConverter.h/cpp     # Channel/sample-rate conversion utilities
-│   ├── PeakCache.h/cpp          # REAPER-style multi-resolution peak cache (.s13peaks sidecar files)
+│   ├── PeakCache.h/cpp          # REAPER-style multi-resolution peak cache (.ospeaks sidecar files)
 │   ├── AudioAnalyzer.h/cpp      # Audio analysis utilities
 │   ├── BuiltInEffects.h/cpp     # Built-in audio effects (EQ, compressor, etc.)
 │   ├── BuiltInEffects2.h/cpp    # Additional built-in effects
@@ -58,13 +58,13 @@ OpenStudio/
 │   ├── HarmonicMaskGenerator.h/cpp # Wiener-filter soft masks at harmonic positions for poly separation
 │   ├── SpectralPitchShifter.h/cpp  # Phase vocoder on masked spectrograms with cepstral formant preservation
 │   ├── SpectralProcessor.h/cpp  # STFT/ISTFT utilities for spectral processing
-│   ├── S13PitchCorrector.h/cpp  # Real-time inline pitch corrector (auto-tune style)
+│   ├── OpenStudioPitchCorrector.h/cpp  # Real-time inline pitch corrector (auto-tune style)
 │   │
 │   │   # Plugin System
-│   ├── S13FXProcessor.h/cpp     # JSFX/Lua script-based audio processor (wraps YSFX)
-│   ├── S13FXGfxEditor.h/cpp     # JSFX @gfx rendering via juce::Image framebuffer at 30fps
-│   ├── S13PluginEditors.h/cpp   # Built-in plugin editor windows
-│   ├── S13ScriptWindow.h/cpp    # Lua gfx API framebuffer window
+│   ├── JSFXProcessor.h/cpp     # JSFX/Lua script-based audio processor (wraps YSFX)
+│   ├── JSFXGfxEditor.h/cpp     # JSFX @gfx rendering via juce::Image framebuffer at 30fps
+│   ├── OpenStudioPluginEditors.h/cpp   # Built-in plugin editor windows
+│   ├── OpenStudioScriptWindow.h/cpp    # Lua gfx API framebuffer window
 │   ├── ScriptEngine.h/cpp       # Lua scripting engine (sol2)
 │   │
 │   │   # Other Features
@@ -115,7 +115,7 @@ OpenStudio/
 │   │       ├── PitchCorrectorPanel.tsx  # Real-time inline corrector (auto-tune style, key/scale/retune)
 │   │       ├── PitchEditorLowerZone.tsx # Graphical pitch editor: canvas host, tools, controls, interaction handlers
 │   │       ├── PitchEditorCanvas.ts     # Imperative canvas renderer (60fps RAF loop): notes, contour, grid, piano keys
-│   │       ├── S13PitchEditor.tsx       # Pitch editor wrapper/container
+│   │       ├── OpenStudioPitchEditor.tsx       # Pitch editor wrapper/container
 │   │       ├── pitchCorrectorPresets.ts # Preset definitions for real-time pitch corrector
 │   │       │
 │   │       │   # Other
@@ -146,6 +146,22 @@ OpenStudio/
 
 ## Build & Dev
 
+### Release notes are a required release gate
+
+Before preparing or publishing any release, review the exact Git range since the
+previous application tag and write `docs/releases/<version>.md`. Describe concrete
+user-visible changes, fixes, known limitations and upgrade steps. Distinguish
+verified changes in the tagged source from unshipped working-tree changes; never
+copy a template, a raw commit list, or claim hardware/platform testing not run.
+Include a comparison/commit/PR link, review the prose, then run
+`python tools/validate-release-notes.py --version <version>` before building or
+publishing. The same notes feed GitHub and updater metadata. CI and local release
+entry points must fail closed when notes are missing, mismatched or unfinished.
+Do not bypass the gate or fabricate notes just to make a release pass.
+For a cumulative release page, review its main release PR as well as later
+hotfixes. Cover the main features and label the hotfix-only comparison separately;
+the immediately preceding tag can already contain the main feature release.
+
 ```bash
 # Full dev (installs deps, builds C++ Debug, starts Vite HMR, launches app)
 python build.py dev --run
@@ -159,11 +175,11 @@ cmake --build build --config Debug
 # C++ rebuild only — Release
 cmake --build build --config Release
 
-# Production (builds frontend + Release C++, single .exe with embedded frontend)
-python build.py prod
+# Production (reviewed notes required; builds frontend + Release C++ and copies webui/runtime files)
+python build.py prod --version <candidate-version>
 ```
 
-**No feature flags** — all features (ASIO, WASAPI, DirectSound, VST3 hosting, WebView2) are always enabled via hardcoded `target_compile_definitions` in CMakeLists.txt. The `build.py dev` mode uses Debug config; `build.py prod` uses Release.
+`build.py dev` uses Debug and `build.py prod` uses Release. Read `CMakeLists.txt` and the platform packaging scripts for current dependency, feature and signing options; do not assume every backend is enabled on every platform.
 
 ### Manual Testing Handoff Requirement
 
@@ -179,6 +195,29 @@ Before asking for manual testing:
 - Do not require the user to pre-run Vite, npm, or any other server. `python build.py dev --run` must start what it needs.
 - Stop any Codex-started dev servers, harness browsers, or background Vite/npm processes before handing off. Verify port `5183` is not left occupied by a Codex-started process.
 - In the handoff, state that the CMake Debug build was completed and that no pre-running server is required.
+
+### Branding and website documentation
+
+- The approved 2160 px master is `assets/branding/openstudio-logo-source.png`.
+  Run `node tools/generate-icons.mjs` after installing frontend dependencies to
+  regenerate native, frontend, menu-bar and README icons. Follow
+  [docs/branding.md](docs/branding.md) for all consumers and cache versions.
+- Keep the master synchronized with `../openstudio-website/assets/branding/`.
+  The website owns its favicon, social card and Store promotional exports; the
+  app owns native package icons and MSIX resources. New source icons do not update
+  already-built or installed binaries. Follow the existing release smoke checklist.
+- Product guides describe the source checkout unless tied to a released tag.
+  Update the app manual and the relevant website guides when public behavior
+  changes; the website lives in the separate `../openstudio-website` repository.
+  Its guides record an app commit and release/development status.
+- Verify menu names and bindings against `MenuBar.tsx`, `actionRegistry.ts`,
+  `shortcutProfiles.ts` and `mouseBehaviorProfiles.ts`. The current window is
+  **Keyboard, Mouse & Trackpad** in Options and Help. `F1` opens Help Reference.
+  Keyboard and mouse profiles are independent; platform, scope and custom
+  overrides can change a displayed shortcut. See [docs/input-profiles.md](docs/input-profiles.md).
+- The website owns shared legal policy and public app/update metadata. Keep
+  stable download/appcast contracts compatible with shipped clients, and only
+  advertise new models/features as released after checking the actual app tag.
 
 ## Key Technical Details
 
@@ -215,7 +254,7 @@ For **continuous edits** (faders, knobs), use the begin/commit pattern: `beginXE
 
 ### Timeline Rendering
 - **Konva** (react-konva) for canvas-based rendering
-- Waveform peaks fetched from C++ via `getWaveformPeaks(filePath, samplesPerPixel, numPixels)` — backed by PeakCache (`.s13peaks` files), never reads audio files directly
+- Waveform peaks fetched from C++ via `getWaveformPeaks(filePath, samplesPerPixel, numPixels)` — backed by PeakCache (`.ospeaks` files), never reads audio files directly
 - `samplesPerPixel` uses the clip's `sampleRate` (not hardcoded) with power-of-2 quantization for cache stability
 - Zoom: exponential scaling via `Math.exp(-deltaY * sensitivity)`, anchored to cursor position
 - Zoom debounce: suppresses waveform re-fetches during active zoom (`isZoomingRef`, 200ms timeout)
@@ -246,7 +285,7 @@ Polyphonic pipeline:
   PolyPitchDetector (Basic-Pitch ONNX) -> PolyNotes -> HarmonicMaskGenerator (Wiener) -> SpectralPitchShifter -> PolyResynthesizer
 
 Real-time corrector:
-  S13PitchCorrector (per-block, key/scale aware) -> inserted as FX plugin on track
+  OpenStudioPitchCorrector (per-block, key/scale aware) -> inserted as FX plugin on track
 ```
 
 **Key data flow** (graphical editor):
@@ -288,11 +327,11 @@ Real-time corrector:
 - **Cached pan gains**: `TrackProcessor` pre-computes `cos`/`sin` pan gains as `std::atomic<float>` (`cachedPanL`, `cachedPanR`) when `setPan()` or `setVolume()` is called on the message thread. `processBlock()` on the audio thread loads these atomics cheaply — no trig computation per callback.
 - **AudioRecorder::writeBlock()** also uses `ScopedTryLock` — same pattern.
 
-### PeakCache System (.s13peaks)
+### PeakCache System (.ospeaks)
 
-- REAPER-inspired multi-resolution peak cache stored as `.s13peaks` sidecar files alongside audio files
+- REAPER-inspired multi-resolution peak cache stored as `.ospeaks` sidecar files alongside audio files
 - 4 mipmap levels at strides: 64, 256, 1024, 4096 samples per peak
-- File format: `PeakFileHeader` (magic `0x53313350` / "S13P", version, source file size/timestamp for invalidation, sample rate, channels, level count) followed by flat float arrays per level
+- File format: `PeakFileHeader` (magic `0x4f53504b` / "OSPK", version, source file size/timestamp for invalidation, sample rate, channels, level count) followed by flat float arrays per level
 - `AudioEngine::getWaveformPeaks()` reads from PeakCache — never reads audio files directly. First call generates the cache synchronously; subsequent calls are instant (memory-cached mipmap lookup)
 - Peak generation is triggered automatically in the background when recording stops (`peakCache.generateAsync()` for each completed clip)
 - `PeakCache::buildPeaks()` reads the audio file in a single pass, computing all 4 mipmap levels simultaneously using per-level accumulators
@@ -337,11 +376,11 @@ Real-time corrector:
 ## Coding Preferences
 
 - Prefer targeted, minimal fixes over large refactors
-- Frontend changes don't require C++ rebuild — just refresh the WebView
+- During Vite development, frontend edits update through HMR without recompiling C++; follow the Debug build/copy requirement above before a manual-testing handoff.
 - C++ changes require `cmake --build build --config Debug` (or Release)
 - C++ builds should compile with **zero warnings** (`/W4` is enabled) — use `juce::ignoreUnused()` for required-but-unused params, avoid C macro name collisions, use `const auto&` for rvalue refs
-- TypeScript has some pre-existing errors in MenuBar, Playhead, ProjectSettingsModal, TrackHeader — these are known
-- Use `npx tsc --noEmit` to check for new TS errors after changes
+- Run `npm run build` in `frontend` for the dependency-notice check, TypeScript and Vite build. Do not waive diagnostics based on a historical list of known errors.
+- Use `npx tsc --noEmit` in `frontend` for a focused TypeScript check during iteration.
 
 ## Known Pitfalls & Past Issues
 
@@ -377,11 +416,16 @@ In Konva, `onMouseDown` fires before `onClick`. Handle all selection logic in `o
 
 Some VST3 plugins (e.g., Amplitube) expect specific channel counts — `TrackProcessor` and render path expand buffers before `processBlock()` if needed (`safeRenderFX` lambda). The render path must also re-prepare all FX plugins with render block size (512) and `reset()` them, then restore original state after. Without this, plugins overflow internal buffers and produce noise.
 
-### Render Modal — What Actually Works in Backend
+### Render and Export Documentation
 
-- **Working**: format (wav/aiff/flac), bit depth (16/24/32), channels (stereo/mono), normalize, tail
-- **Ignored**: sample rate (always renders at device rate)
-- **Not implemented**: "selected_tracks"/"stems" source (always master mix), dither
+- The current renderer supports selected output sample rates, selected-track/stem
+  sources and dither; the old notes saying these are ignored are obsolete.
+- Verify source selection and queue behavior in `frontend/src/store/actions/rendering.ts`
+  and `frontend/src/utils/renderJobPlanning.ts`, and native rendering in
+  `Source/AudioEngine.h/cpp`. Do not infer behavior solely from visible controls.
+- Keep [the user manual](docs/USER_MANUAL.md#12-rendering-and-exporting) and
+  [the implemented-feature inventory](docs/implemented_features.md) aligned.
+  Metadata fields remain a disabled placeholder; do not claim they are written.
 
 ### C++ Naming Conflicts with C Standard Library Macros
 

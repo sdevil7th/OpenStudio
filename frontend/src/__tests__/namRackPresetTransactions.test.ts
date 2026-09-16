@@ -551,7 +551,7 @@ describe("NAM Rack preset transactions", () => {
         chaosWeight: 0.5,
       },
       modelState: { ampModelPath: "C:/NAM/Amp.nam" },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 19 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 20 },
     });
 
     const legacyV9 = {
@@ -566,7 +566,7 @@ describe("NAM Rack preset transactions", () => {
       dspState: { reverbEngineVersion: 4 },
     }, { completePreset: true })).toMatchObject({
       values: { precisionDriveVolumeDb: 9, chaosMode: 0, chaosWeight: 0.5 },
-      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 19 },
+      dspState: { reverbEngineVersion: 5, namEffectsDspVersion: 20 },
     });
   });
 
@@ -648,7 +648,7 @@ describe("NAM Rack preset transactions", () => {
       },
       dspState: {
         reverbEngineVersion: 5,
-        namEffectsDspVersion: 19,
+        namEffectsDspVersion: 20,
       },
     });
   });
@@ -793,7 +793,8 @@ describe("NAM Rack preset transactions", () => {
       "utf8",
     );
 
-    expect(panelSource).toContain('{ modelSize: NAM_FULL_MODEL_SIZE }');
+    expect(panelSource).toContain("modelSize: NAM_FULL_MODEL_SIZE,");
+    expect(panelSource).toContain("declaredCaptureType: selectedCapture");
     expect(explorerSource).toContain("ampModelSize: NAM_FULL_MODEL_SIZE");
     expect(explorerSource).toContain("pedalModelSize: NAM_FULL_MODEL_SIZE");
     expect(explorerSource).toContain("snapshot.ampModelSize === undefined");

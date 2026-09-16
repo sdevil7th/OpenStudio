@@ -309,7 +309,7 @@ function rawWheelModifierCombinations(platform: ShortcutPlatform): WheelEventLik
     const primary = Boolean(bits & 1);
     const secondary = Boolean(bits & 2);
     return {
-      deltaX: 30,
+      deltaX: 0,
       deltaY: 120,
       ctrlKey: platform === "macos" ? secondary : primary,
       metaKey: platform === "macos" ? primary : secondary,

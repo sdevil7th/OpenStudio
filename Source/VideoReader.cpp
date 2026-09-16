@@ -178,7 +178,7 @@ juce::String VideoReader::getFrameAtTime(double timeSeconds, int outputWidth, in
 
     // Extract a single frame as JPEG to a temp file
     juce::File tempFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                              .getChildFile("s13_frame_" + juce::String(juce::Random::getSystemRandom().nextInt()) + ".jpg");
+                              .getChildFile("openstudio_frame_" + juce::String(juce::Random::getSystemRandom().nextInt()) + ".jpg");
 
     juce::String timeStr = juce::String(timeSeconds, 3);
     juce::String scaleFilter = "scale=" + juce::String(outputWidth) + ":" + juce::String(outputHeight);

@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <thread>
+#include "OwnedChildProcess.h"
 
 /**
  * StemSeparator — Source separation via Python subprocess (BS-RoFormer).
@@ -30,6 +31,7 @@ public:
         juce::int64 elapsedMs = 0;
         juce::int64 bytesDownloaded = 0;
         juce::int64 bytesTotal = 0;
+        juce::int64 bytesCached = 0;
         bool available = false;
         bool installerAvailable = false;
         bool pythonDetected = false;
@@ -83,6 +85,8 @@ public:
         juce::StringArray requestedFeatures;
         juce::StringArray installedFeatures;
         juce::String requestedFeature;
+        juce::String requestedModelId;
+        juce::String requestedModelVariant;
         juce::var hardware;
         juce::var features;
     };
@@ -172,7 +176,7 @@ private:
     juce::File getMusicGenerationCheckpointRoot() const;
 
     /** Get the managed Stable Audio 3 Medium snapshot root. */
-    juce::File getStableAudioModelRoot() const;
+    juce::File getStableAudioModelRoot(const juce::String& modelId = "stable-audio-3-medium") const;
 
     /** Find the prepared user-runtime Python executable. */
     juce::File findPython() const;
@@ -256,7 +260,9 @@ private:
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
         juce::String modelId;
+        juce::String modelVariant { "original" };
         juce::String stableAudioModelPath;
+        juce::String huggingFaceToken;
         bool stableAudioLicenseAccepted = false;
     };
 
@@ -296,7 +302,7 @@ private:
     bool hasRequiredModel (const juce::File& modelsDir) const;
 
     /** Return missing required files for a Stable Audio 3 Medium snapshot. */
-    juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot) const;
+    juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId = "stable-audio-3-medium") const;
 
     /** Return true if a Stable Audio 3 Medium snapshot contains the required files. */
     bool isStableAudioModelFolderValid (const juce::File& modelRoot) const;
@@ -309,6 +315,7 @@ private:
 
     /** Stop the dedicated background monitor if one is running. */
     void stopInstallMonitor();
+    juce::CriticalSection installMonitorLifecycleLock;
 
     /** Build the current AI tools status object using already-resolved values. */
     AiToolsStatus buildAiToolsStatus (const juce::File& systemPython,
@@ -322,6 +329,10 @@ private:
 
     /** Schedule a background refresh if one is not already running. */
     void scheduleStatusRefresh();
+
+    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision);
+    static bool applyDiffusersSetupProgress (const juce::String& line, AiToolsStatus& status);
+    friend class RuntimeSafetyRegression;
 
     /** Update the cached AI tools status under lock. */
     void updateCachedAiToolsStatus (const std::function<void (AiToolsStatus&)>& updater);
@@ -358,6 +369,7 @@ private:
 
     std::unique_ptr<juce::ChildProcess> childProcess;
     std::shared_ptr<juce::ChildProcess> installProcess;
+    std::shared_ptr<OwnedChildProcess> diffusersInstallProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
     juce::String installOutputBuffer;
     juce::int64 installLogReadOffset = 0;
@@ -383,12 +395,16 @@ private:
     mutable AiToolsStatus lastAiToolsStatus;
     mutable juce::CriticalSection aiToolsStatusLock;
     mutable bool statusRefreshInFlight = false;
+    juce::uint64 aiToolsStatusRevision = 0;
     mutable bool initialStatusPrepared = false;
     std::atomic<bool> aiToolsInstallWorkInProgress { false };
     std::atomic<bool> aiToolsCancelRequested { false };
     std::atomic<bool> aiToolsInstallMonitorStopRequested { false };
     std::atomic<bool> aiToolsInstallMonitorRunning { false };
     std::unique_ptr<std::thread> aiToolsInstallMonitorThread;
+    std::atomic<bool> shuttingDown { false };
+    std::atomic<bool> installWorkerActive { false };
+    juce::ThreadPool backgroundTasks { 2 }; // Joined before members can be destroyed.
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StemSeparator)
 };

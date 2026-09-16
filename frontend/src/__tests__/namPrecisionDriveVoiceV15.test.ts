@@ -38,12 +38,12 @@ function migrateComplete(
 
 describe("NAM Rack retired Maxon selector V18 compatibility contract", () => {
   it("loads old and current presets as Precision Drive while deleting the retired selector", () => {
-    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(19);
+    expect(CURRENT_NAM_EFFECTS_DSP_VERSION).toBe(20);
     for (const version of [1, 7, 14, 15, 16, 17, 18, 19, undefined, 0, 20, 999]) {
       const migrated = migrateComplete(version, 1);
       expect(migrated.values).not.toHaveProperty("precisionDriveVoice");
       expect(migrated.values.precisionDriveDrive).toBe(0.42);
-      expect(migrated.dspState.namEffectsDspVersion).toBe(19);
+      expect(migrated.dspState.namEffectsDspVersion).toBe(20);
       expect(isCurrentNAMRackPresetState(migrated)).toBe(true);
     }
   });
@@ -54,9 +54,10 @@ describe("NAM Rack retired Maxon selector V18 compatibility contract", () => {
       expect(normalizeNAMPrecisionDriveVoice(value)).toBe(0);
     }
     for (const version of [14, 15, 16, 17, 18, 19]) {
-      expect(normalizeNAMEffectsDspVersion(version)).toBe(19);
+      expect(normalizeNAMEffectsDspVersion(version)).toBe(20);
     }
-    expect(normalizeNAMEffectsDspVersion(20)).toBeUndefined();
+    expect(normalizeNAMEffectsDspVersion(20)).toBe(20);
+    expect(normalizeNAMEffectsDspVersion(21)).toBeUndefined();
   });
 
   it("prunes the retired selector from baseline and Compare snapshots", () => {
@@ -102,7 +103,7 @@ describe("NAM Rack retired Maxon selector V18 compatibility contract", () => {
       { chain: "track", fxIndex: 0 },
       "OpenStudio NAM Rack",
     );
-    expect(bootSchema.modelState?.namEffectsDspVersion).toBe(19);
+    expect(bootSchema.modelState?.namEffectsDspVersion).toBe(20);
     expect(bootSchema.parameters.some((param) => param.id === "precisionDriveVoice")).toBe(false);
   });
 

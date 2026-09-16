@@ -505,6 +505,8 @@ def probe_runtime_capabilities(
         return report
 
     report["runtimeReady"] = True
+    from ai_execution_policy import runtime_capabilities
+    report["executionCapabilities"] = runtime_capabilities(torch)
     report["audioSeparatorVersion"] = _get_dist_version("audio-separator")
     report["aceStepVersion"] = _get_dist_version("ace-step")
     report["diffusersVersion"] = _get_dist_version("diffusers")
@@ -553,25 +555,18 @@ def probe_runtime_capabilities(
     else:
         bridge_import_ok, bridge_import_error = _can_import_music_generation_bridge()
         if bridge_import_ok:
-            report["musicGenerationComputeBackend"] = "cuda" if torch.cuda.is_available() else "cpu"
-            if report["musicGenerationComputeBackend"] != "cuda":
-                _set_music_generation_status(
-                    report,
-                    ready=False,
-                    message="ACE-Step Diffusers requires CUDA on this backend.",
-                    error_code="cuda_required",
-                )
-                report["musicGenerationPerformanceReady"] = False
-                report["musicGenerationPerformanceStatusMessage"] = "CUDA is required for ACE-Step Diffusers."
-                report["backendDecisionTrace"].append("ace diffusers cuda unavailable")
-            else:
-                report["musicGenerationPerformanceReady"] = True
-                report["musicGenerationPerformanceStatusMessage"] = "ACE-Step Diffusers CUDA runtime is available."
-                _set_music_generation_status(
-                    report,
-                    ready=True,
-                    message="ACE-Step Diffusers backend is ready.",
-                )
+            cuda_available = torch.cuda.is_available()
+            report["musicGenerationComputeBackend"] = ("rocm" if cuda_available and torch.version.hip
+                                                       else "cuda" if cuda_available else "cpu")
+            from ai_execution_policy import select_device
+            selected = select_device(torch)
+            report["musicGenerationComputeBackend"] = selected.family
+            report["musicGenerationPerformanceReady"] = cuda_available
+            report["musicGenerationPerformanceStatusMessage"] = (
+                f"ACE-Step uses {selected.name}. "
+                + ("CUDA runtime is available." if cuda_available else
+                   "This device route requires model and performance qualification."))
+            _set_music_generation_status(report, ready=True, message="ACE-Step Diffusers backend is ready.")
         else:
             _set_music_generation_status(
                 report,

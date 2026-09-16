@@ -217,6 +217,34 @@ describe("NAM Rack instrument profile", () => {
     expect(design).toContain('useBoundDesignParam("instrumentProfile")');
   });
 
+  it("keeps the Bass factory starts hiss-safe without silently filtering or EQ-colouring the cabinet", () => {
+    const panel = readFileSync(new URL("../components/NAMRackPanel.tsx", import.meta.url), "utf8");
+    const cleanStart = panel.indexOf('id: "bass-clean-foundation"');
+    const gritStart = panel.indexOf('id: "bass-grit-parallel"');
+    const presetsEnd = panel.indexOf("\n];", gritStart);
+    const cleanPreset = panel.slice(cleanStart, gritStart);
+    const gritPreset = panel.slice(gritStart, presetsEnd);
+
+    expect(cleanPreset).toContain("gateThresholdDb: -70");
+    expect(cleanPreset).toContain("gateReleaseMs: 190");
+    expect(cleanPreset).toContain("cabHPFEnabled: 0");
+    expect(cleanPreset).toContain("cabLPFEnabled: 0");
+    expect(cleanPreset).toContain("cabHPFHz: 30");
+    expect(cleanPreset).toContain("cabLPFHz: 16000");
+    expect(cleanPreset).toContain("cabIRStereo: 0");
+    expect(cleanPreset).toContain("cabDirectMix: 0.25");
+    expect(cleanPreset).toContain("eqEnabled: 0");
+    expect(cleanPreset).toContain("eq65Db: 0");
+    expect(gritPreset).toContain("gateThresholdDb: -65");
+    expect(gritPreset).toContain("gateReleaseMs: 145");
+    expect(gritPreset).toContain("cabHPFEnabled: 0");
+    expect(gritPreset).toContain("cabLPFEnabled: 0");
+    expect(gritPreset).toContain("cabHPFHz: 30");
+    expect(gritPreset).toContain("cabLPFHz: 16000");
+    expect(gritPreset).toContain("cabIRStereo: 0");
+    expect(gritPreset).toContain("cabDirectMix: 0.35");
+  });
+
   it("keeps active opposite-tagged Explorer captures visible before profile filtering", () => {
     const explorer = readFileSync(new URL("../components/NAMExplorer.tsx", import.meta.url), "utf8");
     expect(explorer.match(/filterAndPinNAMInstrumentItems\(/g)?.length).toBeGreaterThanOrEqual(2);

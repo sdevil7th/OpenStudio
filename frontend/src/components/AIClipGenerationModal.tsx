@@ -1,3 +1,5 @@
+import { AIModelVariantSelector } from "./AIModelVariantSelector";
+import { AIGenerationProgressBar, formatGenerationStageProgress } from "./AIGenerationProgressBar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, Music2, Settings2, WandSparkles } from "lucide-react";
 import { useShallow } from "zustand/shallow";
@@ -15,7 +17,7 @@ import {
   normalizeWorkflowParams,
   resolveAiMusicModelId,
 } from "../data/aiWorkflows";
-import { nativeBridge, type AIGenerationProgress } from "../services/NativeBridge";
+import { cancelAIClipJob, clipJobOwner, startAIClipJob, useAIClipJob } from "../services/aiClipJobs";
 import { type AudioClip, useDAWStore } from "../store/useDAWStore";
 import {
   Button,
@@ -29,6 +31,7 @@ import {
   Textarea,
 } from "./ui";
 import { NumericWorkflowParamField } from "./AIWorkflowParamField";
+import { AIGenerationHardwareCheck } from "./AIGenerationHardwareCheck";
 
 const SECTION_ORDER: AIWorkflowSection[] = [
   "prompt",
@@ -150,9 +153,6 @@ function formatSessionModeLabel(sessionMode?: string) {
   }
 }
 
-function progressWidth(progress?: number) {
-  return `${Math.max(4, Math.round((progress ?? 0) * 100))}%`;
-}
 
 function shouldShowParam(workflowId: string, param: AIWorkflowParam) {
   if (workflowId === "variation") {
@@ -201,7 +201,6 @@ export default function AIClipGenerationModal() {
     setAIClipGenerationParams,
     setAIClipGenerationRange,
     setAIClipGenerationError,
-    addGeneratedSourceAudioClip,
     openAiToolsSetup,
   } = useDAWStore(
     useShallow((state) => ({
@@ -222,17 +221,16 @@ export default function AIClipGenerationModal() {
       setAIClipGenerationParams: state.setAIClipGenerationParams,
       setAIClipGenerationRange: state.setAIClipGenerationRange,
       setAIClipGenerationError: state.setAIClipGenerationError,
-      addGeneratedSourceAudioClip: state.addGeneratedSourceAudioClip,
       openAiToolsSetup: state.openAiToolsSetup,
     })),
   );
 
-  const [isGenerating, setIsGenerating] = useState(false);
+  const job = useAIClipJob();
+  const owner = clipJobOwner(aiClipGenerationTrackId || "", aiClipGenerationClipId || "");
+  const progress = job.owner === owner ? job.progress : { state: "idle" as const, progress: 0 };
+  const isGenerating = progress.state === "loading" || progress.state === "generating";
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [progress, setProgress] = useState<AIGenerationProgress>({ state: "idle", progress: 0 });
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const completedRef = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const wasGeneratingRef = useRef(false);
 
@@ -257,7 +255,7 @@ export default function AIClipGenerationModal() {
   );
   const selectedModelStatus = aiToolsStatus.musicModels?.[aiClipGenerationModelId];
   const isModelReady = Boolean(
-    selectedModelStatus?.ready
+    (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" && selectedModelStatus?.variants?.int8?.ready) ?? false : selectedModelStatus?.ready)
     ?? (
       aiClipGenerationModelId === ACE_STEP_MODEL_ID
         ? (
@@ -271,7 +269,7 @@ export default function AIClipGenerationModal() {
     ),
   );
   const modelBlockedMessage =
-    selectedModelStatus?.message
+    (params.modelVariant === "int8" ? (aiToolsStatus.hardware?.gpuBackend?.toLowerCase() === "cuda" ? "Set up the INT8 version in AI Runtime Setup." : "Choose Original on this device. INT8 requires an NVIDIA GPU.") : selectedModelStatus?.message)
     || selectedModelStatus?.blockReason
     || aiToolsStatus.features?.audioGeneration?.message
     || aiToolsStatus.musicGenerationStatusMessage
@@ -326,15 +324,6 @@ export default function AIClipGenerationModal() {
     workflow.id,
   ]);
 
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  };
-
-  useEffect(() => stopPolling, []);
-
   const paramsBySection = useMemo(() => {
     return SECTION_ORDER.map((section) => ({
       section,
@@ -359,8 +348,7 @@ export default function AIClipGenerationModal() {
     formatRuntimeProfileLabel(progress.runtimeProfile),
   ].filter(Boolean);
   const hasProgressDetails = Boolean(
-    progress.statusNote
-    || progress.sourcePatternWarning
+    progress.sourcePatternWarning
     || progressChips.length
     || progress.lastStderrLine
     || progress.lastStdoutLine,
@@ -387,18 +375,12 @@ export default function AIClipGenerationModal() {
   }, [isGenerating]);
 
   const handleCancel = async () => {
-    if (isGenerating) {
-      completedRef.current = true;
-      stopPolling();
-      await nativeBridge.cancelAIGeneration();
-      setIsGenerating(false);
-      setProgress({ state: "idle", progress: 0 });
-      return;
-    }
+    if (isGenerating) { await cancelAIClipJob(owner); return; }
     closeAIClipGeneration();
   };
 
   const handleGenerate = async () => {
+    if (isGenerating) return;
     if (!sourceTrack || !sourceClip || !aiClipGenerationWorkflowId) {
       setAIClipGenerationError("Source clip is no longer available.");
       return;
@@ -416,9 +398,6 @@ export default function AIClipGenerationModal() {
       return;
     }
 
-    completedRef.current = false;
-    setIsGenerating(true);
-    setProgress({ state: "loading", progress: 0.01, phase: "starting" });
     setAIClipGenerationError("");
     scrollStatusIntoView();
 
@@ -434,72 +413,11 @@ export default function AIClipGenerationModal() {
       timeSignature,
     });
 
-    try {
-      const result = await nativeBridge.startAIGeneration(
-        sourceTrack.id,
-        aiClipGenerationModelId,
-        workflow.id,
-        requestParams,
-      );
-
-      if (!result.started) {
-        setIsGenerating(false);
-        setProgress({ state: "error", progress: 0, error: result.error });
-        setAIClipGenerationError(result.error || "Failed to start AI generation.");
-        return;
-      }
-
-      let idleCount = 0;
-      pollRef.current = setInterval(async () => {
-        if (completedRef.current) return;
-        const nextProgress = await nativeBridge.getAIGenerationProgress();
-        if (completedRef.current) return;
-        setProgress(nextProgress);
-
-        if (nextProgress.state === "idle") {
-          idleCount += 1;
-          if (idleCount >= 10) {
-            completedRef.current = true;
-            stopPolling();
-            setIsGenerating(false);
-            setAIClipGenerationError("Generation did not start. Open AI Tools Setup and check the selected model.");
-          }
-          return;
-        }
-        idleCount = 0;
-
-        if (nextProgress.state === "done") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-          if (!nextProgress.outputFile) {
-            setAIClipGenerationError("Generation finished without producing an audio file.");
-            return;
-          }
-          await addGeneratedSourceAudioClip({
-            sourceTrackId: sourceTrack.id,
-            sourceClipId: sourceClip.id,
-            workflowId: workflow.id,
-            filePath: nextProgress.outputFile,
-            extensionDuration,
-          });
-          setTimeout(() => closeAIClipGeneration(), 500);
-        } else if (nextProgress.state === "error") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-          setAIClipGenerationError(nextProgress.error || nextProgress.message || "Generation failed.");
-        } else if (nextProgress.state === "cancelled") {
-          completedRef.current = true;
-          stopPolling();
-          setIsGenerating(false);
-        }
-      }, 250);
-    } catch (error) {
-      stopPolling();
-      setIsGenerating(false);
-      setAIClipGenerationError(error instanceof Error ? error.message : "Generation failed.");
-    }
+    await startAIClipJob({
+      trackId: sourceTrack.id, clipId: sourceClip.id,
+      modelId: aiClipGenerationModelId, workflowId: workflow.id,
+      params: requestParams, extensionDuration,
+    });
   };
 
   const renderParam = (param: AIWorkflowParam) => {
@@ -680,6 +598,17 @@ export default function AIClipGenerationModal() {
             </div>
           </section>
 
+          <AIModelVariantSelector modelId={aiClipGenerationModelId} value={params.modelVariant === "int8" ? "int8" : "original"}
+            status={aiToolsStatus} disabled={isGenerating}
+            onChange={(value) => setAIClipGenerationParams({ ...params, modelVariant: value })} />
+          <AIGenerationHardwareCheck modelId={aiClipGenerationModelId} workflowId={workflow.id}
+            params={sourceTrack && sourceClip ? buildAIClipGenerationRequestParams({
+              params, modelId: aiClipGenerationModelId, sourceTrack, sourceClip,
+              workflowRange: aiClipGenerationRange, extensionDuration: Number(params.extension_duration ?? 20),
+              transportTempo, timeSignature,
+            }) : params}
+            enabled={showAIClipGeneration && isModelReady && !isGenerating && !!sourceClip} />
+
           {model.attribution ? (
             <div className="rounded border border-neutral-800 bg-neutral-950/50 px-4 py-2 text-xs text-daw-text-secondary">
               {model.attribution}
@@ -713,9 +642,9 @@ export default function AIClipGenerationModal() {
             </div>
           ) : null}
 
-          {aiClipGenerationError ? (
+          {(aiClipGenerationError || progress.error) ? (
             <div className="rounded border border-red-700/40 bg-red-950/30 px-4 py-3 text-sm text-red-200">
-              {aiClipGenerationError}
+              {aiClipGenerationError || progress.error}
             </div>
           ) : null}
 
@@ -732,7 +661,7 @@ export default function AIClipGenerationModal() {
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-daw-text-muted">
                   <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
-                    {Math.round((progress.progress ?? 0) * 100)}%
+                    {formatGenerationStageProgress(progress.phaseProgress)}
                   </span>
                   {progress.elapsedMs ? (
                     <span className="rounded-full border border-neutral-700 bg-neutral-900/80 px-2 py-1 text-daw-text">
@@ -741,12 +670,10 @@ export default function AIClipGenerationModal() {
                   ) : null}
                 </div>
               </div>
-              <div className="mt-3 h-2.5 w-full rounded-full bg-neutral-900">
-                <div
-                  className="h-2.5 rounded-full bg-daw-accent transition-all duration-200"
-                  style={{ width: progressWidth(progress.progress) }}
-                />
-              </div>
+              <AIGenerationProgressBar value={progress.phaseProgress} />
+              {progress.statusNote ? (
+                <p role="status" className="mt-3 text-xs leading-5 text-daw-text-secondary">{progress.statusNote}</p>
+              ) : null}
               {hasProgressDetails ? (
                 <div className="mt-3">
                   <Button
@@ -759,9 +686,6 @@ export default function AIClipGenerationModal() {
                   </Button>
                   {detailsOpen ? (
                     <div className="mt-3 space-y-2 rounded border border-neutral-800 bg-black/30 p-3">
-                      {progress.statusNote ? (
-                        <p className="text-xs leading-5 text-daw-text-secondary">{progress.statusNote}</p>
-                      ) : null}
                       {progress.sourcePatternWarning ? (
                         <p className="text-xs leading-5 text-amber-300">{progress.sourcePatternWarning}</p>
                       ) : null}

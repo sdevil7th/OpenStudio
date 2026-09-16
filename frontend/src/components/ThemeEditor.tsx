@@ -8,7 +8,7 @@ interface ThemeEditorProps {
   onClose: () => void;
 }
 
-// REAPER .ReaperTheme color key → Studio13 CSS property mapping
+// REAPER .ReaperTheme color key → OpenStudio CSS property mapping
 // REAPER colors are stored as decimal RGB (R + G*256 + B*65536)
 const REAPER_COLOR_MAP: Record<string, string> = {
   col_main_bg: "--color-daw-dark",
@@ -114,7 +114,7 @@ export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
       if (file.name.endsWith(".ReaperTheme") || file.name.endsWith(".reapertheme")) {
         // REAPER theme INI format
         overrides = parseReaperTheme(content);
-      } else if (file.name.endsWith(".ostheme") || file.name.endsWith(".s13theme") || file.name.endsWith(".json")) {
+      } else if (file.name.endsWith(".ostheme") || file.name.endsWith(".json")) {
         // OpenStudio theme JSON format
         try {
           const parsed = JSON.parse(content);
@@ -303,12 +303,12 @@ export function ThemeEditor({ isOpen, onClose }: ThemeEditorProps) {
             </Button>
           </div>
           <div className="text-[9px] text-neutral-500 mt-1">
-            Supports .ostheme, legacy .s13theme, and .ReaperTheme imports
+            Supports .ostheme and .ReaperTheme imports
           </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".ostheme,.s13theme,.json,.ReaperTheme,.reapertheme"
+            accept=".ostheme,.json,.ReaperTheme,.reapertheme"
             className="hidden"
             onChange={handleImportFile}
           />

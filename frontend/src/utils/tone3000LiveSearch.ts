@@ -40,7 +40,7 @@ function stableSearchFields(input: TONE3000LiveSearchSnapshotInput) {
     query,
     pageSize: Math.max(1, Math.floor(input.pageSize)),
     targetPageSize: Math.max(1, Math.floor(input.targetPageSize)),
-    sort: query ? "best-match" : input.requestedSort,
+    sort: input.requestedSort,
     sortMode: input.sortMode,
     tab: input.tab,
     gearFilter: input.gearFilter,

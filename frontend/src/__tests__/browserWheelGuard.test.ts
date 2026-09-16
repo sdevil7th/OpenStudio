@@ -43,7 +43,7 @@ describe("app-wide browser zoom wheel guard", () => {
     let listener: EventListener | null = null;
     const target = {
       addEventListener: vi.fn((_type: string, next: EventListener) => {
-        listener = next;
+        if (_type === "wheel") listener = next;
       }),
       removeEventListener: vi.fn(),
     } as unknown as Document;
@@ -62,6 +62,6 @@ describe("app-wide browser zoom wheel guard", () => {
     expect(stopPropagation).not.toHaveBeenCalled();
 
     cleanup();
-    expect(target.removeEventListener).toHaveBeenCalledOnce();
+    expect(target.removeEventListener).toHaveBeenCalledTimes(6);
   });
 });

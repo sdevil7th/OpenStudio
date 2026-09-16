@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include "OwnedChildProcess.h"
 
 struct AIGenerationProgress
 {
@@ -26,6 +27,7 @@ struct AIGenerationProgress
     juce::String runtimeProfile;
     juce::String lmModel;
     juce::String statusNote;
+    juce::var generationDetails;
     juce::String failureKind;
     juce::String sessionMode;
     int workerExitCode = 0;
@@ -58,18 +60,26 @@ public:
     AIGenerationProgress pollProgress();
     void cancel();
     bool isRunning() const;
+    // Called on the host control thread before another AI engine needs memory.
+    bool releaseIdleWorker();
+    // Background/control thread only. Reads hardware and checkpoint headers without loading weights.
+    juce::var getGenerationPreflight(const juce::String& modelId, const juce::String& workflowId,
+                                    const juce::String& paramsJson,
+                                    const std::function<bool()>& cancelled) const;
 
 private:
+    friend class RuntimeSafetyRegression;
     juce::File getUserDataRoot() const;
     juce::File getUserRuntimeRoot() const;
     juce::File getStableAudioRuntimeRoot() const;
     juce::File getMusicGenerationCheckpointRoot() const;
-    juce::File getStableAudioModelRoot() const;
+    juce::File getStableAudioModelRoot(const juce::String& modelId) const;
     juce::File findPython() const;
     juce::File findStableAudioPython() const;
+    juce::File findMiniMaxPython() const;
+    static juce::File qualifiedMiniMaxPython(const juce::File& candidateRoot);
     juce::File findScript() const;
     juce::File findStableAudioScript() const;
-    void cleanupLegacyWorkerProcesses(const juce::File& python, const juce::File& script) const;
     bool ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId);
     bool sendGenerateRequest(const juce::String& modelId,
                              const juce::String& workflowId,
@@ -94,7 +104,8 @@ private:
                                 const juce::String& failureKind);
     void resetProcessStateLocked();
 
-    std::unique_ptr<juce::ChildProcess> workerProcess_;
+    std::unique_ptr<OwnedChildProcess> workerProcess_;
+    std::atomic<bool> stopRequested_ { false };
     std::thread readerThread_;
     std::thread generationThread_;
     std::atomic<bool> readerShouldExit_ { false };
@@ -106,9 +117,12 @@ private:
     juce::String lastStderrLine_;
     juce::File currentOutputFile_;
     juce::String currentRequestId_;
+    juce::String recoveryJournalId_;
     juce::String expectedScriptVersion_;
     juce::String workerScriptVersion_;
     juce::String workerScriptPath_;
+    juce::String workerModelId_;
+    juce::File workerPython_;
     bool generationActive_ = false;
     bool expectedProcessExit_ = false;
     bool cancelRequested_ = false;

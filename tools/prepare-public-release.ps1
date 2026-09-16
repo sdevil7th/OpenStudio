@@ -22,7 +22,7 @@ param(
     [string]$FullReleaseNotesUrl = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$NotesFile = "packaging/release-notes-template.md",
+    [string]$NotesFile = "",
 
     [Parameter(Mandatory = $false)]
     [string]$BuildDir = "build-release-windows",
@@ -107,6 +107,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Release content is required even when build/package work is skipped.
+if ([string]::IsNullOrWhiteSpace($NotesFile)) {
+    $NotesFile = Join-Path $PSScriptRoot ("../docs/releases/" + ($Version -replace '^v', '') + ".md")
+}
+& python (Join-Path $PSScriptRoot "validate-release-notes.py") --version $Version --notes-file $NotesFile
+if ($LASTEXITCODE -ne 0) { throw "Release notes failed validation. Write and review the version-specific notes before continuing." }
+
 
 function Write-Step {
     param([string]$Message)
@@ -401,6 +409,8 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedWindowsAiRuntimeAssetPath) `
 }
 
 & $generateMetadataScript @generateMetadataArgs
+& python (Join-RepoPath "tools/updater_manifest.py") sign --metadata-dir $MetadataOutputDir
+if ($LASTEXITCODE -ne 0) { throw "Application update metadata signing failed." }
 
 Write-Step "Validating release metadata"
 $validateMetadataArgs = @(

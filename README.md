@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/icon.svg" height="112" alt="OpenStudio logo"/>
+  <img src="frontend/public/icon.png" height="112" alt="OpenStudio logo"/>
 </p>
 
 <h1 align="center">OpenStudio</h1>
@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/audio-ASIO%20%7C%20WASAPI%20%7C%20DirectSound-green" alt="Audio drivers"/>
   <img src="https://img.shields.io/badge/plugins-VST3%20%7C%20CLAP%20%7C%20LV2-orange" alt="Plugin formats"/>
   <img src="https://img.shields.io/badge/guitar-NAM%20A1%20%7C%20A2-f5ae27" alt="Neural Amp Modeler A1 and A2"/>
-  <img src="https://img.shields.io/badge/AI-ACE--Step%20%7C%20Stable%20Audio%203-purple" alt="AI music models"/>
+  <img src="https://img.shields.io/badge/AI-ACE--Step%20%7C%20Stable%20Audio%203%20%7C%20MiniMax%20Music%203-purple" alt="AI music models"/>
 </p>
 
 <p align="center">
@@ -34,6 +34,8 @@
   <a href="docs/USER_MANUAL.md">User Manual</a>
   |
   <a href="docs/API.md">Lua API</a>
+  |
+  <a href="https://github.com/sponsors/sdevil7th">♥ Sponsor OpenStudio</a>
 </p>
 
 ---
@@ -43,6 +45,11 @@
 OpenStudio is for people who want a real DAW surface, not just a prompt box: record or import material, edit it deeply, host plugins, tune vocals, split stems, generate or transform ideas with local AI tools, and render deliverables without leaving the session.
 
 It combines classic multitrack production with newer tools such as stem separation, audio-to-MIDI, source-conditioned AI generation, graphical pitch editing, and scriptable project operations.
+
+This README and the help guides describe the current source checkout. Published
+installers can lag behind it; check the [release notes](docs/releases/)
+for the features in a specific release. The signed updater and automatic
+macOS/Linux replacement described below still need a new application release.
 
 ## Features At A Glance
 
@@ -56,11 +63,12 @@ It combines classic multitrack production with newer tools such as stem separati
 | Built-in FX | EQ, compressor, gate, limiter, delay, reverb, chorus, saturator, pitch corrector, basic synth/piano/drums |
 | Guitar / Bass / NAM Rack | Free A1/A2 amp, full-rig, and pedal capture host; explicit capture choice inside multi-capture packs; Guitar/Bass voicing profiles; native pedalboard, cabinet IRs, Cabinet Space, Graphic EQ, modulation, delay, reverb/shimmer, presets, calibration, transactional audition, and project recall; optional TONE3000 connection |
 | Pitch | Graphical pitch editor, YIN analysis, note blobs, drift/vibrato tools, real-time auto-tune style FX, and Basic Pitch polyphonic detection in ONNX-enabled builds (current Windows/Linux release pipeline) |
-| AI | Optional AI Tools runtime, stem separation, ACE-Step music generation, Stable Audio 3 text-to-audio, clip variation, inpaint, continuation |
+| AI | Optional AI Tools runtime, stem separation, ACE-Step music generation, MiniMax Music 3 lyrics/section-based songs, Stable Audio 3 text-to-audio, ACE-Step/Stable Audio clip variation, inpaint, continuation |
+| Recovery / practice | Interrupted project, recording, and AI-work recovery; optional periodic recovery snapshots; click-only metronome practice with live monitoring |
 | Render | WAV, AIFF, FLAC, MP3, and OGG; target sample rate, mono/stereo, normalize, tail, dither, track stems, and secondary output (MP3/OGG and FFmpeg conversions require system FFmpeg on macOS/Linux) |
 | Delivery | Render queue, region render matrix, DDP export, batch converter, session archive, project compare, and clean-project tools |
 | Workflow | Command palette, searchable/printable shortcut reference, 19 built-in DAW keyboard profiles, independently selectable mouse/scroll profiles, scoped rebinding, custom keyboard-profile import/export, help overlay, getting started guide, screensets, themes, toolbar editor |
-| Extensibility | Lua scripting API, script editor, JSFX/S13FX script effects, project automation helpers |
+| Extensibility | Lua scripting API, script editor, JSFX script effects, project automation helpers |
 | Sync / media | Timecode display/settings, big clock, media explorer browse/import, media-pool plumbing (partial), missing media resolver, video window plumbing |
 
 Some advanced features are still evolving. See [Implemented But Partial / Caveated](docs/implemented_features.md#implemented-but-partial--caveated) for the honest edges.
@@ -79,7 +87,7 @@ licenses, accounts, hardware requirements, and usage terms.
 | MIDI note editing | **Included — free** | Piano roll, note/velocity/CC editing, transforms, virtual keyboard, and MIDI import/export |
 | Pitch and source workflows | **Included — free** | Graphical monophonic pitch workflow, real-time pitch corrector, stem-separation integration, and audio-to-MIDI plumbing; optional models/runtime may be required |
 | Guitar and bass rig | **Included — free** | NAM A1/A2 capture hosting, pedal/amp/full-rig slots, local cabinet-IR loading, native pedalboard and post effects, Guitar/Bass voicing, presets, A/B, and project recall |
-| Plug-in and scripting host | **Included — free** | Primarily VST3 hosting with CLAP/LV2 code paths, built-in effects, JSFX/S13FX-style effects, and Lua scripting |
+| Plug-in and scripting host | **Included — free** | Primarily VST3 hosting with CLAP/LV2 code paths, built-in effects, JSFX-style effects, and Lua scripting |
 | Hotkey and mouse profiles | **Included — free** | 19 built-in DAW-style keyboard maps, independent mouse/scroll maps, scoped multi-binding, conflict checks, and named custom keyboard profiles with JSON import/export |
 | AI-assisted creation | **Free / optional setup** | Local integration for generation, variation, inpaint, continuation, stems, and audio-to-MIDI; the small Basic Pitch model is included and its inference runtime is enabled in current Windows/Linux releases, while large generation/stem runtimes and models remain optional downloads |
 | Local and inspectable workflow | **Included — free** | Local project files and source-visible JUCE/React implementation under the GNU AGPLv3 |
@@ -159,7 +167,7 @@ Cubase is a mature commercial composition DAW. OpenStudio is the open local-firs
 | Recording / editing / mixing | ✅ Decades of polished DAW workflows | ✅ Native JUCE engine, clip editing, takes, razor/ripple edits, sends, buses, mixer snapshots |
 | Pitch / stems / audio-to-MIDI | VariAudio 3 is in Artist/Pro; AI stem separation is Pro-only; Audio-to-MIDI chords are in Elements/Artist/Pro | Graphical pitch editor, real-time pitch corrector, stem separation integration, and Basic Pitch audio-to-MIDI in ONNX-enabled Windows/Linux builds |
 | AI generation | ⚠️ Assisted tools, but not a local AI music-generation DAW workflow | ✅ Optional local AI Tools runtime for ACE-Step, Stable Audio 3, variation, inpaint, continuation, stems |
-| Plugin ecosystem | VST3 hosting; ARA 2 in Artist/Pro. VST2 can be enabled in limited cases but is officially unsupported | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX/S13FX, Lua |
+| Plugin ecosystem | VST3 hosting; ARA 2 in Artist/Pro. VST2 can be enabled in limited cases but is officially unsupported | ✅ VST3 plus CLAP/LV2 code paths, input/track/master/monitoring FX, JSFX, Lua |
 | Local / private workflow | Local desktop DAW; proprietary software and licensing | ✅ Local project files, optional local AI runtime, source-visible implementation |
 | Open / customizable | ❌ Closed source | ✅ Fork it, script it, extend it, inspect the engine |
 | Where Cubase still wins | ✅ Mature scoring, VariAudio polish, bundled content, commercial support | ⚠️ Some advanced OpenStudio features remain partial or release-hardening dependent |
@@ -175,7 +183,7 @@ Pro Tools is the facility standard. OpenStudio is for producers and builders who
 | Recording / editing / mixing | ✅ Deep tracking, comping, editing, post-production, automation | ✅ Multitrack recording, takes, razor/ripple edits, routing, automation, mixer, render queue |
 | Pitch / repair | All tiers support ARA 2. Intro requires a separately licensed or trial ARA plug-in; active paid subscriptions and perpetual Upgrade Plans include Melodyne essential, RePitch Elements, and other repair tools | Built-in graphical pitch editor, real-time pitch corrector, ARA host plumbing |
 | AI generation | ⚠️ Integrations and assisted workflows, but not a local AI music generator inside the DAW core | ✅ Text-to-music, lyrics+style, text-to-audio, variation, inpaint, continuation, stems |
-| Plugin ecosystem | AAX Native/AudioSuite across all tiers, plus ARA 2 integration; third-party AAX works in Intro and paid tiers | VST3 plus CLAP/LV2 code paths, built-in FX, JSFX/S13FX, Lua scripting |
+| Plugin ecosystem | AAX Native/AudioSuite across all tiers, plus ARA 2 integration; third-party AAX works in Intro and paid tiers | VST3 plus CLAP/LV2 code paths, built-in FX, JSFX, Lua scripting |
 | Local / private workflow | Local desktop DAW; proprietary software/licensing with optional connected services | ✅ Local files, optional local AI runtime, inspectable source |
 | Open / customizable | ❌ Closed source | ✅ Source-visible, scriptable, hackable |
 | Where Pro Tools still wins | ✅ Commercial facilities, HDX/AAX workflows, immersive/post pipelines, support ecosystem | ⚠️ OpenStudio is not claiming facility-standard interchange parity |
@@ -211,7 +219,8 @@ OpenStudio keeps AI as part of the DAW workflow rather than a replacement for it
 | Workflow | What it does |
 |---|---|
 | Text to Music | Generates a fresh music clip through ACE-Step from prompt, lyrics, BPM, key/scale, language, duration, seed, and diffusion controls |
-| Lyrics + Style | Uses structured lyrics plus style/arrangement prompt for song generation |
+| Lyrics + Style | Uses ACE-Step or MiniMax Music 3 with lyrics and a style/arrangement prompt |
+| Song Sections | Uses MiniMax Music 3 with separate verse, chorus, bridge, vocal-direction, and arrangement fields |
 | Text to Audio | Uses Stable Audio 3 Medium for prompt-based audio generation |
 | Create Variation | Builds a source-conditioned variation while preserving the selected clip's identity |
 | Inpaint Selection | Regenerates a selected range inside a clip while matching the surrounding audio |
@@ -219,7 +228,20 @@ OpenStudio keeps AI as part of the DAW workflow rather than a replacement for it
 | Stem Separation | Splits source audio into vocals, drums, bass, and other stems for remixing or cleanup |
 | Audio to MIDI | Extracts MIDI from audio with Basic Pitch / ONNX plumbing where available |
 
-The base app does not bundle heavy AI runtimes. Optional AI Tools are installed from inside OpenStudio so the core DAW can stay lean.
+The base app does not bundle heavy AI runtimes. Use **AI Tools Setup** to install
+only the features you need. Stable Audio 3 and MiniMax offer **Download and Set
+Up** from Hugging Face or **Import Local Model**. Stable Audio requires approved
+model access and automatic conversion; its license checkbox alone does not grant
+access. Setup shows download totals, remaining bytes, cache reuse, and install
+logs, and continues when you close the panel while keeping OpenStudio running.
+
+Generation reports actual sampling stages and uses memory-aware placement and
+offloading where supported. The hardware check in the current checkout is
+advisory, not a guarantee that a request will fit or finish quickly. MiniMax's
+maximum length is a limit; a song can end earlier. Clip variation, inpaint, and
+continuation use ACE-Step or Stable Audio, not MiniMax. See the
+[AI manual](docs/USER_MANUAL.md#18-ai-music-and-assisted-audio) for setup,
+model-specific controls, cancellation, and recovery.
 
 ## DAW Workflow
 
@@ -228,6 +250,11 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 - ASIO, WASAPI, and DirectSound device support on Windows.
 - Track arming, input selection, input monitoring, punch range, and record modes.
 - Audio clips and MIDI clips land directly on the timeline.
+- Click-only metronome mode keeps live monitoring available with the playhead
+  parked, follows Play/Record, and continues after transport stops.
+- Recovery opens interrupted projects as unsaved copies and can import complete
+  recorded samples or restart saved AI requests. Periodic snapshots are opt-in;
+  see [recovery and backups](docs/USER_MANUAL.md#1310-auto-save--auto-backup).
 
 ### Edit
 
@@ -239,6 +266,9 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 
 - Horizontal mixer with channel strips, master strip, detached mixer window, metering, snapshots, routing controls, sends, buses, phase invert, stereo width, sidechain routing, and monitoring FX.
 - Built-in effects and third-party plugins can be used on input FX, track FX, master FX, and monitoring FX chains.
+- On Windows, eligible plugins offer **Separate process (crash protection)** in
+  the Plugin Browser. This per-plugin setting applies on next load and adds
+  latency; ARA is unavailable in this mode. See [plugin hosting](docs/USER_MANUAL.md#94-plugin-hosting).
 
 ### Tune
 
@@ -255,12 +285,9 @@ The base app does not bundle heavy AI runtimes. Optional AI Tools are installed 
 ## Project And File Formats
 
 - Project files: `.osproj`
-- Legacy project import/open: `.s13`
 - Theme exports: `.ostheme`
-- Legacy theme import: `.s13theme`
 - Built-in FX presets: `.ospreset`
 - Waveform peak cache: `.ospeaks`
-- Legacy peak cache support: `.s13peaks`
 
 ## Architecture
 
@@ -318,8 +345,33 @@ cmake --build build --config Debug
 cmake --build build --config Release
 
 # Production package path
-python build.py prod
+python build.py prod --version 0.1.02
 ```
+
+## Installation and first-use access
+
+On Windows, open Setup normally and approve its UAC elevation request. The VC++
+and WebView2 prerequisites are machine-wide installations; a standard account
+may need administrator credentials. Setup skips a sufficient VC++ runtime,
+recognizes restart-required results, and offers Retry with the actual exit code
+and logs under `%ProgramData%\OpenStudio\InstallerLogs`. If you explicitly
+started Setup as another administrator, launch OpenStudio yourself from the Start
+menu afterward so it uses your account's preferences and credentials.
+
+On macOS, microphone authorization is requested when you enable hardware input
+monitoring, record audio, or apply an input device. Playback, MIDI editing and
+playback effects do not need microphone consent. If access was denied, enable
+OpenStudio in **System Settings > Privacy & Security > Microphone**. User media,
+effects and scripts can still require Documents access. Internal macOS logs use
+`~/Library/Logs/OpenStudio`; plugin settings use
+`~/Library/Application Support/OpenStudio/Plugins`. Existing OpenStudio plugin
+settings are copied and verified on first plugin use, with the originals kept.
+
+For online NAM captures, open the Amp or Cab library and use **Connect TONE3000**
+next to the results-panel status. Sign in in your browser; release builds provide
+the app configuration and users do not enter an API key. Login is remembered for
+each OS user/computer, subject to provider revocation and secure-store access.
+Local NAM captures and IR files remain usable offline.
 
 ## macOS First Launch Note
 
@@ -333,9 +385,26 @@ xattr -dr com.apple.quarantine /Applications/OpenStudio.app
 
 Removing quarantine is not the preferred installation path because it recursively removes download provenance from the bundle.
 
+## Application Updates
+
+Release builds expose **Help > Check for Updates**, background downloads, and
+user-controlled installation. The current source verifies signed update metadata,
+platform compatibility, and package hashes, and restores verified staged downloads
+after restart. Windows opens its installer; eligible user-owned macOS bundles and
+Linux AppImages offer **Install update & restart**, with save checks and a retained
+previous version. Protected or package-manager installations require manual updates.
+
+Unsigned macOS updates still go through Gatekeeper and may require approval.
+Real packaged upgrades and Store delivery remain release-qualification work;
+these source changes do not retrofit published v0.1.01 binaries. Debug builds
+must be rebuilt instead of using the updater. See [in-app updates](docs/USER_MANUAL.md#in-app-updates)
+and [updater security and migration](docs/updater-security-and-migration.md).
+
 ## Documentation
 
+- [Code signing policy (draft)](docs/code-signing-policy.md) and [Windows SignPath setup](docs/release-runbook.md#windows-signing-with-signpath)
 - [User Manual](docs/USER_MANUAL.md)
+- [Updater Security and Migration](docs/updater-security-and-migration.md)
 - [Lua Scripting API](docs/API.md)
 - [Runtime Dependency Contract](docs/runtime-dependency-contract.md)
 - [Release Runbook](docs/release-runbook.md)
@@ -356,10 +425,10 @@ available in Git instead of accumulating as dated plan documents.
 |---|---|
 | Native audio | JUCE 9.0.1, ASIO SDK, WASAPI, DirectSound |
 | Embedded UI | JUCE WebBrowserComponent, WebView2 on Windows |
-| Frontend | React 18, TypeScript, Vite, Zustand, Tailwind CSS, Konva |
+| Frontend | React 19, TypeScript, Vite, Zustand, Tailwind CSS, Konva |
 | Plugins | JUCE plugin hosting, VST3, CLAP integration, LV2 code paths, ARA SDK |
-| Analysis / AI | ONNX Runtime, Basic Pitch model flow, ACE-Step, Stable Audio 3 optional runtime |
-| Scripting | Lua / sol2, S13FX / JSFX-style script processor |
+| Analysis / AI | ONNX Runtime, Basic Pitch model flow, ACE-Step, Stable Audio 3, MiniMax Music 3 optional runtimes |
+| Scripting | Lua / sol2, JSFX / JSFX-style script processor |
 | Packaging | CMake, build.py orchestration, platform release scripts |
 
 ## Status
@@ -374,3 +443,7 @@ OpenStudio is under active development. Many core DAW workflows are implemented,
 ## License
 
 OpenStudio is distributed in this repository under the GNU AGPLv3. See `LICENSE`, [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), and the generated [frontend production notices](frontend/THIRD_PARTY_NOTICES.txt) for licensing and dependency notices. Release bundles include upstream notices for the native dependencies they contain. Build-time pinned checksums cover YSFX/WDL, dr_libs, stb, CLAP, Signalsmith, ARA, Basic Pitch, and the complete bundled Windows FFmpeg runtime; notices from the pinned NeuralAmpModelerCore/Eigen source and a provenance-verified ONNX Runtime installation are also packaged when applicable. The FFmpeg runtime build, tests, binary manifest, and complete corresponding-source release process are documented in [docs/ffmpeg-runtime.md](docs/ffmpeg-runtime.md).
+
+## Branding assets
+
+See [logo sources and icon generation](docs/branding.md) for native app, frontend, README and Store artwork references.

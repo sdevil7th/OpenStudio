@@ -117,8 +117,8 @@ juce::StringArray MIDIManager::getOpenDevices() const
 
 void MIDIManager::setMessageCallback(MIDIMessageCallback callback)
 {
-    juce::ScopedLock sl(lock);
-    messageCallback = std::make_shared<MIDIMessageCallback>(std::move(callback));
+    auto published = callback ? std::make_shared<MIDIMessageCallback>(std::move(callback)) : nullptr;
+    std::atomic_store_explicit(&messageCallback, std::move(published), std::memory_order_release);
 }
 
 void MIDIManager::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)

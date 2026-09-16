@@ -343,6 +343,7 @@ export function getTrackAutomationParams(trackType: TrackType): AutomationParamD
 }
 
 export function pluginAutomationParamId(isInputFX: boolean, fxIndex: number, paramIndex: number): string {
+  if (!isInputFX && fxIndex === -1) return `plugin_instrument_0_${paramIndex}`;
   return `plugin_${isInputFX ? "input" : "track"}_${fxIndex}_${paramIndex}`;
 }
 

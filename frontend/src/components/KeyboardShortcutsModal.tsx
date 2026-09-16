@@ -1,5 +1,6 @@
+import { appDialogs } from "../services/appDialogs";
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { Search, Printer } from "lucide-react";
+import { Search, Printer, ChevronDown, Keyboard, Mouse } from "lucide-react";
 import { useShallow } from "zustand/shallow";
 import {
   getActionShortcutScopeLabel,
@@ -12,6 +13,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { Button, Input, NativeSelect } from "./ui";
 import { InputProfileSelectors } from "./InputProfileSelectors";
 import { CustomKeyboardProfileManager } from "./CustomKeyboardProfileManager";
+import { InputGestureReference } from "./InputGestureReference";
 import { Modal } from "./ui/Modal/Modal";
 import { formatShortcut, getShortcutPlatform } from "../utils/platform";
 import {
@@ -176,6 +178,8 @@ export function KeyboardShortcutsModal({
   onClose,
 }: KeyboardShortcutsModalProps) {
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<"keyboard" | "gestures">("keyboard");
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
   const [listeningActionId, setListeningActionId] = useState<string | null>(
     null
   );
@@ -285,14 +289,23 @@ export function KeyboardShortcutsModal({
         );
         if (conflicts.length > 0) {
           const conflictSummary = conflicts
-            .map((conflict) => (
-              `${conflict.actionName} (${conflict.sharedScopes.join(", ")}; ${conflict.platforms.join(", ")})`
-            ))
+            .map((conflict) => {
+              const precedence = conflict.precedence === "same_precedence"
+                ? "same priority"
+                : conflict.precedence === "target_precedes"
+                  ? "new assignment takes priority"
+                  : conflict.precedence === "existing_precedes"
+                    ? "existing assignment takes priority"
+                    : "priority changes with focus";
+              return `${conflict.actionName} (${conflict.sharedScopes.join(", ")}; ${precedence}; ${conflict.platforms.join(", ")})`;
+            })
             .join("\n");
-          const confirmed = window.confirm(
-            `${formatShortcut(shortcut)} is already used by:\n\n${conflictSummary}\n\nAssign it anyway?`,
-          );
-          if (!confirmed) return "handled";
+          setListeningActionId(null);
+          void appDialogs.confirm(`${formatShortcut(shortcut)} is already used by:\n\n${conflictSummary}\n\nAssign it anyway?`).then(confirmed => {
+            if (confirmed) addCustomShortcutBinding(listeningActionId, shortcut, bindingTarget);
+            setCapturedShortcut("");
+          });
+          return "handled";
         }
         addCustomShortcutBinding(listeningActionId, shortcut, bindingTarget);
         setListeningActionId(null);
@@ -409,15 +422,64 @@ export function KeyboardShortcutsModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Keyboard Shortcuts"
-      size="lg"
-      className="!w-[calc(100vw-2rem)] max-w-[700px]"
+        title="Keyboard, Mouse & Trackpad"
+      size="xl"
+      className="max-w-full"
+      footer={<div className="flex flex-col gap-2 w-full sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-neutral-500">
+              {filtered.length} action{filtered.length !== 1 ? "s" : ""}
+            </span>
+            {hasAnyCustomShortcuts && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-[10px] text-orange-400 hover:text-orange-300"
+                onClick={async () => {
+                  if (
+                    (await appDialogs.confirm("Reset all custom shortcuts to the selected profile?"))
+                  ) {
+                    resetCustomShortcuts();
+                  }
+                }}
+              >
+                Reset All
+              </Button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button variant="default" size="sm" onClick={handlePrintCheatSheet}>
+              <Printer size={12} className="mr-1.5" aria-hidden="true" />
+              Print Cheat Sheet
+            </Button>
+            <Button variant="default" size="sm" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </div>
+      }
     >
-      <div className="flex max-h-[calc(100vh-8rem)] min-w-0 flex-col gap-3 overflow-y-auto pr-1">
+      <div className="flex min-w-0 flex-col gap-4">
         {/* Search */}
         <div className="rounded-lg border border-daw-border bg-daw-dark/40 p-3">
-          <InputProfileSelectors compact />
+          <InputProfileSelectors compact showDescriptions={false} />
+          <p className="mt-3 text-xs text-neutral-400">Choose keyboard and mouse behavior independently. Changes apply immediately and are saved automatically.</p>
         </div>
+        <div className="flex gap-1 border-b border-daw-border" role="group" aria-label="Input settings view">
+          {(["keyboard", "gestures"] as const).map((item) => <button key={item} type="button"
+            className={`flex min-h-10 items-center gap-2 border-b-2 px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent ${view === item ? "border-daw-accent text-daw-text" : "border-transparent text-neutral-400 hover:text-daw-text"}`}
+            aria-pressed={view === item} onClick={() => setView(item)} disabled={Boolean(listeningActionId)}>
+            {item === "keyboard" ? <Keyboard size={16} /> : <Mouse size={16} />}
+            {item === "keyboard" ? "Keyboard shortcuts" : "Mouse & gestures"}
+          </button>)}
+        </div>
+        {view === "gestures" ? <InputGestureReference /> : <>
+        <details className="group rounded-lg border border-daw-border">
+          <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-lg px-3 text-xs font-medium text-neutral-300 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent">
+            <ChevronDown size={14} className="-rotate-90 transition-transform group-open:rotate-0" />
+            Custom profiles & platform overrides
+          </summary>
+          <div className="flex flex-col gap-3 p-3 pt-0">
         <CustomKeyboardProfileManager />
 
         <div className="grid gap-2 rounded-lg border border-daw-border bg-daw-dark/40 p-3 sm:grid-cols-[minmax(0,220px)_1fr] sm:items-end">
@@ -444,11 +506,13 @@ export function KeyboardShortcutsModal({
             A platform-specific list replaces All platforms on that platform. An empty list intentionally disables the action there.
           </p>
         </div>
+          </div>
+        </details>
 
         <div className="relative">
           <Search
             size={14}
-            className="absolute left-2 top-1/2 -translate-y-1/2 text-neutral-500"
+            className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-neutral-400"
             aria-hidden="true"
           />
           <Input
@@ -456,7 +520,9 @@ export function KeyboardShortcutsModal({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search shortcuts..."
             aria-label="Search keyboard shortcuts"
-            className="pl-7"
+            className="block w-full"
+            inputClassName="pl-9"
+            fullWidth
             autoFocus={!listeningActionId}
           />
         </div>
@@ -484,7 +550,7 @@ export function KeyboardShortcutsModal({
         )}
 
         <div className="text-xs text-neutral-500 px-1">
-          Select an action name to run it, or add one or more keys for the selected platform target. Scoped bindings apply only in their named editors; a custom list overrides the selected base profile.
+          Click an action to run it, or Add key to customize it. Scoped bindings apply only in their named editors.
         </div>
         {actionRunStatus && (
           <div
@@ -498,13 +564,23 @@ export function KeyboardShortcutsModal({
         )}
 
         {/* Shortcuts List */}
+        <div className="flex items-center justify-between gap-2 text-xs text-neutral-400">
+          <span>{filtered.length} actions</span>
+          <div className="flex gap-3">
+            <button type="button" className="min-h-8 rounded px-1 hover:text-white focus-visible:ring-2 focus-visible:ring-daw-accent" onClick={() => setCollapsedCategories(new Set())}>Expand all</button>
+            <button type="button" className="min-h-8 rounded px-1 hover:text-white focus-visible:ring-2 focus-visible:ring-daw-accent" onClick={() => setCollapsedCategories(new Set(Object.keys(grouped)))}>Collapse all</button>
+          </div>
+        </div>
         <div className="min-w-0 flex-none">
           {Object.entries(grouped).map(([category, categoryActions]) => (
-            <div key={category} className="mb-3">
-              <h3 className="pointer-events-none sticky top-0 z-10 rounded bg-neutral-800 px-2 py-1 text-xs font-semibold uppercase text-daw-text-muted">
-                {category} ({categoryActions.length})
-              </h3>
-              <div className="mt-1">
+            <div key={category} className="mb-2 overflow-hidden rounded-lg border border-daw-border">
+              <h3><button type="button" className="flex min-h-10 w-full items-center gap-2 bg-white/5 px-3 text-left text-xs font-semibold text-neutral-300 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-daw-accent"
+                aria-expanded={Boolean(search) || !collapsedCategories.has(category)} aria-controls={`shortcut-category-${category}`}
+                onClick={() => setCollapsedCategories((previous) => { const next = new Set(previous); if (next.has(category)) next.delete(category); else next.add(category); return next; })}>
+                <ChevronDown size={14} className={!search && collapsedCategories.has(category) ? "-rotate-90" : ""} />
+                {category}<span className="ml-auto rounded bg-black/20 px-2 py-0.5 font-normal text-neutral-400">{categoryActions.length}</span>
+              </button></h3>
+              <div id={`shortcut-category-${category}`} hidden={!search && collapsedCategories.has(category)} className="p-1">
                 {categoryActions.map((action) => {
                   const currentPlatform = getShortcutPlatform();
                   const isCustom = hasCustomShortcutOverride(
@@ -544,7 +620,7 @@ export function KeyboardShortcutsModal({
                   return (
                     <div
                       key={action.id}
-                      className={`group flex flex-col items-stretch gap-1 rounded px-2 py-1 text-sm sm:flex-row sm:items-center sm:justify-between ${
+                      className={`group flex flex-wrap items-center justify-between gap-2 rounded px-2 py-2 text-xs ${
                         isListening
                           ? "bg-daw-accent/10 ring-1 ring-daw-accent"
                           : "hover:bg-neutral-800"
@@ -552,7 +628,7 @@ export function KeyboardShortcutsModal({
                     >
                       <button
                         type="button"
-                        className="min-w-0 flex-1 rounded text-left text-daw-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent disabled:cursor-default aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                        className="min-w-40 flex-1 rounded text-left text-daw-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-accent disabled:cursor-default aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
                         onClick={() => {
                           if (!listeningActionId) {
                             const result = executeShortcutActionFromModal(action, onClose);
@@ -568,7 +644,7 @@ export function KeyboardShortcutsModal({
                           ? `${action.name} — ${availability.reason}`
                           : action.name}
                       >
-                        <span className="block truncate">{action.name}</span>
+                        <span className="block break-words">{action.name}</span>
                       </button>
                       {!availability.available && (
                         <span
@@ -579,11 +655,11 @@ export function KeyboardShortcutsModal({
                         </span>
                       )}
 
-                      <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:ml-2 sm:shrink-0 sm:justify-end">
+                      <div className="flex max-w-full min-w-0 flex-wrap items-center justify-end gap-1.5">
                         {/* Shortcut badge */}
                         {effectiveShortcuts.length > 0 ? (
                           <>
-                            <span className="flex items-center gap-1">
+                            <span className="flex flex-wrap items-center gap-1">
                               {effectiveShortcuts.map((shortcut, index) => (
                                 <span
                                   key={`${shortcut}-${index}`}
@@ -645,7 +721,7 @@ export function KeyboardShortcutsModal({
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-auto px-1.5 py-0.5 text-[10px] opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                          className="min-h-7 px-2 py-0.5 text-[11px] text-neutral-300"
                           onClick={(e) => {
                             e.stopPropagation();
                             if (!canRebind) return;
@@ -670,7 +746,7 @@ export function KeyboardShortcutsModal({
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-auto px-1.5 py-0.5 text-[10px] text-orange-300 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                          className="min-h-7 px-2 py-0.5 text-[11px] text-orange-300"
                           onClick={(event) => {
                             event.stopPropagation();
                             setCustomShortcutBindings(action.id, [], bindingTarget);
@@ -687,7 +763,7 @@ export function KeyboardShortcutsModal({
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="h-auto px-1.5 py-0.5 text-[10px] text-orange-400 opacity-70 transition-opacity hover:text-orange-300 hover:opacity-100 focus-visible:opacity-100"
+                            className="min-h-7 px-2 py-0.5 text-[11px] text-orange-300"
                             onClick={(e) => {
                               e.stopPropagation();
                               handleResetSingle(action.id);
@@ -711,42 +787,8 @@ export function KeyboardShortcutsModal({
             </div>
           )}
         </div>
+        </>}
 
-        {/* Footer */}
-        <div className="flex flex-col gap-2 border-t border-daw-border pt-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-neutral-500">
-              {filtered.length} action{filtered.length !== 1 ? "s" : ""}
-            </span>
-            {hasAnyCustomShortcuts && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-[10px] text-orange-400 hover:text-orange-300"
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Reset all custom shortcuts to the selected profile?"
-                    )
-                  ) {
-                    resetCustomShortcuts();
-                  }
-                }}
-              >
-                Reset All
-              </Button>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button variant="default" size="sm" onClick={handlePrintCheatSheet}>
-              <Printer size={12} className="mr-1.5" aria-hidden="true" />
-              Print Cheat Sheet
-            </Button>
-            <Button variant="default" size="sm" onClick={onClose}>
-              Close
-            </Button>
-          </div>
-        </div>
       </div>
     </Modal>
   );

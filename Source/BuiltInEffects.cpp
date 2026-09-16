@@ -1,18 +1,18 @@
 #include "BuiltInEffects.h"
-#include "S13PluginEditors.h"
+#include "OpenStudioPluginEditors.h"
 
 //==============================================================================
-// S13BuiltInEffect -- shared base class
+// OpenStudioBuiltInEffect -- shared base class
 //==============================================================================
 
-S13BuiltInEffect::S13BuiltInEffect()
+OpenStudioBuiltInEffect::OpenStudioBuiltInEffect()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
 }
 
-bool S13BuiltInEffect::isBusesLayoutSupported(const BusesLayout& layouts) const
+bool OpenStudioBuiltInEffect::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     const auto& mainIn  = layouts.getMainInputChannelSet();
     const auto& mainOut = layouts.getMainOutputChannelSet();
@@ -21,20 +21,20 @@ bool S13BuiltInEffect::isBusesLayoutSupported(const BusesLayout& layouts) const
         || mainOut == juce::AudioChannelSet::stereo();
 }
 
-void S13BuiltInEffect::setOversamplingEnabled(bool enabled)
+void OpenStudioBuiltInEffect::setOversamplingEnabled(bool enabled)
 {
     oversamplingEnabled = enabled;
 }
 
-juce::AudioProcessorEditor* S13BuiltInEffect::createEditor()
+juce::AudioProcessorEditor* OpenStudioBuiltInEffect::createEditor()
 {
     return nullptr; // Derived classes override this
 }
 
-juce::AudioProcessorEditor* S13EQ::createEditor() { return new S13EQEditor(*this); }
-juce::AudioProcessorEditor* S13Compressor::createEditor() { return new S13CompressorEditor(*this); }
-juce::AudioProcessorEditor* S13Gate::createEditor() { return new S13GateEditor(*this); }
-juce::AudioProcessorEditor* S13Limiter::createEditor() { return new S13LimiterEditor(*this); }
+juce::AudioProcessorEditor* OpenStudioEQ::createEditor() { return new OpenStudioEQEditor(*this); }
+juce::AudioProcessorEditor* OpenStudioCompressor::createEditor() { return new OpenStudioCompressorEditor(*this); }
+juce::AudioProcessorEditor* OpenStudioGate::createEditor() { return new OpenStudioGateEditor(*this); }
+juce::AudioProcessorEditor* OpenStudioLimiter::createEditor() { return new OpenStudioLimiterEditor(*this); }
 
 static void sanitizeBuiltInBuffer(juce::AudioBuffer<float>& buffer, float limit)
 {
@@ -81,7 +81,7 @@ float safeFilterMaximum(double sampleRate, float nominalMinimum, float nominalMa
                                  static_cast<float>(sampleRate * 0.475)));
 }
 
-void prepareRealtimeFilterLut(std::vector<S13IIRCoefficientSet>& lut,
+void prepareRealtimeFilterLut(std::vector<OpenStudioIIRCoefficientSet>& lut,
                               double sampleRate,
                               float nominalMinimum,
                               float nominalMaximum,
@@ -108,8 +108,8 @@ void prepareRealtimeFilterLut(std::vector<S13IIRCoefficientSet>& lut,
     }
 }
 
-const S13IIRCoefficientSet& lookupRealtimeFilterLut(
-    const std::vector<S13IIRCoefficientSet>& lut,
+const OpenStudioIIRCoefficientSet& lookupRealtimeFilterLut(
+    const std::vector<OpenStudioIIRCoefficientSet>& lut,
     double sampleRate,
     float frequency,
     float nominalMinimum,
@@ -132,7 +132,7 @@ const S13IIRCoefficientSet& lookupRealtimeFilterLut(
 }
 
 void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
-                                     const S13IIRCoefficientSet& coefficients) noexcept
+                                     const OpenStudioIIRCoefficientSet& coefficients) noexcept
 {
     jassert(filter.coefficients != nullptr);
     if (filter.coefficients == nullptr)
@@ -149,7 +149,7 @@ void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
 
 void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& left,
                                      juce::dsp::IIR::Filter<float>& right,
-                                     const S13IIRCoefficientSet& coefficients) noexcept
+                                     const OpenStudioIIRCoefficientSet& coefficients) noexcept
 {
     writeRealtimeFilterCoefficients(left, coefficients);
     if (right.coefficients != left.coefficients)
@@ -158,7 +158,7 @@ void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& left,
 
 bool advanceRealtimeFilterCoefficients(
     juce::dsp::IIR::Filter<float>& filter,
-    const S13IIRCoefficientSet& target,
+    const OpenStudioIIRCoefficientSet& target,
     float smoothingProportion) noexcept
 {
     if (filter.coefficients == nullptr)
@@ -196,7 +196,7 @@ bool advanceRealtimeFilterCoefficients(
 bool advanceRealtimeFilterCoefficients(
     juce::dsp::IIR::Filter<float>& left,
     juce::dsp::IIR::Filter<float>& right,
-    const S13IIRCoefficientSet& target,
+    const OpenStudioIIRCoefficientSet& target,
     float smoothingProportion) noexcept
 {
     const bool leftSmoothing =
@@ -210,11 +210,11 @@ bool advanceRealtimeFilterCoefficients(
         || leftSmoothing;
 }
 
-constexpr S13IIRCoefficientSet kIdentityBiquad {
+constexpr OpenStudioIIRCoefficientSet kIdentityBiquad {
     1.0f, 0.0f, 0.0f, 0.0f, 0.0f
 };
 
-S13IIRCoefficientSet normaliseBiquad(
+OpenStudioIIRCoefficientSet normaliseBiquad(
     const std::array<float, 6>& coefficients) noexcept
 {
     const float inverseA0 = std::abs(coefficients[3]) > 1.0e-12f
@@ -229,7 +229,7 @@ S13IIRCoefficientSet normaliseBiquad(
     };
 }
 
-S13IIRCoefficientSet normaliseFirstOrderAsBiquad(
+OpenStudioIIRCoefficientSet normaliseFirstOrderAsBiquad(
     const std::array<float, 4>& coefficients) noexcept
 {
     const float inverseA0 = std::abs(coefficients[2]) > 1.0e-12f
@@ -244,7 +244,7 @@ S13IIRCoefficientSet normaliseFirstOrderAsBiquad(
     };
 }
 
-double getFixedBiquadMagnitude(const S13IIRCoefficientSet& coefficients,
+double getFixedBiquadMagnitude(const OpenStudioIIRCoefficientSet& coefficients,
                               double frequency,
                               double sampleRate) noexcept
 {
@@ -272,10 +272,10 @@ double getFixedBiquadMagnitude(const S13IIRCoefficientSet& coefficients,
 }
 
 //==============================================================================
-//  S13EQ -- 8-band parametric EQ
+//  OpenStudioEQ -- 8-band parametric EQ
 //==============================================================================
 
-S13EQ::S13EQ()
+OpenStudioEQ::OpenStudioEQ()
 {
     const float defaultFreqs[numBands] = { 30.0f, 100.0f, 250.0f, 500.0f, 1000.0f, 2500.0f, 6000.0f, 12000.0f };
     for (int i = 0; i < numBands; ++i)
@@ -303,7 +303,7 @@ S13EQ::S13EQ()
     bands[numBands - 1].enabled.store(0.0f);
 }
 
-int S13EQ::getNumStagesForSlope(FilterSlope slope) const
+int OpenStudioEQ::getNumStagesForSlope(FilterSlope slope) const
 {
     switch (slope)
     {
@@ -315,7 +315,7 @@ int S13EQ::getNumStagesForSlope(FilterSlope slope) const
     }
 }
 
-void S13EQ::prepareToPlay(double sampleRate, int samplesPerBlock)
+void OpenStudioEQ::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
     publishedSampleRate.store(sampleRate, std::memory_order_release);
@@ -427,7 +427,7 @@ static float butterworthCascadeStageQ(int stageIndex,
     return 1.0f / (2.0f * std::cos(angle));
 }
 
-void S13EQ::reset()
+void OpenStudioEQ::reset()
 {
     resetWetPathState();
     if (oversampler)
@@ -478,7 +478,7 @@ void S13EQ::reset()
     }
 }
 
-void S13EQ::releaseResources()
+void OpenStudioEQ::releaseResources()
 {
     filtersPrepared = false;
     spectrumDemandSamplesRemaining.store(0, std::memory_order_release);
@@ -528,10 +528,10 @@ void S13EQ::releaseResources()
     }
 }
 
-int S13EQ::buildBandTargets(
+int OpenStudioEQ::buildBandTargets(
     int b,
     bool shouldProcess,
-    std::array<S13IIRCoefficientSet, maxStagesPerBand>& targets) const noexcept
+    std::array<OpenStudioIIRCoefficientSet, maxStagesPerBand>& targets) const noexcept
 {
     targets.fill(kIdentityBiquad);
     if (!shouldProcess)
@@ -672,7 +672,7 @@ int S13EQ::buildBandTargets(
     return 0;
 }
 
-void S13EQ::updateBand(int b, int auditionIndex, bool forceImmediate)
+void OpenStudioEQ::updateBand(int b, int auditionIndex, bool forceImmediate)
 {
     const bool shouldProcess = auditionIndex >= 0
         ? b == auditionIndex
@@ -710,7 +710,7 @@ void S13EQ::updateBand(int b, int auditionIndex, bool forceImmediate)
     activeStages[b] = targetStages[b];
 }
 
-void S13EQ::updateFilters(bool forceImmediate)
+void OpenStudioEQ::updateFilters(bool forceImmediate)
 {
     if (!filtersPrepared)
         return;
@@ -760,7 +760,7 @@ void S13EQ::updateFilters(bool forceImmediate)
         filtersNeedSmoothing = false;
 }
 
-void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer,
+void OpenStudioEQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer,
                                int detectorChannels)
 {
     const int numSamples = buffer.getNumSamples();
@@ -838,7 +838,7 @@ void S13EQ::updateDynamicBands(const juce::AudioBuffer<float>& buffer,
     }
 }
 
-bool S13EQ::advanceStageCoefficients(int bandIndex,
+bool OpenStudioEQ::advanceStageCoefficients(int bandIndex,
                                      int stageIndex) noexcept
 {
     auto& coefficientVector =
@@ -887,7 +887,7 @@ bool S13EQ::advanceStageCoefficients(int bandIndex,
     return stillSmoothing;
 }
 
-void S13EQ::resetWetPathState() noexcept
+void OpenStudioEQ::resetWetPathState() noexcept
 {
     for (int band = 0; band < numBands; ++band)
     {
@@ -906,7 +906,7 @@ void S13EQ::resetWetPathState() noexcept
     }
 }
 
-void S13EQ::advanceAutoGainEstimateProbe() noexcept
+void OpenStudioEQ::advanceAutoGainEstimateProbe() noexcept
 {
     static constexpr int probeCount = 16;
     static constexpr std::array<double, probeCount> probeFrequencies {
@@ -936,10 +936,10 @@ void S13EQ::advanceAutoGainEstimateProbe() noexcept
             const auto& coefficientVector =
                 bandFilters[b][stage].state->coefficients;
             if (coefficientVector.size()
-                != static_cast<int>(S13IIRCoefficientSet {}.size()))
+                != static_cast<int>(OpenStudioIIRCoefficientSet {}.size()))
                 continue;
 
-            S13IIRCoefficientSet currentCoefficients {};
+            OpenStudioIIRCoefficientSet currentCoefficients {};
             for (size_t coefficient = 0;
                  coefficient < currentCoefficients.size();
                  ++coefficient)
@@ -986,7 +986,7 @@ void S13EQ::advanceAutoGainEstimateProbe() noexcept
     }
 }
 
-void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+void OpenStudioEQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -1321,7 +1321,7 @@ void S13EQ::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& mid
     }
 }
 
-bool S13EQ::isSpectrumCaptureRequested(
+bool OpenStudioEQ::isSpectrumCaptureRequested(
     int numSamples) noexcept
 {
     int remaining =
@@ -1350,7 +1350,7 @@ bool S13EQ::isSpectrumCaptureRequested(
     return false;
 }
 
-int S13EQ::claimSpectrumCaptureSlot() noexcept
+int OpenStudioEQ::claimSpectrumCaptureSlot() noexcept
 {
     for (const int claimableState : { 0, 2 })
     {
@@ -1372,7 +1372,7 @@ int S13EQ::claimSpectrumCaptureSlot() noexcept
     return -1;
 }
 
-void S13EQ::captureSpectrumBlock(
+void OpenStudioEQ::captureSpectrumBlock(
     const juce::AudioBuffer<float>& preEQ,
     const juce::AudioBuffer<float>& postEQ) noexcept
 {
@@ -1429,7 +1429,7 @@ void S13EQ::captureSpectrumBlock(
     }
 }
 
-void S13EQ::computeSpectrum(const std::array<float, fftSize>& input, std::array<float, fftSize / 2>& output)
+void OpenStudioEQ::computeSpectrum(const std::array<float, fftSize>& input, std::array<float, fftSize / 2>& output)
 {
     std::array<float, fftSize * 2> fftData {};
     for (int i = 0; i < fftSize; ++i)
@@ -1443,7 +1443,7 @@ void S13EQ::computeSpectrum(const std::array<float, fftSize>& input, std::array<
     }
 }
 
-S13EQ::SpectrumData S13EQ::getSpectrumData()
+OpenStudioEQ::SpectrumData OpenStudioEQ::getSpectrumData()
 {
     const double sampleRate =
         publishedSampleRate.load(std::memory_order_acquire);
@@ -1499,7 +1499,7 @@ S13EQ::SpectrumData S13EQ::getSpectrumData()
     return lastSpectrumOutput;
 }
 
-std::vector<float> S13EQ::getMagnitudeResponse(const std::vector<float>& frequencies) const
+std::vector<float> OpenStudioEQ::getMagnitudeResponse(const std::vector<float>& frequencies) const
 {
     std::vector<float> response(frequencies.size(), 0.0f);
     const int auditionIndex = juce::jlimit(-1, numBands - 1,
@@ -1512,7 +1512,7 @@ std::vector<float> S13EQ::getMagnitudeResponse(const std::vector<float>& frequen
                 std::memory_order_relaxed) < 0.5f)
             continue;
 
-        std::array<S13IIRCoefficientSet,
+        std::array<OpenStudioIIRCoefficientSet,
                    maxStagesPerBand> targets {};
         const int stages =
             buildBandTargets(b, true, targets);
@@ -1542,16 +1542,16 @@ std::vector<float> S13EQ::getMagnitudeResponse(const std::vector<float>& frequen
     return response;
 }
 
-float S13EQ::getBandDynamicGainDB(int bandIndex) const
+float OpenStudioEQ::getBandDynamicGainDB(int bandIndex) const
 {
     if (bandIndex < 0 || bandIndex >= numBands)
         return 0.0f;
     return dynamicGainDB[static_cast<size_t>(bandIndex)].load(std::memory_order_relaxed);
 }
 
-void S13EQ::getStateInformation(juce::MemoryBlock& destData)
+void OpenStudioEQ::getStateInformation(juce::MemoryBlock& destData)
 {
-    juce::ValueTree state("S13EQ");
+    juce::ValueTree state("OpenStudioEQ");
     state.setProperty("outputGain", outputGain.load(), nullptr);
     state.setProperty("autoGain", autoGain.load(), nullptr);
     state.setProperty("auditionBand", auditionBand.load(), nullptr);
@@ -1575,10 +1575,10 @@ void S13EQ::getStateInformation(juce::MemoryBlock& destData)
     state.writeToStream(stream);
 }
 
-void S13EQ::setStateInformation(const void* data, int sizeInBytes)
+void OpenStudioEQ::setStateInformation(const void* data, int sizeInBytes)
 {
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
-    if (!state.isValid() || state.getType().toString() != "S13EQ") return;
+    if (!state.isValid() || state.getType().toString() != "OpenStudioEQ") return;
 
     outputGain.store(static_cast<float>(state.getProperty("outputGain", 0.0f)));
     autoGain.store(static_cast<float>(state.getProperty("autoGain", 0.0f)));
@@ -1604,12 +1604,12 @@ void S13EQ::setStateInformation(const void* data, int sizeInBytes)
 }
 
 //==============================================================================
-//  S13Compressor -- Multi-style compressor
+//  OpenStudioCompressor -- Multi-style compressor
 //==============================================================================
 
-S13Compressor::S13Compressor() {}
+OpenStudioCompressor::OpenStudioCompressor() {}
 
-float S13Compressor::computeGain(float inputDB,
+float OpenStudioCompressor::computeGain(float inputDB,
                                  float thresholdDB,
                                  float compressionSlope,
                                  float kneeDB) noexcept
@@ -1670,7 +1670,7 @@ static float sanitiseCompressorSidechainHPF(float frequency) noexcept
     return frequency;
 }
 
-void S13Compressor::getStyleBallistics(float& atkMs, float& relMs) const
+void OpenStudioCompressor::getStyleBallistics(float& atkMs, float& relMs) const
 {
     const auto styleVal = static_cast<Style>(static_cast<int>(style.load()));
     float baseAtk = juce::jlimit(0.1f, 100.0f, attack.load());
@@ -1686,7 +1686,7 @@ void S13Compressor::getStyleBallistics(float& atkMs, float& relMs) const
     }
 }
 
-void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
+void OpenStudioCompressor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
     envelopeLevel = 0.0f;
@@ -1782,12 +1782,12 @@ void S13Compressor::prepareToPlay(double sampleRate, int samplesPerBlock)
     oversampler->initProcessing(static_cast<size_t>(samplesPerBlock));
 }
 
-void S13Compressor::releaseResources()
+void OpenStudioCompressor::releaseResources()
 {
     reset();
 }
 
-void S13Compressor::reset()
+void OpenStudioCompressor::reset()
 {
     envelopeLevel = 0.0f;
     rmsEnvelopeLevel = 0.0f;
@@ -1866,7 +1866,7 @@ void S13Compressor::reset()
     outputLevelDB.store(-100.0f, std::memory_order_relaxed);
 }
 
-void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+void OpenStudioCompressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -2113,9 +2113,9 @@ void S13Compressor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     outputLevelDB.store(juce::Decibels::gainToDecibels(outputPeak, -100.0f));
 }
 
-void S13Compressor::getStateInformation(juce::MemoryBlock& destData)
+void OpenStudioCompressor::getStateInformation(juce::MemoryBlock& destData)
 {
-    juce::ValueTree state("S13Compressor");
+    juce::ValueTree state("OpenStudioCompressor");
     state.setProperty("threshold", threshold.load(), nullptr);
     state.setProperty("ratio", ratio.load(), nullptr);
     state.setProperty("attack", attack.load(), nullptr);
@@ -2134,10 +2134,10 @@ void S13Compressor::getStateInformation(juce::MemoryBlock& destData)
     state.writeToStream(stream);
 }
 
-void S13Compressor::setStateInformation(const void* data, int sizeInBytes)
+void OpenStudioCompressor::setStateInformation(const void* data, int sizeInBytes)
 {
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
-    if (!state.isValid() || state.getType().toString() != "S13Compressor") return;
+    if (!state.isValid() || state.getType().toString() != "OpenStudioCompressor") return;
 
     threshold.store(static_cast<float>(state.getProperty("threshold", 0.0f)));
     ratio.store(static_cast<float>(state.getProperty("ratio", 1.0f)));
@@ -2156,12 +2156,12 @@ void S13Compressor::setStateInformation(const void* data, int sizeInBytes)
 }
 
 //==============================================================================
-//  S13Gate -- Noise gate with hysteresis and sidechain filter
+//  OpenStudioGate -- Noise gate with hysteresis and sidechain filter
 //==============================================================================
 
-S13Gate::S13Gate() {}
+OpenStudioGate::OpenStudioGate() {}
 
-void S13Gate::prepareToPlay(double sampleRate, int samplesPerBlock)
+void OpenStudioGate::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
     lastSidechainHPF = -1.0f;
@@ -2212,12 +2212,12 @@ void S13Gate::prepareToPlay(double sampleRate, int samplesPerBlock)
     reset();
 }
 
-void S13Gate::releaseResources()
+void OpenStudioGate::releaseResources()
 {
     reset();
 }
 
-void S13Gate::reset()
+void OpenStudioGate::reset()
 {
     envelopeLevel = 0.0f;
     rmsEnvelopeLevel = 0.0f;
@@ -2238,7 +2238,7 @@ void S13Gate::reset()
     gainReductionDB.store(0.0f, std::memory_order_relaxed);
 }
 
-void S13Gate::updateCoefficients(bool forceImmediate)
+void OpenStudioGate::updateCoefficients(bool forceImmediate)
 {
     const double sr = cachedSampleRate;
     if (sr <= 0.0) return;
@@ -2314,7 +2314,7 @@ void S13Gate::updateCoefficients(bool forceImmediate)
     }
 }
 
-void S13Gate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+void OpenStudioGate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -2416,9 +2416,9 @@ void S13Gate::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
     gainReductionDB.store(peakGR);
 }
 
-void S13Gate::getStateInformation(juce::MemoryBlock& destData)
+void OpenStudioGate::getStateInformation(juce::MemoryBlock& destData)
 {
-    juce::ValueTree state("S13Gate");
+    juce::ValueTree state("OpenStudioGate");
     state.setProperty("threshold", threshold.load(), nullptr);
     state.setProperty("attack", attackMs.load(), nullptr);
     state.setProperty("hold", holdMs.load(), nullptr);
@@ -2433,10 +2433,10 @@ void S13Gate::getStateInformation(juce::MemoryBlock& destData)
     state.writeToStream(stream);
 }
 
-void S13Gate::setStateInformation(const void* data, int sizeInBytes)
+void OpenStudioGate::setStateInformation(const void* data, int sizeInBytes)
 {
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
-    if (!state.isValid() || state.getType().toString() != "S13Gate") return;
+    if (!state.isValid() || state.getType().toString() != "OpenStudioGate") return;
 
     threshold.store(static_cast<float>(state.getProperty("threshold", -40.0f)));
     attackMs.store(static_cast<float>(state.getProperty("attack", 1.0f)));
@@ -2453,12 +2453,12 @@ void S13Gate::setStateInformation(const void* data, int sizeInBytes)
 }
 
 //==============================================================================
-//  S13Limiter -- Brickwall limiter with ceiling
+//  OpenStudioLimiter -- Brickwall limiter with ceiling
 //==============================================================================
 
-S13Limiter::S13Limiter() {}
+OpenStudioLimiter::OpenStudioLimiter() {}
 
-void S13Limiter::prepareToPlay(double sampleRate, int samplesPerBlock)
+void OpenStudioLimiter::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
     juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 2u };
@@ -2491,12 +2491,12 @@ void S13Limiter::prepareToPlay(double sampleRate, int samplesPerBlock)
     reset();
 }
 
-void S13Limiter::releaseResources()
+void OpenStudioLimiter::releaseResources()
 {
     reset();
 }
 
-void S13Limiter::reset()
+void OpenStudioLimiter::reset()
 {
     limiter.reset();
     lookaheadBuffer.clear();
@@ -2540,7 +2540,7 @@ void S13Limiter::reset()
     gainReductionDB.store(0.0f, std::memory_order_relaxed);
 }
 
-void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+void OpenStudioLimiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
@@ -2734,9 +2734,9 @@ void S13Limiter::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer
     gainReductionDB.store(juce::jmin(outDB - inDB, juce::Decibels::gainToDecibels(peakGain, -100.0f)));
 }
 
-void S13Limiter::getStateInformation(juce::MemoryBlock& destData)
+void OpenStudioLimiter::getStateInformation(juce::MemoryBlock& destData)
 {
-    juce::ValueTree state("S13Limiter");
+    juce::ValueTree state("OpenStudioLimiter");
     state.setProperty("threshold", threshold.load(), nullptr);
     state.setProperty("release", releaseMs.load(), nullptr);
     state.setProperty("ceiling", ceiling.load(), nullptr);
@@ -2745,10 +2745,10 @@ void S13Limiter::getStateInformation(juce::MemoryBlock& destData)
     state.writeToStream(stream);
 }
 
-void S13Limiter::setStateInformation(const void* data, int sizeInBytes)
+void OpenStudioLimiter::setStateInformation(const void* data, int sizeInBytes)
 {
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
-    if (!state.isValid() || state.getType().toString() != "S13Limiter") return;
+    if (!state.isValid() || state.getType().toString() != "OpenStudioLimiter") return;
 
     threshold.store(static_cast<float>(state.getProperty("threshold", -1.0f)));
     releaseMs.store(static_cast<float>(state.getProperty("release", 100.0f)));

@@ -1,4 +1,5 @@
 #include "PluginWindowManager.h"
+#include "IsolatedPlugin.h"
 #include "ARADebug.h"
 
 #if JUCE_WINDOWS
@@ -156,7 +157,7 @@ juce::String normaliseCodeForDom(const juce::KeyPress& key)
     return {};
 }
 
-juce::var keyPressToVar(const juce::KeyPress& key)
+juce::var keyPressToVar(const juce::KeyPress& key, bool isRepeat)
 {
     auto* obj = new juce::DynamicObject();
     const auto modifiers = key.getModifiers();
@@ -172,7 +173,7 @@ juce::var keyPressToVar(const juce::KeyPress& key)
    #endif
     obj->setProperty("shiftKey", modifiers.isShiftDown());
     obj->setProperty("altKey", modifiers.isAltDown());
-    obj->setProperty("repeat", false);
+    obj->setProperty("repeat", isRepeat);
     obj->setProperty("source", "pluginWindow");
     return juce::var(obj);
 }
@@ -184,6 +185,24 @@ bool shouldLogForwardedShortcut(const juce::KeyPress& key)
     const bool ctrlOrCommand = modifiers.isCtrlDown() || modifiers.isCommandDown();
     return keyCode == juce::KeyPress::spaceKey
         || (ctrlOrCommand && (keyCode == 'z' || keyCode == 'Z'));
+}
+
+bool isNativePluginHistoryShortcut(const juce::KeyPress& key)
+{
+    const auto modifiers = key.getModifiers();
+   #if JUCE_MAC
+    const bool hasPrimaryModifier = modifiers.isCommandDown() && ! modifiers.isCtrlDown();
+   #else
+    const bool hasPrimaryModifier = modifiers.isCtrlDown() && ! modifiers.isCommandDown();
+   #endif
+    if (! hasPrimaryModifier || modifiers.isAltDown())
+        return false;
+
+    const auto keyCode = juce::CharacterFunctions::toUpperCase(key.getKeyCode());
+    if (keyCode == 'Z')
+        return true; // Undo, plus Shift for Redo.
+
+    return keyCode == 'Y' && ! modifiers.isShiftDown(); // Alternate Redo.
 }
 }
 
@@ -256,6 +275,8 @@ PluginWindowManager::PluginWindow::PluginWindow(PluginWindowManager& ownerIn,
 
 PluginWindowManager::PluginWindow::~PluginWindow()
 {
+    if (auto* editor = dynamic_cast<juce::AudioProcessorEditor*>(getContentComponent()))
+        processor.editorBeingDeleted(editor);
     clearContentComponent();
 }
 
@@ -267,6 +288,18 @@ void PluginWindowManager::PluginWindow::closeButtonPressed()
 
 bool PluginWindowManager::PluginWindow::keyPressed(const juce::KeyPress& key)
 {
+    // JUCE sends the key to the focused child editor before bubbling an
+    // unhandled event through its parents. Reaching this window therefore
+    // means the plugin already had its chance to consume the gesture.
+    // A native editor has no host-visible parameter history, so claim its
+    // unhandled Undo/Redo chords before any application-level forwarding.
+    if (isNativePluginHistoryShortcut(key))
+    {
+        owner.logWindowEvent(target, "host_claimed_plugin_history_key",
+                             "key=" + normaliseKeyForDom(key) + " code=" + normaliseCodeForDom(key));
+        return true;
+    }
+
     if (DocumentWindow::keyPressed(key))
     {
         if (shouldLogForwardedShortcut(key))
@@ -275,12 +308,7 @@ bool PluginWindowManager::PluginWindow::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    // Suppress JUCE's spacebar forwarding — the Win32 keyboard hook already
-    // forwarded it. Without this, spacebar would be handled twice.
-    if (key.getKeyCode() == juce::KeyPress::spaceKey)
-        return true;
-
-    return owner.handlePluginWindowKeyPress(key);
+    return owner.handlePluginWindowKeyPress(key, owner.currentNativeKeyIsRepeat);
 }
 
 void PluginWindowManager::PluginWindow::activeWindowStatusChanged()
@@ -308,6 +336,7 @@ PluginWindowManager::PluginWindowManager()
 
 PluginWindowManager::~PluginWindowManager()
 {
+    deferredCallbacks.invalidate();
 #if JUCE_WINDOWS
     removeKeyboardHook();
 #endif
@@ -441,8 +470,9 @@ void PluginWindowManager::closeEditorsForTrack(const std::vector<juce::AudioProc
 
 void PluginWindowManager::closeAllEditors()
 {
-    juce::MessageManager::callAsync([this]()
+    juce::MessageManager::callAsync([this, lifetime = deferredCallbacks.token()]()
     {
+        if (!MessageThreadLifetime::accepts(lifetime)) return;
         focusedEditorTarget.reset();
         activeWindows.clear();
         juce::Logger::writeToLog("PluginWindowManager: Closed all plugin windows");
@@ -456,6 +486,15 @@ void PluginWindowManager::closeAllEditorsSync()
     juce::Logger::writeToLog("PluginWindowManager: Closed all plugin windows (sync)");
 }
 
+bool PluginWindowManager::isEditorVisible(const PluginEditorTarget& target) const
+{
+    for (const auto& entry : activeWindows)
+        if (entry.second && entry.second->target.getStableKey() == target.getStableKey()
+            && entry.second->isVisible())
+            return true;
+    return false;
+}
+
 bool PluginWindowManager::isEditorOpen(juce::AudioProcessor* processor) const
 {
     return activeWindows.find(processor) != activeWindows.end();
@@ -463,18 +502,26 @@ bool PluginWindowManager::isEditorOpen(juce::AudioProcessor* processor) const
 
 std::optional<PluginWindowManager::PluginEditorTarget> PluginWindowManager::getFocusedEditorTarget() const
 {
+    for (const auto& [processor, window] : activeWindows)
+        if (const auto* isolated = dynamic_cast<IsolatedPlugin*>(processor); isolated && isolated->remoteEditorHasFocus())
+            return window->target;
     return focusedEditorTarget;
 }
 
-bool PluginWindowManager::handlePluginWindowKeyPress(const juce::KeyPress& key) const
+bool PluginWindowManager::handlePluginWindowKeyPress(const juce::KeyPress& key, bool isRepeat) const
 {
+    // Defense in depth for every native forwarding entry point. PluginWindow
+    // normally claims this first after child-editor bubbling.
+    if (isNativePluginHistoryShortcut(key))
+        return true;
+
     if (!shortcutForwardCallback)
         return false;
 
     if (shouldSuppressDuplicateForward(key))
         return true;
 
-    const auto payload = keyPressToVar(key);
+    const auto payload = keyPressToVar(key, isRepeat);
     auto* obj = payload.getDynamicObject();
     if (obj == nullptr)
         return false;
@@ -549,6 +596,14 @@ void PluginWindowManager::timerCallback()
     for (auto it = activeWindows.begin(); it != activeWindows.end();)
     {
         auto& window = *it->second;
+        if (auto* isolated = dynamic_cast<IsolatedPlugin*>(it->first))
+        {
+            juce::KeyPress key; bool repeat = false;
+            // Bound work per UI tick; the worker only queues keys its editor did
+            // not consume, and actual foreground PID is rechecked at delivery.
+            for (int i = 0; i < 16 && isolated->takeUnhandledKey(key, repeat); ++i)
+                handlePluginWindowKeyPress(key, repeat);
+        }
         const bool isVisible = window.isVisible();
 
         if (!isVisible)
@@ -577,10 +632,15 @@ void PluginWindowManager::logWindowEvent(const PluginEditorTarget& target, const
 }
 
 //==============================================================================
-// Win32 keyboard hook — intercepts transport keys (spacebar) before they reach
-// plugin native HWNDs that may consume them after ARA edits.
+// Win32 keyboard observer preserves repeat information but never consumes keys.
+// Native plug-in text fields and controls must get the first chance at Space.
 #if JUCE_WINDOWS
 
+// Deliberately do not hook Undo/Redo here. A native child HWND is not required
+// to bubble an unhandled WM_KEYDOWN through JUCE, and a pre-dispatch hook cannot
+// know whether the plugin would consume its own history. If the child consumes
+// the chord, the plugin owns it. If it drops the chord, nothing reaches the DAW.
+// If JUCE does receive an unhandled bubble, PluginWindow::keyPressed claims it.
 PluginWindowManager* PluginWindowManager::hookInstance = nullptr;
 
 static LRESULT CALLBACK pluginWindowKeyboardHookProc (int nCode, WPARAM wParam, LPARAM lParam)
@@ -588,28 +648,14 @@ static LRESULT CALLBACK pluginWindowKeyboardHookProc (int nCode, WPARAM wParam, 
     auto* inst = PluginWindowManager::hookInstance;
     if (nCode >= 0 && inst != nullptr)
     {
-        // Only intercept key-down events (bit 31 of lParam = 0 means key down)
+        // Only intercept key-down events (bit 31 of lParam = 0 means key down).
+        // Bit 30 distinguishes auto-repeat from the initial press.
         const bool isKeyDown = (lParam & (1 << 31)) == 0;
+        const bool isRepeat = (lParam & (1 << 30)) != 0;
 
         if (isKeyDown && inst->isPluginWindowFocused())
-        {
-            const int vk = static_cast<int> (wParam);
-
-            // Intercept spacebar and forward to host transport.
-            // The plugin doesn't handle spacebar itself — the host must
-            // control transport. PluginWindow::keyPressed also suppresses
-            // spacebar to prevent double-handling via JUCE's event path.
-            if (vk == VK_SPACE)
-            {
-                juce::KeyPress key (juce::KeyPress::spaceKey,
-                                    juce::ModifierKeys::currentModifiers, 0);
-
-                logPluginWindowDebug ("PluginWindowManager: hook intercepted VK_SPACE — forwarding to host");
-
-                if (inst->handlePluginWindowKeyPress (key))
-                    return 1;  // Consume — host handles transport
-            }
-        }
+            inst->noteNativeKeyRepeat(isRepeat);
+        juce::ignoreUnused(wParam);
     }
 
     return CallNextHookEx (nullptr, nCode, wParam, lParam);

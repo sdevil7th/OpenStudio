@@ -160,7 +160,7 @@ def get_cpp_exe_path(config="Debug"):
         return os.path.join("build", "OpenStudio_artefacts", config, "OpenStudio")
 
 
-def build_backend(mode="debug"):
+def build_backend(mode="debug", app_version=None):
     print("--- Building Backend ---")
     if platform.system() == "Windows":
         run_command([
@@ -178,6 +178,8 @@ def build_backend(mode="debug"):
     # Configure CMake. On single-config generators (Linux/macOS Make/Ninja)
     # CMAKE_BUILD_TYPE must be set at configure time, not just at build time.
     cmd = ["cmake", "-B", build_dir]
+    if app_version:
+        cmd.append(f"-DOPENSTUDIO_APP_VERSION={app_version}")
     if platform.system() != "Windows":
         cmd.append(f"-DCMAKE_BUILD_TYPE={config_type}")
     tone3000_env_name, tone3000_client_id = get_first_env_value(TONE3000_CLIENT_ID_ENV_NAMES)
@@ -241,6 +243,8 @@ def main():
     parser = argparse.ArgumentParser(description="OpenStudio Builder Tool")
     parser.add_argument("mode", choices=["dev", "prod"], help="Build mode: dev or prod")
     parser.add_argument("--run", action="store_true", help="Auto-start Vite and C++ app (dev mode only)")
+    parser.add_argument("--version", help="Exact application version (required for prod)")
+    parser.add_argument("--notes-file", default="", help="Reviewed release notes (defaults to docs/releases/<version>.md)")
     args = parser.parse_args()
 
     if args.mode == "dev":
@@ -263,8 +267,15 @@ def main():
             print("2. Auto:   python build.py dev --run")
     
     elif args.mode == "prod":
+        if not args.version:
+            parser.error("prod requires --version and reviewed docs/releases/<version>.md")
+        version = args.version.removeprefix("v")
+        validation = [sys.executable, "tools/validate-release-notes.py", "--version", version]
+        if args.notes_file:
+            validation.extend(["--notes-file", args.notes_file])
+        run_command(validation, shell=False)
         build_frontend("prod")
-        build_backend("release")
+        build_backend("release", app_version=version)
         print("\nProduction Build Complete.")
         print(f"Run: {get_cpp_exe_path('Release')}")
 

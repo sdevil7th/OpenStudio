@@ -21,7 +21,7 @@ bool isSupportedProjectPath(const juce::String& candidate)
         return false;
 
     const auto lower = trimmed.toLowerCase();
-    return lower.endsWith(".osproj") || lower.endsWith(".s13");
+    return lower.endsWith(".osproj");
 }
 
 void addCandidate(juce::StringArray& candidates, const juce::String& candidate)

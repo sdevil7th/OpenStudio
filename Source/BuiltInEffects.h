@@ -5,19 +5,19 @@
 #include <mutex>
 #include <vector>
 
-using S13IIRCoefficientSet = std::array<float, 5>;
+using OpenStudioIIRCoefficientSet = std::array<float, 5>;
 
 //==============================================================================
 /**
  * Base class for all OpenStudio built-in effects.
  */
-class S13BuiltInEffect : public juce::AudioProcessor
+class OpenStudioBuiltInEffect : public juce::AudioProcessor
 {
 public:
-    S13BuiltInEffect();
-    ~S13BuiltInEffect() override = default;
+    OpenStudioBuiltInEffect();
+    ~OpenStudioBuiltInEffect() override = default;
 
-    bool isS13BuiltIn() const { return true; }
+    bool isOpenStudioBuiltIn() const { return true; }
 
     // ---- AudioProcessor boilerplate ----
     bool hasEditor() const override { return true; }
@@ -48,22 +48,22 @@ protected:
     std::atomic<float> gainReductionDB { 0.0f };
 
 private:
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13BuiltInEffect)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioBuiltInEffect)
 };
 
 //==============================================================================
 /**
- * S13EQ -- 8-band parametric EQ with selectable filter types per band.
+ * OpenStudioEQ -- 8-band parametric EQ with selectable filter types per band.
  *
  * Each band: Bell, Low Shelf, High Shelf, Low Cut, High Cut, Notch, Band Pass.
  * Slopes for cut/shelf: 6, 12, 24, 48 dB/oct.
  * Includes FFT spectrum analyzer data output.
  */
-class S13EQ : public S13BuiltInEffect
+class OpenStudioEQ : public OpenStudioBuiltInEffect
 {
 public:
-    S13EQ();
-    ~S13EQ() override = default;
+    OpenStudioEQ();
+    ~OpenStudioEQ() override = default;
 
     const juce::String getName() const override { return "OpenStudio EQ"; }
     juce::AudioProcessorEditor* createEditor() override;
@@ -147,7 +147,7 @@ private:
     StereoIIR bandFilters[numBands][maxStagesPerBand];
     int activeStages[numBands] = {};
     int targetStages[numBands] = {};
-    std::array<std::array<S13IIRCoefficientSet, maxStagesPerBand>, numBands>
+    std::array<std::array<OpenStudioIIRCoefficientSet, maxStagesPerBand>, numBands>
         targetBandCoefficients {};
     bool filtersPrepared = false;
     bool filtersNeedSmoothing = false;
@@ -205,7 +205,7 @@ private:
     int buildBandTargets(
         int bandIndex,
         bool shouldProcess,
-        std::array<S13IIRCoefficientSet, maxStagesPerBand>& targets) const noexcept;
+        std::array<OpenStudioIIRCoefficientSet, maxStagesPerBand>& targets) const noexcept;
     bool advanceStageCoefficients(int bandIndex, int stageIndex) noexcept;
     void resetWetPathState() noexcept;
     void advanceAutoGainEstimateProbe() noexcept;
@@ -237,22 +237,22 @@ private:
     void captureSpectrumBlock(const juce::AudioBuffer<float>& preEQ,
                               const juce::AudioBuffer<float>& postEQ) noexcept;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13EQ)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioEQ)
 };
 
 //==============================================================================
 /**
- * S13Compressor -- Multi-style feed-forward compressor.
+ * OpenStudioCompressor -- Multi-style feed-forward compressor.
  *
  * Styles: Clean, Punch, Opto, FET, VCA.
  * Includes dry/wet for parallel compression, sidechain HPF, lookahead,
  * and real-time gain reduction output.
  */
-class S13Compressor : public S13BuiltInEffect
+class OpenStudioCompressor : public OpenStudioBuiltInEffect
 {
 public:
-    S13Compressor();
-    ~S13Compressor() override = default;
+    OpenStudioCompressor();
+    ~OpenStudioCompressor() override = default;
 
     const juce::String getName() const override { return "OpenStudio Compressor"; }
     juce::AudioProcessorEditor* createEditor() override;
@@ -303,8 +303,8 @@ private:
     juce::dsp::IIR::Filter<float> scHPF_L;
     juce::dsp::IIR::Filter<float> scHPF_R;
     float lastSCHPFFreq = 20.0f;
-    std::vector<S13IIRCoefficientSet> scHPFCoefficientLut;
-    S13IIRCoefficientSet targetSCHPFCoefficients {};
+    std::vector<OpenStudioIIRCoefficientSet> scHPFCoefficientLut;
+    OpenStudioIIRCoefficientSet targetSCHPFCoefficients {};
     float scHPFCoefficientSmoothingProportion = 1.0f;
     bool scHPFCoefficientsSmoothing = false;
 
@@ -326,18 +326,18 @@ private:
                              float kneeDB) noexcept;
     void getStyleBallistics(float& atkMs, float& relMs) const;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Compressor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioCompressor)
 };
 
 //==============================================================================
 /**
- * S13Gate -- Noise gate with hold, range, hysteresis, sidechain filter.
+ * OpenStudioGate -- Noise gate with hold, range, hysteresis, sidechain filter.
  */
-class S13Gate : public S13BuiltInEffect
+class OpenStudioGate : public OpenStudioBuiltInEffect
 {
 public:
-    S13Gate();
-    ~S13Gate() override = default;
+    OpenStudioGate();
+    ~OpenStudioGate() override = default;
 
     const juce::String getName() const override { return "OpenStudio Gate"; }
     juce::AudioProcessorEditor* createEditor() override;
@@ -379,10 +379,10 @@ private:
 
     juce::dsp::IIR::Filter<float> scHPF_L, scHPF_R;
     juce::dsp::IIR::Filter<float> scLPF_L, scLPF_R;
-    std::vector<S13IIRCoefficientSet> scHPFCoefficientLut;
-    std::vector<S13IIRCoefficientSet> scLPFCoefficientLut;
-    S13IIRCoefficientSet targetHPFCoefficients {};
-    S13IIRCoefficientSet targetLPFCoefficients {};
+    std::vector<OpenStudioIIRCoefficientSet> scHPFCoefficientLut;
+    std::vector<OpenStudioIIRCoefficientSet> scLPFCoefficientLut;
+    OpenStudioIIRCoefficientSet targetHPFCoefficients {};
+    OpenStudioIIRCoefficientSet targetLPFCoefficients {};
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedMix;
     float sidechainCoefficientSmoothingProportion = 1.0f;
     bool hpfCoefficientsSmoothing = false;
@@ -394,18 +394,18 @@ private:
 
     void updateCoefficients(bool forceImmediate);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Gate)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioGate)
 };
 
 //==============================================================================
 /**
- * S13Limiter -- Brickwall limiter with ceiling and lookahead.
+ * OpenStudioLimiter -- Brickwall limiter with ceiling and lookahead.
  */
-class S13Limiter : public S13BuiltInEffect
+class OpenStudioLimiter : public OpenStudioBuiltInEffect
 {
 public:
-    S13Limiter();
-    ~S13Limiter() override = default;
+    OpenStudioLimiter();
+    ~OpenStudioLimiter() override = default;
 
     const juce::String getName() const override { return "OpenStudio Limiter"; }
     juce::AudioProcessorEditor* createEditor() override;
@@ -439,5 +439,5 @@ private:
     float gainEnvelope = 1.0f;
     std::array<float, 2> previousDetectorSample {};
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(S13Limiter)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioLimiter)
 };

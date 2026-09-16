@@ -93,7 +93,7 @@ function expectedTimelineRules(
         ? { "0110": "logic-pro.control-option-horizontal-zoom" }
         : { "1010": "logic-pro.control-option-horizontal-zoom" };
     case "fl_studio":
-      return {};
+      return { "1000": "fl-studio.horizontal-zoom" };
     case "ableton_live":
       return {
         "0000": "ableton-live.vertical-scroll",
@@ -353,7 +353,7 @@ describe("DAW mouse behavior profiles", () => {
           event,
           { surface: "timeline", subtarget: "content", platform, deviceHint: "mouse" },
           profile.wheel,
-        ).matched).toBe(false);
+        ).matched).toBe(normalizedSignature(event, platform) === "1000");
       }
       expect(resolveWheelGesture(
         { deltaY: -120, shiftKey: true },

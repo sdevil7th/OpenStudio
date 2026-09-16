@@ -1,0 +1,42 @@
+.ai-setup-progress {
+  appearance: none;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-daw-dark);
+}
+
+.ai-setup-progress::-webkit-progress-bar {
+  border-radius: inherit;
+  background: var(--color-daw-dark);
+}
+
+.ai-setup-progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--color-daw-accent);
+}
+
+.ai-setup-progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--color-daw-accent);
+}
+
+.ai-setup-progress:indeterminate,
+.ai-setup-progress:indeterminate::-webkit-progress-bar {
+  background: linear-gradient(var(--color-daw-accent), var(--color-daw-accent))
+    left / 30% 100% no-repeat var(--color-daw-dark);
+  animation: ai-setup-working 1.6s ease-in-out infinite alternate;
+}
+
+@keyframes ai-setup-working {
+  from { background-position-x: 0%; }
+  to { background-position-x: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-setup-progress:indeterminate,
+  .ai-setup-progress:indeterminate::-webkit-progress-bar {
+    animation: none;
+    background-position-x: 50%;
+  }
+}

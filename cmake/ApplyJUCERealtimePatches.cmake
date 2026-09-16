@@ -2,6 +2,8 @@ if(NOT DEFINED JUCE_SOURCE_DIR)
     message(FATAL_ERROR "JUCE_SOURCE_DIR was not provided")
 endif()
 
+include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEVST3StatePatch.cmake")
+
 set(JUCE_ASIO_DEVICE_SOURCE
     "${JUCE_SOURCE_DIR}/modules/juce_audio_devices/native/juce_ASIO_windows.cpp")
 if(NOT EXISTS "${JUCE_ASIO_DEVICE_SOURCE}")

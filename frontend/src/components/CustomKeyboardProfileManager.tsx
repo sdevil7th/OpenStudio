@@ -1,8 +1,13 @@
+import { appDialogs } from "../services/appDialogs";
 import { useEffect, useId, useMemo, useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { getRegisteredActions } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
-import { MAX_CUSTOM_KEYBOARD_PROFILES } from "../utils/customShortcutProfiles";
+import {
+  MAX_CUSTOM_KEYBOARD_PROFILES,
+  parseImportedCustomKeyboardProfile,
+} from "../utils/customShortcutProfiles";
+import { findCustomKeyboardProfileConflicts } from "../utils/shortcutAssignmentConflicts";
 import { Button, Input } from "./ui";
 
 export function CustomKeyboardProfileManager() {
@@ -72,9 +77,9 @@ export function CustomKeyboardProfileManager() {
     }
   };
 
-  const deleteProfile = () => {
+  const deleteProfile = async () => {
     if (!activeProfile) return;
-    if (!window.confirm(`Delete the custom profile “${activeProfile.name}”?`)) return;
+    if (!(await appDialogs.confirm(`Delete the custom profile “${activeProfile.name}”?`))) return;
     if (deleteCustomKeyboardProfile(activeProfile.id)) {
       setStatus("Custom profile deleted. Its built-in base profile is now active.");
     } else {
@@ -106,6 +111,34 @@ export function CustomKeyboardProfileManager() {
     }
     try {
       const serialized = await file.text();
+      const parsed = parseImportedCustomKeyboardProfile(
+        serialized,
+        new Set(knownActionIds),
+      );
+      if (!parsed.success) {
+        setStatus(parsed.error);
+        return;
+      }
+      const conflicts = findCustomKeyboardProfileConflicts(parsed.profile);
+      if (conflicts.length > 0) {
+        const summary = conflicts.slice(0, 8).map((conflict) => {
+          const precedence = conflict.precedence === "same_precedence"
+            ? "same priority"
+            : conflict.precedence === "target_precedes"
+              ? `${conflict.targetActionName} takes priority`
+              : conflict.precedence === "existing_precedes"
+                ? `${conflict.actionName} takes priority`
+                : "priority changes with focus";
+          return `${conflict.targetActionName} / ${conflict.actionName} (${conflict.sharedScopes.join(", ")}; ${precedence}; ${conflict.platforms.join(", ")})`;
+        }).join("\n");
+        const remaining = conflicts.length > 8
+          ? `\n...and ${conflicts.length - 8} more.`
+          : "";
+        if (!(await appDialogs.confirm(`This profile contains overlapping shortcuts:\n\n${summary}${remaining}\n\nImport it anyway?`))) {
+          setStatus("Profile import cancelled; no shortcuts were changed.");
+          return;
+        }
+      }
       const result = importCustomKeyboardProfile(serialized, knownActionIds);
       setStatus(result.success
         ? `Imported and selected ${result.profile.name}.`

@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { useState, useEffect } from "react";
 import {
   useDAWStore,
@@ -44,8 +45,8 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
   const {
     tracks, timeSelection, projectRange, projectPath, syncClipsWithBackend,
     selectedTrackIds, regions, selectedRegionIds, selectedClipIds, razorEdits,
-    projectName, renderMetadata, secondaryOutputEnabled, secondaryOutputFormat,
-    secondaryOutputBitDepth, onlineRender, addToProjectAfterRender,
+    projectName, secondaryOutputEnabled, secondaryOutputFormat,
+    secondaryOutputBitDepth, addToProjectAfterRender,
     loopEnabled, loopStart, loopEnd,
     renderDialogOptions, setRenderDialogOptions, lastRenderDirectory, setLastRenderDirectory,
     showToast,
@@ -61,7 +62,6 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     selectedClipIds: s.selectedClipIds,
     razorEdits: s.razorEdits,
     projectName: s.projectName,
-    renderMetadata: s.renderMetadata,
     loopEnabled: s.transport.loopEnabled,
     loopStart: s.transport.loopStart,
     loopEnd: s.transport.loopEnd,
@@ -72,7 +72,6 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     secondaryOutputEnabled: s.secondaryOutputEnabled,
     secondaryOutputFormat: s.secondaryOutputFormat,
     secondaryOutputBitDepth: s.secondaryOutputBitDepth,
-    onlineRender: s.onlineRender,
     addToProjectAfterRender: s.addToProjectAfterRender,
     showToast: s.showToast,
   })));
@@ -390,11 +389,11 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
 
   const handleRender = async () => {
     if (options.endTime <= options.startTime && options.bounds !== "project_regions" && options.bounds !== "selected_regions") {
-      alert("Invalid render range: end time must be greater than start time.");
+      void appDialogs.alert("Invalid render range: end time must be greater than start time.");
       return;
     }
     if (secondaryOutputEnabled && secondaryOutputFormat === options.format) {
-      alert("Secondary output must use a different format from the primary output.");
+      void appDialogs.alert("Secondary output must use a different format from the primary output.");
       return;
     }
 
@@ -451,7 +450,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         } else if (options.source === "selected_tracks") {
           const tracksToRender = tracks.filter((t) => selectedTrackIds.includes(t.id));
           if (tracksToRender.length === 0) {
-            alert("No tracks selected. Select tracks in the track control panel first.");
+            void appDialogs.alert("No tracks selected. Select tracks in the track control panel first.");
             setIsRendering(false);
             return;
           }
@@ -467,7 +466,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         } else if (options.source === "selected_items" || options.source === "selected_items_master") {
           // Render only selected clips — pass as master with clip filtering
           if (selectedAudioClipIds.length === 0) {
-            alert("No audio items selected. Select one or more audio clips in the timeline first.");
+            void appDialogs.alert("No audio items selected. Select one or more audio clips in the timeline first.");
             setIsRendering(false);
             return;
           }
@@ -483,7 +482,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
         } else if (options.source === "razor") {
           // Render each razor edit area as a separate file
           if (razorEdits.length === 0) {
-            alert("No razor edit areas defined. Use the razor tool to define areas first.");
+            void appDialogs.alert("No razor edit areas defined. Use the razor tool to define areas first.");
             setIsRendering(false);
             return;
           }
@@ -542,7 +541,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       const completedSummary = renderedFiles.length > 0
         ? `\n\n${renderedFiles.length} output file${renderedFiles.length === 1 ? " was" : "s were"} rendered successfully before this later step failed:\n${renderedFiles.join("\n")}`
         : "";
-      alert(`Render did not fully complete: ${detail}${completedSummary}`);
+      void appDialogs.alert(`Render did not fully complete: ${detail}${completedSummary}`);
       setIsRendering(false);
       setRenderProgress(0);
       setRenderStatus("");
@@ -1053,37 +1052,8 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             )}
           </div>
 
-          {/* Metadata */}
-          <details className="bg-daw-darker border border-daw-border rounded opacity-60">
-            <summary className="text-sm font-medium text-daw-text p-3 cursor-pointer select-none">
-              Metadata (coming soon)
-            </summary>
-            <div className="px-3 pb-3 space-y-1.5">
-              {(["title", "artist", "album", "genre", "year", "description", "isrc"] as const).map((field) => (
-                <div key={field} className="flex items-center gap-2">
-                  <span className="text-xs text-daw-text-muted w-20 capitalize">{field === "isrc" ? "ISRC" : field}:</span>
-                  <Input
-                    type="text"
-                    variant="transparent"
-                    size="xs"
-                    value={renderMetadata[field]}
-                    onChange={(e) => useDAWStore.getState().setRenderMetadata({ [field]: e.target.value })}
-                    className="flex-1"
-                    disabled
-                  />
-                </div>
-              ))}
-            </div>
-          </details>
-
           {/* Post-render options */}
           <div className="flex gap-4 text-sm">
-            <Checkbox
-              label="Online render (unsupported)"
-              checked={onlineRender}
-              onChange={(e) => useDAWStore.getState().setOnlineRender(e.target.checked)}
-              disabled
-            />
             <Checkbox
               label="Add to project after render"
               checked={addToProjectAfterRender}

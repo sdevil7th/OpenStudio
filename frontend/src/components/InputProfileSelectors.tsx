@@ -118,7 +118,7 @@ export function InputProfileSelectors({
         />
         {showDescriptions && (
           <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
-            {mouseProfile.name} documented gestures are applied independently from the keyboard map. {mousePresentation.availabilityLabel}. Unsupported parameter-wheel gestures are suppressed; app-wide browser zoom protection remains active.
+            {mouseProfile.name} timeline conventions, with adapted navigation in the note and pitch editors. {mousePresentation.availabilityLabel}. See Mouse & gestures in Keyboard Shortcuts for the current mappings and limitations.
           </p>
         )}
       </div>

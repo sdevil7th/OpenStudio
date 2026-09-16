@@ -415,9 +415,10 @@ Source: [ParametricGraph](../frontend/src/components/ParametricGraph/ParametricG
 - Inputs: `xAxis`/`yAxis` (`linear` or `log`), `nodes` (draggable band
   handles, up to 8 colours in `NODE_COLORS`), `responseCurve`,
   `backgroundCurves`, `perNodeCurves`.
-- Colours are CSS custom properties with fallbacks
-  (`--s13-graph-surface`, `--s13-graph-grid`, `--s13-graph-response`, …), so
-  a site can retheme it without touching the code.
+- Colours use CSS custom properties with fallbacks for the graph surface,
+  grid and response curve, so a site can retheme it without touching the code.
+  Read their exact names from the source revision being copied; the development
+  branch has renamed these tokens.
 - Wrappers `EQGraph`, `CompressorGraph`, `GateGraph`, `DelayGraph`,
   `ReverbGraph`, `SaturationGraph`, `ChorusGraph` turn a plugin slider array
   into nodes and curves. `eqResponseCurve.ts` computes the biquad EQ response.

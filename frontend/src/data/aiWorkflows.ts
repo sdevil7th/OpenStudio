@@ -1,16 +1,20 @@
 export const ACE_STEP_MODEL_ID = "ace-step-v15-xl-turbo" as const;
 export const STABLE_AUDIO_3_MODEL_ID = "stable-audio-3-medium" as const;
+export const MINIMAX_MUSIC_3_MODEL_ID = "minimax-music-3" as const;
+export const isDiffusersImportModel = (id?: string) => id === STABLE_AUDIO_3_MODEL_ID || id === MINIMAX_MUSIC_3_MODEL_ID;
 export const DEFAULT_AI_MUSIC_MODEL_ID = ACE_STEP_MODEL_ID;
 
 export type AiMusicModelId =
   | typeof ACE_STEP_MODEL_ID
-  | typeof STABLE_AUDIO_3_MODEL_ID;
+  | typeof STABLE_AUDIO_3_MODEL_ID
+  | typeof MINIMAX_MUSIC_3_MODEL_ID;
 
 export type AIWorkflowSurface = "ai-track" | "clip-context";
 
 export type AIWorkflowId =
   | "text-to-music"
   | "lyrics-style"
+  | "structured-song"
   | "text-to-audio"
   | "variation"
   | "inpaint-selection"
@@ -36,7 +40,7 @@ export interface AIMusicModel {
   id: AiMusicModelId;
   label: string;
   shortLabel: string;
-  provider: "ace-step" | "stability-ai";
+  provider: "ace-step" | "stability-ai" | "minimax";
   attribution?: string;
 }
 
@@ -91,6 +95,7 @@ export const AI_MUSIC_MODELS: AIMusicModel[] = [
     provider: "stability-ai",
     attribution: "Powered by Stability AI",
   },
+  { id: MINIMAX_MUSIC_3_MODEL_ID, label: "MiniMax Music 3", shortLabel: "MiniMax", provider: "minimax" },
 ];
 
 export const AI_WORKFLOW_SECTION_LABELS: Record<AIWorkflowSection, string> = {
@@ -322,79 +327,37 @@ const ACE_CONTINUE_PARAMS: AIWorkflowParam[] = [
 ];
 
 const STABLE_TEXT_PARAMS: AIWorkflowParam[] = [
-  {
-    key: "prompt",
-    label: "Prompt",
-    type: "textarea",
-    section: "prompt",
-    placeholder: "cinematic analog synth pulse, wide stereo ambience, clean impact",
-    default: "",
-  },
-  {
-    key: "negative_prompt",
-    label: "Negative Prompt",
-    type: "textarea",
-    section: "prompt",
-    placeholder: "distorted, noisy, clipped, low quality",
-    default: "",
-  },
-  {
-    key: "seed",
-    label: "Seed",
-    type: "number",
-    section: "sampling",
-    default: -1,
-  },
-  {
-    key: "duration",
-    label: "Duration (seconds)",
-    type: "slider",
-    section: "generation",
-    min: 1,
-    max: 240,
-    step: 1,
-    default: 30,
-  },
-  {
-    key: "steps",
-    label: "Steps",
-    type: "slider",
-    section: "generation",
-    min: 4,
-    max: 32,
-    step: 1,
-    default: 8,
-    description: "Stable Audio 3 Medium is tuned for 8 steps; very high step counts can reduce quality.",
-  },
-  {
-    key: "cfg_scale",
-    label: "CFG Scale",
-    type: "slider",
-    section: "sampling",
-    min: 0.1,
-    max: 3,
-    step: 0.1,
-    default: 1,
-    description: "Use the medium-model range. CFG 7 is for base models and can sound over-guided here.",
-  },
-  {
-    key: "lora_path",
-    label: "LoRA Path",
-    type: "text",
-    section: "advanced",
-    placeholder: "Optional .safetensors file",
-    default: "",
-  },
-  {
-    key: "lora_strength",
-    label: "LoRA Strength",
-    type: "slider",
-    section: "advanced",
-    min: 0,
-    max: 2,
-    step: 0.05,
-    default: 1,
-  },
+  { key: "prompt", label: "Sound description", type: "textarea", section: "prompt",
+    placeholder: "Instrument, playing style, mood, room and arrangement", default: "" },
+  { key: "seed", label: "Seed", type: "number", section: "sampling", default: -1 },
+  { key: "duration", label: "Duration (seconds)", type: "slider", section: "generation",
+    min: 1, max: 360, step: 1, default: 30 },
+  { key: "steps", label: "Steps", type: "slider", section: "generation",
+    min: 4, max: 32, step: 1, default: 8,
+    description: "Distilled Medium defaults to 8 steps with guidance fixed at 1. More steps are not necessarily better." },
+];
+
+const MINIMAX_PARAMS: AIWorkflowParam[] = [
+  { ...ACE_PROMPT_PARAM, label: "Music description", placeholder: "Genre, BPM, key, mood, vocals and arrangement" },
+  { ...ACE_LYRICS_PARAM, description: "Use [verse], [chorus] and other section tags on their own lines." },
+  { key: "duration", label: "Maximum length (seconds)", type: "slider", section: "music",
+    min: 5, max: 300, step: 5, default: 60,
+    description: "The song may end earlier. Long songs require substantially more time and memory." },
+  { key: "seed", label: "Seed", type: "number", section: "sampling", default: -1 },
+  { key: "steps", label: "Diffusion steps per chunk", type: "slider", section: "generation",
+    min: 1, max: 100, step: 1, default: 30 },
+];
+const MINIMAX_STRUCTURED_PARAMS: AIWorkflowParam[] = [
+  MINIMAX_PARAMS[0],
+  { key: "vocals", label: "Vocal direction", type: "text", section: "prompt", default: "",
+    placeholder: "Warm female lead, intimate verse, layered chorus" },
+  { key: "arrangement", label: "Arrangement", type: "textarea", section: "prompt", default: "",
+    placeholder: "Fingerpicked guitar first; drums and bass enter in the chorus" },
+  ...["verse", "chorus", "bridge"].map((key): AIWorkflowParam => ({
+    key, label: key.charAt(0).toUpperCase() + key.slice(1), type: "textarea", section: "music",
+    default: "", placeholder: key === "bridge" ? "Optional bridge lyrics" : "Lyrics for this section",
+  })),
+  ...MINIMAX_PARAMS.slice(2),
 ];
 
 const STABLE_VARIATION_PROMPT_PARAM: AIWorkflowParam = {
@@ -420,17 +383,8 @@ const STABLE_CONTINUE_PROMPT_PARAM: AIWorkflowParam = {
     "Continue the same musical idea, matching the source clip's tempo, key, primary instrument, harmony, room tone, and mix. Do not add vocals or unrelated instruments unless requested.",
 };
 
-const STABLE_SOURCE_NEGATIVE_PARAM: AIWorkflowParam = {
-  ...STABLE_TEXT_PARAMS[1],
-  placeholder: "distorted, noisy, clipped, abrupt transition, low quality",
-  default: "unrelated instruments, unexpected vocals, full band arrangement unless present in the source, distorted, noisy, clipped, abrupt transition, low quality",
-};
-
-const STABLE_SOURCE_SEED_PARAM = STABLE_TEXT_PARAMS[2];
-const STABLE_SOURCE_STEPS_PARAM = STABLE_TEXT_PARAMS[4];
-const STABLE_SOURCE_CFG_PARAM = STABLE_TEXT_PARAMS[5];
-const STABLE_SOURCE_LORA_PATH_PARAM = STABLE_TEXT_PARAMS[6];
-const STABLE_SOURCE_LORA_STRENGTH_PARAM = STABLE_TEXT_PARAMS[7];
+const STABLE_SOURCE_SEED_PARAM = STABLE_TEXT_PARAMS[1];
+const STABLE_SOURCE_STEPS_PARAM = STABLE_TEXT_PARAMS[3];
 
 const STABLE_SOURCE_EXTENSION_PARAM: AIWorkflowParam = {
   key: "extension_duration",
@@ -458,14 +412,10 @@ const STABLE_VARIATION_AMOUNT_PARAM: AIWorkflowParam = {
 
 const STABLE_SOURCE_ADVANCED_PARAMS: AIWorkflowParam[] = [
   STABLE_SOURCE_STEPS_PARAM,
-  STABLE_SOURCE_CFG_PARAM,
-  STABLE_SOURCE_LORA_PATH_PARAM,
-  STABLE_SOURCE_LORA_STRENGTH_PARAM,
 ];
 
 const STABLE_VARIATION_PARAMS: AIWorkflowParam[] = [
   STABLE_VARIATION_PROMPT_PARAM,
-  STABLE_SOURCE_NEGATIVE_PARAM,
   STABLE_SOURCE_SEED_PARAM,
   STABLE_VARIATION_AMOUNT_PARAM,
   ...STABLE_SOURCE_ADVANCED_PARAMS,
@@ -473,20 +423,21 @@ const STABLE_VARIATION_PARAMS: AIWorkflowParam[] = [
 
 const STABLE_INPAINT_PARAMS: AIWorkflowParam[] = [
   STABLE_INPAINT_PROMPT_PARAM,
-  STABLE_SOURCE_NEGATIVE_PARAM,
   STABLE_SOURCE_SEED_PARAM,
   ...STABLE_SOURCE_ADVANCED_PARAMS,
 ];
 
 const STABLE_CONTINUE_PARAMS: AIWorkflowParam[] = [
   STABLE_CONTINUE_PROMPT_PARAM,
-  STABLE_SOURCE_NEGATIVE_PARAM,
   STABLE_SOURCE_SEED_PARAM,
   STABLE_SOURCE_EXTENSION_PARAM,
   ...STABLE_SOURCE_ADVANCED_PARAMS,
 ];
 
 const AI_WORKFLOW_DEFINITIONS: AIWorkflowDefinition[] = [
+  { id: "structured-song", label: "Song Sections", description: "Write verse, chorus and bridge lyrics with vocal and arrangement direction.",
+    surface: "ai-track", modelIds: [MINIMAX_MUSIC_3_MODEL_ID], params: MINIMAX_STRUCTURED_PARAMS, available: true },
+
   {
     id: "text-to-music",
     label: "Text to Music",
@@ -501,8 +452,8 @@ const AI_WORKFLOW_DEFINITIONS: AIWorkflowDefinition[] = [
     label: "Lyrics + Style",
     description: "Generate a song guided by both prompt text and structured lyrics.",
     surface: "ai-track",
-    modelIds: [ACE_STEP_MODEL_ID],
-    params: ACE_BASE_PARAMS,
+    modelIds: [ACE_STEP_MODEL_ID, MINIMAX_MUSIC_3_MODEL_ID],
+    paramsByModel: { [ACE_STEP_MODEL_ID]: ACE_BASE_PARAMS, [MINIMAX_MUSIC_3_MODEL_ID]: MINIMAX_PARAMS },
     available: true,
   },
   {
@@ -780,7 +731,7 @@ export function normalizeWorkflowParams(
     }),
   );
 
-  return normalized;
+  return { ...normalized, modelVariant: source.modelVariant === "int8" ? "int8" : "original" };
 }
 
 export function mergeWorkflowParams(

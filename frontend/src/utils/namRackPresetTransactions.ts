@@ -555,7 +555,7 @@ export function migrateNAMRackModelQualityState(state: unknown): unknown {
   return migrated;
 }
 
-export const CURRENT_NAM_EFFECTS_DSP_VERSION = 19 as const;
+export const CURRENT_NAM_EFFECTS_DSP_VERSION = 20 as const;
 export const CURRENT_NAM_REVERB_ENGINE_VERSION = 5 as const;
 
 /** The migrated native values are authoritative over optional sidecar tags. */
@@ -658,6 +658,13 @@ const CURRENT_NAM_RACK_COMPONENT_DEFAULTS: Readonly<Record<string, number>> = {
   chaosGate: 0.22,
   chaosMix: 1,
   chaosLevelDb: 0,
+  cabEngineVersion: 3,
+  cabHPFEnabled: 0,
+  cabLPFEnabled: 0,
+  cabHPFHz: 30,
+  cabLPFHz: 16000,
+  cabIRStereo: 0,
+  cabDirectMix: 0,
   cabRoomEnabled: 0,
   cabRoomAmount: 0.22,
   cabRoomWidth: 0.65,
@@ -883,6 +890,10 @@ export function migrateLegacyNAMRackPresetDspState(
   const hasCompressorRelease = Object.prototype.hasOwnProperty.call(values, "compressorReleaseMs");
   const hasCabRoomEnabled = Object.prototype.hasOwnProperty.call(values, "cabRoomEnabled");
   const hasCabDoublerEnabled = Object.prototype.hasOwnProperty.call(values, "cabDoublerEnabled");
+  const hasCabEngineVersion = Object.prototype.hasOwnProperty.call(values, "cabEngineVersion");
+  const storedCabEngineVersion = Number(values.cabEngineVersion);
+  const legacyCabState = !hasCabEngineVersion || storedCabEngineVersion < 1.5;
+  const cabFiltersNeedEqMigration = !hasCabEngineVersion || storedCabEngineVersion < 2.5;
   const legacyCabRoomAmount = values.cabRoomAmount ?? 0;
   const legacyCabDoublerMix = values.cabDoublerMix ?? 0;
   const legacyCompressorDetail = normalizedLegacyCompressorDetail(values.compressorDetail);
@@ -948,6 +959,60 @@ export function migrateLegacyNAMRackPresetDspState(
   // Delay schema. Keep every saved, baseline, and A/B snapshot inside the
   // exact native ranges and canonicalize selector/toggle state.
   sanitizeNAMDelayPresetValues(migratedValues, rawEffectsVersion);
+  const sourceCabHPFEnabled = legacyCabState
+    ? 1
+    : normalizeNAMDelayToggle(values.cabHPFEnabled, 0);
+  const sourceCabLPFEnabled = legacyCabState
+    ? 1
+    : normalizeNAMDelayToggle(values.cabLPFEnabled, 0);
+  const sourceCabHPFHz = clampNAMDelayValue(
+    values.cabHPFHz,
+    20,
+    500,
+    legacyCabState ? 80 : 30,
+  );
+  const sourceCabLPFHz = clampNAMDelayValue(
+    values.cabLPFHz,
+    1000,
+    20000,
+    legacyCabState ? 8500 : 16000,
+  );
+  const sourceCabEnabled = normalizeNAMDelayToggle(values.cabEnabled, 1)
+    && normalizeNAMDelayToggle(values.cabRequestedEnabled, 1);
+  if (cabFiltersNeedEqMigration && sourceCabEnabled && (sourceCabHPFEnabled || sourceCabLPFEnabled)) {
+    // Only audible stages contribute to migration. If EQ was bypassed, start
+    // flat before engaging it to host the active Cab cutoffs.
+    if (!normalizeNAMDelayToggle(values.eqEnabled, 0)) {
+      for (const id of ["eq65Db", "eq125Db", "eq250Db", "eq500Db", "eq1kDb",
+        "eq2kDb", "eq4kDb", "eq8kDb", "eq16kDb", "eqLevelDb"]) migratedValues[id] = 0;
+      migratedValues.eqHPFHz = 0;
+      migratedValues.eqLPFHz = 24000;
+    }
+    migratedValues.eqEnabled = 1;
+    if (sourceCabHPFEnabled) {
+      migratedValues.eqHPFHz = Math.max(migratedValues.eqHPFHz, sourceCabHPFHz);
+    }
+    if (sourceCabLPFEnabled) {
+      const currentEqLPFHz = migratedValues.eqLPFHz < 22000
+        ? migratedValues.eqLPFHz
+        : 24000;
+      migratedValues.eqLPFHz = Math.min(currentEqLPFHz, sourceCabLPFHz);
+    }
+  }
+  migratedValues.cabEngineVersion = 3;
+  migratedValues.cabHPFEnabled = 0;
+  migratedValues.cabLPFEnabled = 0;
+  migratedValues.cabHPFHz = 30;
+  migratedValues.cabLPFHz = 16000;
+  migratedValues.cabIRStereo = legacyCabState
+    ? 1
+    : normalizeNAMDelayToggle(values.cabIRStereo, 0);
+  migratedValues.cabDirectMix = legacyCabState
+    ? 0
+    : clampNAMDelayValue(values.cabDirectMix, 0, 1, 0);
+  ["cabMicPosition", "cabMicDistance", "cabMicBlend", "cabRoomSend"].forEach((retiredKey) => {
+    delete migratedValues[retiredKey];
+  });
   // Room and Doubler previously used zero Amount/Mix as their bypass state.
   // Derive power only when a complete legacy snapshot lacks the new flag;
   // an explicit disabled flag must retain its non-zero stored setting.

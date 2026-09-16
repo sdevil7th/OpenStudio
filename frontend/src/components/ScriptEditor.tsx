@@ -1,3 +1,4 @@
+import { appDialogs } from "../services/appDialogs";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { X, Play, Trash2, Plus, Save, FolderOpen, RefreshCw } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
@@ -41,7 +42,7 @@ export function ScriptEditor() {
   })));
 
   const [code, setCode] = useState(
-    "-- OpenStudio Lua Script\n-- API: s13.play(), s13.stop(), s13.getTempo(), s13.setTempo(bpm)\n-- s13.addTrack(), s13.removeTrack(id), s13.setTrackVolume(id, db)\n-- s13.print(msg) outputs to this console\n\ns13.print('Hello from OpenStudio!')\ns13.print('Tempo: ' .. s13.getTempo() .. ' BPM')\n",
+    "-- OpenStudio Lua Script\n-- API: openstudio.play(), openstudio.stop(), openstudio.getTempo(), openstudio.setTempo(bpm)\n-- openstudio.addTrack(), openstudio.removeTrack(id), openstudio.setTrackVolume(id, db)\n-- openstudio.print(msg) outputs to this console\n\nopenstudio.print('Hello from OpenStudio!')\nopenstudio.print('Tempo: ' .. openstudio.getTempo() .. ' BPM')\n",
   );
   const [selectedScriptId, setSelectedScriptId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -94,8 +95,8 @@ export function ScriptEditor() {
     setIsRunning(false);
   };
 
-  const handleSave = () => {
-    const name = prompt("Script name:", "My Script");
+  const handleSave = async () => {
+    const name = (await appDialogs.prompt("Script name:", "My Script"));
     if (name) {
       useDAWStore.getState().addUserScript(name, code);
     }

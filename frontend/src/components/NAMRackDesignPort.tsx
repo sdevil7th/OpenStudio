@@ -98,6 +98,7 @@ export type NAMSourceFlowDesignActionId =
   | "return"
   | "query"
   | "search"
+  | "connect"
   | "retry"
   | "load-more"
   | "auto-load-more"
@@ -153,6 +154,10 @@ export type NAMSourceFlowDesignConfig = {
   authState: "connected" | "local" | "offline" | "warning";
   authTitle: string;
   authDetail: string;
+  authBusy?: boolean;
+  actionBusy?: boolean;
+  loading?: boolean;
+  filterScopeDetail?: string;
   statusAction?: { id: NAMSourceFlowDesignActionId; label: string };
   searchLabel: string;
   searchText: string;
@@ -317,6 +322,7 @@ const MODULE_NAME_TO_ID: Record<string, RackModuleId> = {
   "precision-drive": "pedal",
   "amp-head": "amp",
   cabinet: "cab",
+  "cabinet-speaker": "cab",
   "mic-panel": "cab",
   "eq-rack": "eq",
   modulator: "mod",
@@ -347,13 +353,14 @@ export const NAM_GRAPHIC_EQ_FILTER_KNOB_PX = 50;
 
 export type NAMPedalHardwareKind = keyof typeof NAM_PEDAL_HARDWARE_STANDARD_PX;
 
-// These rotaries are deliberately not pedal hardware. The Cab IR Shaper uses
-// balanced console controls, Cabinet Space uses large studio-console "hero"
+// These rotaries are deliberately not pedal hardware. The compact Cab/Room
+// strip reserves separate rows for every caption and live value, Cabinet Space
+// uses large studio-console "hero"
 // controls, and the amp tone rail needs enough visual weight on a wide host.
 // Keeping the exceptions named and finite stops an ordinary pedal knob from
 // drifting away from the shared 28 px contract.
 export const NAM_PANEL_ROTARY_VARIANT_PX = {
-  cabPanel: 42,
+  cabPanel: 32,
   roomHero: 68,
   eqPanel: 44,
 } as const;
@@ -654,16 +661,17 @@ export const NAM_GRAPHIC_EQ_FACEPLATE_LAYOUT = {
   },
 } as const;
 
-export const NAM_CAB_ROOM_CONSOLE_LAYOUT = {
-  // The approved Cab view is a single console.  Keeping the decorative speaker
-  // beside it made the actual control surface much smaller and wider than the
-  // reference, especially on compact hosts.
-  group: { x: 54, y: -30, w: 660, h: 402 },
-  console: { x: 54, y: -30, w: 660, h: 402 },
-  topKnobXs: [9.8, 22.9, 36, 49.1, 62.2, 75.3, 88.4],
-  topKnobY: 35.4,
-  utilityY: 51.5,
-  roomBayTop: 60.5,
+export const NAM_CABINET_STAGE_LAYOUT = {
+  // A real speaker cabinet establishes the source visually while the
+  // foreground IR loader gives the small set of literal Cab controls the same
+  // usable scale and hierarchy as the Amp and Graphic EQ faceplates.
+  group: { x: 24, y: 38, w: 720, h: 270 },
+  cabinet: { x: 24, y: 73, w: 334, h: 223 },
+  controller: { x: 285, y: 38, w: 459, h: 270 },
+  knobXs: [31, 52, 70],
+  knobY: 57,
+  switchXs: [10, 85, 94],
+  switchY: 61,
 } as const;
 
 // Native plugin windows have more vertical room than the 768x341 HTML boards.
@@ -681,7 +689,8 @@ const LAYOUT = {
     head: { x: 24, y: -2, w: 720, h: 345 },
   },
   cab: {
-    micPanel: NAM_CAB_ROOM_CONSOLE_LAYOUT.console,
+    cabinet: NAM_CABINET_STAGE_LAYOUT.cabinet,
+    controller: NAM_CABINET_STAGE_LAYOUT.controller,
   },
   eq: {
     rack: { x: 24, y: 50, w: 720, h: 240 },
@@ -696,7 +705,7 @@ const LAYOUT = {
 const SECTION_GROUP_BOX: Record<DesignSectionId, DesignBox> = {
   pre: NAM_PRE_LOGICAL_SURFACE.row,
   amp: { x: 24, y: -2, w: 720, h: 345 },
-  cab: NAM_CAB_ROOM_CONSOLE_LAYOUT.group,
+  cab: NAM_CABINET_STAGE_LAYOUT.group,
   eq: { x: 24, y: 50, w: 720, h: 240 },
   post: NAM_POST_FX_FACEPLATE_LAYOUT.group,
 };
@@ -1210,8 +1219,7 @@ function verticalRotaryValueFromDrag(
 const BODIES = {
   amp: "amp-head-body-v5",
   cab: "cabinet-body",
-  cabRoomIntegrated: "cab-room-integrated-body",
-  irShaper: "ir-shaper-panel-body",
+  cabController: "cab-room-integrated-body",
   mic: "mic-panel-body",
   eq: "graphic-eq-body-v6",
   blue: "stompbox-body-blue",
@@ -3883,36 +3891,26 @@ function MiniParam({
   );
 }
 
+function BoundCabParamValue({
+  paramId,
+  fallback,
+}: {
+  paramId: "cabDirectMix" | "cabLevelDb" | "cabPan";
+  fallback: string;
+}) {
+  const param = useBoundDesignParam(paramId);
+  return <>{param ? formatParamValue(param) : fallback}</>;
+}
+
 function BoundCabRoomPercent({
   paramId,
   fallback,
 }: {
-  paramId: string;
+  paramId: "cabRoomAmount" | "cabRoomWidth";
   fallback: string;
 }) {
   const param = useBoundDesignParam(paramId);
-  return (
-    <>{param ? `${Math.round(normalizeParam(param) * 100)}%` : fallback}</>
-  );
-}
-
-function BoundCabFilterValue({
-  paramId,
-  fallback,
-}: {
-  paramId: "cabHPFHz" | "cabLPFHz";
-  fallback: string;
-}) {
-  const param = useBoundDesignParam(paramId);
-  if (!param) return <>{fallback}</>;
-  const hz = Math.max(0, param.value);
-  return (
-    <>
-      {paramId === "cabLPFHz" && hz >= 1000
-        ? `${(hz / 1000).toFixed(1)} kHz`
-        : `${Math.round(hz)}Hz`}
-    </>
-  );
+  return <>{param ? `${Math.round(normalizeParam(param) * 100)}%` : fallback}</>;
 }
 
 function CabRoomPowerSwitch() {
@@ -3926,17 +3924,14 @@ function CabRoomPowerSwitch() {
       className="cab-room-power-switch"
       data-param-id="cabRoomEnabled"
       data-active={active}
+      role="switch"
       aria-label={active ? "Disable Room ambience" : "Enable Room ambience"}
-      aria-pressed={active}
+      aria-checked={active}
       disabled={!param}
       onClick={() => commit(active ? 0 : 1)}
     >
       <i aria-hidden="true" />
-      <span
-        className="cab-room-status-led"
-        data-active={active}
-        aria-hidden="true"
-      />
+      <span className="cab-room-status-led" data-active={active} aria-hidden="true" />
     </button>
   );
 }
@@ -5068,16 +5063,20 @@ function CabSourceSelector({
   cabLabel,
   cabMode,
   hasRetainedExternalIR,
+  busy,
   onBrowseCabIR,
   onBrowseLocalCabIR,
   onBrowseAmpOnlyCapture,
+  onClearCabIR,
 }: {
   cabLabel: string;
   cabMode: NAMRackCabMode;
   hasRetainedExternalIR: boolean;
+  busy?: boolean;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
+  onClearCabIR?: () => void;
 }) {
   const embedded = cabMode === "embedded";
   const eyebrow = embedded
@@ -5097,14 +5096,12 @@ function CabSourceSelector({
         ? "AMP CAPTURE NEEDS AN IR"
         : "NO CABINET IR";
   const actionLabel = embedded
-    ? "AMP-ONLY"
+    ? "IR LIBRARY"
     : cabMode === "empty"
-      ? "BROWSE AMPS"
-      : cabMode === "loaded"
-        ? "REPLACE"
-        : "CHOOSE IR";
+      ? "AMPS"
+      : "BROWSE";
   const action =
-    embedded || cabMode === "empty" ? onBrowseAmpOnlyCapture : onBrowseCabIR;
+    cabMode === "empty" ? onBrowseAmpOnlyCapture : onBrowseCabIR;
   return (
     <div
       className="cab-source-selector"
@@ -5112,9 +5109,10 @@ function CabSourceSelector({
       data-cab-mode={cabMode}
       role="group"
       aria-label={`Cabinet source. ${sourceLabel}`}
+      aria-busy={busy || undefined}
     >
       <span className="cab-source-copy">
-        <small>IR SHAPER&nbsp;&nbsp;&middot;&nbsp;&nbsp;{eyebrow}</small>
+        <small>IR SLOT&nbsp;&nbsp;&middot;&nbsp;&nbsp;{eyebrow}</small>
         <strong title={sourceLabel}>{sourceLabel}</strong>
       </span>
       <span className="cab-source-actions">
@@ -5124,22 +5122,37 @@ function CabSourceSelector({
             event.stopPropagation();
             action?.();
           }}
-          disabled={!action}
+          disabled={!action || busy}
           aria-label={`${actionLabel}. Current: ${cabLabel}`}
           title={
             embedded
-              ? "Choose an amp-only Capture before using an external IR"
+              ? "Manage the external IR retained for amp-only Captures"
               : actionLabel
           }
         >
-          {embedded || cabMode === "empty" ? (
+          {cabMode === "empty" ? (
             <Library aria-hidden="true" />
           ) : (
             <FolderOpen aria-hidden="true" />
           )}
           {actionLabel}
         </button>
-        {!embedded && onBrowseLocalCabIR ? (
+        {embedded && onBrowseAmpOnlyCapture ? (
+          <button
+            type="button"
+            className="cab-source-secondary"
+            onClick={(event) => {
+              event.stopPropagation();
+              onBrowseAmpOnlyCapture();
+            }}
+            disabled={busy}
+            title="Browse amp-only Captures that can use the retained external IR"
+            aria-label="Browse amp-only Captures"
+          >
+            AMP-ONLY
+          </button>
+        ) : null}
+        {onBrowseLocalCabIR ? (
           <button
             type="button"
             className="cab-source-local"
@@ -5147,10 +5160,29 @@ function CabSourceSelector({
               event.stopPropagation();
               onBrowseLocalCabIR();
             }}
+            disabled={busy}
             title="Load a local cabinet impulse response"
             aria-label="Load a local cabinet impulse response"
           >
             LOCAL
+          </button>
+        ) : null}
+        {(cabMode === "loaded" || hasRetainedExternalIR) && onClearCabIR ? (
+          <button
+            type="button"
+            className="cab-source-unload"
+            data-qa="nam-cab-ir-unload"
+            data-rack-action="unload-cab-ir"
+            onClick={(event) => {
+              event.stopPropagation();
+              onClearCabIR();
+            }}
+            disabled={busy}
+            title={embedded ? "Unload the retained external IR" : "Unload the current cabinet IR"}
+            aria-label={`${embedded ? "Unload retained" : "Unload"} cabinet IR. Current: ${cabLabel}`}
+          >
+            <X aria-hidden="true" />
+            UNLOAD
           </button>
         ) : null}
       </span>
@@ -5163,17 +5195,23 @@ function CabStage({
   cabMode,
   hasCabIR,
   cabRoomInputSourceAvailable,
+  instrumentProfile,
+  busy,
   onBrowseCabIR,
   onBrowseLocalCabIR,
   onBrowseAmpOnlyCapture,
+  onClearCabIR,
 }: {
   cabLabel: string;
   cabMode: NAMRackCabMode;
   hasCabIR: boolean;
   cabRoomInputSourceAvailable: boolean;
+  instrumentProfile: 0 | 1;
+  busy?: boolean;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
   onBrowseAmpOnlyCapture?: () => void;
+  onClearCabIR?: () => void;
 }) {
   const controlsLocked = cabMode !== "loaded";
   const controlsLockedReason =
@@ -5194,192 +5232,182 @@ function CabStage({
       ? { ...designParamContext, onParamChange: undefined }
       : designParamContext;
   return (
-    <Module
-      box={LAYOUT.cab.micPanel}
-      name="mic-panel"
-      body={BODIES.cabRoomIntegrated}
-      className={`ir-shaper-panel cab-room-console cab-mode-${cabMode}${controlsLocked ? " cab-controls-locked" : ""}`}
-      bodyFit="fill"
-      controlsName="Cab / IR and Room"
-    >
-      <CabSourceSelector
-        cabLabel={cabLabel}
-        cabMode={cabMode}
-        hasRetainedExternalIR={hasCabIR && cabMode === "embedded"}
-        onBrowseCabIR={onBrowseCabIR}
-        onBrowseLocalCabIR={onBrowseLocalCabIR}
-        onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
-      />
-      <div
-        className="cab-control-deck"
-        data-locked={controlsLocked ? "true" : "false"}
+    <>
+      <Module
+        box={LAYOUT.cab.cabinet}
+        name="cabinet-speaker"
+        body={BODIES.cab}
+        className={`cabinet-speaker-unit cab-mode-${cabMode}`}
+        controlsName="Cabinet speaker"
       >
-        <DesignParamContext.Provider value={cabParamContext}>
-          <div className="cab-ir-primary-controls">
+        <div className="cab-speaker-cones" aria-hidden="true">
+          <i />
+          <i />
+        </div>
+        <div className="cab-speaker-grille" aria-hidden="true" />
+        <div className="cab-speaker-badge" aria-hidden="true">
+          <strong>IR</strong>
+          <span>CABINET</span>
+        </div>
+      </Module>
+      <Module
+        box={LAYOUT.cab.controller}
+        name="cabinet"
+        body={BODIES.cabController}
+        bodyFit="fill"
+        className={`cabinet-stage cab-ir-controller cab-mode-${cabMode}${controlsLocked ? " cab-controls-locked" : ""}`}
+        controlsName="Cabinet IR and Room"
+      >
+        <div className="cab-controller-heading" aria-hidden="true">
+          <span>OPENSTUDIO</span>
+          <strong>CABINET IR</strong>
+          <em>CONVOLUTION PROCESSOR</em>
+        </div>
+        <CabSourceSelector
+          cabLabel={cabLabel}
+          cabMode={cabMode}
+          hasRetainedExternalIR={hasCabIR && cabMode === "embedded"}
+          busy={busy}
+          onBrowseCabIR={onBrowseCabIR}
+          onBrowseLocalCabIR={onBrowseLocalCabIR}
+          onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+          onClearCabIR={onClearCabIR}
+        />
+        <div
+          className="cab-control-deck"
+          data-locked={controlsLocked ? "true" : "false"}
+          data-instrument={instrumentProfile === 1 ? "bass" : "guitar"}
+        >
+          <DesignParamContext.Provider value={cabParamContext}>
+            <div className="cab-primary-controls">
+            <DesignParamContext.Provider value={designParamContext}>
+              <Knob
+                kind="black"
+                x={31}
+                y={57}
+                size={11}
+                rot={-28}
+                paramId="cabDirectMix"
+                labelText="BASS DIRECT"
+                labelOffset={-42}
+                labelClass="cab-control-name"
+                allowInteraction={instrumentProfile === 1}
+                disabledReason="Direct Mix is available in Bass mode."
+                panelRotaryVariant="cabPanel"
+                assetIdOverride={CONTROLS.knobBlackPanel}
+              />
+            </DesignParamContext.Provider>
             <Knob
               kind="black"
-              x={9.8}
-              y={35.4}
-              size={10}
-              rot={-22}
-              paramId="cabMicPosition"
-              labelText="EDGE"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
+              x={70}
+              y={57}
+              size={11}
+              rot={0}
+              paramId="cabPan"
+              labelText="PAN"
+              labelOffset={-42}
+              labelClass="cab-control-name"
               allowInteraction={!controlsLocked}
               disabledReason={controlsLockedReason}
               panelRotaryVariant="cabPanel"
+              assetIdOverride={CONTROLS.knobBlackPanel}
             />
             <Knob
               kind="black"
-              x={22.9}
-              y={35.4}
-              size={10}
-              rot={-8}
-              paramId="cabMicDistance"
-              labelText="DAMP"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-              panelRotaryVariant="cabPanel"
-            />
-            <Knob
-              kind="black"
-              x={36}
-              y={35.4}
-              size={10}
-              rot={12}
-              paramId="cabMicBlend"
-              labelText="BLEND"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-              panelRotaryVariant="cabPanel"
-            />
-            <Knob
-              kind="black"
-              x={49.1}
-              y={35.4}
-              size={10}
-              rot={10}
-              paramId="cabRoomSend"
-              labelText="LOW BLOOM"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-              panelRotaryVariant="cabPanel"
-            />
-            <Knob
-              kind="black"
-              x={62.2}
-              y={35.4}
-              size={10}
-              rot={-26}
-              paramId="cabHPFHz"
-              labelText="HPF"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-              panelRotaryVariant="cabPanel"
-            />
-            <Knob
-              kind="black"
-              x={75.3}
-              y={35.4}
-              size={10}
-              rot={18}
-              paramId="cabLPFHz"
-              labelText="LPF"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-              panelRotaryVariant="cabPanel"
-            />
-            <Knob
-              kind="black"
-              x={88.4}
-              y={35.4}
-              size={10}
+              x={52}
+              y={57}
+              size={11}
               rot={24}
               paramId="cabLevelDb"
               labelText="LEVEL"
-              labelOffset={-11.7}
-              labelClass="ir-primary-label"
+              labelOffset={-42}
+              labelClass="cab-control-name"
               allowInteraction={!controlsLocked}
               disabledReason={controlsLockedReason}
               panelRotaryVariant="cabPanel"
+              assetIdOverride={CONTROLS.knobBlackPanel}
             />
 
             <Toggle
-              x={9.8}
-              y={51.5}
-              size={4.1}
+              x={10}
+              y={61}
+              size={5.6}
               paramId="cabEnabled"
+              panelSized
+              assetId={CONTROLS.togglePanel}
               allowInteraction={!controlsLocked}
               disabledReason={controlsLockedReason}
             />
             <Led
-              x={15.5}
-              y={51.5}
+              x={16}
+              y={61}
               on
-              size={3.1}
+              size={3.5}
               paramId="cabEnabled"
               value="Cabinet stage enabled"
+              onAssetId={CONTROLS.ledOnPanel}
+              offAssetId={CONTROLS.ledOffPanel}
+              exactSizeVariant="panel-led"
             />
-            <Knob
-              kind="black"
-              x={49.1}
-              y={51.5}
-              size={5.8}
-              rot={0}
-              paramId="cabPan"
-              allowInteraction={!controlsLocked}
-              disabledReason={controlsLockedReason}
-            />
-            <Label x={62.2} y={51.5} className="ir-filter-value">
-              <BoundCabFilterValue paramId="cabHPFHz" fallback="80Hz" />
-            </Label>
-            <Label x={75.3} y={51.5} className="ir-filter-value">
-              <BoundCabFilterValue paramId="cabLPFHz" fallback="8.0 kHz" />
-            </Label>
             <Toggle
-              x={88.4}
-              y={51.5}
-              size={4.1}
-              paramId="cabPhaseInvert"
+              x={85}
+              y={61}
+              size={5.6}
+              paramId="cabIRStereo"
+              panelSized
+              assetId={CONTROLS.togglePanel}
               allowInteraction={!controlsLocked}
               disabledReason={controlsLockedReason}
             />
-          </div>
-        </DesignParamContext.Provider>
+            <Toggle
+              x={94}
+              y={61}
+              size={5.6}
+              paramId="cabPhaseInvert"
+              panelSized
+              assetId={CONTROLS.togglePanel}
+              allowInteraction={!controlsLocked}
+              disabledReason={controlsLockedReason}
+            />
+            <Label x={10} y={15} className="cab-control-name">POWER</Label>
+            <Label x={10} y={97} className="cab-control-value">CAB</Label>
+            <Label x={85} y={15} className="cab-control-name">STEREO</Label>
+            <Label x={94} y={15} className="cab-control-name">PHASE</Label>
+            <Label x={31} y={97} className="cab-control-value">
+              {instrumentProfile === 1
+                ? <BoundCabParamValue paramId="cabDirectMix" fallback="0%" />
+                : "BASS ONLY"}
+            </Label>
+            <Label x={52} y={97} className="cab-control-value">
+              <BoundCabParamValue paramId="cabLevelDb" fallback="0.0 dB" />
+            </Label>
+            <Label x={70} y={97} className="cab-control-value">
+              <BoundCabParamValue paramId="cabPan" fallback="Center" />
+            </Label>
+            <Label x={85} y={97} className="cab-control-value">IR</Label>
+            <Label x={94} y={97} className="cab-control-value">Ø</Label>
+            </div>
+          </DesignParamContext.Provider>
+        </div>
 
         <div className="cab-room-bay" data-qa="nam-cab-room-bay">
           <div className="cab-room-power-zone">
             <span className="cab-room-title">ROOM</span>
-            <div className="cab-room-switch-row">
-              <CabRoomPowerSwitch />
-            </div>
-            <span className="cab-room-state-labels">
-              <i>ON</i>
-              <i>OFF</i>
-            </span>
+            <span className="cab-room-subtitle">POST-CAB AMBIENCE</span>
+            <CabRoomPowerSwitch />
           </div>
           <div className="cab-room-control cab-room-amount">
             <strong>AMOUNT</strong>
             <Knob
               kind="blue-steel"
               x={50}
-              y={52}
-              size={53}
+              y={55}
+              size={26}
               rot={-42}
               paramId="cabRoomAmount"
-              hitSize={62}
-              panelRotaryVariant="roomHero"
+              hitSize={36}
+              panelRotaryVariant="cabPanel"
+              assetIdOverride={CONTROLS.knobBlueSteelPanel}
             />
             <span className="cab-room-value">
               <BoundCabRoomPercent paramId="cabRoomAmount" fallback="22%" />
@@ -5390,12 +5418,13 @@ function CabStage({
             <Knob
               kind="blue-steel"
               x={50}
-              y={52}
-              size={53}
+              y={55}
+              size={26}
               rot={42}
               paramId="cabRoomWidth"
-              hitSize={62}
-              panelRotaryVariant="roomHero"
+              hitSize={36}
+              panelRotaryVariant="cabPanel"
+              assetIdOverride={CONTROLS.knobBlueSteelPanel}
             />
             <span className="cab-room-value">
               <BoundCabRoomPercent paramId="cabRoomWidth" fallback="65%" />
@@ -5405,11 +5434,12 @@ function CabStage({
             className="cab-room-purpose"
             data-status={roomWaitingForCabSource ? "no-source" : "ready"}
           >
-            {roomWaitingForCabSource ? "No cab source" : "POST-CAB AMBIENCE"}
+            <span>{roomWaitingForCabSource ? "WAITING FOR CAB" : "ROOM ACTIVE"}</span>
+            <small>Doubler stays in Signal Chain</small>
           </div>
         </div>
-      </div>
-    </Module>
+      </Module>
+    </>
   );
 }
 
@@ -5953,6 +5983,7 @@ function PostFxStage() {
 
 function SectionStage({
   sectionId,
+  instrumentProfile,
   compressorGainReductionDb,
   onBrowseAmpCapture,
   onBrowseLocalAmpCapture,
@@ -5960,10 +5991,13 @@ function SectionStage({
   onBrowseAmpOnlyCapture,
   onBrowseCabIR,
   onBrowseLocalCabIR,
+  onClearCabIR,
+  cabResourceBusy,
   rig,
   recovery,
 }: {
   sectionId: DesignSectionId;
+  instrumentProfile: 0 | 1;
   compressorGainReductionDb?: number;
   onBrowseAmpCapture?: () => void;
   onBrowseLocalAmpCapture?: () => void;
@@ -5971,6 +6005,8 @@ function SectionStage({
   onBrowseAmpOnlyCapture?: () => void;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
+  onClearCabIR?: () => void;
+  cabResourceBusy?: boolean;
   rig: NAMRackDesignRigSummary;
   recovery?: NAMRackDesignRecovery;
 }) {
@@ -5983,9 +6019,12 @@ function SectionStage({
         cabMode={rig.cabMode}
         hasCabIR={rig.hasCabIR}
         cabRoomInputSourceAvailable={rig.cabRoomInputSourceAvailable ?? true}
+        instrumentProfile={instrumentProfile}
+        busy={cabResourceBusy}
         onBrowseCabIR={onBrowseCabIR}
         onBrowseLocalCabIR={onBrowseLocalCabIR}
         onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+        onClearCabIR={onClearCabIR}
       />
     );
   if (sectionId === "eq") return <EqStage />;
@@ -6226,8 +6265,8 @@ function SourceFlowSurface({
           data-return-target={config.originId}
           data-source-flow-action="return"
           onClick={() => emit("return")}
-          disabled={config.busy}
-          aria-busy={config.busy || undefined}
+          disabled={config.actionBusy}
+          aria-busy={config.actionBusy || undefined}
         >
           <ArrowLeft />
           {config.returnLabel}
@@ -6241,15 +6280,7 @@ function SourceFlowSurface({
           </span>
           <b>{config.sourceLabel}</b>
         </div>
-        <div className="tone-connection-state" data-auth={config.authState}>
-          <i />
-          <span>{config.authTitle}</span>
-          {config.statusAction ? (
-            <button type="button" onClick={() => emit(config.statusAction!.id)}>
-              {config.statusAction.label}
-            </button>
-          ) : null}
-        </div>
+
       </section>
       <div className="tone-source-v2-workspace">
         <main
@@ -6373,6 +6404,12 @@ function SourceFlowSurface({
             </div>
             <em>{resultSummary}</em>
           </div>
+          <div className="tone-connection-state" data-auth={config.authState} title={config.authDetail}>
+            <i /><span role="status">{config.authTitle}</span>
+            {config.statusAction && <button type="button" disabled={config.authBusy} onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>}
+          </div>
+          {config.authState !== "connected" && config.authState !== "local" && <p role="status" className="px-2 text-xs text-neutral-300">{config.authDetail}</p>}
+          {config.filterScopeDetail && <p className="px-2 text-[10px] text-neutral-400">{config.filterScopeDetail}</p>}
           <div className="tone-search-panel">
             <Search aria-hidden="true" />
             <input
@@ -6508,18 +6545,19 @@ function SourceFlowSurface({
           ) : null}
           <div
             className="tone-feed-list"
+            aria-busy={config.loading || undefined}
             data-busy={config.busy}
             ref={feedListRef}
             onScroll={(event) =>
               emit("scroll", String(event.currentTarget.scrollTop))
             }
           >
-            {config.busy && config.results.length === 0
+            {config.loading && config.results.length === 0
               ? Array.from({ length: 5 }, (_, index) => (
                   <div className="tone-feed-skeleton" key={index} />
                 ))
               : null}
-            {!config.busy && config.results.length === 0 ? (
+            {!config.loading && !config.busy && config.results.length === 0 ? (
               <div className="tone-feed-empty">
                 <strong>{config.emptyTitle}</strong>
                 <p>{config.emptyBody}</p>
@@ -6548,6 +6586,10 @@ function SourceFlowSurface({
                 />
               ))
             )}
+            {config.loading && <div role="status" aria-live="polite" aria-label="Loading more tones" className="tone-feed-loading">
+              <span aria-hidden="true" className="size-5 motion-safe:animate-spin rounded-full border-2 border-neutral-600 border-t-amber-300" />
+              <span>Loading {sourceLibraryLabel.toLowerCase()}...</span>
+            </div>}
             {config.pagination?.mode === "live" ? (
               <div
                 ref={appendSentinelRef}
@@ -6574,6 +6616,7 @@ function SourceFlowSurface({
                 onClick={() => emit("load-more")}
                 aria-label="Load more online tones"
               >
+                {config.loading && <span aria-hidden="true" className="mr-2 inline-block size-3 motion-safe:animate-spin rounded-full border-2 border-neutral-600 border-t-amber-300" />}
                 {config.busy
                   ? "Loading"
                   : config.pagination.canLoadMore
@@ -6744,6 +6787,10 @@ function PremiumRigDrawer({
   onSelectLibraryItem,
   onOpenLibrary,
   onBrowseAmpOnlyCapture,
+  resourceBusy = false,
+  compactViewport = false,
+  compactOpen = false,
+  onCloseCompact,
 }: {
   sectionId: DesignSectionId;
   rig: NAMRackDesignRigSummary;
@@ -6753,6 +6800,10 @@ function PremiumRigDrawer({
   onSelectLibraryItem?: (itemId: string) => void;
   onOpenLibrary: (sectionId: DesignSectionId) => void;
   onBrowseAmpOnlyCapture?: () => void;
+  resourceBusy?: boolean;
+  compactViewport?: boolean;
+  compactOpen?: boolean;
+  onCloseCompact?: () => void;
 }) {
   const [visibleLibraryItemCount, setVisibleLibraryItemCount] = useState(12);
   useEffect(() => {
@@ -6801,12 +6852,23 @@ function PremiumRigDrawer({
           }] : []),
           ...installedCabIRItems.map((item) => ({
             id: item.id,
-            eyebrow: item.active ? "Active cabinet IR" : "Installed cabinet IR",
+            eyebrow:
+              item.active && rig.cabMode === "embedded"
+                ? "Retained external IR"
+                : item.active
+                  ? "Active cabinet IR"
+                  : "Installed cabinet IR",
             label: item.name,
-            detail: item.subtitle,
+            detail:
+              item.active && rig.cabMode === "embedded"
+                ? `${item.subtitle} - bypassed by full-rig cab`
+                : item.subtitle,
             asset: BODIES.cab,
-            active: item.active,
-            actionLabel: `Load ${item.name}`,
+            active: item.active && rig.cabMode !== "embedded",
+            actionLabel:
+              rig.cabMode === "embedded"
+                ? `Retain ${item.name} for the next amp-only Capture`
+                : `Load ${item.name}`,
             onClick: () => onSelectLibraryItem?.(item.id),
           })),
         ]
@@ -6914,7 +6976,7 @@ function PremiumRigDrawer({
   const cabinetIRItemCount = installedCabIRItems.length || sectionItems.length;
   const libraryTarget =
     sectionId === "cab" &&
-    (rig.cabMode === "embedded" || rig.cabMode === "empty")
+    rig.cabMode === "empty"
       ? "amp"
       : sectionId === "eq"
         ? "post"
@@ -6944,12 +7006,10 @@ function PremiumRigDrawer({
   const librarySearchLabel =
     sectionId === "cab"
       ? rig.cabMode === "embedded"
-        ? "Browse amp-only captures..."
+        ? "Manage retained cabinet IRs..."
         : rig.cabMode === "empty"
           ? "Browse amp captures..."
-          : rig.cabMode === "loaded"
-            ? "Replace cabinet IR..."
-            : "Choose cabinet IR..."
+          : "Browse cabinet IR library..."
       : sectionId === "eq"
         ? "Browse EQ presets..."
         : sectionId === "post"
@@ -6960,31 +7020,23 @@ function PremiumRigDrawer({
   const libraryActionLabel =
     sectionId === "cab"
       ? rig.cabMode === "embedded"
-        ? "Browse Amp-Only Captures"
+        ? "Manage External IRs"
         : rig.cabMode === "empty"
           ? "Browse Amp Captures"
-          : rig.cabMode === "loaded"
-            ? "Replace IR"
-            : "Choose IR"
+          : "Open IR Library"
       : libraryTarget === "post"
         ? "Open Effect Preset Library"
         : "Open Capture Library";
-  const openResolvedLibrary = () => {
-    if (
-      sectionId === "cab" &&
-      rig.cabMode === "embedded" &&
-      onBrowseAmpOnlyCapture
-    ) {
-      onBrowseAmpOnlyCapture();
-      return;
-    }
-    onOpenLibrary(libraryTarget);
-  };
+  const openResolvedLibrary = () => onOpenLibrary(libraryTarget);
 
   return (
     <aside
       className="premium-rig-drawer"
       data-cab-mode={sectionId === "cab" ? rig.cabMode : undefined}
+      data-compact-open={compactOpen || undefined}
+      data-compact-viewport={compactViewport || undefined}
+      aria-hidden={compactViewport && !compactOpen ? true : undefined}
+      aria-busy={resourceBusy || undefined}
       aria-label={`${libraryTitle} and current rack`}
     >
       <div className="premium-drawer-heading">
@@ -7031,16 +7083,42 @@ function PremiumRigDrawer({
           }
         }}
       >
+        {sectionId === "cab" && rig.cabMode === "embedded" ? (
+          <div className="premium-retained-ir-note" data-qa="nam-retained-ir-note">
+            <span>
+              <strong>Full-rig cab is audible</strong>
+              <small>
+                External IRs stay bypassed here. Select, replace, or unload the retained IR now;
+                it becomes audible with an amp-only Capture.
+              </small>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                onBrowseAmpOnlyCapture?.();
+                onCloseCompact?.();
+              }}
+              disabled={!onBrowseAmpOnlyCapture}
+            >
+              Browse amp-only
+            </button>
+          </div>
+        ) : null}
         {visibleSectionItems.map((item) => (
           <button
             key={item.id}
             type="button"
             className="premium-rig-card"
+            data-library-item-id={item.id}
             data-active={Boolean(item.active)}
             aria-pressed={Boolean(item.active)}
             aria-label={item.actionLabel}
             title={item.actionLabel}
-            onClick={item.onClick}
+            disabled={resourceBusy && sectionId === "cab"}
+            onClick={() => {
+              item.onClick();
+              onCloseCompact?.();
+            }}
           >
             <span className="premium-rig-thumb">
               <DesignAssetImage assetId={item.asset} />
@@ -7098,6 +7176,8 @@ export function NAMRackDesignPort({
   onBrowseAmpOnlyCapture,
   onBrowseCabIR,
   onBrowseLocalCabIR,
+  onClearCabIR,
+  cabResourceBusy = false,
   onOpenLibrary,
   onPreviousPreset,
   onNextPreset,
@@ -7145,6 +7225,8 @@ export function NAMRackDesignPort({
   onBrowseAmpOnlyCapture?: () => void;
   onBrowseCabIR?: () => void;
   onBrowseLocalCabIR?: () => void;
+  onClearCabIR?: () => void;
+  cabResourceBusy?: boolean;
   onOpenLibrary: (sectionId: RackSectionId) => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
@@ -7167,6 +7249,8 @@ export function NAMRackDesignPort({
   const [hostRef] = useElementSize<HTMLElement>();
   const [stageRef, stageSize] = useElementSize<HTMLDivElement>();
   const [localValues, setLocalValues] = useState<Record<string, number>>({});
+  const [compactDrawerViewport, setCompactDrawerViewport] = useState(false);
+  const [compactDrawerOpen, setCompactDrawerOpen] = useState(false);
   const designSection = designSectionFor(sectionId);
   const boardId = shellBoardForSection(sectionId);
   const inlineAmpRecovery = Boolean(
@@ -7248,6 +7332,17 @@ export function NAMRackDesignPort({
     const timeout = window.setTimeout(() => setLocalValues({}), 1500);
     return () => window.clearTimeout(timeout);
   }, [localValues]);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return undefined;
+    const query = window.matchMedia("(max-width: 1030px)");
+    const syncViewport = () => setCompactDrawerViewport(query.matches);
+    syncViewport();
+    query.addEventListener("change", syncViewport);
+    return () => query.removeEventListener("change", syncViewport);
+  }, []);
+  useEffect(() => {
+    setCompactDrawerOpen(false);
+  }, [designSection, tunerOpen]);
   const paramContext = useMemo<DesignParamContextValue>(
     () => ({
       paramsById,
@@ -7260,6 +7355,7 @@ export function NAMRackDesignPort({
   const rackSectionStage = (
     <SectionStage
       sectionId={designSection}
+      instrumentProfile={utilityControls?.instrumentProfile ?? 0}
       compressorGainReductionDb={compressorGainReductionDb}
       onBrowseAmpCapture={onBrowseAmpCapture}
       onBrowseLocalAmpCapture={onBrowseLocalAmpCapture}
@@ -7267,6 +7363,8 @@ export function NAMRackDesignPort({
       onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
       onBrowseCabIR={onBrowseCabIR}
       onBrowseLocalCabIR={onBrowseLocalCabIR}
+      onClearCabIR={onClearCabIR}
+      cabResourceBusy={cabResourceBusy}
       rig={rig}
       recovery={inlineAmpRecovery ? recovery : undefined}
     />
@@ -7349,7 +7447,11 @@ export function NAMRackDesignPort({
               onOversamplingFactorChange={onOversamplingFactorChange}
             />
           </div>
-          <div className="hardware-stage" data-tuner-open={tunerOpen}>
+          <div
+            className="hardware-stage"
+            data-tuner-open={tunerOpen}
+            data-compact-drawer-open={compactDrawerOpen || undefined}
+          >
             <div
               ref={stageRef}
               className="premium-stage-canvas"
@@ -7446,8 +7548,28 @@ export function NAMRackDesignPort({
                   </div>
                 )}
             </div>
-            {(designSection === "amp" ||
-              (designSection === "cab" && rig.cabMode !== "embedded")) && (
+            {!tunerOpen && (designSection === "amp" || designSection === "cab") ? (
+              <>
+                <button
+                  type="button"
+                  className="premium-rig-drawer-toggle"
+                  data-qa="nam-rig-drawer-toggle"
+                  aria-expanded={compactDrawerOpen}
+                  aria-label={`${compactDrawerOpen ? "Close" : "Open"} ${designSection === "cab" ? "cabinet IR" : "amp Capture"} drawer`}
+                  title={`${compactDrawerOpen ? "Close" : "Open"} source drawer`}
+                  onClick={() => setCompactDrawerOpen((open) => !open)}
+                >
+                  {compactDrawerOpen ? <X aria-hidden="true" /> : <Library aria-hidden="true" />}
+                  <span>{compactDrawerOpen ? "Close" : designSection === "cab" ? "Cab IRs" : "My Amps"}</span>
+                </button>
+                {compactDrawerViewport && compactDrawerOpen ? (
+                  <button
+                    type="button"
+                    className="premium-rig-drawer-scrim"
+                    onClick={() => setCompactDrawerOpen(false)}
+                    aria-label="Close source drawer"
+                  />
+                ) : null}
               <PremiumRigDrawer
                 sectionId={designSection}
                 rig={rig}
@@ -7457,8 +7579,13 @@ export function NAMRackDesignPort({
                 onSelectLibraryItem={onSelectLibraryItem}
                 onOpenLibrary={onOpenLibrary}
                 onBrowseAmpOnlyCapture={onBrowseAmpOnlyCapture}
+                resourceBusy={cabResourceBusy}
+                compactViewport={compactDrawerViewport}
+                compactOpen={compactDrawerOpen}
+                onCloseCompact={compactDrawerViewport ? () => setCompactDrawerOpen(false) : undefined}
               />
-            )}
+              </>
+            ) : null}
           </div>
           <Footer
             rackSizePercent={rackSizePercent}

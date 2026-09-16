@@ -683,6 +683,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
         (session: any) => session.trackId === trackId && session.clipId === clipId,
       );
       if (existing) {
+        if (existing.mode === "windowed") void nativeBridge.focusMidiEditorWindow(existing.sessionId);
         set(existing.mode === "docked"
           ? {
               ...globalsFromMidiEditorSession(existing),
@@ -737,6 +738,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       const state = get();
       const session = (state.midiEditorSessions || []).find((candidate: any) => candidate.sessionId === sessionId);
       if (!session) return;
+      if (session.mode === "windowed") void nativeBridge.focusMidiEditorWindow(sessionId);
       set({
         ...globalsFromMidiEditorSession(session),
         showPianoRoll: session.mode === "docked",
