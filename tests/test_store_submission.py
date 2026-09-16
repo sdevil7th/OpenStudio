@@ -504,7 +504,7 @@ class StoreSubmissionTests(unittest.TestCase):
     def test_initial_config_validation_and_repository_pin(self):
         actual = store.load_initial_config(store.ROOT / "packaging/msix/initial-submission.json")
         self.assertEqual(actual["submissionId"], "1152921505701841400")
-        self.assertEqual(actual["releaseTag"], "v0.1.02")
+        self.assertEqual(actual["releaseTag"], "v0.1.03")
         for change in ({"appId": "other"}, {"submissionId": "200/commit"}, {"submissionId": 200},
                        {"releaseTag": "v0.1.02-beta"}, {"previousPackageVersion": "bad"}, {"extra": "field"}):
             path = self.directory / "config.json"

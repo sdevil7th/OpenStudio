@@ -2,7 +2,30 @@
 
 Status recorded: September 16, 2026.
 
-## Current release decision and blockers
+## Current release status after the failed v0.1.02 run
+
+PR #19 merged into main at `dbe34f4`; all ten post-merge Verify checks passed.
+The local Windows RC build, runtime/startup checks and installer packaging passed.
+After the owner completed GitHub identity confirmation, `OPENSTUDIO_STORE_ENABLED`
+was saved as `true` and `v0.1.02` was pushed on that exact merged commit.
+
+[Release #44](https://github.com/sdevil7th/OpenStudio/actions/runs/35089655608)
+failed in Windows MSIX packaging with `Missing runtime directory: presets`.
+The clean checkout contains no bundled presets directory; a developer's existing
+output had hidden the assumption. Publication and Store submission were skipped.
+No Store API credential was exercised and the prepared draft was not modified.
+Linux and macOS release jobs and the separate updater-safety workflow passed.
+
+The packaging follow-up treats only bundled presets as optional, with regression
+coverage for clean staging, optional preset preservation and missing required
+payloads. A complete MSIX and its unpacked payload verification passed locally
+from the clean Release output. That artifact is test evidence, not an upload.
+The retry candidate is `v0.1.03`; its reviewed notes and first-submission config
+must pass CI and merge before tagging. Preserve the existing failed `v0.1.02` tag.
+Credentials and tag restrictions are unchanged; public Store publication remains
+manually held. Live Store preflight and certification are still pending.
+
+## September 16 checkpoint before tag activation
 
 The owner explicitly does **not** want the old code or old branding published.
 The old Submission 1 had passed certification with a manual publishing hold.

@@ -55,7 +55,8 @@ class DirectPackagingNotesTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         (self.root / "tools").mkdir()
         for name in ("validate-release-notes.py", "windows-signing.ps1", "package-windows-release.ps1",
-                     "package-windows-store.ps1", "package-macos-release.sh", "package-linux-release.sh", "run-windows-rc.ps1"):
+                     "package-windows-store.ps1", "windows-store-runtime.ps1", "package-macos-release.sh",
+                     "package-linux-release.sh", "run-windows-rc.ps1"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         shutil.copy2(ROOT / "build.py", self.root / "build.py")
         self.path = self.root / "docs/releases/0.1.01.md"
