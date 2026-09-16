@@ -533,6 +533,32 @@ other listing settings. Publishing a GitHub release does not skip certification.
 7. Test with fake HTTP/API responses and the actual local MSIX. Run the first live
    submission only after the initial manual Store submission and account setup.
 
+The Windows Release job always builds, validates and retains the
+`microsoft-store-package` artifact. `OPENSTUDIO_STORE_ENABLED` controls only the
+credentialed `submit-store` job; keep it `false` while preparing the first Store
+release. An MSIX packaging or offline validation failure still fails the Windows
+release job, so a missing Store artifact cannot silently pass the release gate.
+
+### First Store release from a tag
+
+1. Merge the release and any release-preparation follow-up only after CI passes.
+   Validate `docs/releases/<version>.md` on the final source, then push the stable
+   version tag on that merged `main` revision.
+2. Wait for the tag's Release workflow to succeed. Download its
+   `microsoft-store-package` artifact, retaining `package-report.json` and
+   `validation.json` alongside the MSIX. Confirm the run's tag/commit, package
+   version and SHA256 against the reports before uploading.
+3. Replace the old package in the existing manual Partner Center draft with this
+   exact MSIX. Verify the approved listing artwork, release notes, age ratings,
+   restricted-capability explanation and manual publishing hold. Submit the new
+   package for certification; do not publish the old package as a prerequisite.
+4. After certification, publish the qualified new version deliberately. Only
+   then enable automatic submissions for subsequent tags as described below.
+
+The submission script requires a published baseline and deliberately refuses to
+overwrite an unrelated manual draft. The first release therefore uses the portal
+for submission; creating a tag alone does not queue this first certification.
+
 ### One-time enablement
 
 This repository implements the automation; it cannot provision the owner's

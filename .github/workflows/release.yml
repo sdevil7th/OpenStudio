@@ -392,7 +392,8 @@ jobs:
         run: ./tools/setup-ffmpeg.ps1 -CorrespondingSourceDestination "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
 
       - name: Build validated Microsoft Store package
-        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+        # Always retain a tag-built MSIX for the first manual Store submission.
+        # OPENSTUDIO_STORE_ENABLED gates only the credentialed submit-store job.
         shell: pwsh
         env:
           RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
@@ -406,7 +407,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Store submission preflight failed.' }
 
       - name: Retain Microsoft Store submission artifact
-        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: microsoft-store-package
