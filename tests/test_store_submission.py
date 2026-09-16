@@ -35,7 +35,7 @@ class FakeApi:
         self.calls.append((method, path, copy.deepcopy(body)))
         if path == f"/applications/{store.APP_ID}":
             return {"id": store.APP_ID, "packageIdentityName": store.IDENTITY, "publisherName": store.PUBLISHER,
-                    "lastPublishedApplicationSubmission": {"id": "100"},
+                    "lastPublishedApplicationSubmission": {"id": "100"} if self.published else None,
                     "pendingApplicationSubmission": {"id": "200"} if self.pending else None}
         if path.endswith("/status"):
             return {"status": self.statuses.pop(0), "statusDetails": {"warnings": [{"code": "W1"}]}}
@@ -274,6 +274,275 @@ class StoreSubmissionTests(unittest.TestCase):
             with self.assertRaises(store.StoreError):
                 self.run_submit(api)
             self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def initial_api(self):
+        pending = baseline()
+        pending.update(id="200", status="PendingCommit",
+                       fileUploadUrl="https://test.blob.core.windows.net/upload?sig=SECRET")
+        pending["applicationPackages"][0]["version"] = "0.0.1.0"
+        api = FakeApi(pending=pending)
+        api.published = None
+        return api
+
+    def initial_config(self):
+        return {"appId": store.APP_ID, "submissionId": "200", "releaseTag": "v0.1.02",
+                "previousPackageVersion": "0.0.1.0"}
+
+    def run_initial(self, api, **kwargs):
+        self.run_submit(api, **({"initial_config": self.initial_config(), "release_tag": "v0.1.02"} | kwargs))
+
+    def test_initial_adopts_only_existing_draft_and_preserves_all_settings(self):
+        api = self.initial_api()
+        before = copy.deepcopy(api.pending)
+        self.run_initial(api)
+        self.assertEqual([method for method, _, _ in api.calls], ["GET", "GET", "GET", "PUT", "GET", "POST", "GET"])
+        self.assertTrue(all(not (method == "POST" and path.endswith("/submissions")) and method != "DELETE"
+                            for method, path, _ in api.calls))
+        self.assertEqual(store.initial_settings_digest(api.pending), store.initial_settings_digest(before))
+        self.assertEqual(api.pending["listings"]["en-us"]["baseListing"]["images"],
+                         before["listings"]["en-us"]["baseListing"]["images"])
+        self.assertEqual(api.pending["targetPublishMode"], "Manual")
+        self.assertEqual(api.uploads[0][1:], ([self.package.name], b"tested package"))
+        self.assertEqual(self.report["submissionId"], "200")
+        self.assertEqual(self.report["status"], "PreProcessing")
+        self.assertTrue(self.report["initialSubmission"])
+        self.assertNotIn("SECRET", json.dumps(self.report))
+
+    def test_initial_preflight_authenticates_with_reads_only(self):
+        api = self.initial_api()
+        before = copy.deepcopy(api.pending)
+        self.run_initial(api, preflight_only=True)
+        self.assertEqual(api.pending, before)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        self.assertFalse(api.uploads)
+        self.assertEqual(self.report["status"], "PreflightPassed")
+
+    def test_published_preflight_never_creates_a_submission(self):
+        api = FakeApi()
+        self.run_submit(api, preflight_only=True)
+        self.assertIsNone(api.pending)
+        self.assertFalse(api.uploads)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        self.assertEqual(self.report["status"], "PreflightPassed")
+
+    def test_initial_requires_exact_draft_and_tag(self):
+        for override in ({"initial_config": None}, {"release_tag": "v0.1.2"}, {"release_tag": "v0.1.03"},
+                         {"initial_config": self.initial_config() | {"submissionId": "999"}},
+                         {"initial_config": self.initial_config() | {"releaseTag": "v0.1.03"}}):
+            api = self.initial_api()
+            with self.subTest(override=override), self.assertRaises(store.StoreError):
+                self.run_initial(api, **override)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+            self.assertFalse(api.uploads)
+
+    def test_initial_missing_or_wrong_response_draft_is_not_adopted(self):
+        for missing in (True, False):
+            api = self.initial_api()
+            if missing:
+                api.pending = None
+            else:
+                api.pending["id"] = "999"
+            with self.assertRaises(store.StoreError):
+                self.run_initial(api)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_initial_rejects_ineligible_draft_without_mutations(self):
+        def mutate(pending, case):
+            if case == "hold":
+                pending["targetPublishMode"] = "Immediate"
+            elif case == "status":
+                pending["status"] = "Certification"
+            elif case == "version":
+                pending["applicationPackages"][0]["version"] = "0.1.2.0"
+            elif case == "architecture":
+                pending["applicationPackages"][0]["architecture"] = "ARM64"
+            elif case == "extra_package":
+                pending["applicationPackages"].append(copy.deepcopy(pending["applicationPackages"][0]))
+            elif case == "image_upload":
+                pending["listings"]["en-us"]["baseListing"]["images"][0]["fileStatus"] = "PendingUpload"
+            elif case == "image_delete":
+                pending["listings"]["en-us"]["baseListing"]["images"][0]["fileStatus"] = "PendingDelete"
+            elif case == "missing_images":
+                pending["listings"]["en-us"]["baseListing"]["images"] = []
+            elif case == "no_english":
+                pending["listings"] = {}
+            elif case == "foreign_marker":
+                pending["notesForCertification"] += "\n" + store.MARKER_PREFIX + "other artifact"
+            elif case == "long_notes":
+                pending["notesForCertification"] = "x" * 1999
+        for case in ("hold", "status", "version", "architecture", "extra_package", "image_upload", "image_delete",
+                     "missing_images", "no_english", "foreign_marker", "long_notes"):
+            api = self.initial_api()
+            mutate(api.pending, case)
+            with self.subTest(case=case), self.assertRaises(store.StoreError):
+                self.run_initial(api)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+            self.assertFalse(api.uploads)
+
+    def interrupted_initial_upload(self):
+        api = self.initial_api()
+        with patch.object(api, "upload", side_effect=store.StoreError("Upload interrupted")):
+            with self.assertRaisesRegex(store.StoreError, "interrupted"):
+                self.run_initial(api)
+        self.assertTrue(store.owns(api.pending, self.expected))
+        self.assertEqual(api.pending["status"], "PendingCommit")
+        api.calls.clear()
+        return api
+
+    def test_initial_interrupted_upload_resumes_without_replacing_draft_again(self):
+        api = self.interrupted_initial_upload()
+        self.run_initial(api)
+        self.assertEqual([method for method, _, _ in api.calls], ["GET", "GET", "POST", "GET"])
+        self.assertEqual(len(api.uploads), 1)
+
+    def test_initial_retry_preflight_is_read_only(self):
+        api = self.interrupted_initial_upload()
+        self.run_initial(api, preflight_only=True)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        self.assertFalse(api.uploads)
+
+    def test_initial_changed_hash_notes_and_configuration_fail_on_retry(self):
+        for change in ("hash", "notes", "configuration"):
+            api = self.interrupted_initial_upload()
+            with self.subTest(change=change), self.assertRaises(store.StoreError):
+                if change == "hash":
+                    changed = self.directory / "changed" / self.package.name
+                    changed.parent.mkdir(exist_ok=True)
+                    changed.write_bytes(b"different release artifact")
+                    store.submit(api, changed, "0.1.2.0", store.digest(changed), self.notes, lambda **_: None,
+                                 initial_config=self.initial_config(), release_tag="v0.1.02")
+                elif change == "notes":
+                    store.submit(api, self.package, "0.1.2.0", self.sha, "changed", lambda **_: None,
+                                 initial_config=self.initial_config(), release_tag="v0.1.02")
+                else:
+                    self.run_initial(api, initial_config=self.initial_config() | {"previousPackageVersion": "0.0.2.0"})
+            self.assertFalse(api.uploads)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_initial_saved_artwork_hold_notes_or_packages_changed_on_retry(self):
+        for change in ("artwork", "hold", "notes", "package"):
+            api = self.interrupted_initial_upload()
+            if change == "artwork":
+                api.pending["listings"]["en-us"]["baseListing"]["images"][0]["id"] = "changed"
+            elif change == "hold":
+                api.pending["targetPublishMode"] = "Immediate"
+            elif change == "notes":
+                api.pending["listings"]["en-us"]["baseListing"]["releaseNotes"] = "changed"
+            else:
+                api.pending["applicationPackages"][-1]["fileName"] = "wrong.msix"
+            with self.subTest(change=change), self.assertRaises(store.StoreError):
+                self.run_initial(api)
+            self.assertFalse(api.uploads)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_initial_ambiguous_put_resumes_from_saved_marker(self):
+        api = self.initial_api()
+        request = api.request
+        def ambiguous(method, path, body=None):
+            result = request(method, path, body)
+            if method == "PUT":
+                raise store.StoreError("Timed out after PUT")
+            return result
+        with patch.object(api, "request", side_effect=ambiguous), self.assertRaises(store.StoreError):
+            self.run_initial(api)
+        self.assertFalse(api.uploads)
+        api.calls.clear()
+        self.run_initial(api)
+        self.assertFalse(any(method == "PUT" for method, _, _ in api.calls))
+        self.assertEqual(len(api.uploads), 1)
+
+    def test_initial_ambiguous_commit_polls_without_recommitting(self):
+        api = self.initial_api()
+        request = api.request
+        def ambiguous(method, path, body=None):
+            result = request(method, path, body)
+            if path.endswith("/commit"):
+                raise store.StoreError("Timed out after commit")
+            return result
+        with patch.object(api, "request", side_effect=ambiguous), self.assertRaises(store.StoreError):
+            self.run_initial(api)
+        api.calls.clear()
+        self.run_initial(api)
+        self.assertEqual(len(api.uploads), 1)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_initial_changed_during_preflight_or_after_put_stops_before_upload(self):
+        for after_put in (False, True):
+            api = self.initial_api()
+            request = api.request
+            draft_reads = 0
+            def changing(method, path, body=None):
+                nonlocal draft_reads
+                if method == "GET" and path.endswith("/200"):
+                    draft_reads += 1
+                    if draft_reads == (3 if after_put else 2):
+                        api.pending["visibility"] = "Public"
+                return request(method, path, body)
+            with patch.object(api, "request", side_effect=changing), self.assertRaises(store.StoreError):
+                self.run_initial(api)
+            self.assertFalse(api.uploads)
+            self.assertFalse(any(method == "POST" for method, _, _ in api.calls))
+            if not after_put:
+                self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_initial_failed_certification_is_not_resubmitted(self):
+        api = self.initial_api()
+        self.run_initial(api)
+        api.pending["status"] = "CertificationFailed"
+        api.calls.clear()
+        with self.assertRaisesRegex(store.StoreError, "CertificationFailed"):
+            self.run_initial(api)
+        self.assertEqual(len(api.uploads), 1)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_published_release_uses_regular_path_even_with_initial_config(self):
+        api = FakeApi()
+        self.run_initial(api)
+        self.assertFalse(self.report["initialSubmission"])
+        self.assertTrue(any(method == "POST" and path.endswith("/submissions") for method, path, _ in api.calls))
+
+    def test_initial_config_validation_and_repository_pin(self):
+        actual = store.load_initial_config(store.ROOT / "packaging/msix/initial-submission.json")
+        self.assertEqual(actual["submissionId"], "1152921505701841400")
+        self.assertEqual(actual["releaseTag"], "v0.1.02")
+        for change in ({"appId": "other"}, {"submissionId": "200/commit"}, {"submissionId": 200},
+                       {"releaseTag": "v0.1.02-beta"}, {"previousPackageVersion": "bad"}, {"extra": "field"}):
+            path = self.directory / "config.json"
+            path.write_text(json.dumps(self.initial_config() | change))
+            with self.subTest(change=change), self.assertRaises(store.StoreError):
+                store.load_initial_config(path)
+
+    def test_package_changed_after_validation_never_contacts_store(self):
+        api = self.initial_api()
+        self.package.write_bytes(b"replaced after validation")
+        with self.assertRaisesRegex(store.StoreError, "changed after validation"):
+            self.run_initial(api)
+        self.assertFalse(api.calls)
+        self.assertFalse(api.uploads)
+
+    def test_initial_cli_preflight_and_submit_use_explicit_config(self):
+        self.create_package()
+        config_path = self.directory / "initial.json"
+        config_path.write_text(json.dumps(self.initial_config()))
+        for mode in ("--preflight", "--submit"):
+            api = self.initial_api()
+            report_path = self.directory / "cli-report.json"
+            with patch.object(store, "StoreApi", return_value=api), patch("sys.argv", [
+                    "submit_store_release.py", "--version", "v0.1.02", "--package-dir", str(self.directory),
+                    "--notes-file", str(store.ROOT / "docs/releases/0.1.02.md"),
+                    "--initial-submission-config", str(config_path), "--report", str(report_path), mode]):
+                self.assertEqual(store.main(), 0)
+            report = json.loads(report_path.read_text())
+            self.assertNotIn("SECRET", json.dumps(report))
+            self.assertEqual(report["livePreflight"], mode == "--preflight")
+            self.assertEqual(report["liveSubmission"], mode == "--submit")
+            if mode == "--preflight":
+                self.assertEqual(report["status"], "PreflightPassed")
+                self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+                self.assertFalse(api.uploads)
+            else:
+                self.assertEqual(report["status"], "PreProcessing")
+                self.assertEqual(len(api.uploads), 1)
 
 
 if __name__ == "__main__":
