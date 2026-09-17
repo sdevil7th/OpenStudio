@@ -2,7 +2,73 @@
 
 Status recorded: September 16, 2026.
 
-## Current release decision and blockers
+## Current status and the evidence still needed
+
+PR #20 merged at `3aaf47e324461ca7b63848b0be10327e8305cf4f` and the
+`v0.1.03` tag points to that commit. All three platform builds and GitHub
+publication passed in [Release #45](https://github.com/sdevil7th/OpenStudio/actions/runs/35099203025).
+The website publish job passed. Post-merge Verify passed after one Windows
+browser-test timeout was rerun on unchanged source (100 browser tests passed).
+
+**Store automation is configured, but end-to-end submission is not yet proven.**
+The tag automatically started the Store job and authenticated successfully.
+Its read-only preflight stopped because the initial draft was not `PendingCommit`.
+That run did not record the actual API state, so do not infer a specific state
+from the portal's **In draft** label. No Store mutation ran in GitHub.
+
+The browser fallback uploaded the same run's `OpenStudio-0.1.3.0-x64.msix`,
+removed the `0.0.1.0` placeholder, saved current release/certification notes,
+and submitted draft `1152921505701841400`. Package SHA-256:
+`f84c9ecf4bf85a3c035400f9759af8351a47ac1506331da975ceaab8a008444e`.
+The nine approved artwork slots were retained. Partner Center subsequently
+showed **Certification in progress**, with public publication held until
+**Publish now**. This was a manual portal submission, not an automation pass.
+
+The follow-up workflow runs `preflight-store` against the exact tagged MSIX
+before GitHub publication. Failure blocks publication and retains sanitized
+state/error evidence. The submit job still repeats preflight immediately before
+mutation, because Store state can change between jobs. This check cannot prove
+upload/commit permissions or acceptance; a successful live submission must do that.
+
+To qualify automation after this first version is certified and deliberately
+published, use the next reviewed higher-version release, with no unrelated Store
+draft pending. Require all of the following evidence from that tag's run:
+
+1. `preflight-store` passes using the protected `microsoft-store` environment.
+2. `submit-store` uploads and commits without a browser fallback, and finishes
+   successfully with a real submission ID and an accepted ingestion state.
+3. Its retained report matches the tag, normalized package version and MSIX hash.
+4. Partner Center shows the same submission/version entering preprocessing or
+   certification, with the intended artwork and publication hold.
+
+Only then record **automated submission verified**. Certification approval and
+a Store-installed upgrade remain separate checks. Do not rerun the old Store
+job or cancel the current certification to manufacture a green workflow.
+
+## Historical checkpoint after the failed v0.1.02 run
+
+PR #19 merged into main at `dbe34f4`; all ten post-merge Verify checks passed.
+The local Windows RC build, runtime/startup checks and installer packaging passed.
+After the owner completed GitHub identity confirmation, `OPENSTUDIO_STORE_ENABLED`
+was saved as `true` and `v0.1.02` was pushed on that exact merged commit.
+
+[Release #44](https://github.com/sdevil7th/OpenStudio/actions/runs/35089655608)
+failed in Windows MSIX packaging with `Missing runtime directory: presets`.
+The clean checkout contains no bundled presets directory; a developer's existing
+output had hidden the assumption. Publication and Store submission were skipped.
+No Store API credential was exercised and the prepared draft was not modified.
+Linux and macOS release jobs and the separate updater-safety workflow passed.
+
+The packaging follow-up treats only bundled presets as optional, with regression
+coverage for clean staging, optional preset preservation and missing required
+payloads. A complete MSIX and its unpacked payload verification passed locally
+from the clean Release output. That artifact is test evidence, not an upload.
+The retry candidate is `v0.1.03`; its reviewed notes and first-submission config
+must pass CI and merge before tagging. Preserve the existing failed `v0.1.02` tag.
+Credentials and tag restrictions are unchanged; public Store publication remains
+manually held. Live Store preflight and certification are still pending.
+
+## September 16 checkpoint before tag activation
 
 The owner explicitly does **not** want the old code or old branding published.
 The old Submission 1 had passed certification with a manual publishing hold.

@@ -820,13 +820,65 @@ jobs:
           path: dist/linux/OpenStudio-*-linux-x86_64.AppImage
           if-no-files-found: error
 
+  preflight-store:
+    name: Check Store readiness before publication
+    needs: [build-windows, validate-release-notes]
+    if: vars.OPENSTUDIO_STORE_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: microsoft-store
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: microsoft-store-package
+          path: dist/store
+      - name: Require the exact release tag
+        run: test "$GITHUB_REF_NAME" = "v${VERSION#v}"
+      - name: Inspect Store readiness without changing the submission
+        env:
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        run: >-
+          python3 tools/submit_store_release.py --version "$VERSION"
+          --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
+          --initial-submission-config packaging/msix/initial-submission.json
+          --report output/store-prepublish.json --preflight
+      - name: Retain sanitized readiness evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microsoft-store-readiness-${{ github.run_attempt }}
+          path: output/store-prepublish.json
+          if-no-files-found: warn
+          retention-days: 30
+
   publish:
+    # A skipped Store gate is permitted only for releases where Store submission
+    # is not enabled. Failed/cancelled builds or preflight must never publish.
+    if: >-
+      ${{ !cancelled() && needs.validate-release-notes.result == 'success'
+          && needs.build-windows.result == 'success'
+          && needs.build-macos.result == 'success'
+          && needs.build-linux.result == 'success'
+          && (needs.preflight-store.result == 'success'
+              || (needs.preflight-store.result == 'skipped'
+                  && (vars.OPENSTUDIO_STORE_ENABLED != 'true'
+                      || !startsWith(github.ref, 'refs/tags/v')))) }}
     runs-on: ubuntu-latest
     needs:
       - validate-release-notes
       - build-windows
       - build-macos
       - build-linux
+      - preflight-store
     permissions:
       contents: write
     env:
