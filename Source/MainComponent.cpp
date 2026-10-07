@@ -5306,7 +5306,14 @@ juce::var runNAMCatalogNativeRegressionImpl()
             childLock.l_type = F_WRLCK;
             const char ready = descriptor >= 0
                 && ::fcntl(descriptor, F_SETLK, &childLock) == 0 ? '1' : '0';
-            (void) ::write(readyPipe[1], &ready, 1);
+            ssize_t readyBytesWritten = -1;
+            do
+            {
+                readyBytesWritten = ::write(readyPipe[1], &ready, 1);
+            }
+            while (readyBytesWritten < 0 && errno == EINTR);
+            if (readyBytesWritten != 1)
+                ::_exit(1);
             char released = 0;
             if (ready == '1')
             {

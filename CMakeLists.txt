@@ -175,10 +175,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
     # The pinned VST3 wrapper intentionally discards warnOnFailure's Release
-    # expression. Keep the diagnostic exception on JUCE's aggregates only.
+    # expression. Apple builds compile JUCE's Objective-C++ aggregates.
     set_property(SOURCE
-        "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp"
-        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.mm"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.mm"
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-value")
 endif()
 if(MSVC)
@@ -275,6 +275,14 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$" AND TARGET lic
     set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-kb.mm"
         TARGET_DIRECTORY lice
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-vla-extension")
+endif()
+
+if(APPLE AND CMAKE_C_COMPILER_ID STREQUAL "AppleClang" AND TARGET eel2)
+    # The pinned WDL generated parser tracks syntax errors without reading the
+    # counter. Keep this exception on its including C translation unit only.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/eel2/nseel-yylex.c"
+        TARGET_DIRECTORY eel2
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-but-set-variable")
 endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)

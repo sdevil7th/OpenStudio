@@ -258,9 +258,17 @@ files in the `lice` target. One WDL drag-mask diagnostic is scoped to
 its vendor aggregates. The WDL key mapper's variable-length array exception is
 limited to `swell-kb.mm`, using the compatible parent
 [Clang diagnostic group](https://clang.llvm.org/docs/DiagnosticsReference.html#wvla-extension).
-First-party warning checks remain enabled. Actual hosted
-compiler logs determine the final macOS warning outcome; no successful CI exit
-alone is treated as proof of zero warnings.
+First-party warning checks remain enabled. The `755ba44` macOS ARM build
+passes all 74 native checks with zero first-party warnings, but retains six
+vendor warnings: two relative `y.tab.c` unused error-counter diagnostics and
+four JUCE ignored expressions. Its actual compile log identifies the enclosing
+`nseel-yylex.c` and Objective-C++ `.mm` aggregates. The final exception targets
+those exact translation units, replacing the ineffective Apple `.cpp` selectors.
+The `755ba44` GCC 11 Release also reports a discarded child pipe-write result
+in the new regression fixture; the fixture now checks its return, retries
+`EINTR`, and exits the child on failure. It makes only async-safe child calls.
+Actual hosted compiler logs determine the final warning outcome; no successful
+CI exit alone is treated as proof of zero warnings.
 
 The fresh Debug run passed 74 lifecycle, 239 render, 294 runtime and all 40 engine
 suites, but failed its strict gate with 174 message-queue overflow assertions
@@ -298,7 +306,9 @@ logs, `system-webkitgtk/`, `native-debug-verified/` (earlier failed diagnostics)
 `native-debug-final-348ad87/`, `native-debug-safe-348ad87/`,
 `native-debug-warning-cleanup-normal/`, `native-debug-warning-cleanup-safe/`,
 `native-debug-warning-cleanup-final-normal/`,
-`native-debug-warning-cleanup-final-safe/`, `warning-queue-gdb/`,
+`native-debug-warning-cleanup-final-safe/`,
+`native-debug-apple-vendor-final-normal/`,
+`native-debug-apple-vendor-final-safe/`, `warning-queue-gdb/`,
 `warning-queue-gdb-deep/`, `warning-queue-reproducer/`,
 `ubuntu22-final-installed-normal/`, `ubuntu22-final-installed-safe/`,
 `ubuntu22-final-installed-free-plugins/`, `ubuntu22-final-appimage-normal/`,
@@ -368,7 +378,7 @@ final branch includes the keyboard-policy correction, compiler-warning cleanup
 and cancellation-aware credential-lock repair. The latter changes window teardown
 behavior; the installation/AI artifact pins above describe their prior production
 source rather than this later repair. The rebuilt Debug SHA256 is
-`c874a06fec66ce3fadbdfebf536b5f6919537bb4ce1f60b95d3c630c92d6e9e3`.
+`fe64de359a30bf6e8dbb2cfe887a4cbbd87e411bf34f6da780c93b354ddef36b`.
 It builds with zero warnings/errors, all 147 packaged frontend files match, and
 the copied AI probe retains the recorded source hash. Fresh normal/Safe Mode
 Debug qualification passes normal 74/74, Safe Mode 65/65, render/export
