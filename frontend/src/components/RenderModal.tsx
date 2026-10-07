@@ -1,3 +1,4 @@
+import { activeDitherType, ditherOptions } from "../utils/renderDither";
 import { appDialogs } from "../services/appDialogs";
 import { useState, useEffect } from "react";
 import {
@@ -49,7 +50,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     secondaryOutputBitDepth, addToProjectAfterRender,
     loopEnabled, loopStart, loopEnd,
     renderDialogOptions, setRenderDialogOptions, lastRenderDirectory, setLastRenderDirectory,
-    showToast,
+    showToast, ditherType, setDitherType,
   } = useDAWStore(useShallow((s) => ({
     tracks: s.tracks,
     timeSelection: s.timeSelection,
@@ -74,6 +75,8 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     secondaryOutputBitDepth: s.secondaryOutputBitDepth,
     addToProjectAfterRender: s.addToProjectAfterRender,
     showToast: s.showToast,
+    ditherType: s.ditherType,
+    setDitherType: s.setDitherType,
   })));
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
@@ -290,7 +293,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
       && !isLossyFormat(options.format)
       && options.bitDepth !== 32;
     if (shouldDither) {
-      const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
+      const ditherType = activeDitherType(useDAWStore.getState().ditherType);
       success = await nativeBridge.renderProjectWithDither({ ...params, ditherType });
     } else {
       success = await nativeBridge.renderProject(params);
@@ -330,7 +333,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
     if (options.dither
         && !isLossyFormat(secondaryOutputFormat as AudioFormat)
         && secondaryOutputBitDepth !== 32) {
-      const ditherType = useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType;
+      const ditherType = activeDitherType(useDAWStore.getState().ditherType);
       success = await nativeBridge.renderProjectWithDither({ ...secondaryParams, ditherType });
     } else {
       success = await nativeBridge.renderProject(secondaryParams);
@@ -629,7 +632,7 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
             <h3 className="text-sm font-medium text-daw-text mb-2">
               Time bounds
             </h3>
-            <div className="flex items-center gap-4 text-sm">
+            <div className="flex flex-wrap items-center gap-4 text-sm">
               <div className="flex items-center gap-2">
                 <span className="text-daw-text-muted">Start:</span>
                 <Input
@@ -885,14 +888,21 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                     options.format === "flac"
                       ? [
                           { value: 16, label: "16-bit" },
+                          { value: 18, label: "18-bit precision (24-bit file)" },
+                          { value: 20, label: "20-bit precision (24-bit file)" },
+                          { value: 22, label: "22-bit precision (24-bit file)" },
                           { value: 24, label: "24-bit" },
                         ]
                       : [
                           { value: 16, label: "16-bit PCM" },
+                          { value: 18, label: "18-bit precision (24-bit file)" },
+                          { value: 20, label: "20-bit precision (24-bit file)" },
+                          { value: 22, label: "22-bit precision (24-bit file)" },
                           { value: 24, label: "24-bit PCM" },
                           { value: 32, label: "32-bit float" },
                         ]
                   }
+                  title="Output bit depth"
                   value={options.format === "flac" && options.bitDepth === 32 ? 24 : options.bitDepth}
                   onChange={(val) => {
                     const nextBitDepth = val as BitDepth;
@@ -980,13 +990,12 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                 />
                 {options.dither && (
                   <Select
-                    options={[
-                      { value: "tpdf", label: "TPDF" },
-                      { value: "shaped", label: "Noise Shaped" },
-                    ]}
-                    value={useDAWStore.getState().ditherType === "none" ? "tpdf" : useDAWStore.getState().ditherType}
-                    onChange={(v) => useDAWStore.getState().setDitherType(v as "tpdf" | "shaped")}
-                    size="xs"
+                    options={ditherOptions}
+                    title="Dither mode"
+                    value={activeDitherType(ditherType)}
+                    onChange={(v) => setDitherType(activeDitherType(v))}
+                    disabled={isRendering || options.bitDepth === 32 || isLossyFormat(options.format)}
+                    size="sm"
                   />
                 )}
               </div>
@@ -1041,9 +1050,13 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
                   size="xs"
                   options={[
                     { value: 16, label: "16-bit" },
+                          { value: 18, label: "18-bit precision (24-bit file)" },
+                          { value: 20, label: "20-bit precision (24-bit file)" },
+                          { value: 22, label: "22-bit precision (24-bit file)" },
                     { value: 24, label: "24-bit" },
                     { value: 32, label: "32-bit" },
                   ]}
+                  title="Secondary bit depth"
                   value={secondaryOutputBitDepth}
                   onChange={(v) => useDAWStore.getState().setSecondaryOutputBitDepth(v as number)}
                   disabled={isRendering}

@@ -91,6 +91,8 @@ export function parseValidatedProject(json: string): RecordValue & { tracks: Rec
   if (json.length > 256 * 1024 * 1024) throw new Error("Project exceeds the 256 MiB limit");
   const data = object(JSON.parse(json), "Project");
   inspectEnvelope(data);
+  optionalText(data, "metronomeClickPath");
+  optionalText(data, "metronomeAccentPath");
   if (!Array.isArray(data.tracks)) throw new Error("Project tracks must be an array");
   const tracks = list(data, "tracks", 4096).map(track => object(track, "Track"));
   const clipIds = new Set<string>();
@@ -135,7 +137,12 @@ export function parseValidatedProject(json: string): RecordValue & { tracks: Rec
     const sends = list(track, "sends", 4096).map(send => object(send, "Send"));
     for (const send of sends) {
       id(send.destTrackId, "send destination");
+      if (send.sourceChannel == null) send.sourceChannel = 0;
+      if (typeof send.sourceChannel !== "number" || !Number.isInteger(send.sourceChannel)
+        || send.sourceChannel < 0 || send.sourceChannel > 62 || send.sourceChannel % 2 !== 0)
+        throw new Error("Invalid send output pair");
       bounded(send, "level", 0.5, 0, 4); bounded(send, "pan", 0, -1, 1);
+      bounded(send, "trimDB", 0, -60, 12);
     }
     track.sends = sends;
     bounded(track, "volume", 1, 0, 16); bounded(track, "volumeDB", 0, -150, 24);

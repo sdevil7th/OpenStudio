@@ -1,0 +1,14 @@
+.loudness-history line {
+  stroke: var(--color-daw-border-light);
+  stroke-width: .5;
+}
+.loudness-history polyline {
+  fill: none;
+  stroke-width: 1.5;
+}
+.loudness-history .output {
+  stroke: #58b6ff;
+}
+.loudness-history .reduction {
+  stroke: #e7bd66;
+}

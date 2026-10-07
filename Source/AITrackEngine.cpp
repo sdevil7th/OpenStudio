@@ -2,6 +2,8 @@
 #include <winsock2.h>
 #endif
 #include "AITrackEngine.h"
+#include "AIManagedRuntime.h"
+#include "RuntimeAssetRoot.h"
 #include "RecoveryJournal.h"
 #include "JsonEnvelope.h"
 
@@ -47,7 +49,7 @@ juce::File getApplicationRuntimeDirectory()
         return resourcesDir;
    #endif
 
-    return executableDir;
+    return OpenStudioRuntimeAssets::preferAppImageRoot(executableDir);
 }
 
 juce::File findPythonInRuntimeRoot(const juce::File& runtimeRoot)
@@ -272,7 +274,7 @@ juce::File AITrackEngine::getUserDataRoot() const
 
 juce::File AITrackEngine::getUserRuntimeRoot() const
 {
-    return getUserDataRoot().getChildFile("stem-runtime");
+    return AIManagedRuntime::getActiveStemRuntimeRoot(getUserDataRoot());
 }
 
 juce::File AITrackEngine::getStableAudioRuntimeRoot() const

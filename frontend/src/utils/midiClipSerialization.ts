@@ -138,12 +138,6 @@ function applyVelocityVariance(velocity: number, event: MIDIEvent, seed: string)
   return clampMIDIVelocity(velocity + delta);
 }
 
-function serializedEventPriority(event: { type: string }) {
-  if (event.type === "noteOn") return 0;
-  if (event.type === "noteOff") return 2;
-  return 1;
-}
-
 function applyPitchEffect(events: MIDIEvent[], semitones: number): MIDIEvent[] {
   const shift = Math.round(Number(semitones) || 0);
   if (shift === 0) return events.map(cloneMIDIEvent);
@@ -279,6 +273,8 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
   const loopLength = sourceLoopLength(clip);
   const events: MIDIEvent[] = [];
   const consumed = new Set<number>();
+  const sourceOrder = new WeakMap<MIDIEvent, number>();
+  const pushEvent = (event: MIDIEvent, order: number) => { sourceOrder.set(event, order); events.push(event); };
 
   for (const pair of parseMIDINotePairs(clip.events || [], clip.id)) {
     consumed.add(pair.onIndex);
@@ -320,7 +316,7 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
         noteOffEvent.releaseVelocity = releaseVelocity;
       }
 
-      events.push(
+      pushEvent(
         {
           ...pair.noteOn,
           timestamp: start,
@@ -330,8 +326,9 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
           velocity,
           muted: pair.muted,
         },
-        noteOffEvent,
+        pair.onIndex,
       );
+      pushEvent(noteOffEvent, pair.offIndex);
     }
   }
 
@@ -349,11 +346,11 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
       const visibleLoopIndex = loopLength ? Math.max(0, loopIndex) : 0;
       const seed = `${clip.id}:${event.type}:${eventTime}:${event.note ?? ""}:${event.controller ?? ""}:${visibleLoopIndex}`;
       if (!shouldRenderEvent(event, seed, visibleLoopIndex)) continue;
-      events.push({ ...event, timestamp: Math.max(0, renderedTime - offset) });
+      pushEvent({ ...event, timestamp: Math.max(0, renderedTime - offset) }, index);
     }
   }
 
-  return sortMIDIEvents(events);
+  return events.sort((a, b) => a.timestamp - b.timestamp || (sourceOrder.get(a) ?? 0) - (sourceOrder.get(b) ?? 0));
 }
 
 function getVisibleMIDICCEventsForClip(clip: MIDIClip): MIDICCEvent[] {
@@ -441,7 +438,7 @@ export function serializeMIDIClipsForBackend(clips: MIDIClip[], midiEffects: MID
         if (event.velocityVariance !== undefined) serialized.velocityVariance = event.velocityVariance;
         if (event.centOffset !== undefined) serialized.centOffset = event.centOffset;
         return serialized;
-      }).sort((a, b) => a.timestamp - b.timestamp || serializedEventPriority(a) - serializedEventPriority(b)),
+      }).sort((a, b) => a.timestamp - b.timestamp),
     };
   });
 }

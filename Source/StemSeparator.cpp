@@ -1,4 +1,6 @@
 #include "StemSeparator.h"
+#include "AIManagedRuntime.h"
+#include "RuntimeAssetRoot.h"
 
 #if JUCE_MAC || JUCE_LINUX
  #include <sys/stat.h>
@@ -195,7 +197,8 @@ juce::String sanitiseArchiveEntryName (juce::String name)
 
 juce::File getApplicationRuntimeDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    return OpenStudioRuntimeAssets::preferAppImageRoot(
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
 }
 
 juce::String makeIsoTimestamp()
@@ -300,7 +303,7 @@ juce::File StemSeparator::getUserDataRoot() const
 
 juce::File StemSeparator::getUserRuntimeRoot() const
 {
-    return getUserDataRoot().getChildFile("stem-runtime");
+    return AIManagedRuntime::getActiveStemRuntimeRoot(getUserDataRoot());
 }
 
 juce::File StemSeparator::getStableAudioRuntimeRoot() const
@@ -2887,7 +2890,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         const auto installerScript = findInstallerScript();
         const auto systemPython = findSystemPython();
         const auto logFile = getAiToolsInstallLogFile();
-        const auto runtimeRoot = getUserRuntimeRoot();
+        // A new install is prepared in the base slot while the active runtime
+        // can remain usable until the installer verifies a replacement.
+        const auto runtimeRoot = getUserDataRoot().getChildFile("stem-runtime");
         const auto modelsDir = getUserModelsDir();
         const auto musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot();
         const auto downloadsDir = getAiRuntimeDownloadsDir();
@@ -4477,7 +4482,8 @@ juce::var StemSeparator::resetAiTools()
     cancelAiToolsInstall();
     cancel();
 
-    const auto runtimeRoot = getUserRuntimeRoot();
+    const auto runtimeRoot = getUserDataRoot().getChildFile("stem-runtime");
+    const auto activeRuntimeRoot = getUserRuntimeRoot();
     const auto modelsDir = getUserModelsDir();
     const auto checkpointRoot = getMusicGenerationCheckpointRoot();
     const auto hubCacheDir = checkpointRoot.getParentDirectory().getChildFile(".hub-cache");
@@ -4500,6 +4506,12 @@ juce::var StemSeparator::resetAiTools()
     };
 
     deletePath(runtimeRoot);
+    if (activeRuntimeRoot != runtimeRoot)
+        deletePath(activeRuntimeRoot);
+    for (const auto& candidate : getUserDataRoot().findChildFiles(
+             juce::File::findDirectories, false, "stem-runtime-directml-*"))
+        deletePath(candidate);
+    deletePath(getUserDataRoot().getChildFile("stem-runtime-active.txt"));
     deletePath(modelsDir);
     deletePath(checkpointRoot);
     deletePath(hubCacheDir);

@@ -160,3 +160,27 @@ describe("built-in plugin parameter history", () => {
     expect(history.getRedoEntries()).toHaveLength(0);
   });
 });
+
+
+describe("opaque plugin history", () => {
+  it("keeps assets and hidden engine state together through undo/redo", async () => {
+    const history = new BuiltInPluginParamHistory("reverb-one");
+    const before = JSON.stringify({ fullState: "embedded-IR-a", engine: 1 });
+    const after = JSON.stringify({ fullState: "embedded-IR-b", engine: 2 });
+    history.recordState(before, after);
+    const replay = vi.fn<BuiltInPluginHistoryReplay>(async () => true);
+    await history.undo(async () => true, replay);
+    expect(replay.mock.calls[0][0].state?.before).toBe(before);
+    await history.redo(async () => true, replay);
+    expect(replay.mock.calls[1][0].state?.after).toBe(after);
+    history.recordState(after, after);
+    expect(history.getUndoEntries()).toHaveLength(1);
+  });
+  it("retains a failed opaque recall for retry without crossing instance histories", async () => {
+    const first = new BuiltInPluginParamHistory("one"), second = new BuiltInPluginParamHistory("two");
+    first.recordState("a", "b");
+    await expect(first.undo(async () => true, async () => false)).resolves.toBe("failed");
+    expect(first.canUndo()).toBe(true);
+    expect(second.canUndo()).toBe(false);
+  });
+});

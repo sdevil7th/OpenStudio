@@ -1,14 +1,17 @@
 import { useSyncExternalStore } from "react";
+import { invalidateTONE3000AccountSession } from "./namExplorerSession";
 import {
   nativeBridge,
   type TONE3000AuthFlowOptions,
   type TONE3000AuthFlowResult,
   type TONE3000AuthResult,
   type TONE3000AuthStatus,
+  type TONE3000User,
 } from "./NativeBridge";
 
 export type TONE3000SessionState = {
   status: TONE3000AuthStatus | null;
+  user: TONE3000User | null;
   busy: boolean;
   bootstrapped: boolean;
   lastError: string;
@@ -36,6 +39,7 @@ const listeners = new Set<() => void>();
 
 let state: TONE3000SessionState = {
   status: null,
+  user: null,
   busy: false,
   bootstrapped: false,
   lastError: "",
@@ -63,9 +67,21 @@ function getSnapshot() {
   return state;
 }
 
+let profileGeneration = 0;
+let profileKey = "";
 async function fetchStatus() {
   const status = await nativeBridge.getTONE3000AuthStatus();
   setState({ status, lastError: status.error || "" });
+  const nextProfileKey = status.authenticated && !status.expired ? `${status.clientId}:${status.expiresAtMs}` : "";
+  if (nextProfileKey !== profileKey) {
+    invalidateTONE3000AccountSession();
+    profileKey = nextProfileKey;
+    const generation = ++profileGeneration;
+    setState({ user: null });
+    if (nextProfileKey) void nativeBridge.getTONE3000User().then((result) => {
+      if (generation === profileGeneration) setState({ user: result.success ? result.user ?? null : null });
+    }).catch(() => undefined);
+  }
   return status;
 }
 
@@ -87,10 +103,13 @@ export function getTONE3000SessionSnapshot() {
 }
 
 export function resetTONE3000SessionForTests() {
+  profileGeneration += 1;
+  profileKey = "";
   bootstrapPromise = null;
   refreshPromise = null;
   state = {
     status: null,
+    user: null,
     busy: false,
     bootstrapped: false,
     lastError: "",
@@ -215,6 +234,10 @@ export async function completeTONE3000ManualAuth(code: string, stateValue = "", 
 }
 
 export async function clearTONE3000Session() {
+  invalidateTONE3000AccountSession();
+  profileGeneration += 1;
+  profileKey = "";
+  setState({ user: null, status: state.status ? { ...state.status, authenticated: false } : null });
   setState({ busy: true, lastError: "" });
   try {
     const status = await nativeBridge.clearTONE3000Auth();

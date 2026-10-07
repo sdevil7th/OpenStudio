@@ -62,6 +62,35 @@ describe("render queue execution", () => {
     expect(useDAWStore.getState().renderQueue[0]).toMatchObject({ status: "done" });
   });
 
+  it.each(["tpdf", "shaped", "rpdf", "shaped2"] as const)("preserves queued %s on primary and secondary integer output", async (ditherType) => {
+    const render = vi.spyOn(nativeBridge, "renderProjectWithDither").mockResolvedValue(true);
+    useDAWStore.setState({
+      ditherType: "tpdf",
+      renderQueue: [{ id: "dither-job", options: queuedOptions({
+        format: "wav", bitDepth: 16, dither: true, ditherType,
+        secondaryOutputEnabled: true, secondaryOutputFormat: "flac", secondaryOutputBitDepth: 24,
+      }), status: "pending" }],
+    });
+    await useDAWStore.getState().executeRenderQueue();
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render).toHaveBeenNthCalledWith(1, expect.objectContaining({ format: "wav", bitDepth: 16, ditherType }));
+    expect(render).toHaveBeenNthCalledWith(2, expect.objectContaining({ format: "flac", bitDepth: 24, ditherType }));
+    expect(useDAWStore.getState().renderQueue[0].status).toBe("done");
+  });
+
+  it.each([18, 20, 22])("preserves %s-bit precision in queued primary and secondary exports without dither", async (bits) => {
+    const render = vi.spyOn(nativeBridge, "renderProject").mockResolvedValue(true);
+    useDAWStore.setState({ renderQueue: [{ id: "precision-job", options: queuedOptions({
+      format: "wav", bitDepth: bits, dither: false,
+      secondaryOutputEnabled: true, secondaryOutputFormat: "flac", secondaryOutputBitDepth: bits,
+    }), status: "pending" }] });
+    await useDAWStore.getState().executeRenderQueue();
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render).toHaveBeenNthCalledWith(1, expect.objectContaining({ format: "wav", bitDepth: bits }));
+    expect(render).toHaveBeenNthCalledWith(2, expect.objectContaining({ format: "flac", bitDepth: bits }));
+    expect(useDAWStore.getState().renderQueue[0].status).toBe("done");
+  });
+
   it("marks a native false result as an error instead of a completed export", async () => {
     vi.spyOn(nativeBridge, "renderProject").mockResolvedValue(false);
     useDAWStore.setState({

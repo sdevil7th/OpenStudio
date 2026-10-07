@@ -4,6 +4,7 @@ import {
   createNAMSessionKeyedResourceCache,
   createNAMSessionResourceCache,
   getNAMExplorerSessionView,
+  invalidateTONE3000AccountSession,
   NAMSessionResourceInvalidatedError,
   resetNAMExplorerSessionForTests,
   setNAMExplorerSessionView,
@@ -141,9 +142,27 @@ describe("NAM Explorer session resources", () => {
     cache.delete("query:page:2");
     expect(cache.peek("query:page:2")).toBeUndefined();
   });
+
+  it("prevents a previous account request from repopulating a cleared page cache", async () => {
+    const cache = createNAMSessionKeyedResourceCache<string>(4);
+    const oldAccount = deferred<string>();
+    const staleRequest = cache.load("favorites", () => oldAccount.promise);
+    cache.clear();
+    cache.set("favorites", "new-account");
+    oldAccount.resolve("previous-account");
+    await expect(staleRequest).rejects.toBeInstanceOf(NAMSessionResourceInvalidatedError);
+    expect(cache.peekFresh("favorites")?.value).toBe("new-account");
+  });
 });
 
 describe("NAM Explorer remount view", () => {
+  it("clears private collection views while retaining local library views", () => {
+    setNAMExplorerSessionView("account", { ...sessionView(), tab: "created" });
+    setNAMExplorerSessionView("local", { ...sessionView(), tab: "installed" });
+    invalidateTONE3000AccountSession();
+    expect(getNAMExplorerSessionView("account")).toBeUndefined();
+    expect(getNAMExplorerSessionView("local")?.tab).toBe("installed");
+  });
   it("rejects a local refresh captured for an older source-flow session", () => {
     const epoch = createNAMExplorerSessionEpoch("source-flow:amp");
     const ampRefresh = epoch.capture();

@@ -9,6 +9,8 @@
 */
 
 #include "Metronome.h"
+#include "MetronomeSounds.h"
+#include "AppPaths.h"
 
 #include <limits>
 
@@ -94,9 +96,8 @@ void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
         return;
     }
 
-    // Rebuild all buffers off the audio thread. Custom files are reloaded at
-    // the new device rate; if a file has disappeared, retain its previous
-    // immutable buffer rather than publishing a partial or empty click.
+    // Rebuild from retained prepared audio. A removed source file must not
+    // change the click's pitch or attack timing when the device rate changes.
     const auto previousData =
         getClickDataSnapshot();
     auto nextData =
@@ -114,42 +115,26 @@ void Metronome::prepareToPlay(double newSampleRate, int samplesPerBlock)
             previousData->customClickPath;
         nextData->customAccentPath =
             previousData->customAccentPath;
+        nextData->preparedRegular = previousData->preparedRegular;
+        nextData->preparedAccent = previousData->preparedAccent;
+        nextData->regularInfo = previousData->regularInfo;
+        nextData->accentInfo = previousData->accentInfo;
 
         if (previousData->usingCustomClick)
         {
-            juce::AudioBuffer<float> customClick;
-            if (loadSoundFromFile(
-                    previousData->customClickPath,
-                    newSampleRate,
-                    customClick))
-            {
-                nextData->lowClickBuffer =
-                    std::move(customClick);
-            }
-            else
-            {
-                nextData->lowClickBuffer =
-                    previousData->lowClickBuffer;
-            }
+            nextData->lowClickBuffer = MetronomeSounds::resample(
+                previousData->preparedRegular, MetronomeSounds::preparedRate, newSampleRate);
         }
+        else if (previousData->customClickPath.isNotEmpty())
+            nextData->lowClickBuffer = MetronomeSounds::synthesise(previousData->customClickPath, false, newSampleRate);
 
         if (previousData->usingCustomAccent)
         {
-            juce::AudioBuffer<float> customAccent;
-            if (loadSoundFromFile(
-                    previousData->customAccentPath,
-                    newSampleRate,
-                    customAccent))
-            {
-                nextData->highClickBuffer =
-                    std::move(customAccent);
-            }
-            else
-            {
-                nextData->highClickBuffer =
-                    previousData->highClickBuffer;
-            }
+            nextData->highClickBuffer = MetronomeSounds::resample(
+                previousData->preparedAccent, MetronomeSounds::preparedRate, newSampleRate);
         }
+        else if (previousData->customAccentPath.isNotEmpty())
+            nextData->highClickBuffer = MetronomeSounds::synthesise(previousData->customAccentPath, true, newSampleRate);
     }
     publishClickData(nextData);
     setPracticePlaybackAvailable(true);
@@ -306,6 +291,8 @@ void Metronome::getNextAudioBlock(juce::AudioBuffer<float>& buffer, double curre
 
 bool Metronome::setPracticeEnabled(bool shouldRun)
 {
+    auto timer = practiceTimerState.load();
+    while (!practiceTimerState.compare_exchange_weak(timer, ((timer + 16u) & ~std::uint64_t{15}) | 8u)) {}
     auto previous = practiceState.load(std::memory_order_relaxed);
     for (;;)
     {
@@ -317,8 +304,44 @@ bool Metronome::setPracticeEnabled(bool shouldRun)
     }
 }
 
+bool Metronome::controlPracticeTimer(const juce::String& action, double duration)
+{
+    if (action == "start") {
+        if ((practiceState.load() & 2u) == 0 || !std::isfinite(duration) || duration < 0 || duration > 86400) return false;
+        setPracticeEnabled(false);
+        practiceTimerDuration.store(duration);
+    }
+    auto previous = practiceTimerState.load();
+    for (;;) {
+        const auto state = previous & 7u;
+        std::uint64_t mode = 0;
+        if (action == "start") mode = 9u;
+        else if (action == "reset") mode = 8u;
+        else if (action == "pause" && state == 1u) mode = 2u;
+        else if (action == "resume" && state == 2u && (practiceState.load() & 2u) != 0) mode = 1u;
+        else return false;
+        if (practiceTimerState.compare_exchange_weak(previous, ((previous + 16u) & ~std::uint64_t{15}) | mode)) return true;
+    }
+}
+
+juce::var Metronome::getPracticeTimer() const
+{
+    auto* result = new juce::DynamicObject();
+    const auto state = practiceTimerState.load();
+    const char* names[] { "idle", "running", "paused", "finished", "interrupted" };
+    result->setProperty("status", names[juce::jmin(4, static_cast<int>(state & 7u))]);
+    result->setProperty("duration", practiceTimerDuration.load());
+    result->setProperty("elapsed", (state & 8u) != 0 ? 0.0 : practiceTimerElapsed.load());
+    return result;
+}
+
 void Metronome::setPracticePlaybackAvailable(bool available)
 {
+    if (!available) {
+        auto timer = practiceTimerState.load();
+        while (((timer & 7u) == 1u || (timer & 7u) == 2u)
+            && !practiceTimerState.compare_exchange_weak(timer, ((timer + 16u) & ~std::uint64_t{15}) | 4u)) {}
+    }
     auto previous = practiceState.load(std::memory_order_relaxed);
     for (;;)
     {
@@ -330,12 +353,31 @@ void Metronome::setPracticePlaybackAvailable(bool available)
 
 void Metronome::getNextTransportBlock(juce::AudioBuffer<float>& buffer, double position, bool transportRunning)
 {
+    auto timer = practiceTimerState.load(std::memory_order_acquire);
+    const bool timerRestarted = timer != consumedTimerState && (timer & 8u) != 0;
+    if (timerRestarted) {
+        timerElapsed = 0.0;
+        const auto acknowledged = timer & ~std::uint64_t{8};
+        if (practiceTimerState.compare_exchange_strong(timer, acknowledged)) timer = acknowledged;
+    }
+    bool timerRunning = (timer & 7u) == 1u;
+    if (transportRunning && ((timer & 7u) == 1u || (timer & 7u) == 2u)) {
+        const auto interrupted = ((timer + 16u) & ~std::uint64_t{15}) | 4u;
+        practiceTimerState.compare_exchange_strong(timer, interrupted);
+        timerRunning = false;
+    }
+    consumedTimerState = timer;
+    const auto duration = practiceTimerDuration.load();
+    const auto rate = sampleRate.load();
+    int activeSamples = buffer.getNumSamples();
+    if (timerRunning && duration > 0 && rate > 0)
+        activeSamples = static_cast<int>(juce::jlimit(0.0, static_cast<double>(activeSamples), std::ceil((duration - timerElapsed) * rate - 1.0e-6)));
     const auto practice = practiceState.load(std::memory_order_acquire);
-    const bool practiceOn = (practice & 1u) != 0;
+    const bool practiceOn = (practice & 1u) != 0 || timerRunning;
     const bool active = practiceOn || (transportRunning && isEnabled());
     const auto generation = resetGeneration.load(std::memory_order_acquire);
     const bool deviceReset = generation != consumedResetGeneration;
-    const bool practiceStarted = practiceOn && practice != consumedPracticeState;
+    const bool practiceStarted = practiceOn && (practice != consumedPracticeState || timerRestarted);
     const double currentBpm = getBpm();
     const bool handover = active && (!clockWasRunning || (transportRunning && !clockWasTransport) || deviceReset);
     if (!transportRunning)
@@ -350,7 +392,15 @@ void Metronome::getNextTransportBlock(juce::AudioBuffer<float>& buffer, double p
             freeRunSamplePosition = 0.0;
         position = freeRunSamplePosition;
     }
-    renderBlock(buffer, position, active, handover || (practiceStarted && !transportRunning));
+    renderBlock(buffer, position, active, handover || (practiceStarted && !transportRunning), timerRunning ? activeSamples : -1);
+    if (timerRunning && rate > 0) {
+        timerElapsed += activeSamples / rate;
+        if (duration > 0 && timerElapsed >= duration - 1.0e-9) {
+            timerElapsed = duration;
+            practiceTimerState.compare_exchange_strong(timer, ((timer + 16u) & ~std::uint64_t{15}) | 3u);
+        }
+    }
+    practiceTimerElapsed.store(timerElapsed);
     if (active) freeRunSamplePosition = position + buffer.getNumSamples();
     freeRunBpm = currentBpm;
     consumedPracticeState = practice;
@@ -366,7 +416,7 @@ void Metronome::retireClick() noexcept
     clickSampleCounter = 0;
 }
 
-void Metronome::renderBlock(juce::AudioBuffer<float>& buffer, double currentSamplePosition, bool active, bool resetClock)
+void Metronome::renderBlock(juce::AudioBuffer<float>& buffer, double currentSamplePosition, bool active, bool resetClock, int activeSamples)
 {
 
     const int numSamples =
@@ -459,6 +509,11 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& buffer, double currentSamp
     int offset = 0;
     while (offset < numSamples)
     {
+        if (active && activeSamples >= 0 && offset >= activeSamples) {
+            active = false;
+            renderWasActive = false;
+            retireClick();
+        }
         const double position = currentSamplePosition + offset;
         if (active && nextBeatSample <= position)
         {
@@ -473,6 +528,7 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& buffer, double currentSamp
             nextBeatSample = std::ceil(nextBeatIndex * samplesPerBeat);
         }
         int span = numSamples - offset;
+        if (active && activeSamples >= 0) span = juce::jmin(span, activeSamples - offset);
         if (active && nextBeatSample < currentSamplePosition + numSamples)
             span = juce::jlimit(1, span, static_cast<int>(nextBeatSample - position));
         const auto& source = isHighClick ? clickData->highClickBuffer : clickData->lowClickBuffer;
@@ -712,228 +768,168 @@ bool Metronome::renderToFile(const juce::File& outputFile, double startTimeSecon
 // =============================================================================
 
 bool Metronome::loadSoundFromFile(
-    const juce::String& filePath,
-    double targetSampleRate,
-    juce::AudioBuffer<float>& targetBuffer)
+    const juce::String& filePath, double targetSampleRate,
+    juce::AudioBuffer<float>& targetBuffer, juce::var& info)
 {
-    if (!std::isfinite(targetSampleRate)
-        || targetSampleRate <= 0.0)
+    auto* status = new juce::DynamicObject();
+    info = juce::var(status);
+    const auto fail = [&] (const juce::String& message)
     {
+        status->setProperty("error", message);
         return false;
+    };
+    if (!juce::File::isAbsolutePath(filePath)) return fail("Choose a local audio file.");
+    const juce::File audioFile(filePath);
+    if (!audioFile.existsAsFile()) return fail("This audio file is missing. Choose it again or select a built-in sound.");
+    if (audioFile.getSize() > 64 * 1024 * 1024) return fail("This file is too large. Export a short click sample under 64 MB.");
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(audioFile));
+    if (!reader) return fail("Could not read this file. Choose WAV, AIFF, FLAC or Ogg audio.");
+    if (!std::isfinite(reader->sampleRate) || reader->sampleRate < 8000.0 || reader->sampleRate > 384000.0
+        || reader->numChannels < 1 || reader->numChannels > 8)
+        return fail("Use 1-8 channels and a sample rate from 8 to 384 kHz.");
+    const int count = static_cast<int>(juce::jmin(reader->lengthInSamples,
+        static_cast<juce::int64>(reader->sampleRate * 2.0)));
+    if (count < 8) return fail("This audio file is empty or too short.");
+    juce::AudioBuffer<float> source(static_cast<int>(reader->numChannels), count);
+    if (!reader->read(&source, 0, count, 0, true, true)) return fail("Could not decode this audio sample.");
+    const auto cacheDirectory = AppPaths::applicationData().getChildFile("MetronomeSounds");
+    const bool cachedInput = audioFile.getParentDirectory() == cacheDirectory;
+    auto prepared = MetronomeSounds::PreparedClick();
+    if (cachedInput)
+    {
+        const float peak = source.getMagnitude(0, count);
+        if (reader->sampleRate != MetronomeSounds::preparedRate || reader->numChannels != 1
+            || count > MetronomeSounds::preparedRate * MetronomeSounds::maximumClickSeconds
+            || !std::isfinite(peak) || peak < 0.001f || peak > 0.81f)
+            return fail("This prepared click is damaged. Choose the original sample again.");
+        for (int sample = 0; sample < count; ++sample)
+            if (!std::isfinite(source.getSample(0, sample)))
+                return fail("This prepared click is damaged. Choose the original sample again.");
+        prepared.audio = source;
     }
+    else prepared = MetronomeSounds::prepare(source, reader->sampleRate);
+    if (prepared.error.isNotEmpty()) return fail(prepared.error);
+    targetBuffer = std::move(prepared.audio);
 
-    juce::File audioFile(filePath);
-    if (!audioFile.existsAsFile())
-        return false;
-
-    std::unique_ptr<juce::AudioFormatReader> reader(
-        formatManager.createReaderFor(audioFile));
-    if (!reader)
-        return false;
-
-    if (!std::isfinite(reader->sampleRate)
-        || reader->sampleRate <= 0.0
-        || reader->numChannels == 0 || reader->numChannels > 64)
+    // Cache the usable click, not a fragile reference to a Downloads/removable file.
+    // Content addressing lets Regular and Accent share an identical prepared sample.
+    const auto hash = juce::SHA256(targetBuffer.getReadPointer(0),
+        static_cast<size_t>(targetBuffer.getNumSamples()) * sizeof(float)).toHexString();
+    const auto cached = cachedInput ? audioFile : cacheDirectory.getChildFile(hash + ".wav");
+    if (!cached.existsAsFile())
     {
-        return false;
+        if (!cacheDirectory.createDirectory()) return fail("Could not save the prepared click. Check your app-data folder permissions.");
+        juce::TemporaryFile temporary(cached);
+        std::unique_ptr<juce::OutputStream> stream(temporary.getFile().createOutputStream());
+        juce::WavAudioFormat format;
+        auto writer = format.createWriterFor(stream, juce::AudioFormatWriterOptions()
+            .withSampleRate(MetronomeSounds::preparedRate).withNumChannels(1).withBitsPerSample(24));
+        if (!writer || !writer->writeFromAudioSampleBuffer(targetBuffer, 0, targetBuffer.getNumSamples()))
+            return fail("Could not save the prepared click sample.");
+        writer.reset();
+        if (!temporary.overwriteTargetFileWithTemporary()) return fail("Could not publish the prepared click sample.");
     }
-
-    // Limit click sample to 2 seconds max
-    const auto maxSamples =
-        static_cast<juce::int64>(
-            reader->sampleRate * 2.0);
-    const auto samplesToRead =
-        std::min(
-            reader->lengthInSamples,
-            maxSamples);
-
-    if (samplesToRead <= 0
-        || samplesToRead
-            > static_cast<juce::int64>(
-                std::numeric_limits<int>::max()))
-        return false;
-
-    // Read into a temp buffer at the file's native sample rate
-    juce::AudioBuffer<float> fileBuffer(
-        static_cast<int>(reader->numChannels),
-        static_cast<int>(samplesToRead));
-    if (!reader->read(
-            &fileBuffer,
-            0,
-            static_cast<int>(samplesToRead),
-            0,
-            true,
-            true))
+    status->setProperty("selection", cached.getFullPathName());
+    status->setProperty("name", audioFile.getFileName());
+    status->setProperty("removedLeadMs", prepared.removedLeadMs);
+    status->setProperty("peakMs", MetronomeSounds::peakTimeSeconds * 1000.0);
+    status->setProperty("durationMs", targetBuffer.getNumSamples() * 1000.0 / MetronomeSounds::preparedRate);
+    status->setProperty("monoChannel", prepared.selectedChannel + 1);
+    status->setProperty("sourceChannels", static_cast<int>(reader->numChannels));
+    status->setProperty("shortened", prepared.shortened || reader->lengthInSamples > count);
+    const auto metadataFile = juce::File(cached.getFullPathName() + ".json");
+    if (cachedInput)
     {
-        return false;
+        const auto metadata = juce::JSON::parse(metadataFile);
+        if (const auto* details = metadata.getDynamicObject())
+            status->getProperties() = details->getProperties();
+        status->setProperty("selection", cached.getFullPathName());
     }
+    else if (!metadataFile.existsAsFile())
+        (void) metadataFile.replaceWithText(juce::JSON::toString(info));
+    juce::ignoreUnused(targetSampleRate);
+    return true;
+}
 
-    // Mix to mono if multi-channel
-    int outSamples =
-        static_cast<int>(samplesToRead);
-    // If sample rate differs, resample to match metronome's sample rate
-    if (std::abs(
-            reader->sampleRate
-            - targetSampleRate) > 1.0)
+bool Metronome::setSound(const juce::String& selection, bool accent)
+{
+    const juce::ScopedLock mutationGuard(clickDataMutationLock);
+    const int slot = accent ? 1 : 0;
+    soundErrors[slot].clear();
+    const double rate = sampleRate.load(std::memory_order_relaxed);
+    juce::AudioBuffer<float> replacement, prepared;
+    juce::var info;
+    const bool builtIn = MetronomeSounds::isBuiltIn(selection);
+    juce::String acceptedSelection = selection;
+    if (selection.isEmpty())
     {
-        const double ratio =
-            targetSampleRate
-            / reader->sampleRate;
-        const double outputLength =
-            static_cast<double>(samplesToRead)
-            * ratio;
-        if (!std::isfinite(outputLength)
-            || outputLength <= 0.0
-            || outputLength
-                > static_cast<double>(
-                    std::numeric_limits<int>::max()))
+        juce::AudioBuffer<float> unused;
+        if (accent) generateDefaultClickSounds(rate, replacement, unused);
+        else generateDefaultClickSounds(rate, unused, replacement);
+    }
+    else if (builtIn) replacement = MetronomeSounds::synthesise(selection, accent, rate);
+    else
+    {
+        if (selection.startsWith("builtin:"))
         {
+            soundErrors[slot] = "Unknown built-in click sound.";
             return false;
         }
-        outSamples =
-            juce::jmax(
-                1,
-                static_cast<int>(outputLength));
-    }
-
-    targetBuffer.setSize(1, outSamples);
-    targetBuffer.clear();
-
-    auto* outWrite = targetBuffer.getWritePointer(0);
-
-    if (std::abs(
-            reader->sampleRate
-            - targetSampleRate) > 1.0)
-    {
-        // Simple linear interpolation resample
-        double ratio =
-            reader->sampleRate
-            / targetSampleRate;
-        for (int i = 0; i < outSamples; ++i)
+        if (!loadSoundFromFile(selection, rate, prepared, info))
         {
-            double srcPos = i * ratio;
-            int idx0 = (int)srcPos;
-            int idx1 = idx0 + 1;
-            double frac = srcPos - idx0;
-
-            float val = 0.0f;
-            for (int ch = 0; ch < (int)reader->numChannels; ++ch)
-            {
-                const float* chData = fileBuffer.getReadPointer(ch);
-                float s0 = (idx0 < (int)samplesToRead) ? chData[idx0] : 0.0f;
-                float s1 = (idx1 < (int)samplesToRead) ? chData[idx1] : 0.0f;
-                val += (float)(s0 + (s1 - s0) * frac);
-            }
-            if (!std::isfinite(val)) return false;
-            outWrite[i] = juce::jlimit(-1.0f, 1.0f, val / reader->numChannels);
+            soundErrors[slot] = info["error"].toString();
+            return false;
         }
+        acceptedSelection = info["selection"].toString();
+        replacement = MetronomeSounds::resample(prepared, MetronomeSounds::preparedRate, rate);
+    }
+    const auto current = getClickDataSnapshot();
+    auto next = current != nullptr ? std::make_shared<ClickData>(*current) : createDefaultClickData(rate);
+    if (accent)
+    {
+        next->highClickBuffer = std::move(replacement);
+        next->preparedAccent = std::move(prepared);
+        next->usingCustomAccent = !builtIn;
+        next->customAccentPath = acceptedSelection;
+        next->accentInfo = info;
     }
     else
     {
-        // Same sample rate — just mix to mono
-        for (int i = 0; i < outSamples; ++i)
-        {
-            float val = 0.0f;
-            for (int ch = 0; ch < (int)reader->numChannels; ++ch)
-                val += fileBuffer.getReadPointer(ch)[i];
-            if (!std::isfinite(val)) return false;
-            outWrite[i] = juce::jlimit(-1.0f, 1.0f, val / reader->numChannels);
-        }
+        next->lowClickBuffer = std::move(replacement);
+        next->preparedRegular = std::move(prepared);
+        next->usingCustomClick = !builtIn;
+        next->customClickPath = acceptedSelection;
+        next->regularInfo = info;
     }
-
+    ++next->soundRevision;
+    publishClickData(next);
     return true;
 }
 
-bool Metronome::setClickSound(const juce::String& filePath)
+bool Metronome::setClickSound(const juce::String& selection) { return setSound(selection, false); }
+bool Metronome::setAccentSound(const juce::String& selection) { return setSound(selection, true); }
+
+juce::var Metronome::getSoundInfo(bool accent) const
 {
-    const juce::ScopedLock mutationGuard(
-        clickDataMutationLock);
-    const double targetSampleRate =
-        sampleRate.load(std::memory_order_relaxed);
-    juce::AudioBuffer<float> replacementBuffer;
-
-    if (filePath.isEmpty())
+    const juce::ScopedLock mutationGuard(clickDataMutationLock);
+    const auto snapshot = getClickDataSnapshot();
+    auto* status = new juce::DynamicObject();
+    if (snapshot != nullptr)
     {
-        juce::AudioBuffer<float> unusedHighClick;
-        generateDefaultClickSounds(
-            targetSampleRate,
-            unusedHighClick,
-            replacementBuffer);
+        const auto details = accent ? snapshot->accentInfo : snapshot->regularInfo;
+        if (const auto* object = details.getDynamicObject()) status->getProperties() = object->getProperties();
+        status->setProperty("selection", accent ? snapshot->customAccentPath : snapshot->customClickPath);
     }
-    else if (!loadSoundFromFile(
-                 filePath,
-                 targetSampleRate,
-                 replacementBuffer))
-    {
-        return false;
-    }
-
-    const auto currentData =
-        getClickDataSnapshot();
-    auto nextData =
-        currentData != nullptr
-            ? std::make_shared<ClickData>(
-                *currentData)
-            : createDefaultClickData(
-                targetSampleRate);
-    nextData->lowClickBuffer =
-        std::move(replacementBuffer);
-    ++nextData->soundRevision;
-    nextData->usingCustomClick =
-        filePath.isNotEmpty();
-    nextData->customClickPath =
-        filePath;
-    publishClickData(nextData);
-    return true;
-}
-
-bool Metronome::setAccentSound(const juce::String& filePath)
-{
-    const juce::ScopedLock mutationGuard(
-        clickDataMutationLock);
-    const double targetSampleRate =
-        sampleRate.load(std::memory_order_relaxed);
-    juce::AudioBuffer<float> replacementBuffer;
-
-    if (filePath.isEmpty())
-    {
-        juce::AudioBuffer<float> unusedLowClick;
-        generateDefaultClickSounds(
-            targetSampleRate,
-            replacementBuffer,
-            unusedLowClick);
-    }
-    else if (!loadSoundFromFile(
-                 filePath,
-                 targetSampleRate,
-                 replacementBuffer))
-    {
-        return false;
-    }
-
-    const auto currentData =
-        getClickDataSnapshot();
-    auto nextData =
-        currentData != nullptr
-            ? std::make_shared<ClickData>(
-                *currentData)
-            : createDefaultClickData(
-                targetSampleRate);
-    nextData->highClickBuffer =
-        std::move(replacementBuffer);
-    ++nextData->soundRevision;
-    nextData->usingCustomAccent =
-        filePath.isNotEmpty();
-    nextData->customAccentPath =
-        filePath;
-    publishClickData(nextData);
-    return true;
+    status->setProperty("error", soundErrors[accent ? 1 : 0]);
+    return juce::var(status);
 }
 
 void Metronome::resetToDefaultSounds()
 {
     const juce::ScopedLock mutationGuard(
         clickDataMutationLock);
+    soundErrors[0].clear();
+    soundErrors[1].clear();
     auto nextData =
         createDefaultClickData(
             sampleRate.load(

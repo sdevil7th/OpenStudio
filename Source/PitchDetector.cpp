@@ -4,7 +4,7 @@
 
 PitchDetector::PitchDetector()
 {
-    history.resize(maxHistory);
+
 }
 
 void PitchDetector::prepare(double sr, int /*maxBlockSize*/)
@@ -16,6 +16,7 @@ void PitchDetector::prepare(double sr, int /*maxBlockSize*/)
     samplesAccumulated = 0;
     detectedFreq.store(0.0f, std::memory_order_relaxed);
     confidence.store(0.0f, std::memory_order_relaxed);
+    clearHistory();
 }
 
 void PitchDetector::reset()
@@ -25,6 +26,7 @@ void PitchDetector::reset()
     samplesAccumulated = 0;
     detectedFreq.store(0.0f, std::memory_order_relaxed);
     confidence.store(0.0f, std::memory_order_relaxed);
+    clearHistory();
 }
 
 void PitchDetector::processSamples(const float* samples, int numSamples)
@@ -40,7 +42,7 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
             samplesAccumulated = 0;
 
             // Extract frame from ring buffer
-            std::vector<float> frame(static_cast<size_t>(frameSize));
+            auto& frame = analysisFrame;
             int readPos = (writePos - frameSize + static_cast<int>(inputBuffer.size())) % static_cast<int>(inputBuffer.size());
             for (int j = 0; j < frameSize; ++j)
             {
@@ -60,9 +62,7 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
                 detectedFreq.store(0.0f, std::memory_order_relaxed);
                 confidence.store(0.0f, std::memory_order_relaxed);
 
-                const std::lock_guard<std::mutex> lock(historyMutex);
-                history[static_cast<size_t>(historyWritePos)] = { 0.0f, 0.0f, rmsDB };
-                historyWritePos = (historyWritePos + 1) % maxHistory;
+                publishFrame(0.0f, 0.0f, rmsDB);
                 continue;
             }
 
@@ -72,9 +72,7 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
             // Store result
             float conf = confidence.load(std::memory_order_relaxed); // set by runYIN
 
-            const std::lock_guard<std::mutex> lock(historyMutex);
-            history[static_cast<size_t>(historyWritePos)] = { freq, conf, rmsDB };
-            historyWritePos = (historyWritePos + 1) % maxHistory;
+            publishFrame(freq, conf, rmsDB);
         }
     }
 }
@@ -104,7 +102,10 @@ float PitchDetector::runYIN(const float* frame, int size)
     yinBuffer[0] = 1.0f;
     float runningSum = 0.0f;
 
-    for (int tau = 1; tau < halfSize; ++tau)
+    // Search only reaches tauMax; interpolation needs one further neighbour.
+    // Larger lags cannot affect any normalized value already computed.
+    const int computedMaximum = std::min(halfSize - 1, tauMax + 1);
+    for (int tau = 1; tau <= computedMaximum; ++tau)
     {
         float sum = 0.0f;
         for (int j = 0; j < halfSize; ++j)
@@ -191,18 +192,36 @@ float PitchDetector::parabolicInterpolation(int tauEstimate) const
     return static_cast<float>(tauEstimate) + adjustment;
 }
 
+void PitchDetector::publishFrame(float frequency, float frameConfidence, float rmsDB) noexcept
+{
+    const int position = historyWritePos.load(std::memory_order_relaxed);
+    auto& slot = history[static_cast<size_t>(position)];
+    slot.generation.fetch_add(1);
+    slot.frequency.store(frequency); slot.confidence.store(frameConfidence); slot.rmsDB.store(rmsDB);
+    slot.generation.fetch_add(1);
+    historyWritePos.store((position + 1) % maxHistory, std::memory_order_release);
+}
+
+void PitchDetector::clearHistory() noexcept
+{
+    for (auto& slot : history)
+    {
+        slot.generation.fetch_add(1); slot.frequency.store(0); slot.confidence.store(0); slot.rmsDB.store(-100); slot.generation.fetch_add(1);
+    }
+    historyWritePos.store(0, std::memory_order_release);
+}
+
 std::vector<PitchDetector::PitchFrame> PitchDetector::getRecentFrames(int maxFrames) const
 {
-    const std::lock_guard<std::mutex> lock(historyMutex);
-
-    int count = std::min(maxFrames, maxHistory);
-    std::vector<PitchFrame> result;
-    result.reserve(static_cast<size_t>(count));
-
+    const int position = historyWritePos.load(std::memory_order_acquire);
+    const int count = juce::jlimit(0, maxHistory, maxFrames);
+    std::vector<PitchFrame> result; result.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i)
     {
-        int idx = (historyWritePos - count + i + maxHistory) % maxHistory;
-        result.push_back(history[static_cast<size_t>(idx)]);
+        const auto& slot = history[static_cast<size_t>((position - count + i + maxHistory) % maxHistory)];
+        const auto generation = slot.generation.load();
+        const PitchFrame frame {slot.frequency.load(), slot.confidence.load(), slot.rmsDB.load()};
+        if ((generation & 1u) == 0u && generation == slot.generation.load()) result.push_back(frame);
     }
     return result;
 }

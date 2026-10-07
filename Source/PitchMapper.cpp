@@ -37,12 +37,20 @@ void PitchMapper::reset()
 {
     currentOutputMidi = 0.0f;
     hasLastOutput = false;
+    activeHumanizeMode = getHumanizeMode();
+    hasStableNote = hasSustainedCorrection = false;
+    stableNote = pendingNote = sustainedCorrectionMidi = 0;
+    stableNoteSeconds = pendingNoteSeconds = unvoicedSeconds = 0;
 }
 
 void PitchMapper::setKey(int note) { rootNote.store(note % 12, std::memory_order_relaxed); }
 void PitchMapper::setScale(Scale scale) { currentScale.store(static_cast<int>(scale), std::memory_order_relaxed); }
 void PitchMapper::setRetuneSpeed(float ms) { retuneSpeedMs.store(juce::jlimit(0.0f, 400.0f, ms), std::memory_order_relaxed); }
 void PitchMapper::setHumanize(float pct) { humanizePercent.store(juce::jlimit(0.0f, 100.0f, pct), std::memory_order_relaxed); }
+void PitchMapper::setHumanizeMode(HumanizeMode mode)
+{
+    humanizeMode.store(mode == HumanizeMode::SustainedNotes ? 1 : 0, std::memory_order_relaxed);
+}
 void PitchMapper::setTranspose(int st) { transposeSemitones.store(juce::jlimit(-24, 24, st), std::memory_order_relaxed); }
 void PitchMapper::setCorrectionStrength(float s) { correctionStrength.store(juce::jlimit(0.0f, 1.0f, s), std::memory_order_relaxed); }
 void PitchMapper::setFormantCorrection(bool on) { formantCorrectionOn.store(on, std::memory_order_relaxed); }
@@ -110,6 +118,12 @@ float PitchMapper::getSnapTarget(float detectedHz) const
 
 float PitchMapper::mapPitch(float detectedHz, float conf, float deltaTime)
 {
+    const auto mode = getHumanizeMode();
+    if (activeHumanizeMode != mode) reset();
+    if (mode == HumanizeMode::SustainedNotes)
+        return mapSustainedPitch(detectedHz, conf, deltaTime);
+
+    // Keep the historical arithmetic/order unchanged for every legacy state.
     if (detectedHz <= 0.0f || conf < 0.05f)
     {
         // No valid pitch detected — hold last output
@@ -166,6 +180,83 @@ float PitchMapper::mapPitch(float detectedHz, float conf, float deltaTime)
         currentOutputMidi = inputMidi + (currentOutputMidi - inputMidi) * blend;
     }
 
+    return midiToHz(currentOutputMidi);
+}
+
+float PitchMapper::mapSustainedPitch(float detectedHz, float conf, float deltaTime)
+{
+    const double dt = std::isfinite(deltaTime) ? juce::jlimit(0.0, 1.0, static_cast<double>(deltaTime)) : 0;
+    const bool validPitch = std::isfinite(detectedHz) && detectedHz > 0 && std::isfinite(conf) && conf >= .05f;
+    const bool voiced = validPitch && conf >= .5f;
+    if (!voiced)
+    {
+        unvoicedSeconds += dt;
+        // Brief detector dropouts do not turn one held note into many attacks.
+        // A 40 ms unvoiced gap starts a new note; uncertain frames never age it.
+        if (unvoicedSeconds >= .04)
+        {
+            hasStableNote = false;
+            stableNoteSeconds = pendingNoteSeconds = 0;
+        }
+    }
+    else unvoicedSeconds = 0;
+
+    if (!validPitch)
+        return hasLastOutput ? midiToHz(currentOutputMidi) : 0.0f;
+
+    const float inputMidi = hzToMidi(detectedHz);
+    const float snapped = snapToScale(inputMidi);
+    if (voiced)
+    {
+        if (!hasStableNote)
+        {
+            stableNote = pendingNote = snapped;
+            stableNoteSeconds = pendingNoteSeconds = 0;
+            hasStableNote = true;
+        }
+        // Require a persistent neighbouring target and >=75 cents from the
+        // previous centre. Ordinary vibrato near a scale boundary does not
+        // immediately restart the short-note correction speed.
+        if (snapped != stableNote && std::abs(inputMidi - stableNote) >= .75f)
+        {
+            if (pendingNote != snapped) { pendingNote = snapped; pendingNoteSeconds = 0; }
+            pendingNoteSeconds += dt;
+            if (pendingNoteSeconds >= .04)
+            {
+                stableNote = snapped;
+                stableNoteSeconds = pendingNoteSeconds = 0;
+            }
+        }
+        else { pendingNote = stableNote; pendingNoteSeconds = 0; }
+        stableNoteSeconds += dt;
+    }
+
+    // Keep the chosen Retune Speed for the first 200 ms. From 200..600 ms,
+    // increase the correction-offset time constant toward 400 ms according to
+    // Humanize. A constant off-pitch note still converges to the chosen target;
+    // pitch movement faster than this time constant is retained on long notes.
+    const float ageBlend = hasStableNote ? static_cast<float>(juce::jlimit(0.0, 1.0, (stableNoteSeconds - .2) / .4)) : 0;
+    const float humanize = humanizePercent.load(std::memory_order_relaxed) * .01f;
+    const float baseSpeed = retuneSpeedMs.load(std::memory_order_relaxed);
+    const float speed = baseSpeed + ageBlend * humanize * (400.0f - baseSpeed);
+    const float strength = correctionStrength.load(std::memory_order_relaxed);
+    const float desiredCorrection = (snapped - inputMidi) * strength;
+    if (!hasSustainedCorrection || speed <= .5f)
+    {
+        sustainedCorrectionMidi = desiredCorrection;
+        hasSustainedCorrection = true;
+    }
+    else
+    {
+        const float alpha = static_cast<float>(1.0 - std::exp(-dt / (static_cast<double>(speed) * .001)));
+        sustainedCorrectionMidi += (desiredCorrection - sustainedCorrectionMidi) * alpha;
+    }
+    const float confidenceGain = juce::jlimit(0.0f, 1.0f, conf * 2);
+    // Humanize only changes corrective motion. It must not undo the requested
+    // transposition (LegacyAmount deliberately retains its historical behavior).
+    currentOutputMidi = inputMidi + sustainedCorrectionMidi * confidenceGain
+        + static_cast<float>(transposeSemitones.load(std::memory_order_relaxed)) * strength;
+    hasLastOutput = true;
     return midiToHz(currentOutputMidi);
 }
 

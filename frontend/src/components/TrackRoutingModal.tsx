@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { Modal, Slider } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
+import { MIDIOutputStatus } from "./MIDIOutputStatus";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -49,6 +50,7 @@ interface SendItemProps {
     enabled: boolean;
     preFader: boolean;
     phaseInvert: boolean;
+    sourceChannel?: number;
   };
   destTrackName: string;
   onRemove: () => void;
@@ -309,14 +311,29 @@ function SendItem({ sourceTrackId, sendIndex, send, destTrackName, onRemove }: S
     setTrackSendEnabled,
     setTrackSendPreFader,
     setTrackSendPhaseInvert,
+    setTrackSendSourceChannel,
+    processorSignature,
   } = useDAWStore(
     useShallow((s) => ({
       setTrackSendEnabled: s.setTrackSendEnabled,
       setTrackSendPreFader: s.setTrackSendPreFader,
       setTrackSendPhaseInvert: s.setTrackSendPhaseInvert,
+      setTrackSendSourceChannel: s.setTrackSendSourceChannel,
+      processorSignature: s.tracks.find((track) => track.id === sourceTrackId)?.trackFxCount,
     })),
   );
 
+  const [processingChannels, setProcessingChannels] = useState(2);
+  useEffect(() => {
+    let retired = false;
+    void nativeBridge.getTrackRoutingInfo(sourceTrackId).then((info) => {
+      if (!retired) setProcessingChannels(info?.processingChannelCount ?? 2);
+    });
+    return () => { retired = true; };
+  }, [sourceTrackId, processorSignature]);
+  const selectedPair = send.sourceChannel ?? 0;
+  const pairs = Array.from({ length: Math.ceil(processingChannels / 2) }, (_, index) => index * 2);
+  if (!pairs.includes(selectedPair)) pairs.push(selectedPair);
   const db = linearToDb(send.level);
 
   return (
@@ -381,6 +398,19 @@ function SendItem({ sourceTrackId, sendIndex, send, destTrackName, onRemove }: S
         </div>
       </div>
 
+      <label className="flex items-center gap-2 text-xs text-neutral-300">
+        Source channels
+        <select
+          aria-label={`Source channels to ${destTrackName}`}
+          value={selectedPair}
+          onChange={(event) => void setTrackSendSourceChannel(sourceTrackId, sendIndex, Number(event.target.value))}
+          className="min-h-8 flex-1 rounded border border-neutral-600 bg-neutral-800 px-2 focus-visible:outline-2 focus-visible:outline-daw-accent"
+        >
+          {pairs.map((channel) => <option key={channel} value={channel}>
+            {channel === 0 ? "Main 1/2" : `${channel + 1}/${channel + 2}`}{channel >= processingChannels ? " (unavailable)" : ""}
+          </option>)}
+        </select>
+      </label>
       {/* Volume + Pan sliders */}
       <div className="flex items-center gap-2">
         <label className="text-[9px] text-neutral-500 w-6">Vol</label>
@@ -415,6 +445,7 @@ interface ReceiveItemProps {
     enabled: boolean;
     preFader: boolean;
     phaseInvert: boolean;
+    sourceChannel?: number;
   };
   onRemove: () => void;
 }
@@ -529,6 +560,7 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
     setTrackPlaybackOffset,
     setTrackChannelCount,
     setTrackMIDIOutput,
+    setTrackMIDIOutputMergeKeys,
   } = useDAWStore(
     useShallow((s) => ({
       trackId: s.trackRoutingTrackId,
@@ -541,11 +573,13 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
       setTrackPlaybackOffset: s.setTrackPlaybackOffset,
       setTrackChannelCount: s.setTrackChannelCount,
       setTrackMIDIOutput: s.setTrackMIDIOutput,
+      setTrackMIDIOutputMergeKeys: s.setTrackMIDIOutputMergeKeys,
     })),
   );
 
   const track = tracks.find((t) => t.id === trackId);
   const [midiOutputDevices, setMidiOutputDevices] = useState<string[]>([]);
+  const [midiPolicyBusy, setMidiPolicyBusy] = useState(false);
   const [offsetEnabled, setOffsetEnabled] = useState(false);
   const [offsetUnit, setOffsetUnit] = useState<"ms" | "samples">("ms");
   const [addSendDropdown, setAddSendDropdown] = useState(false);
@@ -777,6 +811,13 @@ export function TrackRoutingModal({ isOpen, onClose }: TrackRoutingModalProps) {
               <option key={d} value={d}>{d}</option>
             ))}
           </select>
+          <label className="flex flex-col gap-1 text-[10px] text-neutral-400">Same-key overlap
+            <select className="h-6 w-full rounded border border-neutral-600 bg-neutral-800 px-1 text-neutral-300" aria-label="MIDI output same-key overlap" value={track.midiOutputMergeKeys ? "merge" : "raw"} disabled={midiPolicyBusy} onChange={event => { setMidiPolicyBusy(true); void setTrackMIDIOutputMergeKeys(trackId, event.target.value === "merge").finally(() => setMidiPolicyBusy(false)); }}>
+              <option value="raw">Raw note messages</option><option value="merge">Merge overlapping keys</option>
+            </select>
+          </label>
+          <MIDIOutputStatus trackId={trackId} active={isOpen} />
+          <p className="text-[10px] leading-relaxed text-neutral-500">Merge sends the first note-on and last note-off for each channel/key, suppressing overlapping retriggers. Changes wait for held keys to release. This affects hardware output only; use separate channels for independent tracks sharing a receiver.</p>
         </section>
 
         <hr className="border-neutral-700" />

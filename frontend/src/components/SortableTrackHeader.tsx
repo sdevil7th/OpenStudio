@@ -57,6 +57,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     duplicateTrack,
     toggleTrackMute,
     toggleTrackSolo,
+    toggleTrackSoloSafe,
     toggleTrackArmed,
     trackGroups,
     addTrackGroup,
@@ -77,6 +78,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
     duplicateTrack: s.duplicateTrack,
     toggleTrackMute: s.toggleTrackMute,
     toggleTrackSolo: s.toggleTrackSolo,
+      toggleTrackSoloSafe: s.toggleTrackSoloSafe,
     toggleTrackArmed: s.toggleTrackArmed,
     trackGroups: s.trackGroups,
     addTrackGroup: s.addTrackGroup,
@@ -100,6 +102,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
   const { showContextMenu, ContextMenuComponent } = useContextMenu();
 
   const handleClick = (e: React.MouseEvent) => {
+    if (!e.currentTarget.contains(e.target as Node)) return;
     // Prevent selection when clicking on interactive elements or color bar
     const target = e.target as HTMLElement;
     if (
@@ -135,6 +138,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
+    if (!e.currentTarget.contains(e.target as Node)) return;
     // If right-clicking a selected track while multiple are selected → bulk menu
     const isMulti = isSelected && selectedTrackIds.length > 1;
     const count = selectedTrackIds.length;
@@ -243,6 +247,7 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
             shortcut: shortcut("track.toggleSelectedSolo", "S"),
             onClick: () => toggleTrackSolo(track.id),
           },
+          { label: track.soloSafe ? "Disable Solo Safe" : "Enable Solo Safe", onClick: () => toggleTrackSoloSafe(track.id) },
           {
             label: track.armed ? "Disarm Record" : "Arm for Recording",
             shortcut: shortcut("track.toggleSelectedArm", "R"),
@@ -367,8 +372,11 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
         Object.entries(listeners).map(([key, handler]) => [
           key,
           (e: any) => {
+            // Portals bubble through the React owner, even when their DOM is
+            // outside this header. They must never activate its drag sensor.
+            if (!e.currentTarget.contains(e.target as Node)) return;
             const target = e.target as HTMLElement;
-            if (target.closest("button, input, select, [data-no-drag], [data-color-bar]")) {
+            if (target.closest("button, input, select, textarea, a, [role='slider'], [contenteditable], [data-no-drag], [data-color-bar]")) {
               return;
             }
             (handler as any)?.(e);

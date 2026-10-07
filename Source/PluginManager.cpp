@@ -5,6 +5,7 @@
 #include "CLAPPluginFormat.h"
 #include "IsolatedPlugin.h"
 #include "JsonEnvelope.h"
+#include "RuntimeAssetRoot.h"
 
 namespace
 {
@@ -1432,8 +1433,8 @@ juce::File PluginManager::getUserEffectsDirectory()
 
 juce::File PluginManager::getStockEffectsDirectory()
 {
-    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
-        .getParentDirectory();
+    auto exeDir = OpenStudioRuntimeAssets::preferAppImageRoot(
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
 
    #if JUCE_MAC
     auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("effects");

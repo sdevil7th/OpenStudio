@@ -1,9 +1,17 @@
+#include "PluginAutomationDelivery.h"
 #include "CLAPPluginFormat.h"
+#include "ProcessorSafety.h"
+#include "PluginParameterCapture.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <thread>
 
 #ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
   #include <windows.h>
   using LibHandle = HMODULE;
   static LibHandle loadLib(const juce::String& path, juce::String& errorMessage)
@@ -157,30 +165,53 @@ static bool updateClapChannelMetadata(const clap_plugin_t& plugin,
 // Minimal CLAP host implementation required by the CLAP API
 //==============================================================================
 
-static void hostRequestRestart(const clap_host_t*) {}
-static void hostRequestProcess(const clap_host_t*) {}
-static void hostRequestCallback(const clap_host_t*) {}
-
-static const void* hostGetExtension(const clap_host_t*, const char*)
+class CLAPHostContext final : private juce::Timer
 {
-    return nullptr; // No host extensions for now
-}
+public:
+    clap_host_t host {};
+    const clap_plugin_t* plugin = nullptr; // Main-thread lifecycle only.
+    std::atomic<bool> flushRequested { false }, callbackRequested { false }, restartRequested { false };
+    std::atomic<uint32_t> rescanFlags { 0 };
+    // CLAP declares clear() main-thread-only. Coalesce requests until the
+    // callback try-lock succeeds; clearing references does not restart DSP.
+    std::map<clap_id, uint32_t> pendingClears;
+    std::function<void(uint32_t, bool)> poll;
 
-static clap_host_t makeHost()
-{
-    clap_host_t host{};
-    host.clap_version = CLAP_VERSION;
-    host.host_data = nullptr;
-    host.name = "OpenStudio";
-    host.vendor = "OpenStudio";
-    host.url = "";
-    host.version = "1.0.0";
-    host.get_extension = hostGetExtension;
-    host.request_restart = hostRequestRestart;
-    host.request_process = hostRequestProcess;
-    host.request_callback = hostRequestCallback;
-    return host;
-}
+    CLAPHostContext()
+    {
+        host.clap_version = CLAP_VERSION;
+        host.host_data = this;
+        host.name = "OpenStudio";
+        host.vendor = "OpenStudio";
+        host.url = "";
+        host.version = "1.0.0";
+        host.request_restart = [](const clap_host_t* h) { context(h).restartRequested.store(true); };
+        host.request_process = [](const clap_host_t* h) { context(h).flushRequested.store(true); };
+        host.request_callback = [](const clap_host_t* h) { context(h).callbackRequested.store(true); };
+        host.get_extension = [](const clap_host_t*, const char* id) -> const void*
+        {
+            static const clap_host_params_t parameters {
+                [](const clap_host_t* h, clap_param_rescan_flags flags) { context(h).rescanFlags.fetch_or(flags); },
+                [](const clap_host_t* h, clap_id id, clap_param_clear_flags flags) {
+                    if (flags & (CLAP_PARAM_CLEAR_ALL | CLAP_PARAM_CLEAR_AUTOMATIONS))
+                        context(h).pendingClears[id] |= flags;
+                },
+                [](const clap_host_t* h) { context(h).flushRequested.store(true); }
+            };
+            return id && std::strcmp(id, CLAP_EXT_PARAMS) == 0 ? &parameters : nullptr;
+        };
+        startTimer(30);
+    }
+    ~CLAPHostContext() override { stop(); }
+    void stop() { stopTimer(); plugin = nullptr; poll = {}; }
+private:
+    static CLAPHostContext& context(const clap_host_t* h) { return *static_cast<CLAPHostContext*>(h->host_data); }
+    void timerCallback() override
+    {
+        if (plugin && callbackRequested.exchange(false)) plugin->on_main_thread(plugin);
+        if (poll) poll(rescanFlags.exchange(0), restartRequested.exchange(false));
+    }
+};
 
 //==============================================================================
 // CLAP Plugin Instance — wraps a clap_plugin_t as a juce::AudioProcessor
@@ -292,29 +323,61 @@ private:
 // CLAP Parameter — wraps a single CLAP parameter as a juce::AudioProcessorParameter
 //==============================================================================
 
+struct CLAPAutomationInputQueue
+{
+    static constexpr size_t capacity = 8192;
+    std::array<clap_event_param_value_t, capacity> events {};
+    size_t size = 0;
+};
+
 class CLAPParameter : public juce::AudioPluginInstance::HostedParameter
 {
 public:
     CLAPParameter(const clap_plugin_t* plugin, const clap_plugin_params_t* paramsExt,
                    clap_id paramId, const juce::String& paramName,
-                   double minVal, double maxVal, double defaultVal)
+                   double minVal, double maxVal, double defaultVal, uint32_t flagsIn, void* cookieIn, CLAPAutomationInputQueue* automationIn = nullptr)
         : clapPlugin(plugin), paramsExtension(paramsExt)
         , id(paramId), parameterName(paramName)
-        , rangeMin(minVal), rangeMax(maxVal), defaultValue(defaultVal)
+        , rangeMin(minVal), rangeMax(maxVal), defaultValue(defaultVal), flags(flagsIn), cookie(cookieIn), automation(automationIn)
     {
-        currentValue = defaultVal;
+        double initial = defaultVal;
+        if (paramsExtension->get_value) paramsExtension->get_value(clapPlugin, id, &initial);
+        currentValue.store(juce::jlimit(rangeMin, rangeMax, initial));
     }
 
     float getValue() const override
     {
         if (rangeMax <= rangeMin) return 0.0f;
-        return static_cast<float>((currentValue - rangeMin) / (rangeMax - rangeMin));
+        return static_cast<float>((currentValue.load(std::memory_order_acquire) - rangeMin) / (rangeMax - rangeMin));
     }
 
     void setValue(float newValue) override
     {
-        currentValue = rangeMin + static_cast<double>(newValue) * (rangeMax - rangeMin);
+        if (!available || !std::isfinite(newValue) || (flags & CLAP_PARAM_IS_READONLY)) return;
+        auto native = rangeMin + static_cast<double>(juce::jlimit(0.0f, 1.0f, newValue)) * (rangeMax - rangeMin);
+        if (isDiscrete()) native = std::round(native);
+        native = juce::jlimit(rangeMin, rangeMax, native);
+        currentValue.store(native, std::memory_order_release);
+        pendingValue.store(native, std::memory_order_relaxed);
+        pending.store(true, std::memory_order_release);
     }
+
+    bool supportsSampleAccurateAutomation() const noexcept override { return automation != nullptr; }
+    bool queueValueAtSampleOffset(float value, int offset) noexcept override
+    {
+        if (!automation || !isAutomatable() || offset < 0 || !std::isfinite(value) || automation->size >= automation->events.size()) return false;
+        auto native = rangeMin + static_cast<double>(juce::jlimit(0.0f, 1.0f, value)) * (rangeMax - rangeMin);
+        if (isDiscrete()) native = std::round(native);
+        currentValue.store(native, std::memory_order_release);
+        auto& event = automation->events[automation->size++]; event = {};
+        event.header.size = sizeof(event); event.header.time = static_cast<uint32_t>(offset);
+        event.header.type = CLAP_EVENT_PARAM_VALUE; event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.param_id = id; event.cookie = cookie; event.value = native;
+        event.note_id = -1; event.port_index = -1; event.channel = -1; event.key = -1;
+        automationQueued = true;
+        return true;
+    }
+    void finishAutomationBlock() noexcept { automationQueued = false; }
 
     float getDefaultValue() const override
     {
@@ -328,6 +391,23 @@ public:
     }
 
     juce::String getLabel() const override { return {}; }
+    bool isAutomatable() const override { return available && rangeMax > rangeMin && (flags & CLAP_PARAM_IS_AUTOMATABLE) && !(flags & CLAP_PARAM_IS_READONLY); }
+    bool isDiscrete() const override { return (flags & CLAP_PARAM_IS_STEPPED) != 0; }
+    bool isBoolean() const override { return isDiscrete() && rangeMin == 0 && rangeMax == 1; }
+    int getNumSteps() const override
+    {
+        return isDiscrete() ? static_cast<int>(juce::jlimit(2.0, static_cast<double>(std::numeric_limits<int>::max()),
+            std::round(rangeMax - rangeMin) + 1.0)) : getDefaultNumParameterSteps();
+    }
+    juce::String getText(float value, int length) const override
+    {
+        double native = rangeMin + juce::jlimit(0.0f, 1.0f, value) * (rangeMax - rangeMin);
+        if (isDiscrete()) native = std::round(native);
+        char text[256] {};
+        if (paramsExtension->value_to_text && paramsExtension->value_to_text(clapPlugin, id, native, text, sizeof(text)))
+            return juce::String::fromUTF8(text, static_cast<int>(sizeof(text))).substring(0, length);
+        return juce::String(native, 3).substring(0, length);
+    }
 
     juce::String getParameterID() const override
     {
@@ -337,13 +417,67 @@ public:
     float getValueForText(const juce::String& text) const override
     {
         double val = text.getDoubleValue();
+        if (paramsExtension->text_to_value) paramsExtension->text_to_value(clapPlugin, id, text.toRawUTF8(), &val);
         if (rangeMax <= rangeMin) return 0.0f;
         return juce::jlimit(0.0f, 1.0f, static_cast<float>((val - rangeMin) / (rangeMax - rangeMin)));
     }
 
     clap_id getClapId() const { return id; }
-    double getNativeValue() const { return currentValue; }
-    void setNativeValue(double v) { currentValue = v; }
+    double getNativeMinimum() const { return rangeMin; }
+    double getNativeMaximum() const { return rangeMax; }
+    uint64_t getReferenceGeneration() const { return referenceGeneration.load(std::memory_order_acquire); }
+    void clearReferences()
+    {
+        pending.store(false, std::memory_order_release);
+        automationQueued = false;
+        publishGesture(false);
+        referenceGeneration.fetch_add(1, std::memory_order_release);
+    }
+    void updateInfo(const clap_param_info_t& info)
+    {
+        parameterName = juce::String(info.name);
+        rangeMin = info.min_value; rangeMax = info.max_value; defaultValue = info.default_value;
+        flags = info.flags; cookie = info.cookie; available = true;
+        double value = defaultValue;
+        if (paramsExtension->get_value) paramsExtension->get_value(clapPlugin, id, &value);
+        restoreNativeValue(value);
+    }
+    void retire()
+    {
+        publishGesture(false);
+        available = false;
+        pending.store(false, std::memory_order_release);
+    }
+    bool takePendingValue(clap_event_param_value_t& event)
+    {
+        if (!pending.exchange(false, std::memory_order_acq_rel) || !available || automationQueued) return false;
+        event = {};
+        event.header.size = sizeof(event);
+        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.header.type = CLAP_EVENT_PARAM_VALUE;
+        event.param_id = id;
+        event.cookie = cookie;
+        event.note_id = -1; event.port_index = -1; event.channel = -1; event.key = -1;
+        event.value = pendingValue.load(std::memory_order_acquire);
+        return true;
+    }
+    void publishNativeValue(double value, bool record)
+    {
+        if (!std::isfinite(value)) return;
+        currentValue.store(juce::jlimit(rangeMin, rangeMax, value), std::memory_order_release);
+        if (record && isAutomatable()) sendValueChangedMessageToListeners(getValue());
+    }
+    void restoreNativeValue(double value)
+    {
+        pending.store(false, std::memory_order_release);
+        publishNativeValue(value, false);
+    }
+    void publishGesture(bool begin)
+    {
+        if (!isAutomatable()) return;
+        if (begin && !gesture.exchange(true)) beginChangeGesture();
+        else if (!begin && gesture.exchange(false)) endChangeGesture();
+    }
 
 private:
     const clap_plugin_t* clapPlugin;
@@ -351,7 +485,14 @@ private:
     clap_id id;
     juce::String parameterName;
     double rangeMin, rangeMax, defaultValue;
-    double currentValue;
+    uint32_t flags = 0;
+    bool available = true; // Changed only while the processor callback lock is held.
+    void* cookie = nullptr;
+    std::atomic<double> currentValue { 0 }, pendingValue { 0 };
+    std::atomic<bool> pending { false }, gesture { false };
+    std::atomic<uint64_t> referenceGeneration { 0 };
+    CLAPAutomationInputQueue* automation = nullptr;
+    bool automationQueued = false;
 };
 
 //==============================================================================
@@ -362,13 +503,14 @@ class CLAPPluginInstance : public juce::AudioPluginInstance
 {
 public:
     CLAPPluginInstance(LibHandle lib, const clap_plugin_t* plugin,
-                       juce::PluginDescription description)
+                       juce::PluginDescription description, std::unique_ptr<CLAPHostContext> context)
         : juce::AudioPluginInstance(BusesProperties()
               .withInput("Input", juce::AudioChannelSet::stereo(), true)
               .withOutput("Output", juce::AudioChannelSet::stereo(), true))
         , libHandle(lib)
         , clapPlugin(plugin)
         , pluginDescription(std::move(description))
+        , hostContext(std::move(context))
     {
         if (clapPlugin)
         {
@@ -379,21 +521,29 @@ public:
                                            && candidateParams->get_info != nullptr)
             {
                 paramsExt = candidateParams;
-                uint32_t paramCount = paramsExt->count(clapPlugin);
+                uint32_t paramCount = juce::jmin(uint32_t(65536), paramsExt->count(clapPlugin));
                 for (uint32_t i = 0; i < paramCount; ++i)
                 {
                     clap_param_info_t info{};
                     if (paramsExt->get_info(clapPlugin, i, &info))
                     {
+                        if (!std::isfinite(info.min_value) || !std::isfinite(info.max_value)
+                            || !std::isfinite(info.default_value) || info.max_value < info.min_value)
+                            continue;
                         auto param = std::make_unique<CLAPParameter>(clapPlugin, paramsExt,
                                                                       info.id, juce::String(info.name),
                                                                       info.min_value, info.max_value,
-                                                                      info.default_value);
+                                                                      info.default_value, info.flags, info.cookie, &automationInput);
                         clapParams.add(param.get());
+                        parametersById.emplace(info.id, param.get());
                         addHostedParameter(std::move(param));
                     }
                 }
             }
+
+            inContext.midiEvents.reserve(maxMidiEvents);
+            inContext.parameterEvents.reserve(static_cast<size_t>(clapParams.size()) + CLAPAutomationInputQueue::capacity);
+            inContext.headers.reserve(maxMidiEvents + static_cast<size_t>(clapParams.size()) + CLAPAutomationInputQueue::capacity);
 
             // Check for GUI support
             const auto* candidateGui = static_cast<const clap_plugin_gui_t*>(
@@ -410,14 +560,65 @@ public:
                                   + missingGuiCallbacks);
             }
         }
+        hostContext->poll = [this](uint32_t flags, bool restart)
+        {
+            const juce::ScopedTryLock guard(getCallbackLock());
+            if (!guard.isLocked())
+            {
+                hostContext->rescanFlags.fetch_or(flags);
+                if (restart) hostContext->restartRequested.store(true);
+                return;
+            }
+            if (!hostContext->pendingClears.empty())
+            {
+                for (const auto& [id, clearFlags] : hostContext->pendingClears)
+                    if (const auto found = parametersById.find(id); found != parametersById.end())
+                    {
+                        found->second->clearReferences();
+                        size_t remaining = 0;
+                        for (size_t i = 0; i < automationInput.size; ++i)
+                            if (automationInput.events[i].param_id != id)
+                                automationInput.events[remaining++] = automationInput.events[i];
+                        automationInput.size = remaining;
+                        auto* cleared = new juce::DynamicObject();
+                        cleared->setProperty("index", found->second->getParameterIndex());
+                        cleared->setProperty("flags", static_cast<juce::int64>(clearFlags));
+                        parameterClears.add(juce::var(cleared));
+                    }
+                hostContext->pendingClears.clear();
+                updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+            }
+            if (restart || (flags & CLAP_PARAM_RESCAN_ALL))
+            {
+                const bool resume = activated;
+                const auto sampleRate = currentSampleRate;
+                const auto blockSize = currentBlockSize;
+                releaseResources();
+                if (flags & CLAP_PARAM_RESCAN_ALL) rescanParameters(true);
+                if (resume) prepareToPlay(sampleRate, blockSize);
+            }
+            else if (flags & CLAP_PARAM_RESCAN_INFO) rescanParameters(false);
+            if (flags & CLAP_PARAM_RESCAN_TEXT)
+                updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+            if ((flags & CLAP_PARAM_RESCAN_VALUES) && paramsExt && paramsExt->get_value)
+                for (auto* parameter : clapParams)
+                {
+                    double value = 0;
+                    if (paramsExt->get_value(clapPlugin, parameter->getClapId(), &value))
+                        parameter->publishNativeValue(value, false);
+                }
+            if (!activated) flushParameterRequests();
+        };
     }
 
     ~CLAPPluginInstance() override
     {
+        hostContext->stop();
         // CLAP spec requires deactivate before destroy. If releaseResources()
         // wasn't called (e.g., unexpected destruction path), do it now.
         if (clapPlugin && activated)
             releaseResources();
+        for (auto* parameter : clapParams) parameter->publishGesture(false);
 
         if (clapPlugin)
         {
@@ -447,6 +648,7 @@ public:
     void prepareToPlay(double sampleRate, int samplesPerBlock) override
     {
         if (!clapPlugin) return;
+        if (activated) releaseResources();
 
         if (!clapPlugin->activate(clapPlugin,
                                   sampleRate,
@@ -475,12 +677,14 @@ public:
         clapPlugin->stop_processing(clapPlugin);
         clapPlugin->deactivate(clapPlugin);
         activated = false;
+        for (auto* parameter : clapParams) parameter->publishGesture(false);
     }
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) override
     {
         if (!clapPlugin || !activated)
             return;
+        flushParameterRequests();
 
         const int numSamples = buffer.getNumSamples();
         const int numCh = buffer.getNumChannels();
@@ -573,18 +777,36 @@ public:
 
         process.transport = &transport;
 
-        struct InputEventsContext
+        inContext.midiEvents.clear();
+        inContext.parameterEvents.clear();
+        inContext.headers.clear();
+        for (auto* parameter : clapParams)
         {
-            std::vector<clap_event_midi_t> midiEvents;
-            std::vector<const clap_event_header_t*> headers;
-        };
+            clap_event_param_value_t event {};
+            if (parameter->takePendingValue(event))
+            {
+                inContext.parameterEvents.push_back(event);
+                inContext.headers.push_back({ &inContext.parameterEvents.back().header, inContext.headers.size() });
+            }
+        }
 
-        InputEventsContext inContext;
-        inContext.midiEvents.reserve(static_cast<size_t>(midiMessages.getNumEvents()));
-        inContext.headers.reserve(static_cast<size_t>(midiMessages.getNumEvents()));
+        for (size_t index = 0; index < automationInput.size; ++index)
+        {
+            auto event = automationInput.events[index];
+            event.header.time = static_cast<uint32_t>(juce::jlimit(0, juce::jmax(0, numSamples - 1), static_cast<int>(event.header.time)));
+            inContext.parameterEvents.push_back(event);
+            inContext.headers.push_back({ &inContext.parameterEvents.back().header, inContext.headers.size() });
+        }
+        automationInput.size = 0;
+        for (auto* parameter : clapParams) parameter->finishAutomationBlock();
 
         for (const auto metadata : midiMessages)
         {
+            if (inContext.midiEvents.size() >= maxMidiEvents)
+            {
+                droppedMidiEvents.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
             const auto& message = metadata.getMessage();
             if (message.isSysEx())
                 continue;
@@ -604,10 +826,13 @@ public:
             std::memcpy(event.data, message.getRawData(), static_cast<size_t>(rawSize));
 
             inContext.midiEvents.push_back(event);
-            inContext.headers.push_back(&inContext.midiEvents.back().header);
+            inContext.headers.push_back({ &inContext.midiEvents.back().header, inContext.headers.size() });
         }
 
         clap_input_events_t inEvents{};
+        std::sort(inContext.headers.begin(), inContext.headers.end(), [](const auto& a, const auto& b) {
+            return a.header->time != b.header->time ? a.header->time < b.header->time : a.order < b.order;
+        });
         inEvents.ctx = &inContext;
         inEvents.size = [](const clap_input_events_t* events) -> uint32_t {
             auto* ctx = static_cast<InputEventsContext*>(events->ctx);
@@ -617,7 +842,7 @@ public:
             auto* ctx = static_cast<InputEventsContext*>(events->ctx);
             if (index >= ctx->headers.size())
                 return nullptr;
-            return ctx->headers[index];
+            return ctx->headers[index].header;
         };
         process.in_events = &inEvents;
 
@@ -625,13 +850,15 @@ public:
         {
             juce::MidiBuffer* midiBuffer = nullptr;
             int maxSamples = 0;
+            CLAPPluginInstance* owner = nullptr;
         };
 
-        OutputEventsContext outContext { &midiMessages, numSamples };
+        OutputEventsContext outContext { &midiMessages, numSamples, this };
         clap_output_events_t outEvents{};
         outEvents.ctx = &outContext;
         outEvents.try_push = [](const clap_output_events_t* events, const clap_event_header_t* header) -> bool {
-            if (events == nullptr || header == nullptr)
+            if (events == nullptr || header == nullptr || header->space_id != CLAP_CORE_EVENT_SPACE_ID
+                || header->size < sizeof(clap_event_header_t))
                 return false;
 
             auto* ctx = static_cast<OutputEventsContext*>(events->ctx);
@@ -642,14 +869,23 @@ public:
 
             switch (header->type)
             {
+                case CLAP_EVENT_PARAM_VALUE:
+                case CLAP_EVENT_PARAM_GESTURE_BEGIN:
+                case CLAP_EVENT_PARAM_GESTURE_END:
+                {
+                    const ScopedPluginAutomationSampleOffset captureOffset(sampleOffset);
+                    return ctx->owner->publishParameterEvent(header);
+                }
                 case CLAP_EVENT_MIDI:
                 {
+                    if (header->size < sizeof(clap_event_midi_t)) return false;
                     auto* midi = reinterpret_cast<const clap_event_midi_t*>(header);
                     ctx->midiBuffer->addEvent(juce::MidiMessage(midi->data, 3), sampleOffset);
                     return true;
                 }
                 case CLAP_EVENT_NOTE_ON:
                 {
+                    if (header->size < sizeof(clap_event_note_t)) return false;
                     auto* note = reinterpret_cast<const clap_event_note_t*>(header);
                     ctx->midiBuffer->addEvent(
                         juce::MidiMessage::noteOn(
@@ -662,6 +898,7 @@ public:
                 case CLAP_EVENT_NOTE_OFF:
                 case CLAP_EVENT_NOTE_CHOKE:
                 {
+                    if (header->size < sizeof(clap_event_note_t)) return false;
                     auto* note = reinterpret_cast<const clap_event_note_t*>(header);
                     ctx->midiBuffer->addEvent(
                         juce::MidiMessage::noteOff(
@@ -681,6 +918,52 @@ public:
     }
 
     double getTailLengthSeconds() const override { return 0.0; }
+
+    void rescanParameters(bool topology)
+    {
+        if (!paramsExt || !paramsExt->count || !paramsExt->get_info) return;
+        if (topology) for (auto* parameter : clapParams) parameter->retire();
+        const auto count = juce::jmin(uint32_t(65536), paramsExt->count(clapPlugin));
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            clap_param_info_t info {};
+            if (!paramsExt->get_info(clapPlugin, index, &info) || info.id == CLAP_INVALID_ID
+                || !std::isfinite(info.min_value) || !std::isfinite(info.max_value)
+                || !std::isfinite(info.default_value) || info.max_value < info.min_value) continue;
+            if (const auto found = parametersById.find(info.id); found != parametersById.end()) found->second->updateInfo(info);
+            else if (topology && clapParams.size() < 65536)
+            {
+                // Keep existing JUCE indices and parameter objects alive. A removed ID
+                // becomes inert; new IDs append rather than retargeting old envelopes.
+                auto parameter = std::make_unique<CLAPParameter>(clapPlugin, paramsExt, info.id, juce::String(info.name),
+                    info.min_value, info.max_value, info.default_value, info.flags, info.cookie, &automationInput);
+                clapParams.add(parameter.get()); parametersById.emplace(info.id, parameter.get());
+                addHostedParameter(std::move(parameter));
+            }
+        }
+        if (topology)
+        {
+            inContext.parameterEvents.reserve(static_cast<size_t>(clapParams.size()) + CLAPAutomationInputQueue::capacity);
+            inContext.headers.reserve(maxMidiEvents + static_cast<size_t>(clapParams.size()) + CLAPAutomationInputQueue::capacity);
+        }
+        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+    }
+
+    void flushParameterRequests()
+    {
+        if (!paramsExt || !paramsExt->flush || !hostContext->flushRequested.exchange(false)) return;
+        const clap_input_events_t input { nullptr,
+            [](const clap_input_events_t*) -> uint32_t { return 0; },
+            [](const clap_input_events_t*, uint32_t) -> const clap_event_header_t* { return nullptr; } };
+        const clap_output_events_t output { this,
+            [](const clap_output_events_t* events, const clap_event_header_t* event) -> bool
+            {
+                if (!event || event->space_id != CLAP_CORE_EVENT_SPACE_ID || event->size < sizeof(clap_event_header_t)) return false;
+                if (event->type != CLAP_EVENT_PARAM_VALUE && event->type != CLAP_EVENT_PARAM_GESTURE_BEGIN && event->type != CLAP_EVENT_PARAM_GESTURE_END) return false;
+                return static_cast<CLAPPluginInstance*>(events->ctx)->publishParameterEvent(event);
+            } };
+        paramsExt->flush(clapPlugin, &input, &output);
+    }
 
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return true; }
@@ -738,19 +1021,70 @@ public:
             c->pos += toRead;
             return (int64_t)toRead;
         };
-        stateExt->load(clapPlugin, &stream);
+        if (stateExt->load(clapPlugin, &stream) && paramsExt && paramsExt->get_value)
+            for (auto* parameter : clapParams)
+            {
+                double value = 0;
+                if (paramsExt->get_value(clapPlugin, parameter->getClapId(), &value))
+                    parameter->restoreNativeValue(value);
+            }
     }
 
+    juce::Array<juce::var> takeParameterClears()
+    {
+        const juce::ScopedLock guard(getCallbackLock());
+        juce::Array<juce::var> result; result.swapWith(parameterClears); return result;
+    }
 private:
+    bool publishParameterEvent(const clap_event_header_t* header)
+    {
+        if (header->type == CLAP_EVENT_PARAM_VALUE)
+        {
+            if (header->size < sizeof(clap_event_param_value_t)) return false;
+            const auto& event = *reinterpret_cast<const clap_event_param_value_t*>(header);
+            // Global track envelopes cannot represent per-note modulation.
+            if (event.note_id != -1 || event.port_index != -1 || event.channel != -1 || event.key != -1)
+                return true;
+            if (const auto found = parametersById.find(event.param_id); found != parametersById.end())
+                {
+                    found->second->publishNativeValue(event.value, (header->flags & CLAP_EVENT_DONT_RECORD) == 0);
+                    return true;
+                }
+        }
+        else
+        {
+            if (header->size < sizeof(clap_event_param_gesture_t)) return false;
+            const auto& event = *reinterpret_cast<const clap_event_param_gesture_t*>(header);
+            if (const auto found = parametersById.find(event.param_id); found != parametersById.end())
+                {
+                    found->second->publishGesture(header->type == CLAP_EVENT_PARAM_GESTURE_BEGIN);
+                    return true;
+                }
+        }
+        return false;
+    }
+    static constexpr size_t maxMidiEvents = 4096;
+    struct InputEventsContext
+    {
+        std::vector<clap_event_midi_t> midiEvents;
+        std::vector<clap_event_param_value_t> parameterEvents;
+        struct Header { const clap_event_header_t* header; size_t order; };
+        std::vector<Header> headers;
+    } inContext;
+    CLAPAutomationInputQueue automationInput;
+    std::atomic<uint64_t> droppedMidiEvents { 0 };
     LibHandle libHandle = nullptr;
     const clap_plugin_t* clapPlugin = nullptr;
     const clap_plugin_params_t* paramsExt = nullptr;
     const clap_plugin_gui_t* guiExt = nullptr;
     juce::Array<CLAPParameter*> clapParams; // Non-owning — AudioProcessor owns them via addParameter
+    std::map<clap_id, CLAPParameter*> parametersById;
+    juce::Array<juce::var> parameterClears;
     juce::PluginDescription pluginDescription;
-    bool activated = false;
+    std::atomic<bool> activated { false };
     double currentSampleRate = 44100.0;
     int currentBlockSize = 512;
+    std::unique_ptr<CLAPHostContext> hostContext;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CLAPPluginInstance)
 };
@@ -759,8 +1093,48 @@ private:
 // CLAPPluginFormat implementation
 //==============================================================================
 
+#include "CLAPAutomationRegression.inc"
+
+void flushOpenStudioCLAPParameterEvents(juce::AudioProcessor* processor, ProcessorSafety* safety)
+{
+    if (auto* instance = dynamic_cast<CLAPPluginInstance*>(processor))
+    {
+        const juce::ScopedTryLock guard(instance->getCallbackLock());
+        if (guard.isLocked() && (!safety || safety->failure.load(std::memory_order_acquire) == ProcessorSafety::Failure::none))
+        {
+            try { instance->flushParameterRequests(); }
+            catch (...)
+            {
+                if (safety) safety->markFailure(ProcessorSafety::Failure::exception);
+                else OpenStudioCrashDiagnostics::recordRealtimeFault(OpenStudioCrashDiagnostics::RealtimeFault::processorException);
+            }
+        }
+    }
+}
+
 CLAPPluginFormat::CLAPPluginFormat() = default;
+bool getOpenStudioCLAPParameterRange(juce::AudioProcessor* processor, int index, double& minimum, double& maximum)
+{
+    if (!processor || !juce::isPositiveAndBelow(index, processor->getParameters().size())) return false;
+    if (const auto* parameter = dynamic_cast<const CLAPParameter*>(processor->getParameters()[index]))
+    {
+        minimum = parameter->getNativeMinimum(); maximum = parameter->getNativeMaximum(); return true;
+    }
+    return false;
+}
 CLAPPluginFormat::~CLAPPluginFormat() = default;
+bool getOpenStudioCLAPParameterReferenceGeneration(juce::AudioProcessor* processor, int index, uint64_t& generation)
+{
+    if (!processor || !juce::isPositiveAndBelow(index, processor->getParameters().size())) return false;
+    if (const auto* parameter = dynamic_cast<const CLAPParameter*>(processor->getParameters()[index]))
+    { generation = parameter->getReferenceGeneration(); return true; }
+    return false;
+}
+juce::Array<juce::var> takeOpenStudioCLAPParameterClears(juce::AudioProcessor* processor)
+{
+    if (auto* instance = dynamic_cast<CLAPPluginInstance*>(processor)) return instance->takeParameterClears();
+    return {};
+}
 
 bool CLAPPluginFormat::fileMightContainThisPluginType(const juce::String& fileOrIdentifier)
 {
@@ -1019,8 +1393,8 @@ void CLAPPluginFormat::createPluginInstance(const juce::PluginDescription& desc,
     }
 
     const auto* matchedDescriptor = matchingDescriptors.front();
-    static clap_host_t host = makeHost();
-    const clap_plugin_t* clapPlugin = factory->create_plugin(factory, &host, matchedDescriptor->id);
+    auto host = std::make_unique<CLAPHostContext>();
+    const clap_plugin_t* clapPlugin = factory->create_plugin(factory, &host->host, matchedDescriptor->id);
 
     if (!clapPlugin)
     {
@@ -1075,6 +1449,8 @@ void CLAPPluginFormat::createPluginInstance(const juce::PluginDescription& desc,
         return;
     }
 
+    host->plugin = clapPlugin;
+
     auto instanceDescription = desc;
     populateClapDescription(instanceDescription,
                             *matchedDescriptor,
@@ -1087,6 +1463,6 @@ void CLAPPluginFormat::createPluginInstance(const juce::PluginDescription& desc,
     // The CLAPPluginInstance destructor handles cleanup.
     auto instance = std::make_unique<CLAPPluginInstance>(lib,
                                                          clapPlugin,
-                                                         std::move(instanceDescription));
+                                                         std::move(instanceDescription), std::move(host));
     callback(std::move(instance), {});
 }

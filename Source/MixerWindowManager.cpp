@@ -1,5 +1,6 @@
 #include "MixerWindowManager.h"
 #include "MainComponent.h"
+#include "NativeWindowTheme.h"
 
 namespace
 {
@@ -15,15 +16,14 @@ juce::Rectangle<int> sanitiseWindowBounds(const juce::Rectangle<int>& requested,
     bounds.setWidth(juce::jmax(minWidth, bounds.getWidth()));
     bounds.setHeight(juce::jmax(minHeight, bounds.getHeight()));
 
-    if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+    if (auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(bounds))
     {
         const auto area = display->userBounds.getSmallestIntegerContainer();
         if (bounds.getWidth() > area.getWidth())
             bounds.setWidth(area.getWidth());
         if (bounds.getHeight() > area.getHeight())
             bounds.setHeight(area.getHeight());
-        if (! area.contains(bounds))
-            bounds = bounds.withPosition(area.getX() + 40, area.getY() + 40);
+        bounds = bounds.constrainedWithin(area);
     }
 
     return bounds;
@@ -49,6 +49,7 @@ public:
         setResizable(true, true);
         setResizeLimits(owner.minWidth, owner.minHeight, 10000, 10000);
         setContentOwned(content.release(), true);
+        applyNativeWindowTheme(*this);
     }
 
     void closeButtonPressed() override
@@ -70,6 +71,7 @@ public:
     void activeWindowStatusChanged() override
     {
         juce::DocumentWindow::activeWindowStatusChanged();
+        applyNativeWindowTheme(*this);
 
         if (isActiveWindow())
             requestHostedBrowserFocus();
@@ -80,6 +82,11 @@ private:
 };
 
 int MixerWindowManager::globalCloseDepth = 0;
+juce::DocumentWindow* MixerWindowManager::getNativeWindow() const
+{
+    return mixerWindow.get();
+}
+
 int MixerWindowManager::globalCreateDepth = 0;
 juce::Array<MixerWindowManager*> MixerWindowManager::managersWithPendingRequests;
 
@@ -150,7 +157,7 @@ bool MixerWindowManager::open(const juce::Rectangle<int>& bounds)
         mixerWindow->toFront(true);
         mixerWindow->requestHostedBrowserFocus();
         setState(WindowState::visible, "open existing bounds=" + describeBounds(targetBounds));
-        scheduleStartupNudge();
+        scheduleStartupLayoutRefresh();
         return true;
     }
 
@@ -269,7 +276,7 @@ bool MixerWindowManager::focus()
     mixerWindow->toFront(true);
     mixerWindow->requestHostedBrowserFocus();
     setState(WindowState::visible, "focus");
-    scheduleStartupNudge();
+    scheduleStartupLayoutRefresh();
     return true;
 }
 
@@ -457,24 +464,28 @@ bool MixerWindowManager::createWindow(const juce::Rectangle<int>& targetBounds, 
              juce::String(visible ? "created visible bounds=" : "created hidden bounds=") + describeBounds(targetBounds));
 
     if (visible)
-        scheduleStartupNudge();
+        scheduleStartupLayoutRefresh();
 
     return true;
 }
 
-void MixerWindowManager::scheduleStartupNudge()
+void MixerWindowManager::scheduleStartupLayoutRefresh()
 {
     if (mixerWindow == nullptr)
         return;
 
-    juce::Component::SafePointer<juce::DocumentWindow> safeWindow(mixerWindow.get());
-    juce::Timer::callAfterDelay(startupNudgeDelayMs, [safeWindow]()
+    juce::Component::SafePointer<MixerWindow> safeWindow(mixerWindow.get());
+    juce::Timer::callAfterDelay(startupLayoutDelayMs, [safeWindow]()
     {
         if (safeWindow != nullptr)
         {
-            const auto boundsNow = safeWindow->getBounds();
-            safeWindow->setBounds(boundsNow.withWidth(boundsNow.getWidth() + 1));
-            safeWindow->setBounds(boundsNow);
+            // Refresh the browser layout without moving/resizing an OS window.
+            // Changing outer bounds here can restore a maximized window.
+            if (auto* content = safeWindow->getHostedComponent())
+            {
+                content->resized();
+                content->repaint();
+            }
         }
     });
 }

@@ -79,6 +79,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
   const {
     toggleTrackMute,
     toggleTrackSolo,
+    toggleTrackSoloSafe,
     toggleMasterMute,
     toggleTrackArmed,
     toggleTrackFXBypass,
@@ -120,6 +121,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
       toggleTrackSolo: s.toggleTrackSolo,
+      toggleTrackSoloSafe: s.toggleTrackSoloSafe,
       toggleMasterMute: s.toggleMasterMute,
       toggleTrackArmed: s.toggleTrackArmed,
       toggleTrackFXBypass: s.toggleTrackFXBypass,
@@ -852,7 +854,8 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               size="xs"
               active={track.soloed}
               onClick={() => toggleTrackSolo(track.id)}
-              title="Solo"
+                onContextMenu={event => { event.preventDefault(); event.stopPropagation(); toggleTrackSoloSafe(track.id); }}
+              title={track.soloSafe ? "Solo Safe enabled; right-click to disable" : "Solo; right-click for Solo Safe"}
               aria-label={
                 track.soloed
                   ? `Unsolo track ${track.name}`
@@ -860,7 +863,7 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               }
               className="flex-1"
             >
-              S
+              {track.soloSafe ? "S\u0338" : "S"}
             </Button>
 
             <Button

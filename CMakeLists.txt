@@ -122,6 +122,22 @@ FetchContent_Declare(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
 )
 FetchContent_MakeAvailable(juce)
+
+# FetchContent's PATCH_COMMAND runs when the dependency is populated. Existing
+# checkouts also need updated recipes applied before compiling host code.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEVST3StatePatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEAutomationPatch.cmake")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DJUCE_SOURCE_DIR=${juce_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
+    RESULT_VARIABLE OPENSTUDIO_JUCE_PATCH_RESULT
+    OUTPUT_VARIABLE OPENSTUDIO_JUCE_PATCH_OUTPUT
+    ERROR_VARIABLE OPENSTUDIO_JUCE_PATCH_ERROR)
+if(NOT OPENSTUDIO_JUCE_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "Pinned JUCE patch verification failed: ${OPENSTUDIO_JUCE_PATCH_ERROR}")
+endif()
 if(MSVC)
     # JUCE's VST3 wrapper has two benign C4458 warnings in vendor code.
     set_source_files_properties(
@@ -382,6 +398,7 @@ target_sources(OpenStudio PRIVATE
     Source/RecordingRecoveryRegression.cpp
     Source/AudioEngine.cpp
     Source/MetronomeRegression.cpp
+    Source/FreePluginRegression.cpp
     Source/NAMDelayRegression.h
     Source/NAMDelayRegression.cpp
     Source/NAMDelayRegressionLifecycle.cpp

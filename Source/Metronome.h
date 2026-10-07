@@ -29,6 +29,8 @@ public:
     // Live-only clock selection. Offline rendering continues to use the method above.
     void getNextTransportBlock(juce::AudioBuffer<float>& buffer, double transportSamplePosition, bool transportRunning);
     bool setPracticeEnabled(bool shouldRun);
+    bool controlPracticeTimer(const juce::String& action, double durationSeconds);
+    juce::var getPracticeTimer() const;
     // prepareToPlay makes practice available; a device stop atomically revokes
     // both availability and the latch so a concurrent start cannot revive it.
     void setPracticePlaybackAvailable(bool available);
@@ -48,6 +50,7 @@ public:
     bool setClickSound(const juce::String& filePath);    // Load custom WAV for regular beats
     bool setAccentSound(const juce::String& filePath);   // Load custom WAV for accented beats
     void resetToDefaultSounds();                          // Restore synthesized clicks
+    juce::var getSoundInfo(bool accent) const;
 
     // Getters for offline rendering
     std::vector<bool> getAccentBeats() const;
@@ -77,6 +80,10 @@ private:
         bool usingCustomAccent = false;
         juce::String customClickPath;
         juce::String customAccentPath;
+        juce::AudioBuffer<float> preparedRegular;
+        juce::AudioBuffer<float> preparedAccent;
+        juce::var regularInfo;
+        juce::var accentInfo;
         std::uint64_t soundRevision = 0;
     };
 
@@ -92,6 +99,13 @@ private:
     std::atomic<float> volume { 0.5f };
     std::atomic<bool> enabled { false };
     std::atomic<std::uint64_t> practiceState { 0 };
+    // Low bits: 0 idle, 1 running, 2 paused, 3 finished, 4 interrupted;
+    // bit 3 requests an elapsed reset. Upper bits identify each command.
+    std::atomic<std::uint64_t> practiceTimerState { 0 };
+    std::atomic<double> practiceTimerDuration { 0.0 };
+    std::atomic<double> practiceTimerElapsed { 0.0 };
+    std::uint64_t consumedTimerState = 0;
+    double timerElapsed = 0.0;
     std::atomic<std::uint64_t> resetGeneration { 0 };
 
     // Playback state
@@ -117,7 +131,7 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> clickGain { 0.5f };
     
     // Internal helpers
-    void renderBlock(juce::AudioBuffer<float>& buffer, double position, bool active, bool resetClock);
+    void renderBlock(juce::AudioBuffer<float>& buffer, double position, bool active, bool resetClock, int activeSamples = -1);
     void retireClick() noexcept;
     static std::uint64_t packTimeSignature(
         int numerator, int denominator) noexcept;
@@ -138,12 +152,15 @@ private:
     bool loadSoundFromFile(
         const juce::String& filePath,
         double targetSampleRate,
-        juce::AudioBuffer<float>& targetBuffer);
+        juce::AudioBuffer<float>& targetBuffer,
+        juce::var& info);
+    bool setSound(const juce::String& selection, bool accent);
 
     // Control-side writes are serialised independently from publication.
     // The audio thread never acquires either lock.
     mutable juce::CriticalSection clickDataPublicationLock;
-    juce::CriticalSection clickDataMutationLock;
+    mutable juce::CriticalSection clickDataMutationLock;
+    juce::String soundErrors[2];
     std::shared_ptr<const ClickData> clickDataOwner;
     std::atomic<const ClickData*> clickDataForAudio {
         nullptr

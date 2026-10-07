@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "MessageThreadLifetime.h"
+#include "OfflineHostedControl.h"
 
 // Message-thread-owned, non-realtime work. Invalidate queued UI completions
 // first, then join running work while its captured dependencies still exist.
@@ -28,7 +29,9 @@ public:
     void shutdown()
     {
         cancelPending();
-        pool.removeAllJobs(true, -1);
+        while (!pool.removeAllJobs(true, 10))
+            if (juce::MessageManager::getInstance()->isThisTheMessageThread())
+                OfflineHostedControls::instance().drain();
     }
 private:
     MessageThreadLifetime lifetime;

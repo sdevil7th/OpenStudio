@@ -395,7 +395,7 @@ OpenStudioSpectrumDisplay::OpenStudioSpectrumDisplay(OpenStudioEQ& eq) : eqProce
 
 void OpenStudioSpectrumDisplay::timerCallback()
 {
-    auto data = eqProcessor.getSpectrumData();
+    auto data = eqProcessor.getSpectrumData(OpenStudioEQ::fftSize);
     if (data.ready)
     {
         const float smoothing = 0.7f;
@@ -546,7 +546,7 @@ OpenStudioParametricEQGraph::OpenStudioParametricEQGraph(OpenStudioEQ& eq) : eqP
 
 void OpenStudioParametricEQGraph::timerCallback()
 {
-    auto data = eqProcessor.getSpectrumData();
+    auto data = eqProcessor.getSpectrumData(OpenStudioEQ::fftSize);
     if (data.ready)
     {
         const float smoothing = 0.7f;

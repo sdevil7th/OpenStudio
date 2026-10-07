@@ -42,7 +42,9 @@ public:
     void setKey(int rootNote);          // 0=C, 1=C#, ..., 11=B
     void setScale(Scale scale);
     void setRetuneSpeed(float ms);      // 0=instant snap, 400=gentle
-    void setHumanize(float percent);    // 0=robotic, 100=natural
+    void setHumanize(float percent);    // Amount; interpretation follows HumanizeMode.
+    enum class HumanizeMode : int { LegacyAmount = 0, SustainedNotes = 1 };
+    void setHumanizeMode(HumanizeMode mode);
     void setTranspose(int semitones);   // -24 to +24
     void setNoteEnabled(int note, bool enabled); // Per-chromatic-note toggle (0-11)
     void setFormantCorrection(bool on);
@@ -53,6 +55,7 @@ public:
     Scale getScale() const { return static_cast<Scale>(currentScale.load(std::memory_order_relaxed)); }
     float getRetuneSpeed() const { return retuneSpeedMs.load(std::memory_order_relaxed); }
     float getHumanize() const { return humanizePercent.load(std::memory_order_relaxed); }
+    HumanizeMode getHumanizeMode() const { return static_cast<HumanizeMode>(humanizeMode.load(std::memory_order_relaxed)); }
     int getTranspose() const { return transposeSemitones.load(std::memory_order_relaxed); }
     bool isNoteEnabled(int note) const { return noteEnables[note % 12].load(std::memory_order_relaxed); }
     bool getFormantCorrection() const { return formantCorrectionOn.load(std::memory_order_relaxed); }
@@ -92,6 +95,7 @@ private:
     std::atomic<int> currentScale { 0 };  // Scale::Chromatic
     std::atomic<float> retuneSpeedMs { 50.0f };
     std::atomic<float> humanizePercent { 0.0f };
+    std::atomic<int> humanizeMode { 0 }; // Missing old state retains LegacyAmount.
     std::atomic<int> transposeSemitones { 0 };
     std::atomic<float> correctionStrength { 1.0f };
     std::atomic<bool> formantCorrectionOn { false };
@@ -103,6 +107,14 @@ private:
     float currentOutputMidi = 0.0f;
     bool hasLastOutput = false;
     double cachedSampleRate = 44100.0;
+
+    // Callback-owned, allocation-free sustained-note tracking. These are
+    // original timing heuristics, not a model of a commercial pitch corrector.
+    HumanizeMode activeHumanizeMode = HumanizeMode::LegacyAmount;
+    bool hasStableNote = false, hasSustainedCorrection = false;
+    float stableNote = 0, pendingNote = 0, sustainedCorrectionMidi = 0;
+    double stableNoteSeconds = 0, pendingNoteSeconds = 0, unvoicedSeconds = 0;
+    float mapSustainedPitch(float detectedHz, float confidence, float deltaTime);
 
     // Convert between Hz and MIDI note number (fractional)
     static float hzToMidi(float hz);

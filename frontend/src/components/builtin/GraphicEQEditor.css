@@ -1,0 +1,278 @@
+.graphic-eq-editor {
+  container-type: size;
+  container-name: graphic-eq;
+  --suite-accent: #93b6d0;
+  --suite-surface: #1d2b35;
+  --color-daw-panel: #1b2730;
+  --color-daw-dark: #14212a;
+  --color-daw-lighter: #243541;
+  --color-daw-border-light: #3b4f5d;
+  --color-daw-accent: #93b6d0;
+  --color-daw-text: #dce5eb;
+  --color-daw-text-muted: #9db0bf;
+  background: linear-gradient(110deg,#87b6da08,transparent),#1b2730;
+  overflow: auto;
+  color-scheme: dark;
+}
+.graphic-eq-editor :is(button,input,select,[tabindex]):focus-visible {
+  outline: 2px solid var(--color-daw-accent);
+  outline-offset: 2px;
+}
+.graphic-eq-modes {
+  border: 1px solid #3b4f5d;
+  border-radius: 5px;
+  background: #15232c;
+}
+.graphic-eq-modes .eq-button {
+  border: 0;
+  min-height: 28px;
+  font-size: 12px;
+  padding: 4px 12px;
+}
+.graphic-eq-modes .eq-button[aria-pressed=true] {
+  background: #334b5d;
+  color: #e2edf5;
+}
+.graphic-eq-response {
+  flex-basis: 160px;
+  min-height: 100px;
+  max-height: 195px;
+  margin: 0 22px 11px;
+  border: 1px solid #344a59;
+  border-radius: 5px;
+  background: #17252f;
+}
+.graphic-eq-response svg {
+  display: block;
+  width: 100%;
+  height: calc(100% - 16px);
+}
+.graphic-eq-response text {
+  font: 10px 'Segoe UI',sans-serif;
+  fill: var(--color-daw-text-muted);
+}
+.graphic-eq-response .gridline {
+  stroke: #2f4352;
+  stroke-width: .5;
+}
+.graphic-eq-response polyline {
+  fill: none;
+  stroke-width: 1.5;
+}
+.graphic-eq-response .response {
+  stroke: #94c1df;
+  stroke-width: 2;
+}
+.graphic-eq-response .spectrum-pre {
+  stroke: #a1a8ad;
+  opacity: .55;
+}
+.graphic-eq-response .spectrum-post {
+  stroke: #64b5a1;
+  opacity: .75;
+}
+.graphic-eq-pages {
+  display: none;
+}
+.graphic-eq-bands {
+  min-height: 162px;
+  flex-basis: 196px;
+}
+.graphic-eq-band {
+  max-width: 80px;
+  border-radius: 4px;
+  background: linear-gradient(#d7e8f204,transparent);
+}
+.graphic-eq-band:has(.eq-button[aria-pressed=true]) {
+  background: #7facc612;
+}
+.graphic-eq-band .eq-button {
+  min-width: 0;
+  min-height: 28px;
+  padding-inline: 2px;
+  font-size: 11px;
+  border-color: transparent;
+  background: transparent;
+}
+.graphic-eq-band .eq-button[aria-pressed=true] {
+  border-color: #769bb7;
+  background: #7cacc21a;
+}
+.graphic-eq-fader {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  appearance: none;
+  background: transparent;
+  width: 24px;
+  min-height: 74px;
+  touch-action: none;
+}
+.graphic-eq-fader::-webkit-slider-runnable-track {
+  width: 4px;
+  border: 1px solid #3b4f5d;
+  border-radius: 3px;
+  background: #101c25;
+}
+.graphic-eq-fader::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 8px;
+  margin-left: -9px;
+  border: 1px solid #9cb7c9;
+  border-radius: 2px;
+  background: linear-gradient(#b8cdd8,#738e9f);
+  box-shadow: 0 2px 3px #0008;
+}
+.graphic-eq-fader::-moz-range-track {
+  width: 4px;
+  border: 1px solid #3b4f5d;
+  border-radius: 3px;
+  background: #101c25;
+}
+.graphic-eq-fader::-moz-range-thumb {
+  width: 20px;
+  height: 8px;
+  border: 1px solid #9cb7c9;
+  border-radius: 2px;
+  background: #9eb8c8;
+}
+.graphic-eq-value,.graphic-eq-offset {
+  width: 46px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-daw-text);
+  text-align: center;
+  font-size: 11px;
+  appearance: textfield;
+}
+.graphic-eq-value:hover,.graphic-eq-value:focus,.graphic-eq-offset {
+  border-color: #3b4f5d;
+  background: #14212a;
+}
+.graphic-eq-offset {
+  width: 52px;
+}
+.graphic-eq-value::-webkit-inner-spin-button,.graphic-eq-offset::-webkit-inner-spin-button {
+  appearance: none;
+}
+.graphic-eq-group {
+  margin: 0 22px;
+  border: 1px solid #344a59;
+  border-radius: 4px;
+  background: #1f303c;
+}
+.graphic-eq-footer {
+  margin: 10px 22px 0;
+  border-top: 1px solid #344a59;
+  min-height: 100px;
+}
+.graphic-eq-footer .suite-knob {
+  width: 44px;
+  height: 44px;
+}
+.graphic-eq-footer .suite-parameter>span:first-child {
+  font-size: 11px;
+}
+.graphic-eq-footer .suite-value {
+  width: 61px;
+  font-size: 16px;
+}
+@container graphic-eq (min-width:901px) {
+  .graphic-eq-editor[data-mode="31"] .graphic-eq-value {
+    width: 28px;
+    min-height: 26px;
+    font-size: 10px;
+  }
+  .graphic-eq-editor[data-mode="31"] .graphic-eq-band .eq-button {
+    font-size: 9px;
+    letter-spacing: -.3px;
+  }
+  .graphic-eq-editor[data-mode="31"] .graphic-eq-fader {
+    width: 22px;
+  }
+}
+@container graphic-eq (max-width:900px) {
+  .graphic-eq-pages {
+    display: flex;
+  }
+  .graphic-eq-editor[data-mode="31"][data-page="0"] .graphic-eq-band:not([data-page="0"]),.graphic-eq-editor[data-mode="31"][data-page="1"] .graphic-eq-band:not([data-page="1"]),.graphic-eq-editor[data-mode="31"][data-page="2"] .graphic-eq-band:not([data-page="2"]) {
+    display: none;
+  }
+  .graphic-eq-heading {
+    padding: 10px 14px;
+    gap: 8px;
+  }
+  .graphic-eq-response {
+    margin-inline: 14px;
+  }
+  .graphic-eq-bands {
+    padding-inline: 14px;
+    gap: 6px;
+  }
+  .graphic-eq-group,.graphic-eq-footer {
+    margin-inline: 14px;
+  }
+}
+@container graphic-eq (max-height:560px) {
+  .graphic-eq-heading {
+    padding-block: 7px;
+  }
+  .graphic-eq-response {
+    min-height: 77px;
+    flex-basis: 85px;
+    margin-bottom: 5px;
+    padding-top: 5px;
+  }
+  .graphic-eq-bands {
+    min-height: 118px;
+    flex-basis: 135px;
+    padding-bottom: 5px;
+  }
+  .graphic-eq-value {
+    min-height: 24px;
+  }
+  .graphic-eq-fader {
+    min-height: 52px;
+  }
+  .graphic-eq-band {
+    gap: 3px;
+  }
+  .graphic-eq-pages [role=tab] {
+    min-height: 28px;
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+  .graphic-eq-group {
+    padding: 5px 8px;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .graphic-eq-group .eq-button {
+    min-height: 28px;
+  }
+  .graphic-eq-footer {
+    min-height: 53px;
+    margin-top: 7px;
+    padding: 7px 4px;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .graphic-eq-footer .suite-parameter {
+    flex-direction: row;
+    gap: 5px;
+  }
+  .graphic-eq-footer .suite-knob {
+    width: 30px;
+    height: 30px;
+  }
+  .graphic-eq-footer .suite-value {
+    width: 48px;
+    font-size: 14px;
+  }
+  .graphic-eq-footer .suite-button {
+    font-size: 11px;
+    padding-inline: 7px;
+  }
+}

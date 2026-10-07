@@ -1,4 +1,5 @@
 #include "BuiltInEffects2.h"
+#include "BuiltInInstrumentTail.h"
 #include "CrashDiagnostics.h"
 #include "NAMModelSafety.h"
 #include "OpenStudioPluginEditors.h"
@@ -2161,12 +2162,26 @@ namespace
 //  OpenStudioDelay
 // ============================================================================
 
-OpenStudioDelay::OpenStudioDelay(float maximumSupportedDelaySeconds)
+OpenStudioDelay::OpenStudioDelay(float maximumSupportedDelaySeconds, bool standalone)
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      standaloneControls(standalone),
       maximumDelaySeconds(juce::jlimit(0.1f, 30.0f, maximumSupportedDelaySeconds))
 {
+    if(standaloneControls)extendedModesEnabled=true;
+}
+
+bool OpenStudioDelay::setStandaloneControl(const juce::String& id,float value) noexcept
+{
+    if(!standaloneControls||!std::isfinite(value))return false;
+    for(const auto& control:standaloneParameters)if(id==control.id)
+    {
+        (this->*control.member).store(juce::jlimit(control.minimum,control.maximum,value));
+        if(id=="customMotion"||id=="wowDepthMs")wowDepthMs.store(customMotion.load()>=.5f?standaloneWowDepth.load():-1.0f);
+        return true;
+    }
+    return false;
 }
 
 void OpenStudioDelay::publishTempoBpmFromAudioCallback(double bpm) noexcept
@@ -2218,9 +2233,11 @@ void OpenStudioDelay::prepareToPlay(double sampleRate, int samplesPerBlock)
     // first legal callback publishes BPM, tail planning must take the 10 BPM
     // worst case and read heads use a disposable 120 BPM provisional value.
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    editorTempoBpm.store(0.0f, std::memory_order_relaxed);
     cachedSampleRate = sampleRate;
     maxDelaySamples = juce::jmax(2, juce::roundToInt(
         maximumDelaySeconds * static_cast<float>(juce::jmax(1.0, sampleRate))) + 4);
+    if (standaloneControls) wetDiffusion.prepare(sampleRate, diffusionAmount.load(), diffusionSpanMs.load());
     delayLineL.setMaximumDelayInSamples(maxDelaySamples);
     delayLineR.setMaximumDelayInSamples(maxDelaySamples);
     if (extendedModesEnabled)
@@ -2587,6 +2604,8 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     if (numChannels < 1 || numSamples == 0)
         return;
 
+    if (standaloneControls) wetDiffusion.configure(diffusionAmount.load(), diffusionSpanMs.load());
+
     const float currentLPFFreq = loadDelayParameter(
         lpfFreq, 200.0f, 20000.0f, 20000.0f);
     const float currentHPFFreq = loadDelayParameter(
@@ -2668,6 +2687,7 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             && previouslyPublishedBpm >= 10.0f
         ? static_cast<double>(previouslyPublishedBpm)
         : 120.0;
+    bool currentHostTempo = false;
     if (auto* ph = getPlayHead())
     {
         const auto pos = ph->getPosition();
@@ -2679,6 +2699,7 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 {
                     bpm = juce::jlimit(10.0, 300.0, *bpmVal);
                     publishTempoBpmFromAudioCallback(bpm);
+                    currentHostTempo = true;
                 }
             }
         }
@@ -2713,6 +2734,10 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         static_cast<float>(maxDelaySamples - 1),
         static_cast<float>(
             delayMsR * 0.001 * cachedSampleRate));
+    effectiveDelayMsL.store(static_cast<float>(delaySamplesL * 1000.0 / cachedSampleRate), std::memory_order_relaxed);
+    effectiveDelayMsR.store(static_cast<float>(delaySamplesR * 1000.0 / cachedSampleRate), std::memory_order_relaxed);
+    editorTempoBpm.store(static_cast<float>(bpm), std::memory_order_relaxed);
+    editorTempoSource.store(currentHostTempo ? 1 : previouslyPublishedBpm >= 10.0f ? 2 : 0, std::memory_order_relaxed);
     const bool historyIsEmpty = validHistorySamples <= 0
         && (! extendedModesEnabled
             || secondaryValidHistorySamples <= 0);
@@ -3618,6 +3643,7 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         float wetR = delayedR * baseAmount
             + multiDelayedR * multiAmount
             + dualWetR * dualAmount;
+        if (standaloneControls) wetDiffusion.process(wetL, wetR);
         if (dataR)
         {
             const float mid = (wetL + wetR) * 0.5f;
@@ -3662,11 +3688,13 @@ void OpenStudioDelay::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 void OpenStudioDelay::reset()
 {
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    editorTempoBpm.store(0.0f, std::memory_order_relaxed);
     resetTailState();
 }
 
 void OpenStudioDelay::resetTailState() noexcept
 {
+    if (standaloneControls) wetDiffusion.reset(diffusionAmount.load(), diffusionSpanMs.load());
     // Rack tail completion runs from the realtime callback. Physically clearing
     // four long DelayLine buffers here would touch tens of megabytes in one
     // callback. Logical history invalidation below makes every stale sample
@@ -3963,7 +3991,9 @@ void OpenStudioDelay::resetRackRuntimeMixState(
 
 void OpenStudioDelay::releaseResources()
 {
+    if (standaloneControls) wetDiffusion.reset(diffusionAmount.load(), diffusionSpanMs.load());
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
+    editorTempoBpm.store(0.0f, std::memory_order_relaxed);
     delayLineL.reset();
     delayLineR.reset();
     if (extendedModesEnabled)
@@ -4257,7 +4287,10 @@ double OpenStudioDelay::getTailLengthSeconds() const
                + 1.0 / juce::jmax(1.0, cachedSampleRate))
               * juce::jmax(1.0, tailIntervals)
         : 0.0;
-    return juce::jmax(requestedTail, publishedLiveTail);
+    const double diffusionTail = standaloneControls && (requestedMix > .0001f || publishedLiveTail > 0)
+        ? juce::jmax(wetDiffusion.tailSeconds(), loadDelayParameter(diffusionAmount, 0, 1, 0) > 0
+            ? .06 * loadDelayParameter(diffusionSpanMs, 5, 200, 40) : 0.0) : 0.0;
+    return juce::jmax(requestedTail, publishedLiveTail) + diffusionTail;
 }
 
 void OpenStudioDelay::getStateInformation(juce::MemoryBlock& destData)
@@ -4283,6 +4316,14 @@ void OpenStudioDelay::getStateInformation(juce::MemoryBlock& destData)
                                       delayMode, 0.0f, 2.0f, 0.0f) },
         { "ducking",      loadDelayParameter(ducking, 0.0f, 1.0f, 0.0f) }
     });
+    if(standaloneControls)
+    {
+        auto state=loadParamsFromMemory(destData.getData(),static_cast<int>(destData.getSize()),"OpenStudioDelay");
+        state.setProperty("standaloneControls",true,nullptr);
+        for(const auto& control:standaloneParameters)state.setProperty(control.id,loadDelayParameter(this->*control.member,control.minimum,control.maximum,control.initial),nullptr);
+        destData.reset();juce::MemoryOutputStream stream(destData,false);state.writeToStream(stream);
+    }
+
 }
 
 void OpenStudioDelay::setStateInformation(const void* data, int sizeInBytes)
@@ -4326,6 +4367,14 @@ void OpenStudioDelay::setStateInformation(const void* data, int sizeInBytes)
               static_cast<int>(std::floor(restoredMode + 0.5f)))
         : restoredMode;
     ducking = restored("ducking", 0.0f, 1.0f, 0.0f);
+    if(standaloneControls)
+    {
+        const bool modern=static_cast<bool>(tree.getProperty("standaloneControls",false));
+        if(!modern)delayMode.store(std::floor(restored("delayMode",0,2,0)));
+        for(const auto& control:standaloneParameters)(this->*control.member).store(restored(control.id,control.minimum,control.maximum,control.initial));
+        wowDepthMs.store(customMotion.load()>=.5f?standaloneWowDepth.load():-1.0f);
+    }
+
 }
 
 bool OpenStudioDelay::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -4571,11 +4620,95 @@ float OpenStudioOctaveShimmerShifter::processSample(
 //  OpenStudioReverb
 // ============================================================================
 
-OpenStudioReverb::OpenStudioReverb()
+OpenStudioReverb::OpenStudioReverb(bool standalone)
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("IR cross paths", juce::AudioChannelSet::stereo(), standalone)),
+      standaloneBanking(standalone)
 {
+    if(standaloneBanking)retroSpace=std::make_unique<BuiltInRetroReverb>();
+    for(size_t i=0;i<modalControls.size();++i)modalControls[i].store(BuiltInModalPlate::defaults[i]);
+    for(size_t i=0;i<modalMaterialControls.size();++i)modalMaterialControls[i].store(BuiltInModalPlate::materialDefaults[i]);
+    for(size_t i=0;i<plateColourControls.size();++i)plateColourControls[i].store(plateColourDefaults[i]);
+    if (standaloneBanking) { convolutionSpace.selectDefault(); shimmerVoiceEngine.store(1.0f); plateEngine.store(1.0f); for (auto& engine : studioEngines) engine.store(1.0f); }
+    const auto controls = bankControls();
+    for (auto& bank : typeBanks)
+        for (size_t i = 0; i < controls.size(); ++i) bank[i].store(controls[i]->load());
+    typeBanks[5][9].store(0.5f);
+    for(size_t i=0;i<springControls.size();++i)springControls[i].store(springDefaults[i]);
+    for(auto& bank:studioToneControls)for(size_t field=0;field<bank.size();++field)bank[field].store(studioToneDefaults[field]);
+    for(size_t field=0;field<plateToneControls.size();++field)plateToneControls[field].store(studioToneDefaults[field]);
+    for(auto& bank:clearControls)for(size_t field=0;field<bank.size();++field)bank[field].store(clearDefaults[field]);
+    for(auto& bank:retroControls)for(size_t field=0;field<bank.size();++field)bank[field].store(BuiltInRetroReverb::defaults[field]);
+    for (auto& bank : driftingControls) for (size_t i = 0; i < bank.size(); ++i) bank[i].store(driftingDefaults[i]);
+    for(auto& bank:ambientControls)for(size_t i=0;i<bank.size();++i)bank[i].store(ambientDefaults[i]);
+    for(auto& bank:echoRoomControls)for(size_t i=0;i<bank.size();++i)bank[i].store(echoRoomDefaults[i]);
+    for(auto& bank:spatialControls)for(size_t i=0;i<bank.size();++i)bank[i].store(spatialDefaults[i]);
+    for (int bank = originalTypeCount; bank < standaloneTypeCount; ++bank)
+        for (int control = 0; control < bankControlCount; ++control)
+            typeBanks[static_cast<size_t>(bank)][static_cast<size_t>(control)].store(bankDefault(bank, control));
+}
+
+float OpenStudioReverb::bankDefault(int bank, int control) noexcept
+{
+    if(bank>=24&&bank<=26){if(control==7)return bank==24?2.2f:bank==25?1.0f:1.8f;if(control==3)return bank==25?.5f:.8f;}
+    if (bank >= 21 && bank <= 23) { if (control == 7) return bank == 21 ? 3.5f : bank == 22 ? 1.2f : 2.5f; if (control == 3) return bank == 22 ? .4f : .7f; }
+    if(bank>=17&&bank<=20){if(control==7){constexpr std::array<float,4> seconds{4,6,10,3};return seconds[static_cast<size_t>(bank-17)];}if(control==3&&bank>=18)return .7f;}
+    if(bank==12){if(control==0)return .35f;if(control==3)return .6f;if(control==7)return 1.2f;}
+    if(bank==13){if(control==0)return .65f;if(control==3)return .75f;if(control==7)return 3.5f;}
+    if(bank==14){if(control==3)return .75f;}
+    if (bank == 8) { if (control == 2) return 25; if (control == 3) return .8f; if (control == 7) return 6; }
+    if (bank == 9) { if (control == 3) return .35f; if (control == 6) return .8f; if (control == 7) return .35f; }
+    return control == 9 ? (bank == 5 ? .5f : 0.0f) : bankDefaults[static_cast<size_t>(control)];
+}
+
+std::array<std::atomic<float>*, OpenStudioReverb::bankControlCount> OpenStudioReverb::bankControls()
+{
+    return { &roomSize, &damping, &preDelay, &diffusion, &lowCut, &highCut, &earlyLevel, &decayTime, &freezeMode, &shimmerAmount,
+        &shimmerPitchA, &shimmerPitchB, &shimmerVoiceMix, &nonlinearShape };
+}
+
+float OpenStudioReverb::getBankValue(int bank, int control)
+{
+    if (bank == static_cast<int>(algorithm.load())) return bankControls()[static_cast<size_t>(control)]->load();
+    return typeBanks[static_cast<size_t>(bank)][static_cast<size_t>(control)].load();
+}
+
+void OpenStudioReverb::setBankValue(int bank, int control, float value)
+{
+    typeBanks[static_cast<size_t>(bank)][static_cast<size_t>(control)].store(value);
+    if (bank == static_cast<int>(algorithm.load())) bankControls()[static_cast<size_t>(control)]->store(value);
+}
+
+void OpenStudioReverb::selectAlgorithm(int index)
+{
+    const int next = juce::jlimit(0, standaloneBanking ? standaloneTypeCount - 1 : 3, index);
+    const int previous = juce::jlimit(0, standaloneBanking ? standaloneTypeCount - 1 : 3, static_cast<int>(algorithm.load()));
+    if (next == previous) return;
+    if (standaloneBanking)
+    {
+        const auto controls = bankControls();
+        for (size_t i = 0; i < controls.size(); ++i)
+        {
+            typeBanks[static_cast<size_t>(previous)][i].store(controls[i]->load());
+            controls[i]->store(typeBanks[static_cast<size_t>(next)][i].load());
+        }
+    }
+    if (standaloneBanking && next == 6) decayTime.store(juce::jlimit(0.1f, 2.0f, decayTime.load()));
+    algorithm.store(static_cast<float>(next));
+}
+
+void OpenStudioReverb::selectSendMode(bool send)
+{
+    if (send == (sendMode.load() >= 0.5f)) return;
+    if (send)
+    {
+        insertWet.store(wetLevel.load()); insertDry.store(dryLevel.load());
+        wetLevel.store(1.0f); dryLevel.store(0.0f);
+    }
+    else { wetLevel.store(insertWet.load()); dryLevel.store(insertDry.load()); }
+    sendMode.store(send ? 1.0f : 0.0f);
 }
 
 void OpenStudioReverb::calculateV4TankDelaySamples(
@@ -4670,8 +4803,85 @@ void OpenStudioReverb::invalidateV3PadState() noexcept
     lastV3PadReturnRms.store(0.0f, std::memory_order_relaxed);
 }
 
+bool OpenStudioReverb::setSpatialDelayCapacity(size_t index,float value)
+{
+    if(!standaloneBanking||index>=spatialDelayCapacity.size()||!std::isfinite(value))return false;
+    const float next=static_cast<float>(juce::jlimit(0,2,juce::roundToInt(value)));if(next==spatialDelayCapacity[index].load())return true;
+    if(spatialSpace.ready())spatialSpace.setCapacity(index,next);spatialDelayCapacity[index].store(next);return true;
+}
+
+bool OpenStudioReverb::setPredelayCapacity(float value)
+{
+    if(!standaloneBanking || !std::isfinite(value))return false;
+    const float next=static_cast<float>(juce::jlimit(0,2,juce::roundToInt(value)));
+    if(next==predelayCapacity.load())return true;
+    if(workflow.ready()){workflow.prepare(cachedSampleRate,next);convolutionCrossWorkflow.prepare(cachedSampleRate,next);}
+    predelayCapacity.store(next);return true;
+}
+
+std::array<float,BuiltInModalPlate::controlCount> OpenStudioReverb::modalSettings() const noexcept
+{
+    std::array<float,BuiltInModalPlate::controlCount> values{};for(size_t i=0;i<values.size();++i)values[i]=modalControls[i].load();return values;
+}
+bool OpenStudioReverb::setModalControl(size_t index,float value)
+{
+    if(!standaloneBanking||index>=modalControls.size()||!std::isfinite(value))return false;
+    const float next=juce::jlimit(BuiltInModalPlate::minima[index],BuiltInModalPlate::maxima[index],index==4?std::round(value):value);
+    if(next==modalControls[index].load())return true;auto values=modalSettings();values[index]=next;
+    if(modalPlate.ready())modalPlate.prepare(cachedSampleRate,values,algorithm.load()==2&&plateEngine.load()>=1.5f,modalMaterialSettings());
+    modalControls[index].store(next);return true;
+}
+
+BuiltInModalPlate::Material OpenStudioReverb::modalMaterialSettings() const noexcept
+{
+    BuiltInModalPlate::Material values{};for(size_t i=0;i<values.size();++i)values[i]=modalMaterialControls[i].load();return values;
+}
+bool OpenStudioReverb::setModalMaterialControl(size_t index,float value)
+{
+    if(!standaloneBanking||index>=modalMaterialControls.size()||!std::isfinite(value))return false;
+    const float next=juce::jlimit(BuiltInModalPlate::materialMinima[index],BuiltInModalPlate::materialMaxima[index],index==0?std::round(value):value);
+    if(next==modalMaterialControls[index].load())return true;auto values=modalMaterialSettings();values[index]=next;
+    if(modalPlate.ready())modalPlate.prepare(cachedSampleRate,modalSettings(),algorithm.load()==2&&plateEngine.load()>=1.5f,values);
+    modalMaterialControls[index].store(next);return true;
+}
+
 void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    workflowSampleRate.store(static_cast<float>(sampleRate));
+    retiringReverbTailSeconds.store(0);
+    peakHold.reset();
+    reconstructedPeakMeter.reset();
+    for(auto& peak:inputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    for(auto& peak:outputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    if (standaloneBanking)
+    {
+        additionalSpaces.prepare(sampleRate, static_cast<int>(algorithm.load()));
+        plateColour.prepare(sampleRate);
+        springSpace.prepare(sampleRate);
+        echoRoom.prepare(sampleRate,isEchoRoom()?static_cast<int>(echoRoomSlot()):-1);
+        ambientSpace.prepare(sampleRate,isAmbientSpace()?static_cast<int>(ambientSlot()):-1);
+        modalPlate.prepare(sampleRate,modalSettings(),algorithm.load()==2&&plateEngine.load()>=1.5f,modalMaterialSettings());
+        plateSpace.prepare(sampleRate, algorithm.load() == 2 && plateEngine.load() >= .5f && plateEngine.load() < 1.5f ? juce::jlimit(0, 2, juce::roundToInt(plateCharacter.load())) : -1);
+        studioSpace.prepare(sampleRate, isStudioSpace() && studioEngines[studioSlot()].load() >= .5f ? studioTopology() : -1);
+        vintageSpace.prepare(sampleRate, isVintageSpace() ? static_cast<int>(vintageSlot()) : -1);
+        driftingSpace.prepare(sampleRate, isDriftingSpace() ? static_cast<int>(driftingSlot()) : -1);
+        clearSpace.prepare(sampleRate,isClearSpace()?static_cast<int>(clearSlot()):-1);
+        retroSpace->prepare(sampleRate,isRetroSpace()?static_cast<int>(retroSlot()):-1);
+        spatialSpace.prepare(sampleRate,isSpatialSpace()?static_cast<int>(spatialSlot()):-1,{spatialDelayCapacity[0].load(),spatialDelayCapacity[1].load(),spatialDelayCapacity[2].load()});
+        workflow.prepare(sampleRate, predelayCapacity.load());
+        convolutionCrossWorkflow.prepare(sampleRate, predelayCapacity.load());
+        workflowReduction.store(0);
+        additionalDry.setSize(2, juce::jmax(1, samplesPerBlock));
+        convolutionWet.setSize(4, juce::jmax(1, samplesPerBlock));
+        convolutionSpace.prepare(sampleRate, samplesPerBlock);
+        convolutionMotion.prepare(sampleRate);convolutionExtension.prepare(sampleRate);
+        convolutionCrossMotion.prepare(sampleRate);convolutionCrossExtension.prepare(sampleRate);
+        convolutionWeight.reset(sampleRate, .05);
+        convolutionWeight.setCurrentAndTargetValue(algorithm.load() == 7 ? 1.0f : 0.0f);
+        convolutionRetirement.prepare(sampleRate,algorithm.load()==7?0:-1);
+        convolutionOuterSettings={enginePredelay(),lowCut.load(),highCut.load(),width.load(),irModDepth.load(),irModRate.load(),irExtensionControls[0].load(),irExtensionControls[1].load(),irExtensionControls[2].load(),irExtensionControls[3].load(),irExtensionControls[4].load(),irExtensionControls[5].load()};
+    }
+
     cachedSampleRate = sampleRate;
     smoothedWetLevel.reset(sampleRate, 0.02);
     smoothedDryLevel.reset(sampleRate, 0.02);
@@ -4748,7 +4958,7 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
         juce::jlimit(
             0.0f,
             500.0f,
-            preDelay.load(std::memory_order_relaxed))
+            enginePredelay())
         * 0.001f
         * static_cast<float>(
             juce::jmax(1.0, sampleRate));
@@ -5426,7 +5636,7 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
         juce::jlimit(
             0.0f,
             500.0f,
-            preDelay.load(std::memory_order_relaxed))
+            enginePredelay())
         * 0.001f * safeSampleRate;
     const float initialLowCutHz =
         juce::jlimit(
@@ -5539,6 +5749,169 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    if (!standaloneBanking || additionalDry.getNumSamples() == 0)
+    {
+        processSelectedEngine(buffer, midi);
+        return;
+    }
+    juce::ScopedNoDenormals noDenormals;
+    const int channels = juce::jmin(getMainBusNumOutputChannels(), buffer.getNumChannels());
+    if (channels == 0) return;
+    // Standalone telemetry only; the embedded NAM return above remains unchanged.
+    const int meterSamples=buffer.getNumSamples();
+    peakHold.beginBlock();
+    reconstructedPeakMeter.beginBlock(reconstructedPeaks.load(std::memory_order_relaxed) >= .5f);
+    reconstructedPeakMeter.process(buffer, false);
+    for(int channel=0;channel<2;++channel)
+    {
+        const float db=juce::Decibels::gainToDecibels(meterSamples>0?buffer.getMagnitude(juce::jmin(channel,channels-1),0,meterSamples):0.0f,-100.0f);
+        inputPeaksDb[static_cast<size_t>(channel)].store(db,std::memory_order_relaxed);peakHold.add(false,static_cast<size_t>(channel),db);
+    }
+    const juce::ScopeGuard publishOutputPeaks { [&] {
+        reconstructedPeakMeter.process(buffer, true);
+        for(int channel=0;channel<2;++channel)
+        {
+            const float db=juce::Decibels::gainToDecibels(meterSamples>0?buffer.getMagnitude(juce::jmin(channel,channels-1),0,meterSamples):0.0f,-100.0f);
+            outputPeaksDb[static_cast<size_t>(channel)].store(db,std::memory_order_relaxed);peakHold.add(true,static_cast<size_t>(channel),db);
+        }
+    } };
+    if (auto* playhead = getPlayHead())
+        if (const auto position = playhead->getPosition())
+            if (const auto bpm = position->getBpm(); bpm && std::isfinite(*bpm)) workflowTempo.store(juce::jlimit(10.0f,300.0f,static_cast<float>(*bpm)));
+    workflow.configure(!isSpatialSpace() && predelaySync.load() >= .5f, effectivePredelay(), wetDuckDepth.load(), wetDuckThreshold.load(), wetDuckRelease.load());
+    convolutionCrossWorkflow.configure(!isSpatialSpace() && predelaySync.load() >= .5f, effectivePredelay(), wetDuckDepth.load(), wetDuckThreshold.load(), wetDuckRelease.load());
+    const bool convolutionSelected=algorithm.load()==7, spillover=tailSpillover.load()>=.5f;
+    convolutionWeight.setTargetValue(convolutionSelected ? 1.0f : 0.0f);
+    if(convolutionSelected||!spillover)convolutionOuterSettings={enginePredelay(),lowCut.load(),highCut.load(),width.load(),irModDepth.load(),irModRate.load(),irExtensionControls[0].load(),irExtensionControls[1].load(),irExtensionControls[2].load(),irExtensionControls[3].load(),irExtensionControls[4].load(),irExtensionControls[5].load()};
+    const std::array<float,6> extensionSettings{convolutionOuterSettings[6],convolutionOuterSettings[7],convolutionOuterSettings[8],convolutionOuterSettings[9],convolutionOuterSettings[10],convolutionOuterSettings[11]};
+    convolutionExtension.configure(extensionSettings,convolutionOuterSettings[3]);
+    convolutionCrossExtension.configure(extensionSettings,convolutionOuterSettings[3]);
+    convolutionRetirement.configure(0,convolutionSelected,spillover,convolutionSpace.tail()+BuiltInConvolutionExtension::tailSeconds(extensionSettings)+1.5+4.0*additionalDry.getNumSamples()/cachedSampleRate);
+    const auto& pc=plateColourControls;
+    modalPlate.configure(algorithm.load()==2&&plateEngine.load()>=1.5f,{decayTime.load(),damping.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+    plateSpace.configure(algorithm.load() == 2 && plateEngine.load() >= .5f && plateEngine.load() < 1.5f ? juce::jlimit(0, 2, juce::roundToInt(plateCharacter.load())) : -1,
+        { decayTime.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
+          width.load(), plateModulation.load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(plateToneControls[0].load()), plateToneControls[1].load(), plateToneControls[2].load()>=.5f }, tailSpillover.load() >= .5f );
+    plateColour.configure({pc[0].load(),pc[1].load(),pc[2].load(),pc[3].load(),pc[4].load(),pc[5].load(),pc[6].load(),pc[7].load(),pc[8].load(),pc[9].load()},(algorithm.load()==2&&plateEngine.load()>=.5f)||(tailSpillover.load()>=.5f&&(plateSpace.retiringTailSeconds()>0||modalPlate.retiringTailSeconds()>0)));
+    studioSpace.configure(isStudioSpace() && studioEngines[studioSlot()].load() >= .5f ? studioTopology() : -1,
+        { decayTime.load(), roomSize.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
+          earlyLevel.load(), width.load(), studioModulation[studioSlot()].load(), studioBassRatio[studioSlot()].load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(studioToneControls[studioSlot()][0].load()), studioToneControls[studioSlot()][1].load(), studioToneControls[studioSlot()][2].load()>=.5f }, tailSpillover.load() >= .5f );
+    vintageSpace.configure(isVintageSpace() ? static_cast<int>(vintageSlot()) : -1,
+        { decayTime.load(), roomSize.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
+          width.load(), vintageColour[vintageSlot()].load(), vintageModulation[vintageSlot()].load(), vintageRate[vintageSlot()].load(), vintageBassRatio[vintageSlot()].load(), vintageBassFrequency[vintageSlot()].load(), vintageConversion[vintageSlot()].load(), vintageBuildUp[vintageSlot()].load(), vintageInputDiffusion[vintageSlot()].load(), vintageTankRate[vintageSlot()].load() }, tailSpillover.load() >= .5f );
+    const auto& retro=retroControls[retroSlot()];
+    retroSpace->configure(isRetroSpace()?static_cast<int>(retroSlot()):-1,
+        {roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),earlyLevel.load(),
+         retro[0].load(),retro[1].load(),retro[2].load(),retro[3].load(),retro[4].load(),retro[5].load(),retro[6].load(),retro[7].load(),retro[8].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+    const auto& clear=clearControls[clearSlot()];
+    clearSpace.configure(isClearSpace()?static_cast<int>(clearSlot()):-1,
+        {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),earlyLevel.load(),
+            clear[0].load(),clear[1].load(),clear[2].load(),clear[3].load(),clear[4].load(),clear[5].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+    const auto& drift = driftingControls[driftingSlot()];
+    driftingSpace.configure(isDriftingSpace() ? static_cast<int>(driftingSlot()) : -1,
+        {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),
+            drift[0].load(),drift[1].load(),drift[2].load(),drift[3].load(),drift[4].load(),drift[5].load(),drift[6].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+    const auto& amb=ambientControls[ambientSlot()];
+    ambientSpace.configure(isAmbientSpace()?static_cast<int>(ambientSlot()):-1,{ambientSlot()==2?amb[8].load():decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),amb[0].load(),amb[1].load(),amb[2].load(),amb[3].load(),amb[4].load(),amb[5].load(),amb[6].load(),amb[7].load(),amb[9].load(),amb[10].load()}, tailSpillover.load()>=.5f);
+    const auto& er=echoRoomControls[echoRoomSlot()];
+    echoRoom.configure(isEchoRoom()?static_cast<int>(echoRoomSlot()):-1,{roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),er[0].load(),er[1].load(),er[2].load(),er[3].load(),er[4].load(),er[5].load(),er[6].load(),er[7].load(),(echoRoomSlot()==0?magneticHold.load():positionedHold.load())>=.5f,holdAcceptsInput()}, tailSpillover.load()>=.5f);
+    const auto& spatial=spatialControls[spatialSlot()];
+    spatialSpace.configure(isSpatialSpace()?static_cast<int>(spatialSlot()):-1,
+        {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),effectivePredelay(),spatial[1].load(),lowCut.load(),highCut.load(),width.load(),spatial[4].load(),spatial[5].load(),spatial[6].load(),spatial[7].load(),freezeMode.load()>=.5f,holdAcceptsInput(),spatialLowShelf[spatialSlot()].load()}, tailSpillover.load()>=.5f);
+    const auto& sp=springControls;
+    const bool dispersiveSpring=algorithm.load()==4&&sp[0].load()>=.5f;
+    springSpace.configure(dispersiveSpring,{decayTime.load(),damping.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),sp[1].load()+1,sp[2].load(),sp[3].load(),sp[4].load(),sp[5].load(),sp[6].load(),springHold.load()>=.5f,holdAcceptsInput()}, tailSpillover.load()>=.5f);
+    additionalSpaces.configure(dispersiveSpring?-1:static_cast<int>(algorithm.load()), { decayTime.load(), roomSize.load(), damping.load(),
+        diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(), shimmerAmount.load(), width.load(),
+        shimmerPitchA.load(), shimmerPitchB.load(), shimmerVoiceMix.load(), nonlinearShape.load(), shimmerVoiceEngine.load(),
+        creativeControls[0].load(), creativeControls[1].load(), creativeControls[2].load(), creativeControls[3].load(), creativeControls[4].load(), shimmerHold.load() >= .5f, holdAcceptsInput(), nonlinearModulation.load(), nonlinearRate.load(), nonlinearHold.load()>=.5f },tailSpillover.load()>=.5f);
+    for (int start = 0; start < buffer.getNumSamples(); start += additionalDry.getNumSamples())
+    {
+        const int count = juce::jmin(additionalDry.getNumSamples(), buffer.getNumSamples() - start);
+        float* pointers[2] {};
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            additionalDry.copyFrom(ch, 0, buffer, ch, start, count);
+            pointers[ch] = buffer.getWritePointer(ch, start);
+        }
+        juce::AudioBuffer<float> segment(pointers, channels, count);
+        auto dryRamp = smoothedDryLevel;
+        dryRamp.setTargetValue(juce::jlimit(0.0f,1.0f,dryLevel.load()));
+        const float legacyDryStart = dryRamp.getCurrentValue();
+        auto endRamp = dryRamp; const float legacyDryEnd = endRamp.skip(count);
+        processSelectedEngine(segment, midi);
+        for (int ch = 0; ch < 2; ++ch) convolutionWet.copyFrom(ch, 0, additionalDry, juce::jmin(ch, channels - 1), 0, count);
+        float* convPointers[] = { convolutionWet.getWritePointer(0), convolutionWet.getWritePointer(1), convolutionWet.getWritePointer(2), convolutionWet.getWritePointer(3) };
+        juce::AudioBuffer<float> convSegment(convPointers, 4, count);
+        juce::AudioBuffer<float> crossSegment(convPointers + 2, 2, count);
+        const bool convolutionWasAwake=!convolutionSpace.isDormant();
+        convolutionSpace.process(convSegment,convolutionOuterSettings[0],convolutionOuterSettings[1],convolutionOuterSettings[2],convolutionOuterSettings[3],convolutionSelected);
+        const bool extensionWasAwake=convolutionExtension.isDraining();
+        if(convolutionSelected||convolutionWasAwake||extensionWasAwake)convolutionExtension.process(convSegment);
+        if(convolutionSelected||convolutionWasAwake||extensionWasAwake||convolutionMotion.isDraining()){convolutionMotion.configure(convolutionOuterSettings[4],convolutionOuterSettings[5]);convolutionMotion.process(convSegment);}
+        const bool crossExtensionWasAwake=convolutionCrossExtension.isDraining();
+        if(convolutionSelected||convolutionWasAwake||crossExtensionWasAwake)convolutionCrossExtension.process(crossSegment);
+        if(convolutionSelected||convolutionWasAwake||crossExtensionWasAwake||convolutionCrossMotion.isDraining())
+        {convolutionCrossMotion.configure(convolutionOuterSettings[4],convolutionOuterSettings[5]);convolutionCrossMotion.process(crossSegment);}
+        const float wet = juce::jlimit(0.0f, 1.0f, wetLevel.load());
+        const float dry = juce::jlimit(0.0f, 1.0f, dryLevel.load());
+        for (int i = 0; i < count; ++i)
+        {
+            const float left = additionalDry.getSample(0, i), right = additionalDry.getSample(channels - 1, i);
+            auto extra = additionalSpaces.process(left, right);
+            const auto spring=springSpace.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=spring[channel];
+            const auto echoes=echoRoom.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=echoes[channel];
+            const auto ambient=ambientSpace.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=ambient[channel];
+            const auto plateDry=plateColour.input({left,right});const auto plateInput=plateColour.pre(plateDry);
+            auto plate = plateSpace.process(plateInput[0],plateInput[1]);const auto modal=modalPlate.process(plateInput[0],plateInput[1]);for(size_t channel=0;channel<plate.size();++channel)plate[channel]+=modal[channel];const auto plateWet=plateColour.post({plate[0],plate[1]});plate[0]=plateWet[0];plate[1]=plateWet[1];
+            for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += plate[channel];
+            const auto studio = studioSpace.process(left, right);
+            for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += studio[channel];
+            const auto spatialOutput=spatialSpace.process(left,right);
+            for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=spatialOutput[channel];
+            const auto retroOutput=retroSpace->process(left,right);
+            for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=retroOutput[channel];
+            const auto clearOutput=clearSpace.process(left,right);
+            for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=clearOutput[channel];
+            const auto drifting = driftingSpace.process(left, right);
+            for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += drifting[channel];
+            const auto vintage = vintageSpace.process(left, right);
+            for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += vintage[channel];
+            const float convWeight = convolutionWeight.getNextValue(), convWetWeight=convolutionRetirement.next(0);
+            const float oldWeight = juce::jlimit(0.0f, 1.0f, 1.0f - extra[2] - convWeight);
+            const float legacyDry = engineVersion.load() >= 1.5f && engineVersion.load() < 2.5f
+                ? dryRamp.getNextValue() : legacyDryStart + (legacyDryEnd-legacyDryStart)*static_cast<float>(i+1)/static_cast<float>(count);
+            std::array<float,2> drySignal {}, mixed {};
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                const float wetSample = channels == 1 ? (extra[0] + extra[1]) * .5f : extra[static_cast<size_t>(ch)];
+                segment.setSample(ch, i, segment.getSample(ch, i) * oldWeight + wetSample * wet
+                    + additionalDry.getSample(ch, i) * dry * (extra[2] + convWeight)
+                    + (channels == 1 ? .5f * (convSegment.getSample(0, i) + convSegment.getSample(1, i)) : convSegment.getSample(ch, i)) * wet * convWetWeight);
+                drySignal[static_cast<size_t>(ch)] = additionalDry.getSample(ch,i)*(legacyDry*oldWeight+dry*(extra[2]+convWeight));
+                const float colourDry=(plateDry[static_cast<size_t>(ch)]-additionalDry.getSample(ch,i))*dry*plate[2]+(echoes[3+static_cast<size_t>(ch)]-additionalDry.getSample(ch,i)*echoes[2])*dry+(ambient[3+static_cast<size_t>(ch)]-additionalDry.getSample(ch,i)*ambient[2])*dry;
+                if(colourDry!=0){segment.setSample(ch,i,segment.getSample(ch,i)+colourDry);drySignal[static_cast<size_t>(ch)]+=colourDry;}
+                mixed[static_cast<size_t>(ch)] = segment.getSample(ch,i);
+            }
+            const bool workflowActive = workflow.active();
+            const auto processedWet = workflow.process(mixed[0]-drySignal[0],mixed[channels-1]-drySignal[channels-1],juce::jmax(std::abs(left),std::abs(right)));
+            const std::array<float,2> crossWet { crossSegment.getSample(0,i)*wet*convWetWeight, crossSegment.getSample(1,i)*wet*convWetWeight };
+            const auto processedCross=convolutionCrossWorkflow.process(crossWet[0],crossWet[1],juce::jmax(std::abs(left),std::abs(right)));
+            const int crossStart=getMainBusNumOutputChannels();
+            if(getBus(false,1)->getNumberOfChannels()==2 && buffer.getNumChannels()>=crossStart+2)
+                for(int ch=0;ch<2;++ch)buffer.addSample(crossStart+ch,start+i,workflowActive?processedCross[static_cast<size_t>(ch)]:crossWet[static_cast<size_t>(ch)]);
+            // Disabled is an exact bypass, including the legacy floating-point mix.
+            if (workflowActive) for (int ch=0;ch<channels;++ch)
+                segment.setSample(ch,i,drySignal[static_cast<size_t>(ch)]+processedWet[static_cast<size_t>(ch)]);
+        }
+    }
+    retiringReverbTailSeconds.store(std::max({studioSpace.retiringTailSeconds(),plateSpace.retiringTailSeconds(),modalPlate.retiringTailSeconds(),vintageSpace.retiringTailSeconds(),driftingSpace.retiringTailSeconds(),clearSpace.retiringTailSeconds(),retroSpace->retiringTailSeconds(),spatialSpace.retiringTailSeconds(),ambientSpace.retiringTailSeconds(),echoRoom.retiringTailSeconds(),springSpace.retiringTailSeconds(),convolutionRetirement.retiringTailSeconds(),additionalSpaces.retiringTailSeconds()}),std::memory_order_relaxed);
+    workflowReduction.store(workflow.gainReductionDb());
+    sanitizeBuiltInBuffer(buffer, 4.0f);
+}
+
+void OpenStudioReverb::processSelectedEngine(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
     const float selectedEngine =
         engineVersion.load(std::memory_order_relaxed);
     if (selectedEngine < 1.5f)
@@ -5567,7 +5940,7 @@ void OpenStudioReverb::processLegacyBlock(juce::AudioBuffer<float>& buffer,
     if (numChannels < 1 || numSamples == 0)
         return;
 
-    const float preDelayMs = juce::jlimit(0.0f, 500.0f, preDelay.load());
+    const float preDelayMs = juce::jlimit(0.0f, 500.0f, enginePredelay());
     const float preDelaySamples = static_cast<float>(preDelayMs * 0.001 * cachedSampleRate);
     const float lc = juce::jlimit(20.0f, 500.0f, lowCut.load());
     const float hc = juce::jlimit(1000.0f, 20000.0f, highCut.load());
@@ -6070,7 +6443,7 @@ void OpenStudioReverb::processV2Block(juce::AudioBuffer<float>& buffer,
     const float preDelayMs = juce::jlimit(
         0.0f,
         500.0f,
-        preDelay.load(std::memory_order_relaxed));
+        enginePredelay());
     const float preDelaySamples =
         preDelayMs * 0.001f
         * static_cast<float>(cachedSampleRate);
@@ -7441,7 +7814,7 @@ void OpenStudioReverb::processV3Block(juce::AudioBuffer<float>& buffer,
         juce::jlimit(
             0.0f,
             500.0f,
-            preDelay.load(std::memory_order_relaxed))
+            enginePredelay())
         * 0.001f * safeSampleRate;
     const float wetTarget =
         juce::jlimit(
@@ -10297,6 +10670,12 @@ void OpenStudioReverb::processV3Block(juce::AudioBuffer<float>& buffer,
 
 void OpenStudioReverb::resetTailState() noexcept
 {
+    retiringReverbTailSeconds.store(0);
+    peakHold.reset();
+    reconstructedPeakMeter.reset();
+    for(auto& peak:inputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    for(auto& peak:outputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    if (standaloneBanking) { additionalSpaces.reset(); convolutionSpace.reset(); convolutionMotion.reset(); convolutionExtension.reset(); convolutionCrossMotion.reset(); convolutionCrossExtension.reset(); convolutionCrossWorkflow.reset(); convolutionRetirement.reset({convolutionWeight}); plateSpace.reset(); modalPlate.reset(); plateColour.reset(); studioSpace.reset(); vintageSpace.reset(); driftingSpace.reset(); clearSpace.reset(); retroSpace->reset(); spatialSpace.reset(); echoRoom.reset(); ambientSpace.reset(); springSpace.reset(); workflow.reset(); workflowReduction.store(0); }
     validEarlyHistorySamples = 0;
     validPreDelayHistorySamples = 0;
     validLateHistorySamples = 0;
@@ -10477,7 +10856,7 @@ void OpenStudioReverb::resetTailState() noexcept
         juce::jlimit(
             0.0f,
             500.0f,
-            preDelay.load(std::memory_order_relaxed))
+            enginePredelay())
         * 0.001f * safeSampleRate;
     v3ActivePreDelaySamples =
         resetPreDelaySamples;
@@ -10841,12 +11220,67 @@ double OpenStudioReverb::calculateTailLengthSecondsV3(
 
 double OpenStudioReverb::getTailLengthSeconds() const
 {
+    const double selected=getSelectedTailLengthSeconds();
+    return standaloneBanking&&tailSpillover.load()>=.5f&&wetLevel.load()>0 ? juce::jmax(selected,retiringReverbTailSeconds.load(std::memory_order_relaxed)) : selected;
+}
+
+double OpenStudioReverb::getSelectedTailLengthSeconds() const
+{
+    if(standaloneBanking&&algorithm.load()==5&&shimmerHold.load()>=.5f&&wetLevel.load()>0)return 120;
+    if(standaloneBanking&&isSpatialSpace())
+    {
+        if(wetLevel.load()<=0)return 0;const auto& p=spatialControls[spatialSlot()];const double feedback=effectivePredelay()<=0?0:juce::jlimit(0.0f,1.0f,p[1].load());
+        if((spatialSlot()<2&&freezeMode.load()>=.5f)||feedback>=.9999)return 120;
+        const double time=effectivePredelay()*.001+(spatialSlot()==2?(.2+roomSize.load()*3)*.0688:0);
+        return juce::jmin(120.0,time+(feedback>0?time*std::log(.001)/std::log(feedback):0)+(spatialSlot()<2?decayTime.load():3.0));
+    }
+
+    if(standaloneBanking&&algorithm.load()==4&&springControls[0].load()>=.5f)
+        return wetLevel.load()<=0?0:springHold.load()>=.5f?120:juce::jlimit(.8,10.0,static_cast<double>(decayTime.load()))*2+2+effectivePredelay()*.001;
+    if(standaloneBanking&&isAmbientSpace())
+    {
+        const auto& p=ambientControls[ambientSlot()];if(wetLevel.load()<=0)return 0;if(p[9].load()>=.5f)return 120;
+        const double seconds=ambientSlot()==2?p[8].load():decayTime.load(),feedback=juce::jlimit(0.0f,.95f,p[3].load());const double build=ambientSlot()==1?.634*p[2].load()*(1+(feedback>0?std::log(.001)/std::log(feedback):0)):ambientSlot()==2?3.0:0.0;
+        return juce::jmin(120.0,seconds*juce::jmax(1.0f,p[10].load())*1.5+2+build+effectivePredelay()*.001);
+    }
+    if(standaloneBanking&&isEchoRoom())
+    {
+        if(wetLevel.load()<=0)return 0;const auto& p=echoRoomControls[echoRoomSlot()];if(echoRoomSlot()==1)return positionedHold.load()>=.5f?120:.6+effectivePredelay()*.001;if(magneticHold.load()>=.5f)return 120;
+        const double feedback=juce::jlimit(0.0f,.98f,p[3].load()),time=p[0].load()*.001;return juce::jmin(120.0,time+(feedback>0?time*std::log(.001)/std::log(feedback):0)+.2+effectivePredelay()*.001);
+    }
+    if(standaloneBanking&&isRetroSpace())return wetLevel.load()<=0?0:retroSlot()==9?2.05+effectivePredelay()*.001:freezeMode.load()>=.5f?120
+        :juce::jmin(120.0,retroControls[retroSlot()][0].load()*juce::jmax(1.0f,retroControls[retroSlot()][6].load())*2.0+2+effectivePredelay()*.001+BuiltInRetroReverb::profiles[retroSlot()].spread);
+    if(standaloneBanking&&isClearSpace())return wetLevel.load()<=0?0:freezeMode.load()>=.5f?120
+        :juce::jmin(120.0,juce::jlimit(.1,20.0,static_cast<double>(decayTime.load()))*juce::jlimit(1.0,4.0,static_cast<double>(clearControls[clearSlot()][4].load()))*2+2+effectivePredelay()*.001+clearControls[clearSlot()][1].load()*.003);
+    if (standaloneBanking && isDriftingSpace())
+        return wetLevel.load() <= 0 ? 0 : freezeMode.load() >= .5f ? 120
+            : juce::jmin(120.0, juce::jlimit(.1,20.0,static_cast<double>(decayTime.load())) * juce::jlimit(1.0,4.0,static_cast<double>(driftingControls[driftingSlot()][5].load())) * 2 + 2 + effectivePredelay() * .001);
+    if (standaloneBanking && isVintageSpace())
+        return wetLevel.load() <= 0 ? 0 : juce::jlimit(.1, 20.0, static_cast<double>(decayTime.load())) * juce::jlimit(1.0, 4.0, static_cast<double>(vintageBassRatio[vintageSlot()].load())) * 2 + 2 + effectivePredelay() * .001 + juce::jlimit(0.0, 300.0, static_cast<double>(vintageBuildUp[vintageSlot()].load())) * .03;
+    if (standaloneBanking && isStudioSpace() && studioEngines[studioSlot()].load() >= .5f)
+        return wetLevel.load() <= 0 ? 0.0 : (freezeMode.load() >= .5f ? 60.0 : juce::jlimit(.1, 20.0, static_cast<double>(decayTime.load()))
+            * juce::jlimit(1.0, 2.0, static_cast<double>(studioBassRatio[studioSlot()].load())) * 1.5 + 1.0) + juce::jlimit(0.0, 96.0, effectivePredelay() * .001);
+    if (standaloneBanking && algorithm.load() == 2 && plateEngine.load() >= .5f)
+        return wetLevel.load() <= 0 ? (dryLevel.load()>0&&(plateColourControls[0].load()>0||plateColourControls[1].load()>20)?1.0:0.0)
+            : (freezeMode.load() >= .5f ? 60.0 : juce::jlimit(.1, 20.0, static_cast<double>(decayTime.load())) * 1.5 + 1.1) + juce::jlimit(0.0, 96.0, effectivePredelay() * .001);
+    if (standaloneBanking && algorithm.load() == 7) return convolutionSpace.tail() + effectivePredelay() * .001 + irModDepth.load()*.001 + BuiltInConvolutionExtension::tailSeconds({irExtensionControls[0].load(),irExtensionControls[1].load(),irExtensionControls[2].load(),irExtensionControls[3].load(),irExtensionControls[4].load(),irExtensionControls[5].load()});
+    if (standaloneBanking && algorithm.load() == 6)
+        return wetLevel.load() <= 0 ? 0 : nonlinearHold.load()>=.5f?120:BuiltInAdditionalReverbs::nonlinearTailSeconds(decayTime.load(), creativeControls[1].load(),
+            creativeControls[2].load(), creativeControls[3].load(), creativeControls[4].load()) + effectivePredelay() * .001;
+    if (standaloneBanking && algorithm.load() >= 3.5f)
+    {
+        if (wetLevel.load() <= 0.0f) return 0.0;
+        const double duration = algorithm.load() >= 5.5f ? juce::jlimit(.1, 2.0, static_cast<double>(decayTime.load()))
+            : juce::jlimit(.1, 20.0, static_cast<double>(decayTime.load())) * 1.5 + .5;
+        return duration + juce::jlimit(0.0, 96.0, effectivePredelay() * .001) + .1;
+    }
+
     const float selectedEngine =
         engineVersion.load(
             std::memory_order_relaxed);
     if (selectedEngine >= 2.5f)
     {
-        return calculateTailLengthSecondsV3(
+        return (standaloneBanking && predelaySync.load() >= .5f ? effectivePredelay() * .001 : 0.0) + calculateTailLengthSecondsV3(
             wetLevel.load(
                 std::memory_order_relaxed),
             preDelay.load(
@@ -10862,7 +11296,7 @@ double OpenStudioReverb::getTailLengthSeconds() const
 
     if (selectedEngine >= 1.5f)
     {
-        return calculateTailLengthSecondsV2(
+        return (standaloneBanking && predelaySync.load() >= .5f ? effectivePredelay() * .001 : 0.0) + calculateTailLengthSecondsV2(
             static_cast<int>(
                 std::round(
                     algorithm.load(
@@ -10886,7 +11320,7 @@ double OpenStudioReverb::getTailLengthSeconds() const
             shimmerRegen.load(
                 std::memory_order_relaxed));
     }
-    return calculateTailLengthSeconds(
+    return (standaloneBanking && predelaySync.load() >= .5f ? effectivePredelay() * .001 : 0.0) + calculateTailLengthSeconds(
         static_cast<int>(std::round(algorithm.load(std::memory_order_relaxed))),
         roomSize.load(std::memory_order_relaxed),
         wetLevel.load(std::memory_order_relaxed),
@@ -10938,17 +11372,224 @@ void OpenStudioReverb::getStateInformation(juce::MemoryBlock& destData)
         { "reverbDspVersion", persistedDspVersion },
         { "reverbShimmerDspVersion", persistedDspVersion }
     });
+    if (standaloneBanking)
+    {
+        auto state = juce::ValueTree::readFromData(destData.getData(), destData.getSize());
+        convolutionSpace.save(state);
+        state.setProperty("sendMode", sendMode.load(), nullptr);
+        state.setProperty("mixLock", mixLock.load(), nullptr);
+        state.setProperty("insertWet", insertWet.load(), nullptr);
+        state.setProperty("insertDry", insertDry.load(), nullptr);
+        state.setProperty("shimmerPitchA", shimmerPitchA.load(), nullptr);
+        state.setProperty("shimmerPitchB", shimmerPitchB.load(), nullptr);
+        state.setProperty("shimmerVoiceMix", shimmerVoiceMix.load(), nullptr);
+        state.setProperty("nonlinearShape", nonlinearShape.load(), nullptr);
+        state.setProperty("nonlinearModulation", nonlinearModulation.load(), nullptr);
+        state.setProperty("nonlinearRate", nonlinearRate.load(), nullptr);
+        state.setProperty("springHold", springHold.load(), nullptr);
+        state.setProperty("magneticHold", magneticHold.load(), nullptr);
+        state.setProperty("nonlinearHold", nonlinearHold.load(), nullptr);
+        state.setProperty("positionedHold", positionedHold.load(), nullptr);
+        state.setProperty("reconstructedPeaks", reconstructedPeaks.load(), nullptr);
+        state.setProperty("shimmerVoiceEngine", shimmerVoiceEngine.load(), nullptr);
+        state.setProperty("shimmerHold",shimmerHold.load(),nullptr);
+        state.setProperty("tailSpillover",tailSpillover.load(),nullptr);
+        for(size_t i=0;i<spatialLowShelf.size();++i)state.setProperty("spatialLowShelf"+juce::String(static_cast<int>(i)),spatialLowShelf[i].load(),nullptr);
+        for(size_t i=0;i<spatialDelayCapacity.size();++i)state.setProperty("spatialDelayCapacity"+juce::String(static_cast<int>(i)),spatialDelayCapacity[i].load(),nullptr);
+        state.setProperty("irModDepth",irModDepth.load(),nullptr);state.setProperty("irModRate",irModRate.load(),nullptr);state.setProperty("roomCharacter",roomCharacter.load(),nullptr);
+        for(size_t i=0;i<irExtensionControls.size();++i)state.setProperty("irExtension"+juce::String(static_cast<int>(i)),irExtensionControls[i].load(),nullptr);
+        for(size_t i=0;i<holdInputModes.size();++i)state.setProperty("holdInput"+juce::String(static_cast<int>(i)),holdInputModes[i].load(),nullptr);
+        for (size_t i = 0; i < creativeControls.size(); ++i) state.setProperty(creativeIds[i], creativeControls[i].load(), nullptr);
+        state.setProperty("plateEngine", plateEngine.load(), nullptr);
+        for(size_t i=0;i<modalControls.size();++i)state.setProperty(BuiltInModalPlate::ids[i],modalControls[i].load(),nullptr);
+        for(size_t i=0;i<modalMaterialControls.size();++i)state.setProperty(BuiltInModalPlate::materialIds[i],modalMaterialControls[i].load(),nullptr);
+        state.setProperty("plateCharacter", plateCharacter.load(), nullptr);
+        state.setProperty("plateModulation", plateModulation.load(), nullptr);
+        for(size_t i=0;i<plateColourControls.size();++i)state.setProperty(plateColourIds[i],plateColourControls[i].load(),nullptr);
+        state.setProperty("predelaySync",predelaySync.load(),nullptr);
+        state.setProperty("predelayDivision",predelayDivision.load(),nullptr);
+        state.setProperty("predelayCapacity",predelayCapacity.load(),nullptr);
+        state.setProperty("wetDuckDepth",wetDuckDepth.load(),nullptr);
+        state.setProperty("wetDuckThreshold",wetDuckThreshold.load(),nullptr);
+        state.setProperty("wetDuckRelease",wetDuckRelease.load(),nullptr);
+        for(size_t i=0;i<springControls.size();++i)state.setProperty(springIds[i],springControls[i].load(),nullptr);
+        for(size_t bank=0;bank<ambientControls.size();++bank)for(size_t control=0;control<ambientIds.size();++control)
+            state.setProperty("ambient"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control)),ambientControls[bank][control].load(),nullptr);
+        for(size_t bank=0;bank<echoRoomControls.size();++bank)for(size_t control=0;control<echoRoomIds.size();++control)
+            state.setProperty("echoRoom"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control)),echoRoomControls[bank][control].load(),nullptr);
+        for(size_t bank=0;bank<spatialControls.size();++bank)for(size_t control=0;control<spatialIds.size();++control)
+            state.setProperty("spatial"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control)),spatialControls[bank][control].load(),nullptr);
+        for(size_t bank=0;bank<clearControls.size();++bank)for(size_t field=0;field<clearIds.size();++field)
+            state.setProperty("clear"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(field)),clearControls[bank][field].load(),nullptr);
+        for(size_t bank=0;bank<retroControls.size();++bank)for(size_t field=0;field<BuiltInRetroReverb::controlCount;++field)
+            state.setProperty("retro"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(field)),retroControls[bank][field].load(),nullptr);
+        for (size_t bank = 0; bank < driftingControls.size(); ++bank) for (size_t field = 0; field < driftingIds.size(); ++field)
+            state.setProperty("drifting" + juce::String(static_cast<int>(bank)) + "_" + juce::String(static_cast<int>(field)), driftingControls[bank][field].load(), nullptr);
+        for (size_t slot = 0; slot < vintageColour.size(); ++slot)
+        {
+            const juce::String prefix = "vintage" + juce::String(static_cast<int>(slot));
+            state.setProperty(prefix + "Conversion", vintageConversion[slot].load(), nullptr);
+            state.setProperty(prefix + "TankRate", vintageTankRate[slot].load(), nullptr);
+            state.setProperty(prefix + "BuildUp", vintageBuildUp[slot].load(), nullptr);
+            state.setProperty(prefix + "InputDiffusion", vintageInputDiffusion[slot].load(), nullptr);
+            state.setProperty(prefix + "Colour", vintageColour[slot].load(), nullptr);
+            state.setProperty(prefix + "Modulation", vintageModulation[slot].load(), nullptr);
+            state.setProperty(prefix + "Rate", vintageRate[slot].load(), nullptr);
+            state.setProperty(prefix + "BassRatio", vintageBassRatio[slot].load(), nullptr);
+            state.setProperty(prefix + "BassFrequency", vintageBassFrequency[slot].load(), nullptr);
+        }
+        for (size_t slot = 0; slot < studioEngines.size(); ++slot)
+        {
+            const juce::String prefix = "studio" + juce::String(static_cast<int>(slot));
+            state.setProperty(prefix + "Engine", studioEngines[slot].load(), nullptr);
+            state.setProperty(prefix + "Modulation", studioModulation[slot].load(), nullptr);
+            state.setProperty(prefix + "BassRatio", studioBassRatio[slot].load(), nullptr);
+            for(size_t field=0;field<studioToneIds.size();++field)state.setProperty("studioTone"+juce::String(static_cast<int>(slot))+"_"+juce::String(static_cast<int>(field)),studioToneControls[slot][field].load(),nullptr);
+        }
+        for(size_t field=0;field<plateToneIds.size();++field)state.setProperty(plateToneIds[field],plateToneControls[field].load(),nullptr);
+        for (int bank = 0; bank < standaloneTypeCount; ++bank)
+            for (int control = 0; control < bankControlCount; ++control)
+                state.setProperty("bank" + juce::String(bank) + "_" + juce::String(control), getBankValue(bank, control), nullptr);
+        juce::MemoryOutputStream stream(destData, false); state.writeToStream(stream);
+    }
 }
 
 void OpenStudioReverb::setStateInformation(const void* data, int sizeInBytes)
 {
-    auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioReverb");
+    restoreStateTree(loadParamsFromMemory(data,sizeInBytes,"OpenStudioReverb"),true);
+}
+
+void OpenStudioReverb::restoreStateTree(const juce::ValueTree& tree, bool restoreConvolution)
+{
     if (!tree.isValid())
         return;
+    if (standaloneBanking)
+    {
+        if (restoreConvolution && tree.hasProperty("irData"))
+        {
+            if (!convolutionSpace.restore(tree)) return;
+        }
+        else if (restoreConvolution) convolutionSpace.selectDefault();
+        sendMode.store(static_cast<float>(tree.getProperty("sendMode", 0.0f)));
+        mixLock.store(static_cast<float>(tree.getProperty("mixLock", 0.0f)));
+        insertWet.store(static_cast<float>(tree.getProperty("insertWet", 0.33f)));
+        insertDry.store(static_cast<float>(tree.getProperty("insertDry", 0.7f)));
+        for (int bank = 0; bank < standaloneTypeCount; ++bank)
+            for (int control = 0; control < bankControlCount; ++control)
+            {
+                const auto slot = static_cast<size_t>(control);
+                const float fallback = bankDefault(bank, control);
+                const float stored = static_cast<float>(tree.getProperty("bank" + juce::String(bank) + "_" + juce::String(control), fallback));
+                typeBanks[static_cast<size_t>(bank)][slot].store(std::isfinite(stored)
+                    ? juce::jlimit(bankMinima[slot], bank == 6 && control == 7 ? 2.0f : bankMaxima[slot], stored) : fallback);
+            }
+        const auto restoreAdded = [&tree](const char* id, std::atomic<float>& target, int control)
+        {
+            const auto slot = static_cast<size_t>(control);
+            const float stored = static_cast<float>(tree.getProperty(id, bankDefaults[slot]));
+            target.store(std::isfinite(stored) ? juce::jlimit(bankMinima[slot], bankMaxima[slot], stored) : bankDefaults[slot]);
+        };
+        restoreAdded("shimmerPitchA", shimmerPitchA, 10);
+        restoreAdded("shimmerPitchB", shimmerPitchB, 11);
+        restoreAdded("shimmerVoiceMix", shimmerVoiceMix, 12);
+        restoreAdded("nonlinearShape", nonlinearShape, 13);
+        shimmerVoiceEngine.store(static_cast<float>(tree.getProperty("shimmerVoiceEngine", 0.0f)) >= .5f ? 1.0f : 0.0f);
+        const float storedPlateEngine=static_cast<float>(tree.getProperty("plateEngine",0));
+        plateEngine.store(std::isfinite(storedPlateEngine)?juce::jlimit(0.0f,2.0f,std::round(storedPlateEngine)):0.0f);
+        for(size_t i=0;i<modalControls.size();++i){const float value=static_cast<float>(tree.getProperty(BuiltInModalPlate::ids[i],BuiltInModalPlate::defaults[i]));modalControls[i].store(std::isfinite(value)?juce::jlimit(BuiltInModalPlate::minima[i],BuiltInModalPlate::maxima[i],i==4?std::round(value):value):BuiltInModalPlate::defaults[i]);}
+        const float character = static_cast<float>(tree.getProperty("plateCharacter", 1.0f));
+        plateCharacter.store(std::isfinite(character) ? juce::jlimit(0.0f, 2.0f, std::round(character)) : 1.0f);
+        const float modulation = static_cast<float>(tree.getProperty("plateModulation", .25f));
+        plateModulation.store(std::isfinite(modulation) ? juce::jlimit(0.0f, 1.0f, modulation) : .25f);
+        const auto restoreWorkflow = [&tree](const char* id,std::atomic<float>& target,float lo,float hi,float fallback) {
+            const float stored=static_cast<float>(tree.getProperty(id,fallback));target.store(std::isfinite(stored)?juce::jlimit(lo,hi,stored):fallback);
+        };
+        for (size_t i = 0; i < creativeControls.size(); ++i) restoreWorkflow(creativeIds[i], creativeControls[i], creativeMin[i], creativeMax[i], creativeDefaults[i]);
+        creativeControls[0].store(std::round(creativeControls[0].load()));
+        restoreWorkflow("nonlinearModulation", nonlinearModulation, 0, 1, 0);
+        restoreWorkflow("nonlinearRate", nonlinearRate, .05f, 8, .7f);
+        restoreWorkflow("springHold", springHold, 0, 1, 0);
+        restoreWorkflow("magneticHold", magneticHold, 0, 1, 0);
+        restoreWorkflow("nonlinearHold", nonlinearHold, 0, 1, 0);
+        restoreWorkflow("positionedHold", positionedHold, 0, 1, 0);
+        restoreWorkflow("reconstructedPeaks", reconstructedPeaks, 0, 1, 0);
+        restoreWorkflow("shimmerHold",shimmerHold,0,1,0);
+        restoreWorkflow("tailSpillover",tailSpillover,0,1,0);
+        for(size_t i=0;i<spatialLowShelf.size();++i){const auto id="spatialLowShelf"+juce::String(static_cast<int>(i));restoreWorkflow(id.toRawUTF8(),spatialLowShelf[i],-24,0,0);}
+        for(size_t i=0;i<spatialDelayCapacity.size();++i){const float value=static_cast<float>(tree.getProperty("spatialDelayCapacity"+juce::String(static_cast<int>(i)),0));setSpatialDelayCapacity(i,std::isfinite(value)?value:0);}
+        restoreWorkflow("irModDepth",irModDepth,0,5,0);restoreWorkflow("irModRate",irModRate,.05f,5,.3f);restoreWorkflow("roomCharacter",roomCharacter,0,1,0);
+        constexpr std::array<float,6> extensionMin{0,.1f,.1f,.1f,60,1000},extensionMax{1,20,20,20,2000,16000},extensionDefault{0,2,2,2,250,4000};
+        for(size_t i=0;i<irExtensionControls.size();++i)restoreWorkflow(("irExtension"+juce::String(static_cast<int>(i))).toRawUTF8(),irExtensionControls[i],extensionMin[i],extensionMax[i],extensionDefault[i]);
+        for(size_t i=0;i<holdInputModes.size();++i){const auto id="holdInput"+juce::String(static_cast<int>(i));restoreWorkflow(id.toRawUTF8(),holdInputModes[i],0,1,0);}
+        for(size_t i=0;i<plateColourControls.size();++i)restoreWorkflow(plateColourIds[i],plateColourControls[i],plateColourMin[i],plateColourMax[i],plateColourDefaults[i]);
+        restoreWorkflow("predelaySync",predelaySync,0,1,0);
+        restoreWorkflow("predelayDivision",predelayDivision,0,18,4);
+        const float capacity=static_cast<float>(tree.getProperty("predelayCapacity",0));
+        setPredelayCapacity(std::isfinite(capacity)?capacity:0);
+        restoreWorkflow("wetDuckDepth",wetDuckDepth,0,24,0);
+        restoreWorkflow("wetDuckThreshold",wetDuckThreshold,-60,0,-24);
+        restoreWorkflow("wetDuckRelease",wetDuckRelease,20,2000,250);
+        for(size_t i=0;i<springControls.size();++i)restoreWorkflow(springIds[i],springControls[i],springMin[i],springMax[i],springDefaults[i]);
+        for(size_t bank=0;bank<ambientControls.size();++bank)for(size_t control=0;control<ambientIds.size();++control)
+        {const auto id="ambient"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control));restoreWorkflow(id.toRawUTF8(),ambientControls[bank][control],ambientMin[control],ambientMax[control],ambientDefaults[control]);}
+        for(size_t bank=0;bank<echoRoomControls.size();++bank)for(size_t control=0;control<echoRoomIds.size();++control)
+        {const auto id="echoRoom"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control));restoreWorkflow(id.toRawUTF8(),echoRoomControls[bank][control],echoRoomMin[control],echoRoomMax[control],echoRoomDefaults[control]);}
+        for(size_t bank=0;bank<spatialControls.size();++bank)for(size_t control=0;control<spatialIds.size();++control)
+        {
+            const auto id="spatial"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(control));
+            restoreWorkflow(id.toRawUTF8(),spatialControls[bank][control],spatialMin[control],control==6&&bank<2?2.0f:spatialMax[control],spatialDefaults[control]);
+        }
+        for(size_t bank=0;bank<clearControls.size();++bank)for(size_t field=0;field<clearIds.size();++field)
+        {const auto id="clear"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(field));restoreWorkflow(id.toRawUTF8(),clearControls[bank][field],clearMin[field],clearMax[field],clearDefaults[field]);}
+        for(size_t bank=0;bank<retroControls.size();++bank)for(size_t field=0;field<BuiltInRetroReverb::controlCount;++field)
+        {const auto id="retro"+juce::String(static_cast<int>(bank))+"_"+juce::String(static_cast<int>(field));restoreWorkflow(id.toRawUTF8(),retroControls[bank][field],BuiltInRetroReverb::minima[field],BuiltInRetroReverb::maxima[field],BuiltInRetroReverb::defaults[field]);}
+        for (size_t bank = 0; bank < driftingControls.size(); ++bank) for (size_t field = 0; field < driftingIds.size(); ++field)
+        {
+            const auto id = "drifting" + juce::String(static_cast<int>(bank)) + "_" + juce::String(static_cast<int>(field));
+            restoreWorkflow(id.toRawUTF8(), driftingControls[bank][field], driftingMin[field], driftingMax[field], driftingDefaults[field]);
+        }
+        for (size_t slot = 0; slot < vintageColour.size(); ++slot)
+        {
+            const juce::String prefix = "vintage" + juce::String(static_cast<int>(slot));
+            restoreWorkflow((prefix + "Conversion").toRawUTF8(), vintageConversion[slot], 0, 1, 0);
+            vintageConversion[slot].store(std::round(vintageConversion[slot].load()));
+            restoreWorkflow((prefix + "TankRate").toRawUTF8(), vintageTankRate[slot], 0, 2, 0);
+            vintageTankRate[slot].store(std::round(vintageTankRate[slot].load()));
+            restoreWorkflow((prefix + "BuildUp").toRawUTF8(), vintageBuildUp[slot], 0, 300, 0);
+            restoreWorkflow((prefix + "InputDiffusion").toRawUTF8(), vintageInputDiffusion[slot], 0, 1, .5f);
+            restoreWorkflow((prefix + "Colour").toRawUTF8(), vintageColour[slot], 0, 2, 0);
+            vintageColour[slot].store(std::round(vintageColour[slot].load()));
+            restoreWorkflow((prefix + "Modulation").toRawUTF8(), vintageModulation[slot], 0, 1, .35f);
+            restoreWorkflow((prefix + "Rate").toRawUTF8(), vintageRate[slot], .05f, 2, .3f);
+            restoreWorkflow((prefix + "BassRatio").toRawUTF8(), vintageBassRatio[slot], .25f, 4, 1);
+            restoreWorkflow((prefix + "BassFrequency").toRawUTF8(), vintageBassFrequency[slot], 100, 10000, 500);
+        }
+        constexpr std::array<float,5> modulationDefaults {.15f,.3f,.1f,.2f,.05f};
+        for (size_t slot = 0; slot < studioEngines.size(); ++slot)
+        {
+            const juce::String prefix = "studio" + juce::String(static_cast<int>(slot));
+            studioEngines[slot].store(slot >= 3 || static_cast<float>(tree.getProperty(prefix + "Engine", 0.0f)) >= .5f ? 1.0f : 0.0f);
+            const float motion = static_cast<float>(tree.getProperty(prefix + "Modulation", modulationDefaults[slot]));
+            studioModulation[slot].store(std::isfinite(motion) ? juce::jlimit(0.0f,1.0f,motion) : modulationDefaults[slot]);
+            const float ratio = static_cast<float>(tree.getProperty(prefix + "BassRatio", 1.0f));
+            studioBassRatio[slot].store(std::isfinite(ratio) ? juce::jlimit(.5f,2.0f,ratio) : 1.0f);
+            for(size_t field=0;field<studioToneIds.size();++field){const auto id="studioTone"+juce::String(static_cast<int>(slot))+"_"+juce::String(static_cast<int>(field));restoreWorkflow(id.toRawUTF8(),studioToneControls[slot][field],studioToneMin[field],studioToneMax[field],studioToneDefaults[field]);if(field!=1)studioToneControls[slot][field].store(std::round(studioToneControls[slot][field].load()));}
+        }
+    }
 
+    if(standaloneBanking)for(size_t field=0;field<BuiltInModalPlate::materialCount;++field)
+    {
+        const float value=static_cast<float>(tree.getProperty(BuiltInModalPlate::materialIds[field],BuiltInModalPlate::materialDefaults[field]));
+        modalMaterialControls[field].store(std::isfinite(value)?juce::jlimit(BuiltInModalPlate::materialMinima[field],BuiltInModalPlate::materialMaxima[field],field==0?std::round(value):value):BuiltInModalPlate::materialDefaults[field]);
+    }
+    if(standaloneBanking)for(size_t field=0;field<plateToneIds.size();++field)
+    {
+        const float value=static_cast<float>(tree.getProperty(plateToneIds[field],studioToneDefaults[field]));
+        plateToneControls[field].store(std::isfinite(value)?juce::jlimit(studioToneMin[field],studioToneMax[field],field==1?value:std::round(value)):studioToneDefaults[field]);
+    }
     algorithm  = juce::jlimit(
         0.0f,
-        3.0f,
+        standaloneBanking ? static_cast<float>(standaloneTypeCount - 1) : 3.0f,
         static_cast<float>((double)tree.getProperty("algorithm", 0.0)));
     roomSize   = static_cast<float>((double)tree.getProperty("roomSize", 0.5));
     damping    = static_cast<float>((double)tree.getProperty("damping", 0.5));
@@ -10962,6 +11603,7 @@ void OpenStudioReverb::setStateInformation(const void* data, int sizeInBytes)
     highCut    = static_cast<float>((double)tree.getProperty("highCut", 20000.0));
     earlyLevel = static_cast<float>((double)tree.getProperty("earlyLevel", 0.5));
     decayTime  = static_cast<float>((double)tree.getProperty("decayTime", 2.0));
+    if (standaloneBanking && algorithm.load() == 6.0f) decayTime.store(juce::jlimit(0.1f, 2.0f, decayTime.load()));
     ducking = juce::jlimit(
         0.0f,
         1.0f,
@@ -11027,7 +11669,9 @@ void OpenStudioReverb::setStateInformation(const void* data, int sizeInBytes)
                                 2.0f,
                                 2.49f,
                                 storedEngineVersion)
-                           : 0.0f)));
+                           : (tree.hasProperty("engineVersion")
+                                  ? juce::jlimit(0.0f, 1.49f, storedEngineVersion)
+                                  : 0.0f))));
     // Standalone state has no Rack topology selector. Never infer a V5 voice
     // from the historical Algorithm enum: the old Rack's audible Plate marker
     // was ignored by the V3/V4 core and migrates to Studio.
@@ -11043,10 +11687,17 @@ void OpenStudioReverb::setStateInformation(const void* data, int sizeInBytes)
                               "shimmerAmount",
                               0.0))))
             : 0.0f;
+    if(standaloneBanking&&modalPlate.ready())modalPlate.prepare(cachedSampleRate,modalSettings(),algorithm.load()==2&&plateEngine.load()>=1.5f,modalMaterialSettings());
 }
 
 bool OpenStudioReverb::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
+    if (layouts.inputBuses.size() != 1 || layouts.outputBuses.size() != 2)
+        return false;
+    const auto& crossPaths = layouts.outputBuses[1];
+    if (crossPaths != juce::AudioChannelSet::disabled()
+        && crossPaths != juce::AudioChannelSet::stereo())
+        return false;
     const auto& mainOut = layouts.getMainOutputChannelSet();
     const auto& mainIn  = layouts.getMainInputChannelSet();
     if (mainOut != mainIn)
@@ -11403,6 +12054,18 @@ float OpenStudioChorus::readDelayTap(
                + value4 * coefficient4);
 }
 
+float OpenStudioChorus::resolveLFORate() noexcept
+{
+    const float manual = loadDelayParameter(rate, .01f, 20.0f, 1.0f);
+    if (loadDelayParameter(tempoSync, 0.0f, 1.0f, 0.0f) < .5f) return manual;
+    if (auto* hostPlayHead = getPlayHead())
+        if (const auto position = hostPlayHead->getPosition())
+            if (const auto bpm = position->getBpm(); bpm.hasValue() && std::isfinite(*bpm) && *bpm > 0)
+                hostTempoBpm.store(juce::jlimit(10.0, 300.0, *bpm), std::memory_order_relaxed);
+    const int division = juce::jlimit(0, 9, juce::roundToInt(loadDelayParameter(syncDivision, 0, 9, 7)));
+    return static_cast<float>(hostTempoBpm.load(std::memory_order_relaxed) / (60.0 * cycleBeats[static_cast<size_t>(division)]));
+}
+
 void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ignoreUnused(midi);
@@ -11459,37 +12122,7 @@ void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         static_cast<LFOShape>(activeLFOShapeIndex);
     const int characterIndex =
         activeCharacterIndex;
-    float targetLFORate =
-        juce::jlimit(
-            0.01f,
-            20.0f,
-            rate.load(std::memory_order_relaxed));
-    if (loadDelayParameter(
-            tempoSync, 0.0f, 1.0f, 0.0f) >= 0.5f)
-    {
-        double bpm = 120.0;
-        if (auto* ph = getPlayHead())
-        {
-            auto pos = ph->getPosition();
-            if (pos.hasValue())
-                if (auto bpmVal = pos->getBpm())
-                    bpm = *bpmVal;
-        }
-
-        const int syncIndex =
-            juce::jlimit(
-                0,
-                5,
-                static_cast<int>(
-                    std::round(
-                        rate.load(
-                            std::memory_order_relaxed))));
-        const float barsPerCycle[] { 4.0f, 2.0f, 1.0f, 0.5f, 0.25f, 0.125f };
-        targetLFORate =
-            static_cast<float>(
-                (bpm / 60.0)
-                / (barsPerCycle[syncIndex] * 4.0));
-    }
+    const float targetLFORate = resolveLFORate();
     smoothedRate.setTargetValue(targetLFORate);
     const float targetDepth = juce::jlimit(
         0.0f,
@@ -12282,6 +12915,7 @@ void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     // Feedback is constrained by fbAmount and the rack maps it below unity.
     // Only clear non-finite output samples here; clipping the mixed buffer
     // would also clip the fully dry path while the effect is bypassed.
+    effectiveRateHz.store(smoothedRate.getCurrentValue(), std::memory_order_relaxed);
     clearNonFiniteSamples(buffer);
 }
 
@@ -12487,6 +13121,7 @@ void OpenStudioChorus::getStateInformation(juce::MemoryBlock& destData)
         { "highCut",   highCut.load() },
         { "lowCut",    lowCut.load() },
         { "tempoSync", tempoSync.load() },
+        { "syncDivision", syncDivision.load() },
         { "characterMode", characterMode.load() },
         { "randomBlend", randomBlend.load() },
         { "mixLaw", mixLaw.load() }
@@ -12510,6 +13145,10 @@ void OpenStudioChorus::setStateInformation(const void* data, int sizeInBytes)
     highCut   = static_cast<float>((double)tree.getProperty("highCut", 20000.0));
     lowCut    = static_cast<float>((double)tree.getProperty("lowCut", 20.0));
     tempoSync = static_cast<float>((double)tree.getProperty("tempoSync", 0.0));
+    constexpr std::array<int, 6> oldDivisions { 9, 8, 7, 6, 5, 2 };
+    const int oldIndex = juce::jlimit(0, 5, juce::roundToInt(loadDelayParameter(rate, .01f, 20, 1)));
+    const float storedDivision = static_cast<float>(tree.getProperty("syncDivision", oldDivisions[static_cast<size_t>(oldIndex)]));
+    syncDivision.store(std::isfinite(storedDivision) ? static_cast<float>(juce::jlimit(0, 9, juce::roundToInt(storedDivision))) : 7.0f);
     characterMode = static_cast<float>(juce::jlimit(
         0,
         1,
@@ -12613,6 +13252,7 @@ void OpenStudioSaturator::updateOversamplingConfiguration(bool resetProcessingSt
 
     if (resetProcessingState || configurationChanged)
     {
+        colour.reset();
         if (oversampler2x != nullptr)
             oversampler2x->reset();
         if (oversampler4x != nullptr)
@@ -12624,6 +13264,9 @@ void OpenStudioSaturator::updateOversamplingConfiguration(bool resetProcessingSt
 void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     cachedSampleRate = sampleRate;
+    colour.prepare(sampleRate);
+    activeColourEngine=useLowLatencyOversampling?0:juce::jlimit(0,5,juce::roundToInt(colourEngine.load()));
+    if(!useLowLatencyOversampling)lowCutBeforeSaturation=activeColourEngine>0;
     cachedBlockSize = juce::jmax(1, samplesPerBlock);
 
     toneFilterL.reset();
@@ -12732,9 +13375,9 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Construct the immutable diode table on the prepare thread, never lazily
     // from the realtime callback.
     juce::ignoreUnused(getDiodeCurveLut());
-    const float initialDriveDB = juce::jlimit(0.0f, 30.0f, drive.load());
-    const float initialAutoCompDB = automaticDriveCompensationEnabled
-        ? -initialDriveDB * 0.42f
+    const float initialDriveDB = juce::jlimit(0.0f, 30.0f, drive.load())+(activeColourEngine>0?inputTrim.load()+(boostDrive.load()>=.5f?20.0f:0.0f):0);
+    const float initialAutoCompDB = automaticDriveCompensationEnabled && (activeColourEngine==0||driveCompensation.load()>=.5f)
+        ? -juce::jmax(0.0f,initialDriveDB) * 0.42f
         : 0.0f;
     lastDriveDbTarget = initialDriveDB;
     lastMixTarget =
@@ -12786,6 +13429,7 @@ float OpenStudioSaturator::processSample(
     float asym,
     int channel)
 {
+    if(activeColourEngine>0)return colour.shape(input*driveLinear,asym,channel);
     const bool centreAtZero = zeroInputInvariantEnabled;
     // The stateful diode circuit remains an unbiased anti-parallel pair until
     // it has a genuine asymmetric topology. Other embedded Rack curves retain
@@ -12981,6 +13625,11 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     if (numChannels < 1 || numSamples == 0)
         return;
 
+    float inputPeak=0;for(int ch=0;ch<numChannels;++ch)inputPeak=juce::jmax(inputPeak,buffer.getMagnitude(ch,0,numSamples));
+    inputLevelDb.store(juce::Decibels::gainToDecibels(inputPeak,-100.0f));
+    colour.configure({activeColourEngine,colourDynamics.load(),colourTone.load(),cornerBump.load(),lowCutFreq.load(),toneFreq.load(),steepCut.load()>=.5f},1<<juce::jlimit(0,2,activeOversamplingMode.load()));
+    const auto processTone=[&](float sample,int channel){return activeColourEngine>0?colour.post(sample,channel):(channel==0?toneFilterL.processSample(sample):toneFilterR.processSample(sample));};
+
     // Update tone filter if frequency changed
     const float currentToneFreq = juce::jlimit(200.0f, 20000.0f, toneFreq.load());
     if (std::abs(currentToneFreq - lastToneFreq) > 1.0f)
@@ -13050,12 +13699,12 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         }
     };
 
-    const float driveDB = juce::jlimit(0.0f, 30.0f, drive.load());
+    const float driveDB = juce::jlimit(0.0f, 30.0f, drive.load())+(activeColourEngine>0?inputTrim.load()+(boostDrive.load()>=.5f?20.0f:0.0f):0);
     const float outGainDB = automaticDriveCompensationEnabled
         ? juce::jlimit(-12.0f, 0.0f, outputGain.load())
         : juce::jlimit(-24.0f, 12.0f, outputGain.load());
-    const float autoCompDB = automaticDriveCompensationEnabled
-        ? -driveDB * 0.42f
+    const float autoCompDB = automaticDriveCompensationEnabled && (activeColourEngine==0||driveCompensation.load()>=.5f)
+        ? -juce::jmax(0.0f,driveDB) * 0.42f
         : 0.0f;
     const float currentMix =
         juce::jlimit(0.0f, 1.0f, mix.load());
@@ -13085,8 +13734,9 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         static_cast<int>(SatType::DiodeClipper),
         static_cast<int>(std::round(
             satType.load(std::memory_order_relaxed))));
+    const int requestedColourEngine=useLowLatencyOversampling?0:juce::jlimit(0,5,juce::roundToInt(colourEngine.load()));
     if (requestedSaturationType
-        != activeSaturationType)
+        != activeSaturationType || requestedColourEngine!=activeColourEngine)
     {
         if (topologyTransitionStage != 1)
         {
@@ -13135,6 +13785,8 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         {
             activeSaturationType =
                 requestedSaturationType;
+            activeColourEngine=requestedColourEngine;colour.reset();
+            if(!useLowLatencyOversampling)lowCutBeforeSaturation=activeColourEngine>0;
             diodeCapacitorState.fill(0.0f);
             const float committedDiodeMode =
                 activeSaturationType
@@ -13306,8 +13958,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 processLeftDiode,
                 leftModeSmoother);
             processedLeft =
-                toneFilterL.processSample(
-                    processedLeft);
+                processTone(processedLeft,0);
             if (! lowCutBeforeSaturation)
             {
                 processedLeft =
@@ -13353,8 +14004,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                     processRightDiode,
                     rightModeSmoother);
                 processedRight =
-                    toneFilterR.processSample(
-                        processedRight);
+                    processTone(processedRight,1);
                 if (! lowCutBeforeSaturation)
                 {
                     processedRight =
@@ -13384,6 +14034,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         }
 
         finishTopologyTransition();
+        publishColourMeters(buffer);
         return;
     }
 
@@ -13471,7 +14122,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             const float outGainLinear = smoothedOutputGain.getNextValue();
             const float topologyGain =
                 smoothedTopologyGain.getNextValue();
-            float processedLeft = toneFilterL.processSample(wetLeft[sample]);
+            float processedLeft = processTone(wetLeft[sample],0);
             if (! lowCutBeforeSaturation)
                 processedLeft = lowCutFilterL.processSample(processedLeft);
             processedLeft *= outGainLinear;
@@ -13489,7 +14140,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             if (wetRight != nullptr && dryRight != nullptr)
             {
                 float processedRight =
-                    toneFilterR.processSample(wetRight[sample]);
+                    processTone(wetRight[sample],1);
                 if (! lowCutBeforeSaturation)
                     processedRight =
                         lowCutFilterR.processSample(processedRight);
@@ -13514,10 +14165,14 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     // values are removed so Mix=0 remains sample-transparent.
     clearNonFiniteSamples(buffer);
     finishTopologyTransition();
+    publishColourMeters(buffer);
 }
 
 void OpenStudioSaturator::releaseResources()
 {
+    colour.reset();
+    activeColourEngine=useLowLatencyOversampling?0:juce::jlimit(0,5,juce::roundToInt(colourEngine.load()));
+    if(!useLowLatencyOversampling)lowCutBeforeSaturation=activeColourEngine>0;
     toneFilterL.reset();
     toneFilterR.reset();
     lowCutFilterL.reset();
@@ -13591,15 +14246,13 @@ void OpenStudioSaturator::releaseResources()
                 1.0f,
                 asymmetry.load(std::memory_order_relaxed)));
     }
-    smoothedDriveGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(juce::jlimit(0.0f, 30.0f, drive.load())));
-    smoothedMix.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, mix.load()));
-    const float driveDB = juce::jlimit(0.0f, 30.0f, drive.load());
-    const float restoredOutputDb = automaticDriveCompensationEnabled
-        ? juce::jlimit(-12.0f, 0.0f, outputGain.load())
-            - driveDB * 0.42f
-        : juce::jlimit(-24.0f, 12.0f, outputGain.load());
-    smoothedOutputGain.setCurrentAndTargetValue(
-        juce::Decibels::decibelsToGain(restoredOutputDb));
+    const float driveDB=juce::jlimit(0.0f,30.0f,drive.load())+(activeColourEngine>0?inputTrim.load()+(boostDrive.load()>=.5f?20.0f:0.0f):0);
+    const float compensation=automaticDriveCompensationEnabled&&(activeColourEngine==0||driveCompensation.load()>=.5f)?-juce::jmax(0.0f,driveDB)*.42f:0;
+    const float outputDb=(automaticDriveCompensationEnabled?juce::jlimit(-12.0f,0.0f,outputGain.load()):juce::jlimit(-24.0f,12.0f,outputGain.load()))+compensation;
+    lastDriveDbTarget=driveDB;lastMixTarget=juce::jlimit(0.0f,1.0f,mix.load());lastOutputDbTarget=outputDb;
+    smoothedDriveGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(driveDB));
+    smoothedMix.setCurrentAndTargetValue(lastMixTarget);
+    smoothedOutputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(outputDb));
 }
 
 void OpenStudioSaturator::resetRealtimeStateForEmbeddedBypass() noexcept
@@ -13697,9 +14350,18 @@ void OpenStudioSaturator::resetRealtimeStateForEmbeddedBypass() noexcept
     smoothedTopologyGain.setCurrentAndTargetValue(1.0f);
 }
 
+void OpenStudioSaturator::publishColourMeters(const juce::AudioBuffer<float>& buffer)
+{
+    float peak=0;for(int ch=0;ch<buffer.getNumChannels();++ch)peak=juce::jmax(peak,buffer.getMagnitude(ch,0,buffer.getNumSamples()));
+    outputLevelDb.store(juce::Decibels::gainToDecibels(peak,-100.0f));
+    drivenLevelDb.store(activeColourEngine>0?juce::Decibels::gainToDecibels(colour.getDrivenPeak(),-100.0f):inputLevelDb.load()+drive.load());
+}
+
 void OpenStudioSaturator::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioSaturator", {
+        { "colourEngine",colourEngine.load() }, { "inputTrim",inputTrim.load() }, { "boostDrive",boostDrive.load() }, { "driveCompensation",driveCompensation.load() },
+        { "colourTone",colourTone.load() }, { "cornerBump",cornerBump.load() }, { "colourDynamics",colourDynamics.load() }, { "steepCut",steepCut.load() },
         { "satType",        satType.load() },
         { "drive",          drive.load() },
         { "mix",            mix.load() },
@@ -13719,6 +14381,9 @@ void OpenStudioSaturator::setStateInformation(const void* data, int sizeInBytes)
     if (!tree.isValid())
         return;
 
+    const auto readColour=[&](const char* id,float fallback,float minimum,float maximum){const float value=static_cast<float>(tree.getProperty(id,fallback));return std::isfinite(value)?juce::jlimit(minimum,maximum,value):fallback;};
+    colourEngine.store(readColour("colourEngine",0,0,5));inputTrim.store(readColour("inputTrim",0,-24,24));boostDrive.store(readColour("boostDrive",0,0,1));driveCompensation.store(readColour("driveCompensation",1,0,1));
+    colourTone.store(readColour("colourTone",0,-1,1));cornerBump.store(readColour("cornerBump",0,0,6));colourDynamics.store(readColour("colourDynamics",1,0,1));steepCut.store(readColour("steepCut",0,0,1));
     satType        = static_cast<float>((double)tree.getProperty("satType", 0.0));
     drive          = static_cast<float>((double)tree.getProperty("drive", 6.0));
     mix            = static_cast<float>((double)tree.getProperty("mix", 1.0));
@@ -29031,40 +29696,88 @@ bool OpenStudioNAMRack::isBusesLayoutSupported(const BusesLayout& layouts) const
 //  OpenStudioBasicSynthInstrument
 // ============================================================================
 
-static float synthPolyBlep(float phase, float phaseDelta)
+std::array<float, 9> OpenStudioBasicSynthInstrument::modulationValues() const noexcept
 {
-    if (phaseDelta <= 0.0f)
-        return 0.0f;
-
-    if (phase < phaseDelta)
+    std::array<float, 9> values {};
+    for (size_t i = 0; i < values.size(); ++i)
     {
-        const float t = phase / phaseDelta;
-        return t + t - t * t - 1.0f;
+        const auto& control = modulationControls[i]; const float raw = (this->*control.member).load(std::memory_order_relaxed);
+        values[i] = juce::jlimit(control.minimum, control.maximum, std::isfinite(raw) ? raw : control.initial);
     }
-
-    if (phase > 1.0f - phaseDelta)
-    {
-        const float t = (phase - 1.0f) / phaseDelta;
-        return t * t + t + t + 1.0f;
-    }
-
-    return 0.0f;
+    return values;
 }
 
-static float synthSaw(float phase, float phaseDelta)
+std::array<float,11> OpenStudioBasicSynthInstrument::matrixValues() const noexcept
 {
-    return (2.0f * phase - 1.0f) - synthPolyBlep(phase, phaseDelta);
+    std::array<float,11> values{};
+    for(size_t i=0;i<values.size();++i)
+    {
+        const auto& control=modulationControls[15+i];const float raw=(this->*control.member).load(std::memory_order_relaxed);
+        const float maximum=i>=2 && (i-2)%3==0?12.0f:i>=2 && (i-2)%3==1?27.0f:control.maximum;
+        values[i]=juce::jlimit(control.minimum,maximum,std::isfinite(raw)?raw:control.initial);
+    }
+    return values;
 }
 
-static float synthSquare(float phase, float phaseDelta)
+std::array<float,19> OpenStudioBasicSynthInstrument::extendedMatrixValues() const noexcept
 {
-    float value = phase < 0.5f ? 1.0f : -1.0f;
-    value += synthPolyBlep(phase, phaseDelta);
-    float fallingPhase = phase - 0.5f;
-    if (fallingPhase < 0.0f)
-        fallingPhase += 1.0f;
-    value -= synthPolyBlep(fallingPhase, phaseDelta);
-    return value;
+    std::array<float,19> values{};
+    for(size_t i=0;i<values.size();++i)
+    {
+        const auto& control=modulationControls[35+i];const float raw=(this->*control.member).load(std::memory_order_relaxed);
+        values[i]=juce::jlimit(control.minimum,i<15&&i%3==1?27.0f:control.maximum,std::isfinite(raw)?raw:control.initial);
+    }
+    for(size_t i=0;i<4;++i)values[15+i]=ccMacros.value(i,values[15+i]);
+    return values;
+}
+
+BuiltInSynthMPE::Configuration OpenStudioBasicSynthInstrument::mpeValues() const noexcept
+{
+    return { mpeEnabled.load(), mpeLowerMembers.load(), mpeUpperMembers.load(), mpeLowerBend.load(),
+             mpeLowerMasterBend.load(), mpeUpperBend.load(), mpeUpperMasterBend.load() };
+}
+
+void OpenStudioBasicSynthInstrument::configureCCMacros() noexcept
+{
+    ccMacros.configure({juce::roundToInt(macro1CC.load()),juce::roundToInt(macro2CC.load()),juce::roundToInt(macro3CC.load()),juce::roundToInt(macro4CC.load())},
+        {juce::roundToInt(macro1Channel.load()),juce::roundToInt(macro2Channel.load()),juce::roundToInt(macro3Channel.load()),juce::roundToInt(macro4Channel.load())});
+}
+
+bool OpenStudioBasicSynthInstrument::setModulationControl(const juce::String& id, float value)
+{
+    if (!std::isfinite(value)) return false;
+    for(const auto& control:macroMappings)if(id==control.id){(this->*control.member).store(std::floor(juce::jlimit(control.minimum,control.maximum,value)+.5f));return true;}
+    for(int slot=0;slot<4;++slot)if(id=="macro"+juce::String(slot+1))ccMacros.clear(static_cast<size_t>(slot));
+    if(id.startsWith("matrix")&&id.endsWith("TargetFull"))
+    {
+        const auto original=id.dropLastCharacters(4);
+        for(const auto& control:modulationControls)if(original==control.id){(this->*control.member).store(std::floor(juce::jlimit(0.0f,27.0f,value)+.5f));return true;}
+        return false;
+    }
+    if(id.startsWith("matrix") && id.endsWith("Expanded"))
+    {
+        const auto original=id.dropLastCharacters(8);
+        for(size_t i=17;i<26;++i)
+            if(original==modulationControls[i].id && (original.endsWith("Source") || original.endsWith("Target")))
+            {
+                (this->*modulationControls[i].member).store(std::floor(juce::jlimit(0.0f,original.endsWith("Source")?12.0f:7.0f,value)+.5f));
+                return true;
+            }
+        return false;
+    }
+    for (const auto& control : modulationControls)
+        if (id == control.id)
+        {
+            float bounded = juce::jlimit(control.minimum, control.maximum, value);
+            if (id == "oscillatorAShape" || id == "oscillatorBShape" || id == "mpeEnabled" || id.endsWith("Members") || id == "filterMode" || id == "lfoDestination" || id == "lfoShape" || id == "filterEnvelopeSource" || id == "lfoMode" || id == "wheelMode" || (id.startsWith("matrix") && !id.endsWith("Amount"))) bounded = std::floor(bounded + .5f);
+            (this->*control.member).store(bounded, std::memory_order_relaxed);
+            if (id == "mpeLowerMembers" && bounded > 0 && mpeUpperMembers.load() > 0 && bounded + mpeUpperMembers.load() > 14)
+                mpeUpperMembers.store(juce::jmax(0.0f, 14.0f - bounded));
+            if (id == "mpeUpperMembers" && bounded > 0 && mpeLowerMembers.load() > 0 && bounded + mpeLowerMembers.load() > 14)
+                mpeLowerMembers.store(juce::jmax(0.0f, 14.0f - bounded));
+            return true;
+        }
+    return false;
 }
 
 OpenStudioBasicSynthInstrument::OpenStudioBasicSynthInstrument()
@@ -29074,10 +29787,61 @@ OpenStudioBasicSynthInstrument::OpenStudioBasicSynthInstrument()
 {
 }
 
+float OpenStudioBasicSynthInstrument::releaseModulationBound() const noexcept
+{
+    using Parameter = std::atomic<float> OpenStudioBasicSynthInstrument::*;
+    static constexpr std::array<std::array<Parameter, 3>, 8> routes {{
+        {{ &OpenStudioBasicSynthInstrument::matrix1Source, &OpenStudioBasicSynthInstrument::matrix1Target, &OpenStudioBasicSynthInstrument::matrix1Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix2Source, &OpenStudioBasicSynthInstrument::matrix2Target, &OpenStudioBasicSynthInstrument::matrix2Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix3Source, &OpenStudioBasicSynthInstrument::matrix3Target, &OpenStudioBasicSynthInstrument::matrix3Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix4Source, &OpenStudioBasicSynthInstrument::matrix4Target, &OpenStudioBasicSynthInstrument::matrix4Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix5Source, &OpenStudioBasicSynthInstrument::matrix5Target, &OpenStudioBasicSynthInstrument::matrix5Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix6Source, &OpenStudioBasicSynthInstrument::matrix6Target, &OpenStudioBasicSynthInstrument::matrix6Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix7Source, &OpenStudioBasicSynthInstrument::matrix7Target, &OpenStudioBasicSynthInstrument::matrix7Amount }},
+        {{ &OpenStudioBasicSynthInstrument::matrix8Source, &OpenStudioBasicSynthInstrument::matrix8Target, &OpenStudioBasicSynthInstrument::matrix8Amount }}
+    }};
+    float amount = 0;
+    for (const auto& route : routes)
+    {
+        const float source = (this->*route[0]).load(std::memory_order_relaxed);
+        const float target = (this->*route[1]).load(std::memory_order_relaxed);
+        const float depth = (this->*route[2]).load(std::memory_order_relaxed);
+        // Source 0 is Off; target 13 is Amp Release. A negative amount can
+        // lengthen release when its source is bipolar, so retain its magnitude.
+        if (std::isfinite(source) && source >= .5f && std::isfinite(target)
+            && std::round(target) == 13 && std::isfinite(depth))
+            amount += std::abs(depth);
+    }
+    return juce::jlimit(0.0f, 1.0f, amount);
+}
+
+double OpenStudioBasicSynthInstrument::getTailLengthSeconds() const
+{
+    // Route smoothing can retain the former destination for 20 ms. Count that
+    // interval in full before the current release bound; filter history is
+    // multiplied by the amplitude envelope and cannot outlive the voice.
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        BuiltInInstrumentTail::positive(releaseMs.load(std::memory_order_relaxed), 180),
+        std::exp2(-4 * releaseModulationBound())) + .021;
+}
+
+double OpenStudioBasicSynthInstrument::getMaximumTailLengthSeconds() const noexcept
+{
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        5000, 1.0f / 16) + .021;
+}
+
 void OpenStudioBasicSynthInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    tailSampleRate.store(cachedSampleRate, std::memory_order_relaxed);
+    modulation.prepare(cachedSampleRate, modulationValues());
+    ccMacros.reset();configureCCMacros();
+    matrix.prepare(cachedSampleRate,matrixValues());matrix.setExtendedTargets(extendedMatrixValues(),true);
+    oscillators.prepare(cachedSampleRate,juce::roundToInt(oscillatorAShape.load()),juce::roundToInt(oscillatorBShape.load()));
+    mpe.prepare(cachedSampleRate, mpeValues());
+    filterEnvelopeBlend.reset(cachedSampleRate, .02);
     clearVoices();
 }
 
@@ -29086,8 +29850,21 @@ void OpenStudioBasicSynthInstrument::releaseResources()
     clearVoices();
 }
 
-void OpenStudioBasicSynthInstrument::clearVoices()
+void OpenStudioBasicSynthInstrument::clearVoices(bool resetMPE)
 {
+    performanceTelemetry.reset();
+    if(resetMPE)channelMix.reset(cachedSampleRate);
+    ccMacros.reset();
+    if (resetMPE) mpe.reset(mpeValues());
+    voicePool.reset();
+    oscillators.configure(juce::roundToInt(oscillatorAShape.load()),juce::roundToInt(oscillatorBShape.load()),true);
+    matrix.reset();matrix.setTargets(matrixValues(),true);matrix.setExtendedTargets(extendedMatrixValues(),true);globalModulationVoice={};
+    for(auto& channel:previousRoutes)for(auto& routes:channel)routes.fill(0);
+    for(auto& channel:sharedLfoOffset)channel.fill(0);
+    for (auto& voices : modulationVoices) voices.fill({});
+    for (auto& voices : filterEnvelopes) voices.fill({});
+    filterEnvelopeBlend.setCurrentAndTargetValue(filterEnvelopeSource.load() >= .5f ? 1.0f : 0.0f);
+    for (auto& notes : decaying) notes.fill(false);
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : releasing) notes.fill(false);
     for (auto& notes : phaseA) notes.fill(0.0f);
@@ -29103,7 +29880,56 @@ void OpenStudioBasicSynthInstrument::clearVoices()
 
 void OpenStudioBasicSynthInstrument::handleMidi(const juce::MidiMessage& message)
 {
+    performanceTelemetry.observe(message);
     const int channel = juce::jlimit(0, 15, message.getChannel() > 0 ? message.getChannel() - 1 : 0);
+    channelMix.controller(message,[&](size_t receiver){return mpe.isEnabled()?mpe.affects(static_cast<size_t>(channel),receiver):receiver==static_cast<size_t>(channel);});
+    if(ccMacros.controller(message,[&](int receiver){return mpe.isEnabled()?mpe.affects(static_cast<size_t>(channel),static_cast<size_t>(receiver)):receiver==channel;}))
+        matrix.setExtendedTargets(extendedMatrixValues());
+    const bool member = mpe.manager(static_cast<size_t>(channel)) >= 0;
+    if (mpe.isEnabled())
+    {
+        if (mpe.handle(message)) { clearVoices(false); return; }
+        if (message.isController() && (message.getControllerNumber() == 64 || message.getControllerNumber() == 66 || message.getControllerNumber() == 121))
+        {
+            const size_t sender=static_cast<size_t>(channel);const int controller=message.getControllerNumber();
+            if(controller==66)voicePool.setSostenuto(sender,message.getControllerValue()>=64,[&](size_t receiver){return mpe.affects(sender,receiver);});
+            if(controller==121)for(size_t owner=0;owner<16;++owner)if(mpe.affects(sender,owner))voicePool.setSostenuto(owner,false,[](size_t){return false;});
+            for (size_t receiver = 0; receiver < 16; ++receiver) if (mpe.affects(sender, receiver))
+            {
+                voicePool.pedal[receiver] = mpe.pedal(receiver);
+                for (size_t slot = 0; slot < BuiltInVoiceAllocation::voicesPerChannel; ++slot)
+                    if (!voicePool.held[receiver][slot]&&!voicePool.sustained(receiver,slot)) releasing[receiver][slot] = true;
+                if (message.getControllerNumber() == 121)
+                { matrix.resetChannel(receiver); pitchBendSemitones[receiver] = 0; modWheel[receiver] = 0; }
+            }
+            return;
+        }
+        if (message.isAllNotesOff() || message.isAllSoundOff())
+        {
+            for (size_t receiver = 0; receiver < 16; ++receiver) if (mpe.affects(static_cast<size_t>(channel), receiver))
+            {
+                voicePool.releaseChannel(receiver);
+                for (size_t slot = 0; slot < BuiltInVoiceAllocation::voicesPerChannel; ++slot)
+                {
+                    mpe.stopVoice(receiver, slot);
+                    releasing[receiver][slot] = !voicePool.sustained(receiver,slot);
+                    if (message.isAllSoundOff()) { active[receiver][slot] = false; envelope[receiver][slot] = 0; }
+                }
+            }
+            return;
+        }
+        if (mpe.isManager(static_cast<size_t>(channel))) return;
+        if (member && (message.isPitchWheel() || message.isChannelPressure()
+            || (message.isController() && (message.getControllerNumber() == 1 || message.getControllerNumber() == 74)))) return;
+    }
+    if(message.isChannelPressure()){matrix.pressureTarget(static_cast<size_t>(channel),message.getChannelPressureValue()/127.0f);return;}
+    if(message.isAftertouch())
+    {
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+            if(voicePool.key[static_cast<size_t>(channel)][slot]==message.getNoteNumber()&&active[static_cast<size_t>(channel)][slot])
+                matrix.polyTarget(static_cast<size_t>(channel),slot,message.getAfterTouchValue()/127.0f);
+        return;
+    }
     if (message.isPitchWheel())
     {
         const float normalized = (static_cast<float>(message.getPitchWheelValue()) - 8192.0f) / 8192.0f;
@@ -29113,31 +29939,62 @@ void OpenStudioBasicSynthInstrument::handleMidi(const juce::MidiMessage& message
     if (message.isController() && message.getControllerNumber() == 1)
     {
         modWheel[static_cast<size_t>(channel)] = static_cast<float>(message.getControllerValue()) / 127.0f;
+        matrix.wheelTarget(static_cast<size_t>(channel),modWheel[static_cast<size_t>(channel)]);
+        return;
+    }
+
+    if (message.isController() && (message.getControllerNumber() == 64 || message.getControllerNumber() == 66 || message.getControllerNumber() == 121))
+    {
+        const size_t ch=static_cast<size_t>(channel);const int controller=message.getControllerNumber();
+        if(controller==66)voicePool.setSostenuto(ch,message.getControllerValue()>=64,[ch](size_t receiver){return receiver==ch;});
+        if(controller==64||controller==121)voicePool.pedal[ch]=controller==64&&message.getControllerValue()>=64;
+        if(controller==121)voicePool.setSostenuto(ch,false,[](size_t){return false;});
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+            if(!voicePool.held[ch][slot]&&!voicePool.sustained(ch,slot))releasing[ch][slot]=true;
+        if (message.getControllerNumber() == 121) { matrix.resetChannel(static_cast<size_t>(channel)); pitchBendSemitones[static_cast<size_t>(channel)] = 0; modWheel[static_cast<size_t>(channel)] = 0; }
         return;
     }
 
     if (message.isNoteOn())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        active[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
-        releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = false;
-        phaseA[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        phaseB[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.25f;
-        phaseSub[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        velocity[static_cast<size_t>(channel)][static_cast<size_t>(note)] = message.getFloatVelocity();
-        envelope[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        filterState[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        ageSamples[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0;
+        const size_t slot = voicePool.start(static_cast<size_t>(channel), note, active);
+        decaying[static_cast<size_t>(channel)][slot] = false;
+        active[static_cast<size_t>(channel)][slot] = true;
+        releasing[static_cast<size_t>(channel)][slot] = false;
+        phaseA[static_cast<size_t>(channel)][slot] = 0.0f;
+        phaseB[static_cast<size_t>(channel)][slot] = 0.25f;
+        phaseSub[static_cast<size_t>(channel)][slot] = 0.0f;
+        velocity[static_cast<size_t>(channel)][slot] = message.getFloatVelocity();
+        envelope[static_cast<size_t>(channel)][slot] = 0.0f;
+        filterState[static_cast<size_t>(channel)][slot] = 0.0f;
+        modulationVoices[static_cast<size_t>(channel)][slot] = {};
+        matrix.startVoice(static_cast<size_t>(channel),slot);
+        previousRoutes[static_cast<size_t>(channel)][slot].fill(0);sharedLfoOffset[static_cast<size_t>(channel)][slot]=0;
+        if (member) mpe.startVoice(static_cast<size_t>(channel), slot);
+        filterEnvelopes[static_cast<size_t>(channel)][slot].start(cachedSampleRate, filterAttackMs.load(), filterDecayMs.load(), filterSustain.load(), filterReleaseMs.load(), message.getFloatVelocity(), filterVelocity.load());
+        ageSamples[static_cast<size_t>(channel)][slot] = 0;
     }
     else if (message.isNoteOff())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
+        const int released = voicePool.stop(static_cast<size_t>(channel), note);
+        if (released < 0) return;
+        const size_t slot = static_cast<size_t>(released);
+        if (member) mpe.stopVoice(static_cast<size_t>(channel), slot);
+        releasing[static_cast<size_t>(channel)][slot] = !voicePool.sustained(static_cast<size_t>(channel),slot);
     }
     else if (message.isAllNotesOff() || message.isAllSoundOff())
     {
-        for (auto& notes : releasing[static_cast<size_t>(channel)])
-            notes = true;
+        voicePool.releaseChannel(static_cast<size_t>(channel));
+        if (message.isAllSoundOff())
+        {
+            active[static_cast<size_t>(channel)].fill(false);
+            envelope[static_cast<size_t>(channel)].fill(0);
+        }
+
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+            releasing[static_cast<size_t>(channel)][slot]=!voicePool.sustained(static_cast<size_t>(channel),slot);
     }
 }
 
@@ -29149,16 +30006,26 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
     if (numSamples <= 0 || numChannels <= 0)
         return;
 
+    if (mpe.configure(mpeValues())) clearVoices(false);
     buffer.clear();
     const float sr = static_cast<float>(juce::jmax(1.0, cachedSampleRate));
     const float attackStep = 1.0f / juce::jmax(1.0f, sr * attackMs.load(std::memory_order_relaxed) * 0.001f);
+    const float sustainLevel = juce::jlimit(0.0f, 1.0f, sustain.load());
+    const float decayStep = (1.0f - sustainLevel) / juce::jmax(1.0f, sr * decayMs.load() * .001f);
+    const float blend = juce::jlimit(0.0f, 1.0f, oscillatorBlend.load());
     const float releaseStep = 1.0f / juce::jmax(1.0f, sr * releaseMs.load(std::memory_order_relaxed) * 0.001f);
     const float bright = juce::jlimit(0.0f, 1.0f, brightness.load(std::memory_order_relaxed));
-    const float detune = std::pow(2.0f, juce::jlimit(0.0f, 35.0f, detuneCents.load(std::memory_order_relaxed)) / 1200.0f);
+    const float detuneAmount=juce::jlimit(0.0f,35.0f,detuneCents.load(std::memory_order_relaxed));
+    const float detune = std::pow(2.0f, detuneAmount / 1200.0f);
     const float sub = juce::jlimit(0.0f, 0.8f, subLevel.load(std::memory_order_relaxed));
     const float noise = juce::jlimit(0.0f, 0.25f, noiseLevel.load(std::memory_order_relaxed));
     const float outGain = juce::Decibels::decibelsToGain(juce::jlimit(-36.0f, 0.0f, outputGain.load(std::memory_order_relaxed)));
     const float filterCoeff = juce::jlimit(0.015f, 0.55f, 0.04f + bright * bright * 0.46f);
+    modulation.setTargets(modulationValues());
+    configureCCMacros();
+    matrix.setTargets(matrixValues());matrix.setExtendedTargets(extendedMatrixValues());
+    oscillators.configure(juce::roundToInt(oscillatorAShape.load()),juce::roundToInt(oscillatorBShape.load()));
+    filterEnvelopeBlend.setTargetValue(filterEnvelopeSource.load() >= .5f ? 1.0f : 0.0f);
     const float twoPi = juce::MathConstants<float>::twoPi;
     std::array<BuiltInMidiVoiceRef, kBuiltInMidiVoiceSlots> voiceRefs {};
 
@@ -29176,65 +30043,127 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
 
         for (int sample = start; sample < end; ++sample)
         {
-            float mixed = 0.0f;
+            const auto channelFrame=channelMix.next();
+            const auto modulationFrame = modulation.next();
+            const auto matrixFrame=matrix.next();
+            const auto oscillatorFrame=oscillators.next();
+            const auto sharedPhase=globalModulationVoice.phase;
+            const float globalLfo=modulation.lfo(globalModulationVoice,modulationFrame);
+            const float independentBlend = filterEnvelopeBlend.getNextValue();
+            float mixed = 0.0f,mixedL=0.0f,mixedR=0.0f;
+            std::array<float,16> channelLevels{},panL{},panR{};
+            for(size_t ch=0;ch<16;++ch){auto control=channelFrame[ch];const int manager=mpe.manager(ch);if(manager>=0){const auto& master=channelFrame[static_cast<size_t>(manager)];control.level*=master.level;control.pan=BuiltInMIDIChannelMix::biasPan(control.pan,master.pan);}channelLevels[ch]=control.level;panL[ch]=control.pan==0?1:std::sqrt(1-control.pan);panR[ch]=control.pan==0?1:std::sqrt(1+control.pan);}
             for (int voiceIndex = 0; voiceIndex < voiceCount;)
             {
                 const auto voiceRef = voiceRefs[static_cast<size_t>(voiceIndex)];
                 const size_t channel = voiceRef.channel;
-                const size_t note = voiceRef.note;
+                const size_t slot = voiceRef.note;
+                const size_t note = static_cast<size_t>(voicePool.key[channel][slot]);
 
-                if (!active[channel][note] && envelope[channel][note] <= 0.0f)
+                if (!active[channel][slot] && envelope[channel][slot] <= 0.0f)
                 {
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
-                if (active[channel][note] && !releasing[channel][note])
-                    envelope[channel][note] = juce::jmin(1.0f, envelope[channel][note] + attackStep);
+                const auto& previous=previousRoutes[channel][slot];
+                const float voiceAttackStep=previous[10]==0?attackStep:attackStep*std::exp2(-4*previous[10]);
+                const float voiceSustain=previous[12]==0?sustainLevel:juce::jlimit(0.0f,1.0f,sustainLevel+previous[12]);
+                const float voiceDecayStep=previous[11]==0&&previous[12]==0?decayStep:(1-voiceSustain)/juce::jmax(1.0f,sr*decayMs.load()*.001f*std::exp2(4*previous[11]));
+                const float voiceReleaseStep=previous[13]==0?releaseStep:releaseStep*std::exp2(-4*previous[13]);
+                if (active[channel][slot] && !releasing[channel][slot])
+                {
+                    if (!decaying[channel][slot])
+                    {
+                        envelope[channel][slot] = juce::jmin(1.0f, envelope[channel][slot] + voiceAttackStep);
+                        decaying[channel][slot] = envelope[channel][slot] >= 1.0f;
+                    }
+                    else envelope[channel][slot] = juce::jmax(voiceSustain, envelope[channel][slot] - voiceDecayStep);
+                }
                 else
-                    envelope[channel][note] = juce::jmax(0.0f, envelope[channel][note] - releaseStep);
+                    envelope[channel][slot] = juce::jmax(0.0f, envelope[channel][slot] - voiceReleaseStep);
 
-                if (envelope[channel][note] <= 0.0f)
+                if (envelope[channel][slot] <= 0.0f && releasing[channel][slot])
                 {
-                    active[channel][note] = false;
-                    releasing[channel][note] = false;
-                    velocity[channel][note] = 0.0f;
+                    active[channel][slot] = false;
+                    releasing[channel][slot] = false;
+                    velocity[channel][slot] = 0.0f;
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
+                const float independentEnvelope = filterEnvelopes[channel][slot].next(releasing[channel][slot],previous[14],previous[15],previous[16],previous[17]);
+                const float filterEnv = independentBlend <= 0 ? envelope[channel][slot]
+                    : envelope[channel][slot] + independentBlend * (independentEnvelope - envelope[channel][slot]);
                 const float freq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
-                const float bendFactor = std::pow(2.0f, pitchBendSemitones[channel] / 12.0f);
-                const float mod = juce::jlimit(0.0f, 1.0f, modWheel[channel]);
-                const float vibrato = std::sin(twoPi * (static_cast<float>(ageSamples[channel][note]) / sr) * 5.4f) * mod * 0.018f;
-                const float modulatedFreq = freq * bendFactor * (1.0f + vibrato);
-                const float deltaA = juce::jmin(0.45f, modulatedFreq / sr / detune);
-                const float deltaB = juce::jmin(0.45f, modulatedFreq * detune / sr);
+                const bool expressiveMember = mpe.manager(channel) >= 0;
+                const auto expression = expressiveMember ? mpe.next(channel, slot) : BuiltInSynthMPE::Expression {};
+                const float bendFactor = std::pow(2.0f, (expressiveMember ? expression.bend : pitchBendSemitones[channel]) / 12.0f);
+                const float mod = juce::jlimit(0.0f, 1.0f, expressiveMember ? expression.wheel : modWheel[channel])*matrixFrame.legacyWheel;
+                const float vibrato = std::sin(twoPi * (static_cast<float>(ageSamples[channel][slot]) / sr) * 5.4f) * mod * 0.018f;
+                auto& modulationVoice = modulationVoices[channel][slot];
+                auto lfoFrame=modulationFrame;
+                if(previous[20]!=0)lfoFrame.rate=juce::jlimit(.01f,100.0f,modulationFrame.rate*std::exp2(4*previous[20]));
+                const float noteLfo=modulation.lfo(modulationVoice,lfoFrame);
+                auto& offset=sharedLfoOffset[channel][slot];float sharedValue=globalLfo;
+                if(offset!=0){BuiltInSynthModulation::Voice sharedVoice;sharedVoice.phase=sharedPhase+offset;sharedVoice.phase-=std::floor(sharedVoice.phase);sharedValue=modulation.lfo(sharedVoice,modulationFrame);}
+                if(previous[20]!=0){offset+=(lfoFrame.rate-modulationFrame.rate)/sr;offset-=std::floor(offset);}
+                const float lfo=matrixFrame.globalLfo==0?noteLfo:noteLfo+matrixFrame.globalLfo*(sharedValue-noteLfo);
+                const auto routed=BuiltInSynthMatrix::applyExtended(matrixFrame,{0,velocity[channel][slot],expressiveMember ? expression.wheel : matrixFrame.wheel[channel],expressiveMember ? expression.pressure : matrixFrame.pressure[channel],matrix.poly(channel,slot),envelope[channel][slot],independentEnvelope,lfo,expressiveMember ? expression.slide : 0.0f,matrixFrame.macros[0],matrixFrame.macros[1],matrixFrame.macros[2],matrixFrame.macros[3]});
+                previousRoutes[channel][slot]=routed;
+                const float voiceBrightness=routed[9]==0?bright:juce::jlimit(0.0f,1.0f,bright+routed[9]);
+                const float voiceDepth=routed[21]==0?modulationFrame.depth:juce::jlimit(0.0f,1.0f,modulationFrame.depth+routed[21]);
+                const float voiceBlend=routed[3]==0?blend:juce::jlimit(0.0f,1.0f,blend+routed[3]);
+                const float pitchModulation = lfo * voiceDepth * modulationFrame.destination[2];
+                float modulatedFreq = freq * bendFactor * (1.0f + vibrato);
+                if (pitchModulation != 0) modulatedFreq *= std::exp2(pitchModulation / 6.0f);
+                if(routed[1]!=0)modulatedFreq*=std::exp2(routed[1]);
+                const float voiceDetune=routed[4]==0?detune:std::pow(2.0f,juce::jlimit(0.0f,70.0f,detuneAmount+35*routed[4])/1200.0f);
+                const float voiceSub=routed[5]==0?sub:juce::jlimit(0.0f,.8f,sub+.8f*routed[5]);
+                const float voiceNoise=routed[6]==0?noise:juce::jlimit(0.0f,.25f,noise+.25f*routed[6]);
+                const float freqA=routed[22]==0?modulatedFreq:modulatedFreq*std::exp2(2*routed[22]);
+                const float freqB=routed[23]==0?modulatedFreq:modulatedFreq*std::exp2(2*routed[23]);
+                const float deltaA = juce::jmin(0.45f, freqA / sr / voiceDetune);
+                const float deltaB = juce::jmin(0.45f, freqB * voiceDetune / sr);
                 const float deltaSub = juce::jmin(0.45f, modulatedFreq * 0.5f / sr);
-                const float saw = synthSaw(phaseA[channel][note], deltaA);
-                const float square = synthSquare(phaseB[channel][note], deltaB);
-                const float subOsc = std::sin(twoPi * phaseSub[channel][note]);
-                const float transient = builtinNoise(ageSamples[channel][note], static_cast<int>(note))
-                    * noise * std::exp(-static_cast<float>(ageSamples[channel][note]) / (sr * 0.25f));
-                float voice = saw * 0.58f + square * (0.22f + (bright + mod * 0.25f) * 0.18f) + subOsc * sub + transient;
+                const float saw = BuiltInSynthOscillators::modulatedSample(oscillatorFrame,0,phaseA[channel][slot],deltaA,routed[24],routed[26]);
+                const float square = BuiltInSynthOscillators::modulatedSample(oscillatorFrame,1,phaseB[channel][slot],deltaB,routed[25],routed[27]);
+                const float subOsc = std::sin(twoPi * phaseSub[channel][slot]);
+                const float transient = builtinNoise(ageSamples[channel][slot], static_cast<int>(note))
+                    * voiceNoise * std::exp(-static_cast<float>(ageSamples[channel][slot]) / (sr * 0.25f));
+                float voice = saw * (1.16f * (1.0f - voiceBlend)) + square * (2.0f * voiceBlend) * (0.22f + (voiceBrightness + mod * 0.25f) * 0.18f) + subOsc * voiceSub + transient;
 
-                filterState[channel][note] += filterCoeff * (voice - filterState[channel][note]);
-                voice = filterState[channel][note] * envelope[channel][note] * velocity[channel][note] * outGain;
-                mixed += voice;
+                const float voiceFilterCoeff=routed[9]==0?filterCoeff:juce::jlimit(.015f,.55f,.04f+voiceBrightness*voiceBrightness*.46f);
+                filterState[channel][slot] += voiceFilterCoeff * (voice - filterState[channel][slot]);
+                auto voiceModulation=modulationFrame;voiceModulation.depth=voiceDepth;
+                if(routed[18]!=0)voiceModulation.envelope=juce::jlimit(-8.0f,8.0f,modulationFrame.envelope+4*routed[18]);
+                if(routed[19]!=0)voiceModulation.keyTrack=juce::jlimit(0.0f,1.0f,modulationFrame.keyTrack+routed[19]);
+                if(routed[7]!=0)voiceModulation.q=juce::jlimit(.5f,12.0f,modulationFrame.q*std::exp2(4*routed[7]));
+                const float filtered = modulation.process(modulationVoice, voiceModulation, voice, filterState[channel][slot], static_cast<int>(note), filterEnv, lfo,4*routed[0]);
+                voice = filtered * envelope[channel][slot] * velocity[channel][slot] * outGain;
+                const float amplitudeDepth = voiceDepth * modulationFrame.destination[3];
+                if (amplitudeDepth != 0) voice *= 1.0f - amplitudeDepth * .5f * (1.0f - lfo);
+                if(routed[2]!=0)voice*=juce::Decibels::decibelsToGain(24*routed[2]);
+                voice*=channelLevels[channel];mixed += voice;
+                if(numChannels>1){if(routed[8]==0){mixedL+=voice*panL[channel];mixedR+=voice*panR[channel];}
+                    else{const float left=panL[channel]*std::sqrt(1-routed[8]),right=panR[channel]*std::sqrt(1+routed[8]);mixedL+=voice*left;mixedR+=voice*right;}}
 
-                phaseA[channel][note] += deltaA;
-                phaseB[channel][note] += deltaB;
-                phaseSub[channel][note] += deltaSub;
-                if (phaseA[channel][note] >= 1.0f) phaseA[channel][note] -= std::floor(phaseA[channel][note]);
-                if (phaseB[channel][note] >= 1.0f) phaseB[channel][note] -= std::floor(phaseB[channel][note]);
-                if (phaseSub[channel][note] >= 1.0f) phaseSub[channel][note] -= std::floor(phaseSub[channel][note]);
-                ++ageSamples[channel][note];
+                phaseA[channel][slot] += deltaA;
+                phaseB[channel][slot] += deltaB;
+                phaseSub[channel][slot] += deltaSub;
+                if (phaseA[channel][slot] >= 1.0f) phaseA[channel][slot] -= std::floor(phaseA[channel][slot]);
+                if (phaseB[channel][slot] >= 1.0f) phaseB[channel][slot] -= std::floor(phaseB[channel][slot]);
+                if (phaseSub[channel][slot] >= 1.0f) phaseSub[channel][slot] -= std::floor(phaseSub[channel][slot]);
+                ++ageSamples[channel][slot];
                 ++voiceIndex;
             }
 
-            mixed = softLimitInstrumentBus(mixed);
-            for (int ch = 0; ch < numChannels; ++ch)
-                buffer.addSample(ch, sample, mixed);
+            if(numChannels==1)buffer.addSample(0,sample,softLimitInstrumentBus(mixed));
+            else
+            {
+                mixedL=softLimitInstrumentBus(mixedL);mixedR=softLimitInstrumentBus(mixedR);
+                for(int ch=0;ch<numChannels;++ch)buffer.addSample(ch,sample,ch==0?mixedL:ch==1?mixedR:(mixedL+mixedR)*.5f);
+            }
         }
     };
 
@@ -29254,12 +30183,65 @@ void OpenStudioBasicSynthInstrument::getStateInformation(juce::MemoryBlock& dest
 {
     saveParamsToMemory(destData, "OpenStudioBasicSynthInstrument", {
         { "attackMs", attackMs.load() },
+        { "decayMs", decayMs.load() }, { "sustain", sustain.load() }, { "oscillatorBlend", oscillatorBlend.load() },
         { "releaseMs", releaseMs.load() },
         { "brightness", brightness.load() },
         { "detuneCents", detuneCents.load() },
         { "subLevel", subLevel.load() },
         { "noiseLevel", noiseLevel.load() },
-        { "outputGain", outputGain.load() }
+        { "outputGain", outputGain.load() },
+        { "filterMode", filterMode.load() },
+        { "filterCutoff", filterCutoff.load() },
+        { "filterQ", filterQ.load() },
+        { "filterKeyTrack", filterKeyTrack.load() },
+        { "filterEnvelope", filterEnvelope.load() },
+        { "lfoDestination", lfoDestination.load() },
+        { "lfoRate", lfoRate.load() },
+        { "lfoDepth", lfoDepth.load() },
+        { "lfoShape", lfoShape.load() },
+        { "filterEnvelopeSource", filterEnvelopeSource.load() },
+        { "filterAttackMs", filterAttackMs.load() }, { "filterDecayMs", filterDecayMs.load() },
+        { "filterSustain", filterSustain.load() }, { "filterReleaseMs", filterReleaseMs.load() },
+        { "filterVelocity", filterVelocity.load() },
+        { "lfoMode", lfoMode.load() },
+        { "wheelMode", wheelMode.load() },
+        { "matrix1Source", matrix1Source.load() },
+        { "matrix1Target", matrix1Target.load() },
+        { "matrix1Amount", matrix1Amount.load() },
+        { "matrix2Source", matrix2Source.load() },
+        { "matrix2Target", matrix2Target.load() },
+        { "matrix2Amount", matrix2Amount.load() },
+        { "matrix3Source", matrix3Source.load() },
+        { "matrix3Target", matrix3Target.load() },
+        { "matrix3Amount", matrix3Amount.load() },
+        { "mpeEnabled", mpeEnabled.load() }, { "mpeLowerMembers", mpeLowerMembers.load() },
+        { "mpeUpperMembers", mpeUpperMembers.load() }, { "mpeLowerBend", mpeLowerBend.load() },
+        { "mpeLowerMasterBend", mpeLowerMasterBend.load() }, { "mpeUpperBend", mpeUpperBend.load() },
+        { "mpeUpperMasterBend", mpeUpperMasterBend.load() },
+        { "oscillatorAShape", oscillatorAShape.load() }, { "oscillatorBShape", oscillatorBShape.load() },
+        { "matrix4Source", matrix4Source.load() },
+        { "matrix4Target", matrix4Target.load() },
+        { "matrix4Amount", matrix4Amount.load() },
+        { "matrix5Source", matrix5Source.load() },
+        { "matrix5Target", matrix5Target.load() },
+        { "matrix5Amount", matrix5Amount.load() },
+        { "matrix6Source", matrix6Source.load() },
+        { "matrix6Target", matrix6Target.load() },
+        { "matrix6Amount", matrix6Amount.load() },
+        { "matrix7Source", matrix7Source.load() },
+        { "matrix7Target", matrix7Target.load() },
+        { "matrix7Amount", matrix7Amount.load() },
+        { "matrix8Source", matrix8Source.load() },
+        { "matrix8Target", matrix8Target.load() },
+        { "matrix8Amount", matrix8Amount.load() },
+        { "macro1", macro1.load() },
+        { "macro2", macro2.load() },
+        { "macro3", macro3.load() },
+        { "macro4", macro4.load() },
+        { "macro1CC",macro1CC.load() }, { "macro1Channel",macro1Channel.load() },
+        { "macro2CC",macro2CC.load() }, { "macro2Channel",macro2Channel.load() },
+        { "macro3CC",macro3CC.load() }, { "macro3Channel",macro3Channel.load() },
+        { "macro4CC",macro4CC.load() }, { "macro4Channel",macro4Channel.load() }
     });
 }
 
@@ -29269,6 +30251,9 @@ void OpenStudioBasicSynthInstrument::setStateInformation(const void* data, int s
     if (!tree.isValid())
         return;
 
+    decayMs = juce::jlimit(1.0f, 5000.0f, static_cast<float>(tree.getProperty("decayMs", 250.0f)));
+    sustain = juce::jlimit(0.0f, 1.0f, static_cast<float>(tree.getProperty("sustain", 1.0f)));
+    oscillatorBlend = juce::jlimit(0.0f, 1.0f, static_cast<float>(tree.getProperty("oscillatorBlend", .5f)));
     attackMs    = static_cast<float>((double)tree.getProperty("attackMs", 8.0));
     releaseMs   = static_cast<float>((double)tree.getProperty("releaseMs", 180.0));
     brightness  = static_cast<float>((double)tree.getProperty("brightness", 0.62));
@@ -29276,6 +30261,16 @@ void OpenStudioBasicSynthInstrument::setStateInformation(const void* data, int s
     subLevel    = static_cast<float>((double)tree.getProperty("subLevel", 0.18));
     noiseLevel  = static_cast<float>((double)tree.getProperty("noiseLevel", 0.015));
     outputGain  = static_cast<float>((double)tree.getProperty("outputGain", -15.0));
+    for (const auto& control : modulationControls)
+    {
+        const float value = static_cast<float>(tree.getProperty(control.id, control.initial));
+        const juce::String id(control.id);
+        const bool expanded=(id.startsWith("matrix1")||id.startsWith("matrix2")||id.startsWith("matrix3"))&&(id.endsWith("Source")||id.endsWith("Target"));
+        setModulationControl(id.startsWith("matrix")&&id.endsWith("Target")?id+"Full":expanded?id+"Expanded":id, std::isfinite(value) ? value : control.initial);
+    }
+    for(const auto& control:macroMappings){const float raw=static_cast<float>(tree.getProperty(control.id,control.initial));setModulationControl(control.id,std::isfinite(raw)?raw:control.initial);}
+    ccMacros.reset();
+    channelMix.reset(cachedSampleRate);
 }
 
 bool OpenStudioBasicSynthInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -29288,6 +30283,19 @@ bool OpenStudioBasicSynthInstrument::isBusesLayoutSupported(const BusesLayout& l
 //  OpenStudioPianoInstrument
 // ============================================================================
 
+bool OpenStudioPianoInstrument::setPerformanceControl(const juce::String& id, float value)
+{
+    if (!std::isfinite(value)) return false;
+    for (const auto& control : performanceControls) if (id == control.id)
+    {
+        float bounded = juce::jlimit(control.minimum, control.maximum, value);
+        if (id == "performanceMode") bounded = std::floor(bounded + .5f);
+        (this->*control.member).store(bounded, std::memory_order_relaxed); return true;
+    }
+    for (const auto& control : coupledBodyControls) if (id == control.id) { (this->*control.member).store(juce::jlimit(control.minimum,control.maximum,value)); return true; }
+    return false;
+}
+
 OpenStudioPianoInstrument::OpenStudioPianoInstrument()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
@@ -29295,10 +30303,31 @@ OpenStudioPianoInstrument::OpenStudioPianoInstrument()
 {
 }
 
+double OpenStudioPianoInstrument::getTailLengthSeconds() const
+{
+    // Expressive voices latch their performance mode at note-on. Even if the
+    // current mode is Legacy, a sounding expressive voice may have a .25 release
+    // speed from note-off velocity. The bound assumes both pedals are released.
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        BuiltInInstrumentTail::positive(releaseMs.load(std::memory_order_relaxed), 950), .25f)
+        + BuiltInInstrumentTail::body(coupledBody.load(std::memory_order_relaxed),
+                                     bodyDecay.load(std::memory_order_relaxed)) + .025;
+}
+
+double OpenStudioPianoInstrument::getMaximumTailLengthSeconds() const noexcept
+{
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        5000, .25f) + BuiltInInstrumentTail::body(1, 8) + .025;
+}
+
 void OpenStudioPianoInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    tailSampleRate.store(cachedSampleRate, std::memory_order_relaxed);
+    coupledNetwork.prepare(cachedSampleRate, true); coupledAmount.reset(cachedSampleRate,.02);
+    for (auto* group : { &continuousPedal, &continuousSoft }) for (auto& smoother : *group) smoother.reset(cachedSampleRate, .01);
+    smoothedDamperCurve.reset(cachedSampleRate, .02); smoothedSoftDepth.reset(cachedSampleRate, .02);
     clearVoices();
 }
 
@@ -29309,6 +30338,19 @@ void OpenStudioPianoInstrument::releaseResources()
 
 void OpenStudioPianoInstrument::clearVoices()
 {
+    performanceTelemetry.reset();
+    channelMix.reset(cachedSampleRate);
+    coupledNetwork.reset(); coupledAmount.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,coupledBody.load()));
+    voicePool.reset();
+    for (auto* group : { &expressiveVoice, &sostenutoVoice }) for (auto& voices : *group) voices.fill(false);
+    for (auto& voices : naturalDecay) voices.fill(0);
+    for (auto& voices : strikeGain) voices.fill(1);
+    for (auto& voices : strikeTime) voices.fill(.012f);
+    for (auto& voices : releaseSpeed) voices.fill(1);
+    sostenutoPedal.fill(false);
+    for (auto* group : { &continuousPedal, &continuousSoft }) for (auto& smoother : *group) smoother.setCurrentAndTargetValue(0);
+    smoothedDamperCurve.setCurrentAndTargetValue(juce::jlimit(1.0f, 4.0f, damperCurve.load()));
+    smoothedSoftDepth.setCurrentAndTargetValue(juce::jlimit(0.0f, 1.0f, softPedalDepth.load()));
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : releasing) notes.fill(false);
     for (auto& notes : sustained) notes.fill(false);
@@ -29321,10 +30363,27 @@ void OpenStudioPianoInstrument::clearVoices()
 
 void OpenStudioPianoInstrument::handleMidi(const juce::MidiMessage& message)
 {
+    performanceTelemetry.observe(message);
     const int channel = juce::jlimit(0, 15, message.getChannel() > 0 ? message.getChannel() - 1 : 0);
-    if (message.isController() && message.getControllerNumber() == 64)
+    channelMix.controller(message,[&](size_t receiver){return receiver==static_cast<size_t>(channel);});
+    if (message.isController())
     {
-        const bool pedalDown = message.getControllerValue() >= 64;
+        const size_t ch = static_cast<size_t>(channel); const int controller = message.getControllerNumber();
+        const float amount = static_cast<float>(message.getControllerValue()) / 127.0f;
+        if (controller == 64) continuousPedal[ch].setTargetValue(amount);
+        if (controller == 67) { continuousSoft[ch].setTargetValue(amount); return; }
+        if (controller == 66)
+        {
+            const bool down = message.getControllerValue() >= 64;
+            if (down && !sostenutoPedal[ch])
+                for (size_t slot = 0; slot < BuiltInVoiceAllocation::voicesPerChannel; ++slot) sostenutoVoice[ch][slot] = active[ch][slot] && voicePool.held[ch][slot];
+            sostenutoPedal[ch] = down; if (!down) sostenutoVoice[ch].fill(false); return;
+        }
+        if (controller == 121) { continuousPedal[ch].setTargetValue(0); continuousSoft[ch].setTargetValue(0); sostenutoPedal[ch] = false; sostenutoVoice[ch].fill(false); }
+    }
+    if (message.isController() && (message.getControllerNumber() == 64 || message.getControllerNumber() == 121))
+    {
+        const bool pedalDown = message.getControllerNumber() == 64 && message.getControllerValue() >= 64;
         sustainPedal[static_cast<size_t>(channel)] = pedalDown;
         if (!pedalDown)
         {
@@ -29343,28 +30402,55 @@ void OpenStudioPianoInstrument::handleMidi(const juce::MidiMessage& message)
     if (message.isNoteOn())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        active[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
-        releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = false;
-        sustained[static_cast<size_t>(channel)][static_cast<size_t>(note)] = false;
-        phase[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        velocity[static_cast<size_t>(channel)][static_cast<size_t>(note)] = message.getFloatVelocity();
-        envelope[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        ageSamples[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0;
+        const size_t slot = voicePool.start(static_cast<size_t>(channel), note, active);
+        active[static_cast<size_t>(channel)][slot] = true;
+        releasing[static_cast<size_t>(channel)][slot] = false;
+        sustained[static_cast<size_t>(channel)][slot] = false;
+        phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        velocity[static_cast<size_t>(channel)][slot] = message.getFloatVelocity();
+        const size_t ch = static_cast<size_t>(channel);
+        // Performance selection and strike colour are latched at note-on.
+        expressiveVoice[ch][slot] = performanceMode.load() >= .5f;
+        sostenutoVoice[ch][slot] = false; naturalDecay[ch][slot] = 0; releaseSpeed[ch][slot] = 1;
+        if (expressiveVoice[ch][slot])
+        {
+            velocity[ch][slot] = std::pow(velocity[ch][slot], std::exp2(juce::jlimit(-1.0f, 1.0f, velocityCurve.load())));
+            const float contrast = juce::jlimit(0.0f, 1.0f, strikeColour.load()) * (velocity[ch][slot] - .5f);
+            strikeGain[ch][slot] = 1 + contrast * 1.4f; strikeTime[ch][slot] = .012f * (1 - contrast);
+        }
+        envelope[static_cast<size_t>(channel)][slot] = 0.0f;
+        ageSamples[static_cast<size_t>(channel)][slot] = 0;
     }
     else if (message.isNoteOff())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        if (sustainPedal[static_cast<size_t>(channel)])
-            sustained[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
+        const int released = voicePool.stop(static_cast<size_t>(channel), note);
+        if (released < 0) return;
+        const size_t slot = static_cast<size_t>(released);
+        if (expressiveVoice[static_cast<size_t>(channel)][slot])
+        {
+            releasing[static_cast<size_t>(channel)][slot] = true;
+            releaseSpeed[static_cast<size_t>(channel)][slot] = 1 + juce::jlimit(0.0f, 1.0f, releaseVelocity.load()) * (2 * message.getFloatVelocity() - 1) * .75f;
+        }
+        else if (sustainPedal[static_cast<size_t>(channel)])
+            sustained[static_cast<size_t>(channel)][slot] = true;
         else
-            releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
+            releasing[static_cast<size_t>(channel)][slot] = true;
     }
     else if (message.isAllNotesOff() || message.isAllSoundOff())
     {
+        voicePool.releaseChannel(static_cast<size_t>(channel));
+        if (message.isAllSoundOff())
+        {
+            coupledNetwork.resetChannel(static_cast<size_t>(channel));
+            active[static_cast<size_t>(channel)].fill(false);
+            envelope[static_cast<size_t>(channel)].fill(0);
+        }
+
         for (auto& notes : releasing[static_cast<size_t>(channel)])
-            notes = true;
+            notes = !sustainPedal[static_cast<size_t>(channel)];
         for (auto& notes : sustained[static_cast<size_t>(channel)])
-            notes = false;
+            notes = sustainPedal[static_cast<size_t>(channel)];
     }
 }
 
@@ -29377,6 +30463,10 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
         return;
 
     buffer.clear();
+    coupledAmount.setTargetValue(juce::jlimit(0.0f,1.0f,coupledBody.load()));
+    coupledNetwork.configure(bodyCoupling.load(),bodyDecay.load());
+    const bool processBody = coupledAmount.getCurrentValue() > 0 || coupledAmount.getTargetValue() > 0;
+    if (!processBody) coupledNetwork.reset();
     const float toneValue = juce::jlimit(0.0f, 1.0f, tone.load(std::memory_order_relaxed));
     const float bodyValue = juce::jlimit(0.0f, 1.0f, body.load(std::memory_order_relaxed));
     const float hammerValue = juce::jlimit(0.0f, 1.0f, hammer.load(std::memory_order_relaxed));
@@ -29387,6 +30477,8 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
     const float attackStep = 1.0f / juce::jmax(1.0f, sr * 0.0038f);
     const float releaseStep = 1.0f / juce::jmax(1.0f, sr * releaseMs.load(std::memory_order_relaxed) * 0.001f);
     const float outGain = juce::Decibels::decibelsToGain(juce::jlimit(-36.0f, 0.0f, outputGain.load(std::memory_order_relaxed))) * 0.78f;
+    smoothedDamperCurve.setTargetValue(juce::jlimit(1.0f, 4.0f, damperCurve.load()));
+    smoothedSoftDepth.setTargetValue(juce::jlimit(0.0f, 1.0f, softPedalDepth.load()));
     const float twoPi = juce::MathConstants<float>::twoPi;
     std::array<BuiltInMidiVoiceRef, kBuiltInMidiVoiceSlots> voiceRefs {};
 
@@ -29402,69 +30494,117 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
             }
         }
 
+        if (processBody) for (size_t ch=0;ch<16;++ch)
+        {
+            std::array<bool,128> keys {};
+            for (size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+                if (active[ch][slot] && (voicePool.held[ch][slot] || (sostenutoVoice[ch][slot] && sostenutoPedal[ch])))
+                    keys[static_cast<size_t>(voicePool.key[ch][slot])] = true;
+            coupledNetwork.setOpenKeys(ch,keys);
+        }
+
         for (int sample = start; sample < end; ++sample)
         {
+            const auto channelFrame=channelMix.next();
+            std::array<float, 16> pedalValues {}, softValues {};
+            for (size_t ch = 0; ch < 16; ++ch) { pedalValues[ch] = continuousPedal[ch].getNextValue(); softValues[ch] = continuousSoft[ch].getNextValue(); }
+            const float damperExponent = smoothedDamperCurve.getNextValue(), softDepth = smoothedSoftDepth.getNextValue();
+            std::array<float,16> bodyInput {};
+            const float coupledGain = coupledAmount.getNextValue();
             float mixedL = 0.0f;
             float mixedR = 0.0f;
             for (int voiceIndex = 0; voiceIndex < voiceCount;)
             {
                 const auto voiceRef = voiceRefs[static_cast<size_t>(voiceIndex)];
                 const size_t channel = voiceRef.channel;
-                const size_t note = voiceRef.note;
+                const size_t slot = voiceRef.note;
+                const size_t note = static_cast<size_t>(voicePool.key[channel][slot]);
 
-                if (!active[channel][note] && envelope[channel][note] <= 0.0f)
+                if (!active[channel][slot] && envelope[channel][slot] <= 0.0f)
                 {
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
-                if (active[channel][note] && !releasing[channel][note])
-                    envelope[channel][note] = juce::jmin(1.0f, envelope[channel][note] + attackStep);
-                else
-                    envelope[channel][note] = juce::jmax(0.0f, envelope[channel][note] - releaseStep);
-
-                if (envelope[channel][note] <= 0.0f)
+                const bool expressive = expressiveVoice[channel][slot];
+                if (expressive)
                 {
-                    active[channel][note] = false;
-                    releasing[channel][note] = false;
-                    sustained[channel][note] = false;
-                    velocity[channel][note] = 0.0f;
+                    if (voicePool.held[channel][slot]) envelope[channel][slot] = juce::jmin(1.0f, envelope[channel][slot] + attackStep);
+                    else if (!(sostenutoVoice[channel][slot] && sostenutoPedal[channel]))
+                        envelope[channel][slot] = juce::jmax(0.0f, envelope[channel][slot] - releaseStep * releaseSpeed[channel][slot] * std::pow(1 - pedalValues[channel], damperExponent));
+                }
+                else if (active[channel][slot] && !releasing[channel][slot])
+                    envelope[channel][slot] = juce::jmin(1.0f, envelope[channel][slot] + attackStep);
+                else
+                    envelope[channel][slot] = juce::jmax(0.0f, envelope[channel][slot] - releaseStep);
+
+                if (envelope[channel][slot] <= 0.0f)
+                {
+                    active[channel][slot] = false;
+                    releasing[channel][slot] = false;
+                    sustained[channel][slot] = false;
+                    velocity[channel][slot] = 0.0f;
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
                 const float freq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
-                const float ageSec = static_cast<float>(ageSamples[channel][note]) / sr;
+                const float ageSec = static_cast<float>(ageSamples[channel][slot]) / sr;
                 const float noteBright = juce::jlimit(0.35f, 1.35f, 0.72f + (static_cast<float>(note) - 60.0f) * 0.008f);
                 const float modelTone = modelIndex == 1 ? 1.22f : (modelIndex == 2 ? 0.72f : 1.0f);
                 const float pedalLength = sustainPedal[channel] ? 1.0f + resonanceValue * 0.8f : 1.0f;
-                const float decay = std::exp(-ageSec / ((0.85f + bodyValue * 2.6f + (1.0f - noteBright) * 0.4f) * pedalLength));
-                const float p = phase[channel][note];
-                const float strike = builtinNoise(ageSamples[channel][note], static_cast<int>(note))
+                float decay = std::exp(-ageSec / ((0.85f + bodyValue * 2.6f + (1.0f - noteBright) * 0.4f) * pedalLength));
+                if (expressive)
+                {
+                    decay = static_cast<float>(std::exp(-naturalDecay[channel][slot]));
+                    naturalDecay[channel][slot] += 1.0 / (sr * (0.85f + bodyValue * 2.6f + (1.0f - noteBright) * .4f) * (1 + resonanceValue * pedalValues[channel] * .8f));
+                }
+                const float p = phase[channel][slot];
+                float strike = builtinNoise(ageSamples[channel][slot], static_cast<int>(note))
                     * std::exp(-ageSec / 0.012f) * (0.012f + hammerValue * 0.045f) * modelTone;
                 const float fundamental = std::sin(twoPi * p) * (0.82f + bodyValue * 0.28f);
-                const float partial2 = std::sin(twoPi * p * 2.003f) * (0.24f + toneValue * 0.20f * modelTone)
+                float partial2 = std::sin(twoPi * p * 2.003f) * (0.24f + toneValue * 0.20f * modelTone)
                                      * std::exp(-ageSec / 1.1f) * nyquistFade(freq * 2.003f, sr);
-                const float partial3 = std::sin(twoPi * p * 3.011f) * (0.13f + toneValue * 0.15f * modelTone)
+                float partial3 = std::sin(twoPi * p * 3.011f) * (0.13f + toneValue * 0.15f * modelTone)
                                      * std::exp(-ageSec / 0.74f) * nyquistFade(freq * 3.011f, sr);
-                const float partial5 = std::sin(twoPi * p * 5.031f) * (0.04f + toneValue * 0.08f * modelTone)
+                float partial5 = std::sin(twoPi * p * 5.031f) * (0.04f + toneValue * 0.08f * modelTone)
                                      * std::exp(-ageSec / 0.42f) * nyquistFade(freq * 5.031f, sr);
                 const float soundboard = std::sin(twoPi * p * 1.497f + 0.7f) * resonanceValue * 0.09f
                                        * std::exp(-ageSec / 3.8f) * nyquistFade(freq * 1.497f, sr);
+                if (expressive)
+                {
+                    const float colour = strikeGain[channel][slot] - 1;
+                    const float softened = softDepth * softValues[channel];
+                    partial2 *= (1 + colour * .45f) * (1 - softened * .35f);
+                    partial3 *= (1 + colour * .75f) * (1 - softened * .55f);
+                    partial5 *= (1 + colour) * (1 - softened * .75f);
+                    strike = builtinNoise(ageSamples[channel][slot], static_cast<int>(note)) * std::exp(-ageSec / strikeTime[channel][slot])
+                        * (0.012f + hammerValue * .045f) * modelTone * strikeGain[channel][slot] * (1 - softened * .5f);
+                }
                 const float feltDamping = modelIndex == 2 ? 0.72f : 1.0f;
-                const float voice = (fundamental + partial2 + partial3 + partial5 + soundboard + strike)
-                                  * decay * envelope[channel][note] * velocity[channel][note] * outGain * feltDamping;
+                float voice = (fundamental + partial2 + partial3 + partial5 + soundboard + strike)
+                                  * decay * envelope[channel][slot] * velocity[channel][slot] * outGain * feltDamping;
+                if (expressive) voice *= 1 - softDepth * softValues[channel] * .25f;
                 const float pan = juce::jlimit(-0.82f, 0.82f, (static_cast<float>(note) - 60.0f) / 36.0f * widthValue);
-                const float leftGain = std::sqrt(0.5f * (1.0f - pan));
-                const float rightGain = std::sqrt(0.5f * (1.0f + pan));
-                mixedL += voice * leftGain;
-                mixedR += voice * rightGain;
+                const float midiPan=BuiltInMIDIChannelMix::biasPan(pan,channelFrame[channel].pan);
+                const float leftGain = std::sqrt(0.5f * (1.0f - midiPan));
+                const float rightGain = std::sqrt(0.5f * (1.0f + midiPan));
+                if (processBody) bodyInput[channel] += voice;
+                mixedL += voice * leftGain * channelFrame[channel].level;
+                mixedR += voice * rightGain * channelFrame[channel].level;
 
-                phase[channel][note] += freq / sr;
-                if (phase[channel][note] >= 1.0f)
-                    phase[channel][note] -= std::floor(phase[channel][note]);
-                ++ageSamples[channel][note];
+                phase[channel][slot] += freq / sr;
+                if (phase[channel][slot] >= 1.0f)
+                    phase[channel][slot] -= std::floor(phase[channel][slot]);
+                ++ageSamples[channel][slot];
                 ++voiceIndex;
+            }
+
+            if (processBody) for (size_t ch=0;ch<16;++ch)
+            {
+                const float response = coupledNetwork.process(ch,bodyInput[ch],pedalValues[ch]) * coupledGain * channelFrame[ch].level;
+                mixedL += response * std::sqrt(.5f * (1 - channelFrame[ch].pan));
+                mixedR += response * std::sqrt(.5f * (1 + channelFrame[ch].pan));
             }
 
             mixedL = softLimitInstrumentBus(mixedL);
@@ -29498,6 +30638,7 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
 void OpenStudioPianoInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioPianoInstrument", {
+        {"coupledBody",coupledBody.load()},{"bodyCoupling",bodyCoupling.load()},{"bodyDecay",bodyDecay.load()},
         { "tone", tone.load() },
         { "body", body.load() },
         { "hammer", hammer.load() },
@@ -29505,7 +30646,13 @@ void OpenStudioPianoInstrument::getStateInformation(juce::MemoryBlock& destData)
         { "outputGain", outputGain.load() },
         { "resonance", resonance.load() },
         { "stereoWidth", stereoWidth.load() },
-        { "model", model.load() }
+        { "model", model.load() },
+        { "performanceMode", performanceMode.load() },
+        { "velocityCurve", velocityCurve.load() },
+        { "strikeColour", strikeColour.load() },
+        { "releaseVelocity", releaseVelocity.load() },
+        { "damperCurve", damperCurve.load() },
+        { "softPedalDepth", softPedalDepth.load() }
     });
 }
 
@@ -29514,6 +30661,12 @@ void OpenStudioPianoInstrument::setStateInformation(const void* data, int sizeIn
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioPianoInstrument");
     if (!tree.isValid())
         return;
+    for (const auto& control : coupledBodyControls) { const float value=static_cast<float>(tree.getProperty(control.id,control.initial)); setPerformanceControl(control.id,std::isfinite(value)?value:control.initial); }
+    for (const auto& control : performanceControls)
+    {
+        const float value = static_cast<float>(tree.getProperty(control.id, control.initial));
+        setPerformanceControl(control.id, std::isfinite(value) ? value : control.initial);
+    }
 
     tone       = static_cast<float>((double)tree.getProperty("tone", 0.58));
     body       = static_cast<float>((double)tree.getProperty("body", 0.72));
@@ -29523,6 +30676,7 @@ void OpenStudioPianoInstrument::setStateInformation(const void* data, int sizeIn
     resonance  = static_cast<float>((double)tree.getProperty("resonance", 0.38));
     stereoWidth = static_cast<float>((double)tree.getProperty("stereoWidth", 0.62));
     model      = static_cast<float>((double)tree.getProperty("model", 0.0));
+    channelMix.reset(cachedSampleRate);
 }
 
 bool OpenStudioPianoInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -29535,6 +30689,24 @@ bool OpenStudioPianoInstrument::isBusesLayoutSupported(const BusesLayout& layout
 //  OpenStudioCleanGuitarInstrument
 // ============================================================================
 
+bool OpenStudioCleanGuitarInstrument::setStringControl(const juce::String& id, float value)
+{
+    if (!std::isfinite(value)) return false;
+    for (const auto& control : stringControls) if (id == control.id)
+    {
+        float bounded = juce::jlimit(control.minimum, control.maximum, value);
+        if (id == "stringEngine") bounded = std::floor(bounded + .5f);
+        (this->*control.member).store(bounded, std::memory_order_relaxed); return true;
+    }
+    for(const auto& control:articulationControls)if(id==control.id){float bounded=juce::jlimit(control.minimum,control.maximum,value);if(id!="slideTime")bounded=std::round(bounded);(this->*control.member).store(bounded);return true;}
+    for (const auto& control : coupledBodyControls) if (id == control.id) { (this->*control.member).store(juce::jlimit(control.minimum,control.maximum,value)); return true; }
+    return false;
+}
+BuiltInPluckedLoop::Parameters OpenStudioCleanGuitarInstrument::loopParameters() const noexcept
+{
+    return { juce::jlimit(.2f,8.0f,stringDecay.load()), juce::jlimit(0.0f,1.0f,stringDamping.load()), juce::jlimit(.05f,.5f,pickPosition.load()), juce::jlimit(0.0f,1.0f,pickHardness.load()), juce::jlimit(.05f,.5f,pickupPosition.load()), juce::jlimit(0.0f,1.0f,palmMute.load()), juce::jlimit(0.0f,1.0f,body.load()) };
+}
+
 OpenStudioCleanGuitarInstrument::OpenStudioCleanGuitarInstrument()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
@@ -29546,10 +30718,31 @@ OpenStudioCleanGuitarInstrument::OpenStudioCleanGuitarInstrument()
         notes.fill(-1);
 }
 
+double OpenStudioCleanGuitarInstrument::getTailLengthSeconds() const
+{
+    // Both primary engines are amplitude-enveloped. The coupled body follows
+    // them in series; the delay chorus can retain another 18 ms plus smoothing.
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        BuiltInInstrumentTail::positive(releaseMs.load(std::memory_order_relaxed), 210))
+        + BuiltInInstrumentTail::body(coupledBody.load(std::memory_order_relaxed),
+                                     bodyDecay.load(std::memory_order_relaxed)) + .04;
+}
+
+double OpenStudioCleanGuitarInstrument::getMaximumTailLengthSeconds() const noexcept
+{
+    return BuiltInInstrumentTail::linearRelease(tailSampleRate.load(std::memory_order_relaxed),
+        2000) + BuiltInInstrumentTail::body(1, 8) + .04;
+}
+
 void OpenStudioCleanGuitarInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    tailSampleRate.store(cachedSampleRate, std::memory_order_relaxed);
+    coupledNetwork.prepare(cachedSampleRate, false); coupledAmount.reset(cachedSampleRate,.02);
+    pluckedLoop.prepare(cachedSampleRate);
+    delayChorus.prepare(cachedSampleRate, juce::jlimit(0.0f,1.0f,chorusMix.load()), juce::jlimit(.05f,5.0f,chorusRate.load()), juce::jlimit(0.0f,6.0f,chorusDepth.load()));
+    for (auto& smoother : loopSmoothers) smoother.reset(cachedSampleRate, .02);
     clearVoices();
 }
 
@@ -29560,6 +30753,16 @@ void OpenStudioCleanGuitarInstrument::releaseResources()
 
 void OpenStudioCleanGuitarInstrument::clearVoices()
 {
+    performanceTelemetry.reset();
+    channelMix.reset(cachedSampleRate);
+    coupledNetwork.reset(); coupledAmount.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,coupledBody.load()));
+    for(auto& channel:slideOutStarted)channel.fill(false);
+    liveArticulation.fill(-1);for(auto& channel:voiceArticulation)channel.fill(0);for(auto& channel:articulationMute)channel.fill(0);
+    for(auto& channel:articulationPitch)for(auto& pitch:channel){pitch.reset(cachedSampleRate,.003);pitch.setCurrentAndTargetValue(60);}
+    voicePool.reset(); pluckedLoop.reset(); delayChorus.reset();
+    for (auto& voices : loopVoice) voices.fill(false);
+    const auto p = loopParameters(); const std::array<float,5> values {p.decay,p.damping,p.pickup,p.mute,p.body};
+    for (size_t i=0;i<values.size();++i) loopSmoothers[i].setCurrentAndTargetValue(values[i]);
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : releasing) notes.fill(false);
     for (auto& notes : phase) notes.fill(0.0f);
@@ -29573,6 +30776,33 @@ void OpenStudioCleanGuitarInstrument::clearVoices()
     stringNote.fill(-1);
     stringChannel.fill(-1);
     chorusPhase = 0.0f;
+    publishGuitarPerformance();
+}
+
+void OpenStudioCleanGuitarInstrument::publishGuitarPerformance() noexcept
+{
+    const bool plucked = stringEngine.load(std::memory_order_relaxed) >= .5f;
+    const bool keys = articulationKeys.load(std::memory_order_relaxed) >= .5f;
+    const int panel = juce::jlimit(0, 8, juce::roundToInt(articulation.load(std::memory_order_relaxed)));
+    guitarPerformance.begin();
+    for (size_t channel = 0; channel < BuiltInGuitarPerformance::channels; ++channel)
+    {
+        const bool keyswitchOverride = plucked && keys && liveArticulation[channel] >= 0;
+        guitarPerformance.setNext(channel, !plucked ? 0 : keyswitchOverride ? liveArticulation[channel] : panel,
+                                 !plucked ? 0 : keyswitchOverride ? 2 : 1);
+        for (size_t slot = 0; slot < BuiltInGuitarPerformance::slots; ++slot)
+        {
+            const int string = voiceString[channel][slot];
+            const bool assigned = string >= 0 && string < 6
+                && stringChannel[static_cast<size_t>(string)] == static_cast<int>(channel)
+                && stringNote[static_cast<size_t>(string)] == static_cast<int>(slot);
+            guitarPerformance.setVoice(channel, slot, active[channel][slot] || envelope[channel][slot] > 0,
+                voicePool.key[channel][slot], string, voiceArticulation[channel][slot],
+                voicePool.held[channel][slot], voicePool.sustained(channel, slot), releasing[channel][slot],
+                loopVoice[channel][slot], assigned);
+        }
+    }
+    guitarPerformance.end();
 }
 
 int OpenStudioCleanGuitarInstrument::chooseStringForNote(int note, int midiChannel) const
@@ -29603,9 +30833,25 @@ int OpenStudioCleanGuitarInstrument::chooseStringForNote(int note, int midiChann
     return 0;
 }
 
+void OpenStudioCleanGuitarInstrument::beginSlideOut(size_t channel,size_t slot) noexcept
+{
+    if(slideOutStarted[channel][slot])return;slideOutStarted[channel][slot]=true;
+    voiceArticulation[channel][slot]=6;
+    auto& pitch=articulationPitch[channel][slot];pitch.reset(cachedSampleRate,juce::jlimit(5.0f,500.0f,slideTime.load())*.001);
+    pitch.setTargetValue(pitch.getCurrentValue()-5);
+}
+
 void OpenStudioCleanGuitarInstrument::handleMidi(const juce::MidiMessage& message)
 {
+    performanceTelemetry.observe(message);
     const int channel = juce::jlimit(0, 15, message.getChannel() > 0 ? message.getChannel() - 1 : 0);
+    channelMix.controller(message,[&](size_t receiver){return receiver==static_cast<size_t>(channel);});
+    if(stringEngine.load()>=.5f&&articulationKeys.load()>=.5f&&(message.isNoteOn()||message.isNoteOff())&&message.getNoteNumber()>=24&&message.getNoteNumber()<=32)
+    {
+        if(message.isNoteOn()){liveArticulation[static_cast<size_t>(channel)]=message.getNoteNumber()-24;
+            if(liveArticulation[static_cast<size_t>(channel)]==6)for(size_t slot=0;slot<16;++slot)if(active[static_cast<size_t>(channel)][slot]&&loopVoice[static_cast<size_t>(channel)][slot])beginSlideOut(static_cast<size_t>(channel),slot);}
+        return;
+    }
     if (message.isPitchWheel())
     {
         const float normalized = (static_cast<float>(message.getPitchWheelValue()) - 8192.0f) / 8192.0f;
@@ -29619,33 +30865,75 @@ void OpenStudioCleanGuitarInstrument::handleMidi(const juce::MidiMessage& messag
         return;
     }
 
+    if (message.isController() && (message.getControllerNumber() == 64 || message.getControllerNumber() == 66 || message.getControllerNumber() == 121))
+    {
+        const size_t ch=static_cast<size_t>(channel);const int controller=message.getControllerNumber();
+        if(controller==66)voicePool.setSostenuto(ch,message.getControllerValue()>=64,[ch](size_t receiver){return receiver==ch;});
+        if(controller==64||controller==121)voicePool.pedal[ch]=controller==64&&message.getControllerValue()>=64;
+        if(controller==121)voicePool.setSostenuto(ch,false,[](size_t){return false;});
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+            if(!voicePool.held[ch][slot]&&!voicePool.sustained(ch,slot))releasing[ch][slot]=true;
+        if (message.getControllerNumber() == 121) { liveArticulation[static_cast<size_t>(channel)]=-1; pitchBendSemitones[static_cast<size_t>(channel)] = 0; modWheel[static_cast<size_t>(channel)] = 0; }
+        return;
+    }
+
     if (message.isNoteOn())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        const int string = chooseStringForNote(note, channel);
+        const size_t slot = voicePool.start(static_cast<size_t>(channel), note, active);
+        for (size_t string = 0; string < stringNote.size(); ++string)
+            if (stringNote[string] == static_cast<int>(slot) && stringChannel[string] == channel)
+            { stringNote[string] = -1; stringChannel[string] = -1; }
+        const int style=stringEngine.load()>=.5f?juce::jlimit(0,8,articulationKeys.load()>=.5f&&liveArticulation[static_cast<size_t>(channel)]>=0?liveArticulation[static_cast<size_t>(channel)]:juce::roundToInt(articulation.load())):0;
+        int string = chooseStringForNote(note, channel);
+        // In automatic mode prefer the nearest held string for a legato
+        // destination; explicit channel-to-string selection keeps its ownership.
+        if((style==3||style==4)&&stringMode.load()<.5f){int distance=128;for(size_t candidate=0;candidate<6;++candidate){const int oldSlot=stringNote[candidate],oldChannel=stringChannel[candidate];if(oldSlot>=0&&oldChannel==channel&&voicePool.held[static_cast<size_t>(channel)][static_cast<size_t>(oldSlot)]){const int delta=std::abs(note-voicePool.key[static_cast<size_t>(channel)][static_cast<size_t>(oldSlot)]);if(delta<distance){distance=delta;string=static_cast<int>(candidate);}}}}
+
         const int previousNote = stringNote[static_cast<size_t>(string)];
         const int previousChannel = stringChannel[static_cast<size_t>(string)];
         if (previousNote >= 0 && previousChannel >= 0)
             releasing[static_cast<size_t>(previousChannel)][static_cast<size_t>(previousNote)] = true;
 
-        stringNote[static_cast<size_t>(string)] = note;
+        stringNote[static_cast<size_t>(string)] = static_cast<int>(slot);
         stringChannel[static_cast<size_t>(string)] = channel;
-        active[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
-        releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = false;
-        phase[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        velocity[static_cast<size_t>(channel)][static_cast<size_t>(note)] = message.getFloatVelocity();
-        envelope[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        pluckFilter[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        ageSamples[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0;
-        voiceString[static_cast<size_t>(channel)][static_cast<size_t>(note)] = string;
+        active[static_cast<size_t>(channel)][slot] = true;
+        releasing[static_cast<size_t>(channel)][slot] = false;
+        phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        velocity[static_cast<size_t>(channel)][slot] = message.getFloatVelocity();
+        envelope[static_cast<size_t>(channel)][slot] = 0.0f;
+        pluckFilter[static_cast<size_t>(channel)][slot] = 0.0f;
+        ageSamples[static_cast<size_t>(channel)][slot] = 0;
+        voiceString[static_cast<size_t>(channel)][slot] = string;
+        loopVoice[static_cast<size_t>(channel)][slot] = stringEngine.load() >= .5f;
+        const size_t ch=static_cast<size_t>(channel);voiceArticulation[ch][slot]=style;slideOutStarted[ch][slot]=false;
+        articulationMute[ch][slot]=style==1?juce::jlimit(.65f,.98f,1-message.getFloatVelocity()*.3f):style==7?1.0f:0.0f;
+        auto& pitch=articulationPitch[ch][slot];pitch.reset(cachedSampleRate,style==3?.004:juce::jlimit(5.0f,500.0f,slideTime.load())*.001);pitch.setCurrentAndTargetValue(static_cast<float>(note));
+        bool transferred=false;
+        if((style==3||style==4)&&previousNote>=0&&previousChannel==channel&&previousNote!=static_cast<int>(slot))
+        {
+            const size_t old=static_cast<size_t>(previousNote);
+            if(loopVoice[ch][old]&&active[ch][old]&&voicePool.held[ch][old])
+            {
+                transferred=pluckedLoop.transfer(ch*16+slot,ch*16+old);
+                if(transferred){pitch.setCurrentAndTargetValue(articulationPitch[ch][old].getCurrentValue());pitch.setTargetValue(static_cast<float>(note));envelope[ch][slot]=envelope[ch][old];phase[ch][slot]=phase[ch][old];pluckFilter[ch][slot]=pluckFilter[ch][old];ageSamples[ch][slot]=ageSamples[ch][old];active[ch][old]=false;envelope[ch][old]=0;}
+            }
+        }
+        if(style==5){pitch.setCurrentAndTargetValue(static_cast<float>(note)-2);pitch.setTargetValue(static_cast<float>(note));}
+        if(loopVoice[ch][slot]&&!transferred){auto parameters=loopParameters();if(style==2)parameters.harmonic=juce::jlimit(2,6,juce::roundToInt(harmonicNode.load()));if(style==8)parameters.hardness=1;pluckedLoop.start(ch*16+slot,note,message.getFloatVelocity(),parameters);}
+
     }
     else if (message.isNoteOff())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        releasing[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
+        const int released = voicePool.stop(static_cast<size_t>(channel), note);
+        if (released < 0) return;
+        const size_t slot = static_cast<size_t>(released);
+        if(voiceArticulation[static_cast<size_t>(channel)][slot]==6)beginSlideOut(static_cast<size_t>(channel),slot);
+        releasing[static_cast<size_t>(channel)][slot] = !voicePool.sustained(static_cast<size_t>(channel),slot);
         for (int string = 0; string < 6; ++string)
         {
-            if (stringNote[static_cast<size_t>(string)] == note && stringChannel[static_cast<size_t>(string)] == channel)
+            if (stringNote[static_cast<size_t>(string)] == released && stringChannel[static_cast<size_t>(string)] == channel)
             {
                 stringNote[static_cast<size_t>(string)] = -1;
                 stringChannel[static_cast<size_t>(string)] = -1;
@@ -29654,8 +30942,16 @@ void OpenStudioCleanGuitarInstrument::handleMidi(const juce::MidiMessage& messag
     }
     else if (message.isAllNotesOff() || message.isAllSoundOff())
     {
-        for (auto& notes : releasing[static_cast<size_t>(channel)])
-            notes = true;
+        voicePool.releaseChannel(static_cast<size_t>(channel));
+        if (message.isAllSoundOff())
+        {
+            coupledNetwork.resetChannel(static_cast<size_t>(channel));
+            active[static_cast<size_t>(channel)].fill(false);
+            envelope[static_cast<size_t>(channel)].fill(0);
+        }
+
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+            releasing[static_cast<size_t>(channel)][slot]=!voicePool.sustained(static_cast<size_t>(channel),slot);
         for (int string = 0; string < 6; ++string)
         {
             if (stringChannel[static_cast<size_t>(string)] == channel)
@@ -29676,6 +30972,10 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
         return;
 
     buffer.clear();
+    coupledAmount.setTargetValue(juce::jlimit(0.0f,1.0f,coupledBody.load()));
+    coupledNetwork.configure(bodyCoupling.load(),bodyDecay.load());
+    const bool processBody = coupledAmount.getCurrentValue() > 0 || coupledAmount.getTargetValue() > 0;
+    if (!processBody) coupledNetwork.reset();
     const int modelIndex = juce::jlimit(0, 3, static_cast<int>(std::round(model.load(std::memory_order_relaxed))));
     const float toneValue = juce::jlimit(0.0f, 1.0f, tone.load(std::memory_order_relaxed));
     const float bodyValue = juce::jlimit(0.0f, 1.0f, body.load(std::memory_order_relaxed));
@@ -29685,6 +30985,9 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
     const float attackStep = 1.0f / juce::jmax(1.0f, sr * 0.0028f);
     const float releaseStep = 1.0f / juce::jmax(1.0f, sr * releaseMs.load(std::memory_order_relaxed) * 0.001f);
     const float outGain = juce::Decibels::decibelsToGain(juce::jlimit(-36.0f, 0.0f, outputGain.load(std::memory_order_relaxed)));
+    auto loopSettings = loopParameters();
+    const std::array<float,5> loopTargets {loopSettings.decay,loopSettings.damping,loopSettings.pickup,loopSettings.mute,loopSettings.body};
+    for (size_t i=0;i<loopTargets.size();++i) loopSmoothers[i].setTargetValue(loopTargets[i]);
     const float twoPi = juce::MathConstants<float>::twoPi;
     std::array<BuiltInMidiVoiceRef, kBuiltInMidiVoiceSlots> voiceRefs {};
 
@@ -29702,6 +31005,11 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
 
         for (int sample = start; sample < end; ++sample)
         {
+            const auto channelFrame=channelMix.next();
+            loopSettings.decay=loopSmoothers[0].getNextValue(); loopSettings.damping=loopSmoothers[1].getNextValue();
+            loopSettings.pickup=loopSmoothers[2].getNextValue(); loopSettings.mute=loopSmoothers[3].getNextValue(); loopSettings.body=loopSmoothers[4].getNextValue();
+            std::array<float,16> bodyInput {};
+            const float coupledGain = coupledAmount.getNextValue();
             float mixedL = 0.0f;
             float mixedR = 0.0f;
             const float chorusLfo = std::sin(twoPi * chorusPhase);
@@ -29713,66 +31021,90 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
             {
                 const auto voiceRef = voiceRefs[static_cast<size_t>(voiceIndex)];
                 const size_t channel = voiceRef.channel;
-                const size_t note = voiceRef.note;
-                if (!active[channel][note] && envelope[channel][note] <= 0.0f)
+                const size_t slot = voiceRef.note;
+                const size_t note = static_cast<size_t>(voicePool.key[channel][slot]);
+                if (!active[channel][slot] && envelope[channel][slot] <= 0.0f)
                 {
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
-                if (active[channel][note] && !releasing[channel][note])
-                    envelope[channel][note] = juce::jmin(1.0f, envelope[channel][note] + attackStep);
+                if (active[channel][slot] && !releasing[channel][slot])
+                    envelope[channel][slot] = juce::jmin(1.0f, envelope[channel][slot] + attackStep);
                 else
-                    envelope[channel][note] = juce::jmax(0.0f, envelope[channel][note] - releaseStep);
+                    envelope[channel][slot] = juce::jmax(0.0f, envelope[channel][slot] - releaseStep);
 
-                if (envelope[channel][note] <= 0.0f)
+                if (envelope[channel][slot] <= 0.0f)
                 {
-                    active[channel][note] = false;
-                    releasing[channel][note] = false;
-                    velocity[channel][note] = 0.0f;
-                    voiceString[channel][note] = -1;
+                    active[channel][slot] = false;
+                    releasing[channel][slot] = false;
+                    velocity[channel][slot] = 0.0f;
+                    voiceString[channel][slot] = -1;
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
-                const float baseFreq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
+                const int style=voiceArticulation[channel][slot];
+                const float pitch=articulationPitch[channel][slot].getNextValue();
+                const float baseFreq = style==3||style==4||style==5||style==6?static_cast<float>(440*std::exp2((static_cast<double>(pitch)-69)/12)):static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
                 const float bendFactor = std::pow(2.0f, pitchBendSemitones[channel] / 12.0f);
-                const float ageSec = static_cast<float>(ageSamples[channel][note]) / sr;
+                const float ageSec = static_cast<float>(ageSamples[channel][slot]) / sr;
                 const float freq = baseFreq * bendFactor;
-                const float p = phase[channel][note];
+                const float p = phase[channel][slot];
                 const float noteBright = juce::jlimit(0.55f, 1.45f, 0.78f + (static_cast<float>(note) - 52.0f) * 0.009f);
                 const float pickupBright = modelIndex == 0 ? 1.08f : (modelIndex == 1 ? 1.22f : (modelIndex == 3 ? 1.18f : 0.96f));
-                const float bodyDecay = 0.75f + bodyValue * 1.2f + (1.0f - noteBright) * 0.22f;
-                const float decay = std::exp(-ageSec / bodyDecay);
-                const float pickupPhase = modelIndex == 1 ? 0.18f : 0.09f;
-                const float fundamental = std::sin(twoPi * p) * 0.72f;
-                const float partial2 = std::sin(twoPi * (p * 2.01f + pickupPhase)) * (0.28f + toneValue * 0.24f) * nyquistFade(freq * 2.01f, sr);
-                const float partial3 = std::sin(twoPi * (p * 3.02f + 0.31f)) * (0.16f + toneValue * 0.14f) * nyquistFade(freq * 3.02f, sr);
-                const float partial5 = std::sin(twoPi * (p * 5.07f + 0.11f)) * (0.045f + toneValue * 0.08f) * nyquistFade(freq * 5.07f, sr);
-                const float pluck = builtinNoise(ageSamples[channel][note], static_cast<int>(note) + 37)
-                    * std::exp(-ageSec / 0.018f) * (0.02f + pickValue * 0.075f) * pickupBright;
-                float raw = (fundamental + partial2 + partial3 + partial5 + pluck) * decay * pickupBright;
+                float raw = 0;
+                if (loopVoice[channel][slot])
+                {
+                    const float pluck = builtinNoise(ageSamples[channel][slot], static_cast<int>(note) + 37)
+                        * std::exp(-ageSec / .018f) * (.02f + pickValue * .075f) * pickupBright;
+                    auto voicedSettings=loopSettings;voicedSettings.mute=juce::jmax(voicedSettings.mute,articulationMute[channel][slot]);
+                    raw = pluckedLoop.process(channel*16+slot, freq, voicedSettings) * (style==8?2.5f:1.8f) + pluck * pickValue;
+                    if(style==7)raw*=std::exp(-ageSec/.025f);
+                }
+                else
+                {
+                    const float bodyDecay = 0.75f + bodyValue * 1.2f + (1.0f - noteBright) * 0.22f;
+                    const float decay = std::exp(-ageSec / bodyDecay);
+                    const float pickupPhase = modelIndex == 1 ? 0.18f : 0.09f;
+                    const float fundamental = std::sin(twoPi * p) * 0.72f;
+                    const float partial2 = std::sin(twoPi * (p * 2.01f + pickupPhase)) * (0.28f + toneValue * 0.24f) * nyquistFade(freq * 2.01f, sr);
+                    const float partial3 = std::sin(twoPi * (p * 3.02f + 0.31f)) * (0.16f + toneValue * 0.14f) * nyquistFade(freq * 3.02f, sr);
+                    const float partial5 = std::sin(twoPi * (p * 5.07f + 0.11f)) * (0.045f + toneValue * 0.08f) * nyquistFade(freq * 5.07f, sr);
+                    const float pluck = builtinNoise(ageSamples[channel][slot], static_cast<int>(note) + 37)
+                        * std::exp(-ageSec / 0.018f) * (0.02f + pickValue * 0.075f) * pickupBright;
+                    raw = (fundamental + partial2 + partial3 + partial5 + pluck) * decay * pickupBright;
+                }
                 const float filterCoeff = juce::jlimit(0.04f, 0.72f, 0.12f + toneValue * 0.46f + noteBright * 0.08f);
-                pluckFilter[channel][note] += filterCoeff * (raw - pluckFilter[channel][note]);
-                raw = pluckFilter[channel][note];
+                pluckFilter[channel][slot] += filterCoeff * (raw - pluckFilter[channel][slot]);
+                raw = pluckFilter[channel][slot];
 
                 const float cleanAmp = modelIndex >= 2 ? std::tanh(raw * (1.08f + bodyValue * 0.24f)) : raw;
-                const float voice = cleanAmp * envelope[channel][note] * velocity[channel][note] * outGain * 0.72f;
-                const int assignedString = voiceString[channel][note];
+                const float voice = cleanAmp * envelope[channel][slot] * velocity[channel][slot] * outGain * 0.72f;
+                const int assignedString = voiceString[channel][slot];
                 const int string = assignedString >= 0 ? assignedString : chooseStringForNote(static_cast<int>(note), static_cast<int>(channel));
                 const float stringPan = juce::jlimit(-0.48f, 0.48f, (static_cast<float>(string) - 2.5f) * 0.15f);
                 const float chorusOffset = (modelIndex == 3 ? 0.14f : 0.04f) * chorusValue * chorusLfo;
                 const float pan = juce::jlimit(-0.65f, 0.65f, stringPan + chorusOffset);
-                const float leftGain = std::sqrt(0.5f * (1.0f - pan));
-                const float rightGain = std::sqrt(0.5f * (1.0f + pan));
-                mixedL += voice * leftGain;
-                mixedR += voice * rightGain;
+                const float midiPan=BuiltInMIDIChannelMix::biasPan(pan,channelFrame[channel].pan);
+                const float leftGain = std::sqrt(0.5f * (1.0f - midiPan));
+                const float rightGain = std::sqrt(0.5f * (1.0f + midiPan));
+                if (processBody) bodyInput[channel] += voice;
+                mixedL += voice * leftGain * channelFrame[channel].level;
+                mixedR += voice * rightGain * channelFrame[channel].level;
 
-                phase[channel][note] += juce::jmin(0.45f, freq / sr);
-                if (phase[channel][note] >= 1.0f)
-                    phase[channel][note] -= std::floor(phase[channel][note]);
-                ++ageSamples[channel][note];
+                phase[channel][slot] += juce::jmin(0.45f, freq / sr);
+                if (phase[channel][slot] >= 1.0f)
+                    phase[channel][slot] -= std::floor(phase[channel][slot]);
+                ++ageSamples[channel][slot];
                 ++voiceIndex;
+            }
+
+            if (processBody) for (size_t ch=0;ch<16;++ch)
+            {
+                const float response = coupledNetwork.process(ch,bodyInput[ch]) * coupledGain * channelFrame[ch].level;
+                mixedL += response * std::sqrt(.5f * (1 - channelFrame[ch].pan));
+                mixedR += response * std::sqrt(.5f * (1 + channelFrame[ch].pan));
             }
 
             mixedL = softLimitInstrumentBus(mixedL);
@@ -29800,12 +31132,15 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
         cursor = eventSample;
     }
     render(cursor, numSamples);
+    delayChorus.process(buffer, juce::jlimit(0.0f,1.0f,chorusMix.load()), juce::jlimit(.05f,5.0f,chorusRate.load()), juce::jlimit(0.0f,6.0f,chorusDepth.load()));
     sanitizeBuiltInBuffer(buffer, 2.5f);
+    publishGuitarPerformance();
 }
 
 void OpenStudioCleanGuitarInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioCleanGuitarInstrument", {
+        {"coupledBody",coupledBody.load()},{"bodyCoupling",bodyCoupling.load()},{"bodyDecay",bodyDecay.load()},
         { "model", model.load() },
         { "tone", tone.load() },
         { "body", body.load() },
@@ -29814,7 +31149,18 @@ void OpenStudioCleanGuitarInstrument::getStateInformation(juce::MemoryBlock& des
         { "chorus", chorus.load() },
         { "stringMode", stringMode.load() },
         { "bendRangeSemitones", bendRangeSemitones.load() },
-        { "outputGain", outputGain.load() }
+        { "outputGain", outputGain.load() },
+        { "stringEngine", stringEngine.load() },
+        { "stringDecay", stringDecay.load() },
+        { "stringDamping", stringDamping.load() },
+        { "pickPosition", pickPosition.load() },
+        { "pickHardness", pickHardness.load() },
+        { "pickupPosition", pickupPosition.load() },
+        { "palmMute", palmMute.load() },
+        { "chorusMix", chorusMix.load() },
+        { "chorusRate", chorusRate.load() },
+        { "chorusDepth", chorusDepth.load() },
+        {"articulation",articulation.load()},{"articulationKeys",articulationKeys.load()},{"slideTime",slideTime.load()},{"harmonicNode",harmonicNode.load()}
     });
 }
 
@@ -29823,7 +31169,15 @@ void OpenStudioCleanGuitarInstrument::setStateInformation(const void* data, int 
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioCleanGuitarInstrument");
     if (!tree.isValid())
         return;
+    for (const auto& control : coupledBodyControls) { const float value=static_cast<float>(tree.getProperty(control.id,control.initial)); setStringControl(control.id,std::isfinite(value)?value:control.initial); }
+    for (const auto& control : stringControls)
+    {
+        const float value = static_cast<float>(tree.getProperty(control.id, control.initial));
+        setStringControl(control.id, std::isfinite(value) ? value : control.initial);
+    }
 
+    for(const auto& control:articulationControls){const float value=static_cast<float>(tree.getProperty(control.id,control.initial));setStringControl(control.id,std::isfinite(value)?value:control.initial);}
+    liveArticulation.fill(-1);
     model = static_cast<float>((double)tree.getProperty("model", 0.0));
     tone = static_cast<float>((double)tree.getProperty("tone", 0.68));
     body = static_cast<float>((double)tree.getProperty("body", 0.46));
@@ -29833,6 +31187,8 @@ void OpenStudioCleanGuitarInstrument::setStateInformation(const void* data, int 
     stringMode = static_cast<float>((double)tree.getProperty("stringMode", 1.0));
     bendRangeSemitones = static_cast<float>((double)tree.getProperty("bendRangeSemitones", 2.0));
     outputGain = static_cast<float>((double)tree.getProperty("outputGain", -14.0));
+    channelMix.reset(cachedSampleRate);
+    publishGuitarPerformance();
 }
 
 bool OpenStudioCleanGuitarInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -29845,18 +31201,41 @@ bool OpenStudioCleanGuitarInstrument::isBusesLayoutSupported(const BusesLayout& 
 //  OpenStudioDrumInstrument
 // ============================================================================
 
+int OpenStudioDrumInstrument::pieceForNote(int note)
+{
+    if (note == 35 || note == 36) return 0;
+    if (note == 37 || note == 38 || note == 40) return 1;
+    if (note == 42 || note == 44 || note == 22) return 2;
+    if (note == 46 || note == 26) return 3;
+    if (note == 41 || note == 43) return 4;
+    if (note == 45 || note == 47 || note == 48 || note == 50) return 5;
+    if (note == 51 || note == 53 || note == 59) return 7;
+    return 6;
+}
+
 OpenStudioDrumInstrument::OpenStudioDrumInstrument()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 1", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 2", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 3", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 4", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 5", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 6", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 7", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Drum 8", juce::AudioChannelSet::stereo(), true))
 {
     hihatPedal.fill(0.65f);
+    for(auto& value:pieceDecay)value.store(1);
+    for(size_t i=0;i<noteMap.size();++i)noteMap[i].store(static_cast<float>(i));
 }
 
 void OpenStudioDrumInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    for (size_t i = 0; i < 8; ++i) { pieceTuneSmoothers[i].reset(cachedSampleRate, .02); piecePanSmoothers[i].reset(cachedSampleRate, .02); pieceDecaySmoothers[i].reset(cachedSampleRate,.02); }
     clearVoices();
 }
 
@@ -29867,14 +31246,39 @@ void OpenStudioDrumInstrument::releaseResources()
 
 void OpenStudioDrumInstrument::clearVoices()
 {
+    performanceTelemetry.reset();
+    channelMix.reset(cachedSampleRate);
+    voicePool.reset();
+    for (size_t i = 0; i < 8; ++i)
+    {
+        pieceTuneSmoothers[i].setCurrentAndTargetValue(std::exp2(juce::jlimit(-12.0f, 12.0f, pieceTuning[i].load()) / 12.0f));
+        piecePanSmoothers[i].setCurrentAndTargetValue(juce::jlimit(-1.0f, 1.0f, piecePan[i].load()));
+        pieceDecaySmoothers[i].setCurrentAndTargetValue(juce::jlimit(.1f,4.0f,pieceDecay[i].load()));
+    }
+    hihatPedal.fill(.65f);
+    observedNoteEvent.store(((observedNoteEvent.load(std::memory_order_relaxed)+256u)&0xffffff00u)|255u,std::memory_order_release);
+    for(auto& channel:inputKeys)channel.fill(-1);
+    for(auto& channel:partialPhases)for(auto& voice:channel)voice.fill(0);
+    for (auto& channel : choking) channel.fill(false);
+    for (auto& channel : chokeGain) channel.fill(1.0f);
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : phase) notes.fill(0.0f);
     for (auto& notes : velocity) notes.fill(0.0f);
     for (auto& notes : ageSamples) notes.fill(0);
 }
 
+BuiltInDrumArticulations::Voice OpenStudioDrumInstrument::articulationForInput(int note) const noexcept
+{
+    if(note<0||note>127)return {-1,BuiltInDrumArticulations::Kind::Legacy,0,"Ignored"};
+    if(customMapEnabled.load()>=.5f)note=juce::jlimit(-1,127,juce::roundToInt(noteMap[static_cast<size_t>(note)].load()));
+    if(note<0)return {-1,BuiltInDrumArticulations::Kind::Legacy,0,"Ignored"};
+    return BuiltInDrumArticulations::identify(juce::jlimit(0,2,juce::roundToInt(mapPreset.load())),note);
+}
+
 int OpenStudioDrumInstrument::mapIncomingNote(int note) const
 {
+    if(customMapEnabled.load()>=.5f){if(note<0||note>127)return -1;note=juce::jlimit(-1,127,juce::roundToInt(noteMap[static_cast<size_t>(note)].load()));if(note<0)return -1;}
+    if(mapPreset.load()>=1.5f)return BuiltInDrumArticulations::identify(2,note).note;
     const int preset = juce::jlimit(0, 1, static_cast<int>(std::round(mapPreset.load(std::memory_order_relaxed))));
     if (preset == 0)
         return note;
@@ -29894,31 +31298,79 @@ int OpenStudioDrumInstrument::mapIncomingNote(int note) const
     }
 }
 
+juce::var OpenStudioDrumInstrument::describeMapping() const
+{
+    juce::Array<juce::var> rows;
+    for (int input=0;input<128;++input)
+    {
+        const auto articulation=articulationForInput(input);
+        const int note = articulationEngine.load()>=.5f?articulation.note:mappedNote(input); auto* row = new juce::DynamicObject();
+        row->setProperty("articulation",articulationEngine.load()>=.5f?articulation.label:"Legacy synthesized voice");row->setProperty("openness",articulation.openness);row->setProperty("ignored",note<0);
+        row->setProperty("inputNote", input); row->setProperty("voiceNote", note); row->setProperty("piece",note<0?-1:pieceForNote(note));
+        row->setProperty("closesHat",articulationEngine.load()>=.5f?articulation.closesHat:note == 42 || note == 44);
+        row->setProperty("aftertouchChoke",articulationEngine.load()>=.5f?articulation.choke:note == 49 || note == 51 || note == 57 || note == 46);
+        rows.add(row);
+    }
+    return rows;
+}
+
 void OpenStudioDrumInstrument::handleMidi(const juce::MidiMessage& message)
 {
+    performanceTelemetry.observe(message);
     const int channel = juce::jlimit(0, 15, message.getChannel() > 0 ? message.getChannel() - 1 : 0);
+    channelMix.controller(message,[&](size_t receiver){return receiver==static_cast<size_t>(channel);});
     if (message.isController() && message.getControllerNumber() == 4)
     {
         hihatPedal[static_cast<size_t>(channel)] = static_cast<float>(message.getControllerValue()) / 127.0f;
+        if (message.getControllerValue() >= 96)
+            for (size_t slot = 0; slot < BuiltInVoiceAllocation::voicesPerChannel; ++slot)
+                if (voicePool.key[static_cast<size_t>(channel)][slot] == 46) choking[static_cast<size_t>(channel)][slot] = true;
+        return;
+    }
+    if (message.isAftertouch() && message.getAfterTouchValue() >= 64)
+    {
+        for(size_t slot=0;slot<BuiltInVoiceAllocation::voicesPerChannel;++slot)
+        {
+            const auto ch=static_cast<size_t>(channel);const int key=voicePool.key[ch][slot];
+            const auto& articulation=voiceArticulations[ch][slot];
+            if(inputKeys[ch][slot]==message.getNoteNumber()&&(articulation.kind!=BuiltInDrumArticulations::Kind::Legacy?articulation.choke:key==49||key==51||key==57||key==46))choking[ch][slot]=true;
+        }
         return;
     }
 
     if (message.isNoteOn())
     {
-        const int note = juce::jlimit(0, 127, mapIncomingNote(message.getNoteNumber()));
+        const auto previousObservation=observedNoteEvent.load(std::memory_order_relaxed);
+        observedNoteEvent.store(((previousObservation+256u)&0xffffff00u)|static_cast<juce::uint32>(message.getNoteNumber()),std::memory_order_release);
+        auto articulation=articulationForInput(message.getNoteNumber());
+        if(articulationEngine.load()<.5f)articulation.kind=BuiltInDrumArticulations::Kind::Legacy;
+        const int note=articulationEngine.load()>=.5f?articulation.note:mapIncomingNote(message.getNoteNumber());
+        if(note<0||note>127)return;
         const float curve = juce::jlimit(-1.0f, 1.0f, velocityCurve.load(std::memory_order_relaxed));
         const float exponent = juce::jmap(curve, -1.0f, 1.0f, 1.65f, 0.62f);
         const float curvedVelocity = std::pow(juce::jlimit(0.0f, 1.0f, message.getFloatVelocity()), exponent);
-        active[static_cast<size_t>(channel)][static_cast<size_t>(note)] = true;
-        phase[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0.0f;
-        velocity[static_cast<size_t>(channel)][static_cast<size_t>(note)] = curvedVelocity;
-        ageSamples[static_cast<size_t>(channel)][static_cast<size_t>(note)] = 0;
+        const size_t slot = voicePool.start(static_cast<size_t>(channel), note, active, true);
+        active[static_cast<size_t>(channel)][slot] = true;
+        voiceArticulations[static_cast<size_t>(channel)][slot]=articulation;inputKeys[static_cast<size_t>(channel)][slot]=message.getNoteNumber();partialPhases[static_cast<size_t>(channel)][slot].fill(0);
+        phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        velocity[static_cast<size_t>(channel)][slot] = curvedVelocity;
+        ageSamples[static_cast<size_t>(channel)][slot] = 0;
 
+        choking[static_cast<size_t>(channel)][slot] = false;
+        chokeGain[static_cast<size_t>(channel)][slot] = 1.0f;
         if (note == 42 || note == 44)
-            active[static_cast<size_t>(channel)][46] = false;
+            for (size_t voice = 0; voice < BuiltInVoiceAllocation::voicesPerChannel; ++voice)
+                if (voicePool.key[static_cast<size_t>(channel)][voice] == 46)
+                    choking[static_cast<size_t>(channel)][voice] = true;
     }
     else if (message.isAllNotesOff() || message.isAllSoundOff())
     {
+        voicePool.releaseChannel(static_cast<size_t>(channel));
+        if (message.isAllSoundOff())
+        {
+            active[static_cast<size_t>(channel)].fill(false);
+        }
+
         active[static_cast<size_t>(channel)].fill(false);
     }
 }
@@ -29932,6 +31384,15 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
         return;
 
     buffer.clear();
+    std::array<int, 8> auxiliaryChannels {};
+    int nextAuxiliaryChannel = getMainBusNumOutputChannels();
+    for (int bus = 1; bus <= 8; ++bus)
+    {
+        const int channels = getBus(false, bus)->getNumberOfChannels();
+        auxiliaryChannels[static_cast<size_t>(bus - 1)] = channels == 2 ? nextAuxiliaryChannel : -1;
+        nextAuxiliaryChannel += channels;
+    }
+    const bool monoMain = numChannels == 1 || getMainBusNumOutputChannels() == 1;
     const int kitIndex = juce::jlimit(0, 2, static_cast<int>(std::round(kit.load(std::memory_order_relaxed))));
     const float tune = std::pow(2.0f, juce::jlimit(-12.0f, 12.0f, tuning.load(std::memory_order_relaxed)) / 12.0f);
     const float room = juce::jlimit(0.0f, 1.0f, ambience.load(std::memory_order_relaxed));
@@ -29939,6 +31400,12 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
     const float punchValue = juce::jlimit(0.0f, 1.0f, punch.load(std::memory_order_relaxed));
     const float widthValue = juce::jlimit(0.0f, 1.0f, stereoWidth.load(std::memory_order_relaxed));
     const float gain = juce::Decibels::decibelsToGain(juce::jlimit(-36.0f, 0.0f, outputGain.load(std::memory_order_relaxed)));
+    for (size_t i = 0; i < 8; ++i)
+    {
+        pieceTuneSmoothers[i].setTargetValue(std::exp2(juce::jlimit(-12.0f, 12.0f, pieceTuning[i].load()) / 12.0f));
+        piecePanSmoothers[i].setTargetValue(juce::jlimit(-1.0f, 1.0f, piecePan[i].load()));
+        pieceDecaySmoothers[i].setTargetValue(juce::jlimit(.1f,4.0f,pieceDecay[i].load()));
+    }
     const float twoPi = juce::MathConstants<float>::twoPi;
     std::array<BuiltInMidiVoiceRef, kBuiltInMidiVoiceSlots> voiceRefs {};
 
@@ -29956,88 +31423,114 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
 
         for (int sample = start; sample < end; ++sample)
         {
+            const auto channelFrame=channelMix.next();
+            std::array<float, 8> tuningValues {}, panValues {}, decayValues {};
+            for (size_t i = 0; i < 8; ++i) { tuningValues[i] = pieceTuneSmoothers[i].getNextValue(); panValues[i] = piecePanSmoothers[i].getNextValue(); decayValues[i]=pieceDecaySmoothers[i].getNextValue(); }
             float mixedL = 0.0f;
             float mixedR = 0.0f;
+            std::array<std::array<float, 2>, 8> auxiliary {};
             for (int voiceIndex = 0; voiceIndex < voiceCount;)
             {
                 const auto voiceRef = voiceRefs[static_cast<size_t>(voiceIndex)];
                 const size_t channel = voiceRef.channel;
-                const size_t note = voiceRef.note;
+                const size_t slot = voiceRef.note;
+                const size_t note = static_cast<size_t>(voicePool.key[channel][slot]);
+                if (choking[channel][slot])
+                {
+                    chokeGain[channel][slot] = juce::jmax(0.0f, chokeGain[channel][slot] - 1.0f / (static_cast<float>(cachedSampleRate) * .004f));
+                    if (chokeGain[channel][slot] <= 0.0f) active[channel][slot] = false;
+                }
                 const float pedalClosed = juce::jlimit(0.0f, 1.0f, hihatPedal[channel] * tightness);
 
-                if (!active[channel][note])
+                if (!active[channel][slot])
                 {
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
                 const int midiNote = static_cast<int>(note);
-                const float ageSec = static_cast<float>(ageSamples[channel][note]) / static_cast<float>(cachedSampleRate);
-                const float velocityValue = velocity[channel][note];
-                const float decay = drumDecaySeconds(midiNote, pedalClosed) * (0.82f + velocityValue * 0.42f);
+                const size_t piece = static_cast<size_t>(pieceForNote(midiNote));
+                const float ageSec = (static_cast<float>(ageSamples[channel][slot]) / static_cast<float>(cachedSampleRate)) / decayValues[piece];
+                const auto& articulation=voiceArticulations[channel][slot];
+                const bool articulated=articulation.kind!=BuiltInDrumArticulations::Kind::Legacy;
+                const float velocityValue = (velocity[channel][slot] * chokeGain[channel][slot]);
+                const float decay = (articulated?BuiltInDrumArticulations::decay(articulation,hihatPedal[channel]):drumDecaySeconds(midiNote, pedalClosed)) * (0.82f + velocityValue * 0.42f);
                 const float env = std::exp(-ageSec / decay);
                 if (env < 0.0002f)
                 {
-                    active[channel][note] = false;
-                    velocity[channel][note] = 0.0f;
+                    active[channel][slot] = false;
+                    velocity[channel][slot] = 0.0f;
                     voiceRefs[static_cast<size_t>(voiceIndex)] = voiceRefs[static_cast<size_t>(--voiceCount)];
                     continue;
                 }
 
-                const float noise = builtinNoise(ageSamples[channel][note], midiNote);
+                const float noise = builtinNoise(ageSamples[channel][slot], midiNote);
                 const float sweep = (midiNote == 35 || midiNote == 36) ? std::exp(-ageSec / 0.035f) * 72.0f : 0.0f;
-                const float freq = juce::jlimit(20.0f, 8000.0f, drumBaseFrequency(midiNote) * tune + sweep);
-                phase[channel][note] += freq / static_cast<float>(cachedSampleRate);
-                if (phase[channel][note] >= 1.0f)
-                    phase[channel][note] -= std::floor(phase[channel][note]);
+                const float freq = juce::jlimit(20.0f, 8000.0f, (drumBaseFrequency(midiNote) * tune + sweep) * tuningValues[piece]);
+                phase[channel][slot] += freq / static_cast<float>(cachedSampleRate);
+                if (phase[channel][slot] >= 1.0f)
+                    phase[channel][slot] -= std::floor(phase[channel][slot]);
 
                 float drum = 0.0f;
-                if (midiNote == 35 || midiNote == 36)
+                if(articulated)drum=BuiltInDrumArticulations::render(articulation,partialPhases[channel][slot],freq,static_cast<float>(cachedSampleRate),ageSec/(.82f+velocityValue*.42f),noise,velocityValue,hihatPedal[channel],punchValue);
+                else if (midiNote == 35 || midiNote == 36)
                 {
-                    const float body = std::sin(twoPi * phase[channel][note]) * std::exp(-ageSec / (kitIndex == 1 ? 0.52f : 0.36f));
+                    const float body = std::sin(twoPi * phase[channel][slot]) * std::exp(-ageSec / (kitIndex == 1 ? 0.52f : 0.36f));
                     const float click = noise * std::exp(-ageSec / 0.012f) * (kitIndex == 2 ? 0.38f : 0.18f) * (0.7f + punchValue * 0.8f);
                     drum = body * 1.18f + click;
                 }
                 else if (midiNote == 37 || midiNote == 38 || midiNote == 40)
                 {
                     const float snap = noise * std::exp(-ageSec / (kitIndex == 1 ? 0.22f : 0.16f));
-                    const float body = std::sin(twoPi * phase[channel][note]) * std::exp(-ageSec / 0.12f);
+                    const float body = std::sin(twoPi * phase[channel][slot]) * std::exp(-ageSec / 0.12f);
                     drum = snap * (kitIndex == 2 ? 0.95f : 0.72f) * (0.75f + punchValue * 0.65f) + body * 0.34f;
                 }
                 else if (midiNote == 42 || midiNote == 44 || midiNote == 46 || midiNote == 22 || midiNote == 26)
                 {
-                    const float metal = std::sin(twoPi * phase[channel][note] * 7.1f) * 0.24f
-                                      + std::sin(twoPi * phase[channel][note] * 11.7f) * 0.18f;
+                    const float metal = std::sin(twoPi * phase[channel][slot] * 7.1f) * 0.24f
+                                      + std::sin(twoPi * phase[channel][slot] * 11.7f) * 0.18f;
                     drum = (noise * 0.78f + metal) * env;
                 }
                 else if (midiNote == 49 || midiNote == 51 || midiNote == 52 || midiNote == 53
                          || midiNote == 55 || midiNote == 57 || midiNote == 59)
                 {
-                    const float shimmer = std::sin(twoPi * phase[channel][note] * 5.3f) * 0.15f
-                                        + std::sin(twoPi * phase[channel][note] * 9.7f) * 0.12f;
+                    const float shimmer = std::sin(twoPi * phase[channel][slot] * 5.3f) * 0.15f
+                                        + std::sin(twoPi * phase[channel][slot] * 9.7f) * 0.12f;
                     drum = (noise * 0.64f + shimmer) * env;
                 }
                 else
                 {
-                    const float body = std::sin(twoPi * phase[channel][note]) * env;
+                    const float body = std::sin(twoPi * phase[channel][slot]) * env;
                     drum = body * 0.9f + noise * 0.08f * std::exp(-ageSec / 0.04f);
                 }
 
-                const float roomTail = std::sin(twoPi * phase[channel][note] * 0.37f + static_cast<float>(midiNote))
+                const float roomTail = std::sin(twoPi * phase[channel][slot] * 0.37f + static_cast<float>(midiNote))
                     * room * 0.08f * std::exp(-ageSec / 0.9f);
-                const float voice = (drum + roomTail) * velocityValue * gain * 0.85f;
-                const float pan = drumPanPosition(midiNote) * widthValue;
-                const float leftGain = std::sqrt(0.5f * (1.0f - pan));
-                const float rightGain = std::sqrt(0.5f * (1.0f + pan));
-                mixedL += voice * leftGain;
-                mixedR += voice * rightGain;
-                ++ageSamples[channel][note];
+                const float voice = (drum + roomTail) * velocityValue * gain * 0.85f * juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, pieceGain[static_cast<size_t>(pieceForNote(midiNote))].load()));
+                const float pan = juce::jlimit(-1.0f, 1.0f, drumPanPosition(midiNote) + panValues[piece]) * widthValue;
+                const float midiPan=BuiltInMIDIChannelMix::biasPan(pan,channelFrame[channel].pan);
+                const float leftGain = std::sqrt(0.5f * (1.0f - midiPan));
+                const float rightGain = std::sqrt(0.5f * (1.0f + midiPan));
+                const float outputValue = pieceOutput[piece].load(std::memory_order_relaxed);
+                const int output = std::isfinite(outputValue) ? juce::jlimit(0, 8, juce::roundToInt(outputValue)) : 0;
+                if (output == 0)
+                {
+                    mixedL += voice * leftGain * channelFrame[channel].level;
+                    mixedR += voice * rightGain * channelFrame[channel].level;
+                }
+                else
+                {
+                    auto& pair = auxiliary[static_cast<size_t>(output - 1)];
+                    pair[0] += voice * leftGain * channelFrame[channel].level;
+                    pair[1] += voice * rightGain * channelFrame[channel].level;
+                }
+                ++ageSamples[channel][slot];
                 ++voiceIndex;
             }
 
             mixedL = softLimitInstrumentBus(mixedL);
             mixedR = softLimitInstrumentBus(mixedR);
-            if (numChannels == 1)
+            if (monoMain)
             {
                 buffer.addSample(0, sample, (mixedL + mixedR) * 0.707f);
             }
@@ -30045,8 +31538,13 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
             {
                 buffer.addSample(0, sample, mixedL);
                 buffer.addSample(1, sample, mixedR);
-                for (int ch = 2; ch < numChannels; ++ch)
-                    buffer.addSample(ch, sample, (mixedL + mixedR) * 0.5f);
+            }
+            for (int output = 1; output <= 8; ++output)
+            {
+                const int firstChannel = auxiliaryChannels[static_cast<size_t>(output - 1)];
+                if (firstChannel < 0 || firstChannel + 1 >= numChannels) continue;
+                buffer.addSample(firstChannel, sample, softLimitInstrumentBus(auxiliary[static_cast<size_t>(output - 1)][0]));
+                buffer.addSample(firstChannel + 1, sample, softLimitInstrumentBus(auxiliary[static_cast<size_t>(output - 1)][1]));
             }
         }
     };
@@ -30074,8 +31572,20 @@ void OpenStudioDrumInstrument::getStateInformation(juce::MemoryBlock& destData)
         { "mapPreset", mapPreset.load() },
         { "punch", punch.load() },
         { "stereoWidth", stereoWidth.load() },
-        { "velocityCurve", velocityCurve.load() }
+        { "velocityCurve", velocityCurve.load() },
+        { "articulationEngine", articulationEngine.load() }, { "customMapEnabled", customMapEnabled.load() }
     });
+    auto state = juce::ValueTree::readFromData(destData.getData(), destData.getSize());
+    for (size_t i = 0; i < pieceGain.size(); ++i) state.setProperty("pieceGain" + juce::String(static_cast<int>(i)), pieceGain[i].load(), nullptr);
+    for (size_t i = 0; i < 8; ++i)
+    {
+        state.setProperty("pieceTuning" + juce::String(static_cast<int>(i)), pieceTuning[i].load(), nullptr);
+        state.setProperty("piecePan" + juce::String(static_cast<int>(i)), piecePan[i].load(), nullptr);
+        state.setProperty("pieceDecay"+juce::String(static_cast<int>(i)),pieceDecay[i].load(),nullptr);
+        state.setProperty("pieceOutput"+juce::String(static_cast<int>(i)),pieceOutput[i].load(),nullptr);
+    }
+    for(size_t i=0;i<noteMap.size();++i)state.setProperty("noteMap"+juce::String(static_cast<int>(i)),noteMap[i].load(),nullptr);
+    juce::MemoryOutputStream stream(destData, false); state.writeToStream(stream);
 }
 
 void OpenStudioDrumInstrument::setStateInformation(const void* data, int sizeInBytes)
@@ -30084,6 +31594,18 @@ void OpenStudioDrumInstrument::setStateInformation(const void* data, int sizeInB
     if (!tree.isValid())
         return;
 
+    for (size_t i = 0; i < pieceGain.size(); ++i) pieceGain[i].store(juce::jlimit(-60.0f, 12.0f, static_cast<float>(tree.getProperty("pieceGain" + juce::String(static_cast<int>(i)), 0.0f))));
+    for (size_t i = 0; i < 8; ++i)
+    {
+        const float tuneValue = static_cast<float>(tree.getProperty("pieceTuning" + juce::String(static_cast<int>(i)), 0.0f));
+        const float panValue = static_cast<float>(tree.getProperty("piecePan" + juce::String(static_cast<int>(i)), 0.0f));
+        const float decayValue=static_cast<float>(tree.getProperty("pieceDecay"+juce::String(static_cast<int>(i)),1.0f));
+        const float outputValue = static_cast<float>(tree.getProperty("pieceOutput"+juce::String(static_cast<int>(i)), 0));
+        pieceOutput[i].store(std::isfinite(outputValue) ? static_cast<float>(juce::jlimit(0, 8, juce::roundToInt(outputValue))) : 0.0f);
+        pieceDecay[i].store(std::isfinite(decayValue)?juce::jlimit(.1f,4.0f,decayValue):1.0f);
+        pieceTuning[i].store(std::isfinite(tuneValue) ? juce::jlimit(-12.0f, 12.0f, tuneValue) : 0.0f);
+        piecePan[i].store(std::isfinite(panValue) ? juce::jlimit(-1.0f, 1.0f, panValue) : 0.0f);
+    }
     kit            = static_cast<float>((double)tree.getProperty("kit", 0.0));
     tuning         = static_cast<float>((double)tree.getProperty("tuning", 0.0));
     ambience       = static_cast<float>((double)tree.getProperty("ambience", 0.18));
@@ -30093,12 +31615,21 @@ void OpenStudioDrumInstrument::setStateInformation(const void* data, int sizeInB
     punch          = static_cast<float>((double)tree.getProperty("punch", 0.55));
     stereoWidth    = static_cast<float>((double)tree.getProperty("stereoWidth", 0.7));
     velocityCurve  = static_cast<float>((double)tree.getProperty("velocityCurve", 0.0));
+    articulationEngine.store(static_cast<float>(tree.getProperty("articulationEngine",0))>=.5f?1.0f:0.0f);
+    customMapEnabled.store(static_cast<float>(tree.getProperty("customMapEnabled",0))>=.5f?1.0f:0.0f);
+    for(size_t i=0;i<noteMap.size();++i){const float mapped=static_cast<float>(tree.getProperty("noteMap"+juce::String(static_cast<int>(i)),static_cast<int>(i)));noteMap[i].store(std::isfinite(mapped)?static_cast<float>(juce::jlimit(-1,127,juce::roundToInt(mapped))):static_cast<float>(i));}
+    mapPreset.store(std::isfinite(mapPreset.load())?juce::jlimit(0.0f,2.0f,std::round(mapPreset.load())):0.0f);
+    channelMix.reset(cachedSampleRate);
 }
 
 bool OpenStudioDrumInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
     const auto& mainOut = layouts.getMainOutputChannelSet();
-    return mainOut == juce::AudioChannelSet::mono() || mainOut == juce::AudioChannelSet::stereo();
+    if (mainOut != juce::AudioChannelSet::mono() && mainOut != juce::AudioChannelSet::stereo()) return false;
+    if (layouts.outputBuses.size() != 9) return false;
+    for (int bus = 1; bus < layouts.outputBuses.size(); ++bus)
+        if (!layouts.outputBuses[bus].isDisabled() && layouts.outputBuses[bus] != juce::AudioChannelSet::stereo()) return false;
+    return true;
 }
 
 bool OpenStudioSaturator::isBusesLayoutSupported(const BusesLayout& layouts) const

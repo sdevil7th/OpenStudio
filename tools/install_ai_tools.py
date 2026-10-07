@@ -14,6 +14,7 @@ an external Python interpreter.
 from __future__ import annotations
 
 import argparse
+import atexit
 from collections import deque
 import ctypes
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -96,6 +98,21 @@ SESSION_ID = ""
 RUNTIME_CANDIDATE = ""
 FALLBACK_ATTEMPTED = False
 START_TIME_MONOTONIC = time.monotonic()
+PENDING_RUNTIME_CANDIDATE: Path | None = None
+
+
+def cleanup_pending_runtime_candidate() -> None:
+    global PENDING_RUNTIME_CANDIDATE
+    candidate = PENDING_RUNTIME_CANDIDATE
+    PENDING_RUNTIME_CANDIDATE = None
+    if candidate is not None and candidate.exists():
+        try:
+            shutil.rmtree(candidate, onerror=_handle_remove_readonly)
+        except OSError as exc:
+            write_log(f"Could not remove unused runtime candidate {candidate}: {exc}")
+
+
+atexit.register(cleanup_pending_runtime_candidate)
 
 
 class InstallerStepError(Exception):
@@ -3013,6 +3030,65 @@ def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested:
     return None
 
 
+def prepare_windows_fallback_runtime(runtime_root: Path, runtime_python: Path) -> tuple[Path, Path]:
+    """Build a relocatable candidate without replacing DLLs in the active runtime."""
+    global PENDING_RUNTIME_CANDIDATE
+
+    candidate = runtime_root.with_name(f"stem-runtime-directml-{uuid.uuid4().hex}")
+    try:
+        relative_python = runtime_python.relative_to(runtime_root)
+        shutil.copytree(runtime_root, candidate)
+        candidate_python = candidate / relative_python
+        if not candidate_python.is_file():
+            raise OSError(f"Copied runtime is missing {relative_python}")
+    except (OSError, ValueError) as exc:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+        raise InstallerStepError(
+            f"Could not prepare a separate DirectML runtime: {exc}",
+            error_code="backend_fallback_prepare_failed",
+            progress=0.74,
+        ) from exc
+
+    PENDING_RUNTIME_CANDIDATE = candidate
+    log_event(
+        "installer", "installing_backend", "backend_fallback_candidate_prepared",
+        sourceRuntime=str(runtime_root), candidateRuntime=str(candidate),
+    )
+    return candidate, candidate_python
+
+
+def activate_windows_runtime(base_runtime_root: Path, selected_runtime_root: Path) -> None:
+    """Publish a verified runtime selection with an atomic, allowlisted marker."""
+    global PENDING_RUNTIME_CANDIDATE
+
+    if platform.system() != "Windows":
+        return
+    name = selected_runtime_root.name
+    if name != "stem-runtime" and not re.fullmatch(r"stem-runtime-directml-[0-9a-f]{32}", name):
+        return
+    if selected_runtime_root.parent != base_runtime_root.parent:
+        raise InstallerStepError(
+            "The verified runtime is outside the OpenStudio runtime directory.",
+            error_code="runtime_activation_failed", progress=0.99,
+        )
+
+    marker = base_runtime_root.parent / "stem-runtime-active.txt"
+    temporary_marker = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary_marker.write_text(name + "\n", encoding="utf-8")
+        os.replace(temporary_marker, marker)
+    except OSError as exc:
+        temporary_marker.unlink(missing_ok=True)
+        raise InstallerStepError(
+            f"Could not activate the verified AI runtime: {exc}",
+            error_code="runtime_activation_failed", progress=0.99,
+        ) from exc
+    if PENDING_RUNTIME_CANDIDATE == selected_runtime_root:
+        PENDING_RUNTIME_CANDIDATE = None
+    log_event("installer", "ready", "runtime_activated", runtimeRoot=str(selected_runtime_root))
+
+
 def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_features: list[str]) -> Path:
     install_source = "externalPython"
     requires_external_python = True
@@ -4020,6 +4096,7 @@ def main() -> None:
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
+    base_runtime_root = runtime_root
     models_dir = Path(args.models_dir).expanduser().resolve()
     music_gen_checkpoint_root = resolve_music_gen_checkpoint_root(args.music_gen_checkpoint_root)
     bootstrap_python = Path(args.bootstrap_with).expanduser().resolve() if args.bootstrap_with else None
@@ -4210,9 +4287,15 @@ def main() -> None:
                 )
 
                 try:
+                    fallback_runtime_root = runtime_root
+                    fallback_runtime_python = runtime_python
+                    if platform.system() == "Windows" and install_source == "downloadedRuntime":
+                        fallback_runtime_root, fallback_runtime_python = prepare_windows_fallback_runtime(
+                            runtime_root, runtime_python
+                        )
                     apply_backend_install_plan(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         fallback_backend_install_plan,
                         backend_requested=fallback_backend_requested,
                         selected_features=install_features,
@@ -4222,8 +4305,8 @@ def main() -> None:
                         build_runtime_mode=build_runtime_mode,
                     )
                     verify_runtime(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         require_audio_separator=True,
                         require_music_generation=False,
                         install_source=install_source,
@@ -4233,8 +4316,8 @@ def main() -> None:
                         raise_on_error=True,
                     )
                     probe_runtime(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         models_dir,
                         args.model,
                         acceleration_mode="auto",
@@ -4247,6 +4330,8 @@ def main() -> None:
                         build_runtime_mode=build_runtime_mode,
                         raise_on_error=True,
                     )
+                    runtime_root = fallback_runtime_root
+                    runtime_python = fallback_runtime_python
                     log_event(
                         "installer",
                         "installing_backend",
@@ -4443,6 +4528,30 @@ def main() -> None:
             else "AI feature setup finished, but one or more selected features are not ready."
         )
     )
+
+    if PENDING_RUNTIME_CANDIDATE is not None and not stem_separation_ready:
+        fail(
+            "The DirectML runtime did not pass the final stem-separation check; the previous runtime remains active.",
+            progress=0.99,
+            error_code="backend_fallback_probe_failed",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
+    try:
+        activate_windows_runtime(base_runtime_root, runtime_root)
+    except InstallerStepError as activation_error:
+        fail(
+            activation_error.message,
+            progress=activation_error.progress,
+            error_code=activation_error.error_code,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
 
     emit(
         "ready",

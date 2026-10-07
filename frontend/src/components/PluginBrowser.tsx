@@ -29,7 +29,7 @@ import {
   type PluginScanReport,
 } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import {
   getFXChainSlots,
   notifyFXChainChanged,
@@ -1337,6 +1337,7 @@ export function PluginBrowser({
     <div
       className="fixed inset-0 bg-black/80 flex items-center justify-center z-[10000]"
       data-modal-root="true"
+      {...modalPointerBoundaryProps}
       onPointerDownCapture={() => activateShortcutContext({ kind: "browser" })}
       onFocusCapture={() => activateShortcutContext({ kind: "browser" })}
       data-shortcut-context="browser"

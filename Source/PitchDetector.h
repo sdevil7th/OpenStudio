@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <vector>
 #include <atomic>
+#include <array>
 
 /**
  * PitchDetector — YIN-style real-time fundamental frequency estimation.
@@ -72,9 +73,16 @@ private:
 
     // History ring buffer for UI
     static constexpr int maxHistory = 512;
-    std::vector<PitchFrame> history;
-    int historyWritePos = 0;
-    mutable std::mutex historyMutex;
+    struct PublishedFrame
+    {
+        std::atomic<unsigned int> generation { 0 };
+        std::atomic<float> frequency { 0 }, confidence { 0 }, rmsDB { -100 };
+    };
+    std::array<PublishedFrame, maxHistory> history;
+    std::atomic<int> historyWritePos { 0 };
+    std::array<float, frameSize> analysisFrame {};
+    void publishFrame(float frequency, float frameConfidence, float rmsDB) noexcept;
+    void clearHistory() noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchDetector)
 };

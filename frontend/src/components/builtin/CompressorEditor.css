@@ -1,0 +1,96 @@
+.compressor-models {
+  border-bottom: 1px solid #3a4146;
+  padding-bottom: 12px;
+}
+.compressor-models .effect-mode-switch {
+  gap: 5px;
+}
+.compressor-models .effect-mode-switch button {
+  min-height: 40px;
+}
+.compressor-meter-row {
+  min-height: 150px;
+  flex-basis: 180px;
+  flex-grow: 1;
+}
+.compressor-meter-stats {
+  width: 112px;
+}
+.compressor-ratio {
+  max-width: 150px;
+  min-width: 100px;
+}
+.compressor-ratio>label {
+  width: 100%;
+}
+.compressor-ratio .suite-select {
+  font-size: 12px;
+}
+.compressor-opto {
+  max-width: 170px;
+}
+.compressor-approved .core-detail-content {
+  min-height: 116px;
+}
+.compressor-approved .core-main-controls {
+  min-height: 144px;
+}
+@container core-effect (max-width:800px) {
+  .compressor-models .effect-mode-switch {
+    gap: 3px;
+  }
+  .compressor-models .effect-mode-switch button {
+    font-size: 10px;
+    line-height: 1.4;
+    padding-inline: 5px;
+  }
+  .compressor-meter-stats {
+    width: 88px;
+  }
+  .compressor-meter-row {
+    gap: 10px;
+    min-height: 135px;
+    flex-basis: 155px;
+  }
+  .compressor-ratio {
+    max-width: 122px;
+    min-width: 86px;
+  }
+  .compressor-ratio .suite-select {
+    font-size: 11px;
+  }
+  .compressor-opto {
+    max-width: 145px;
+  }
+  .compressor-approved .core-detail-content {
+    min-height: 104px;
+  }
+  .compressor-approved .core-main-controls {
+    min-height: 120px;
+  }
+  .compressor-models {
+    padding-bottom: 9px;
+  }
+}
+@container core-effect (max-height:560px) {
+  .compressor-meter-row {
+    flex-basis: 126px;
+    min-height: 126px;
+  }
+  .compressor-approved .core-main-controls {
+    min-height: 113px;
+  }
+  .compressor-models {
+    padding-bottom: 6px;
+  }
+  .compressor-models .effect-mode-switch button {
+    min-height: 34px;
+    padding-block: 6px;
+  }
+  .compressor-approved .core-detail-content {
+    min-height: 98px;
+  }
+  .compressor-approved .core-detail-tabs button {
+    padding-block: 7px;
+  }
+}

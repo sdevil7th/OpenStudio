@@ -14,6 +14,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { MetronomeSettings } from "./MetronomeSettings";
 import { MetronomeControls } from "./MetronomeControls";
+import { PracticeTimerStatus } from "./PracticeTimer";
 import { Button, Input, TimeSignatureInput } from "./ui";
 import { formatShortcut } from "../utils/platform";
 
@@ -309,6 +310,7 @@ export function TransportBar() {
           </Button>
           <div className="w-2" />
           <MetronomeControls compact />
+          <PracticeTimerStatus onOpen={() => setShowMetronomeSettings(true)} />
         </div>
 
         <div className="flex items-center gap-4 text-xs">

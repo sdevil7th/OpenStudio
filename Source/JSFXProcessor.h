@@ -4,6 +4,9 @@
 #include <ysfx.h>
 #include <vector>
 #include <mutex>
+#include <array>
+
+class JSFXSliderParameter;
 
 /**
  * JSFXProcessor — JUCE AudioProcessor wrapper around a YSFX (JSFX) effect instance.
@@ -97,6 +100,10 @@ private:
     // Mutex for thread safety between audio thread and gfx rendering (message thread)
     std::mutex gfxMutex;
     float gfxScaleFactor = 1.0f;
+    std::array<JSFXSliderParameter*, ysfx_max_sliders> sliderParameters {};
+    void refreshSliderParameters();
+    void publishScriptSliderChanges();
+    std::vector<SliderInfo> readSlidersForSetup() const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(JSFXProcessor)
 };

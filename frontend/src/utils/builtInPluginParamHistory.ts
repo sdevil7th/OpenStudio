@@ -8,6 +8,7 @@ export type BuiltInPluginParamHistoryChange = {
 export type BuiltInPluginParamHistoryEntry = {
   instanceId: string;
   changes: BuiltInPluginParamHistoryChange[];
+  state?: { before: string; after: string };
 };
 
 export type BuiltInPluginHistoryDirection = "before" | "after";
@@ -150,6 +151,18 @@ export class BuiltInPluginParamHistory {
     });
   }
 
+  recordState(before: string, after: string): void {
+    if (before === after) return;
+    this.undoStack.push({ instanceId: this.instanceId, changes: [], state: { before, after } });
+    if (this.undoStack.length > this.maxEntries) this.undoStack.shift();
+    this.redoStack = [];
+    let bytes = this.undoStack.reduce((sum, entry) => sum + (entry.state ? entry.state.before.length + entry.state.after.length : 0), 0);
+    while (bytes > 64 * 1024 * 1024 && this.undoStack.length > 1) {
+      const removed = this.undoStack.shift()!;
+      if (removed.state) bytes -= removed.state.before.length + removed.state.after.length;
+    }
+  }
+
   clear(): void {
     this.activeEdit = null;
     this.undoStack = [];
@@ -181,6 +194,7 @@ export class BuiltInPluginParamHistory {
     return {
       instanceId: entry.instanceId,
       changes: entry.changes.map((change) => ({ ...change })),
+      ...(entry.state ? { state: { ...entry.state } } : {}),
     };
   }
 

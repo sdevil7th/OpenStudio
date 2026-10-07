@@ -138,6 +138,7 @@ export default function PluginEditorWindowApp() {
   return (
     <div className="plugin-editor-window-app">
       <BuiltInPluginPanel
+        chrome="detached"
         address={session.address}
         fallbackName={title}
         shortcutSessionId={windowSessionId}

@@ -1,7 +1,13 @@
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Music2, Volume2 } from "lucide-react";
+import { nativeBridge, type MetronomeSoundInfo } from "../services/NativeBridge";
+import { getProjectEpoch } from "../utils/projectLifetime";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { MetronomeControls } from "./MetronomeControls";
-import { Button, Modal, TimeSignatureInput, Slider } from "./ui";
+import { PracticeTimer } from "./PracticeTimer";
+import { Button, Modal, NativeSelect, TimeSignatureInput, Slider } from "./ui";
+import { METRONOME_SOUND_OPTIONS, isCustomMetronomeSound, metronomeSoundLabel } from "../utils/metronomeSounds";
 
 interface MetronomeSettingsProps {
   isOpen: boolean;
@@ -43,6 +49,43 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
     metronomeAccentPath: s.metronomeAccentPath,
   })));
 
+  const [soundPending, setSoundPending] = useState(false);
+  const [soundError, setSoundError] = useState("");
+  const soundBusy = useRef(false);
+  const [soundInfo, setSoundInfo] = useState<MetronomeSoundInfo[]>([]);
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    const epoch = getProjectEpoch();
+    void Promise.all([nativeBridge.getMetronomeSoundInfo(false), nativeBridge.getMetronomeSoundInfo(true)])
+      .then(info => { if (active && epoch === getProjectEpoch()) setSoundInfo(info); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [isOpen]);
+  const chooseSound = async (accent: boolean, selection = "custom") => {
+    if (soundBusy.current) return;
+    soundBusy.current = true;
+    setSoundPending(true);
+    setSoundError("");
+    const epoch = getProjectEpoch();
+    try {
+      const custom = selection === "custom";
+      const path = custom ? await nativeBridge.showOpenDialog(
+        accent ? "Choose accent sound" : "Choose click sound", "*.wav;*.aif;*.aiff;*.flac;*.ogg")
+        : selection;
+      if ((custom && !path) || getProjectEpoch() !== epoch) return;
+      const state = useDAWStore.getState();
+      const accepted = await (accent ? state.setMetronomeAccentSound(path) : state.setMetronomeClickSound(path));
+      const info = await nativeBridge.getMetronomeSoundInfo(accent);
+      if (getProjectEpoch() !== epoch) return;
+      if (!accepted) setSoundError(`${info.error || "Could not load this sound."} Your previous sound is kept.`);
+      else setSoundInfo(current => {
+        const next = [...current]; next[accent ? 1 : 0] = info; return next;
+      });
+    } catch { setSoundError("Could not load this sound. Please try another file."); }
+    finally { soundBusy.current = false; setSoundPending(false); }
+  };
+
   if (!isOpen) return null;
 
   const handleBeatClick = (index: number) => {
@@ -66,192 +109,98 @@ export function MetronomeSettings({ isOpen, onClose }: MetronomeSettingsProps) {
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Metronome Settings" size="sm" className="max-w-full">
-        {/* Enable/Disable */}
-        <div className="mb-4 space-y-2 border-b border-neutral-700 pb-3">
-          <MetronomeControls />
-          <p className="text-xs leading-relaxed text-neutral-400">
-            Enable lights up whenever either metronome mode is on; switch it off to stop both.
-            Click only keeps live monitoring on without playing clips or moving the playhead.
-            It follows Play/Record, then continues when transport stops.
-          </p>
-          {practiceEnabled && (
-            <p role="status" className="text-xs font-medium text-amber-300">
-              {isRecording ? "Click following recording" : isPlaying ? "Click following playback" : "Click only · transport stopped"}
-            </p>
-          )}
-          {practiceError && <p role="alert" className="text-xs text-red-300">{practiceError}</p>}
-        </div>
-
-        {/* Volume Control */}
-        <div className="mb-4 pb-3 border-b border-neutral-700">
-          <div className="text-xs text-neutral-400 mb-2">Volume</div>
-          <div className="flex items-center gap-3">
-            <Slider
-              aria-label="Metronome volume"
-              orientation="horizontal"
-              variant="default"
-              min={0}
-              max={100}
-              step={1}
-              value={Math.round(metronomeVolume * 100)}
-              onChange={(val) => setMetronomeVolume(val / 100)}
-              width="180px"
-            />
-            <span className="text-neutral-300 text-xs w-8 text-right">
-              {Math.round(metronomeVolume * 100)}%
-            </span>
+    <Modal isOpen={isOpen} onClose={onClose} title="Metronome Settings" size="md" className="max-w-full"
+      footer={<Button size="sm" onClick={onClose}>Done</Button>}>
+      <div className="space-y-4 text-sm text-daw-text">
+        <section aria-label="Playback and volume" className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <MetronomeControls />
+            {practiceEnabled && <span role="status" className="text-xs text-daw-solo">
+              {isRecording ? "Following recording" : isPlaying ? "Following playback" : "Click only playing"}
+            </span>}
           </div>
-        </div>
-
-        {/* Time Signature Section */}
-        <div className="mb-4 pb-3 border-b border-neutral-700">
-          <div className="text-xs text-neutral-400 mb-2">Time Signature</div>
-          <div className="flex items-center gap-3">
-            <TimeSignatureInput
-              numerator={timeSignature.numerator}
-              denominator={timeSignature.denominator}
-              onChange={setTimeSignature}
-              size="md"
-            />
-            <span className="text-neutral-500 text-xs">
-              (Beats per bar / Note value)
-            </span>
+          <p className="text-xs text-daw-text-muted">Enable with playback, or play the click on its own.</p>
+          {practiceError && <p role="alert" className="text-xs text-daw-record">{practiceError}</p>}
+          <div className="flex items-center gap-4">
+            <span className="w-24 shrink-0 text-xs text-daw-text-muted">Click volume</span>
+            <div className="min-w-0 flex-1"><Slider aria-label="Metronome volume" orientation="horizontal" min={0} max={100} step={1}
+              value={Math.round(metronomeVolume * 100)} onChange={val => setMetronomeVolume(val / 100)} /></div>
+            <span className="w-10 text-right text-xs tabular-nums">{Math.round(metronomeVolume * 100)}%</span>
           </div>
-        </div>
+        </section>
 
-        {/* Accent Beats */}
-        <div className="mb-4 pb-3 border-b border-neutral-700">
-          <div className="text-xs text-neutral-400 mb-2">
-            Click beats to toggle accent (beat 1 is always accented)
+        <section aria-labelledby="metronome-rhythm-heading" className="space-y-3 border-t border-daw-border pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 id="metronome-rhythm-heading" className="font-medium">Rhythm & accents</h3>
+            <TimeSignatureInput numerator={timeSignature.numerator} denominator={timeSignature.denominator} onChange={setTimeSignature} size="md" />
           </div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex flex-wrap items-center gap-2">
             {Array.from({ length: timeSignature.numerator }).map((_, i) => (
-              <Button
-                key={i}
-                variant={i === 0 || metronomeAccentBeats[i] ? "warning" : "default"}
-                size="md"
-                onClick={() => handleBeatClick(i)}
-                disabled={i === 0}
-                active={i === 0 || metronomeAccentBeats[i]}
-                className="h-10 w-10 rounded-lg"
-              >
+              <Button key={i} variant={i === 0 || metronomeAccentBeats[i] ? "warning" : "default"} size="sm"
+                aria-label={`Accent beat ${i + 1}`} aria-pressed={i === 0 || metronomeAccentBeats[i]}
+                onClick={() => handleBeatClick(i)} disabled={i === 0} active={i === 0 || metronomeAccentBeats[i]} className="h-8 w-8">
                 {i + 1}
               </Button>
             ))}
-          </div>
-        </div>
-
-        {/* Metronome Track */}
-        <div className="mb-4 pb-3 border-b border-neutral-700">
-          <div className="text-xs text-neutral-400 mb-2">
-            Render as Track (for export)
-          </div>
-          <div className="flex gap-2">
-            {metronomeTrackId ? (
-              <>
-                <Button
-                  variant="warning"
-                  size="sm"
-                  onClick={() => generateMetronomeTrack()}
-                  fullWidth
-                >
-                  Regenerate Track
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => removeMetronomeTrack()}
-                  fullWidth
-                >
-                  Remove Track
-                </Button>
-              </>
-            ) : (
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => generateMetronomeTrack()}
-                fullWidth
-              >
-                Add as Track
-              </Button>
-            )}
-          </div>
-          {metronomeTrackId && (
-            <p className="text-[10px] text-neutral-500 mt-1">
-              Track auto-regenerates when metronome settings change. This is a separate
-              audio track: mute it during practice playback to avoid doubling the live click.
-            </p>
-          )}
-        </div>
-
-        {/* Custom Click Sounds (Phase 9C) */}
-        <div className="mb-4 pb-3 border-b border-neutral-700">
-          <div className="text-xs text-neutral-400 mb-2">Click Sounds</div>
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-neutral-400 w-14">Click:</span>
-              <span className="text-xs text-neutral-300 flex-1 truncate">
-                {metronomeClickPath ? metronomeClickPath.split(/[/\\]/).pop() : "Default (Synth)"}
-              </span>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => {
-                  void useDAWStore.getState().setMetronomeClickSound("");
-                }}
-              >
-                {metronomeClickPath ? "Reset" : "Custom..."}
-              </Button>
+            <div className="ml-auto flex gap-1">
+              <Button variant="ghost" size="sm" onClick={handleReset}>Reset accents</Button>
+              <Button variant="ghost" size="sm" onClick={handleAccentAll}>Accent all</Button>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-neutral-400 w-14">Accent:</span>
-              <span className="text-xs text-neutral-300 flex-1 truncate">
-                {metronomeAccentPath ? metronomeAccentPath.split(/[/\\]/).pop() : "Default (Synth)"}
-              </span>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => {
-                  void useDAWStore.getState().setMetronomeAccentSound("");
-                }}
-              >
-                {metronomeAccentPath ? "Reset" : "Custom..."}
-              </Button>
-            </div>
-            {(metronomeClickPath || metronomeAccentPath) && (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => { void useDAWStore.getState().resetMetronomeSounds(); }}
-                fullWidth
-              >
-                Reset All to Default
-              </Button>
-            )}
           </div>
-        </div>
+          <p className="text-xs text-daw-text-muted">Highlighted beats use the accent sound. Beat 1 is always accented.</p>
+        </section>
 
-        {/* Quick Actions */}
-        <div className="flex gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleReset}
-            fullWidth
-          >
-            Reset
-          </Button>
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleAccentAll}
-            fullWidth
-          >
-            Accent All
-          </Button>
-        </div>
+        <details className="group overflow-hidden rounded-lg border border-daw-border bg-daw-dark/40">
+          <summary className="flex cursor-pointer list-none items-center gap-2.5 px-4 py-3 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-daw-accent [&::-webkit-details-marker]:hidden">
+            <Volume2 size={16} className="shrink-0 text-daw-text-muted" />
+            <span className="font-medium">Click sounds</span>
+            <span className="ml-auto min-w-0 truncate text-xs text-daw-text-muted">
+              {metronomeClickPath === metronomeAccentPath ? metronomeSoundLabel(metronomeClickPath)
+                : `${metronomeSoundLabel(metronomeClickPath)} / ${metronomeSoundLabel(metronomeAccentPath)}`}
+            </span>
+            <ChevronDown size={14} className="shrink-0 text-daw-text-muted transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="space-y-3 border-t border-daw-border px-4 py-3">
+          <p className="text-xs text-daw-text-muted">Choose a sound for each beat type. Use Play click only above to listen.</p>
+          <div className="divide-y divide-daw-border">
+            {[{ label: "Regular", path: metronomeClickPath, accent: false }, { label: "Accent", path: metronomeAccentPath, accent: true }].map(sound => (
+              <div key={sound.label} className="flex flex-wrap items-end gap-3 py-3">
+                <div className="min-w-0 flex-1 basis-48">
+                  <NativeSelect label={`${sound.label} sound`} size="sm" fullWidth showPlaceholder={false}
+                    options={[...METRONOME_SOUND_OPTIONS, { value: "custom", label: "Custom sample…" }]}
+                    value={isCustomMetronomeSound(sound.path) ? "custom" : sound.path}
+                    disabled={soundPending} onChange={value => void chooseSound(sound.accent, String(value))} />
+                  {isCustomMetronomeSound(sound.path) && <p className="mt-1 truncate text-xs text-daw-text-muted" title={soundInfo[sound.accent ? 1 : 0]?.name || sound.path}>
+                    {soundInfo[sound.accent ? 1 : 0]?.name || "Prepared custom click"}
+                  </p>}
+                </div>
+                <Button size="sm" aria-label={`Choose ${sound.label.toLowerCase()} sound`} disabled={soundPending}
+                  onClick={() => void chooseSound(sound.accent)}>{isCustomMetronomeSound(sound.path) ? "Replace file…" : "Choose file…"}</Button>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs leading-relaxed text-daw-text-muted">Custom WAV, AIFF, FLAC or Ogg: choose one clear, sharp hit. We inspect the first 2 seconds, align its attack, match its peak level, and fade it to at most 100 ms. A prepared copy is kept locally.</p>
+          {soundPending && <p role="status" className="text-xs text-daw-text-muted">Preparing click sound…</p>}
+          {soundError && <p role="alert" className="text-xs text-daw-record">{soundError}</p>}
+          </div>
+        </details>
+
+        <PracticeTimer />
+
+        <details className="group overflow-hidden rounded-lg border border-daw-border bg-daw-dark/40">
+          <summary className="flex cursor-pointer list-none items-center gap-2.5 px-4 py-3 text-sm focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-daw-accent [&::-webkit-details-marker]:hidden">
+            <Music2 size={16} className="text-daw-text-muted" /><span className="flex-1 font-medium">Render click as a track</span>
+            <ChevronDown size={14} className="text-daw-text-muted transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="space-y-3 border-t border-daw-border px-4 py-3">
+            <p className="text-xs leading-relaxed text-daw-text-muted">Add an audio track to include the click in an export. Mute it when using the live metronome to avoid a double click.</p>
+            <div className="flex gap-2">
+              <Button variant="primary" size="sm" onClick={() => generateMetronomeTrack()}>{metronomeTrackId ? "Regenerate track" : "Add as track"}</Button>
+              {metronomeTrackId && <Button variant="danger" size="sm" onClick={() => removeMetronomeTrack()}>Remove track</Button>}
+            </div>
+          </div>
+        </details>
+      </div>
     </Modal>
   );
 }

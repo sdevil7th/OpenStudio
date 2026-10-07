@@ -527,6 +527,7 @@ export async function syncTrackCoreToBackend(track: any, options?: { includeAddT
   }
 
   await nativeBridge.setTrackType(track.id, track.type).catch(() => false);
+  await nativeBridge.setAutomationTrimValue(track.id, track.trimVolumeDB ?? 0).catch(() => false);
   await nativeBridge.setTrackRecordArm(track.id, track.armed).catch(() => false);
   await nativeBridge.setTrackInputMonitoring(track.id, track.monitorEnabled).catch(() => false);
   await nativeBridge.setTrackInputChannels(
@@ -544,6 +545,7 @@ export async function syncTrackCoreToBackend(track: any, options?: { includeAddT
     ).catch(() => false);
   }
 
+  await nativeBridge.setTrackMIDIOutputMergeKeys(track.id, Boolean(track.midiOutputMergeKeys)).catch(() => false);
   if (track.midiOutputDevice) {
     await nativeBridge.setTrackMIDIOutput(track.id, track.midiOutputDevice).catch(() => false);
   }
@@ -572,6 +574,7 @@ async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, is
   const bypassFx = isInputFX ? nativeBridge.bypassTrackInputFX.bind(nativeBridge) : nativeBridge.bypassTrackFX.bind(nativeBridge);
   const sourceFx = await getFx(sourceTrackId).catch(() => []);
 
+  let restoredCount = 0;
   for (let i = 0; i < sourceFx.length; i++) {
     const pluginPath = sourceFx[i]?.pluginPath;
     if (!pluginPath) continue;
@@ -579,16 +582,21 @@ async function restoreTrackFxChain(sourceTrackId: string, newTrackId: string, is
       ? await nativeBridge.addTrackBuiltInFX(newTrackId, pluginPath, isInputFX).catch(() => false)
       : await addFx(newTrackId, pluginPath, false).catch(() => false);
     if (!success) continue;
+    const restoredIndex = restoredCount++;
     const pluginState = await nativeBridge.getPluginState(sourceTrackId, i, isInputFX).catch(() => null);
     if (pluginState) {
-      await nativeBridge.setPluginState(newTrackId, i, isInputFX, pluginState).catch(() => false);
+      await nativeBridge.setPluginState(newTrackId, restoredIndex, isInputFX, pluginState).catch(() => false);
+    }
+    if (!isInputFX) {
+      const source = await nativeBridge.getSidechainSource(sourceTrackId, i);
+      if (source) await nativeBridge.setSidechainSource(newTrackId, restoredIndex, source);
     }
     if (sourceFx[i]?.bypassed) {
-      await bypassFx(newTrackId, i, true).catch(() => false);
+      await bypassFx(newTrackId, restoredIndex, true).catch(() => false);
     }
   }
 
-  return sourceFx.length;
+  return restoredCount;
 }
 
 async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, insertIndex: number) {
@@ -598,6 +606,7 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
   await nativeBridge.setTrackPan(newTrack.id, newTrack.pan).catch(() => false);
   await nativeBridge.setTrackMute(newTrack.id, newTrack.muted).catch(() => false);
   await nativeBridge.setTrackSolo(newTrack.id, newTrack.soloed).catch(() => false);
+  await nativeBridge.setTrackSoloSafe(newTrack.id, !!newTrack.soloSafe).catch(() => false);
   await nativeBridge.setTrackRecordSafe(newTrack.id, newTrack.recordSafe).catch(() => false);
   await nativeBridge.setTrackPhaseInvert(newTrack.id, !!newTrack.phaseInverted).catch(() => false);
   await nativeBridge.setTrackStereoWidth(newTrack.id, newTrack.stereoWidth ?? 100).catch(() => false);
@@ -631,15 +640,8 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
     await syncTrackMIDIClipsToBackend(newTrack.id, newTrack.midiClips, newTrack.midiEffects || []).catch(() => false);
   }
 
-  for (const [sendIndex, send] of (newTrack.sends ?? []).entries()) {
-    const createdIndex = await nativeBridge.addTrackSend(newTrack.id, send.destTrackId).catch(() => sendIndex);
-    const resolvedIndex = typeof createdIndex === "number" && createdIndex >= 0 ? createdIndex : sendIndex;
-    await nativeBridge.setTrackSendLevel(newTrack.id, resolvedIndex, send.level).catch(() => false);
-    await nativeBridge.setTrackSendPan(newTrack.id, resolvedIndex, send.pan).catch(() => false);
-    await nativeBridge.setTrackSendEnabled(newTrack.id, resolvedIndex, send.enabled).catch(() => false);
-    await nativeBridge.setTrackSendPreFader(newTrack.id, resolvedIndex, send.preFader).catch(() => false);
-    await nativeBridge.setTrackSendPhaseInvert(newTrack.id, resolvedIndex, send.phaseInvert).catch(() => false);
-  }
+  if (!await nativeBridge.replaceTrackSends(newTrack.id, newTrack.sends ?? []))
+    throw new Error("The audio engine rejected the complete restored send configuration");
 
   const inputFxCount = await restoreTrackFxChain(sourceTrack.id, newTrack.id, true);
   const trackFxCount = await restoreTrackFxChain(sourceTrack.id, newTrack.id, false);
@@ -672,6 +674,7 @@ async function captureTrackFxSlots(trackId: string, isInputFX: boolean) {
     bypassed: Boolean(slot?.bypassed),
     precisionOverride: slot?.precisionOverride === "float32" ? "float32" : "auto",
     state: await nativeBridge.getPluginState(trackId, index, isInputFX).catch(() => ""),
+    sidechainSource: isInputFX ? "" : await nativeBridge.getSidechainSource(trackId, index),
   })));
 }
 
@@ -712,6 +715,8 @@ async function restoreCapturedTrackFxSlots(trackId: string, slots: any[], isInpu
       );
       if (!restored) throw new Error(`Could not restore plug-in state for ${slot.pluginPath}`);
     }
+    if (!isInputFX && slot.sidechainSource)
+      await nativeBridge.setSidechainSource(trackId, restoredIndex, slot.sidechainSource);
     if (slot.bypassed) {
       await (isInputFX
         ? nativeBridge.bypassTrackInputFX(trackId, restoredIndex, true)
@@ -739,6 +744,7 @@ async function restoreRemovedTrackToBackend(
   await nativeBridge.setTrackPan(track.id, track.pan).catch(() => false);
   await nativeBridge.setTrackMute(track.id, track.muted).catch(() => false);
   await nativeBridge.setTrackSolo(track.id, track.soloed).catch(() => false);
+  await nativeBridge.setTrackSoloSafe(track.id, !!track.soloSafe).catch(() => false);
   await nativeBridge.setTrackRecordSafe(track.id, track.recordSafe).catch(() => false);
   await nativeBridge.setTrackPhaseInvert(track.id, Boolean(track.phaseInverted)).catch(() => false);
   await nativeBridge.setTrackStereoWidth(track.id, track.stereoWidth ?? 100).catch(() => false);
@@ -782,15 +788,8 @@ async function restoreRemovedTrackToBackend(
   if (track.midiClips.length > 0) {
     await syncTrackMIDIClipsToBackend(track.id, track.midiClips, track.midiEffects || []);
   }
-  for (const [sendIndex, send] of (track.sends || []).entries()) {
-    const createdIndex = await nativeBridge.addTrackSend(track.id, send.destTrackId).catch(() => sendIndex);
-    const resolvedIndex = typeof createdIndex === "number" && createdIndex >= 0 ? createdIndex : sendIndex;
-    await nativeBridge.setTrackSendLevel(track.id, resolvedIndex, send.level).catch(() => false);
-    await nativeBridge.setTrackSendPan(track.id, resolvedIndex, send.pan).catch(() => false);
-    await nativeBridge.setTrackSendEnabled(track.id, resolvedIndex, send.enabled).catch(() => false);
-    await nativeBridge.setTrackSendPreFader(track.id, resolvedIndex, send.preFader).catch(() => false);
-    await nativeBridge.setTrackSendPhaseInvert(track.id, resolvedIndex, send.phaseInvert).catch(() => false);
-  }
+  if (!await nativeBridge.replaceTrackSends(track.id, track.sends ?? []))
+    throw new Error("The audio engine rejected the complete restored send configuration");
   await restoreCapturedTrackFxSlots(track.id, externalState.inputFX, true);
   await restoreCapturedTrackFxSlots(track.id, externalState.trackFX, false);
   for (const lane of track.automationLanes || []) syncAutomationLaneToBackend(track.id, lane);
@@ -2749,12 +2748,25 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       for (const tid of linkedIds) {
         const t = get().tracks.find((candidate) => candidate.id === tid);
         if (t?.automationWriteEnabled) {
-          get().beginAutomationParamTouch?.(tid, "mute");
+          get().beginAutomationParamTouch?.(tid, "mute", { time: get().transport.currentTime, initialValue: oldStates.get(tid) ? 1 : 0 });
           get().setAutomationWriteValue?.(tid, "mute", newMuted ? 1 : 0);
           get().recordAutomationWriteTick?.(Date.now());
           get().endAutomationParamTouch?.(tid, "mute");
         }
       }
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
+
+    toggleTrackSoloSafe: (id: string) => {
+      const track = get().tracks.find((candidate) => candidate.id === id);
+      if (!track) return;
+      const previous = !!track.soloSafe;
+      const apply = (safe: boolean) => {
+        set((state) => ({ tracks: state.tracks.map((candidate) => candidate.id === id ? { ...candidate, soloSafe: safe } : candidate), isModified: true }));
+        void nativeBridge.setTrackSoloSafe(id, safe).catch(logBridgeError("solo safe"));
+      };
+      commandManager.execute({ type: "TRACK_SOLO_SAFE", description: previous ? "Disable Solo Safe" : "Enable Solo Safe", timestamp: Date.now(),
+        execute: () => apply(!previous), undo: () => apply(previous) });
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
@@ -2973,7 +2985,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         for (const [trackId, muted] of states) {
           const track = get().tracks.find((candidate) => candidate.id === trackId);
           if (!track?.automationWriteEnabled) continue;
-          get().beginAutomationParamTouch?.(trackId, "mute");
+          get().beginAutomationParamTouch?.(trackId, "mute", { time: get().transport.currentTime, initialValue: muted ? 0 : 1 });
           get().setAutomationWriteValue?.(trackId, "mute", muted ? 1 : 0);
           get().recordAutomationWriteTick?.(Date.now());
           get().endAutomationParamTouch?.(trackId, "mute");

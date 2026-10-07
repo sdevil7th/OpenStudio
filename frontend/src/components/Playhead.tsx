@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useLayoutEffect } from "react";
 import { Line, Rect } from "react-konva";
 import Konva from "konva";
 import { useDAWStore } from "../store/useDAWStore";
@@ -28,23 +28,13 @@ export function Playhead({
   const lineRef = useRef<Konva.Line>(null);
   const rectRef = useRef<Konva.Rect>(null);
 
-  // Subscribe to both currentTime AND scrollX from store for perfect sync
-  // This ensures both ruler and main playhead update atomically when auto-scroll happens
-  useEffect(() => {
-    let prevTime = useDAWStore.getState().transport.currentTime;
-    let prevScrollX = useDAWStore.getState().scrollX;
-
-    const unsubscribe = useDAWStore.subscribe((state) => {
+  // Read the entire horizontal transform from one store snapshot. Zoom and
+  // scroll writes can arrive before React commits new props during wheel zoom.
+  useLayoutEffect(() => {
+    const updatePosition = (state: ReturnType<typeof useDAWStore.getState>) => {
       const time = state.transport.currentTime;
       const storeScrollX = state.scrollX;
-
-      // Only update if time or scrollX changed
-      if (time === prevTime && storeScrollX === prevScrollX) return;
-      prevTime = time;
-      prevScrollX = storeScrollX;
-
-      // Use scrollX from store for perfect sync during auto-scroll
-      const x = time * pixelsPerSecond - storeScrollX;
+      const x = time * state.pixelsPerSecond - storeScrollX;
       const isVisible = x >= 0 && x <= viewportWidth;
 
       if (type === "main" && lineRef.current) {
@@ -60,7 +50,20 @@ export function Playhead({
           rectRef.current.x(x - 6);
         }
       }
+    };
+
+    const unsubscribe = useDAWStore.subscribe((state, previous) => {
+      if (
+        state.transport.currentTime === previous.transport.currentTime
+        && state.scrollX === previous.scrollX
+        && state.pixelsPerSecond === previous.pixelsPerSecond
+      ) return;
+      updatePosition(state);
     });
+
+    // Restore imperative Konva attributes after every geometry change, even
+    // when JSX props compare equal and transport is stopped.
+    updatePosition(useDAWStore.getState());
 
     return () => unsubscribe();
   }, [pixelsPerSecond, stageHeight, viewportWidth, type]);
@@ -69,7 +72,7 @@ export function Playhead({
   const initialState = useDAWStore.getState();
   const initialTime = initialState.transport.currentTime;
   const initialScrollX = initialState.scrollX;
-  const initialX = initialTime * pixelsPerSecond - initialScrollX;
+  const initialX = initialTime * initialState.pixelsPerSecond - initialScrollX;
   const initialVisible = initialX >= 0 && initialX <= viewportWidth;
 
   if (type === "main") {

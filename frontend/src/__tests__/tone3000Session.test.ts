@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBridge } from "../services/NativeBridge";
 import {
   bootstrapTONE3000Session,
+  clearTONE3000Session,
   ensureTONE3000Session,
   getTONE3000SessionSnapshot,
   resetTONE3000SessionForTests,
@@ -30,6 +31,28 @@ describe("TONE3000 shared session", () => {
     expect(refresh).not.toHaveBeenCalled();
     expect(startAuth).not.toHaveBeenCalled();
     expect(getTONE3000SessionSnapshot().status?.authenticated).toBe(true);
+  });
+
+  it("loads the connected username and avatar once for the stored session", async () => {
+    vi.spyOn(nativeBridge, "getTONE3000AuthStatus").mockResolvedValue({ success: true, authenticated: true, expired: false, clientId: "client", expiresAtMs: 10000 });
+    const profile = vi.spyOn(nativeBridge, "getTONE3000User").mockResolvedValue({ success: true, user: { id: 7, username: "guitarist", avatar_url: "https://example.com/avatar.png" } });
+    await bootstrapTONE3000Session();
+    await bootstrapTONE3000Session();
+    expect(profile).toHaveBeenCalledTimes(1);
+    expect(getTONE3000SessionSnapshot().user).toMatchObject({ username: "guitarist", avatar_url: "https://example.com/avatar.png" });
+  });
+
+  it("discards a delayed account profile after sign-out", async () => {
+    vi.spyOn(nativeBridge, "getTONE3000AuthStatus").mockResolvedValue({ success: true, authenticated: true, expired: false, clientId: "client" });
+    let finishProfile!: (value: Awaited<ReturnType<typeof nativeBridge.getTONE3000User>>) => void;
+    vi.spyOn(nativeBridge, "getTONE3000User").mockImplementation(() => new Promise(resolve => { finishProfile = resolve; }));
+    vi.spyOn(nativeBridge, "clearTONE3000Auth").mockResolvedValue({ success: true, authenticated: false });
+    await bootstrapTONE3000Session();
+    await clearTONE3000Session();
+    finishProfile({ success: true, user: { username: "previous_user" } });
+    await Promise.resolve();
+    expect(getTONE3000SessionSnapshot().user).toBeNull();
+    expect(getTONE3000SessionSnapshot().status?.authenticated).toBe(false);
   });
 
   it("silently refreshes an expired stored token once on startup", async () => {

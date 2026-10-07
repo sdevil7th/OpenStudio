@@ -1,4 +1,5 @@
 import { appDialogs } from "../services/appDialogs";
+import { builtInEditorPluginId, getBuiltInEditor } from "./builtin/editorRegistry";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -35,14 +36,18 @@ import {
   type PluginScanReport,
 } from "../services/NativeBridge";
 import { PitchCorrectorPanel } from "./PitchCorrectorPanel";
+import { PitchFXEditorEntry } from "./PitchFXEditorEntry";
+import { isPitchCorrectFX } from "../utils/pitchEditorEntry";
+import type { PitchFXOrigin } from "../services/pitchEditorFXEntry";
 import { BuiltInPluginPanel } from "./BuiltInPluginPanel";
 import { MIDIFXControls } from "./MIDIFXControls";
 import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
-import { builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
+import { automationParameterMetadata, formatAutomationParameterValue, automationParameterChoices, builtInAutomationParamId, pluginAutomationParamId } from "../store/automationParams";
+import { editFXStage } from "../utils/stageFXHistory";
 import { useShallow } from "zustand/react/shallow";
 import { denormalizeParamValue } from "../utils/builtInParamValue";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import {
   activateShortcutContext,
   getActiveShortcutContext,
@@ -78,6 +83,8 @@ interface FXChainPanelProps {
 }
 
 interface FXSlot {
+  automationPrefix?: string;
+  instanceId?: string;
   index: number;
   name: string;
   type?: "vst3" | "lv2" | "clap" | "jsfx" | "builtin" | "";
@@ -102,19 +109,7 @@ interface JSFXSlider {
 type PluginParam = PluginParameterInfo;
 
 function formatPluginParameterValue(param: PluginParam, normalizedValue: number): string {
-  if (!param.builtIn) return `${Math.round(normalizedValue * 100)}%`;
-  const minimum = Number(param.min ?? 0);
-  const maximum = Number(param.max ?? 1);
-  let rawValue = denormalizeParamValue({ id: param.paramId ?? "", min: minimum, max: maximum }, normalizedValue);
-  if (param.discrete) rawValue = Math.round(rawValue);
-  if (param.type === "toggle") return rawValue >= 0.5 ? "On" : "Off";
-  if (param.type === "enum") {
-    return param.enumOptions?.find((option) => Math.round(option.value) === Math.round(rawValue))?.label
-      ?? String(Math.round(rawValue));
-  }
-  const span = Math.abs(maximum - minimum);
-  const decimals = span <= 2 ? 2 : span <= 50 ? 1 : 0;
-  return `${rawValue.toFixed(decimals)}${param.unit ? ` ${param.unit}` : ""}`;
+  return formatAutomationParameterValue(automationParameterMetadata(param), normalizedValue);
 }
 
 interface Plugin {
@@ -215,11 +210,11 @@ export function FXChainPanel({
     loadFXChainPreset,
     deleteFXChainPreset,
     addAutomationLane,
+    addMasterAutomationLane,
     setAutomationWriteValue,
     beginAutomationParamTouch,
     endAutomationParamTouch,
     tracks,
-    openPitchEditor,
   } = useDAWStore(
     useShallow((s) => ({
       updateTrack: s.updateTrack,
@@ -239,11 +234,11 @@ export function FXChainPanel({
       loadFXChainPreset: s.loadFXChainPreset,
       deleteFXChainPreset: s.deleteFXChainPreset,
       addAutomationLane: s.addAutomationLane,
+      addMasterAutomationLane: s.addMasterAutomationLane,
       setAutomationWriteValue: s.setAutomationWriteValue,
       beginAutomationParamTouch: s.beginAutomationParamTouch,
       endAutomationParamTouch: s.endAutomationParamTouch,
       tracks: s.tracks,
-      openPitchEditor: s.openPitchEditor,
     })),
   );
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
@@ -254,6 +249,8 @@ export function FXChainPanel({
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
   const [pluginActivity, setPluginActivity] = useState<string | null>(null);
   const [openingEditor, setOpeningEditor] = useState<string | null>(null);
+  const [pitchEntry, setPitchEntry] = useState<{ id: number; origin: PitchFXOrigin } | null>(null);
+  const pitchEntrySequence = useRef(0);
   const addingRef = useRef(false);
   const openingRef = useRef(false);
 
@@ -366,7 +363,7 @@ export function FXChainPanel({
 
   // Fetch current sidechain sources when fxSlots change
   useEffect(() => {
-    if (chainType === "master" || fxSlots.length === 0) return;
+    if (chainType !== "track" || fxSlots.length === 0) { setSidechainSources({}); return; }
     let cancelled = false;
     const fetchSidechainSources = async () => {
       const sources: Record<number, string> = {};
@@ -392,16 +389,8 @@ export function FXChainPanel({
   const handleSetSidechainSource = useCallback(
     async (fxIndex: number, sourceTrackId: string) => {
       try {
-        if (sourceTrackId === "") {
-          await nativeBridge.clearSidechainSource(trackId, fxIndex);
-        } else {
-          await nativeBridge.setSidechainSource(
-            trackId,
-            fxIndex,
-            sourceTrackId,
-          );
-        }
-        setSidechainSources((prev) => ({ ...prev, [fxIndex]: sourceTrackId }));
+        const success = await useDAWStore.getState().setSidechainSourceWithUndo(trackId, fxIndex, sourceTrackId);
+        if (success) setSidechainSources((prev) => ({ ...prev, [fxIndex]: sourceTrackId }));
       } catch (e) {
         console.error("[FXChain] Failed to set sidechain source:", e);
       }
@@ -652,7 +641,7 @@ export function FXChainPanel({
 
       if (plugin.pluginType === "builtin") {
         if (chainType === "master") {
-          success = await nativeBridge.addMasterBuiltInFX(plugin.name);
+          success = await editFXStage("master", `Add ${plugin.name} to master`, () => nativeBridge.addMasterBuiltInFX(plugin.name));
         } else {
           success = await addTrackBuiltInFXWithUndo(
             trackId,
@@ -673,17 +662,17 @@ export function FXChainPanel({
         }
       } else if (plugin.pluginType === "jsfx") {
         if (chainType === "master") {
-          success = await nativeBridge.addMasterJSFX(plugin.fileOrIdentifier);
+          success = await editFXStage("master", `Add ${plugin.name} to master`, () => nativeBridge.addMasterJSFX(plugin.fileOrIdentifier));
         } else {
-          const isInputFX = chainType === "input";
-          success = await nativeBridge.addTrackJSFX(
+          success = await addTrackFXWithUndo(
             trackId,
             plugin.fileOrIdentifier,
-            isInputFX,
+            chainType,
+            "jsfx",
           );
         }
       } else if (chainType === "master") {
-        success = await nativeBridge.addMasterFX(pluginReference);
+        success = await editFXStage("master", `Add ${plugin.name} to master`, () => nativeBridge.addMasterFX(pluginReference));
       } else if (plugin.isInstrument && chainType === "track" && trackId) {
         // Instrument plugins (VSTi) must be loaded via loadInstrument so the
         // track is set to Instrument type and receives MIDI for synthesis.
@@ -852,6 +841,10 @@ export function FXChainPanel({
   };
 
   async function handleOpenBuiltInEditor(fx: FXSlot) {
+    if (isPitchCorrectFX(fx)) {
+      setPitchEntry({ id: ++pitchEntrySequence.current, origin: { trackId, chain: chainType, fxIndex: fx.index, instanceId: fx.instanceId } });
+      return;
+    }
     const title = fx.name || "OpenStudio Plugin";
     const address: BuiltInPluginAddress = {
       trackId,
@@ -859,10 +852,13 @@ export function FXChainPanel({
       fxIndex: fx.index,
     };
     const isNAMRack = title.toLowerCase().includes("nam rack");
+    const pluginId = builtInEditorPluginId(title);
+    const editor = getBuiltInEditor(pluginId);
     const sessionId = JSON.stringify({
       address,
       title,
       fallbackName: title,
+      pluginId,
     });
 
     await openEditorWithFeedback(title, () => nativeBridge.openBuiltInPluginEditorWindow(
@@ -870,8 +866,8 @@ export function FXChainPanel({
         {
           x: isNAMRack ? 140 : 220,
           y: isNAMRack ? 70 : 130,
-          width: isNAMRack ? 1320 : 980,
-          height: isNAMRack ? 860 : 720,
+          width: isNAMRack ? 1320 : editor.preferred.width,
+          height: isNAMRack ? 860 : editor.preferred.height,
         },
       ), { sessionId });
   }
@@ -1104,7 +1100,9 @@ export function FXChainPanel({
 
     try {
       let success = false;
-      if (chainType !== "master") {
+      if (chainType === "master") {
+        success = await editFXStage("master", "Reorder master FX", () => nativeBridge.reorderMasterFX(draggedIndex, dropIndex));
+      } else {
         success = await reorderTrackFXWithUndo(
           trackId,
           draggedIndex,
@@ -1218,14 +1216,18 @@ export function FXChainPanel({
   };
 
   const handleAutomateParam = (fxIndex: number, param: PluginParam) => {
-    if (chainType === "master") return; // Master automation not supported
-    const automationParam = param.builtIn && param.paramId
+    const automationParam = param.automationId ?? (param.builtIn && param.paramId
       ? builtInAutomationParamId(chainType === "input", fxIndex, param.paramId)
-      : pluginAutomationParamId(chainType === "input", fxIndex, param.index);
+      : pluginAutomationParamId(chainType === "input", fxIndex, param.index));
+    if (chainType === "master") {
+      addMasterAutomationLane(automationParam, `${fxSlots.find(f => f.index === fxIndex)?.name}: ${param.name}`, automationParameterMetadata(param));
+      return;
+    }
     addAutomationLane(
       trackId,
       automationParam,
       `${fxSlots.find((f) => f.index === fxIndex)?.name || "Plugin"}: ${param.name}`,
+      automationParameterMetadata(param),
     );
   };
 
@@ -1235,9 +1237,9 @@ export function FXChainPanel({
     value: number,
   ) => {
     const isInputFX = chainType === "input";
-    const automationParam = changedParam.builtIn && changedParam.paramId
+    const automationParam = changedParam.automationId ?? (changedParam.builtIn && changedParam.paramId
       ? builtInAutomationParamId(isInputFX, fxIndex, changedParam.paramId)
-      : pluginAutomationParamId(isInputFX, fxIndex, changedParam.index);
+      : pluginAutomationParamId(isInputFX, fxIndex, changedParam.index));
     setAutomationWriteValue(trackId, automationParam, value);
     setPluginParams((params) =>
       params.map((param) =>
@@ -1252,7 +1254,7 @@ export function FXChainPanel({
       let rawValue = denormalizeParamValue({ id: changedParam.paramId, min: minimum, max: maximum }, value);
       if (changedParam.discrete) rawValue = Math.round(rawValue);
       await nativeBridge.setBuiltInPluginParam(
-        { trackId, chain: isInputFX ? "input" : "track", fxIndex },
+        { trackId, chain: chainType, fxIndex },
         changedParam.paramId,
         rawValue,
       );
@@ -1363,6 +1365,7 @@ export function FXChainPanel({
     <div
       className="fx-chain-overlay"
       data-modal-root="true"
+      {...modalPointerBoundaryProps}
       onClick={onClose}
       onContextMenu={guardModalContextMenu}
       role="dialog"
@@ -1395,6 +1398,9 @@ export function FXChainPanel({
             <X size={16} />
           </Button>
         </div>
+
+        {pitchEntry && <PitchFXEditorEntry key={pitchEntry.id} origin={pitchEntry.origin}
+          onCancel={() => setPitchEntry(null)} onOpened={() => { setPitchEntry(null); onClose(); }} />}
 
         {(openingEditor || pluginActivity) && <div className="shrink-0 px-4 py-2"><PluginActivity message={openingEditor || pluginActivity!} /></div>}
         <div className="fx-chain-two-column-content" inert={Boolean(pluginActivity || openingEditor)}>
@@ -1674,12 +1680,13 @@ export function FXChainPanel({
                       <div key={fx.index}>
                         <div
                           className={`fx-slot-item flex-wrap ${draggedIndex === index ? "dragging" : ""} ${selectedFxIndex === fx.index ? "ring-1 ring-cyan-500/70" : ""} ${isJSFX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
-                          draggable={chainType !== "master"}
+                          draggable
                           tabIndex={0}
                           data-selected={selectedFxIndex === fx.index ? "true" : undefined}
                           onPointerDown={() => setSelectedFxIndex(fx.index)}
                           onFocus={() => setSelectedFxIndex(fx.index)}
                           onDragStart={() => handleDragStart(index)}
+                          onDragEnd={() => setDraggedIndex(null)}
                           onDragOver={handleDragOver}
                           onDrop={(e) => handleDrop(e, index)}
                           onClick={() => {
@@ -1690,14 +1697,12 @@ export function FXChainPanel({
                             } else handleOpenEditor(fx.index);
                           }}
                         >
-                          {chainType !== "master" && (
                           <div
                             className="fx-drag-handle"
                             title="Drag to reorder"
                           >
                             <GripVertical size={14} />
                           </div>
-                          )}
                           <input
                             type="checkbox"
                             checked={!bypassedFx.has(fx.index)}
@@ -1905,8 +1910,8 @@ export function FXChainPanel({
                         </div>
 
                         {/* Sidechain Source Selector */}
-                        {chainType !== "master" &&
-                          sidechainTrackOptions.length > 0 && (
+                        {chainType === "track" &&
+                          (sidechainTrackOptions.length > 0 || !!sidechainSources[fx.index]) && (
                             <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900/60 border-x border-neutral-700">
                               <Link2
                                 size={11}
@@ -1929,6 +1934,7 @@ export function FXChainPanel({
                                 title="Sidechain source track"
                               >
                                 <option value="">None</option>
+                                {sidechainSources[fx.index] && !sidechainTrackOptions.some(t => t.id === sidechainSources[fx.index]) && <option value={sidechainSources[fx.index]}>Unavailable source (silent)</option>}
                                 {sidechainTrackOptions.map((t) => (
                                   <option key={t.id} value={t.id}>
                                     {t.name}
@@ -1965,9 +1971,9 @@ export function FXChainPanel({
                                     midiLearnActive?.paramKey === (param.builtIn && param.paramId
                                       ? `builtin:${param.paramId}`
                                       : `plugin:${param.index}`);
-                                  const automationParamId = param.builtIn && param.paramId
+                                  const automationParamId = param.automationId ?? (param.builtIn && param.paramId
                                     ? builtInAutomationParamId(chainType === "input", fx.index, param.paramId)
-                                    : pluginAutomationParamId(chainType === "input", fx.index, param.index);
+                                    : pluginAutomationParamId(chainType === "input", fx.index, param.index));
                                   return (
                                     <div
                                       key={param.index}
@@ -1985,27 +1991,35 @@ export function FXChainPanel({
                                       >
                                         {param.text}
                                       </span>
-                                      <ProfiledRangeInput
+                                      {param.type === "toggle" ? (
+                                        <button type="button" aria-label={`Set ${param.name}`} aria-pressed={param.value >= .5}
+                                          className="px-2 py-1 rounded border border-neutral-600 text-[11px] focus-visible:outline focus-visible:outline-cyan-400"
+                                          onClick={() => void handlePluginParamChange(fx.index, param, param.value >= .5 ? 0 : 1)}>
+                                          {param.value >= .5 ? "On" : "Off"}
+                                        </button>
+                                      ) : automationParameterChoices(param).length ? (
+                                        <select aria-label={`Set ${param.name}`} value={param.value}
+                                          className="max-w-32 rounded border border-neutral-600 bg-neutral-800 px-1 py-1 text-[11px] focus-visible:outline focus-visible:outline-cyan-400"
+                                          onChange={event => void handlePluginParamChange(fx.index, param, Number(event.target.value))}>
+                                          {automationParameterChoices(param).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                        </select>
+                                      ) : <ProfiledRangeInput
                                         min={0}
                                         max={1}
                                         step={0.001}
                                         value={param.value}
                                         className="w-20 h-1 accent-cyan-500"
                                         onBeginEdit={() => {
-                                          if (chainType !== "master") {
                                             beginAutomationParamTouch(
                                               trackId,
                                               automationParamId,
                                             );
-                                          }
                                         }}
                                         onCommitEdit={() => {
-                                          if (chainType !== "master") {
                                             endAutomationParamTouch(
                                               trackId,
                                               automationParamId,
                                             );
-                                          }
                                         }}
                                         onValueChange={(value) => {
                                           void handlePluginParamChange(
@@ -2015,7 +2029,7 @@ export function FXChainPanel({
                                           );
                                         }}
                                         title={`Set ${param.name}`}
-                                      />
+                                      />}
                                       {/* MIDI Learn button */}
                                       {chainType !== "master" && (isLearning ? (
                                         <button
@@ -2045,7 +2059,7 @@ export function FXChainPanel({
                                           Learn
                                         </button>
                                       ))}
-                                      {chainType !== "master" && (
+                                      {(
                                         <button
                                           className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/30 text-cyan-400 hover:bg-cyan-700/60 transition-colors opacity-60 group-hover:opacity-100 shrink-0"
                                           onClick={() =>
@@ -2224,6 +2238,8 @@ export function FXChainPanel({
                                           max={slider.max}
                                           step={slider.inc || 0.001}
                                           value={slider.value}
+                                          onBeginEdit={() => beginAutomationParamTouch(trackId, fx.automationPrefix ? fx.automationPrefix + slider.index : pluginAutomationParamId(chainType === "input", fx.index, slider.index))}
+                                          onCommitEdit={() => endAutomationParamTouch(trackId, fx.automationPrefix ? fx.automationPrefix + slider.index : pluginAutomationParamId(chainType === "input", fx.index, slider.index))}
                                           onValueChange={(value) =>
                                             handleJSFXSliderChange(
                                               slider.index,
@@ -2253,16 +2269,7 @@ export function FXChainPanel({
                                 trackId={trackId}
                                 fxIndex={fx.index}
                                 onClose={() => setExpandedPitchCorrector(null)}
-                                onOpenGraphicalEditor={() => {
-                                  // Find the first selected audio clip on this track to analyze
-                                  const track = tracks.find(
-                                    (t) => t.id === trackId,
-                                  );
-                                  const clip = track?.clips?.[0];
-                                  if (clip) {
-                                    openPitchEditor(trackId, clip.id, fx.index);
-                                  }
-                                }}
+                                onOpenGraphicalEditor={() => { void handleOpenBuiltInEditor(fx); }}
                               />
                             </div>
                           )}

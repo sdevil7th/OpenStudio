@@ -15,6 +15,8 @@ export interface GraphNode {
   enabled: boolean;
   color?: string;
   label?: string;
+  displayLabel?: string;
+  lockY?: boolean;
   nodeType?: number; // enum value for per-node type (e.g., filter type)
 }
 
@@ -45,11 +47,17 @@ export interface ParametricGraphProps {
     opacity?: number;
     strokeWidth?: number;
   }>;
+  backgroundRegions?: Array<{ id: string; start: number; end: number; color: string; opacity?: number }>;
   perNodeCurves?: { nodeId: string; points: { x: number; y: number }[] }[];
   onNodeAdd?: (x: number, y: number) => void;
   onNodeChange?: (id: string, changes: Partial<GraphNode>) => void;
   onNodeRemove?: (id: string) => void;
   onNodeDragStart?: (id: string) => void;
   onNodeDragEnd?: (id: string) => void;
+  onNodeDragCancel?: (id: string) => void;
   className?: string;
+  selectedNodeId?: string;
+  selectedNodeIds?: string[];
+  onSelectionChange?: (ids: string[], primary?: string) => void;
+  onNodeSelect?: (id: string) => void;
 }

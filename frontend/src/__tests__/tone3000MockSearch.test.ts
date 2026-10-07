@@ -53,6 +53,20 @@ describe("TONE3000 dev NAM search mock", () => {
     ]);
   });
 
+  it("keeps mock token identity stable across status reads and updates it only on refresh", async () => {
+    const initial = await nativeBridge.getTONE3000AuthStatus();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(initial.expiresAtMs! + 5000);
+    try {
+      expect((await nativeBridge.getTONE3000AuthStatus()).expiresAtMs).toBe(initial.expiresAtMs);
+      const refreshed = await nativeBridge.refreshTONE3000Auth();
+      expect(refreshed.expiresAtMs).toBeGreaterThan(initial.expiresAtMs!);
+      clock.mockReturnValue(refreshed.expiresAtMs! - 1000);
+      expect((await nativeBridge.getTONE3000AuthStatus()).expiresAtMs).toBe(refreshed.expiresAtMs);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("models preview-to-library promotion with a new durable path", async () => {
     const preview = await nativeBridge.installNAMModel({
       id: 5320302,

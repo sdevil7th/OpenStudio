@@ -10,6 +10,7 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 import { createDefaultTrack } from "../useDAWStore";
+import { getProjectEpoch } from "../../utils/projectLifetime";
 
 const AUDIO_PLAYBACK_LOG_PREFIX = "[audio.playback]";
 
@@ -282,6 +283,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
 
     importExternalMediaAtTimeline: async (request) => {
       const startedAt = performance.now();
+      const projectEpoch = getProjectEpoch();
       const sourcePath = request.filePath;
       const fileName = sourcePath.split(/[/\\]/).pop() || "Audio";
       const clipName = request.name || fileName.replace(/\.[^.]+$/, "") || "Audio";
@@ -314,34 +316,47 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         : null;
       const requestedInsertIndex = request.insertIndex;
 
+      let replayClip = provisionalClip;
+      let nativeTrackReady = Promise.resolve(true);
+      let generation = 0;
       const command = {
         type: "IMPORT_EXTERNAL_MEDIA",
         description: `Import "${clipName}"`,
         timestamp: Date.now(),
         execute: () => {
+          const run = ++generation;
           set((state) => {
             let tracks = state.tracks;
             if (createdTrack && !tracks.some((track) => track.id === createdTrack.id)) {
               const newTracks = [...tracks];
               newTracks.splice(clampInsertIndex(requestedInsertIndex, newTracks.length), 0, createdTrack);
               tracks = newTracks;
-              nativeBridge.addTrack(createdTrack.id, "audio").catch((error) =>
-                console.error("[DAWStore] Failed to create backend track for external import:", error),
-              );
+              nativeTrackReady = nativeBridge.addTrack(createdTrack.id, "audio").catch(() => false);
             }
 
             return {
               tracks: tracks.map((track) =>
                 track.id === trackId && !track.clips.some((clip) => clip.id === clipId)
-                  ? { ...track, clips: [...track.clips, provisionalClip] }
+                  ? { ...track, clips: [...track.clips, replayClip] }
                   : track,
               ),
+              isModified: true,
+              selectedTrackIds: [trackId],
               selectedTrackId: trackId,
               selectedClipIds: [clipId],
             };
           });
+          if (replayClip.importStatus === "ready") {
+            void nativeTrackReady.then(async (ready) => {
+              if (!ready) throw new Error("The audio engine could not restore the track.");
+              if (generation !== run || getProjectEpoch() !== projectEpoch || !clipStillExists()) return;
+              await nativeBridge.addPlaybackClip(trackId, replayClip.filePath, replayClip.startTime, replayClip.duration,
+                replayClip.offset, replayClip.volumeDB, replayClip.fadeIn, replayClip.fadeOut, replayClip.id);
+            }).catch((error) => console.error("[DAWStore] Import redo failed:", error));
+          }
         },
         undo: () => {
+          ++generation;
           const current = get().tracks
             .flatMap((track) => track.clips.map((clip) => ({ trackId: track.id, clip })))
             .find((entry) => entry.clip.id === clipId);
@@ -359,6 +374,8 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
                     ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) }
                     : track,
                 ),
+            isModified: true,
+            selectedTrackIds: state.selectedTrackIds.filter((id) => id !== createdTrack?.id),
             selectedClipIds: state.selectedClipIds.filter((id) => id !== clipId),
             selectedTrackId: state.selectedTrackId === createdTrack?.id ? null : state.selectedTrackId,
           }));
@@ -369,6 +386,8 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
 
       const updateClip = (patch) => {
+        replayClip = { ...replayClip, ...patch };
+        if (getProjectEpoch() !== projectEpoch) return;
         set((state) => ({
           tracks: state.tracks.map((track) =>
             track.id === trackId
@@ -383,7 +402,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         }));
       };
       const clipStillExists = () =>
-        get().tracks.some((track) => track.id === trackId && track.clips.some((clip) => clip.id === clipId));
+        getProjectEpoch() === projectEpoch && get().tracks.some((track) => track.id === trackId && track.clips.some((clip) => clip.id === clipId));
 
       try {
         const mediaInfo = await nativeBridge.probeMediaFile(sourcePath);
@@ -391,8 +410,6 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           updateClip({ importStatus: "failed" });
           throw new Error("Unsupported file format or failed to read: " + sourcePath);
         }
-        if (!clipStillExists()) return;
-
         updateClip({
           filePath: mediaInfo.filePath,
           duration: mediaInfo.duration,
@@ -401,7 +418,12 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           importStatus: "preparingPlayback",
         });
 
-        await nativeBridge.addPlaybackClip(
+        // Retain decoded metadata even if Undo happened during the probe.
+        // Redo can then restore the finished import without leaving a placeholder.
+        replayClip = { ...replayClip, importStatus: "ready", waveformStatus: "building" };
+        if (!await nativeTrackReady) throw new Error("The audio engine could not create the track.");
+        if (!clipStillExists()) return;
+        const accepted = await nativeBridge.addPlaybackClip(
           trackId,
           mediaInfo.filePath,
           provisionalClip.startTime,
@@ -413,6 +435,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           clipId,
         );
 
+        if (!accepted) throw new Error("The audio engine could not prepare the imported clip.");
         if (clipStillExists()) {
           updateClip({ importStatus: "ready", waveformStatus: "building" });
           console.log("[audio.import] external import ready", {

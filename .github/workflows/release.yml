@@ -387,6 +387,28 @@ jobs:
             }
           }
 
+      - name: Qualify installed Windows release
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "OpenStudio-installed-qualification"
+          $installer = (Resolve-Path "dist/windows/OpenStudio-Setup-x64.exe").Path
+          $installLog = Join-Path $env:RUNNER_TEMP "openstudio-install.log"
+          $install = Start-Process -FilePath $installer -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            ('/DIR="{0}"' -f $installRoot), ('/LOG="{0}"' -f $installLog))
+          if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode). See $installLog" }
+          try {
+            ./tools/run-window-lifecycle-smoke.ps1 -AppPath "$installRoot/OpenStudio.exe" `
+              -ReportPath "$env:RUNNER_TEMP/windows-installed-lifecycle.json" -TimeoutSeconds 300
+          } finally {
+            $uninstaller = Join-Path $installRoot "unins000.exe"
+            if (Test-Path -LiteralPath $uninstaller) {
+              $uninstall = Start-Process -FilePath $uninstaller -WindowStyle Hidden -PassThru -Wait `
+                -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+              if ($uninstall.ExitCode -ne 0) { throw "Qualification uninstall failed: $($uninstall.ExitCode)" }
+            }
+          }
+
       - name: Stage checksum-pinned FFmpeg corresponding source
         shell: pwsh
         run: ./tools/setup-ffmpeg.ps1 -CorrespondingSourceDestination "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
@@ -701,7 +723,7 @@ jobs:
             libgl1-mesa-dev libfreetype6-dev libfontconfig1-dev \
             libcurl4-openssl-dev libsecret-tools \
             libx11-dev libxext-dev libxrandr-dev libxi-dev \
-            libxinerama-dev libxcursor-dev libxcomposite-dev
+            libxinerama-dev libxcursor-dev libxcomposite-dev xvfb xauth openbox
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -813,6 +835,12 @@ jobs:
             -BundlePath "$EXTRACT_ROOT/squashfs-root/usr/bin" \
             -ExpectedVersion "$VERSION" \
             -EnforceLeanBundle
+
+      - name: Launch packaged Linux AppImage
+        shell: bash
+        run: |
+          python3 tools/smoke-linux-appimage.py \
+            "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

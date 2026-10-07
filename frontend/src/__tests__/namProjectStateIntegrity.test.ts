@@ -73,11 +73,10 @@ describe("NAM project-state integrity", () => {
     expect(summary).not.toContain("Master / FX 3");
   });
 
-  it("wires master asset discovery and checks every NAM restore result", () => {
+  it("wires master asset discovery and reports NAM restore issues", () => {
     expect(projectActionsSource).toContain('trackName: "Master"');
     expect(projectActionsSource).toContain('chain: "master"');
     expect(projectActionsSource).toContain("rawNAMAssets.push(...collectNAMAssetsFromPluginState");
-    expect(projectActionsSource.match(/if \(isNAMRack && !stateResult\)/g)).toHaveLength(3);
     expect(projectActionsSource).toContain("summarizeNAMProjectStateIssues(namProjectStateIssues)");
     expect(projectActionsSource).toContain("Project loaded with ${missingNAMAssets.length} missing NAM resource file");
   });

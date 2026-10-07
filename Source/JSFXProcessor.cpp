@@ -1,5 +1,6 @@
 #include "JSFXProcessor.h"
 #include "JSFXGfxEditor.h"
+#include "JSFXSliderParameter.h"
 
 JSFXProcessor::JSFXProcessor()
     : AudioProcessor(BusesProperties()
@@ -8,6 +9,11 @@ JSFXProcessor::JSFXProcessor()
 {
     config = ysfx_config_new();
     ysfx_register_builtin_audio_formats(config);
+    for (auto& parameter : sliderParameters)
+    {
+        parameter = new JSFXSliderParameter();
+        addParameter(parameter); // JUCE owns these stable slider-index parameters.
+    }
 }
 
 JSFXProcessor::~JSFXProcessor()
@@ -20,6 +26,11 @@ JSFXProcessor::~JSFXProcessor()
 
 bool JSFXProcessor::loadScript(const juce::String& path)
 {
+    for (auto* parameter : sliderParameters)
+    {
+        parameter->exists = false;
+        parameter->pending.store(false);
+    }
     // Free any existing effect
     if (effect)
     {
@@ -73,6 +84,7 @@ bool JSFXProcessor::loadScript(const juce::String& path)
     juce::Logger::writeToLog("JSFXProcessor: Loaded script: " + effectName +
                              " (ins=" + juce::String(ysfx_get_num_inputs(effect)) +
                              " outs=" + juce::String(ysfx_get_num_outputs(effect)) + ")");
+    refreshSliderParameters();
     return true;
 }
 
@@ -83,14 +95,8 @@ bool JSFXProcessor::reloadScript()
 
     // Save current slider state
     std::vector<std::pair<uint32_t, double>> savedSliders;
-    if (effect && ysfx_is_compiled(effect))
-    {
-        for (uint32_t i = 0; i < ysfx_max_sliders; ++i)
-        {
-            if (ysfx_slider_exists(effect, i))
-                savedSliders.push_back({ i, ysfx_slider_get_value(effect, i) });
-        }
-    }
+    for (const auto& slider : getSliders())
+        savedSliders.push_back({ slider.index, slider.value });
 
     // Reload the script
     if (!loadScript(scriptPath))
@@ -100,7 +106,7 @@ bool JSFXProcessor::reloadScript()
     for (auto& [idx, val] : savedSliders)
     {
         if (ysfx_slider_exists(effect, idx))
-            ysfx_slider_set_value(effect, idx, val);
+            setSliderValue(idx, val);
     }
 
     return true;
@@ -111,7 +117,7 @@ bool JSFXProcessor::isScriptLoaded() const
     return effect != nullptr && ysfx_is_compiled(effect);
 }
 
-std::vector<JSFXProcessor::SliderInfo> JSFXProcessor::getSliders() const
+std::vector<JSFXProcessor::SliderInfo> JSFXProcessor::readSlidersForSetup() const
 {
     std::vector<SliderInfo> sliders;
 
@@ -164,16 +170,54 @@ std::vector<JSFXProcessor::SliderInfo> JSFXProcessor::getSliders() const
     return sliders;
 }
 
+void JSFXProcessor::refreshSliderParameters()
+{
+    for (auto* parameter : sliderParameters)
+    {
+        parameter->exists = false;
+        parameter->pending.store(false);
+    }
+    for (auto& slider : readSlidersForSetup())
+    {
+        auto* parameter = sliderParameters[slider.index];
+        parameter->exists = true;
+        parameter->path = ysfx_slider_is_path(effect, slider.index);
+        parameter->info = std::move(slider);
+        parameter->normalized.store(parameter->normalize(parameter->info.value));
+    }
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+}
+
+std::vector<JSFXProcessor::SliderInfo> JSFXProcessor::getSliders() const
+{
+    std::vector<SliderInfo> sliders;
+    for (const auto* parameter : sliderParameters)
+        if (parameter->exists)
+        {
+            auto info = parameter->info;
+            info.value = parameter->nativeValue();
+            sliders.push_back(std::move(info));
+        }
+    return sliders;
+}
+
 bool JSFXProcessor::setSliderValue(uint32_t index, double value)
 {
-    if (!effect || !ysfx_is_compiled(effect))
+    if (index >= sliderParameters.size() || !sliderParameters[index]->exists || !std::isfinite(value))
         return false;
-
-    if (!ysfx_slider_exists(effect, index))
-        return false;
-
-    ysfx_slider_set_value(effect, index, value);
+    auto* parameter = sliderParameters[index];
+    parameter->setValueNotifyingHost(parameter->normalize(value));
     return true;
+}
+
+void JSFXProcessor::publishScriptSliderChanges()
+{
+    const auto changed = ysfx_fetch_slider_changes(effect);
+    const auto automated = ysfx_fetch_slider_automations(effect);
+    for (size_t index = 0; index < sliderParameters.size(); ++index)
+        if (((changed | automated) & (uint64_t(1) << index)) != 0)
+            sliderParameters[index]->publishScriptValue(ysfx_slider_get_value(effect, static_cast<uint32_t>(index)),
+                (automated & (uint64_t(1) << index)) != 0);
 }
 
 // ---- juce::AudioProcessor overrides ----
@@ -189,6 +233,9 @@ void JSFXProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
         ysfx_set_block_size(effect, static_cast<uint32_t>(samplesPerBlock));
         ysfx_set_midi_capacity(effect, 1024, true);
         ysfx_init(effect);
+        for (size_t index = 0; index < sliderParameters.size(); ++index)
+            if (sliderParameters[index]->exists)
+                ysfx_slider_set_value(effect, static_cast<uint32_t>(index), sliderParameters[index]->nativeValue());
     }
 
     // Pre-allocate temp buffer for channel adaptation
@@ -203,6 +250,12 @@ void JSFXProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
 
     const int numSamples = buffer.getNumSamples();
     const int bufferChannels = buffer.getNumChannels();
+    for (size_t index = 0; index < sliderParameters.size(); ++index)
+    {
+        auto* parameter = sliderParameters[index];
+        if (parameter->exists && parameter->pending.exchange(false, std::memory_order_acq_rel))
+            ysfx_slider_set_value(effect, static_cast<uint32_t>(index), parameter->pendingValue.load(std::memory_order_acquire));
+    }
 
     // Feed MIDI events to YSFX
     for (const auto metadata : midiMessages)
@@ -255,6 +308,7 @@ void JSFXProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuf
     // Process audio through YSFX
     ysfx_process_float(effect, inputPtrs.data(), outputPtrs.data(),
                        ysfxIns, ysfxOuts, static_cast<uint32_t>(numSamples));
+    publishScriptSliderChanges();
 
     // Copy output back to the JUCE buffer
     for (int ch = 0; ch < bufferChannels; ++ch)

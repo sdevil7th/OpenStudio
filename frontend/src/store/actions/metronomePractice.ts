@@ -1,6 +1,7 @@
 import { nativeBridge } from "../../services/NativeBridge";
 
 interface PracticeState {
+  isProjectLoading?: boolean;
   metronomeEnabled: boolean;
   metronomeVolume: number;
   metronomePracticeEnabled: boolean;
@@ -53,6 +54,14 @@ export function metronomePracticeActions(
   };
   return {
     setMetronomePracticeEnabled: (enabled: boolean) => requestChange(enabled),
+    async toggleMetronomePractice(): Promise<boolean> {
+      const state = get();
+      if (state.metronomePracticePending || state.isProjectLoading) return false;
+      const accepted = await requestChange(!state.metronomePracticeEnabled);
+      if (!accepted && get().metronomePracticeError)
+        get().showToast?.(get().metronomePracticeError, "error");
+      return accepted;
+    },
     async toggleMetronome(): Promise<void> {
       const state = get();
       // The icon represents either enabled mode. Turning it off must stop

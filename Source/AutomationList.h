@@ -3,6 +3,8 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -47,6 +49,13 @@ public:
     void clear();
 
     int getNumPoints() const { return pointCount.load(std::memory_order_acquire); }
+    bool hasPlaybackData() const { return hasPreview() || hasWrittenValue() || getNumPoints() > 0; }
+    bool hasWrittenValue() const { return std::isfinite(writtenValue.load(std::memory_order_acquire)); }
+    void setWrittenValue(float value, double start = 0.0) { if (std::isfinite(value) && std::isfinite(start)) { writtenStart.store(start,std::memory_order_relaxed); writtenValue.store(value, std::memory_order_release); } }
+    void clearWrittenValue() { writtenValue.store(std::numeric_limits<float>::quiet_NaN(), std::memory_order_release); }
+    bool hasPreview() const { return std::isfinite(previewValue.load(std::memory_order_acquire)); }
+    void setPreviewValue(float value) { if (std::isfinite(value)) previewValue.store(value, std::memory_order_release); }
+    void clearPreview() { previewValue.store(std::numeric_limits<float>::quiet_NaN(), std::memory_order_release); }
     bool hasPointValueAtOrAbove(float threshold) const;
 
     void setDefaultValue(float val) { defaultValue.store(val, std::memory_order_relaxed); }
@@ -65,6 +74,12 @@ public:
 
     float eval(double timeSeconds) const;
     void evalBlock(double startTimeSeconds, double sampleRate, int numSamples, float* outputBuffer) const;
+
+    // Synchronous processing-thread visitor, using a single immutable snapshot.
+    // Linear SDK queues need only segment boundaries; event-value protocols need
+    // every changed sample. The sink is bounded and may reject excess events.
+    int deliverSampleAccuratePoints(double start, double rate, int samples, bool linearQueue,
+                                   void* context, bool (*sink)(void*, int, float)) const noexcept;
 
     bool shouldPlayback() const;
     bool shouldPlaybackForRead() const;
@@ -85,6 +100,9 @@ private:
 
     std::atomic<AutomationMode> mode { AutomationMode::Off };
     std::atomic<float> defaultValue { 0.0f };
+    std::atomic<float> previewValue { std::numeric_limits<float>::quiet_NaN() };
+    std::atomic<float> writtenValue { std::numeric_limits<float>::quiet_NaN() };
+    std::atomic<double> writtenStart { 0.0 };
     std::atomic<bool> isTouching { false };
     std::atomic<bool> latchActive { false };
     std::atomic<AutomationInterpolation> interpolation { AutomationInterpolation::Linear };

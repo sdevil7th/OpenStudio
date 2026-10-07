@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { normalizeTrimDB } from "../../utils/automationTrim";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -10,11 +11,13 @@ type GetFn = () => any;
  */
 import { nativeBridge, type MissingMediaEntry } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
+import { usePitchEditorStore } from "../pitchEditorStore";
 import { advanceProjectEpoch, getProjectEpoch, getRecoveryDocumentId, getProjectEditRevision, markProjectEdited, serializeProjectSave } from "../../utils/projectLifetime";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
 import { createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
+import { parseSendAutomationParamId } from "../automationParams";
 import {
   DEFAULT_AI_MUSIC_MODEL_ID,
   getDefaultWorkflowForModel,
@@ -37,6 +40,12 @@ import {
 import { isRetiredNAMRackAutomationParamId } from "../../utils/namPortableState";
 import { migrateLegacyChorusRateAutomationValue } from "../../utils/builtInParamValue";
 import { parseValidatedProject } from "../../utils/projectValidation";
+import { restoreMetronomeProjectSounds } from "../../utils/metronomeProjectSounds";
+import { compatibleAutomationMetadata, normalizeSavedSafeParameters, savedAutomationAddress, prepareUnavailableFXForLoad, recoveredAutomationLabel, resolveSavedPluginParameter, resolveSavedSafeParameter, unavailableFXKey } from "../../utils/automationRecovery";
+import { automationParameterMetadata } from "../automationParams";
+import { normalizeSavedMIDILearnMappings, resolveSavedMIDILearnParameter, savedMIDILearnMapping } from "../../utils/midiLearnRecovery";
+import { registerPluginParameterManifest, validatePluginAutomationLane } from "../../utils/pluginParameterManifest";
+import { notifyFXChainChanged, notifyInstrumentChanged } from "../../utils/fxChain";
 
 const AUTOMATION_CURVE_VERSION = 2;
 const SAVED_GRID_VALUES = new Set([
@@ -57,6 +66,9 @@ const BUILT_IN_PLUGIN_NAMES = new Set([
   "OpenStudio Reverb",
   "OpenStudio Chorus",
   "OpenStudio Saturator",
+  "OpenStudio Preamp",
+  "OpenStudio Graphic EQ",
+  "OpenStudio Gain Phase",
   "OpenStudio NAM Rack",
   "OpenStudio Pitch Correct",
 ]);
@@ -296,7 +308,7 @@ function persistRecentProjects(projects: string[]) {
 }
 
 function normalizeAutomationWriteBehavior(value: unknown) {
-  return value === "latch" || value === "overwrite" ? value : "touch";
+  return ["latch", "overwrite", "touch-latch", "cross-over"].includes(String(value)) ? value : "touch";
 }
 
 function automationLaneReadFromLegacy(lane: any): boolean {
@@ -395,8 +407,10 @@ function deriveAutomationReadEnabled(data: any, lanes: any[]): boolean {
 function serializeAutomationLanesForProject(lanes: any[]) {
   return (Array.isArray(lanes) ? lanes : []).map((lane) => {
     const readEnabled = automationLaneReadFromLegacy(lane);
+    const { referenceGeneration: _runtimeGeneration, ...persistentMetadata } = lane.metadata ?? {};
     return {
       ...lane,
+      ...(lane.metadata ? { metadata: persistentMetadata } : {}),
       points: (Array.isArray(lane?.points) ? lane.points : []).map((point: any, index: number) => ({
         ...point,
         id: persistedAutomationPointId(lane, point, index),
@@ -411,6 +425,16 @@ function serializeAutomationLanesForProject(lanes: any[]) {
 function buildProjectResetState() {
   const freshProjectState = createFreshProjectDocumentState();
   return {
+    lastTouchedAutomationParameter: null,
+    masterAutomationSafeParams: [],
+    masterAutomationSafeParameters: [],
+    unavailableFXStages: {},
+    automationTouchReturnSeconds: 0,
+    automationTrimCoalesce: "manual",
+    automationAutoJoinEnabled:false,
+    automationJoinSession:null,
+    automationRecoveryBusy: false,
+    projectRestoreError: "",
     ...freshProjectState,
     showPluginBrowser: false,
     pluginBrowserTrackId: null,
@@ -478,6 +502,8 @@ function buildSerializedProjectData(
     metronomeEnabled: state.metronomeEnabled,
     metronomeVolume: state.metronomeVolume,
     metronomeAccentBeats: state.metronomeAccentBeats,
+    metronomeClickPath: state.metronomeClickPath,
+    metronomeAccentPath: state.metronomeAccentPath,
     metronomeTrackId: state.metronomeTrackId,
     projectRange: state.projectRange,
     snapEnabled: state.snapEnabled,
@@ -490,6 +516,7 @@ function buildSerializedProjectData(
     tempoMarkers: state.tempoMarkers,
     masterVolume: state.masterVolume,
     masterPan: state.masterPan,
+    masterTrimVolumeDB: normalizeTrimDB(state.masterTrimVolumeDB),
     isMasterMuted: state.isMasterMuted,
     masterMono: state.masterMono,
     masterAutomationLanes: serializeAutomationLanesForProject(state.masterAutomationLanes),
@@ -502,6 +529,7 @@ function buildSerializedProjectData(
       state.masterAutomationLanes || [],
     ),
     masterAutomationWriteEnabled: false,
+    masterAutomationTrimWriteEnabled: false,
     masterAutomationEnabled: deriveAutomationReadEnabled(
       {
         automationReadEnabled: state.masterAutomationReadEnabled,
@@ -510,6 +538,12 @@ function buildSerializedProjectData(
       state.masterAutomationLanes || [],
     ),
     automationWriteBehavior: normalizeAutomationWriteBehavior(state.automationWriteBehavior),
+    automationTouchReturnSeconds: Math.max(0, Math.min(5, state.automationTouchReturnSeconds ?? 0)),
+    automationTrimCoalesce: state.automationTrimCoalesce ?? "manual",
+    automationAutoJoinEnabled: state.automationAutoJoinEnabled ?? false,
+    masterAutomationSafeParams: state.masterAutomationSafeParams ?? [],
+    masterAutomationSafeParameters: state.masterAutomationSafeParameters ?? [],
+    unavailableFXStages: state.unavailableFXStages ?? {},
     suspendedMasterAutomationState: null,
     tracks: serializedTracks,
     masterFXPaths,
@@ -538,6 +572,7 @@ function documentFingerprint(state: any) {
 }
 
 async function teardownCurrentProject(get: GetFn, set: SetFn) {
+  if (!await get().cancelAutomationPreview()) return [{ location: "Automation Preview", phase: "remove", detail: "temporary values could not be restored" }];
   const retiredDocumentId = getRecoveryDocumentId();
   advanceProjectEpoch();
   const freshProjectState = createFreshProjectDocumentState();
@@ -550,6 +585,10 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
     return removalIssues;
   }
   await nativeBridge.closeAllPluginWindows().catch(() => false);
+  for (const lane of get().masterAutomationLanes) {
+    await nativeBridge.setAutomationMode("master", lane.param, "off");
+    await nativeBridge.clearAutomation("master", lane.param);
+  }
 
   const currentMasterFX = await nativeBridge.getMasterFX().catch((error) => {
     removalIssues.push({
@@ -591,6 +630,7 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
 
   if (typeof get().closePitchEditor === "function")
     get().closePitchEditor();
+  usePitchEditorStore.getState().close();
   if (typeof get().closePianoRoll === "function")
     get().closePianoRoll();
   if (typeof get().closePluginBrowser === "function")
@@ -624,9 +664,12 @@ async function teardownCurrentProject(get: GetFn, set: SetFn) {
     freshProjectState.timeSignature.denominator,
   ).catch(logBridgeError("sync"));
   await nativeBridge.setMetronomeEnabled(false).catch(logBridgeError("sync"));
+  await nativeBridge.resetMetronomeSounds().catch(logBridgeError("sync"));
   await nativeBridge.setMetronomeAccentBeats(freshProjectState.metronomeAccentBeats).catch(logBridgeError("sync"));
   await nativeBridge.setMetronomeVolume(freshProjectState.metronomeVolume).catch(logBridgeError("sync"));
   await nativeBridge.setMasterVolume(freshProjectState.masterVolume).catch(logBridgeError("sync"));
+  await nativeBridge.setAutomationTrimValue("master", 0).catch(logBridgeError("sync"));
+  await nativeBridge.setMasterMute(false).catch(logBridgeError("sync"));
   await nativeBridge.setMasterPan(freshProjectState.masterPan).catch(logBridgeError("sync"));
   await nativeBridge.setMasterMono(Boolean(freshProjectState.masterMono)).catch(logBridgeError("sync"));
   await nativeBridge.setMIDILearnMappings([]).catch(logBridgeError("sync"));
@@ -830,6 +873,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
     setModified: (modified) => { if (modified) markProjectEdited(); set({ isModified: modified }); },
 
     saveProject: (saveAs = false, recoveryOnly = false) => serializeProjectSave(async () => {
+      if (!await get().cancelAutomationPreview()) return false;
+      if (get().projectRestoreError) {
+        get().showToast("Project restoration was incomplete. Reopen the original saved project before saving so its retained data is not overwritten.", "error");
+        return false;
+      }
       const epoch = getProjectEpoch();
       const documentId = getRecoveryDocumentId();
       let path = get().projectPath;
@@ -855,6 +903,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           const trackNAMAssets: any[] = [];
 
           const inputFXList = await nativeBridge.getTrackInputFX(track.id);
+          const inputFXTypes = inputFXList.map(item => item.type || "plugin");
           const inputFXPaths: string[] = [];
           for (let i = 0; i < inputFXList.length; i++) {
             const item = inputFXList[i];
@@ -874,15 +923,18 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             }
           }
 
+          const trackFXSidechains: string[] = [];
           const trackFXStates: string[] = [];
           const trackFXPaths: string[] = [];
           const trackFXList = await nativeBridge.getTrackFX(track.id);
+          const trackFXTypes = trackFXList.map(item => item.type || "plugin");
           for (let i = 0; i < trackFXList.length; i++) {
             const item = trackFXList[i];
             if (!item.pluginPath) throw new Error(`Cannot save track FX ${i + 1} on ${track.name}: missing plugin identity`);
             trackFXPaths.push(item.pluginPath);
             const fxState = await nativeBridge.getPluginState(track.id, i, false);
             trackFXStates.push(fxState || "");
+            trackFXSidechains.push(await nativeBridge.getSidechainSource(track.id, i));
             if (isNAMRackPluginPath(item.pluginPath)) {
               const builtInState = await nativeBridge.getBuiltInPluginState({ trackId: track.id, chain: "track", fxIndex: i }).catch(() => null);
               trackNAMAssets.push(...collectNAMAssetsFromPluginState(builtInState, {
@@ -900,6 +952,30 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             : "";
           const trackAutomationReadEnabled = deriveAutomationReadEnabled(track, track.automationLanes || []);
 
+          const automationSafeParameters = [];
+          const safeSchemas = new Map<string, Awaited<ReturnType<typeof nativeBridge.getPluginParameters>>>();
+          for (const param of track.automationSafeParams ?? []) {
+            const address = /^(builtin|plugin)_(input|track|instrument)_(\d+)_(.+)$/.exec(param);
+            if (!address) continue;
+            const input = address[2] === "input", index = address[2] === "instrument" ? -1 : Number(address[3]);
+            const expected = index === -1 ? track.instrumentPlugin || (address[1] === "builtin" && ["instrument", "midi"].includes(track.type)) : (input ? inputFXList : trackFXList)[index];
+            if (!expected) throw new Error(`Cannot save Automation Safe control ${param}: its FX is unavailable`);
+            const schemaKey = `${address[2]}:${index}`;
+            if (!safeSchemas.has(schemaKey)) safeSchemas.set(schemaKey, await nativeBridge.getPluginParameters(track.id, index, input));
+            const parameter = resolveSavedSafeParameter({ param }, safeSchemas.get(schemaKey)!);
+            if (!parameter) throw new Error(`Cannot save Automation Safe control ${param}: its parameter is unavailable`);
+            const { referenceGeneration: _generation, ...metadata } = automationParameterMetadata(parameter);
+            automationSafeParameters.push({ param, metadata });
+          }
+          if (automationSafeParameters.length) {
+            for (const [input, expected] of [[true, inputFXList], [false, trackFXList]] as const) {
+              const current = await (input ? nativeBridge.getTrackInputFX(track.id) : nativeBridge.getTrackFX(track.id));
+              if (current.length !== expected.length || expected.some((item, index) => item.instanceId
+                ? item.instanceId !== current[index]?.instanceId : item.pluginPath !== current[index]?.pluginPath))
+                throw new Error("The FX chain changed while saving Automation Safe controls. Save again after the edit finishes.");
+            }
+          }
+
           const serializedTrack = {
             id: track.id,
             name: track.name,
@@ -909,9 +985,18 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             inputStartChannel: track.inputStartChannel,
             inputChannelCount: track.inputChannelCount,
             volumeDB: track.volumeDB,
+            sends: (track.sends ?? []).map(send => ({ ...send, sourceChannel: send.sourceChannel ?? 0 })),
+            masterSendEnabled: track.masterSendEnabled !== false,
+            phaseInverted: !!track.phaseInverted,
+            stereoWidth: track.stereoWidth ?? 100,
+            outputStartChannel: track.outputStartChannel ?? 0,
+            outputChannelCount: track.outputChannelCount ?? 2,
+            playbackOffsetMs: track.playbackOffsetMs ?? 0,
+            trackChannelCount: track.trackChannelCount ?? 2,
             pan: track.pan,
             muted: track.muted,
             soloed: track.soloed,
+            soloSafe: !!track.soloSafe,
             armed: track.armed,
             monitorEnabled: track.monitorEnabled,
             inputChannel: track.inputChannel,
@@ -921,6 +1006,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             midiInputDevice: track.midiInputDevice,
             midiChannel: track.midiChannel,
             midiOutputDevice: track.midiOutputDevice,
+            midiOutputMergeKeys: Boolean(track.midiOutputMergeKeys),
             midiPitchBendRangeUp: track.midiPitchBendRangeUp ?? 2,
             midiPitchBendRangeDown: track.midiPitchBendRangeDown ?? track.midiPitchBendRangeUp ?? 2,
             midiPitchBendRangeLinked: track.midiPitchBendRangeLinked ?? true,
@@ -933,15 +1019,23 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             aiWorkflow: track.aiWorkflow,
             aiWorkflowParams: track.aiWorkflowParams,
             inputFXPaths,
+            inputFXTypes,
             inputFXStates,
             trackFXPaths,
+            trackFXTypes,
             trackFXStates,
+            trackFXSidechains,
             instrumentPlugin: track.instrumentPlugin,
             instrumentState,
             automationLanes: serializeAutomationLanesForProject(track.automationLanes),
+            automationSafeParams: track.automationSafeParams ?? [],
+            automationSafeParameters,
+            unavailableFX: track.unavailableFX ?? [],
             showAutomation: Boolean(track.showAutomation),
             automationReadEnabled: trackAutomationReadEnabled,
             automationWriteEnabled: false,
+            automationTrimWriteEnabled: false,
+            trimVolumeDB: normalizeTrimDB(track.trimVolumeDB),
             automationEnabled: trackAutomationReadEnabled,
             suspendedAutomationState: null,
           };
@@ -998,7 +1092,16 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           originalFileName: inspection.fileName,
         });
       }));
-      const midiLearnMappings = await nativeBridge.getMIDILearnMappings().catch(() => []);
+      // A failed snapshot must not overwrite the last save with an empty CC map.
+      const activeMIDILearnMappings = await nativeBridge.getMIDILearnMappings();
+      const midiParameters = new Map();
+      const midiLearnMappings = await Promise.all(activeMIDILearnMappings.map(async mapping => {
+        const key = `${mapping.trackId}:${mapping.chainType}:${mapping.pluginIndex}`;
+        if (!midiParameters.has(key)) midiParameters.set(key,
+          nativeBridge.getPluginParameters(mapping.trackId, mapping.pluginIndex, mapping.chainType === "input"));
+        const parameters = await midiParameters.get(key);
+        return savedMIDILearnMapping(mapping, resolveSavedMIDILearnParameter(mapping, parameters));
+      }));
 
       const projectData = buildSerializedProjectData(
         state,
@@ -1008,6 +1111,37 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         namAssets,
         midiLearnMappings,
       );
+      // Optional fields preserve old-project compatibility and slot identities.
+      const [masterFXStageState, monitorFXStageState] = await Promise.all([
+        nativeBridge.getFXStageState("master"), nativeBridge.getFXStageState("monitor"),
+      ]);
+      if (masterFXStageState) projectData.masterFXStageState = masterFXStageState;
+      if (monitorFXStageState) projectData.monitorFXStageState = monitorFXStageState;
+      const stageSafeParameters = [];
+      for (const chain of ["master", "monitor"]) {
+        const safe = (state.masterAutomationSafeParams ?? []).filter(param => savedAutomationAddress(param)?.chain === chain);
+        if (!safe.length) continue;
+        const slots = await (chain === "master" ? nativeBridge.getMasterFX() : nativeBridge.getMonitoringFX());
+        const schemas = await Promise.all(slots.map(slot => nativeBridge.getPluginParameters(chain, slot.index, false)));
+        for (const param of safe) {
+          const address = savedAutomationAddress(param);
+          const schema = schemas.find(parameters => parameters.some(parameter => parameter.automationId?.startsWith(address.prefix)));
+          const parameter = schema && resolveSavedSafeParameter({ param }, schema);
+          if (!parameter) {
+            const retained = state.masterAutomationSafeParameters?.find(entry => entry.param === param);
+            if (state.unavailableFXStages?.[chain]?.length && retained) { stageSafeParameters.push(retained); continue; }
+            throw new Error(`Cannot save Automation Safe control ${param}: its stage parameter is unavailable`);
+          }
+          const { referenceGeneration: _generation, ...metadata } = automationParameterMetadata(parameter);
+          stageSafeParameters.push({ param, metadata });
+        }
+        const current = await nativeBridge.getFXStageState(chain);
+        const expected = chain === "master" ? masterFXStageState : monitorFXStageState;
+        const identities = items => items?.map(item => [item.automationKey, item.pluginPath, item.type]);
+        if (JSON.stringify(identities(current)) !== JSON.stringify(identities(expected)))
+          throw new Error("The FX stage changed while saving Automation Safe controls. Save again after the edit finishes.");
+      }
+      projectData.masterAutomationSafeParameters = stageSafeParameters;
 
       if (epoch !== getProjectEpoch()) return false;
       const success = await nativeBridge.saveProjectToFile(
@@ -1080,6 +1214,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
     },
 
     loadProject: async (path, options) => {
+      if (!await get().cancelAutomationPreview()) return false;
       await resetSyncCache();
 
       const bypassFX = options?.bypassFX ?? false;
@@ -1098,9 +1233,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         }
       });
 
-      const json = await nativeBridge.loadProjectFromFile(path);
-      if (!json) {
+      let json: string;
+      try {
+        json = await nativeBridge.loadProjectFromFile(path);
+        if (!json) throw new Error("The project file could not be read");
+      } catch (error) {
         set({ isProjectLoading: false, projectLoadingMessage: "" });
+        console.error("[loadProject] File read failed", path, error);
+        get().showToast(`Could not open project: ${String(error)}`, "error");
         return false;
       }
 
@@ -1195,9 +1335,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         ).catch(logBridgeError("sync"));
         await nativeBridge.setMetronomeAccentBeats(loadedMetronomeAccentBeats).catch(logBridgeError("sync"));
         await nativeBridge.setMetronomeVolume(loadedMetronomeVolume).catch(logBridgeError("sync"));
+        const restoredClicks = await restoreMetronomeProjectSounds(data);
         await nativeBridge.setMetronomeEnabled(Boolean(data.metronomeEnabled)).catch(logBridgeError("sync"));
         await nativeBridge.setMasterVolume(loadedMasterVolume).catch(logBridgeError("sync"));
         await nativeBridge.setMasterPan(loadedMasterPan).catch(logBridgeError("sync"));
+        await nativeBridge.setAutomationTrimValue("master", normalizeTrimDB(data.masterTrimVolumeDB)).catch(logBridgeError("sync"));
         await nativeBridge.setMasterMono(Boolean(data.masterMono)).catch(logBridgeError("sync"));
 
         set({
@@ -1215,6 +1357,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           metronomeEnabled: Boolean(data.metronomeEnabled),
           metronomeVolume: loadedMetronomeVolume,
           metronomeAccentBeats: loadedMetronomeAccentBeats,
+          metronomeClickPath: restoredClicks.metronomeClickPath,
+          metronomeAccentPath: restoredClicks.metronomeAccentPath,
           metronomeTrackId: data.metronomeTrackId ?? null,
           projectRange: data.projectRange || freshProjectState.projectRange,
           snapEnabled: typeof data.snapEnabled === "boolean" ? data.snapEnabled : freshProjectState.snapEnabled,
@@ -1227,14 +1371,24 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           tempoMarkers: Array.isArray(data.tempoMarkers) ? data.tempoMarkers : freshProjectState.tempoMarkers,
           masterVolume: loadedMasterVolume,
           masterPan: loadedMasterPan,
+          masterTrimVolumeDB: normalizeTrimDB(data.masterTrimVolumeDB),
+          automationTrimLiveValues: {},
+          automationPreviewSession: null,
+          automationCapturedPreview: null,
           isMasterMuted: Boolean(data.isMasterMuted),
           masterMono: Boolean(data.masterMono),
           masterAutomationLanes: loadedMasterAutomationLanes,
           showMasterAutomation: Boolean(data.showMasterAutomation),
           masterAutomationReadEnabled: loadedMasterAutomationRead,
           masterAutomationWriteEnabled: false,
+          masterAutomationTrimWriteEnabled: false,
           masterAutomationEnabled: loadedMasterAutomationRead,
           automationWriteBehavior: loadedAutomationWriteBehavior,
+          automationTouchReturnSeconds: Math.max(0, Math.min(5, Number(data.automationTouchReturnSeconds) || 0)),
+          automationTrimCoalesce: ["after-pass","on-exit"].includes(data.automationTrimCoalesce) ? data.automationTrimCoalesce : "manual",
+          automationAutoJoinEnabled:data.automationAutoJoinEnabled === true,
+          masterAutomationSafeParams: Array.isArray(data.masterAutomationSafeParams) ? data.masterAutomationSafeParams.filter(param => typeof param === "string") : [],
+          masterAutomationSafeParameters: normalizeSavedSafeParameters(data.masterAutomationSafeParameters),
           // Suspension is an in-session editing state. Never carry its saved
           // owner/lane snapshot into a newly loaded project.
           suspendedMasterAutomationState: null,
@@ -1251,16 +1405,59 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           onlineRender: Boolean(data.onlineRender),
           addToProjectAfterRender: Boolean(data.addToProjectAfterRender),
         });
+        if (restoredClicks.warnings.length > 0)
+          get().showToast(restoredClicks.warnings.join(" "), "warning");
         syncTempoMarkersToBackend(
           Array.isArray(data.tempoMarkers) ? data.tempoMarkers : [],
         );
-        if (data.isMasterMuted) {
-          await nativeBridge.setMasterVolume(0).catch(logBridgeError("sync"));
-        }
+        await nativeBridge.setMasterMute(Boolean(data.isMasterMuted)).catch(logBridgeError("sync"));
 
+        const pendingSidechains: Array<{ trackId: string; fxIndex: number; sourceTrackId: string }> = [];
+        const restoredMIDILearnMappings = [];
+        const savedMIDILearnMappings = normalizeSavedMIDILearnMappings(data.midiLearnMappings);
         const totalTracks = data.tracks.length;
         for (let ti = 0; ti < totalTracks; ti++) {
-          const trackData = data.tracks[ti];
+          const trackData = prepareUnavailableFXForLoad(data.tracks[ti]);
+          const plannedMIDILearnMappings = savedMIDILearnMappings.filter(mapping => mapping.trackId === trackData.id).flatMap(mapping => {
+            const index = trackData.liveIndices[mapping.chainType].get(mapping.pluginIndex);
+            return index === undefined ? [] : [{ ...mapping, pluginIndex: index }];
+          });
+          for (const slot of trackData.unavailableFX ?? []) {
+            const index = [...trackData.recoveryKeys[slot.chain]].find(([, key]) => key === slot.key)?.[0];
+            if (index !== undefined) plannedMIDILearnMappings.push(...(slot.midiLearnMappings ?? [])
+              .filter(mapping => mapping.trackId === trackData.id && mapping.chainType === slot.chain)
+              .map(mapping => ({ ...mapping, pluginIndex: index })));
+          }
+          const unavailableFX = [];
+          const restoredParameters = { input: new Map(), track: new Map() };
+          const verifyParameters = async (chain, originalIndex, index) => {
+            const candidates = (trackData.automationLanes ?? []).filter(lane => new RegExp(`^(builtin|plugin)_${chain}_${originalIndex}_`).test(lane.param));
+            const midiCandidates = plannedMIDILearnMappings.filter(mapping => mapping.chainType === chain && mapping.pluginIndex === originalIndex);
+            const safeCandidates = (trackData.automationSafeParameters ?? []).filter(entry => new RegExp(`^(builtin|plugin)_${chain}_${originalIndex}_`).test(entry.param));
+            if (!candidates.length && !midiCandidates.length && !safeCandidates.length) return true;
+            const parameters = await nativeBridge.getPluginParameters(trackData.id, index, chain === "input");
+            restoredParameters[chain].set(originalIndex, parameters);
+            if (!safeCandidates.every(entry => resolveSavedSafeParameter(entry, parameters))) return false;
+            if (!trackData.recoveryKeys[chain].has(originalIndex)) return true;
+            return midiCandidates.every(mapping => resolveSavedMIDILearnParameter(mapping, parameters)) && candidates.every(lane => {
+              const parameter = resolveSavedPluginParameter(lane, parameters);
+              return parameter && compatibleAutomationMetadata(lane.metadata, automationParameterMetadata(parameter));
+            });
+          };
+          const retainUnavailableFX = (chain, index, pluginPath) => {
+            const input = chain === "input";
+            const key = trackData.recoveryKeys[chain].get(index) ?? unavailableFXKey(chain, index, pluginPath);
+            const existing = trackData.unavailableFX?.find(slot => slot.key === key);
+            unavailableFX.push({ key, chain, pluginPath, originalIndex: index,
+              pluginType: (input ? trackData.inputFXTypes : trackData.trackFXTypes)?.[index] || (isBuiltInPluginPath(pluginPath) ? "builtin" : /\.jsfx$/i.test(pluginPath) ? "jsfx" : "plugin"),
+              state: (input ? trackData.inputFXStates : trackData.trackFXStates)?.[index] ?? existing?.state ?? "",
+              sidechain: input ? "" : trackData.trackFXSidechains?.[index] ?? existing?.sidechain ?? "",
+              safeParams: (trackData.automationSafeParams ?? []).filter(param => new RegExp(`^(builtin|plugin)_${chain}_${index}_`).test(param)),
+              safeParameters: (trackData.automationSafeParameters ?? []).filter(entry => new RegExp(`^(builtin|plugin)_${chain}_${index}_`).test(entry.param)),
+              midiLearnMappings: plannedMIDILearnMappings.filter(mapping => mapping.chainType === chain && mapping.pluginIndex === index),
+            });
+            return key;
+          };
           set({ projectLoadingMessage: `Loading track ${ti + 1}/${totalTracks}: ${trackData.name}` });
           await new Promise((r) => setTimeout(r, 0));
 
@@ -1272,9 +1469,16 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             await nativeBridge.setTrackType(trackData.id, restoredTrackType).catch(logBridgeError("sync"));
             await nativeBridge.setTrackVolume(trackData.id, trackData.volumeDB);
             await nativeBridge.setTrackPan(trackData.id, trackData.pan);
+            await nativeBridge.setAutomationTrimValue(trackData.id, normalizeTrimDB(trackData.trimVolumeDB));
+            await nativeBridge.setTrackPhaseInvert(trackData.id, !!trackData.phaseInverted);
+            await nativeBridge.setTrackStereoWidth(trackData.id, trackData.stereoWidth ?? 100);
+            await nativeBridge.setTrackOutputChannels(trackData.id, trackData.outputStartChannel ?? 0, trackData.outputChannelCount ?? 2);
+            await nativeBridge.setTrackPlaybackOffset(trackData.id, trackData.playbackOffsetMs ?? 0);
+            await nativeBridge.setTrackChannelCount(trackData.id, trackData.trackChannelCount ?? 2);
 
             if (trackData.muted)
               await nativeBridge.setTrackMute(trackData.id, true);
+            await nativeBridge.setTrackSoloSafe(trackData.id, !!trackData.soloSafe);
             if (trackData.soloed)
               await nativeBridge.setTrackSolo(trackData.id, true);
             if (trackData.armed)
@@ -1306,6 +1510,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               ).catch(logBridgeError("sync"));
             }
 
+            await nativeBridge.setTrackMIDIOutputMergeKeys(trackData.id, Boolean(trackData.midiOutputMergeKeys)).catch(logBridgeError("sync"));
             if (trackData.midiOutputDevice) {
               await nativeBridge.setTrackMIDIOutput(trackData.id, trackData.midiOutputDevice)
                 .catch(logBridgeError("sync"));
@@ -1350,6 +1555,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
             console.log(`[DEBUG LOAD] Track "${trackData.name}" FX data from file: bypassFX=${bypassFX}, inputFXPaths=${JSON.stringify(trackData.inputFXPaths || "MISSING")}, trackFXPaths=${JSON.stringify(trackData.trackFXPaths || "MISSING")}`);
             let inputFxRestored = 0;
+            const restoredInputIndices = new Map<number, number>();
+            const restoredTrackIndices = new Map<number, number>();
             if (!bypassFX && trackData.inputFXPaths && trackData.inputFXPaths.length > 0) {
               set({ projectLoadingMessage: `Restoring input FX for ${trackData.name}...` });
               await new Promise((r) => setTimeout(r, 0));
@@ -1361,6 +1568,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                 const success = await (
                   isBuiltInPluginPath(fxPath)
                     ? nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, true)
+                    : trackData.inputFXTypes?.[i] === "jsfx" || /\.jsfx$/i.test(fxPath)
+                      ? nativeBridge.addTrackJSFX(trackData.id, fxPath, true)
                     : nativeBridge.addTrackInputFX(trackData.id, fxPath, false)
                 ).catch((error) => {
                   if (isNAMRack) {
@@ -1373,21 +1582,30 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                   return false;
                 });
                 console.log(`[DEBUG LOAD]   addInputFX result: ${success}`);
+                if (!success) retainUnavailableFX("input", i, fxPath);
                 if (!isNAMRack && !success) pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: ${fxPath} could not be loaded`);
                 if (success) {
+                  restoredInputIndices.set(i, restoredFxIndex);
                   if (trackData.inputFXStates && trackData.inputFXStates[i]) {
                     const stateResult = await nativeBridge
                       .setPluginState(trackData.id, restoredFxIndex, true, trackData.inputFXStates[i])
                       .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(input) result: ${stateResult}`);
-                    if (!isNAMRack && !stateResult) pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: ${fxPath} state could not be restored`);
-                    if (isNAMRack && !stateResult) {
-                      recordNAMProjectStateIssue(
-                        "restore",
-                        `${trackData.name} / Input FX ${i + 1}`,
-                        `${fxPath} was added, but its saved NAM state was rejected`,
-                      );
+                    if (!stateResult) {
+                      if (isNAMRack) recordNAMProjectStateIssue("restore", `${trackData.name} / Input FX ${i + 1}`, `${fxPath} was added, but its saved NAM state was rejected`);
+                      retainUnavailableFX("input", i, fxPath);
+                      restoredInputIndices.delete(i);
+                      if (!await nativeBridge.removeTrackInputFX(trackData.id, restoredFxIndex)) throw new Error("Could not roll back rejected input FX recovery");
+                      pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: ${fxPath} state could not be restored; original data retained`);
+                      continue;
                     }
+
+                  }
+                  if (!await verifyParameters("input", i, restoredFxIndex)) {
+                    retainUnavailableFX("input", i, fxPath); restoredInputIndices.delete(i);
+                    if (!await nativeBridge.removeTrackInputFX(trackData.id, restoredFxIndex)) throw new Error("Could not roll back incompatible input FX recovery");
+                    pluginRestoreIssues.push(`${trackData.name} / Input FX ${i + 1}: saved automation parameters changed; original data retained`);
+                    continue;
                   }
                   inputFxRestored++;
                 } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
@@ -1415,6 +1633,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                 const success = await (
                   isBuiltInPluginPath(fxPath)
                     ? nativeBridge.addTrackBuiltInFX(trackData.id, fxPath, false)
+                    : trackData.trackFXTypes?.[i] === "jsfx" || /\.jsfx$/i.test(fxPath)
+                      ? nativeBridge.addTrackJSFX(trackData.id, fxPath, false)
                     : nativeBridge.addTrackFX(trackData.id, fxPath, false)
                 ).catch((error) => {
                   if (isNAMRack) {
@@ -1427,22 +1647,34 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                   return false;
                 });
                 console.log(`[DEBUG LOAD]   addTrackFX result: ${success}`);
+                if (!success) retainUnavailableFX("track", i, fxPath);
                 if (!isNAMRack && !success) pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: ${fxPath} could not be loaded`);
                 if (success) {
+                  restoredTrackIndices.set(i, restoredFxIndex);
                   if (trackData.trackFXStates && trackData.trackFXStates[i]) {
                     const stateResult = await nativeBridge
                       .setPluginState(trackData.id, restoredFxIndex, false, trackData.trackFXStates[i])
                       .catch(() => false);
                     console.log(`[DEBUG LOAD]   setPluginState(track) result: ${stateResult}`);
-                    if (!isNAMRack && !stateResult) pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: ${fxPath} state could not be restored`);
-                    if (isNAMRack && !stateResult) {
-                      recordNAMProjectStateIssue(
-                        "restore",
-                        `${trackData.name} / Track FX ${i + 1}`,
-                        `${fxPath} was added, but its saved NAM state was rejected`,
-                      );
+                    if (!stateResult) {
+                      if (isNAMRack) recordNAMProjectStateIssue("restore", `${trackData.name} / Track FX ${i + 1}`, `${fxPath} was added, but its saved NAM state was rejected`);
+                      retainUnavailableFX("track", i, fxPath);
+                      restoredTrackIndices.delete(i);
+                      if (!await nativeBridge.removeTrackFX(trackData.id, restoredFxIndex)) throw new Error("Could not roll back rejected track FX recovery");
+                      pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: ${fxPath} state could not be restored; original data retained`);
+                      continue;
                     }
+
                   }
+                  if (!await verifyParameters("track", i, restoredFxIndex)) {
+                    retainUnavailableFX("track", i, fxPath); restoredTrackIndices.delete(i);
+                    if (!await nativeBridge.removeTrackFX(trackData.id, restoredFxIndex)) throw new Error("Could not roll back incompatible track FX recovery");
+                    pluginRestoreIssues.push(`${trackData.name} / Track FX ${i + 1}: saved automation parameters changed; original data retained`);
+                    continue;
+                  }
+                  const sourceTrackId = trackData.trackFXSidechains?.[i];
+                  if (typeof sourceTrackId === "string" && sourceTrackId)
+                    pendingSidechains.push({ trackId: trackData.id, fxIndex: restoredFxIndex, sourceTrackId });
                   trackFxRestored++;
                 } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
                   issue.phase === "add" && issue.location === `${trackData.name} / Track FX ${i + 1}`)) {
@@ -1459,16 +1691,95 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               await nativeBridge.setTrackType(trackData.id, "instrument").catch(logBridgeError("built-in instrument type restore"));
             }
 
+            if (bypassFX) for (const chain of ["input", "track"]) {
+              const paths = chain === "input" ? trackData.inputFXPaths : trackData.trackFXPaths;
+              (paths ?? []).forEach((path, index) => retainUnavailableFX(chain, index, path));
+            }
+            for (const mapping of plannedMIDILearnMappings) {
+              const index = (mapping.chainType === "input" ? restoredInputIndices : restoredTrackIndices).get(mapping.pluginIndex);
+              if (index === undefined) continue;
+              const parameters = restoredParameters[mapping.chainType].get(mapping.pluginIndex) ?? [];
+              const parameter = resolveSavedMIDILearnParameter(mapping, parameters);
+              if (parameter) restoredMIDILearnMappings.push({ ...mapping, pluginIndex: index, paramIndex: parameter.index });
+              else pluginRestoreIssues.push(`${trackData.name}: MIDI CC ${mapping.ccNumber} parameter is unavailable; relearn this control`);
+            }
+
             console.log(`[DEBUG LOAD] Track "${trackData.name}" restored ${inputFxRestored} input FX and ${trackFxRestored} track FX`);
 
             const restoredMidiClips = (trackData.midiClips || []).map((clip: any) =>
               normalizeMIDIClipLoopLength(clip),
             );
+            const instrumentSafe = (trackData.automationSafeParams ?? []).filter(param => savedAutomationAddress(param)?.chain === "instrument");
+            const needsInstrumentSchema = instrumentSafe.length || (trackData.automationLanes ?? []).some(lane => savedAutomationAddress(lane.param)?.chain === "instrument");
+            let samplerLoaded = false;
+            if (trackData.samplerSamplePath) {
+              samplerLoaded = await nativeBridge.setTrackSamplerSample(trackData.id, trackData.samplerSamplePath, trackData.samplerRootNote ?? 60)
+                .catch(logBridgeError("sampler load"));
+            } else if (trackData.type === "instrument" && trackData.builtInInstrument) {
+              const modeMap = { synth: 0, piano: 1, drums: 2 };
+              await nativeBridge.setBuiltInPluginParam({ trackId: trackData.id, chain: "instrument", fxIndex: -1 },
+                "instrumentMode", modeMap[trackData.builtInInstrument] ?? 0).catch(logBridgeError("built-in instrument load"));
+            }
+            const instrumentParameters = (restoredInstrumentPlugin || ["instrument", "midi"].includes(trackData.type)) && needsInstrumentSchema
+              ? await nativeBridge.getPluginParameters(trackData.id, -1, false) : undefined;
+            if (instrumentParameters) for (const kind of ["plugin", "builtin"])
+              registerPluginParameterManifest(trackData.id, `${kind}_instrument_0_`, instrumentParameters, restoredInstrumentPlugin);
+            if (instrumentSafe.some(param => !instrumentParameters || !resolveSavedSafeParameter(
+              trackData.automationSafeParameters?.find(entry => entry.param === param) ?? { param,
+                metadata: trackData.automationLanes?.find(lane => lane.param === param)?.metadata }, instrumentParameters)))
+              throw new Error(`${trackData.name}: the saved instrument Automation Safe control is unavailable or changed meaning. Restore the compatible instrument before saving.`);
             const normalizedAutomationLanes = normalizeAutomationLanes(
               trackData.automationLanes || [],
               trackData,
               Number(data.automationCurveVersion) || 1,
-            );
+            ).map(lane => {
+              if (savedAutomationAddress(lane.param)?.chain === "instrument") {
+                if (instrumentParameters) return validatePluginAutomationLane(trackData.id, lane);
+                return { ...lane, param: `unavailable_parameter:${lane.param}`, unavailableParameter: {
+                  param: lane.param, pluginPath: trackData.instrumentPlugin ?? "", parameterOnly: true } };
+              }
+              const address = /^(builtin|plugin)_(input|track)_(\d+)_(.+)$/.exec(lane.param);
+              if (!address) return lane;
+              const mapping = address[2] === "input" ? restoredInputIndices : restoredTrackIndices;
+              const originalIndex = Number(address[3]);
+              const restoredIndex = mapping.get(originalIndex);
+              if (restoredIndex !== undefined) {
+                const parameters = restoredParameters[address[2]].get(originalIndex);
+                const parameter = parameters && resolveSavedPluginParameter(lane, parameters);
+                const bound = { ...lane, param: `${address[1]}_${address[2]}_${restoredIndex}_${parameter && address[1] === "plugin" ? parameter.index : address[4]}`,
+                  ...(lane.unavailableParameter ? { unavailableParameter: undefined, label: (recoveredAutomationLabel(lane) ?? lane.metadata?.name ?? lane.param).replace(/ \(parameter unavailable\)$/, "") } : {}) };
+                if (parameters) {
+                  const prefix = `${address[1]}_${address[2]}_${restoredIndex}_`;
+                  const path = (address[2] === "input" ? trackData.inputFXPaths : trackData.trackFXPaths)?.[originalIndex] ?? "";
+                  registerPluginParameterManifest(trackData.id, prefix, parameters, path);
+                  return validatePluginAutomationLane(trackData.id, bound);
+                }
+                return bound;
+              }
+              const pluginPath = (address[2] === "input" ? trackData.inputFXPaths : trackData.trackFXPaths)?.[originalIndex] ?? "";
+              return { ...lane, param: `unavailable:${lane.param}:${encodeURIComponent(pluginPath)}`,
+                label: `${recoveredAutomationLabel(lane) || lane.metadata?.name || lane.param} (FX unavailable)`,
+                unavailableParameter: { param: lane.param, pluginPath,
+                  fxKey: unavailableFX.find(slot => slot.chain === address[2] && slot.originalIndex === originalIndex)?.key,
+                  safe: (trackData.automationSafeParams ?? []).includes(lane.param) } };
+            });
+            const restoredSafeParams = (Array.isArray(trackData.automationSafeParams) ? trackData.automationSafeParams : [])
+              .filter(param => typeof param === "string").flatMap(param => {
+                const instrumentAddress = savedAutomationAddress(param);
+                if (instrumentAddress?.chain === "instrument") {
+                  const parameter = resolveSavedSafeParameter(trackData.automationSafeParameters?.find(entry => entry.param === param)
+                    ?? { param, metadata: trackData.automationLanes?.find(lane => lane.param === param)?.metadata }, instrumentParameters);
+                  return [parameter.automationId ?? `${instrumentAddress.prefix}${instrumentAddress.kind === "builtin" ? parameter.paramId : parameter.index}`];
+                }
+                const address = /^(builtin|plugin)_(input|track)_(\d+)_(.+)$/.exec(param);
+                if (!address) return [param];
+                const index = (address[2] === "input" ? restoredInputIndices : restoredTrackIndices).get(Number(address[3]));
+                if (index === undefined) return [];
+                const contract = trackData.automationSafeParameters?.find(entry => entry.param === param);
+                const parameters = restoredParameters[address[2]].get(Number(address[3]));
+                const parameter = parameters && resolveSavedSafeParameter(contract ?? { param }, parameters);
+                return [`${address[1]}_${address[2]}_${index}_${parameter && address[1] === "plugin" ? parameter.index : address[4]}`];
+              });
             const automationReadEnabled = deriveAutomationReadEnabled(trackData, normalizedAutomationLanes);
             const restoredAutomationLanes = resolveLoadedAutomationLaneModes(
               normalizedAutomationLanes,
@@ -1616,9 +1927,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               midiPitchBendRangeDown: trackData.midiPitchBendRangeDown ?? trackData.midiPitchBendRangeUp ?? 2,
               midiPitchBendRangeLinked: trackData.midiPitchBendRangeLinked ?? true,
               automationLanes: restoredAutomationLanes,
+              inputFxCount: inputFxRestored,
+              trackFxCount: trackFxRestored,
+              automationSafeParams: restoredSafeParams,
+              unavailableFX,
               showAutomation: Boolean(trackData.showAutomation),
               automationReadEnabled,
               automationWriteEnabled: false,
+              automationTrimWriteEnabled: false,
+              trimVolumeDB: normalizeTrimDB(trackData.trimVolumeDB),
               automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
@@ -1628,21 +1945,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             };
 
             if (frontendTrack.samplerSamplePath) {
-              const samplerLoaded = await nativeBridge
-                .setTrackSamplerSample(frontendTrack.id, frontendTrack.samplerSamplePath, frontendTrack.samplerRootNote ?? 60)
-                .catch(logBridgeError("sampler load"));
               if (samplerLoaded && !frontendTrack.instrumentPlugin) {
                 frontendTrack.type = "instrument";
               }
-            } else if (frontendTrack.type === "instrument" && frontendTrack.builtInInstrument) {
-              const modeMap: Record<string, number> = { synth: 0, piano: 1, drums: 2 };
-              await nativeBridge
-                .setBuiltInPluginParam(
-                  { trackId: frontendTrack.id, chain: "instrument", fxIndex: -1 },
-                  "instrumentMode",
-                  modeMap[frontendTrack.builtInInstrument] ?? 0,
-                )
-                .catch(logBridgeError("built-in instrument load"));
             }
 
             if (
@@ -1655,65 +1960,102 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             }
 
             set((state) => ({ tracks: [...state.tracks, frontendTrack] }));
+            notifyFXChainChanged({ trackId: frontendTrack.id, chainType: "input" });
+            notifyFXChainChanged({ trackId: frontendTrack.id, chainType: "track" });
+            notifyInstrumentChanged({ trackId: frontendTrack.id });
             for (const lane of frontendTrack.automationLanes) {
-              syncAutomationLaneToBackend(frontendTrack.id, lane);
+              if (!parseSendAutomationParamId(lane.param)) syncAutomationLaneToBackend(frontendTrack.id, lane);
             }
           } catch (trackError) {
             console.error(`[DEBUG LOAD] Failed to load track "${trackData.name}"`, trackError);
+            set({ projectRestoreError: String(trackError) });
+            throw trackError;
           }
         }
 
+        // Restore graph edges only after all destination tracks and their processors exist.
+        for (const track of get().tracks) {
+          await nativeBridge.setTrackMasterSendEnabled(track.id, track.masterSendEnabled !== false)
+            .catch(logBridgeError("restore master send"));
+          try {
+            if (!await nativeBridge.replaceTrackSends(track.id, track.sends ?? []))
+              throw new Error("complete send configuration rejected");
+            for (const lane of track.automationLanes)
+              if (parseSendAutomationParamId(lane.param)) await syncAutomationLaneToBackend(track.id, lane);
+          } catch (error) {
+            // Native rejection leaves this newly-created track with no sends.
+            // Reflect that safe state; the saved file remains available to retry.
+            set(state => ({ tracks: state.tracks.map(item => item.id === track.id
+              ? { ...item, sends: [] } : item) }));
+            pluginRestoreIssues.push(`Sends from ${track.name} could not be restored: ${String(error)}`);
+          }
+        }
+
+        for (const route of pendingSidechains) {
+          const restored = await nativeBridge.setSidechainSource(route.trackId, route.fxIndex, route.sourceTrackId).catch(() => false);
+          if (!restored) pluginRestoreIssues.push(`Sidechain for ${route.trackId} / FX ${route.fxIndex + 1}: source ${route.sourceTrackId} could not be restored`);
+        }
         set({ projectLoadingMessage: "Verifying MIDI signal path..." });
         await verifyAndRepairLoadedMIDISync(get);
 
         let restoredMasterFxCount = 0;
-        if (!bypassFX && data.masterFXPaths && data.masterFXPaths.length > 0) {
-          set({ projectLoadingMessage: "Restoring master FX..." });
-          await new Promise((r) => setTimeout(r, 0));
-          for (let i = 0; i < data.masterFXPaths.length; i++) {
-            const masterFxPath = data.masterFXPaths[i];
-            const isNAMRack = isNAMRackPluginPath(masterFxPath);
-            const restoredFxIndex = restoredMasterFxCount;
-            const success = await (
-              isBuiltInPluginPath(masterFxPath)
-                ? nativeBridge.addMasterBuiltInFX(masterFxPath)
-                : nativeBridge.addMasterFX(masterFxPath)
-            ).catch((error) => {
-              if (isNAMRack) {
-                recordNAMProjectStateIssue(
-                  "add",
-                  `Master / FX ${i + 1}`,
-                  `${masterFxPath} threw while being added (${String(error)})`,
-                );
-              }
-              return false;
-            });
-            if (success && data.masterFXStates && data.masterFXStates[i]) {
-              const stateResult = await nativeBridge
-                .setMasterPluginState(restoredFxIndex, data.masterFXStates[i])
-                .catch(() => false);
-              if (isNAMRack && !stateResult) {
-                recordNAMProjectStateIssue(
-                  "restore",
-                  `Master / FX ${i + 1}`,
-                  `${masterFxPath} was added, but its saved NAM state was rejected`,
-                );
-              }
-            }
-            if (success) {
-              restoredMasterFxCount++;
-            } else if (isNAMRack && !namProjectStateIssues.some((issue) =>
-              issue.phase === "add" && issue.location === `Master / FX ${i + 1}`)) {
-              recordNAMProjectStateIssue(
-                "add",
-                `Master / FX ${i + 1}`,
-                `${masterFxPath} could not be added`,
-              );
-            }
+        const unavailableFXStages = {};
+        const stagePlan = (chain, saved) => {
+          const pending = data.unavailableFXStages?.[chain];
+          if (!Array.isArray(pending)) return saved;
+          const keys = new Set(pending.map(slot => slot.automationKey));
+          return [...pending, ...(Array.isArray(saved) ? saved.filter(slot => !keys.has(slot.automationKey)) : [])];
+        };
+        const legacyMasterStage = Array.isArray(data.masterFXPaths) ? data.masterFXPaths.map((pluginPath, index) => {
+          const builtIn = isBuiltInPluginPath(pluginPath), script = /\.jsfx$/i.test(pluginPath);
+          return { automationKey: crypto.randomUUID(), name: pluginPath.split(/[\\/]/).pop() || pluginPath,
+            type: builtIn ? "builtin" : script ? "jsfx" : "plugin", pluginPath,
+            pluginFormat: builtIn ? "Built-in" : script ? "JSFX" : /\.vst3$/i.test(pluginPath) ? "VST3" : /\.clap$/i.test(pluginPath) ? "CLAP" : "Plugin",
+            state: typeof data.masterFXStates?.[index] === "string" ? data.masterFXStates[index] : "", bypassed: false, forceFloat: false };
+        }) : undefined;
+        const masterStagePlan = stagePlan("master", data.masterFXStageState ?? legacyMasterStage);
+        const monitorStagePlan = stagePlan("monitor", data.monitorFXStageState);
+        const restoredStageChains = [];
+        if (Array.isArray(masterStagePlan)) {
+          const restored = !bypassFX && await nativeBridge.setFXStageState("master", masterStagePlan).catch(() => false);
+          if (restored) { restoredMasterFxCount = masterStagePlan.length; restoredStageChains.push("master"); }
+          else if (masterStagePlan.length) {
+            unavailableFXStages.master = masterStagePlan;
+            pluginRestoreIssues.push("The saved master FX stage could not be restored; its settings and envelopes are retained for recovery.");
           }
         }
 
-        set({ masterFxCount: restoredMasterFxCount });
+        if (Array.isArray(monitorStagePlan)) {
+          const restored = !bypassFX && await nativeBridge.setFXStageState("monitor", monitorStagePlan).catch(() => false);
+          if (restored) restoredStageChains.push("monitor");
+          if (!restored && monitorStagePlan.length) {
+            unavailableFXStages.monitor = monitorStagePlan;
+            pluginRestoreIssues.push("The saved monitor FX stage could not be restored; its settings and envelopes are retained for recovery.");
+          }
+        }
+        set({ masterFxCount: restoredMasterFxCount, unavailableFXStages });
+        let stageSafe = [...(get().masterAutomationSafeParams ?? [])];
+        for (const chain of restoredStageChains) {
+          const slots = await (chain === "master" ? nativeBridge.getMasterFX() : nativeBridge.getMonitoringFX());
+          const schemas = await Promise.all(slots.map(slot => nativeBridge.getPluginParameters(chain, slot.index, false)));
+          schemas.forEach((parameters, index) => {
+            const prefixes = new Set(parameters.map(parameter => parameter.automationId && savedAutomationAddress(parameter.automationId)?.prefix).filter(Boolean));
+            for (const prefix of prefixes) registerPluginParameterManifest("master", prefix, parameters, slots[index]?.pluginPath ?? "");
+          });
+          stageSafe = stageSafe.map(param => {
+            const address = savedAutomationAddress(param);
+            if (address?.chain !== chain) return param;
+            const schema = schemas.find(parameters => parameters.some(parameter => parameter.automationId?.startsWith(address.prefix)));
+            const contract = get().masterAutomationSafeParameters?.find(entry => entry.param === param)
+              ?? { param, metadata: get().masterAutomationLanes.find(lane => lane.param === param)?.metadata };
+            const parameter = schema && resolveSavedSafeParameter(contract, schema);
+            if (!parameter) throw new Error(`The saved ${chain} Automation Safe control is unavailable or changed meaning. Restore compatible FX before saving.`);
+            return parameter.automationId ?? `${address.prefix}${address.kind === "builtin" ? parameter.paramId : parameter.index}`;
+          });
+        }
+        set({ masterAutomationSafeParams: stageSafe, masterAutomationLanes: get().masterAutomationLanes.map(lane => validatePluginAutomationLane("master", lane)) });
+        notifyFXChainChanged({ trackId: "master", chainType: "master" });
+        notifyFXChainChanged({ trackId: "master", chainType: "monitor" });
         for (const lane of get().masterAutomationLanes) {
           syncAutomationLaneToBackend("master", lane);
         }
@@ -1737,9 +2079,13 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         });
         persistRecentProjects(get().recentProjects);
 
-        await nativeBridge.setMIDILearnMappings(
-          Array.isArray(data.midiLearnMappings) ? data.midiLearnMappings : [],
-        ).catch(logBridgeError("sync"));
+        try {
+          if (!await nativeBridge.setMIDILearnMappings(restoredMIDILearnMappings))
+            throw new Error("The native host rejected the saved MIDI Learn controls");
+        } catch (error) {
+          set({ projectRestoreError: `MIDI Learn restoration failed: ${String(error)}` });
+          throw error;
+        }
 
         set({ projectLoadingMessage: "Checking media files..." });
         await new Promise((r) => setTimeout(r, 0));
@@ -1784,7 +2130,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         return true;
       } catch (e) {
         console.error("[loadProject]", e);
-        set({ isProjectLoading: false, projectLoadingMessage: "" });
+        set({ isProjectLoading: false, projectLoadingMessage: "", projectRestoreError: get().projectRestoreError || String(e) });
         get().showToast("Failed to load project: " + String(e), "error");
         return false;
       }
@@ -1802,6 +2148,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         automationLanes: serializeAutomationLanesForProject(t.automationLanes),
         automationReadEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
         automationWriteEnabled: false,
+        automationTrimWriteEnabled: false,
+        trimVolumeDB: normalizeTrimDB(t.trimVolumeDB),
         automationEnabled: deriveAutomationReadEnabled(t, t.automationLanes || []),
         meterLevel: 0,
         peakLevel: 0,
@@ -1814,6 +2162,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         tracks: templateTracks,
         masterVolume: state.masterVolume,
         masterPan: state.masterPan,
+    masterTrimVolumeDB: normalizeTrimDB(state.masterTrimVolumeDB),
         tempo: state.transport.tempo,
         timeSignature: { ...state.timeSignature },
       };
@@ -1875,6 +2224,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               ),
               automationReadEnabled,
               automationWriteEnabled: false,
+              automationTrimWriteEnabled: false,
+              trimVolumeDB: normalizeTrimDB(trackData.trimVolumeDB),
               automationEnabled: automationReadEnabled,
               meterLevel: 0,
               peakLevel: 0,
@@ -1885,7 +2236,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             // Sync track properties to backend
             nativeBridge.setTrackVolume(newId, trackData.volumeDB).catch(logBridgeError("sync"));
             nativeBridge.setTrackPan(newId, trackData.pan).catch(logBridgeError("sync"));
+            nativeBridge.setAutomationTrimValue(newId, normalizeTrimDB(trackData.trimVolumeDB)).catch(logBridgeError("sync"));
             if (trackData.muted) nativeBridge.setTrackMute(newId, true).catch(logBridgeError("sync"));
+            void nativeBridge.setTrackSoloSafe(newId, !!trackData.soloSafe);
             if (trackData.soloed) nativeBridge.setTrackSolo(newId, true).catch(logBridgeError("sync"));
           }
 

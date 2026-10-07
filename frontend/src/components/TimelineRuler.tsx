@@ -415,58 +415,60 @@ export function TimelineRuler() {
     for (let bar = startBar; bar <= endBar; bar += 1) {
       const barTime = bar * secondsPerBar;
       const barX = barTime * pixelsPerSecond - scrollX;
-      if (barX < -60 || barX > width + 60) continue;
-
-      const showBarLabel = bar >= 0 && bar % rulerDensity.labelEveryBars === 0;
-      marks.push(
-        <Line
-          key={`bar-line-${bar}`}
-          points={[barX, showBarLabel ? 0 : 12, barX, TIMELINE_RULER_HEIGHT]}
-          stroke="#555"
-          strokeWidth={showBarLabel ? 1 : 0.5}
-        />,
-      );
-
-      if (showBarLabel) {
+      // A bar starting offscreen can still contain visible beats.
+      if (barX >= -60 && barX <= width + 60) {
+        const showBarLabel = bar >= 0 && bar % rulerDensity.labelEveryBars === 0;
         marks.push(
-          <Text
-            key={`bar-label-${bar}`}
-            x={Math.round(barX) + 3}
-            y={2}
-            text={`${bar + 1}`}
-            fontSize={10}
-            fill="#888"
+          <Line
+            key={`bar-line-${bar}`}
+            points={[barX, showBarLabel ? 0 : 12, barX, TIMELINE_RULER_HEIGHT]}
+            stroke="#555"
+            strokeWidth={showBarLabel ? 1 : 0.5}
           />,
         );
+
+        if (showBarLabel) {
+          marks.push(
+            <Text
+              key={`bar-label-${bar}`}
+              x={Math.round(barX) + 3}
+              y={2}
+              text={`${bar + 1}`}
+              fontSize={10}
+              fill="#888"
+            />,
+          );
+        }
       }
 
       if (rulerDensity.mode === "bar") continue;
 
-      for (let beat = 1; beat < beatsPerBar; beat += 1) {
+      for (let beat = 0; beat < beatsPerBar; beat += 1) {
         const beatTime = barTime + beat * secondsPerBeat;
         const beatX = beatTime * pixelsPerSecond - scrollX;
-        if (beatX < -20 || beatX > width + 20) continue;
-
-        marks.push(
-          <Line
-            key={`beat-line-${bar}-${beat}`}
-            points={[beatX, 18, beatX, TIMELINE_RULER_HEIGHT]}
-            stroke="#444"
-            strokeWidth={0.5}
-          />,
-        );
-
-        if (rulerDensity.mode === "beat" && beatX >= 0 && beatX <= width) {
+        // Cull the beat independently of its subdivisions.
+        if (beat > 0 && beatX >= -20 && beatX <= width + 20) {
           marks.push(
-            <Text
-              key={`beat-label-${bar}-${beat}`}
-              x={Math.round(beatX) + 2}
-              y={14}
-              text={`${bar + 1}.${beat + 1}`}
-              fontSize={9}
-              fill="#666"
+            <Line
+              key={`beat-line-${bar}-${beat}`}
+              points={[beatX, 18, beatX, TIMELINE_RULER_HEIGHT]}
+              stroke="#444"
+              strokeWidth={0.5}
             />,
           );
+
+          if ((rulerDensity.mode === "beat" || rulerDensity.mode === "division") && beatX >= 0 && beatX <= width) {
+            marks.push(
+              <Text
+                key={`beat-label-${bar}-${beat}`}
+                x={Math.round(beatX) + 2}
+                y={14}
+                text={`${bar + 1}.${beat + 1}`}
+                fontSize={9}
+                fill="#666"
+              />,
+            );
+          }
         }
 
         if (rulerDensity.mode !== "division") continue;
@@ -511,6 +513,7 @@ export function TimelineRuler() {
     timeSignature.numerator,
     width,
   ]);
+
 
   const devicePixelRatio =
     typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;

@@ -7,6 +7,7 @@ import { Button } from '../Button';
 import {
   guardModalContextMenu,
   guardModalPointerEvent,
+  modalPointerBoundaryProps,
 } from '../../../utils/modalEventGuards';
 import {
   routeModalShortcutEvent,
@@ -91,6 +92,7 @@ export function Modal({
         as="div"
         className="fixed inset-0 z-[10000]"
         data-modal-root="true"
+        {...modalPointerBoundaryProps}
         onClose={handleClose}
         onContextMenu={guardModalContextMenu}
         onPointerDownCapture={() => activateShortcutContext({ kind: 'modal' })}

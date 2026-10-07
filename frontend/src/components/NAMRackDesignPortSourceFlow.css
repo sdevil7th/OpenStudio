@@ -69,7 +69,7 @@
   padding: clamp(8px, .62cqw, 16px);
   gap: clamp(5px, .45cqw, 12px);
 }
-.source-flow-workspace .tone-source-flow button {
+.source-flow-workspace .tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   min-height: clamp(24px, 1.4cqw, 38px);
   font-size: clamp(10px, .56cqw, 15px);
 }
@@ -112,7 +112,7 @@
 .tone-source-flow .tone-detail-panel { grid-column: 3; grid-row: 2; }
 .tone-source-flow .tone-audition-status { grid-column: 1/-1; grid-row: 3; }
 .tone-return-button,
-.tone-source-flow button {
+.tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   min-height: max(11px,.86cqw);
   border: 1px solid rgba(31,42,58,.22);
   border-radius: 3px;
@@ -596,7 +596,7 @@
   background: linear-gradient(180deg, #181c23, #12151a);
 }
 .nam-rack-source-flow-design-port .tone-return-button,
-.nam-rack-source-flow-design-port .tone-source-flow button {
+.nam-rack-source-flow-design-port .tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   border-color: rgba(255,255,255,.12);
   color: #b9bec6;
   background: #191d24;
@@ -758,7 +758,7 @@
 .nam-rack-source-flow-design-port .source-flow-workspace .tone-source-v2 {
   inset: clamp(11px, 1.5vh, 18px) clamp(12px, 1.2vw, 20px) clamp(10px, 1.4vh, 16px);
   display: grid;
-  grid-template: 58px minmax(0,1fr) / minmax(0,1fr);
+  grid-template: auto minmax(0,1fr) / minmax(0,1fr);
   gap: 0;
   padding: 0;
   overflow: hidden;
@@ -769,6 +769,8 @@
   box-shadow: 0 26px 70px rgba(0,0,0,.48), inset 0 1px rgba(255,255,255,.03);
 }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-source-header {
+  min-height: 58px;
+  flex-wrap: wrap;
   grid-column: 1;
   grid-row: 1;
   display: flex;
@@ -947,6 +949,7 @@
   z-index: 2;
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
@@ -1058,9 +1061,10 @@
   background: transparent;
 }
 .nam-rack-source-flow-design-port .tone-search-panel button svg { width: 15px; height: 15px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; }
+.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button {
-  min-width: 0;
+  flex: 1 1 calc(33.333% - 4px);
+  min-width: 74px;
   min-height: 33px;
   padding: 0 5px;
   border-color: transparent;
@@ -1334,7 +1338,7 @@
   .nam-rack-source-flow-design-port .tone-compact-selection-copy strong { overflow: hidden; color: #e8e9eb; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
   .nam-rack-source-flow-design-port .tone-compact-selection .tone-action-grid { width: min(620px,70vw); max-width: none; gap: 5px; }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-compact-selection .tone-action-grid button { min-width: 0; min-height: 32px; padding: 0 6px; font-size: 8px; white-space: nowrap; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb span { display: none; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb { display: none; }
 }
 /* One-dimensional Flex ownership helpers. */
 .tone-source-header > :nth-child(2) {

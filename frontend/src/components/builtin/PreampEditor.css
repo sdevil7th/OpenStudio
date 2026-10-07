@@ -1,0 +1,188 @@
+.preamp-approved {
+  --suite-accent: #ccb38b;
+  --suite-surface: #232b2e;
+  background: linear-gradient(120deg,#2b2c2844,transparent 60%),#1c2327;
+}
+.preamp-approved .core-effect-face {
+  padding: 25px 29px;
+  gap: 26px;
+}
+.preamp-heading>.core-panel-label {
+  color: #bba882;
+  letter-spacing: 2px;
+}
+.preamp-route {
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #90a5ae;
+  border: 1px solid #3c4b4e;
+  border-radius: 3px;
+  padding: 7px 9px;
+}
+.preamp-main {
+  flex-basis: 310px;
+  flex-grow: 1;
+}
+.preamp-gain {
+  width: 126px;
+}
+.preamp-gain .core-detail-note {
+  font-size: 10px;
+}
+.preamp-tone {
+  gap: 23px;
+  padding: 30px 20px;
+  background: #232b2e;
+  border-top: 1px solid #4d524e;
+  border-bottom: 1px solid #131b20;
+  border-radius: 8px;
+  min-height: 248px;
+}
+.preamp-tone-strip {
+  gap: 21px;
+}
+.preamp-tone-strip h3,.preamp-tone-off h3 {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: #b5b6a6;
+  white-space: nowrap;
+}
+.preamp-tone-strip>label {
+  width: 100%;
+  max-width: 130px;
+}
+.preamp-tone-strip>label>span {
+  font-size: 10px;
+  color: #96a9b1;
+}
+.preamp-tone-strip .suite-select {
+  font-size: 11px;
+  background: #192228;
+}
+.preamp-fixed-frequency {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 63px;
+  font-size: 12px;
+  color: #bec8cc;
+}
+.preamp-fixed-frequency small {
+  font-size: 10px;
+  color: #92a4ad;
+}
+.preamp-output {
+  width: 105px;
+}
+.preamp-output .core-effect-stat {
+  text-align: center;
+}
+.preamp-analysis {
+  flex-basis: 185px;
+  flex-grow: 1;
+}
+.preamp-character {
+  width: 275px;
+}
+.preamp-character>label {
+  min-width: 120px;
+}
+.preamp-tone-off {
+  min-height: 186px;
+  text-align: center;
+}
+.preamp-tone-off p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #8d9fa8;
+}
+.preamp-band-off {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 106px;
+  font-size: 12px;
+  color: #8fa0a5;
+}
+@container core-effect (max-width:800px) {
+  .preamp-approved .core-effect-face {
+    padding: 17px;
+    gap: 20px;
+  }
+  .preamp-route {
+    display: none;
+  }
+  .preamp-main {
+    gap: 13px;
+    flex-basis: 280px;
+  }
+  .preamp-gain {
+    width: 96px;
+    gap: 14px;
+  }
+  .preamp-tone {
+    gap: 10px;
+    padding: 24px 12px;
+    min-height: 226px;
+  }
+  .preamp-tone-strip {
+    gap: 16px;
+  }
+  .preamp-tone-strip h3 {
+    font-size: 9px;
+    letter-spacing: .8px;
+  }
+  .preamp-tone-strip .suite-parameter>span:first-child {
+    font-size: 11px;
+  }
+  .preamp-tone-strip .suite-value {
+    width: 48px;
+    font-size: 16px;
+  }
+  .preamp-tone-strip .suite-select {
+    font-size: 10px;
+    padding-inline: 5px;
+  }
+  .preamp-tone-strip>label>span {
+    font-size: 9px;
+  }
+  .preamp-output {
+    width: 87px;
+  }
+  .preamp-character {
+    width: 160px;
+    gap: 15px;
+  }
+  .preamp-character>label {
+    min-width: 100px;
+  }
+  .preamp-character .core-detail-note {
+    display: none;
+  }
+  .preamp-analysis {
+    gap: 15px;
+    flex-basis: 174px;
+  }
+}
+@container core-effect (max-height:560px) {
+  .preamp-approved .core-effect-face {
+    padding-block: 14px;
+    gap: 16px;
+  }
+  .preamp-main {
+    flex-basis: 232px;
+  }
+  .preamp-tone {
+    min-height: 218px;
+    padding-block: 20px;
+  }
+  .preamp-gain .core-detail-note {
+    display: none;
+  }
+  .preamp-analysis {
+    flex-basis: 172px;
+  }
+  .preamp-output .core-effect-stat strong {
+    font-size: 22px;
+  }
+}

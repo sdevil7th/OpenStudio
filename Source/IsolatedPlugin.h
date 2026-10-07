@@ -45,6 +45,8 @@ public:
     // Device-free subprocess fixture uses the exact production transport.
     bool setTestFailure(int);
     bool sendTestParameterGesture();
+    void drainParameterEdits(); // Message thread; also flushed before automation Stop.
+    uint64_t takeParameterEditDrops();
 private:
     struct Impl;
     IsolatedPlugin(std::unique_ptr<Impl>, const BusesProperties&);
@@ -56,3 +58,5 @@ private:
 int runIsolatedPluginWorker(const juce::String& mappingName);
 int runIsolatedPluginRegression(const juce::File& directory, bool exerciseEditors = false);
 int runIsolatedPluginCompatibility(const juce::File& catalog, const juce::String& name, const juce::File& directory);
+void flushOpenStudioIsolatedParameterEdits(juce::AudioProcessor* processor);
+uint64_t takeOpenStudioIsolatedParameterEditDrops(juce::AudioProcessor* processor);

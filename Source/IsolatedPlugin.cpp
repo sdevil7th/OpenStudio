@@ -45,9 +45,20 @@ IsolatedPlugin::BusesProperties readBuses(const juce::var& metadata, bool& valid
 class RemoteParameter final : public juce::HostedAudioProcessorParameter
 {
 public:
-    RemoteParameter(Shared& state, int index, juce::var data) : shared(state), slot(state.params[index]), metadata(std::move(data)) {}
+    RemoteParameter(Shared& state, ParameterPacket& queue, int index, juce::var data)
+        : shared(state), slot(state.params[index]), pending(queue), parameterIndex(static_cast<uint32_t>(index)), metadata(std::move(data)),
+          sampleAccurate(static_cast<bool>(metadata.getProperty("sampleAccurate", false))),
+          linearQueue(static_cast<bool>(metadata.getProperty("linearQueue", false))), automatable(static_cast<bool>(metadata.getProperty("automatable", true))),
+          discrete(static_cast<bool>(metadata.getProperty("discrete", false))), boolean(static_cast<bool>(metadata.getProperty("boolean", false))),
+          steps(juce::jmax(2, static_cast<int>(metadata.getProperty("steps", getDefaultNumParameterSteps())))),
+          category(static_cast<Category>(static_cast<int>(metadata.getProperty("category", 0)))), choices(metadata.getProperty("enumLabels", {}))
+    { updatePresentation(metadata); }
     float getValue() const override
     {
+        const auto dispatched = editorDispatchValue.load();
+        if (std::isfinite(dispatched)) return dispatched;
+        const auto automated = automationValue.load();
+        if (std::isfinite(automated)) return automated;
         const auto value = slot.revision.load(std::memory_order_acquire) == slot.acknowledged.load(std::memory_order_acquire)
             ? slot.actual.load() : slot.desired.load();
         return std::isfinite(value) ? juce::jlimit(0.0f, 1.0f, value) : 0.0f;
@@ -55,41 +66,89 @@ public:
     void setValue(float value) override
     {
         if (!std::isfinite(value)) return;
+        automationValue.store(std::numeric_limits<float>::quiet_NaN());
         slot.desired.store(juce::jlimit(0.0f, 1.0f, value));
         slot.revision.fetch_add(1, std::memory_order_release);
         shared.parameterChanges.fetch_add(1, std::memory_order_release);
     }
-    float getDefaultValue() const override { return juce::jlimit(0.0f, 1.0f, static_cast<float>(metadata.getProperty("default", 0))); }
-    juce::String getName(int length) const override { return metadata.getProperty("name", "Parameter").toString().substring(0, length); }
+    bool supportsSampleAccurateAutomation() const noexcept override { return sampleAccurate; }
+    bool supportsLinearAutomationQueue() const noexcept override { return linearQueue; }
+    bool queueValueAtSampleOffset(float value, int offset) noexcept override
+    {
+        if (!supportsSampleAccurateAutomation() || !isAutomatable() || offset < 0 || !std::isfinite(value)) return false;
+        const auto bounded = juce::jlimit(0.0f, 1.0f, value);
+        if (!pending.add(parameterIndex, static_cast<uint32_t>(offset), bounded)) return false;
+        automationValue.store(bounded); return true;
+    }
+    float getDefaultValue() const override { return defaultValue.load(); }
+    juce::String getName(int length) const override {
+        const auto name = std::atomic_load(&displayName);
+        return name ? name->substring(0, length) : juce::String("Parameter");
+    }
+    void updatePresentation(const juce::var& data) {
+        std::atomic_store(&displayName, std::make_shared<const juce::String>(data.getProperty("name", "Parameter").toString().substring(0, 256)));
+        defaultValue.store(juce::jlimit(0.0f, 1.0f, static_cast<float>(data.getProperty("default", 0))));
+    }
     // Generic proxy controls expose normalized values, not the plugin's unit
     // conversion. The native worker editor retains the exact plugin display.
     juce::String getLabel() const override { return {}; }
     juce::String getParameterID() const override { return metadata.getProperty("id", "").toString(); }
-    int getNumSteps() const override { return juce::jmax(2, static_cast<int>(metadata.getProperty("steps", getDefaultNumParameterSteps()))); }
-    bool isDiscrete() const override { return static_cast<bool>(metadata.getProperty("discrete", false)); }
-    bool isBoolean() const override { return static_cast<bool>(metadata.getProperty("boolean", false)); }
-    bool isAutomatable() const override { return static_cast<bool>(metadata.getProperty("automatable", true)); }
+    int getNumSteps() const override { return steps; }
+    bool isDiscrete() const override { return discrete; }
+    bool isBoolean() const override { return boolean; }
+    Category getCategory() const override { return category; }
+    bool isAutomatable() const override { return automatable; }
     // A normalized fallback is explicit; the real native editor retains the
     // plugin's exact units/value parser rather than inventing a linear mapping.
-    juce::String getText(float value, int length) const override { return (juce::String(value * 100.0f, 1) + "%").substring(0, length); }
-    float getValueForText(const juce::String& text) const override { return juce::jlimit(0.0f, 1.0f, text.getFloatValue() / 100.0f); }
+    juce::String getText(float value, int length) const override {
+        if (const auto* labels = choices.getArray(); labels && !labels->isEmpty())
+            return (*labels)[juce::jlimit(0, labels->size() - 1, juce::roundToInt(value * static_cast<float>(labels->size() - 1)))].toString().substring(0, length);
+        return (juce::String(value * 100.0f, 1) + "%").substring(0, length);
+    }
+    float getValueForText(const juce::String& text) const override {
+        if (const auto* labels = choices.getArray(); labels && labels->size() > 1)
+            for (int index = 0; index < labels->size(); ++index) if ((*labels)[index].toString() == text) return static_cast<float>(index) / static_cast<float>(labels->size() - 1);
+        return juce::jlimit(0.0f, 1.0f, text.getFloatValue() / 100.0f);
+    }
     void dispatchEditorChanges()
     {
         const auto flags = slot.editorEvents.exchange(0, std::memory_order_acq_rel);
+        if (flags) automationValue.store(std::numeric_limits<float>::quiet_NaN());
         if ((flags & 1u) && !editorGesture) { beginChangeGesture(); editorGesture = true; }
         if (flags & 2u) sendValueChangedMessageToListeners(slot.editorValue.load());
         if ((flags & 4u) && editorGesture) { endChangeGesture(); editorGesture = false; }
     }
+    void dispatchEditorEvent(const PluginAutomationCapturedEvent& event)
+    {
+        const ScopedPluginAutomationExternalCapture context(event);
+        automationValue.store(std::numeric_limits<float>::quiet_NaN());
+        editorDispatchValue.store(event.value);
+        if (event.phase == 1u && !editorGesture) { beginChangeGesture(); editorGesture = true; }
+        else if (event.phase == 2u) sendValueChangedMessageToListeners(event.value);
+        else if (event.phase == 4u && editorGesture) { endChangeGesture(); editorGesture = false; }
+        editorDispatchValue.store(std::numeric_limits<float>::quiet_NaN());
+    }
     void discardEditorChanges()
     {
         slot.editorEvents.store(0);
+        automationValue.store(std::numeric_limits<float>::quiet_NaN());
         if (editorGesture) { endChangeGesture(); editorGesture = false; }
     }
 private:
     bool editorGesture = false;
     Shared& shared;
     Parameter& slot;
+    ParameterPacket& pending;
+    uint32_t parameterIndex;
+    std::atomic<float> automationValue { std::numeric_limits<float>::quiet_NaN() }, editorDispatchValue { std::numeric_limits<float>::quiet_NaN() };
     juce::var metadata;
+    std::shared_ptr<const juce::String> displayName;
+    std::atomic<float> defaultValue { 0.0f };
+    const bool sampleAccurate, linearQueue, automatable;
+    const bool discrete, boolean;
+    const int steps;
+    const Category category;
+    const juce::var choices;
 };
 }
 
@@ -111,9 +170,13 @@ struct IsolatedPlugin::Impl
     juce::AudioBuffer<float> input, output;
     juce::MidiBuffer returnedMidi;
     MidiPacket inputMidi, outputMidi;
+    ParameterPacket pendingParameters, inputParameters;
+    PluginAutomationProcessingContext inputAutomationContext;
+    uint64_t automationEpoch = 0;
     juce::AudioPlayHead::PositionInfo inputPosition;
     bool hasInputPosition = false, prepared = false;
     uint32_t controlSequence = 0, generation = 0;
+    uint32_t presentationRevision = 0;
     uint64_t sequence = 0;
     int quantum = 512, channelCount = 2, cursor = 0, consecutiveMisses = 0;
     double rate = 44100;
@@ -164,8 +227,9 @@ struct IsolatedPlugin::Impl
             { fault.store(deadline); child.kill(); return false; }
             juce::Thread::sleep(1);
         }
-        if (shared->success.load() != 1 || shared->fault.load() != healthy)
-        { fault.store(controlFailure); return false; }
+        const auto workerFault = shared->fault.load();
+        if (shared->success.load() != 1 || workerFault != healthy)
+        { fault.store(workerFault != healthy ? workerFault : controlFailure); return false; }
         if (!editorOnly) paused.store(wasPaused, std::memory_order_seq_cst);
         return true;
     }
@@ -210,7 +274,18 @@ struct IsolatedPlugin::Impl
         if (text.getNumBytesAsUTF8() >= metadataBytes) { error = "Plugin description is too large"; return false; }
         memcpy(shared->text, text.toRawUTF8(), text.getNumBytesAsUTF8() + 1);
         shared->textBytes = static_cast<uint32_t>(text.getNumBytesAsUTF8());
-        if (!transact(initialise, 0, 20000)) { error = "Isolated plugin failed to initialise (no in-process fallback)"; return false; }
+        if (!transact(initialise, 0, 20000)) {
+            error = "Isolated plugin failed to initialise (no in-process fallback)";
+            if (shared->textBytes < metadataBytes) {
+                const auto failureText = juce::String::fromUTF8(shared->text, static_cast<int>(shared->textBytes));
+                if (hasBoundedJsonEnvelope(failureText, metadataBytes)) {
+                    const auto failure = juce::JSON::parse(failureText);
+                    const auto reason = failure.getProperty("error", {}).toString().substring(0, 1024);
+                    if (reason.isNotEmpty()) error += ": " + reason;
+                }
+            }
+            return false;
+        }
         if (shared->textBytes >= metadataBytes) { error = "Invalid isolated metadata size"; return false; }
         const auto response = juce::String::fromUTF8(shared->text, static_cast<int>(shared->textBytes));
         if (!hasBoundedJsonEnvelope(response, metadataBytes)) { error = "Invalid isolated metadata envelope"; return false; }
@@ -230,7 +305,9 @@ struct IsolatedPlugin::Impl
         const auto started = juce::Time::getMillisecondCounterHiRes();
         while (slot.state.load(std::memory_order_acquire) != 3)
         {
-            if (shared->fault.load() != healthy || !child.isRunning()) { fault.store(childExited); return false; }
+            const auto workerFault = shared->fault.load();
+            if (workerFault != healthy) { fault.store(workerFault); return false; }
+            if (!child.isRunning()) { fault.store(childExited); return false; }
             if (juce::Time::getMillisecondCounterHiRes() - started > 2000) { fault.store(deadline); return false; }
             juce::Thread::sleep(1);
         }
@@ -268,6 +345,9 @@ struct IsolatedPlugin::Impl
         slot.sequence = sequence; slot.generation = generation;
         slot.hasPosition = hasInputPosition; slot.position = inputPosition;
         slot.midi = inputMidi;
+        slot.automation.count = inputParameters.count;
+        std::copy_n(inputParameters.points.begin(), inputParameters.count, slot.automation.points.begin());
+        slot.automationContext = inputAutomationContext;
         for (int channel = 0; channel < channelCount; ++channel)
             memcpy(slot.audio[channel], input.getReadPointer(channel), static_cast<size_t>(quantum) * sizeof(float));
         slot.state.store(1, std::memory_order_release);
@@ -297,7 +377,7 @@ IsolatedPlugin::IsolatedPlugin(std::unique_ptr<Impl> state, const BusesPropertie
 {
     impl->channelCount = juce::jmax(isMidiEffect() ? 2 : 1, getTotalNumInputChannels(), getTotalNumOutputChannels());
     const auto params = impl->metadata.getProperty("parameters", {});
-    for (int i = 0; i < params.size(); ++i) addHostedParameter(std::make_unique<RemoteParameter>(*impl->shared, i, params[i]));
+    for (int i = 0; i < params.size(); ++i) addHostedParameter(std::make_unique<RemoteParameter>(*impl->shared, impl->pendingParameters, i, params[i]));
     impl->returnedMidi.ensureSize(32768);
     startTimer(100);
 }
@@ -325,6 +405,7 @@ juce::String IsolatedPlugin::failureDescription() const
         case deadline: return "The isolated plugin missed its processing/control deadline and was quarantined.";
         case invalidAudio: return "The isolated plugin produced non-finite audio and was quarantined.";
         case invalidPacket: return "The isolated plugin exceeded its audio/MIDI transport contract.";
+        case incompatible: return "The isolated plugin's parameter or channel contract changed. Its worker must be reloaded before automation can resume.";
         default: return "The isolated plugin failed a control or compatibility operation.";
     }
 }
@@ -344,6 +425,7 @@ void IsolatedPlugin::prepareToPlay(double sampleRate, int block)
     impl->input.setSize(impl->channelCount, impl->quantum); impl->input.clear();
     impl->output.setSize(impl->channelCount, impl->quantum); impl->output.clear();
     impl->inputMidi.clear(); impl->outputMidi.clear();
+    impl->pendingParameters.clear(); impl->inputParameters.clear(); impl->automationEpoch = 0;
     impl->cursor = 0; impl->sequence = 0; impl->consecutiveMisses = 0;
     impl->warmup = 2; impl->resetPending.store(false);
     impl->prepared = true;
@@ -360,6 +442,7 @@ void IsolatedPlugin::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     struct Leave { std::atomic<int>& readers; ~Leave() { readers.fetch_sub(1, std::memory_order_seq_cst); } } leave { impl->readers };
     if (impl->paused.load(std::memory_order_seq_cst) || !isHealthy() || !impl->prepared)
     {
+        impl->pendingParameters.clear();
         if (impl->fault.load() == healthy && impl->shared->fault.load() != healthy) impl->fault.store(impl->shared->fault.load());
         buffer.clear(); midi.clear(); return;
     }
@@ -367,9 +450,23 @@ void IsolatedPlugin::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     {
         ++impl->generation; impl->cursor = 0; impl->warmup = 2;
         impl->input.clear(); impl->output.clear(); impl->inputMidi.clear(); impl->outputMidi.clear();
+        impl->inputParameters.clear();
     }
     impl->returnedMidi.clear();
     const auto count = buffer.getNumSamples();
+    if (!impl->pendingParameters.valid(static_cast<uint32_t>(count), impl->shared->parameterCount))
+    { impl->fault.store(invalidPacket); impl->pendingParameters.clear(); buffer.clear(); midi.clear(); return; }
+    const auto context = pluginAutomationProcessingContext;
+    if (context.processing)
+    {
+        impl->shared->captureClock.update(context);
+        if (context.epoch != 0 && impl->automationEpoch != 0 && context.epoch != impl->automationEpoch)
+        {
+            ++impl->generation; impl->cursor = 0; impl->warmup = 2;
+            impl->input.clear(); impl->output.clear(); impl->inputMidi.clear(); impl->outputMidi.clear(); impl->inputParameters.clear();
+        }
+        impl->automationEpoch = context.epoch;
+    }
     if (count > impl->quantum || buffer.getNumChannels() < impl->channelCount)
     { impl->fault.store(invalidPacket); buffer.clear(); midi.clear(); return; }
     // Caller storage is preallocated in the engine; a bounded output packet is
@@ -379,7 +476,9 @@ void IsolatedPlugin::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     {
         if (impl->cursor == 0)
         {
-            impl->beginQuantum(); impl->inputMidi.clear();
+            impl->beginQuantum(); impl->inputMidi.clear(); impl->inputParameters.clear();
+            impl->inputAutomationContext = context;
+            impl->inputAutomationContext.position += static_cast<double>(start) / impl->rate;
             const auto position = getPlayHead() ? getPlayHead()->getPosition() : juce::nullopt;
             impl->hasInputPosition = position.hasValue();
             if (position) {
@@ -391,6 +490,13 @@ void IsolatedPlugin::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
         const auto amount = juce::jmin(count - start, impl->quantum - impl->cursor);
+        for (uint32_t i = 0; i < impl->pendingParameters.count; ++i)
+        {
+            const auto& event = impl->pendingParameters.points[i];
+            if (event.sample >= static_cast<uint32_t>(start) && event.sample < static_cast<uint32_t>(start + amount)
+                && !impl->inputParameters.add(event.index, static_cast<uint32_t>(impl->cursor) + event.sample - static_cast<uint32_t>(start), event.value))
+                impl->fault.store(invalidPacket);
+        }
         for (const auto event : midi)
             if (event.samplePosition >= start && event.samplePosition < start + amount
                 && !impl->inputMidi.add(event.data, event.numBytes, impl->cursor + event.samplePosition - start))
@@ -417,6 +523,7 @@ void IsolatedPlugin::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         { impl->submitQuantum(); ++impl->sequence; impl->cursor = 0; }
     }
     midi.clear();
+    impl->pendingParameters.clear();
     if (!isHealthy())
     {
         if (impl->fault.load() == healthy) impl->fault.store(impl->shared->fault.load());
@@ -445,7 +552,12 @@ void IsolatedPlugin::setStateInformation(const void* data, int size)
     juce::TemporaryFile temporary(impl->stateFile);
     if (!temporary.getFile().replaceWithData(data, static_cast<size_t>(size)) || !temporary.overwriteTargetFileWithTemporary())
     { impl->fault.store(controlFailure); return; }
-    if (impl->transact(setState)) impl->acknowledgedState.replaceAll(data, static_cast<size_t>(size));
+    if (impl->transact(setState))
+    {
+        impl->acknowledgedState.replaceAll(data, static_cast<size_t>(size));
+        PluginAutomationCapturedEvent stale; while (impl->shared->editorQueue.pop(stale)) {}
+        for (auto* parameter : getParameters()) if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->discardEditorChanges();
+    }
 }
 bool IsolatedPlugin::openRemoteEditor()
 {
@@ -497,11 +609,63 @@ void IsolatedPlugin::timerCallback()
         return;
     }
     const auto latency = impl->shared->latency.load();
-    for (auto* parameter : getParameters())
-        if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->dispatchEditorChanges();
+    drainParameterEdits();
     if (latency < 0 || latency > 3840000) { impl->fault.store(invalidPacket); return; }
     const auto total = transportLatencySamples() + latency;
     if (getLatencySamples() != total) setLatencySamples(total);
+}
+void IsolatedPlugin::drainParameterEdits()
+{
+    if (!impl->shared || !isHealthy()) return;
+    if (impl->shared->parameterPresentationRevision.load(std::memory_order_acquire) != impl->presentationRevision)
+    {
+        const juce::ScopedLock lock(impl->controlLock);
+        if (!impl->transact(getParameterPresentation)) return;
+        if (impl->shared->textBytes >= metadataBytes) { impl->fault.store(invalidPacket); return; }
+        const auto text = juce::String::fromUTF8(impl->shared->text, static_cast<int>(impl->shared->textBytes));
+        if (!hasBoundedJsonEnvelope(text, metadataBytes)) { impl->fault.store(invalidPacket); return; }
+        const auto result = juce::JSON::parse(text), items = result.getProperty("parameters", {});
+        const auto revision = static_cast<juce::int64>(result.getProperty("revision", -1));
+        auto parametersMetadata = impl->metadata.getProperty("parameters", {});
+        if (!items.isArray() || items.size() != getParameters().size() || revision < 0 || revision > UINT32_MAX)
+        { impl->fault.store(incompatible); return; }
+        for (int index = 0; index < items.size(); ++index)
+        {
+            const auto& item = items[index];
+            const auto value = static_cast<double>(item.getProperty("default", -1));
+            if (!item.isObject() || item.getProperty("id", "").toString() != getHostedParameter(index)->getParameterID()
+                || !item.getProperty("name", {}).isString() || !std::isfinite(value) || value < 0 || value > 1)
+            { impl->fault.store(incompatible); return; }
+        }
+        for (int index = 0; index < items.size(); ++index)
+        {
+            if (auto* remote = dynamic_cast<RemoteParameter*>(getParameters()[index])) remote->updatePresentation(items[index]);
+            if (auto* data = parametersMetadata[index].getDynamicObject())
+                for (const auto* key : { "name", "label", "default" }) data->setProperty(key, items[index].getProperty(key, {}));
+        }
+        impl->presentationRevision = static_cast<uint32_t>(revision);
+        updateHostDisplay(juce::AudioProcessorListener::ChangeDetails().withParameterInfoChanged(true));
+    }
+    PluginAutomationCapturedEvent event;
+    for (size_t i = 0; i < PluginAutomationEventQueue::capacity && impl->shared->editorQueue.pop(event); ++i)
+    {
+        if (!juce::isPositiveAndBelow(event.parameter, getParameters().size()) || !std::isfinite(event.value)
+            || event.value < 0 || event.value > 1 || (event.timed && (!std::isfinite(event.time) || event.time < 0))
+            || (event.phase != 1u && event.phase != 2u && event.phase != 4u)) { impl->fault.store(invalidPacket); return; }
+        if (auto* remote = dynamic_cast<RemoteParameter*>(getParameters()[event.parameter])) remote->dispatchEditorEvent(event);
+    }
+    for (auto* parameter : getParameters())
+        if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->dispatchEditorChanges();
+}
+void flushOpenStudioIsolatedParameterEdits(juce::AudioProcessor* processor)
+{
+    if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor)) isolated->drainParameterEdits();
+}
+uint64_t IsolatedPlugin::takeParameterEditDrops() { return impl->shared ? impl->shared->editorDropped.exchange(0) : 0; }
+uint64_t takeOpenStudioIsolatedParameterEditDrops(juce::AudioProcessor* processor)
+{
+    if (auto* isolated = dynamic_cast<IsolatedPlugin*>(processor)) return isolated->takeParameterEditDrops();
+    return 0;
 }
 bool IsolatedPlugin::restart()
 {
@@ -517,6 +681,9 @@ bool IsolatedPlugin::restart()
     impl->shared->editorVisible.store(0); impl->shared->editorFocused.store(0);
     impl->shared->keyRead.store(0); impl->shared->keyWrite.store(0);
     impl->shared->parameterChanges.store(0); impl->shared->resetRequested.store(0);
+    impl->shared->parameterPresentationRevision.store(0); impl->presentationRevision = 0;
+    PluginAutomationCapturedEvent stale; while (impl->shared->editorQueue.pop(stale)) {}
+    impl->shared->editorDropped.store(0); impl->shared->captureClock.ticks.store(0);
     for (auto* parameter : getParameters())
         if (auto* remote = dynamic_cast<RemoteParameter*>(parameter)) remote->discardEditorChanges();
     for (auto& slot : impl->shared->packets) slot.state.store(0);
@@ -526,11 +693,18 @@ bool IsolatedPlugin::restart()
     if (!impl->launch(impl->rate, impl->quantum, error)) { impl->fault.store(controlFailure); return false; }
     // Existing automation parameters hold references to this mapping. Never
     // replace their identity/layout beneath live graph readers after an update.
-    for (const auto* key : { "parameters", "inputs", "outputs" })
+    for (const auto* key : { "inputs", "outputs" })
         if (juce::JSON::toString(oldMetadata.getProperty(key, {})) != juce::JSON::toString(impl->metadata.getProperty(key, {})))
         { impl->fault.store(incompatible); return false; }
+    const auto before = oldMetadata.getProperty("parameters", {}), after = impl->metadata.getProperty("parameters", {});
+    if (!before.isArray() || !after.isArray() || before.size() != after.size()) { impl->fault.store(incompatible); return false; }
+    for (int index = 0; index < before.size(); ++index)
+        for (const auto* key : { "id", "steps", "discrete", "boolean", "automatable", "category", "enumLabels", "sampleAccurate", "linearQueue" })
+            if (juce::JSON::toString(before[index].getProperty(key, {})) != juce::JSON::toString(after[index].getProperty(key, {})))
+            { impl->fault.store(incompatible); return false; }
     prepareToPlay(impl->rate, impl->quantum);
     if (state.getSize()) setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    drainParameterEdits();
     return isHealthy();
 }
 

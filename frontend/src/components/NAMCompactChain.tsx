@@ -13,6 +13,7 @@ import type {
   NAMSignalChainRouteModule,
 } from "./NAMSignalChainTypes";
 import "./NAMCompactChain.css";
+import { TONE3000LoadedTone, TONE3000Logo } from "./TONE3000Branding";
 
 export type NAMCompactChainProps = {
   fixedPre: NAMSignalChainRouteModule[];
@@ -72,6 +73,8 @@ function ChainNode({
           <small>{module.caption}</small>
         </span>
       </button>
+
+      {module.toneOrigin && <TONE3000LoadedTone tone={module.toneOrigin} onDetails={module.onToneDetails} />}
 
       <footer>
         <span className="nam-compact-chain-node-state" data-active={active} title={stateLabel}>
@@ -194,7 +197,7 @@ export function NAMCompactChain({
       >
         <div className="nam-compact-chain-lane">
           <ChainGroup eyebrow="01" title="Pre & pedals" accent="pre" modules={fixedPre} />
-          <ChainGroup eyebrow="02" title="Capture & cab" accent="capture" modules={captureCore} />
+          <div className="flex flex-col gap-2"><TONE3000Logo /><ChainGroup eyebrow="02" title="Capture & cab" accent="capture" modules={captureCore} /></div>
           <ChainGroup
             eyebrow="03"
             title="Post effects"

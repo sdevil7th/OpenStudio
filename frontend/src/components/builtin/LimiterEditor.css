@@ -1,0 +1,91 @@
+.limiter-approved {
+  --suite-accent: #8ab8dd;
+  --suite-surface: #1d2a34;
+  background: #1d2a34;
+}
+.limiter-main {
+  min-height: 316px;
+  flex-grow: 1;
+  flex-basis: 340px;
+}
+.limiter-input {
+  width: 145px;
+}
+.limiter-input .suite-button {
+  font-size: 10px;
+  min-height: 30px;
+  padding-inline: 7px;
+}
+.limiter-metering {
+  background: #14232e;
+  border: 1px solid #344a5a;
+}
+.limiter-peak-stats {
+  padding: 12px 14px;
+  border-top: 1px solid #344a5a;
+}
+.limiter-peak-stats .core-effect-stat strong {
+  font-size: 24px;
+}
+.limiter-metering .loudness-panel {
+  padding: 12px 16px;
+  gap: 9px;
+}
+.limiter-metering .loudness-panel .text-3xl {
+  font-size: 27px;
+}
+.limiter-approved .core-detail-content {
+  min-height: 126px;
+}
+@container core-effect (max-width:800px) {
+  .limiter-main {
+    gap: 12px;
+    min-height: 280px;
+    flex-basis: 300px;
+  }
+  .limiter-input {
+    width: 108px;
+  }
+  .limiter-metering .loudness-panel {
+    padding: 10px;
+    gap: 8px;
+  }
+  .limiter-peak-stats {
+    padding: 10px;
+    gap: 8px;
+  }
+  .limiter-peak-stats .core-effect-stat strong {
+    font-size: 20px;
+  }
+  .limiter-peak-stats .core-effect-stat>span {
+    font-size: 9px;
+    letter-spacing: .5px;
+  }
+  .limiter-metering .loudness-panel .text-3xl {
+    font-size: 23px;
+  }
+  .limiter-metering .loudness-panel .eq-button {
+    font-size: 10px;
+  }
+  .limiter-approved .core-detail-content {
+    min-height: 112px;
+  }
+}
+@container core-effect (max-height:560px) {
+  .limiter-main {
+    min-height: 300px;
+    flex-basis: 300px;
+  }
+  .limiter-input {
+    padding: 0;
+  }
+  .limiter-metering .loudness-panel {
+    gap: 5px;
+  }
+  .limiter-peak-stats {
+    padding-block: 8px;
+  }
+  .limiter-approved .core-detail-content {
+    min-height: 104px;
+  }
+}

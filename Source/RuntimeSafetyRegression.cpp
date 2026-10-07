@@ -58,6 +58,7 @@ public:
         return auxiliary ? buses.withInput("Auxiliary", juce::AudioChannelSet::stereo(), true) : buses;
     }
     std::atomic<int> mode { 0 }, calls { 0 };
+    double keyLeft = 0.0, keyRight = 0.0, mainInput = 0.0;
     void prepareToPlay(double, int) override {}
     void releaseResources() override {}
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override { process(buffer); }
@@ -67,6 +68,14 @@ public:
         ++calls;
         if (buffer.getNumChannels() < juce::jmax(getTotalNumInputChannels(), getTotalNumOutputChannels()))
             throw std::runtime_error("host supplied a truncated bus layout");
+        if (buffer.getNumSamples() > 0 && getMainBusNumInputChannels() > 0)
+            mainInput = static_cast<double>(buffer.getSample(0, 0));
+        if (getBusCount(true) > 1 && buffer.getNumSamples() > 0)
+        {
+            const auto key = getBusBuffer(buffer, true, 1);
+            keyLeft = key.getNumChannels() > 0 ? static_cast<double>(key.getSample(0, 0)) : 0.0;
+            keyRight = key.getNumChannels() > 1 ? static_cast<double>(key.getSample(1, 0)) : keyLeft;
+        }
         if (mode.load() == 1) throw std::runtime_error("injected processor exception");
         if (mode.load() == 2) buffer.setSample(0, 0, std::numeric_limits<Sample>::quiet_NaN());
         if (mode.load() == 3) buffer.setSample(0, 0, std::numeric_limits<Sample>::infinity());
@@ -493,11 +502,17 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("callback_scratch_identity_unchanged", scratch == track.fxProcessBuffer.getWritePointer(0)
             && automation == track.automationGainBuffer.getWritePointer(0)
             && preFader == track.preFaderBuffer.getWritePointer(0));
-        for (int channels : { 0, 3, 65 })
+        // The hosted four-channel fixture expands the prepared track contract;
+        // a three-channel input is valid and is adapted by TrackProcessor.
+        for (int channels : { 0, track.getProcessingChannelCount() + 1, 65 })
         {
             juce::AudioBuffer<float> block(channels, 64);
             check("invalid_track_channels_rejected", !track.tryProcessBlock(block, midi));
         }
+        juce::AudioBuffer<float> multichannel(3, 64);
+        fill(multichannel);
+        check("prepared_multichannel_input_accepted", track.tryProcessBlock(multichannel, midi)
+            && ProcessorSafety::isFinite(multichannel));
         fill(normal);
         check("valid_block_recovers_after_contract_fault", track.tryProcessBlock(normal, midi)
             && ProcessorSafety::isFinite(normal) && normal.getMagnitude(0, 64) > 0.0f);
@@ -563,13 +578,59 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         track.setSidechainSource(0, "short-sidechain");
         juce::AudioBuffer<float> shortSource(2, 3), block(2, 64);
         fill(shortSource);
-        track.setSidechainBuffer(&shortSource);
+        auto routes = track.getSidechainRouteSnapshot();
+        routes.front().buffer = &shortSource;
+        track.setSidechainBuffers(&routes);
         fill(block);
         track.processBlock(block, midi);
         check("short_sidechain_zero_padded", ProcessorSafety::isFinite(block)
             && track.fxProcessBuffer.getSample(2, 2) == 0.125f
             && track.fxProcessBuffer.getSample(2, 3) == 0.0f
             && track.fxProcessBuffer.getSample(2, 63) == 0.0f);
+    }
+    for (const auto precision : { ProcessingPrecisionMode::Float32, ProcessingPrecisionMode::Hybrid64 })
+    {
+        TrackProcessor track;
+        track.setRateAndBufferSizeDetails(48000, 64);
+        track.setProcessingPrecisionMode(precision);
+        track.prepareToPlay(48000, 64);
+        auto first = std::make_unique<FaultProbe>(2, true);
+        auto second = std::make_unique<FaultProbe>(2, true);
+        auto* firstProbe = first.get();
+        auto* secondProbe = second.get();
+        track.addTrackFX(std::move(first), 48000, 64);
+        track.addTrackFX(std::move(second), 48000, 64);
+        track.setSidechainSource(0, "key-a");
+        track.setSidechainSource(1, "key-b");
+        juce::AudioBuffer<float> keyA(1, 64), keyB(2, 64), block(2, 64);
+        fill(keyA); keyA.applyGain(2.0f);
+        fill(keyB); keyB.applyGain(6.0f);
+        auto routes = track.getSidechainRouteSnapshot();
+        for (auto& route : routes)
+            route.buffer = route.sourceTrackId == "key-a" ? &keyA : &keyB;
+        track.setSidechainBuffers(&routes);
+        const auto process = [&] { fill(block); track.processBlock(block, midi); };
+        process();
+        const bool independent = firstProbe->keyLeft == 0.25 && firstProbe->keyRight == 0.25
+            && secondProbe->keyLeft == 0.75 && secondProbe->keyRight == 0.75;
+        track.reorderTrackFX(0, 1);
+        process();
+        const bool reordered = track.getSidechainSource(0) == "key-b"
+            && track.getSidechainSource(1) == "key-a"
+            && firstProbe->keyLeft == 0.25 && secondProbe->keyLeft == 0.75;
+        track.setSidechainSource(1, "new-key");
+        process();
+        const bool staleSourceSilent = firstProbe->keyLeft == 0.0 && firstProbe->keyRight == 0.0;
+        track.removeTrackFX(1);
+        process();
+        const bool removed = track.getSidechainSource(0) == "key-b"
+            && track.getSidechainSource(1).isEmpty() && secondProbe->keyLeft == 0.75;
+        track.setSidechainBuffers(nullptr);
+        process();
+        check(precision == ProcessingPrecisionMode::Float32 ? "per_effect_keys_float" : "per_effect_keys_double",
+            independent && reordered && staleSourceSilent && removed
+            && secondProbe->keyLeft == 0.0 && secondProbe->keyRight == 0.0
+            && ProcessorSafety::isFinite(block));
     }
     for (const bool monoInput : { false, true })
     {
@@ -583,7 +644,9 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         juce::AudioBuffer<float> source(2, 64), block(2, 64);
         fill(source);
         source.applyGain(2.0f);
-        track.setSidechainBuffer(&source);
+        auto routes = track.getSidechainRouteSnapshot();
+        routes.front().buffer = &source;
+        track.setSidechainBuffers(&routes);
         fill(block);
         track.processBlock(block, midi);
         const int offset = monoInput ? 1 : 2;

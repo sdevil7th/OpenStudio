@@ -7,7 +7,7 @@ import {
 } from "../store/actionRegistry";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import {
   routeModalShortcutEvent,
   useModalShortcutScope,
@@ -131,6 +131,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     <div
       className="fixed inset-0 z-[10000] flex items-start justify-center pt-[15vh]"
       data-modal-root="true"
+      {...modalPointerBoundaryProps}
       onClick={onClose}
       onContextMenu={guardModalContextMenu}
       onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
