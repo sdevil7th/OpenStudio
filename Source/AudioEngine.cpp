@@ -74830,7 +74830,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 if (ffmpegOk)
                     for (juce::int64 offset = 0; offset < reader->lengthInSamples && ffmpegOk; offset += 4096)
                     {
-                        const int count = static_cast<int>(juce::jmin<juce::int64>(4096, reader->lengthInSamples - offset));
+                        const int count = static_cast<int>(juce::jmin(juce::int64{4096}, reader->lengthInSamples - offset));
                         ffmpegOk = (!keepRunning || keepRunning())
                             && reader->read(&block, 0, count, offset, true, numChannels > 1)
                             && exportQuantizer.write(*finalWriter, block, 0, count);

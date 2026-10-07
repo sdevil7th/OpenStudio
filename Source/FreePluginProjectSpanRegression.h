@@ -12,7 +12,7 @@ inline juce::var checkProjectSpanAlignment()
         const auto* storage=a.audio[0].data();juce::AudioBuffer<float> source(2,511),target(2,511);
         for(juce::int64 position=0;position<span+19;)
         {
-            const int count=static_cast<int>(juce::jmin<juce::int64>(position%2?127:511,span+19-position));source.setSize(2,count,false,false,true);target.setSize(2,count,false,false,true);
+            const int count=static_cast<int>(juce::jmin(static_cast<juce::int64>(position%2?127:511),span+19-position));source.setSize(2,count,false,false,true);target.setSize(2,count,false,false,true);
             for(int i=0;i<count;++i){const float value=signal(position+i),shared=-signal(position+i-37)*.25f+signal(position+i+9876543);for(int ch=0;ch<2;++ch){source.setSample(ch,i,value);target.setSample(ch,i,shared);}}
             a.process(source,position,true);b.process(target,position,true);position+=count;
         }

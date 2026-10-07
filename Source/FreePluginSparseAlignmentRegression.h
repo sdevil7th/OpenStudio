@@ -20,7 +20,7 @@ inline juce::var checkSparseAlignment()
         const auto* storage=a.audio[0].data();juce::AudioBuffer<float> source(2,511),target(2,511);double previous=0;
         for(juce::int64 position=0;position<span+23;)
         {
-            const int count=static_cast<int>(juce::jmin<juce::int64>((position%2)?127:511,span+23-position));
+            const int count=static_cast<int>(juce::jmin(static_cast<juce::int64>((position%2)?127:511),span+23-position));
             source.setSize(2,count,false,false,true);target.setSize(2,count,false,false,true);
             for(int i=0;i<count;++i){const float value=signal(position+i),delayed=-signal(position+i-37);source.setSample(0,i,value);source.setSample(1,i,-value);target.setSample(0,i,delayed);target.setSample(1,i,-delayed);}
             a.process(source,position,true);b.process(target,position,true);const double next=a.progress();progress=progress&&next>=previous&&next<=1;previous=next;position+=count;

@@ -98,7 +98,7 @@ public:
         }
         std::stable_sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b){return a.frequency<b.frequency;});
         if(candidates.size()>static_cast<size_t>(budget))candidates.resize(static_cast<size_t>(budget));
-        std::vector<Mode> prepared;prepared.reserve(candidates.size());const double gain=.12/std::sqrt(static_cast<double>(juce::jmax<size_t>(1,candidates.size())));
+        std::vector<Mode> prepared;prepared.reserve(candidates.size());const double gain=.12/std::sqrt(static_cast<double>(juce::jmax(size_t{1},candidates.size())));
         for(const auto& candidate:candidates)
         {
             const auto shape=[&](double x,double y){return std::sin(candidate.m*juce::MathConstants<double>::pi*x)*std::sin(candidate.n*juce::MathConstants<double>::pi*y);};

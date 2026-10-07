@@ -14,7 +14,7 @@ inline juce::var checkContinuousAlignment()
         juce::AudioBuffer<float> a(2,511),b(2,511);
         for(juce::int64 position=0;position<span+19;)
         {
-            const int count=static_cast<int>(juce::jmin<juce::int64>(position%2?127:511,span+19-position));
+            const int count=static_cast<int>(juce::jmin(static_cast<juce::int64>(position%2?127:511),span+19-position));
             a.setSize(2,count,false,false,true);b.setSize(2,count,false,false,true);
             for(int sample=0;sample<count;++sample)for(int ch=0;ch<2;++ch){a.setSample(ch,sample,signal(position+sample));b.setSample(ch,sample,-signal(position+sample-(conflict&&position>span/2?45:37)));}
 #if JUCE_WINDOWS && defined(_DEBUG)

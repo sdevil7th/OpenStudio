@@ -46,7 +46,7 @@ public:
     void prepare(double rate, int selected)
     {
         sampleRate = rate;
-        fadeSamples = juce::jmax<juce::int64>(1, static_cast<juce::int64>(std::ceil(rate * .05)));
+        fadeSamples = juce::jmax(juce::int64{1}, static_cast<juce::int64>(std::ceil(rate * .05)));
         remaining.fill(0); duration.fill(0); retained.fill(false);
         for (size_t i = 0; i < Count; ++i)
         {

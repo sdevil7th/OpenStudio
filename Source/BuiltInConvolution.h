@@ -214,7 +214,7 @@ public:
             }
         }
         }
-        drainRemaining=juce::jmax<juce::int64>(0,drainRemaining-buffer.getNumSamples());
+        drainRemaining=juce::jmax(juce::int64{0},drainRemaining-buffer.getNumSamples());
         if(drainRemaining==0&&!fading&&!eqFade.isSmoothing())
         {
             // FIR history has been clocked out. Clear only small filter state;
@@ -457,7 +457,7 @@ private:
         {
             processed=shaped(samples,sourceRate,next,progress);if(progress&&progress->isCancelled())return false;envelope={};float shapedPeak=0;
             for(int ch=0;ch<processed.getNumChannels();++ch)shapedPeak=juce::jmax(shapedPeak,processed.getMagnitude(ch,0,processed.getNumSamples()));
-            for(int ch=0;ch<processed.getNumChannels();++ch)for(int i=0;i<processed.getNumSamples();++i){const size_t bin=juce::jmin<size_t>(95,static_cast<size_t>(i)*96/static_cast<size_t>(processed.getNumSamples()));envelope[bin]=juce::jmax(envelope[bin],std::abs(processed.getSample(ch,i))/juce::jmax(shapedPeak,1e-9f));}
+            for(int ch=0;ch<processed.getNumChannels();++ch)for(int i=0;i<processed.getNumSamples();++i){const size_t bin=juce::jmin(size_t{95},static_cast<size_t>(i)*96/static_cast<size_t>(processed.getNumSamples()));envelope[bin]=juce::jmax(envelope[bin],std::abs(processed.getSample(ch,i))/juce::jmax(shapedPeak,1e-9f));}
             nextDuration=processed.getNumSamples()/sourceRate;
             if(progress&&!progress->advance(BuiltInIRPreparation::analysing))return false;
             nextDecay=BuiltInIRDecay::analyzeBands(processed,sourceRate,next.earlyEnd,next.lowCrossover,next.highCrossover);

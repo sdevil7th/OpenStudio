@@ -87,6 +87,15 @@ jobs:
       - name: Run shortcut and input-profile browser tests
         run: npm run test:e2e
 
+      - name: Upload browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: input-profile-browser-${{ matrix.os }}-${{ github.run_attempt }}
+          path: output/playwright/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
   verify-windows:
     runs-on: windows-latest
     env:

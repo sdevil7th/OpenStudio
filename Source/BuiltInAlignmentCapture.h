@@ -7,6 +7,8 @@
 
 // Single producer, serialized control consumer. Arm allocates the bounded window
 // before publishing it; recording only copies into that prepared storage.
+// Scalar min/max arguments use the same type so JUCE's SIMD overloads are not
+// explicitly instantiated for integer aliases that differ across platforms.
 class BuiltInAlignmentCapture
 {
 public:
@@ -66,7 +68,7 @@ public:
                 const auto write=streamWriteIndex.load(std::memory_order_relaxed);
                 if(write-streamReadIndex.load(std::memory_order_acquire)>=streamSlots){state.store(-1,std::memory_order_release);return;}
                 const auto slot=static_cast<size_t>(write%streamSlots);
-                const int amount=static_cast<int>(juce::jmin<juce::int64>(windowLength-streamOffset,last-absolute));
+                const int amount=static_cast<int>(juce::jmin(static_cast<juce::int64>(windowLength-streamOffset),last-absolute));
                 for(int ch=0;ch<2;++ch)for(int i=0;i<amount;++i)
                 {
                     const float value=buffer.getSample(juce::jmin(ch,buffer.getNumChannels()-1),static_cast<int>(absolute-position)+i);
@@ -98,7 +100,7 @@ public:
         state.store(cancel.load()||missed?-1:written==count?2:1,std::memory_order_release);
     }
     int size()const noexcept{return count;}
-    double progress()const noexcept{return static_cast<double>(progressSamples.load(std::memory_order_acquire))/static_cast<double>(juce::jmax<juce::int64>(1,spanSamples));}
+    double progress()const noexcept{return static_cast<double>(progressSamples.load(std::memory_order_acquire))/static_cast<double>(juce::jmax(juce::int64{1},spanSamples));}
 private:
     bool armWindows(juce::int64 first,juce::int64 span,int window,int windows,double rate,bool publish=true)
     {

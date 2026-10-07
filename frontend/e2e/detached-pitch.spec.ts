@@ -1,5 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
+type PitchFixtureWindow = Window & {
+  __pitchFixture: {
+    daw: typeof import("../src/store/useDAWStore").useDAWStore;
+    createDefaultTrack: typeof import("../src/store/useDAWStore").createDefaultTrack;
+    pitch: typeof import("../src/store/pitchEditorStore").usePitchEditorStore;
+    bridge: typeof import("../src/services/NativeBridge").nativeBridge;
+  };
+};
+
 test("two pitch views share edits and undo, preserve viewport, and survive docking", async ({ browser }) => {
   test.setTimeout(90000);
   const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, deviceScaleFactor: 2 });
@@ -29,11 +38,16 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
   });
   // Install the test transport before either React root mounts. All editor and
   // controller code remains production code; only native message delivery is simulated.
+  // Retain the stores loaded by that root rather than dynamically importing them
+  // inside evaluate, where Chromium can collect an unresolved module promise.
   await context.route(/\/src\/(App|PitchEditorWindowApp)\.tsx(?:\?|$)/, async route => {
     const response = await route.fetch();
     const source = await response.text();
     await route.fulfill({ response, body: `
       import { nativeBridge as __pitchTestBridge } from "/src/services/NativeBridge.ts";
+      import { useDAWStore as __pitchTestDAW, createDefaultTrack as __pitchTestTrack } from "/src/store/useDAWStore.ts";
+      import { usePitchEditorStore as __pitchTestStore } from "/src/store/pitchEditorStore.ts";
+      window.__pitchFixture = { daw: __pitchTestDAW, createDefaultTrack: __pitchTestTrack, pitch: __pitchTestStore, bridge: __pitchTestBridge };
       __pitchTestBridge.pitchEditorSession = (operation, payload) => window.__pitchRelay(operation, payload);
       window.__pitchDeliver = (event, payload) => { for (const cb of __pitchTestBridge.eventListeners.get(event) || []) cb(payload); };
       ${source}` });
@@ -48,10 +62,8 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
   await main.goto("/?platform=windows&windowChrome=native");
   await expect(main.getByText("Starting OpenStudio...", { exact: true })).toBeHidden({ timeout: 25000 });
   await expect(main.getByRole("button", { name: "Audio Settings", exact: true })).toBeVisible();
-  await main.evaluate(async () => {
-    const { useDAWStore, createDefaultTrack } = await import("/src/store/useDAWStore.ts");
-    const { usePitchEditorStore } = await import("/src/store/pitchEditorStore.ts");
-    const { nativeBridge } = await import("/src/services/NativeBridge.ts");
+  await main.evaluate(() => {
+    const { daw: useDAWStore, createDefaultTrack, pitch: usePitchEditorStore, bridge: nativeBridge } = (window as PitchFixtureWindow).__pitchFixture;
     nativeBridge.applyPitchCorrection = async () => ({ success: true, outputFile: "" });
     const track = { ...createDefaultTrack("pitch-qa", "Vocal"), clips: [{ id: "clip-qa", name: "Voice", filePath: "C:/fixture.wav", startTime: 0, duration: 3, offset: 0, color: "#ffaa33", volumeDB: 0, fadeIn: 0, fadeOut: 0, locked: false }] };
     useDAWStore.setState({ tracks: [track], pixelsPerSecond: 75, scrollX: 123 });
@@ -69,10 +81,9 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
   await expect(main.getByText("Pitch editor is open in its own window.")).toBeVisible();
   const remoteFailures: string[] = [];
   remote.on("pageerror", error => remoteFailures.push(String(error)));
-  const remotePitch = () => remote!.evaluate(async () => (await import("/src/store/pitchEditorStore.ts")).usePitchEditorStore.getState().notes[0]?.correctedPitch);
-  await remote.evaluate(async () => {
-    const { usePitchEditorStore } = await import("/src/store/pitchEditorStore.ts");
-    const { nativeBridge } = await import("/src/services/NativeBridge.ts");
+  const remotePitch = () => remote!.evaluate(() => (window as PitchFixtureWindow).__pitchFixture.pitch.getState().notes[0]?.correctedPitch);
+  await remote.evaluate(() => {
+    const { pitch: usePitchEditorStore, bridge: nativeBridge } = (window as PitchFixtureWindow).__pitchFixture;
     nativeBridge.applyPitchCorrection = async () => { throw new Error("Detached view attempted to own rendering"); };
     const s = usePitchEditorStore.getState();
     s.beginInteractivePreview("note-qa"); s.pushUndo("Pitch +4");
@@ -80,9 +91,9 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
     s.setZoomX(300); s.setScrollX(0.25);
   });
   await expect.poll(remotePitch).toBe(64);
-  await remote.evaluate(async () => (await import("/src/store/pitchEditorStore.ts")).usePitchEditorStore.getState().undo());
+  await remote.evaluate(() => (window as PitchFixtureWindow).__pitchFixture.pitch.getState().undo());
   await expect.poll(remotePitch).toBe(60);
-  await remote.evaluate(async () => (await import("/src/store/pitchEditorStore.ts")).usePitchEditorStore.getState().redo());
+  await remote.evaluate(() => (window as PitchFixtureWindow).__pitchFixture.pitch.getState().redo());
   await expect.poll(remotePitch).toBe(64);
   const geometry = await remote.locator("canvas").evaluate((canvas: HTMLCanvasElement) => ({ backing: canvas.width, css: canvas.getBoundingClientRect().width, ratio: devicePixelRatio }));
   expect(geometry.backing).toBeCloseTo(geometry.css * geometry.ratio, 0);
@@ -102,13 +113,16 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
     } };
     window.dispatchEvent(new ErrorEvent("error", { message: "Simulated detached view failure" }));
   });
-  await expect.poll(() => remote!.evaluate(() => (window as any).__failureCalls)).toEqual(["closeWindow"]);
+  // Startup reports may also reach this late-installed backend. Verify that the
+  // failure handler requests exactly one close without counting those reports.
+  await expect.poll(() => remote!.evaluate(() => ((window as any).__failureCalls as string[]).filter(name => name === "closeWindow"))).toEqual(["closeWindow"]);
   await remote.getByRole("button", { name: "Dock", exact: true }).click();
   await remote.close(); remote = undefined;
   await expect(main.getByRole("button", { name: "Detach pitch editor" })).toBeVisible();
-  expect(await main.evaluate(async () => {
-    const p = (await import("/src/store/pitchEditorStore.ts")).usePitchEditorStore.getState();
-    const d = (await import("/src/store/useDAWStore.ts")).useDAWStore.getState();
+  expect(await main.evaluate(() => {
+    const { pitch, daw } = (window as PitchFixtureWindow).__pitchFixture;
+    const p = pitch.getState();
+    const d = daw.getState();
     return [p.notes[0].correctedPitch, p.zoomX, p.scrollX, d.pixelsPerSecond, d.scrollX];
   })).toEqual([64, 300, 0.25, 75, 123]);
   expect(remoteFailures).toEqual([]);
