@@ -99,8 +99,39 @@ jobs:
         if: runner.os != 'Linux'
         run: npx playwright install chromium webkit
 
+      - name: Enable all-controls keyboard navigation for Playwright WebKit
+        if: runner.os == 'macOS'
+        run: defaults write org.webkit.Playwright AppleKeyboardUIMode -int 2
+
+      - name: Verify WebKit Tab traverses buttons on macOS
+        if: runner.os == 'macOS'
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { webkit } from '@playwright/test';
+
+          const browser = await webkit.launch();
+          try {
+            const page = await browser.newPage();
+            await page.setContent('<button id="first">First</button><button id="second">Second</button><button id="third">Third</button>');
+            await page.locator('#first').focus();
+            for (const [key, expected] of [['Tab', 'second'], ['Tab', 'third'], ['Shift+Tab', 'second'], ['Shift+Tab', 'first']]) {
+              await page.keyboard.press(key);
+              const actual = await page.evaluate(() => document.activeElement?.id);
+              assert.equal(actual, expected, `${key} must focus ${expected}; actual focus: ${actual}`);
+              console.log(`WebKit keyboard preflight: ${key} -> ${actual}`);
+            }
+          } finally {
+            await browser.close();
+          }
+          NODE
+
       - name: Run shortcut and input-profile browser tests
         run: npm run test:e2e
+
+      - name: Remove Playwright WebKit keyboard-navigation preference
+        if: always() && runner.os == 'macOS'
+        run: defaults delete org.webkit.Playwright AppleKeyboardUIMode 2>/dev/null || true
 
       - name: Check controls in the system WebKitGTK
         if: runner.os == 'Linux'

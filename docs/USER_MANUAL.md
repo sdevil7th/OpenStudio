@@ -106,10 +106,12 @@ the software center's installed applications and choose **Uninstall** or the
 trash button. On Debian/Ubuntu/Mint, `sudo apt remove openstudio` is an alternative;
 this removes the application rather than projects saved in your home directory.
 
-Qualification is in progress. Revision 5 passed installed native checks in
+Qualification is in progress. Earlier revision 5 passed installed native checks in
 Ubuntu 22.04, Debian 13, Fedora 44 and a Mint 22.3 live session, with the exact
 desktop and lifecycle limits recorded in the
 [Linux installation and qualification plan](linux-installation-and-qualification-plan.md).
+Those are historical checkpoints. The integrated PR 26 source and current test
+scope are recorded in the [October 7 qualification report](linux-pr26-qualification.md).
 
 OpenStudio also includes automatic update checks. Open **Help > Check for
 Updates...** to check immediately and choose when to download/install. See
@@ -1543,6 +1545,9 @@ OpenStudio hosts third-party plugins for effects and virtual instruments. VST3 i
 2. Click **Scan** to scan standard plugin directories for installed plugins.
 3. Scanned plugins appear in the plugin list organized by manufacturer and category.
 
+On Linux, LV2 bundles containing multiple plugins list each plugin separately.
+Rescan after installing a compatible plugin or changing its search folder.
+
 **Adding a plugin:**
 1. Open the FX Chain Panel for a track.
 2. Click the **+** button or "Add Plugin".
@@ -1700,7 +1705,7 @@ Automation allows parameter values to change over time. OpenStudio supports auto
 - Host-exposed parameters of track FX, input FX and the dedicated instrument plugin.
 - Eligible controls in EQ, Graphic EQ, Compressor, Gate, Limiter, Preamp, Saturator, Reverb, Delay, Chorus, Gain Phase, realtime Pitch Correct, Basic Synth, Piano, Clean Guitar, Drums and NAM Rack. The fallback instrument exposes 12 scalar/choice controls. Model/IR file selection, instrument type, calibration, presets, MIDI mapping and processing configuration are not automation parameters. The graphical Pitch Editor edits a clip's working audio copy and does not use parameter envelopes.
 
-This describes unshipped development-checkout behavior. Native VST3 editor gestures feed the same writer as the generic FX sliders, including plugins running in isolation. Eligible JSFX numeric/choice sliders have stable slider IDs; file selectors remain excluded. Scripts must use `slider_automate()` to report an edit for recording. CLAP values, gestures and active/inactive flush are integrated; protocol fixtures pass, but vendor CLAP editors have not been qualified. Parameter rescans refresh names, choices and eligible targets. Compatible JSFX/CLAP targets retain their lanes; removed targets or changed meanings retain their points as unavailable lanes. An isolated plugin that changes parameter IDs, automation meaning or audio-bus layout requires a worker reload. Display-name changes within an unchanged contract refresh without faulting the worker. A control must be exposed to the host: Kontakt libraries such as One Kit Wonder may need a Kontakt host-automation assignment. Komplete Kontrol exposes its mapped controls, not necessarily every nested instrument control.
+This describes unshipped development-checkout behavior. Native VST3 editor gestures feed the same writer as the generic FX sliders, including plugins running in isolation. Eligible JSFX numeric/choice sliders have stable slider IDs; file selectors remain excluded. Scripts must use `slider_automate()` to report an edit for recording. CLAP values, gestures and active/inactive flush are integrated; protocol fixtures and selected vendor editor-window cycles pass; broader CLAP compatibility remains plugin-specific. Parameter rescans refresh names, choices and eligible targets. Compatible JSFX/CLAP targets retain their lanes; removed targets or changed meanings retain their points as unavailable lanes. An isolated plugin that changes parameter IDs, automation meaning or audio-bus layout requires a worker reload. Display-name changes within an unchanged contract refresh without faulting the worker. A control must be exposed to the host: Kontakt libraries such as One Kit Wonder may need a Kontakt host-automation assignment. Komplete Kontrol exposes its mapped controls, not necessarily every nested instrument control.
 
 AmpliTube 5 exposes sixteen assignable DAW parameter slots plus bypass. Assign the desired amp or pedal knob to a DAW slot in AmpliTube's Automation panel, then choose that slot in OpenStudio's envelope panel. The host cannot automatically turn every internal AmpliTube control into a separate envelope.
 
@@ -2808,6 +2813,14 @@ fixes remain unpublished. Native ACE-Step generation/import/undo/redo passes on
 the Ubuntu 26.04 Radeon 8060S host using ROCm and shared GPU memory. This does not
 qualify NVIDIA INT8, every model, other GPU/OS combinations or subjective quality.
 See [the dated Ubuntu AI report](ai-ubuntu-qualification-2026-10-01.md).
+
+**Integrated PR 26 qualification (2026-10-07):** fresh CPU runtime/stem-model
+setup, real download cancellation/retry, six-stem inference and native ROCm
+generation/import/undo/redo passed on the recorded Linux candidates. Native
+seven-track save/open/resave also passed. See the
+[integration report](linux-pr26-qualification.md) for exact artifacts, source,
+remaining platform/model checks and the limits of these results. This remains
+an unpublished application candidate.
 
 ### 18.2 AI Tracks
 
