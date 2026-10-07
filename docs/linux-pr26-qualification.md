@@ -49,7 +49,7 @@ repair rebuild/requalify Debug; final hosted outcomes are linked from the PR.
 | Ubuntu 22.04 baseline | **pass on the recorded candidate**: actual prerequisite installation, GCC 11 Release build with external system Python AI fallback disabled, and glibc 2.35 ABI gate. |
 | Native packages | **pass**: final DEB26→27 upgrade, removal/reinstall and actual FUSE AppImage normal/Safe/full qualification. All 302 recorded user files survive removal/reinstall byte-for-byte; reinstalled native lifecycle passes. Earlier14→26 upgrade remains separately recorded. |
 | AI runtime/workers | **pass** for fresh CPU runtime/stem-model installation, real transfer cancellation/retry, repeat setup, inference and the additional workflows below. Fresh GPU overlays/ACE model downloads are **not_asserted**. |
-| Native AI UI | **pass** for earlier ten-second ROCm generation, six-stem import, undo/redo, completed-job recovery and native seven-track save/open/resave; final current-source 30-second native ROCm generation/import also passes with automatic child library paths. |
+| Native AI UI | **pass** for earlier ten-second ROCm generation, six-stem import, undo/redo, completed-job recovery and native seven-track save/open/resave; final `348ad87` Release 30-second native ROCm generation/import also passes with automatic child library paths. |
 | Development entry point | **pass**: actual `python3 build.py dev --run` built frontend/Debug, started Vite itself, loaded the development URL and reached native main `boot-ready`. Closing the window stopped its ten owned app/server/helper processes; port 5183 was free afterwards. The host has no `python` alias; no host alias or package was installed. |
 | Hosted CI | On `348ad87`, Linux DEB/AppImage, Windows Release87/87 plus readonly-install preflight, macOS14ARM74/74, macOS15Intel74/74 and Windows/Ubuntu unit2832/browser194 jobs pass. The macOS15 browser job passed192/194 with two Tab-policy failures; its CI-only correction is described below. All ten other Verify jobs and all three updater-safety jobs pass; this is not an overall success claim for that original run. |
 
@@ -174,7 +174,7 @@ roundtrip. The retained native startup log explicitly records the generation
 denoising phase with `backend=rocm`, its managed runtime and successful worker
 exit; the backend claim does not rely only on the readiness display.
 
-A final current-source Release run also generates/imports a finite 30-second
+A final `348ad87` Release run also generates/imports a finite 30-second
 stereo 48 kHz file (1,440,000 frames). Its native parent has no `/opt/rocm` library
 path, while the actual managed worker receives `/opt/rocm/lib` plus the unchanged
 inherited paths. Native startup records denoising `backend=rocm`. This directly
