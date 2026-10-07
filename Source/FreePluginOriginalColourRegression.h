@@ -254,7 +254,7 @@ inline juce::var checkOriginalColourStages()
     result->setProperty("vcaBothResponseEnginesSingleColourStage",vcaResponseEngines);
     result->setProperty("maximumVCAStageError",maximumVCAStageError);
     result->setProperty("processingCostDiagnostic",processingCost);result->setProperty("processingCostScope","Single instance,48kHz/128,20 warmup and200 timed blocks including sine fill; build/machine dependent, not a device-safety or release-performance gate.");
-    result->setProperty("declaredTailBound",tails);result->setProperty("tailResidueAfterOneSecond",maximumTailResidue);result->setProperty("tailScope","Intentional Punch noise disabled; max-drive DC pulse followed by1s decay and100ms observation, four sample rates, silence below−120dBFS.");
+    result->setProperty("declaredTailBound",tails);result->setProperty("tailResidueAfterOneSecond",maximumTailResidue);result->setProperty("tailScope",juce::String::fromUTF8("Intentional Punch noise disabled; max-drive DC pulse followed by1s decay and100ms observation, four sample rates, silence below−120dBFS."));
     result->setProperty("commercialFidelity","not_asserted");result->setProperty("listeningAcceptance","not_asserted");result->setProperty("broadbandAliasingAndIMD","diagnostic_followup_required");
     return juce::var(result);
 }

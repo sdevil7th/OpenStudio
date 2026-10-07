@@ -11,7 +11,8 @@ void prepareMIDINoteLifetimes(Entries& events, MessageAt messageAt)
 {
     constexpr auto none = std::numeric_limits<size_t>::max();
     std::array<std::array<size_t,128>,16> first {}, last {};
-    for(auto& channel:first)channel.fill(none); for(auto& channel:last)channel.fill(none);
+    for(auto& channel:first)channel.fill(none);
+    for(auto& channel:last)channel.fill(none);
     std::array<size_t,16> sounding {}; sounding.fill(none);
     std::array<bool,16> sustain {}, sostenuto {};
     std::vector<size_t> nextKey(events.size(),none), next(events.size(),none), previous(events.size(),none);

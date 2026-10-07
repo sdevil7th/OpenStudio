@@ -1,10 +1,11 @@
+import { AUDIO_FILE_FILTER, VIDEO_FILE_FILTER } from "../utils/fileDialogFilters";
 import { getProjectEpoch } from "../utils/projectLifetime";
 import { nativeBridge } from "./NativeBridge";
 import { appDialogs } from "./appDialogs";
 import { useDAWStore } from "../store/useDAWStore";
 
 export type MediaImportKind = "audio" | "midi" | "media";
-export const audioImportFilter = "*.wav;*.wave;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a;*.aac;*.wma;*.opus";
+export const audioImportFilter = `${AUDIO_FILE_FILTER};*.wave;*.m4a;*.aac;*.wma;*.opus`;
 export const midiImportFilter = "*.mid;*.midi";
 let importing = false;
 
@@ -17,7 +18,7 @@ export async function importMediaWithDialog(kind: MediaImportKind): Promise<void
   const startTime = initial.transport.currentTime;
   const selectedId = initial.selectedTrackIds[0] ?? initial.selectedTrackId ?? undefined;
   const filter = kind === "audio" ? audioImportFilter : kind === "midi" ? midiImportFilter
-    : `${audioImportFilter};${midiImportFilter};*.mp4;*.mov;*.mkv;*.webm;*.avi`;
+    : `${audioImportFilter};${midiImportFilter};${VIDEO_FILE_FILTER}`;
   try {
     const paths = await nativeBridge.showImportFilesDialog(`Import ${kind === "midi" ? "MIDI" : kind === "audio" ? "Audio" : "Media"} Files`, filter);
     for (const filePath of paths) {

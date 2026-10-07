@@ -346,7 +346,7 @@ export const TrackHeader = React.memo(function TrackHeader({
       >
         {/* Main track controls area — fixed at trackHeight */}
         <div
-          className="flex shrink-0 overflow-hidden"
+          className="flex shrink-0 overflow-x-hidden overflow-y-auto"
           style={{ height: trackHeight }}
         >
           {/* Link group bracket */}
@@ -387,7 +387,7 @@ export const TrackHeader = React.memo(function TrackHeader({
             )}
 
           {/* Main Content — single flex-wrap row, wraps when TCP is narrow */}
-          <div className="flex-1 flex flex-wrap items-center py-1 px-2 gap-x-2 gap-y-1 content-center">
+          <div className="min-w-0 flex-1 flex flex-wrap items-center py-1 px-2 gap-x-2 gap-y-1 content-start">
             {/* Record Arm Button */}
             <Button
               variant="danger"

@@ -9,7 +9,8 @@ struct BuiltInIRBrightness
 {
     static bool apply(juce::AudioBuffer<float>& response,double sampleRate,double amount,double directEnd,BuiltInIRPreparation* progress=nullptr)
     {
-        if(amount<=0)return true;amount=juce::jlimit(0.0,1.0,amount);
+        if(amount<=0)return true;
+        amount=juce::jlimit(0.0,1.0,amount);
         const int count=response.getNumSamples(),first=juce::jlimit(0,count,static_cast<int>(std::ceil(directEnd*sampleRate)));
         if(first>=count)return true;
         const double envelopePole=std::exp(-1/(sampleRate*.01)),highPole=std::exp(-juce::MathConstants<double>::twoPi*juce::jmin(3000.0,sampleRate*.2)/sampleRate);

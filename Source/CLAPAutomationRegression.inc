@@ -4,6 +4,7 @@ struct CLAPAutomationFixture
 {
     clap_plugin_t plugin {};
     clap_plugin_params_t parameters {};
+    clap_plugin_timer_support_t timers {};
     double gain = 0.2, choice = 0, extra = 0;
     int topology = 0, activations = 0, deactivations = 0;
     bool renamed = false;
@@ -11,6 +12,8 @@ struct CLAPAutomationFixture
     bool validHostEvents = true, allowTimedEvents = false;
     std::array<std::pair<uint32_t, double>, 256> hostPoints {};
     size_t hostPointCount = 0;
+    int timerCalls = 0, mainThreadCalls = 0;
+    clap_id lastTimerId = CLAP_INVALID_ID;
 
     static CLAPAutomationFixture& fixture(const clap_plugin_t* p)
     { return *static_cast<CLAPAutomationFixture*>(p->plugin_data); }
@@ -60,9 +63,17 @@ struct CLAPAutomationFixture
         plugin.deactivate = [](const clap_plugin_t* p) { ++fixture(p).deactivations; };
         plugin.start_processing = [](const clap_plugin_t*) { return true; };
         plugin.stop_processing = [](const clap_plugin_t*) {};
-        plugin.on_main_thread = [](const clap_plugin_t*) {};
+        plugin.on_main_thread = [](const clap_plugin_t* p) { ++fixture(p).mainThreadCalls; };
         plugin.get_extension = [](const clap_plugin_t* p, const char* id) -> const void*
-        { return std::strcmp(id, CLAP_EXT_PARAMS) == 0 ? &fixture(p).parameters : nullptr; };
+        {
+            if (std::strcmp(id, CLAP_EXT_PARAMS) == 0) return &fixture(p).parameters;
+            if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &fixture(p).timers;
+            return nullptr;
+        };
+        timers.on_timer = [](const clap_plugin_t* p, clap_id id) {
+            ++fixture(p).timerCalls;
+            fixture(p).lastTimerId = id;
+        };
         plugin.process = [](const clap_plugin_t* p, const clap_process_t* process) -> clap_process_status
         {
             auto& f = fixture(p);
@@ -115,6 +126,17 @@ struct CLAPAutomationFixture
 
 juce::var runOpenStudioCLAPAutomationRegression()
 {
+    // Timer dispatch depends on JUCE's message queue as well as its clock.
+    // Headless startup has not entered the normal app dispatch loop yet.
+    const auto dispatchUntil = [](const std::function<bool()>& ready, int milliseconds)
+    {
+        const auto deadline=juce::Time::getMillisecondCounterHiRes()+milliseconds;
+        do
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+            juce::Timer::callPendingTimersSynchronously();
+        } while(!ready()&&juce::Time::getMillisecondCounterHiRes()<deadline);
+    };
     CLAPAutomationFixture fixture;
     auto context = std::make_unique<CLAPHostContext>();
     context->plugin = &fixture.plugin;
@@ -122,6 +144,40 @@ juce::var runOpenStudioCLAPAutomationRegression()
     juce::PluginDescription description;
     description.name = "CLAP protocol fixture";
     auto instance = std::make_shared<CLAPPluginInstance>(nullptr, &fixture.plugin, description, std::move(context));
+    const auto* timerExtension = static_cast<const clap_host_timer_support_t*>(
+        host->host.get_extension(&host->host, CLAP_EXT_TIMER_SUPPORT));
+    const auto* guiExtension = static_cast<const clap_host_gui_t*>(
+        host->host.get_extension(&host->host, CLAP_EXT_GUI));
+    bool extensionsPass = timerExtension != nullptr && guiExtension != nullptr
+        && host->host.get_extension(&host->host, CLAP_EXT_PARAMS) != nullptr
+        && host->host.get_extension(&host->host, nullptr) == nullptr
+        && host->host.get_extension(&host->host, "openstudio.unknown-extension") == nullptr;
+    clap_id timerId = CLAP_INVALID_ID;
+    bool timerPass = extensionsPass;
+    if (timerExtension != nullptr)
+    {
+        timerPass = !timerExtension->register_timer(&host->host, 0, &timerId)
+            && !timerExtension->register_timer(&host->host, 5, nullptr)
+            && !timerExtension->register_timer(&host->host, UINT32_MAX, &timerId)
+            && !timerExtension->unregister_timer(&host->host, CLAP_INVALID_ID)
+            && timerExtension->register_timer(&host->host, 5, &timerId)
+            && timerId != 0 && timerId != CLAP_INVALID_ID;
+        bool rejectedWorkerThread = false;
+        std::thread worker([&] {
+            clap_id workerTimerId = CLAP_INVALID_ID;
+            rejectedWorkerThread = !timerExtension->register_timer(&host->host, 5, &workerTimerId)
+                && !timerExtension->unregister_timer(&host->host, timerId);
+        });
+        worker.join();
+        timerPass = timerPass && rejectedWorkerThread;
+        host->host.request_callback(&host->host);
+        dispatchUntil([&]{return fixture.timerCalls>0&&fixture.mainThreadCalls>0;},1000);
+        timerPass = timerPass && fixture.timerCalls > 0 && fixture.lastTimerId == timerId
+            && fixture.mainThreadCalls == 1;
+    }
+    if (guiExtension != nullptr)
+        extensionsPass = extensionsPass && !guiExtension->request_resize(&host->host, 640, 480)
+            && !guiExtension->request_show(&host->host) && !guiExtension->request_hide(&host->host);
     PluginParameterCapture capture(instance);
     instance->prepareToPlay(48000, 64);
     bool pass = instance->getParameters().size() == 3 && instance->getParameters()[0]->isAutomatable()
@@ -303,6 +359,10 @@ juce::var runOpenStudioCLAPAutomationRegression()
     PluginParameterCapture replacementCapture(graph);
     const auto originalMeaning = pluginParameterMeaning(graph.get(), 0);
     graph->getParameters()[0]->beginChangeGesture(); graph->getParameters()[0]->setValueNotifyingHost(.6f);
+    // Balance the processor's own gesture before destroying its parameter.
+    // The capture still has queued old-generation begin/value/end events,
+    // which replacement must discard rather than replay on the new meaning.
+    graph->getParameters()[0]->endChangeGesture();
     graph->setParameterTree(juce::AudioProcessorParameterGroup("root", "Root", "/",
         std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("replacement", 1), "Replacement", 0.0f, 2.0f, .5f)));
     events.clear(); replacementCapture.drain("replacement", false, 0, events);
@@ -311,10 +371,46 @@ juce::var runOpenStudioCLAPAutomationRegression()
     events.clear(); graph->getParameters()[0]->setValueNotifyingHost(.8f); replacementCapture.drain("replacement", false, 0, events);
     replacementPass = replacementPass && events.size() == 1 && events[0]["phase"].toString() == "value"
         && events[0]["metadata"]["hostParamId"].toString() == "replacement";
-    pass = pass && infoPass && restartPass && topologyPass && appendedPass && timingPass && boundedPass && deliveryPass && clearPass && concurrentPass && replacementPass;
+    // Distinct instances can use the same numeric timer ID without sharing a
+    // callback target. Retiring either instance must cancel only its own timers.
+    CLAPAutomationFixture otherFixture;
+    CLAPHostContext otherHost;
+    otherHost.plugin = &otherFixture.plugin;
+    const auto* otherTimers = static_cast<const clap_host_timer_support_t*>(
+        otherHost.host.get_extension(&otherHost.host, CLAP_EXT_TIMER_SUPPORT));
+    clap_id otherId = CLAP_INVALID_ID;
+    bool timerLifetimePass = otherTimers != nullptr && timerExtension != nullptr;
+    if (timerLifetimePass)
+    {
+        timerLifetimePass = otherTimers->register_timer(&otherHost.host, 5, &otherId)
+            && otherId == timerId && timerExtension->unregister_timer(&host->host, timerId)
+            && !timerExtension->unregister_timer(&host->host, timerId);
+        const auto retiredTimerCalls = fixture.timerCalls;
+        dispatchUntil([&]{return otherFixture.timerCalls>0;},1000);
+        timerLifetimePass = timerLifetimePass && fixture.timerCalls == retiredTimerCalls
+            && otherFixture.timerCalls > 0 && otherFixture.lastTimerId == otherId;
+        clap_id nextId = CLAP_INVALID_ID;
+        timerLifetimePass = timerLifetimePass
+            && timerExtension->register_timer(&host->host, 5, &nextId) && nextId != timerId;
+        host->stop();
+        otherHost.stop();
+        clap_id retiredId = CLAP_INVALID_ID;
+        timerLifetimePass = timerLifetimePass
+            && !timerExtension->register_timer(&host->host, 5, &retiredId)
+            && timerExtension->unregister_timer(&host->host, nextId)
+            && !timerExtension->unregister_timer(&host->host, nextId);
+        const auto stoppedOtherCalls = otherFixture.timerCalls;
+        dispatchUntil([]{return false;},40);
+        timerLifetimePass = timerLifetimePass && fixture.timerCalls == retiredTimerCalls
+            && otherFixture.timerCalls == stoppedOtherCalls;
+    }
+    pass = pass && extensionsPass && timerPass && timerLifetimePass && infoPass && restartPass && topologyPass && appendedPass && timingPass && boundedPass && deliveryPass && clearPass && concurrentPass && replacementPass;
     auto* result = new juce::DynamicObject();
     result->setProperty("plugin", "CLAP host values, choice flags, editor gestures, flush and DONT_RECORD");
     result->setProperty("pass", pass);
+    result->setProperty("hostExtensionsPass", extensionsPass);
+    result->setProperty("timerDispatchPass", timerPass);
+    result->setProperty("timerLifetimePass", timerLifetimePass);
     result->setProperty("metadataRescanPass", infoPass);
     result->setProperty("restartPass", restartPass);
     result->setProperty("stableTopologyPass", topologyPass);

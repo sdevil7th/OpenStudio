@@ -14,9 +14,15 @@ inline juce::var checkAlignmentSections()
         juce::Random random(51817);std::vector<float> source(static_cast<size_t>(count)),target(source.size());for(auto& value:source)value=(random.nextFloat()-.5f)*.2f;
         for(int i=0;i<count;++i)target[static_cast<size_t>(i)]=i>=37?-source[static_cast<size_t>(i-37)]:0;
         const auto accepted=estimateBuiltInAlignmentSections(source.data(),target.data(),count);consistent=consistent&&accepted.combined.accepted&&accepted.combined.invert&&std::abs(accepted.combined.lag-37)<.02;
-        for(int i=count/2;i<count;++i)target[static_cast<size_t>(i)]=-source[static_cast<size_t>(i-42)];const auto shifted=estimateBuiltInAlignmentSections(source.data(),target.data(),count);drift=drift&&!shifted.combined.accepted;
-        for(int i=count/2;i<count;++i)target[static_cast<size_t>(i)]=source[static_cast<size_t>(i-37)];const auto flipped=estimateBuiltInAlignmentSections(source.data(),target.data(),count);polarity=polarity&&!flipped.combined.accepted;
-        for(int i=count*2/3;i<count;++i)target[static_cast<size_t>(i)]=0;const auto missing=estimateBuiltInAlignmentSections(source.data(),target.data(),count);silence=silence&&!missing.combined.accepted;
+        for(int i=count/2;i<count;++i)target[static_cast<size_t>(i)]=-source[static_cast<size_t>(i-42)];
+        const auto shifted=estimateBuiltInAlignmentSections(source.data(),target.data(),count);
+        drift=drift&&!shifted.combined.accepted;
+        for(int i=count/2;i<count;++i)target[static_cast<size_t>(i)]=source[static_cast<size_t>(i-37)];
+        const auto flipped=estimateBuiltInAlignmentSections(source.data(),target.data(),count);
+        polarity=polarity&&!flipped.combined.accepted;
+        for(int i=count*2/3;i<count;++i)target[static_cast<size_t>(i)]=0;
+        const auto missing=estimateBuiltInAlignmentSections(source.data(),target.data(),count);
+        silence=silence&&!missing.combined.accepted;
         auto* row=new juce::DynamicObject();row->setProperty("sampleRate",rate);row->setProperty("captureSamples",count);row->setProperty("sectionSamples",accepted.window);row->setProperty("estimatedLag",accepted.combined.lag);row->setProperty("accepted",accepted.combined.accepted);row->setProperty("driftRejected",!shifted.combined.accepted);row->setProperty("polarityRejected",!flipped.combined.accepted);row->setProperty("missingSectionRejected",!missing.combined.accepted);cases.add(row);
     }
     result->setProperty("pass",capture&&consistent&&drift&&polarity&&silence);result->setProperty("preparedStorageAndExactWindow",capture);result->setProperty("sectionConsensus",consistent);result->setProperty("driftRejected",drift);result->setProperty("polarityRejected",polarity);result->setProperty("missingSectionRejected",silence);result->setProperty("cases",cases);result->setProperty("audioQuality","not_asserted");return result;

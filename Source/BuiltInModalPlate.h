@@ -143,7 +143,8 @@ public:
     }
     std::array<float,3> process(float left,float right) noexcept
     {
-        if(!ready())return {};const float weight=selection[0].getNextValue(),wet=retirement.next(0);
+        if(!ready())return {};
+        const float weight=selection[0].getNextValue(),wet=retirement.next(0);
         if(wet<=0&&!selected){if(running)clearHistory();return {0,0,weight};}
         running=true;const auto output=converter.processThrough({safe(left,-16,16,0),safe(right,-16,16,0)},[this](auto input) noexcept{return processModes(input);});return {output[0]*wet,output[1]*wet,weight};
     }

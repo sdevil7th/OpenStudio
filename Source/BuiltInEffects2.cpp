@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "BuiltInEffects2.h"
 #include "BuiltInInstrumentTail.h"
 #include "CrashDiagnostics.h"
@@ -295,6 +296,13 @@ namespace
                                      static_cast<float>(sampleRate * 0.475)));
     }
 
+    // Keep nominal parameter/state values intact; only the DSP frequency is
+    // bounded for the active rate, including preparation before LUT assignment.
+    float safeFilterFrequency(double sampleRate, float frequency) noexcept
+    {
+        return juce::jlimit(1.0f, static_cast<float>(sampleRate * 0.475), frequency);
+    }
+
     void prepareRealtimeFilterLut(std::vector<OpenStudioIIRCoefficientSet>& lut,
                                   double sampleRate,
                                   float nominalMinimum,
@@ -316,7 +324,7 @@ namespace
                 ? juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequency)
                 : juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, frequency);
             const auto& source = coefficients->coefficients;
-            jassert(source.size() == lut[index].size());
+            jassert(source.size() == static_cast<int>(lut[index].size()));
             for (size_t coefficient = 0; coefficient < lut[index].size(); ++coefficient)
                 lut[index][coefficient] = source[static_cast<int>(coefficient)];
         }
@@ -353,8 +361,8 @@ namespace
             return;
 
         auto& destination = filter.coefficients->coefficients;
-        jassert(destination.size() == coefficients.size());
-        if (destination.size() != coefficients.size())
+        jassert(destination.size() == static_cast<int>(coefficients.size()));
+        if (destination.size() != static_cast<int>(coefficients.size()))
             return;
 
         for (size_t coefficient = 0; coefficient < coefficients.size(); ++coefficient)
@@ -384,8 +392,8 @@ namespace
             left.coefficients->coefficients;
         auto& rightCoefficients =
             right.coefficients->coefficients;
-        if (leftCoefficients.size() != target.size()
-            || rightCoefficients.size() != target.size())
+        if (leftCoefficients.size() != static_cast<int>(target.size())
+            || rightCoefficients.size() != static_cast<int>(target.size()))
         {
             return false;
         }
@@ -2446,12 +2454,12 @@ void OpenStudioDelay::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     lastLPFFreq = loadDelayParameter(
         lpfFreq, 200.0f, 20000.0f, 20000.0f);
-    auto lpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastLPFFreq);
+    auto lpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, safeFilterFrequency(sampleRate, lastLPFFreq));
     feedbackLPF_L.coefficients = lpfCoeffs;
     feedbackLPF_R.coefficients = lpfCoeffs;
     auto alternateLpfCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeLowPass(
-            sampleRate, lastLPFFreq);
+            sampleRate, safeFilterFrequency(sampleRate, lastLPFFreq));
     alternateFeedbackLPF_L.coefficients =
         alternateLpfCoeffs;
     alternateFeedbackLPF_R.coefficients =
@@ -2475,12 +2483,12 @@ void OpenStudioDelay::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     lastHPFFreq = loadDelayParameter(
         hpfFreq, 20.0f, 2000.0f, 20.0f);
-    auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastHPFFreq);
+    auto hpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, safeFilterFrequency(sampleRate, lastHPFFreq));
     feedbackHPF_L.coefficients = hpfCoeffs;
     feedbackHPF_R.coefficients = hpfCoeffs;
     auto alternateHpfCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeHighPass(
-            sampleRate, lastHPFFreq);
+            sampleRate, safeFilterFrequency(sampleRate, lastHPFFreq));
     alternateFeedbackHPF_L.coefficients =
         alternateHpfCoeffs;
     alternateFeedbackHPF_R.coefficients =
@@ -4807,7 +4815,9 @@ bool OpenStudioReverb::setSpatialDelayCapacity(size_t index,float value)
 {
     if(!standaloneBanking||index>=spatialDelayCapacity.size()||!std::isfinite(value))return false;
     const float next=static_cast<float>(juce::jlimit(0,2,juce::roundToInt(value)));if(next==spatialDelayCapacity[index].load())return true;
-    if(spatialSpace.ready())spatialSpace.setCapacity(index,next);spatialDelayCapacity[index].store(next);return true;
+    if(spatialSpace.ready())spatialSpace.setCapacity(index,next);
+    spatialDelayCapacity[index].store(next);
+    return true;
 }
 
 bool OpenStudioReverb::setPredelayCapacity(float value)
@@ -4827,7 +4837,9 @@ bool OpenStudioReverb::setModalControl(size_t index,float value)
 {
     if(!standaloneBanking||index>=modalControls.size()||!std::isfinite(value))return false;
     const float next=juce::jlimit(BuiltInModalPlate::minima[index],BuiltInModalPlate::maxima[index],index==4?std::round(value):value);
-    if(next==modalControls[index].load())return true;auto values=modalSettings();values[index]=next;
+    if(next==modalControls[index].load())return true;
+    auto values=modalSettings();
+    values[index]=next;
     if(modalPlate.ready())modalPlate.prepare(cachedSampleRate,values,algorithm.load()==2&&plateEngine.load()>=1.5f,modalMaterialSettings());
     modalControls[index].store(next);return true;
 }
@@ -4840,7 +4852,9 @@ bool OpenStudioReverb::setModalMaterialControl(size_t index,float value)
 {
     if(!standaloneBanking||index>=modalMaterialControls.size()||!std::isfinite(value))return false;
     const float next=juce::jlimit(BuiltInModalPlate::materialMinima[index],BuiltInModalPlate::materialMaxima[index],index==0?std::round(value):value);
-    if(next==modalMaterialControls[index].load())return true;auto values=modalMaterialSettings();values[index]=next;
+    if(next==modalMaterialControls[index].load())return true;
+    auto values=modalMaterialSettings();
+    values[index]=next;
     if(modalPlate.ready())modalPlate.prepare(cachedSampleRate,modalSettings(),algorithm.load()==2&&plateEngine.load()>=1.5f,values);
     modalMaterialControls[index].store(next);return true;
 }
@@ -5018,24 +5032,24 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
     v3WetHighCutAlternateL.reset();
     v3WetHighCutAlternateR.reset();
 
-    auto lcCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, 20.0f);
+    auto lcCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, safeFilterFrequency(sampleRate, 20.0f));
     wetLowCutL.coefficients = lcCoeffs;
     wetLowCutR.coefficients = lcCoeffs;
     auto alternateLcCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeHighPass(
-            sampleRate, 20.0f);
+            sampleRate, safeFilterFrequency(sampleRate, 20.0f));
     v3WetLowCutAlternateL.coefficients =
         alternateLcCoeffs;
     v3WetLowCutAlternateR.coefficients =
         alternateLcCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 500.0f, true);
 
-    auto hcCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, 20000.0f);
+    auto hcCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, safeFilterFrequency(sampleRate, 20000.0f));
     wetHighCutL.coefficients = hcCoeffs;
     wetHighCutR.coefficients = hcCoeffs;
     auto alternateHcCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeLowPass(
-            sampleRate, 20000.0f);
+            sampleRate, safeFilterFrequency(sampleRate, 20000.0f));
     v3WetHighCutAlternateL.coefficients =
         alternateHcCoeffs;
     v3WetHighCutAlternateR.coefficients =
@@ -6040,6 +6054,13 @@ void OpenStudioReverb::processLegacyBlock(juce::AudioBuffer<float>& buffer,
         case Algorithm::Chamber:
             // Chamber: balanced
             roomSizeAdj *= 0.8f;
+            break;
+        case Algorithm::Spring:
+        case Algorithm::Shimmer:
+        case Algorithm::Nonlinear:
+        case Algorithm::Convolution:
+            // Standalone engines are dispatched separately; the legacy index
+            // above is restricted to Room through Chamber.
             break;
     }
 
@@ -11023,6 +11044,12 @@ double OpenStudioReverb::calculateTailLengthSeconds(int algorithmIndex,
         case Algorithm::Chamber:
             adjustedRoomSize *= 0.8f;
             break;
+        case Algorithm::Spring:
+        case Algorithm::Shimmer:
+        case Algorithm::Nonlinear:
+        case Algorithm::Convolution:
+            // This legacy tail model receives the clamped 0..3 index above.
+            break;
     }
 
     // The longest early-reflection tap is 53 ms and is sourced before the
@@ -11229,7 +11256,9 @@ double OpenStudioReverb::getSelectedTailLengthSeconds() const
     if(standaloneBanking&&algorithm.load()==5&&shimmerHold.load()>=.5f&&wetLevel.load()>0)return 120;
     if(standaloneBanking&&isSpatialSpace())
     {
-        if(wetLevel.load()<=0)return 0;const auto& p=spatialControls[spatialSlot()];const double feedback=effectivePredelay()<=0?0:juce::jlimit(0.0f,1.0f,p[1].load());
+        if(wetLevel.load()<=0)return 0;
+        const auto& p=spatialControls[spatialSlot()];
+        const double feedback=effectivePredelay()<=0?0:juce::jlimit(0.0f,1.0f,p[1].load());
         if((spatialSlot()<2&&freezeMode.load()>=.5f)||feedback>=.9999)return 120;
         const double time=effectivePredelay()*.001+(spatialSlot()==2?(.2+roomSize.load()*3)*.0688:0);
         return juce::jmin(120.0,time+(feedback>0?time*std::log(.001)/std::log(feedback):0)+(spatialSlot()<2?decayTime.load():3.0));
@@ -11245,7 +11274,10 @@ double OpenStudioReverb::getSelectedTailLengthSeconds() const
     }
     if(standaloneBanking&&isEchoRoom())
     {
-        if(wetLevel.load()<=0)return 0;const auto& p=echoRoomControls[echoRoomSlot()];if(echoRoomSlot()==1)return positionedHold.load()>=.5f?120:.6+effectivePredelay()*.001;if(magneticHold.load()>=.5f)return 120;
+        if(wetLevel.load()<=0)return 0;
+        const auto& p=echoRoomControls[echoRoomSlot()];
+        if(echoRoomSlot()==1)return positionedHold.load()>=.5f?120:.6+effectivePredelay()*.001;
+        if(magneticHold.load()>=.5f)return 120;
         const double feedback=juce::jlimit(0.0f,.98f,p[3].load()),time=p[0].load()*.001;return juce::jmin(120.0,time+(feedback>0?time*std::log(.001)/std::log(feedback):0)+.2+effectivePredelay()*.001);
     }
     if(standaloneBanking&&isRetroSpace())return wetLevel.load()<=0?0:retroSlot()==9?2.05+effectivePredelay()*.001:freezeMode.load()>=.5f?120
@@ -11865,25 +11897,25 @@ void OpenStudioChorus::prepareToPlay(double sampleRate, int samplesPerBlock)
     alternateWetHighCutR.reset();
     lastLowCut = juce::jlimit(20.0f, 2000.0f, lowCut.load());
     lastHighCut = juce::jlimit(200.0f, 20000.0f, highCut.load());
-    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastLowCut);
+    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, safeFilterFrequency(sampleRate, lastLowCut));
     wetLowCutL.coefficients = lowCutCoeffs;
     wetLowCutR.coefficients = lowCutCoeffs;
     auto alternateLowCutCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeHighPass(
             sampleRate,
-            lastLowCut);
+            safeFilterFrequency(sampleRate, lastLowCut));
     alternateWetLowCutL.coefficients =
         alternateLowCutCoeffs;
     alternateWetLowCutR.coefficients =
         alternateLowCutCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 2000.0f, true);
-    auto highCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastHighCut);
+    auto highCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, safeFilterFrequency(sampleRate, lastHighCut));
     wetHighCutL.coefficients = highCutCoeffs;
     wetHighCutR.coefficients = highCutCoeffs;
     auto alternateHighCutCoeffs =
         juce::dsp::IIR::Coefficients<float>::makeLowPass(
             sampleRate,
-            lastHighCut);
+            safeFilterFrequency(sampleRate, lastHighCut));
     alternateWetHighCutL.coefficients =
         alternateHighCutCoeffs;
     alternateWetHighCutR.coefficients =
@@ -13276,12 +13308,12 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     toneCoefficientsSmoothing = false;
     lowCutCoefficientsSmoothing = false;
     lastToneFreq = juce::jlimit(200.0f, 20000.0f, toneFreq.load());
-    auto coeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, lastToneFreq);
+    auto coeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, safeFilterFrequency(sampleRate, lastToneFreq));
     toneFilterL.coefficients = coeffs;
     toneFilterR.coefficients = coeffs;
     prepareRealtimeFilterLut(toneCoefficientLut, sampleRate, 200.0f, 20000.0f, false);
     lastLowCutFreq = juce::jlimit(20.0f, 1000.0f, lowCutFreq.load());
-    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, lastLowCutFreq);
+    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, safeFilterFrequency(sampleRate, lastLowCutFreq));
     lowCutFilterL.coefficients = lowCutCoeffs;
     lowCutFilterR.coefficients = lowCutCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 1000.0f, true);
@@ -13313,14 +13345,15 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     const auto oversamplingFilterType = useLowLatencyOversampling
         ? juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR
         : juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
+    const int preparedChannels = juce::jlimit(1, 2, getTotalNumInputChannels());
     oversampler2x = std::make_unique<juce::dsp::Oversampling<float>>(
-        2,
+        static_cast<size_t>(preparedChannels),
         1,
         oversamplingFilterType,
         false,
         true);
     oversampler4x = std::make_unique<juce::dsp::Oversampling<float>>(
-        2,
+        static_cast<size_t>(preparedChannels),
         2,
         oversamplingFilterType,
         false,
@@ -13328,7 +13361,6 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     oversampler2x->initProcessing(static_cast<size_t>(cachedBlockSize));
     oversampler4x->initProcessing(static_cast<size_t>(cachedBlockSize));
 
-    const int preparedChannels = juce::jmax(2, getTotalNumInputChannels());
     oversamplingDryBuffer.setSize(
         preparedChannels, cachedBlockSize, false, false, true);
     oversamplingDryBuffer.clear();
@@ -15030,7 +15062,7 @@ static bool prepareNAMModelProbeDirectory(const juce::File& directory,
 
 static bool probeNAMModelInChildProcess(const juce::File& modelFile, juce::String& error)
 {
-    const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     if (! executable.existsAsFile())
     {
         error = "Could not locate OpenStudio executable for NAM safety probe.";
@@ -17702,6 +17734,7 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
             calibrationReferenceDbu.load(std::memory_order_relaxed),
             isBassInstrumentProfile()));
     realtimeBufferCapacity = getNAMRackRealtimeCapacity(cachedBlockSize);
+    const int preparedChannels = juce::jlimit(1, 2, getTotalNumOutputChannels());
     const int resampledCapacity = getNAMRackDspFrameCapacity(realtimeBufferCapacity, cachedSampleRate, cachedSampleRate * 4.0);
 
     workBuffer.setSize(2, realtimeBufferCapacity, false, false, true);
@@ -17722,7 +17755,7 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     cabDirectDelaySpec.sampleRate = cachedSampleRate;
     cabDirectDelaySpec.maximumBlockSize =
         static_cast<juce::uint32>(realtimeBufferCapacity);
-    cabDirectDelaySpec.numChannels = 2;
+    cabDirectDelaySpec.numChannels = static_cast<juce::uint32>(preparedChannels);
     cabDirectDelay.prepare(cabDirectDelaySpec);
     cabDirectDelay.reset();
     cabDirectDelaySamples = juce::jlimit(
@@ -17838,9 +17871,9 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     preEqHPF.setResonance(juce::MathConstants<float>::sqrt2 * 0.5f);
     preEqLPF.setResonance(juce::MathConstants<float>::sqrt2 * 0.5f);
     preEqHPF.setCutoffFrequency(
-        smoothedPreEqHPFCutoff.getCurrentValue());
+        safeFilterFrequency(cachedSampleRate, smoothedPreEqHPFCutoff.getCurrentValue()));
     preEqLPF.setCutoffFrequency(
-        smoothedPreEqLPFCutoff.getCurrentValue());
+        safeFilterFrequency(cachedSampleRate, smoothedPreEqLPFCutoff.getCurrentValue()));
     for (auto& filter : graphicEqFilters)
         filter.prepare(spec, 0.025);
     graphicEqHPF.setType(juce::dsp::StateVariableTPTFilterType::highpass);
@@ -17850,9 +17883,9 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     graphicEqHPF.setResonance(juce::MathConstants<float>::sqrt2 * 0.5f);
     graphicEqLPF.setResonance(juce::MathConstants<float>::sqrt2 * 0.5f);
     graphicEqHPF.setCutoffFrequency(
-        smoothedGraphicEqHPFCutoff.getCurrentValue());
+        safeFilterFrequency(cachedSampleRate, smoothedGraphicEqHPFCutoff.getCurrentValue()));
     graphicEqLPF.setCutoffFrequency(
-        smoothedGraphicEqLPFCutoff.getCurrentValue());
+        safeFilterFrequency(cachedSampleRate, smoothedGraphicEqLPFCutoff.getCurrentValue()));
     lowShelfFilter.resetState();
     midPeakFilter.resetState();
     highShelfFilter.resetState();
@@ -18198,7 +18231,7 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     embeddedDriveOversampler =
         std::make_unique<
             juce::dsp::Oversampling<float>>(
-            2,
+            static_cast<size_t>(preparedChannels),
             embeddedDriveOversamplingStages,
             juce::dsp::Oversampling<float>::
                 filterHalfBandPolyphaseIIR,
@@ -18221,7 +18254,7 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     embeddedDriveDelaySpec.maximumBlockSize =
         static_cast<juce::uint32>(
             embeddedDriveHighRateCapacity);
-    embeddedDriveDelaySpec.numChannels = 2;
+    embeddedDriveDelaySpec.numChannels = static_cast<juce::uint32>(preparedChannels);
     precisionDriveBypassDelay.prepare(embeddedDriveDelaySpec);
     chaosBypassDelay.prepare(embeddedDriveDelaySpec);
     precisionDriveBypassDelay.setDelay(0.0f);
@@ -22994,6 +23027,10 @@ void OpenStudioNAMRack::prepareFilterTargetTables()
         for (auto& table : profileTables)
             table.resize(static_cast<size_t>(filterGainTableSize));
 
+    const auto safeToneFrequency = [this] (float frequency) {
+        return juce::jmin(frequency, static_cast<float>(cachedSampleRate * 0.45));
+    };
+
     for (int index = 0; index < filterGainTableSize; ++index)
     {
         const float gainDb = -12.0f + static_cast<float>(index) * 0.1f;
@@ -23002,13 +23039,13 @@ void OpenStudioNAMRack::prepareFilterTargetTables()
         {
             const bool bassProfile = profile == bassInstrumentProfile;
             toneFilterTables[static_cast<std::size_t>(profile)][0][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-                juce::dsp::IIR::ArrayCoefficients<float>::makeLowShelf(cachedSampleRate, bassProfile ? 80.0f : 115.0f, 0.707f, gain));
+                juce::dsp::IIR::ArrayCoefficients<float>::makeLowShelf(cachedSampleRate, safeToneFrequency(bassProfile ? 80.0f : 115.0f), 0.707f, gain));
             toneFilterTables[static_cast<std::size_t>(profile)][1][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-                juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(cachedSampleRate, bassProfile ? 500.0f : 780.0f, 0.85f, gain));
+                juce::dsp::IIR::ArrayCoefficients<float>::makePeakFilter(cachedSampleRate, safeToneFrequency(bassProfile ? 500.0f : 780.0f), 0.85f, gain));
             toneFilterTables[static_cast<std::size_t>(profile)][2][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 2400.0f, 0.707f, gain));
+                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, safeToneFrequency(2400.0f), 0.707f, gain));
             toneFilterTables[static_cast<std::size_t>(profile)][3][static_cast<size_t>(index)] = normaliseNAMRackBiquad(
-                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, 5200.0f, 0.8f, gain));
+                juce::dsp::IIR::ArrayCoefficients<float>::makeHighShelf(cachedSampleRate, safeToneFrequency(5200.0f), 0.8f, gain));
         }
     }
 
@@ -23817,12 +23854,12 @@ void OpenStudioNAMRack::processPreEQ(juce::AudioBuffer<float>& buffer)
         if (smoothedPreEqHPFCutoff.isSmoothing())
         {
             preEqHPF.setCutoffFrequency(
-                smoothedPreEqHPFCutoff.getNextValue());
+                safeFilterFrequency(cachedSampleRate, smoothedPreEqHPFCutoff.getNextValue()));
         }
         if (smoothedPreEqLPFCutoff.isSmoothing())
         {
             preEqLPF.setCutoffFrequency(
-                smoothedPreEqLPFCutoff.getNextValue());
+                safeFilterFrequency(cachedSampleRate, smoothedPreEqLPFCutoff.getNextValue()));
         }
         const float currentHPFPower = processHPF
             ? smoothedPreEqHPFPower.getNextValue()
@@ -24057,12 +24094,12 @@ void OpenStudioNAMRack::processGraphicEQ(juce::AudioBuffer<float>& buffer)
         if (smoothedGraphicEqHPFCutoff.isSmoothing())
         {
             graphicEqHPF.setCutoffFrequency(
-                smoothedGraphicEqHPFCutoff.getNextValue());
+                safeFilterFrequency(cachedSampleRate, smoothedGraphicEqHPFCutoff.getNextValue()));
         }
         if (smoothedGraphicEqLPFCutoff.isSmoothing())
         {
             graphicEqLPF.setCutoffFrequency(
-                smoothedGraphicEqLPFCutoff.getNextValue());
+                safeFilterFrequency(cachedSampleRate, smoothedGraphicEqLPFCutoff.getNextValue()));
         }
         const float currentHPFPower = processHPF
             ? smoothedGraphicEqHPFPower.getNextValue()
@@ -25619,8 +25656,13 @@ void OpenStudioNAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buf
             const float biased = driven + diodeBias;
             const float knee =
                 biased >= 0.0f ? positiveKnee : negativeKnee;
-            const float clipped =
-                knee * std::tanh(biased / knee) - zeroResponse;
+            // The bias response can be constant-folded by the compiler while
+            // this sample uses the runtime libm. Older tanhf implementations
+            // may differ by one ULP at the bias point. Preserve the analytic
+            // zero without suppressing the channel's filter/DC-blocker tails.
+            const float clipped = driven == 0.0f
+                ? 0.0f
+                : knee * std::tanh(biased / knee) - zeroResponse;
 
             auto& brightLow =
                 precisionDriveBrightLowState[stateIndex];
@@ -30835,7 +30877,8 @@ int OpenStudioCleanGuitarInstrument::chooseStringForNote(int note, int midiChann
 
 void OpenStudioCleanGuitarInstrument::beginSlideOut(size_t channel,size_t slot) noexcept
 {
-    if(slideOutStarted[channel][slot])return;slideOutStarted[channel][slot]=true;
+    if(slideOutStarted[channel][slot])return;
+    slideOutStarted[channel][slot]=true;
     voiceArticulation[channel][slot]=6;
     auto& pitch=articulationPitch[channel][slot];pitch.reset(cachedSampleRate,juce::jlimit(5.0f,500.0f,slideTime.load())*.001);
     pitch.setTargetValue(pitch.getCurrentValue()-5);

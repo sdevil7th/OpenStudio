@@ -7,11 +7,16 @@ echo "=== OpenStudio Linux prerequisites setup ==="
 
 sudo apt-get update
 
-sudo apt-get install -y \
+# First boot may still be applying distribution security updates. Wait for its
+# package transaction rather than failing halfway through prerequisite setup.
+sudo apt-get -o DPkg::Lock::Timeout=120 install -y \
     build-essential \
     cmake \
     ninja-build \
     pkg-config \
+    dpkg-dev \
+    desktop-file-utils \
+    appstream \
     git \
     \
     libasound2-dev \
@@ -37,13 +42,8 @@ sudo apt-get install -y \
     \
     ffmpeg \
     python3 \
+    python-is-python3 \
     python3-venv
-
-# webkit2gtk-4.1 may not be available on Ubuntu 22.04 — fall back to 4.0
-if ! dpkg -l libwebkit2gtk-4.1-dev &>/dev/null; then
-    echo "webkit2gtk-4.1 not found, installing 4.0 fallback..."
-    sudo apt-get install -y libwebkit2gtk-4.0-dev
-fi
 
 echo ""
 echo "All prerequisites installed."

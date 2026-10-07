@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "PluginSettingsMigration.h"
 #include "AppPaths.h"
 #include "PluginManager.h"
@@ -5,7 +6,6 @@
 #include "CLAPPluginFormat.h"
 #include "IsolatedPlugin.h"
 #include "JsonEnvelope.h"
-#include "RuntimeAssetRoot.h"
 
 namespace
 {
@@ -160,7 +160,7 @@ juce::StringArray getSearchPathsForFormat(juce::AudioPluginFormat& format,
     addSearchPath(paths, format.getDefaultLocationsToSearch());
 
     const auto formatName = format.getName();
-    const auto executableDirectory = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    const auto executableDirectory = OpenStudioRuntime::executableFile()
                                          .getParentDirectory();
 
    #if JUCE_WINDOWS
@@ -471,7 +471,7 @@ public:
         ScopedPluginProbeArtifacts artifacts;
 
         juce::StringArray arguments;
-        arguments.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName());
+        arguments.add(OpenStudioRuntime::executableFile().getFullPathName());
         arguments.add("--plugin-scan-probe-headless");
         arguments.add(fileOrIdentifier);
         arguments.add("--plugin-format");
@@ -1433,8 +1433,8 @@ juce::File PluginManager::getUserEffectsDirectory()
 
 juce::File PluginManager::getStockEffectsDirectory()
 {
-    auto exeDir = OpenStudioRuntimeAssets::preferAppImageRoot(
-        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
+    auto exeDir = OpenStudioRuntime::executableFile()
+        .getParentDirectory();
 
    #if JUCE_MAC
     auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("effects");

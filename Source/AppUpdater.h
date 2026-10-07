@@ -40,7 +40,7 @@ private:
                                        juce::int64 size, juce::String& error);
 
     void publishStatus(const juce::var& status);
-    bool rejectDevelopmentUpdate(const Completion& completion);
+    bool rejectUnsupportedInstallerUpdate(const Completion& completion);
     bool shouldSkipAutomaticCheck() const;
     void recordSuccessfulCheck(const juce::String& latestVersion, const juce::String& publishedAt);
     bool savePersistedState() const;

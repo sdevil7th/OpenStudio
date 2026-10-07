@@ -1,6 +1,5 @@
 import { useState, useEffect, useSyncExternalStore, useRef } from "react";
-import { createPortal } from "react-dom";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import {
   nativeBridge,
   type AudioDebugSnapshot,
@@ -8,11 +7,9 @@ import {
 } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { Button, NativeSelect } from "./ui";
-import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
+import { Button, NativeSelect, Modal } from "./ui";
 import { AudioSettingsSession, audioDeviceDraft, isWasapiType, wasapiModes } from "../utils/audioSettingsSession";
 import { resolveAudioPerformanceAdvisory } from "../utils/audioPerformanceAdvisory";
-import { useModalShortcutScope } from "../utils/modalShortcutScope";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -29,7 +26,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [oversamplingFactor, setOversamplingFactor] = useState<2 | 4 | 8>(4);
   const appliedOversampling = useRef<2 | 4 | 8>(4);
   const openGeneration = useRef(0);
-  const dialogRef = useRef<HTMLDivElement>(null);
   const { refreshAudioDeviceSetup, stop } = useDAWStore(useShallow((s) => ({
     refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
     stop: s.stop,
@@ -68,19 +64,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     session.invalidate();
     onClose();
   };
-  useModalShortcutScope(isOpen, close, !applying && !openingDriverPanel);
 
   useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (isOpen) {
       setDriverPanelMessage(null);
       void refreshConfig();
-      dialogRef.current?.focus();
     }
     return () => {
       ++openGeneration.current;
       session.invalidate();
-      if (isOpen && previousFocus?.isConnected) previousFocus.focus();
     };
   }, [isOpen, session]);
 
@@ -163,49 +155,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   if (!isOpen) return null;
 
-  return createPortal(
-    <div
-      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-[10000] backdrop-blur-[2px]"
-      data-modal-root="true"
-      {...modalPointerBoundaryProps}
-      onClick={close}
-      onContextMenu={guardModalContextMenu}
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={close}
+      title="Audio Settings"
+      size="md"
+      fullHeight
+      closeOnEscape={!applying && !openingDriverPanel}
+      closeOnOverlayClick={!applying && !openingDriverPanel}
     >
-      <div
-        className="bg-neutral-900 border border-neutral-700 w-[500px] max-w-[90vw] max-h-[85vh] flex flex-col rounded-lg shadow-2xl text-neutral-200"
-        role="dialog"
-        ref={dialogRef}
-        tabIndex={-1}
-        aria-modal="true"
-        aria-label="Audio Settings"
-        onKeyDown={(event) => {
-          if (event.key === "Tab") {
-            const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), select:not(:disabled)"));
-            const first = controls[0];
-            const last = controls[controls.length - 1];
-            if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
-              event.preventDefault(); last?.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault(); first?.focus();
-            }
-          }
-        }}
-        onClick={(e) => e.stopPropagation()}
-        onContextMenu={guardModalContextMenu}
-      >
-        <div className="flex justify-between items-center p-4 bg-neutral-800 rounded-t-lg border-b border-neutral-700">
-          <h2 className="m-0 text-lg font-medium">Audio Settings</h2>
-          <Button
-            variant="ghost"
-            size="icon-md"
-            aria-label="Close Audio Settings"
-            disabled={applying || openingDriverPanel}
-            onClick={close}
-          >
-            <X size={18} />
-          </Button>
-        </div>
-
         <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-5">
           {isLoading && (
             <div className="flex items-center gap-2 p-3 bg-blue-500/15 border border-blue-500 rounded text-blue-400 text-sm animate-pulse">
@@ -462,8 +421,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             OK
           </Button>
         </div>
-      </div>
-    </div>,
-    document.body
+    </Modal>
   );
 }

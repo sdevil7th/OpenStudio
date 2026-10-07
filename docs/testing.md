@@ -460,7 +460,7 @@ Remove-Item Env:OPENSTUDIO_WINDOW_CYCLES
 
 Record physical rectangles and DPI; verify title-bar movement, resize, minimize/restore, native close/reopen, main-window inactivity, target/project replacement and owner-loss checkpoint recovery. Repeat actual 100/125/150/200% scaling and monitor moves. A CSS viewport or direct native bounds setter does not prove OS gestures or mixed-DPI behavior. The 29 September build-tree Windows Release run passed 50 pitch reopen cycles; it did not qualify an installed artifact or other platforms. Later source changes require new relevant evidence.
 
-Release gates install/test the Windows EXE, exercise the mounted macOS DMG and launch the Linux AppImage under Xvfb/Openbox. AppImage runtime assets resolve from a validated `APPDIR/usr/bin` when launched through AppImage. Xvfb/Openbox qualifies X11/XWayland, not native Wayland. Pipeline definitions alone are not executed platform results.
+Release gates install/test the Windows EXE, exercise the mounted macOS DMG and launch the Linux AppImage under Xvfb/Openbox. On Linux, runtime assets resolve beside the running ELF through `/proc/self/exe`, including AppImage launches; inherited `APPDIR` cannot redirect resource lookup. Xvfb/Openbox qualifies X11/XWayland, not native Wayland. Pipeline definitions alone are not executed platform results.
 
 For each physical recording configuration, start with 60 seconds then a 30-minute sustained capture. Exercise the actual interface (including supported ASIO small buffers), WASAPI USB/webcam input/output pairs, Core Audio permission/aggregate configurations and Linux's shipped audio backend. Save `getAudioDebugSnapshot()` immediately before and after the take plus the original PCM WAV:
 

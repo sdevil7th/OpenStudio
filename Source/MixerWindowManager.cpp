@@ -393,7 +393,7 @@ void MixerWindowManager::drainGlobalPendingRequests()
     while (! isGlobalLifecycleBusy() && ! managersWithPendingRequests.isEmpty())
     {
         auto* manager = managersWithPendingRequests.getFirst();
-        managersWithPendingRequests.remove(0);
+        managersWithPendingRequests.removeRange(0, 1);
 
         if (manager != nullptr)
             manager->runPendingRequest();

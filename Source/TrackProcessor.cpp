@@ -646,49 +646,6 @@ static void computePanLawGains(PanLaw panLaw, float pan, float volumeGain,
     }
 }
 
-static void normalizeMonoLikeBufferToDualMono(juce::AudioBuffer<float>& buffer,
-                                              int bufferChannels,
-                                              int numSamples)
-{
-    if (bufferChannels < 2 || numSamples <= 0)
-        return;
-
-    const auto* left = buffer.getReadPointer(0);
-    const auto* right = buffer.getReadPointer(1);
-
-    float peakLeft = 0.0f;
-    float peakRight = 0.0f;
-    float maxDifference = 0.0f;
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        const float absLeft = std::abs(left[sample]);
-        const float absRight = std::abs(right[sample]);
-        peakLeft = juce::jmax(peakLeft, absLeft);
-        peakRight = juce::jmax(peakRight, absRight);
-        maxDifference = juce::jmax(maxDifference, std::abs(left[sample] - right[sample]));
-    }
-
-    constexpr float silenceThreshold = 1.0e-5f;
-    const float identicalTolerance = juce::jmax(1.0e-4f, juce::jmax(peakLeft, peakRight) * 1.0e-3f);
-
-    const bool leftSilent = peakLeft <= silenceThreshold;
-    const bool rightSilent = peakRight <= silenceThreshold;
-    const bool nearlyIdentical = maxDifference <= identicalTolerance;
-
-    if (nearlyIdentical)
-        return;
-
-    if (!leftSilent && rightSilent)
-    {
-        buffer.copyFrom(1, 0, buffer, 0, 0, numSamples);
-        return;
-    }
-
-    if (leftSilent && !rightSilent)
-        buffer.copyFrom(0, 0, buffer, 1, 0, numSamples);
-}
-
 static float backendWidthToPercent(float backendWidth)
 {
     return juce::jlimit(0.0f, 200.0f, (juce::jlimit(-1.0f, 1.0f, backendWidth) + 1.0f) * 100.0f);
@@ -2293,6 +2250,9 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     if (!std::isfinite(sampleRate) || sampleRate <= 0.0
         || samplesPerBlock <= 0 || samplesPerBlock > 65536)
         return;
+    // Tracks are also prepared directly before a running graph adds its node.
+    // Keep AudioProcessor's metadata in sync: the fallback sampler and automation
+    // read getSampleRate(), which otherwise remains zero until graph preparation.
     setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
     realtimeFXTailSampleRateHz.store(
         juce::roundToInt(juce::jlimit(8000.0, 384000.0,
@@ -4306,11 +4266,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // Preserve deliberate single-sided output from stereo instruments (e.g. MIDI
-    // pan). The mono-source repair remains for the existing audio/FX paths.
-    const bool stereoInstrument=hasTrackBuiltInInstrument
-        ||(instrumentSnapshot!=nullptr&&instrumentSnapshot->getTotalNumOutputChannels()>1);
-    if(!stereoInstrument)normalizeMonoLikeBufferToDualMono(buffer, bufferChannels, buffer.getNumSamples());
+    // Preserve stereo channel identity at the send taps. A silent channel is valid
+    // stereo content; mono expansion belongs to the declared source/plugin layout.
 
     // ===== CAPTURE PRE-FADER BUFFER (for pre-fader sends) =====
     if (sendSnapshot && !sendSnapshot->empty())
@@ -4534,10 +4491,15 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // duplicated mono signal, producing a "polyphonic" doubled sound).
     if (plugin->getTotalNumInputChannels() == 0 && plugin->getTotalNumOutputChannels() == 0)
     {
-        juce::AudioProcessor::BusesLayout stereoLayout;
-        stereoLayout.inputBuses.add(juce::AudioChannelSet::stereo());
-        stereoLayout.outputBuses.add(juce::AudioChannelSet::stereo());
-        plugin->setBusesLayout(stereoLayout);
+        // A MIDI-only processor can genuinely have no audio buses. Enabling
+        // existing buses must not invent buses or change their count.
+        auto stereoLayout = plugin->getBusesLayout();
+        if (!stereoLayout.inputBuses.isEmpty())
+            stereoLayout.inputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.outputBuses.isEmpty())
+            stereoLayout.outputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.inputBuses.isEmpty() || !stereoLayout.outputBuses.isEmpty())
+            plugin->setBusesLayout(stereoLayout);
     }
 
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
@@ -4574,10 +4536,15 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // (same rationale as addInputFX — preserve the plugin's default layout).
     if (plugin->getTotalNumInputChannels() == 0 && plugin->getTotalNumOutputChannels() == 0)
     {
-        juce::AudioProcessor::BusesLayout stereoLayout;
-        stereoLayout.inputBuses.add(juce::AudioChannelSet::stereo());
-        stereoLayout.outputBuses.add(juce::AudioChannelSet::stereo());
-        plugin->setBusesLayout(stereoLayout);
+        // A MIDI-only processor can genuinely have no audio buses. Enabling
+        // existing buses must not invent buses or change their count.
+        auto stereoLayout = plugin->getBusesLayout();
+        if (!stereoLayout.inputBuses.isEmpty())
+            stereoLayout.inputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.outputBuses.isEmpty())
+            stereoLayout.outputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.inputBuses.isEmpty() || !stereoLayout.outputBuses.isEmpty())
+            plugin->setBusesLayout(stereoLayout);
     }
 
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,

@@ -20,7 +20,8 @@ class BuiltInVintageConverter
             float a=0,b=0,c=0,d=0;int i=0;
             for(;i+3<filled;i+=4){a+=samples[i]*taps[i];b+=samples[i+1]*taps[i+1];c+=samples[i+2]*taps[i+2];d+=samples[i+3]*taps[i+3];}
             float output=(a+b)+(c+d);for(;i<filled;++i)output+=samples[i]*taps[i];
-            if(++position==length)position=0;return output;
+            if(++position==length)position=0;
+            return output;
         }
     };
 public:
@@ -43,7 +44,8 @@ public:
                 const double window=length==1?1:.42-.5*std::cos(juce::MathConstants<double>::twoPi*i/(length-1))+.08*std::cos(2*juce::MathConstants<double>::twoPi*i/(length-1));
                 coefficients[static_cast<size_t>(i)]=static_cast<float>(length==1?1:sinc*window);sum+=coefficients[static_cast<size_t>(i)];
             }
-            for(int i=0;i<length;++i)coefficients[static_cast<size_t>(i)]/=static_cast<float>(sum);reset();
+            for(int i=0;i<length;++i)coefficients[static_cast<size_t>(i)]/=static_cast<float>(sum);
+            reset();
         }
         void reset() noexcept {for(auto& filter:inputFilter)filter.reset();for(auto& filter:outputFilter)filter.reset();lastInput={};previousOutput={};currentOutput={};phase=0;ticks=0;}
         float quantize(float input) const noexcept
@@ -84,7 +86,8 @@ public:
     void prepare(double rate)
     {
         banks[0].prepare(rate,24000,12);banks[1].prepare(rate,48000,16);
-        for(auto& weight:weights)weight.reset(rate,.05);reset();
+        for(auto& weight:weights)weight.reset(rate,.05);
+        reset();
     }
     void reset() noexcept {for(auto& bank:banks)bank.reset();running={};initialized=false;}
     void configure(bool enabled,int colour) noexcept

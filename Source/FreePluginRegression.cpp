@@ -85,6 +85,7 @@ bool writeProbeWave(const juce::File& file, const juce::AudioBuffer<float>& audi
 #include "FreePluginVintageConversionRegression.h"
 #include "FreePluginVintageTankRateRegression.h"
 #include "FreePluginLongPredelayRegression.h"
+#include "FreePluginLowRateChannelRegression.h"
 #include "FreePluginModalPlateRegression.h"
 #include "FreePluginSpatialLongDelayRegression.h"
 #include "FreePluginIRBrightnessRegression.h"
@@ -195,7 +196,7 @@ juce::var checkDrumPieceControls()
         panIsolation=panIsolation&&left.getMagnitude(0,0,left.getNumSamples())>left.getMagnitude(1,0,left.getNumSamples())&&right.getMagnitude(0,0,right.getNumSamples())==0&&right.getMagnitude(1,0,right.getNumSamples())>0;
         const auto a=render(rate,127,0,0,true),b=render(rate,512,0,0,true);for(int ch=0;ch<2;++ch)for(int i=0;i<a.getNumSamples();++i){const double value=a.getSample(ch,i);finite=finite&&std::isfinite(value)&&std::abs(value)<1;partitionError=juce::jmax(partitionError,std::abs(value-b.getSample(ch,i)));}
     }
-    OpenStudioDrumInstrument drums;const auto gm=drums.describeMapping();drums.mapPreset.store(1);const auto td=drums.describeMapping();bool mapping=true;for(const auto pair:std::array<std::pair<int,int>,9>{{{22,42},{26,46},{47,45},{50,48},{58,43},{55,49},{52,57},{59,51},{53,51}}})mapping=mapping&&drums.mappedNote(pair.first)==pair.second;
+    OpenStudioDrumInstrument drums;const auto gm=drums.describeMapping();drums.mapPreset.store(1);const auto td=drums.describeMapping();bool mapping=true;for(const auto& pair:std::array<std::pair<int,int>,9>{{{22,42},{26,46},{47,45},{50,48},{58,43},{55,49},{52,57},{59,51},{53,51}}})mapping=mapping&&drums.mappedNote(pair.first)==pair.second;
     bool setters=true;for(int i=0;i<8;++i){setters=setters&&setFreePluginParamForRegression(drums,"pieceTuning"+juce::String(i),static_cast<float>(i-4));setters=setters&&setFreePluginParamForRegression(drums,"piecePan"+juce::String(i),static_cast<float>(i-4)/4);}
     juce::MemoryBlock state;drums.getStateInformation(state);OpenStudioDrumInstrument restored;restored.setStateInformation(state.getData(),static_cast<int>(state.getSize()));bool recall=true;for(size_t i=0;i<8;++i)recall=recall&&drums.pieceTuning[i].load()==restored.pieceTuning[i].load()&&drums.piecePan[i].load()==restored.piecePan[i].load();
     auto tree=juce::ValueTree::readFromData(state.getData(),state.getSize());for(int i=0;i<8;++i){tree.removeProperty("pieceTuning"+juce::String(i),nullptr);tree.removeProperty("piecePan"+juce::String(i),nullptr);}juce::MemoryBlock old;juce::MemoryOutputStream stream(old,false);tree.writeToStream(stream);restored.setStateInformation(old.getData(),static_cast<int>(old.getSize()));bool migration=true;for(size_t i=0;i<8;++i)migration=migration&&restored.pieceTuning[i].load()==0&&restored.piecePan[i].load()==0;
@@ -1592,7 +1593,9 @@ juce::var checkIRBandDecayEstimate()
         ordered=ordered&&mixed.bands[0].rt60>mixed.bands[1].rt60&&mixed.bands[1].rt60>mixed.bands[2].rt60;
         if(rate==48000)example=mixed.toVar();
         impulse.clear();const auto silent=BuiltInIRDecay::analyzeBands(impulse,rate,.08,250,4000);for(const auto& band:silent.bands)rejected=rejected&&!band.available;
-        for(int i=0;i<count;++i)impulse.setSample(0,i,.1f);const auto constant=BuiltInIRDecay::analyzeBands(impulse,rate,.08,250,4000);rejected=rejected&&!constant.bands[0].available;
+        for(int i=0;i<count;++i)impulse.setSample(0,i,.1f);
+        const auto constant=BuiltInIRDecay::analyzeBands(impulse,rate,.08,250,4000);
+        rejected=rejected&&!constant.bands[0].available;
     }
     juce::AudioBuffer<float> lowRate(1,1600);lowRate.clear();const auto clamped=BuiltInIRDecay::analyzeBands(lowRate,8000,.08,2000,16000);bounds=bounds&&clamped.bands[0].highHz==1800&&clamped.bands[1].highHz==3600&&clamped.bands[2].highHz==4000;
     result->setProperty("pass",accepted&&error<.01&&channelError<1e-8&&bounds&&rejected&&ordered);result->setProperty("isolatedToneRelativeError",error);result->setProperty("opposedChannelErrorSeconds",channelError);result->setProperty("allToneFits",accepted);result->setProperty("mixedTailOrdering",ordered);result->setProperty("sourceRateBounds",bounds);result->setProperty("invalidTailRejection",rejected);result->setProperty("example",example);result->setProperty("acousticAccuracy","diagnostic_only");result->setProperty("audioQuality","not_asserted");return result;
@@ -1610,7 +1613,8 @@ juce::var checkIRDecayEstimate()
         accepted=accepted&&mono.available&&stereo.available;relativeError=juce::jmax(relativeError,std::abs(mono.rt60/seconds-1));channelError=juce::jmax(channelError,std::abs(mono.rt60-stereo.rt60));
         juce::AudioBuffer<float> shortTail(1,juce::roundToInt(rate*.2));for(int i=0;i<shortTail.getNumSamples();++i)shortTail.setSample(0,i,static_cast<float>(std::exp(-std::log(10.0)*3*i/(rate*3))));rejected=rejected&&!BuiltInIRDecay::analyze(shortTail,rate,0).available;
         shortTail.clear();rejected=rejected&&!BuiltInIRDecay::analyze(shortTail,rate,0).available;
-        for(int i=0;i<shortTail.getNumSamples();++i)shortTail.setSample(0,i,.1f);rejected=rejected&&!BuiltInIRDecay::analyze(shortTail,rate,0).available;
+        for(int i=0;i<shortTail.getNumSamples();++i)shortTail.setSample(0,i,.1f);
+        rejected=rejected&&!BuiltInIRDecay::analyze(shortTail,rate,0).available;
         shortTail.setSample(0,10,std::numeric_limits<float>::quiet_NaN());rejected=rejected&&!BuiltInIRDecay::analyze(shortTail,rate,0).available;
     }
     const double rate=48000;juce::AudioBuffer<float> impulse(2,96000);for(int i=0;i<impulse.getNumSamples();++i){const float v=static_cast<float>(.2*std::sin(juce::MathConstants<double>::twoPi*997*i/rate)*std::exp(-std::log(10.0)*3*i/rate));impulse.setSample(0,i,v);impulse.setSample(1,i,-v);}
@@ -2606,7 +2610,8 @@ juce::var checkConvolutionCrossTerms()
             const int length=juce::jmin(block,6000-position,position<256?256-position:6000-position);chunk.setSize(2,length,false,false,true);chunk.clear();
             if(position==0)chunk.setSample(0,0,1);
             source.process(chunk,0,20,20000,1,true,false);
-            for(int ch=0;ch<2;++ch)output.copyFrom(ch,position,chunk,ch,0,length);position+=length;
+            for(int ch=0;ch<2;++ch)output.copyFrom(ch,position,chunk,ch,0,length);
+            position+=length;
         }
         return output;
     };
@@ -3895,6 +3900,7 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     if (selectedCase.isNotEmpty())
     {
         const std::map<juce::String, std::function<juce::var()>> focused {
+            {"low-rate-channel-safety", checkLowRateChannelSafety},
             {"automation-registry", checkFreePluginAutomationRegistry},
             {"mute-point-timing", checkTrackMutePointTiming},
             {"send-automation", checkSendAutomation},
@@ -3947,6 +3953,9 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     const auto monoPitch = checkMonoPitchSafety();
     passed = passed && static_cast<bool>(monoPitch["pass"]);
     results.add(monoPitch);
+    const auto lowRateChannels = checkLowRateChannelSafety();
+    passed = passed && static_cast<bool>(lowRateChannels["pass"]);
+    results.add(lowRateChannels);
     const auto eqContract = checkEQEditorContract();
     passed = passed && static_cast<bool>(eqContract["pass"]);
     results.add(eqContract);

@@ -6,7 +6,8 @@ inline juce::var checkVintageConversion()
     const auto render=[](double rate,double target,int bits,double hz,int blockSize)
     {
         BuiltInVintageConverter::Bank bank;bank.prepare(rate,target,bits);const int count=static_cast<int>(rate*.3);std::vector<float> output(static_cast<size_t>(count));
-        for(int start=0;start<count;start+=blockSize)for(int i=start;i<juce::jmin(count,start+blockSize);++i){const float value=static_cast<float>(.25*std::sin(juce::MathConstants<double>::twoPi*hz*i/rate));output[static_cast<size_t>(i)]=bank.process({value,-value})[0];}return output;
+        for(int start=0;start<count;start+=blockSize)for(int i=start;i<juce::jmin(count,start+blockSize);++i){const float value=static_cast<float>(.25*std::sin(juce::MathConstants<double>::twoPi*hz*i/rate));output[static_cast<size_t>(i)]=bank.process({value,-value})[0];}
+        return output;
     };
     for(const double rate:{44100.0,48000.0,96000.0,192000.0})
     for(const auto& format:std::array<std::pair<double,int>,2>{{{24000,12},{48000,16}}})

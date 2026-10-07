@@ -73,7 +73,7 @@ private:
         Line predelay;
         std::array<float, 2> feedback {}, damp {}, hp {}, lp {};
         // Table 2 output taps: delay line index, delay at 29761 Hz, sign.
-        struct Tap { int line, delay; float sign; juce::SmoothedValue<float> loss; };
+        struct Tap { int line, delay; float sign; juce::SmoothedValue<float> loss {}; };
         std::array<std::array<Tap, 7>, 2> taps {{
             {{{5,266,1}, {5,2974,1}, {6,1913,-1}, {7,1996,1}, {1,1990,-1}, {2,187,-1}, {3,1066,-1}}},
             {{{1,353,1}, {1,3627,1}, {2,1228,-1}, {3,2673,1}, {5,2111,-1}, {6,335,-1}, {7,121,-1}}}

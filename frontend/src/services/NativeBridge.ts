@@ -32,7 +32,7 @@ import {
 } from "../utils/namPortableState";
 
 export interface AppUpdateStatus {
-  status: "idle" | "development" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
+  status: "idle" | "development" | "manual-update" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
     | "downloading" | "download-ready" | "installing" | "install-started" | "cancelled" | "incompatible" | "error";
   message: string;
   currentVersion?: string;
@@ -2308,7 +2308,7 @@ declare global {
         queryAudioDeviceSetup?: (draft: AudioDeviceDraft) => Promise<AudioDeviceSetupResponse>;
         applyAudioDeviceSetup?: (draft: AudioDeviceDraft) => Promise<AudioDeviceApplyResult>;
         openAudioDeviceControlPanel?: () => Promise<AudioDeviceControlPanelResult>;
-        setAudioDeviceSetup?: (config: any) => Promise<boolean>;
+        setAudioDeviceSetup?: (config: any) => Promise<boolean | { success: boolean; error?: string }>;
         getNAMRackOversamplingFactor?: () => Promise<2 | 4 | 8>;
         setNAMRackOversamplingFactor?: (factor: 2 | 4 | 8) => Promise<boolean>;
 
@@ -4435,7 +4435,10 @@ class NativeBridge {
 
   async setAudioDeviceSetup(config: any): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setAudioDeviceSetup) {
-      return await window.__JUCE__.backend.setAudioDeviceSetup(config);
+      const result = await window.__JUCE__.backend.setAudioDeviceSetup(config);
+      if (typeof result === "boolean") return result;
+      if (!result.success) throw new Error(result.error || "Audio device rejected the requested configuration");
+      return true;
     } else {
       console.log("Mock: setAudioDeviceSetup", config);
       return true;

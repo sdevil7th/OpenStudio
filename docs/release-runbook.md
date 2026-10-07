@@ -74,7 +74,7 @@ Use this flow instead:
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-linux-x86_64.AppImage`
+   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-x86_64.AppImage`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-macos-arm64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-cpu-x64.zip`
@@ -112,8 +112,20 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - Windows setup, CMake configuration, and runtime validation fail if any pinned
   FFmpeg runtime, manifest, source-lock, license, or provenance file is absent
   or altered.
-- Linux release automation extracts the completed AppImage and reruns the
-  runtime-bundle contract against its packaged `usr/bin` payload.
+- Linux release/verification workflows now target Ubuntu 22.04 and audit the
+  complete AppDir's ELF dependencies with a glibc 2.35 ceiling. Native `.deb`
+  installation, packaged window/render/engine checks, and finished-AppImage
+  window tests accompany the existing runtime-bundle contract. These workflow
+  edits require a successful remote run before release qualification.
+- Linux build provenance is produced by the pinned GitHub attestation action.
+  Verify an actual published artifact with `gh attestation verify <artifact>
+  --repo sdevil7th/OpenStudio`. This authenticates build provenance, not a
+  malware-free promise or an Ubuntu local-file publisher badge. Production RPM
+  and repository signing and the Snap publisher account remain separate gates.
+- The new AppImage name omits `linux`; old release assets are unchanged. The
+  updater's manifest/appcast fields and Linux stable redirect keep their existing
+  AppImage meaning. Native download choices must be qualified and exposed
+  separately rather than redirecting an old AppImage client to a `.deb`.
 
 ## Dependency contract
 

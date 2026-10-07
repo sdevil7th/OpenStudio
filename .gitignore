@@ -185,3 +185,6 @@ Desktop.ini
 # Local cabinet presentation captures
 /tmp_cab_showcase/
 /tmp_cab_showcase_v2/
+
+# Download cache for local AI runtime assembly
+/.cache/

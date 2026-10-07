@@ -35,7 +35,11 @@ public:
     }
     void reset() noexcept
     {
-        for(auto& network:networks)for(auto& line:network)line.reset();split={};remaining=0;initialized=false;empty=true;
+        for(auto& network:networks)for(auto& line:network)line.reset();
+        split={};
+        remaining=0;
+        initialized=false;
+        empty=true;
     }
     static double tailSeconds(const std::array<float,6>& values) noexcept
     {

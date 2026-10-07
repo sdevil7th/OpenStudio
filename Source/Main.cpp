@@ -1,3 +1,6 @@
+#include "RegressionMessagePump.h"
+#include "AudioDeviceProbe.h"
+#include "RuntimeLocation.h"
 #include <JuceHeader.h>
 #include "ApplicationLaunchState.h"
 #include "AudioEngine.h"
@@ -18,6 +21,7 @@
 #include "ASIOCapabilities.h"
 #include "NAMModelSafety.h"
 #include "PluginManager.h"
+#include "PluginQualification.h"
 #include "IsolatedPlugin.h"
 
 #include "NAM/container.h"
@@ -109,7 +113,8 @@ juce::StringArray readPluginScanSearchPathsFile(const juce::File& pathsFile)
 int runHeadlessPluginScanProbe(const juce::String& formatName,
                                const juce::String& pluginIdentifier,
                                const juce::StringArray& searchPaths,
-                               const juce::File& reportFile)
+                               const juce::File& reportFile,
+                               bool qualify = false, bool checkEditor = false)
 {
     juce::AudioPluginFormatManager formats;
     juce::addDefaultFormatsToManager(formats);
@@ -171,6 +176,15 @@ int runHeadlessPluginScanProbe(const juce::String& formatName,
             result->setAttribute("pluginCount", descriptions.size());
             if (descriptions.isEmpty())
                 result->setAttribute("error", "The module loaded no compatible plug-in types.");
+            if (qualify)
+                for (const auto* description : descriptions)
+                    if (description != nullptr)
+                    {
+                        auto qualification = PluginQualification::run(formats, *description, checkEditor);
+                        if (!qualification->getBoolAttribute("success"))
+                            result->setAttribute("status", "qualification-failed");
+                        result->addChildElement(qualification.release());
+                    }
         }
     }
 
@@ -1232,12 +1246,23 @@ public:
             else
             {
                 OwnedChildProcess descendant;
-                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+                const auto executable = OpenStudioRuntime::executableFile();
                 if (!descendant.start({ executable.getFullPathName(), "--owned-worker-fixture", ownedWorkerFixture, "--owned-worker-leaf" }))
                 { setApplicationReturnValue(3); quit(); return; }
                 fixtureDirectory.getChildFile("descendant.pid").replaceWithText(juce::String(descendant.getProcessId()));
                 juce::Thread::sleep(30000);
             }
+            quit(); return;
+        }
+        const auto audioProbeName = getCommandLineOptionValue(commandLine, "--audio-device-probe");
+        if (audioProbeName.isNotEmpty())
+        {
+            const auto output = getCommandLineOptionValue(commandLine, "--output-dir");
+            const auto seconds = getCommandLineOptionValue(commandLine, "--audio-probe-seconds");
+            const auto buffer = getCommandLineOptionValue(commandLine, "--audio-probe-buffer");
+            setApplicationReturnValue(output.isNotEmpty()
+                ? AudioDeviceProbe::run(audioProbeName, juce::File(output),
+                    seconds.isEmpty() ? 10 : seconds.getIntValue(), buffer.isEmpty() ? 512 : buffer.getIntValue()) : 2);
             quit(); return;
         }
         const auto runtimeTestPath = getCommandLineOptionValue(commandLine, "--runtime-safety-self-test");
@@ -1289,6 +1314,7 @@ public:
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
         if (commandLineHasFlag(commandLine, "--free-plugin-regression-headless"))
         {
+            ScopedHeadlessRegressionMessages headlessMessages(true);
             const auto reportPath = getCommandLineOptionValue(commandLine, "--report");
             const auto fixturePath = getCommandLineOptionValue(commandLine, "--fixtures");
             const auto result = runFreePluginRegression(
@@ -1317,6 +1343,12 @@ public:
         const auto pluginScanSearchPathsFile = getCommandLineOptionValue(commandLine, "--plugin-search-paths-file");
         const auto pluginScanRegressionHeadlessMode = commandLineHasFlag(commandLine, "--plugin-scan-regression-headless");
         const auto windowLifecycleHarnessMode = commandLineHasFlag(commandLine, "--window-lifecycle-harness");
+        ScopedHeadlessRegressionMessages headlessMessages(
+            automatedRegressionHeadlessMode || renderExportRegressionHeadlessMode
+            || pitchRegressionHeadlessJobPath.isNotEmpty()
+            || cleanGuitarRegressionReportPath.isNotEmpty()
+            || namRackRegressionReportPath.isNotEmpty()
+            || namRackDIRegressionInputPath.isNotEmpty());
         startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
@@ -1324,7 +1356,8 @@ public:
         auto logFile = pluginScanProbePath.isNotEmpty() && startupSelfTestReportPath.isNotEmpty()
             ? juce::File(startupSelfTestReportPath.trim().unquoted()).withFileExtension("log")
             : getWritableStartupLogFile();
-        juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
+        startupLogger = std::make_unique<juce::FileLogger>(logFile, "OpenStudio Startup Log");
+        juce::Logger::setCurrentLogger(startupLogger.get());
         juce::Logger::writeToLog("Application Initialising...");
         juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
         juce::Logger::writeToLog("Startup mode: " + juce::String(startupMode == MainComponent::StartupMode::safe ? "safe" : "normal"));
@@ -1426,7 +1459,9 @@ public:
                 pluginScanSearchPathsFile.isNotEmpty()
                     ? readPluginScanSearchPathsFile(juce::File(pluginScanSearchPathsFile.trim().unquoted()))
                     : juce::StringArray(),
-                reportFile);
+                reportFile,
+                commandLineHasFlag(commandLine, "--plugin-qualify"),
+                commandLineHasFlag(commandLine, "--plugin-editor-check"));
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -1651,6 +1686,7 @@ public:
         audioEngine.reset();
 
         juce::Logger::setCurrentLogger(nullptr);
+        startupLogger.reset();
     }
 
     void systemRequestedQuit() override
@@ -2859,8 +2895,14 @@ private:
         auto stepIndex = std::make_shared<size_t>(0);
         auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
-        *runner = [this, reportFile, checks, inputEvidence, steps, stepIndex, stepAttempt, runner, midiSessionId]() mutable
+        const std::weak_ptr<std::function<void()>> weakRunner = runner;
+        *runner = [this, reportFile, checks, inputEvidence, steps, stepIndex, stepAttempt, weakRunner, midiSessionId]() mutable
         {
+            // Timers own the next invocation. The function must not own itself,
+            // otherwise all check results survive application shutdown.
+            const auto runner = weakRunner.lock();
+            if (runner == nullptr)
+                return;
             if (*stepIndex >= steps->size())
             {
                 const bool success = ! hasFailedHarnessCheck(*checks);
@@ -2940,6 +2982,7 @@ private:
         (*runner)();
     }
 
+    std::unique_ptr<juce::FileLogger> startupLogger;
     std::unique_ptr<AudioEngine> audioEngine;
     AppUpdater appUpdater;
     std::unique_ptr<juce::DocumentWindow> storeQueryWindow;

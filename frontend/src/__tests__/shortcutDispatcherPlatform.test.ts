@@ -37,6 +37,20 @@ describe("platform-explicit shortcut dispatch", () => {
     useDAWStore.setState(original);
   });
 
+  it.each(["linux", "windows", "macos"] as const)("isolates modal editing but preserves transport on %s", platform => {
+    useDAWStore.setState({ keyboardShortcutProfileId: "openstudio" });
+    activateShortcutContext({ kind: "modal" });
+    const executeAction = vi.fn();
+    const event = { key: "t", code: "KeyT", source: "browser", targetIsModal: true,
+      ...(platform === "macos" ? { metaKey: true } : { ctrlKey: true }) };
+    dispatchGlobalShortcut(event as any, platform, { executeAction, canHandleAction: () => true });
+    expect(executeAction).not.toHaveBeenCalled();
+    dispatchGlobalShortcut({ key: " ", code: "Space", targetIsModal: true } as any, platform, { executeAction });
+    expect(executeAction).toHaveBeenCalledWith(expect.objectContaining({ id: "transport.play" }));
+    executeAction.mockClear();
+    dispatchGlobalShortcut({ ...event, targetIsModal: false } as any, platform, { executeAction, canHandleAction: () => true });
+    expect(executeAction).toHaveBeenCalledWith(expect.objectContaining({ id: "insert.audioTrack" }));
+  });
   it("matches the portable primary modifier as Control on Windows and Command on macOS", () => {
     const windowsEvent = { key: "e", code: "KeyE", ctrlKey: true };
     const macEvent = { key: "e", code: "KeyE", metaKey: true };

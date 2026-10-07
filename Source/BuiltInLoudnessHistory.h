@@ -17,7 +17,8 @@ public:
     void prepare(double sampleRate)
     {
         rate=sampleRate;hop=juce::jmax(1,juce::roundToInt(rate*.1));momentarySamples=juce::jmax(1,juce::roundToInt(rate*.4));shortSamples=juce::jmax(1,juce::roundToInt(rate*3));
-        if(!histograms)histograms=std::make_unique<Histograms>();reset();
+        if(!histograms)histograms=std::make_unique<Histograms>();
+        reset();
     }
     void requestReset() noexcept { resetRequest.fetch_add(1,std::memory_order_release); }
     void reset() noexcept

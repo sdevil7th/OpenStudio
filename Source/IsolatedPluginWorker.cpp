@@ -49,6 +49,7 @@ public:
     };
     void fail(int crashMode, int hangMode)
     {
+        juce::ignoreUnused(crashMode);
 #if JUCE_WINDOWS
         if (mode.load() == crashMode) RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
 #endif

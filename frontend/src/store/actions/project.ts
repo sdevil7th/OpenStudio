@@ -14,8 +14,9 @@ import { commandManager } from "../commands";
 import { usePitchEditorStore } from "../pitchEditorStore";
 import { advanceProjectEpoch, getProjectEpoch, getRecoveryDocumentId, getProjectEditRevision, markProjectEdited, serializeProjectSave } from "../../utils/projectLifetime";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
+import { restoreProjectRouting } from "../../utils/projectRoutingRestore";
 import { resetSyncCache } from "./clips";
-import { createFreshProjectDocumentState } from "../useDAWStore";
+import { createDefaultTrack, createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { parseSendAutomationParamId } from "../automationParams";
 import {
@@ -994,6 +995,15 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             playbackOffsetMs: track.playbackOffsetMs ?? 0,
             trackChannelCount: track.trackChannelCount ?? 2,
             pan: track.pan,
+            notes: track.notes,
+            waveformZoom: track.waveformZoom,
+            spectralView: track.spectralView,
+            isFolder: track.isFolder,
+            parentFolderId: track.parentFolderId,
+            folderCollapsed: track.folderCollapsed,
+            takes: track.takes,
+            activeTakeIndex: track.activeTakeIndex,
+            recordSafe: track.recordSafe,
             muted: track.muted,
             soloed: track.soloed,
             soloSafe: !!track.soloSafe,
@@ -1251,6 +1261,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         const data = parseValidatedProject(json);
         const namProjectStateIssues: NAMProjectStateIssue[] = [];
         const pluginRestoreIssues: string[] = [];
+        const routingIssues: string[] = [];
         const recordNAMProjectStateIssue = (
           phase: NAMProjectStateIssue["phase"],
           location: string,
@@ -1470,11 +1481,8 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             await nativeBridge.setTrackVolume(trackData.id, trackData.volumeDB);
             await nativeBridge.setTrackPan(trackData.id, trackData.pan);
             await nativeBridge.setAutomationTrimValue(trackData.id, normalizeTrimDB(trackData.trimVolumeDB));
-            await nativeBridge.setTrackPhaseInvert(trackData.id, !!trackData.phaseInverted);
-            await nativeBridge.setTrackStereoWidth(trackData.id, trackData.stereoWidth ?? 100);
-            await nativeBridge.setTrackOutputChannels(trackData.id, trackData.outputStartChannel ?? 0, trackData.outputChannelCount ?? 2);
-            await nativeBridge.setTrackPlaybackOffset(trackData.id, trackData.playbackOffsetMs ?? 0);
-            await nativeBridge.setTrackChannelCount(trackData.id, trackData.trackChannelCount ?? 2);
+            // Set the track's channel layout before preparing its FX processors.
+            routingIssues.push(...await restoreProjectRouting([trackData]));
 
             if (trackData.muted)
               await nativeBridge.setTrackMute(trackData.id, true);
@@ -1797,6 +1805,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
               : trackData.aiWorkflow;
 
             const frontendTrack: Track = {
+              ...createDefaultTrack(trackData.id, trackData.name, trackData.color, trackData.type),
               ...trackData,
               type: restoredInstrumentPlugin || restoredBuiltInInstrumentFX ? "instrument" : trackData.type,
               aiMusicModelId,
@@ -1975,8 +1984,6 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
         // Restore graph edges only after all destination tracks and their processors exist.
         for (const track of get().tracks) {
-          await nativeBridge.setTrackMasterSendEnabled(track.id, track.masterSendEnabled !== false)
-            .catch(logBridgeError("restore master send"));
           try {
             if (!await nativeBridge.replaceTrackSends(track.id, track.sends ?? []))
               throw new Error("complete send configuration rejected");
@@ -1987,7 +1994,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             // Reflect that safe state; the saved file remains available to retry.
             set(state => ({ tracks: state.tracks.map(item => item.id === track.id
               ? { ...item, sends: [] } : item) }));
-            pluginRestoreIssues.push(`Sends from ${track.name} could not be restored: ${String(error)}`);
+            routingIssues.push(`Sends from ${track.name} could not be restored: ${String(error)}`);
           }
         }
 
@@ -2073,7 +2080,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
 
           return {
             projectPath: recoveryCopy ? null : path,
-            isModified: recoveryCopy,
+            isModified: recoveryCopy || routingIssues.length > 0,
             recentProjects: newRecent,
           };
         });
@@ -2115,7 +2122,9 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         }
 
         set({ isProjectLoading: false, projectLoadingMessage: "" });
-        if (pluginRestoreIssues.length > 0) {
+        if (routingIssues.length > 0) {
+          get().showToast(`Project opened with routing errors: ${routingIssues.join("; ")}`, "error");
+        } else if (pluginRestoreIssues.length > 0) {
           get().showToast(`Project opened with plugin errors: ${pluginRestoreIssues.join("; ")}${namProjectStateIssues.length ? "; " + summarizeNAMProjectStateIssues(namProjectStateIssues) : ""}`, "error");
         } else if (namProjectStateIssues.length > 0) {
           get().showToast(summarizeNAMProjectStateIssues(namProjectStateIssues), "error");

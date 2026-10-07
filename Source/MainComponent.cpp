@@ -1,4 +1,5 @@
 #if defined(__APPLE__)
+#include "RuntimeLocation.h"
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
 #include <Security/Security.h>
@@ -18,7 +19,6 @@
 #include "NAMModelSafety.h"
 #include "OwnedChildProcess.h"
 #include "RecordingWriterSafety.h"
-#include "RuntimeAssetRoot.h"
 #include <array>
 #include <atomic>
 #include <set>
@@ -470,7 +470,7 @@ juce::WebBrowserComponent::Options::Backend getPreferredBrowserBackend()
 
 juce::File getExecutableDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    return OpenStudioRuntime::executableFile().getParentDirectory();
 }
 
 juce::File getRuntimeAssetRoot()
@@ -481,7 +481,7 @@ juce::File getRuntimeAssetRoot()
         return resourcesDir;
 #endif
 
-    return OpenStudioRuntimeAssets::preferAppImageRoot(getExecutableDirectory());
+    return getExecutableDirectory();
 }
 
 juce::Array<juce::File> getPackagedFrontendCandidates()
@@ -4567,8 +4567,7 @@ NAMLibraryMultiProcessRegressionResult
 runNAMLibraryMultiProcessRegression()
 {
     NAMLibraryMultiProcessRegressionResult result;
-    const auto executable = juce::File::getSpecialLocation(
-        juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     const auto regressionDirectory = juce::File::getSpecialLocation(
         juce::File::tempDirectory).getChildFile(
             "OpenStudio_NAM_Library_Multiprocess_"
@@ -4696,8 +4695,7 @@ NAMLibraryMultiProcessRegressionResult
 runNAMLibraryProcessCleanupRegression()
 {
     NAMLibraryMultiProcessRegressionResult result;
-    const auto executable = juce::File::getSpecialLocation(
-        juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     const auto regressionDirectory = juce::File::getSpecialLocation(
         juce::File::tempDirectory).getChildFile(
             "OpenStudio_NAM_Library_Multiprocess_"
@@ -8192,7 +8190,7 @@ juce::var runNAMLibraryReliabilityRegressionImpl()
     return juce::var(result.get());
 }
 
-bool isLocalFrontendDevServerReachable()
+[[maybe_unused]] bool isLocalFrontendDevServerReachable()
 {
     if (juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_FORCE_PACKAGED_FRONTEND", {}).trim() == "1")
     {
@@ -8286,6 +8284,9 @@ juce::String determineStartupFailureCategory(const StartupDependencyStatus& depe
 
         return "webview2-backend-unusable";
     }
+#elif JUCE_LINUX
+    if (! dependencyStatus.browserBackendSupported)
+        return "linux-webkit-unavailable";
 #else
     if (! dependencyStatus.browserBackendSupported)
         return "macos-backend-unavailable";
@@ -8313,6 +8314,10 @@ juce::String buildStartupFailureSummary(const StartupDependencyStatus& dependenc
 
     if (failureCategory == "webview2-backend-unusable")
         return "WebView2 Runtime was detected, but JUCE still reports the backend as unavailable.";
+#elif JUCE_LINUX
+    if (failureCategory == "linux-webkit-unavailable")
+        return "The GTK/WebKitGTK browser runtime could not be loaded. "
+               "Repair or reinstall the OpenStudio package using your software installer to restore its runtime dependencies.";
 #else
     if (failureCategory == "macos-backend-unavailable")
         return "The system browser backend is unavailable on this macOS installation.";
@@ -9235,7 +9240,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         });
                     })
                     .withNativeFunction ("setAudioDeviceSetup", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        // Expecting: [type, input, output, sampleRate, bufferSize]
+                        // A single audio setup request, with explicit default selection.
                         if (args.size() == 1 && args[0].isObject()) {
                            auto* obj = args[0].getDynamicObject();
                            juce::String type = obj->getProperty("type");
@@ -9243,12 +9248,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            juce::String output = obj->getProperty("outputDevice");
                            double sampleRate = obj->getProperty("sampleRate");
                            int bufferSize = obj->getProperty("bufferSize");
+                           bool useDefaultDevices = obj->getProperty("useDefaultDevices");
                            
                            // Device changes belong on the message thread. Resolve
                            // the JS promise only after JUCE has accepted (and
                            // verified) the actual setup so the UI cannot report a
                            // false success.
-                           juce::MessageManager::callAsync([this, type, input, output, sampleRate, bufferSize,
+                           juce::MessageManager::callAsync([this, type, input, output, sampleRate, bufferSize, useDefaultDevices,
                                                             completion = std::move(completion)]() mutable {
                                audioEngine.setAudioDeviceSetup(
                                    type,
@@ -9262,8 +9268,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                        if (! applied && errorMessage.isNotEmpty())
                                            juce::Logger::writeToLog(
                                                "setAudioDeviceSetup failed: " + errorMessage);
-                                       completion(applied);
-                                   });
+                                       auto result = std::make_unique<juce::DynamicObject>();
+                                       result->setProperty("success", applied);
+                                       result->setProperty("error", errorMessage);
+                                       completion(juce::var(result.release()));
+                                   }, useDefaultDevices);
                            });
                         } else {
                            completion(false);
@@ -10015,7 +10024,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             if(action=="stop")found->second.ticket->cancel();else found->second.ticket->touch();
                             auto command=found->second.request.clone();command.getDynamicObject()->setProperty("immediate",static_cast<bool>(request["immediate"]));
                             const auto result=audioEngine.eqDraftAudition(action,command);
-                            if(action=="stop")eqDraftJobs.erase(found);completion(result);return;
+                            if(action=="stop")eqDraftJobs.erase(found);
+                            completion(result);return;
                         }
                         if((action!="start"&&action!="update")||session.isEmpty()||session.length()>128){fail("A unique EQ audition session is required");return;}
                         std::shared_ptr<BuiltInWorkerJob> job;auto workRequest=request;
@@ -10159,8 +10169,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         if(id.isEmpty()||id.length()>80){completion(juce::var());return;}
                         if(action=="begin")
                         {
-                            if(irPreparationJobs.size()>=32)for(auto it=irPreparationJobs.begin();it!=irPreparationJobs.end();)
-                                if(it->second->terminal())it=irPreparationJobs.erase(it);else ++it;
+                            if(irPreparationJobs.size()>=32)
+                            {
+                                for(auto it=irPreparationJobs.begin();it!=irPreparationJobs.end();)
+                                {
+                                    if(it->second->terminal())it=irPreparationJobs.erase(it);else ++it;
+                                }
+                            }
                             if(irPreparationJobs.size()>=32||irPreparationJobs.count(id)!=0){completion(juce::var());return;}
                             irPreparationJobs.emplace(id,std::make_shared<BuiltInIRPreparation>());
                         }
@@ -14480,7 +14495,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     auto notesVar = obj->getProperty ("notes");
                                     noteCount = notesVar.isArray() ? notesVar.getArray()->size() : 0;
                                     hasResult = true;
-                                    juce::Logger::writeToLog ("PitchAnalysis: Complete — "
+                                    juce::Logger::writeToLog ("PitchAnalysis: Complete - "
                                         + juce::String(noteCount) + " notes detected, clipId=" + clipId);
                                 }
                                 else
@@ -14565,7 +14580,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     auto notesVar = obj->getProperty ("notes");
                                     noteCount = notesVar.isArray() ? notesVar.getArray()->size() : 0;
                                     hasResult = true;
-                                    juce::Logger::writeToLog ("PitchAnalysis: Complete — "
+                                    juce::Logger::writeToLog ("PitchAnalysis: Complete - "
                                         + juce::String(noteCount) + " notes detected, clipId=" + clipId);
                                 }
                                 else
@@ -15812,6 +15827,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     << " was detected, but JUCE reported the browser backend as unavailable on this machine.";
         message << "\n\n" << webView2FailureDetail;
         startupRepairAction = dependencyStatus.repairAvailable ? StartupRepairAction::dependencies : StartupRepairAction::none;
+#elif JUCE_LINUX
+        message << "\n\n" << buildStartupFailureSummary(dependencyStatus);
+        startupRepairAction = StartupRepairAction::none;
 #else
         message << "\n\nOpenStudio could not access the system browser backend on this macOS installation.";
         startupRepairAction = StartupRepairAction::none;

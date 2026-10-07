@@ -64,7 +64,8 @@ private:
             constexpr std::array<float,16> randomTimes{.0293f,.0377f,.0431f,.0539f,.0611f,.0719f,.0797f,.0899f,.0311f,.0409f,.0479f,.0571f,.0677f,.0739f,.0833f,.0971f};
             for(int i=0;i<count;++i)
             {auto& line=lines[static_cast<size_t>(i)];line.base=mode==0?plateTimes[static_cast<size_t>(i)]:mode==1?roomTimes[static_cast<size_t>(i)]:randomTimes[static_cast<size_t>(i)];line.delay.prepare(static_cast<int>(rate*(line.base*1.5f+.003f)));for(auto* value:{&line.samples,&line.loss,&line.bassLoss})value->reset(rate,.1);for(auto& value:line.tapLoss)value.reset(rate,.1);}
-            for(auto& line:pre)line.prepare(static_cast<int>(rate*.501));for(auto& line:earlyHistory)line.prepare(static_cast<int>(rate*.111));
+            for(auto& line:pre)line.prepare(static_cast<int>(rate*.501));
+            for(auto& line:earlyHistory)line.prepare(static_cast<int>(rate*.111));
             for(auto& channel:inputDiffusers)for(auto& line:channel)line.prepare(static_cast<int>(rate*.121));
             for(auto* value:{&scatter,&inputCoefficient,&onset,&depth,&preSamples,&damping,&bassPole,&lowPole,&highPole,&width,&earlyLevel,&hold,&excitation,&size})value->reset(rate,.05);
             reset();frames=0;

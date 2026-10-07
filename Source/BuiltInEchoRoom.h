@@ -32,7 +32,11 @@ private:
         {
             rate=fs;mode=index;input.prepare(static_cast<int>(fs*.51));echo.prepare(static_cast<int>(fs*(index==0?1.55:.5)));for(size_t i=0;i<diffusers.size();++i)diffusers[i].prepare(static_cast<int>(fs*.03));
             for(auto* value:{&pre,&time,&feedback,&diffusion,&motion,&lowPole,&highPole,&dampPole,&dampMix,&lowMix,&highMix,&width,&panLeft,&panRight,&holdWeight,&inputGate})value->reset(fs,.05);
-            for(auto& value:headPositions)value.reset(fs,.1);for(auto& value:headLevels)value.reset(fs,.05);for(auto& value:feedbackLevels)value.reset(fs,.05);reset();frames=0;
+            for(auto& value:headPositions)value.reset(fs,.1);
+            for(auto& value:headLevels)value.reset(fs,.05);
+            for(auto& value:feedbackLevels)value.reset(fs,.05);
+            reset();
+            frames=0;
         }
         void reset(){input.reset();echo.reset();for(auto& line:diffusers)line.reset();lowState={};highState={};dampState={};loopDamp={};loopLow={};loopHigh={};phase=flutterPhase=0;initialized=false;geometryRemaining=0;}
         void configure(Settings next)
@@ -61,7 +65,8 @@ private:
                 const auto image=[](int index,double span,double source){return index*span+(std::abs(index)%2?span-source:source);};
                 size_t tap=0;for(int nx=-2;nx<=2;++nx)for(int ny=-2;ny<=2;++ny)for(int nz=-2;nz<=2;++nz)
                 {
-                    if(nx==0&&ny==0&&nz==0)continue;const int order=std::abs(nx)+std::abs(ny)+std::abs(nz);
+                    if(nx==0&&ny==0&&nz==0)continue;
+                    const int order=std::abs(nx)+std::abs(ny)+std::abs(nz);
                     for(size_t ch=0;ch<2;++ch)
                     {
                         const double sign=ch==0?-1:1,sx=(.1+.8*settings.x)*w+sign*.15,sy=(.1+.8*settings.y)*length;
@@ -79,7 +84,8 @@ private:
         std::array<float,4> process(Pair source,bool active)
         {
             ++frames;const float predelay=pre.getNextValue(),gate=inputGate.getNextValue(),held=holdWeight.getNextValue();Pair delayed{},wet{};const Pair excitation=active?Pair{source[0]*gate,source[1]*gate}:Pair{};
-            for(size_t ch=0;ch<2;++ch)delayed[ch]=(predelay<1?excitation[ch]:input.read(predelay,ch))*gate;input.write(excitation);
+            for(size_t ch=0;ch<2;++ch)delayed[ch]=(predelay<1?excitation[ch]:input.read(predelay,ch))*gate;
+            input.write(excitation);
             const float lp=highPole.getNextValue(),hp=lowPole.getNextValue(),damp=dampPole.getNextValue(),loMix=lowMix.getNextValue(),hiMix=highMix.getNextValue(),dampAmount=dampMix.getNextValue();
             if(mode==0)
             {

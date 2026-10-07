@@ -17,7 +17,8 @@ inline juce::var checkEQAdaptiveDynamics()
             for(int i=0;i<count;++i){const float amplitude=(start+i>=burst&&start+i<endBurst?.3f:.03f)*scale;const float sample=amplitude*static_cast<float>(std::sin(juce::MathConstants<double>::twoPi*1000*(start+i)/rate));block.setSample(0,i,sample);block.setSample(1,i,sample);}
             eq->processBlock(block,midi);for(int ch=0;ch<2;++ch)for(int i=0;i<count;++i)measurement.finite=measurement.finite&&std::isfinite(block.getSample(ch,i))&&std::abs(block.getSample(ch,i))<1;
             const auto controls=eq->getBandDynamicControls(1);if(start+count==burst){measurement.settled=eq->getBandDynamicGainDB(1);measurement.threshold=controls[0];measurement.attack=controls[1];measurement.release=controls[2];}
-            if(start>=burst&&start<endBurst)measurement.peak=juce::jmin(measurement.peak,eq->getBandDynamicGainDB(1));start+=count;
+            if(start>=burst&&start<endBurst)measurement.peak=juce::jmin(measurement.peak,eq->getBandDynamicGainDB(1));
+            start+=count;
         }
         return measurement;
     };

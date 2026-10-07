@@ -178,6 +178,9 @@ def build_backend(mode="debug", app_version=None):
     # Configure CMake. On single-config generators (Linux/macOS Make/Ninja)
     # CMAKE_BUILD_TYPE must be set at configure time, not just at build time.
     cmd = ["cmake", "-B", build_dir]
+    # Production installs must fetch the managed runtime, never depend on system Python.
+    cmd.append("-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK="
+               + ("ON" if mode == "debug" else "OFF"))
     if app_version:
         cmd.append(f"-DOPENSTUDIO_APP_VERSION={app_version}")
     if platform.system() != "Windows":

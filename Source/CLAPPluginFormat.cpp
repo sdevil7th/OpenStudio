@@ -2,10 +2,12 @@
 #include "CLAPPluginFormat.h"
 #include "ProcessorSafety.h"
 #include "PluginParameterCapture.h"
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <set>
 #include <thread>
 
 #ifdef _WIN32
@@ -100,9 +102,9 @@ static void populateClapDescription(juce::PluginDescription& result,
                                     const juce::File& moduleFile,
                                     bool hasSharedContainer)
 {
-    result.name = clapDescriptor.name ? clapDescriptor.name : "Unknown";
-    result.manufacturerName = clapDescriptor.vendor ? clapDescriptor.vendor : "Unknown";
-    result.descriptiveName = clapDescriptor.description ? clapDescriptor.description : "";
+    result.name = juce::String::fromUTF8(clapDescriptor.name ? clapDescriptor.name : "Unknown");
+    result.manufacturerName = juce::String::fromUTF8(clapDescriptor.vendor ? clapDescriptor.vendor : "Unknown");
+    result.descriptiveName = juce::String::fromUTF8(clapDescriptor.description ? clapDescriptor.description : "");
     result.version = clapDescriptor.version ? clapDescriptor.version : "";
     result.pluginFormatName = "CLAP";
     result.fileOrIdentifier = moduleFile.getFullPathName();
@@ -165,7 +167,9 @@ static bool updateClapChannelMetadata(const clap_plugin_t& plugin,
 // Minimal CLAP host implementation required by the CLAP API
 //==============================================================================
 
-class CLAPHostContext final : private juce::Timer
+// Each plugin owns its callback poll and registered CLAP timers. Registration,
+// dispatch and retirement stay on the main thread for the module's lifetime.
+class CLAPHostContext final : private juce::MultiTimer
 {
 public:
     clap_host_t host {};
@@ -198,18 +202,78 @@ public:
                 },
                 [](const clap_host_t* h) { context(h).flushRequested.store(true); }
             };
-            return id && std::strcmp(id, CLAP_EXT_PARAMS) == 0 ? &parameters : nullptr;
+            static const clap_host_timer_support_t timers {
+                [](const clap_host_t* h, uint32_t period, clap_id* timerId) {
+                    return context(h).registerTimer(period, timerId);
+                },
+                [](const clap_host_t* h, clap_id timerId) {
+                    return context(h).unregisterTimer(timerId);
+                }
+            };
+            // Embedded editors keep their plugin-reported size. Fixed-size
+            // editors still require the GUI callbacks to be advertised.
+            static const clap_host_gui_t gui {
+                [](const clap_host_t*) {},
+                [](const clap_host_t*, uint32_t, uint32_t) { return false; },
+                [](const clap_host_t*) { return false; },
+                [](const clap_host_t*) { return false; },
+                [](const clap_host_t*, bool) {}
+            };
+            if (id != nullptr && std::strcmp(id, CLAP_EXT_PARAMS) == 0) return &parameters;
+            if (id != nullptr && std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &timers;
+            if (id != nullptr && std::strcmp(id, CLAP_EXT_GUI) == 0) return &gui;
+            return nullptr;
         };
-        startTimer(30);
+        startTimer(0, 30);
     }
     ~CLAPHostContext() override { stop(); }
-    void stop() { stopTimer(); plugin = nullptr; poll = {}; }
-private:
-    static CLAPHostContext& context(const clap_host_t* h) { return *static_cast<CLAPHostContext*>(h->host_data); }
-    void timerCallback() override
+    void stop()
     {
-        if (plugin && callbackRequested.exchange(false)) plugin->on_main_thread(plugin);
-        if (poll) poll(rescanFlags.exchange(0), restartRequested.exchange(false));
+        stopTimer(0);
+        for (const auto timerId : registeredTimers) stopTimer(static_cast<int>(timerId));
+        // The plugin may unregister its timers during destroy() after dispatch
+        // has stopped. Keep the IDs valid until that lifecycle callback returns.
+        retired = true;
+        plugin = nullptr;
+        poll = {};
+    }
+private:
+    int nextTimerId = 1;
+    bool retired = false;
+    std::set<clap_id> registeredTimers;
+    static CLAPHostContext& context(const clap_host_t* h) { return *static_cast<CLAPHostContext*>(h->host_data); }
+    bool registerTimer(uint32_t milliseconds, clap_id* id)
+    {
+        if (retired || id == nullptr || milliseconds == 0
+            || milliseconds > static_cast<uint32_t>((std::numeric_limits<int>::max)())
+            || nextTimerId == (std::numeric_limits<int>::max)()
+            || !juce::MessageManager::getInstance()->isThisTheMessageThread()) return false;
+        *id = static_cast<clap_id>(nextTimerId++);
+        registeredTimers.insert(*id);
+        startTimer(static_cast<int>(*id), static_cast<int>(milliseconds));
+        return true;
+    }
+    bool unregisterTimer(clap_id id)
+    {
+        if (!juce::MessageManager::getInstance()->isThisTheMessageThread()
+            || registeredTimers.erase(id) == 0) return false;
+        stopTimer(static_cast<int>(id));
+        return true;
+    }
+    void timerCallback(int id) override
+    {
+        if (id == 0)
+        {
+            if (plugin && callbackRequested.exchange(false)) plugin->on_main_thread(plugin);
+            if (poll) poll(rescanFlags.exchange(0), restartRequested.exchange(false));
+        }
+        else if (plugin != nullptr)
+        {
+            const auto* timers = static_cast<const clap_plugin_timer_support_t*>(
+                plugin->get_extension(plugin, CLAP_EXT_TIMER_SUPPORT));
+            if (timers != nullptr && timers->on_timer != nullptr)
+                timers->on_timer(plugin, static_cast<clap_id>(id));
+        }
     }
 };
 
@@ -253,10 +317,13 @@ public:
     {
         if (guiCreated && guiExt && clapPlugin)
         {
-            guiExt->set_parent(clapPlugin, nullptr);
+            if (guiExt->hide != nullptr)
+                guiExt->hide(clapPlugin);
             guiExt->destroy(clapPlugin);
         }
     }
+
+    bool wasCreated() const { return guiCreated; }
 
     void parentHierarchyChanged() override
     {
@@ -435,7 +502,7 @@ public:
     }
     void updateInfo(const clap_param_info_t& info)
     {
-        parameterName = juce::String(info.name);
+        parameterName = juce::String::fromUTF8(info.name);
         rangeMin = info.min_value; rangeMax = info.max_value; defaultValue = info.default_value;
         flags = info.flags; cookie = info.cookie; available = true;
         double value = defaultValue;
@@ -531,7 +598,7 @@ public:
                             || !std::isfinite(info.default_value) || info.max_value < info.min_value)
                             continue;
                         auto param = std::make_unique<CLAPParameter>(clapPlugin, paramsExt,
-                                                                      info.id, juce::String(info.name),
+                                                                      info.id, juce::String::fromUTF8(info.name),
                                                                       info.min_value, info.max_value,
                                                                       info.default_value, info.flags, info.cookie, &automationInput);
                         clapParams.add(param.get());
@@ -971,7 +1038,10 @@ public:
     juce::AudioProcessorEditor* createEditor() override
     {
         if (guiExt && clapPlugin)
-            return new CLAPEditorComponent(*this, clapPlugin, guiExt);
+        {
+            auto editor = std::make_unique<CLAPEditorComponent>(*this, clapPlugin, guiExt);
+            if (editor->wasCreated()) return editor.release();
+        }
         return nullptr;
     }
     bool hasEditor() const override { return guiExt != nullptr; }
@@ -986,7 +1056,8 @@ public:
     {
         if (!clapPlugin) return;
         auto* stateExt = (const clap_plugin_state_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_STATE);
-        if (!stateExt) return;
+        if (!stateExt || !stateExt->save) return;
+        destData.reset();
 
         // Use a stream to capture state
         struct StreamCtx { juce::MemoryBlock* block; };
@@ -1006,7 +1077,7 @@ public:
     {
         if (!clapPlugin) return;
         auto* stateExt = (const clap_plugin_state_t*)clapPlugin->get_extension(clapPlugin, CLAP_EXT_STATE);
-        if (!stateExt) return;
+        if (!stateExt || !stateExt->load || data == nullptr || sizeInBytes <= 0) return;
 
         struct StreamCtx { const void* data; int size; int pos; };
         StreamCtx ctx{ data, sizeInBytes, 0 };
@@ -1438,8 +1509,10 @@ void CLAPPluginFormat::createPluginInstance(const juce::PluginDescription& desc,
         return;
     }
 
+    host->plugin = clapPlugin;
     if (!clapPlugin->init(clapPlugin))
     {
+        host->stop();
         clapPlugin->destroy(clapPlugin);
         entry->deinit();
         freeLib(lib);

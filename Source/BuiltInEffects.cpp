@@ -118,7 +118,7 @@ void prepareRealtimeFilterLut(std::vector<OpenStudioIIRCoefficientSet>& lut,
             ? juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequency)
             : juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, frequency);
         const auto& source = coefficients->coefficients;
-        jassert(source.size() == lut[index].size());
+        jassert(source.size() == static_cast<int>(lut[index].size()));
         for (size_t coefficient = 0; coefficient < lut[index].size(); ++coefficient)
             lut[index][coefficient] = source[static_cast<int>(coefficient)];
     }
@@ -155,8 +155,8 @@ void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
         return;
 
     auto& destination = filter.coefficients->coefficients;
-    jassert(destination.size() == coefficients.size());
-    if (destination.size() != coefficients.size())
+    jassert(destination.size() == static_cast<int>(coefficients.size()));
+    if (destination.size() != static_cast<int>(coefficients.size()))
         return;
 
     for (size_t coefficient = 0; coefficient < coefficients.size(); ++coefficient)
@@ -2905,7 +2905,7 @@ void OpenStudioGate::prepareToPlay(double sampleRate, int samplesPerBlock)
         juce::dsp::IIR::Coefficients<float>::makeHighPass(
             sampleRate,
             juce::jlimit(
-                20.0f, 2000.0f,
+                20.0f, safeFilterMaximum(sampleRate, 20.0f, 2000.0f),
                 sidechainHPF.load(std::memory_order_relaxed)));
     scHPF_L.coefficients = hpfCoeffs;  scHPF_R.coefficients = hpfCoeffs;
 
@@ -2913,7 +2913,7 @@ void OpenStudioGate::prepareToPlay(double sampleRate, int samplesPerBlock)
         juce::dsp::IIR::Coefficients<float>::makeLowPass(
             sampleRate,
             juce::jlimit(
-                200.0f, 20000.0f,
+                200.0f, safeFilterMaximum(sampleRate, 200.0f, 20000.0f),
                 sidechainLPF.load(std::memory_order_relaxed)));
     scLPF_L.coefficients = lpfCoeffs;  scLPF_R.coefficients = lpfCoeffs;
     prepareRealtimeFilterLut(

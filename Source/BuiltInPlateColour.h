@@ -67,7 +67,11 @@ public:
     Pair pre(Pair source){return running?before.process(source,chorusPre.getNextValue()*active,.43):source;}
     Pair post(Pair source)
     {
-        if(!running)return source;source=after.process(source,chorusPost.getNextValue()*active,.61);lowShelf.advance(smoothing);highShelf.advance(smoothing);const float mix=eqMix.getNextValue()*active;
+        if(!running)return source;
+        source=after.process(source,chorusPost.getNextValue()*active,.61);
+        lowShelf.advance(smoothing);
+        highShelf.advance(smoothing);
+        const float mix=eqMix.getNextValue()*active;
         for(size_t ch=0;ch<2;++ch){const float filtered=highShelf.process(lowShelf.process(source[ch],ch),ch);source[ch]+=mix*(filtered-source[ch]);}return source;
     }
 };

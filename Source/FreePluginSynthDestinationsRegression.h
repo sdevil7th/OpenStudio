@@ -21,7 +21,8 @@ inline juce::var checkSynthDestinations()
             partition=juce::jmax(partition,error);influence=influence&&difference>1e-4;auto* row=new juce::DynamicObject();row->setProperty("sampleRate",rate);row->setProperty("destination",target);row->setProperty("absoluteAudioDifference",difference);row->setProperty("partitionError",error);cases.add(row);
         }
         const auto shared=render(rate,20,127,true),sharedOther=render(rate,20,511,true),sharedBase=render(rate,-1,127,true);double sharedDifference=0;
-        for(int ch=0;ch<2;++ch)for(int i=0;i<shared.getNumSamples();++i){sharedDifference+=std::abs(shared.getSample(ch,i)-sharedBase.getSample(ch,i));partition=juce::jmax(partition,std::abs(static_cast<double>(shared.getSample(ch,i)-sharedOther.getSample(ch,i))));}influence=influence&&sharedDifference>1e-4;
+        for(int ch=0;ch<2;++ch)for(int i=0;i<shared.getNumSamples();++i){sharedDifference+=std::abs(shared.getSample(ch,i)-sharedBase.getSample(ch,i));partition=juce::jmax(partition,std::abs(static_cast<double>(shared.getSample(ch,i)-sharedOther.getSample(ch,i))));}
+        influence=influence&&sharedDifference>1e-4;
     }
     auto source=std::make_unique<OpenStudioBasicSynthInstrument>(),copy=std::make_unique<OpenStudioBasicSynthInstrument>();
     for(int slot=1;slot<=8;++slot)for(int destination=0;destination<28;++destination)

@@ -387,7 +387,7 @@ Local NAM captures and IR files remain usable offline.
 
 ## macOS First Launch Note
 
-The v1 macOS community package is unsigned. Verify the published SHA-256 checksum, try to open the app once, then use **System Settings > Privacy & Security > Open Anyway** and confirm **Open**. This is Apple's per-app override and preserves the diagnostic distinction between Gatekeeper and an OpenStudio startup failure.
+The v1 macOS package is unsigned. Verify the published SHA-256 checksum, try to open the app once, then use **System Settings > Privacy & Security > Open Anyway** and confirm **Open**. This is Apple's per-app override and preserves the diagnostic distinction between Gatekeeper and an OpenStudio startup failure.
 
 Only when diagnosing a verified artifact that still cannot be approved through the macOS UI, compare behavior after removing quarantine:
 

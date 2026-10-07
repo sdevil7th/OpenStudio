@@ -21,12 +21,16 @@ public:
     // Integral of the quadratic BLEP, rounding both triangle slope changes.
     static float blamp(float phase,float delta) noexcept
     {
-        if(delta<=0)return 0;const float distance=juce::jmin(phase,1-phase);
-        if(distance>=delta)return 0;const float t=1-distance/delta;return delta*t*t*t/3;
+        if(delta<=0)return 0;
+        const float distance=juce::jmin(phase,1-phase);
+        if(distance>=delta)return 0;
+        const float t=1-distance/delta;
+        return delta*t*t*t/3;
     }
     static float wave(int shape,float phase,float delta) noexcept
     {
-        if(shape==0)return saw(phase,delta);if(shape==1)return square(phase,delta);
+        if(shape==0)return saw(phase,delta);
+        if(shape==1)return square(phase,delta);
         if(shape==3)return std::sin(juce::MathConstants<float>::twoPi*phase);
         float opposite=phase+.5f;if(opposite>=1)opposite-=1;
         return 1-4*std::abs(phase-.5f)+4*(blamp(phase,delta)-blamp(opposite,delta));
@@ -62,7 +66,10 @@ public:
         for(size_t shape=0;shape<4;++shape)
         {
             const float weight=frame.moving[bank]?frame.weights[bank][shape]:static_cast<int>(shape)==frame.selected[bank]?1.0f:0.0f;
-            if(weight==0)continue;const float position=juce::jlimit(0.0f,3.0f,static_cast<float>(shape)+3*shapeOffset);const int low=static_cast<int>(position),high=juce::jmin(3,low+1);const float fraction=position-static_cast<float>(low);
+            if(weight==0)continue;
+            const float position=juce::jlimit(0.0f,3.0f,static_cast<float>(shape)+3*shapeOffset);
+            const int low=static_cast<int>(position),high=juce::jmin(3,low+1);
+            const float fraction=position-static_cast<float>(low);
             value+=weight*(shaped(low)*(1-fraction)+shaped(high)*fraction);
         }
         return value;

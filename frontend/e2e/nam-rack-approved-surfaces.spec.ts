@@ -227,6 +227,14 @@ async function surfaceGeometryFailures(page: Page, moduleId: string) {
 
 async function cabinetTextGeometryFailures(page: Page) {
   return page.locator('[data-module="cabinet"]').evaluate((module) => {
+    // Labels are authored in the rack's intrinsic CSS pixels. WebKit rounds
+    // subpixel text/transform positions before the rack is scaled; comparing
+    // that against half a screen pixel falsely rejects the same layout at 4K.
+    // Preserve the half-pixel alignment bound in authored coordinates, as the
+    // faceplate projection checks do for their intrinsic artwork coordinates.
+    const sourceWidth = parseFloat(getComputedStyle(module).width);
+    const renderScale = module.getBoundingClientRect().width / sourceWidth;
+    if (!Number.isFinite(renderScale) || renderScale <= 0) throw new Error('Invalid cabinet scale');
     const visible = (node: Element) => {
       const rect = node.getBoundingClientRect();
       const style = getComputedStyle(node);
@@ -292,7 +300,7 @@ async function cabinetTextGeometryFailures(page: Page) {
         range.selectNodeContents(caption);
         const textRect = range.getBoundingClientRect();
         const delta = Math.abs(textRect.left + textRect.width / 2
-          - (controlRect.left + controlRect.width / 2));
+          - (controlRect.left + controlRect.width / 2)) / renderScale;
         if (delta > 0.5) captionAlignment.push(`${paramId}:${caption.textContent}:${delta.toFixed(2)}`);
       }
     }
@@ -301,7 +309,7 @@ async function cabinetTextGeometryFailures(page: Page) {
         const rect = node.getBoundingClientRect();
         return rect.top + rect.height / 2;
       });
-      if (Math.max(...centers) - Math.min(...centers) > 0.5) {
+      if ((Math.max(...centers) - Math.min(...centers)) / renderScale > 0.5) {
         captionAlignment.push(`${row === names ? "names" : "values"}:uneven-row`);
       }
     }

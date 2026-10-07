@@ -38,8 +38,11 @@ inline juce::var checkLimiterOversampling()
     };
     const auto difference = [](const auto& a, const auto& b)
     {
-        double value = 0; for (int ch = 0; ch < a.getNumChannels(); ++ch) for (int i = 0; i < a.getNumSamples(); ++i)
-            value = juce::jmax(value, std::abs(static_cast<double>(a.getSample(ch, i) - b.getSample(ch, i)))); return value;
+        double value = 0;
+        for (int ch = 0; ch < a.getNumChannels(); ++ch)
+            for (int i = 0; i < a.getNumSamples(); ++i)
+                value = juce::jmax(value, std::abs(static_cast<double>(a.getSample(ch, i) - b.getSample(ch, i))));
+        return value;
     };
     for (double rate : {44100.0, 48000.0, 96000.0, 192000.0}) for (int quality = 0; quality <= 5; ++quality)
     {

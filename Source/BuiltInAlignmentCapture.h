@@ -152,7 +152,8 @@ struct BuiltInAlignmentSpectrum
     {
         count=samples;spectrum.resize(static_cast<size_t>(fft.getSize()));energy.assign(static_cast<size_t>(count+1),0);
         std::vector<Complex> input(spectrum.size());double mean=0;
-        for(int i=0;i<count;++i)mean+=source[i];mean/=count;
+        for(int i=0;i<count;++i)mean+=source[i];
+        mean/=count;
         for(int i=0;i<count;++i){const auto index=static_cast<size_t>(i);input[index]=static_cast<float>(source[i]-mean);energy[index+1]=energy[index]+std::norm(input[index]);}
         rms=std::sqrt(energy.back()/count);fft.perform(input.data(),spectrum.data(),false);
     }

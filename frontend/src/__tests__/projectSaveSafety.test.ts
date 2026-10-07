@@ -423,6 +423,70 @@ describe("project save concurrency and recovery", () => {
     expect(restore).toHaveBeenLastCalledWith("track", false);
     expect(!!useDAWStore.getState().tracks[0].midiOutputMergeKeys).toBe(false);
   });
+  it("round-trips routing, folders, notes and takes and restores native sends after destinations", async () => {
+    const clip = { id: "take", name: "Alternate", filePath: "", startTime: 0, duration: 1, offset: 0 };
+    const fields = { stereoWidth: 150, masterSendEnabled: false, outputStartChannel: 2,
+      outputChannelCount: 2, playbackOffsetMs: -12, phaseInverted: true, trackChannelCount: 4,
+      notes: "Keep this note", waveformZoom: 2, parentFolderId: "bus", activeTakeIndex: 1,
+      takes: [[clip]], recordSafe: true, spectralView: true,
+      sends: [{ destTrackId: "bus", level: 0, pan: -0.25, enabled: false, preFader: true, phaseInvert: true }] };
+    useDAWStore.setState({ tracks: [
+      { ...createDefaultTrack("track", "Track"), ...fields } as any,
+      { ...createDefaultTrack("bus", "Bus", undefined, "bus"), isFolder: true, folderCollapsed: true },
+    ] });
+    const addTrack = vi.spyOn(nativeBridge, "addTrack").mockResolvedValue("ok");
+    const replaceSends = vi.spyOn(nativeBridge, "replaceTrackSends").mockResolvedValue(true);
+    const width = vi.spyOn(nativeBridge, "setTrackStereoWidth");
+    const master = vi.spyOn(nativeBridge, "setTrackMasterSendEnabled");
+    const offset = vi.spyOn(nativeBridge, "setTrackPlaybackOffset");
+    expect(await useDAWStore.getState().saveProject()).toBe(true);
+    const saved = JSON.parse(vi.mocked(nativeBridge.saveProjectToFile).mock.calls[0][1]);
+    expect(saved.tracks[0]).toMatchObject(fields);
+    expect(saved.tracks[1]).toMatchObject({ isFolder: true, folderCollapsed: true });
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify(saved));
+    expect(await useDAWStore.getState().loadProject("C:/session.osproj")).toBe(true);
+    expect(useDAWStore.getState().tracks[0]).toMatchObject(fields);
+    expect(replaceSends.mock.invocationCallOrder[0]).toBeGreaterThan(addTrack.mock.invocationCallOrder[1]);
+    expect(replaceSends).toHaveBeenCalledWith("track", expect.arrayContaining([expect.objectContaining(fields.sends[0])]));
+    expect(width).toHaveBeenCalledWith("track", 150);
+    expect(master).toHaveBeenCalledWith("track", false);
+    expect(offset).toHaveBeenCalledWith("track", -12);
+    expect(await useDAWStore.getState().saveProject()).toBe(true);
+    const resaved = JSON.parse(vi.mocked(nativeBridge.saveProjectToFile).mock.calls[1][1]);
+    expect(resaved.tracks[0]).toMatchObject(fields);
+  });
+  it("restores the channel layout before loading FX and keeps rejected sends dirty", async () => {
+    const track = createDefaultTrack("source", "Source", "#fff", "audio");
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify({ tracks: [
+      { ...track, trackChannelCount: 4, trackFXPaths: ["OpenStudio EQ"], sends: [{ destTrackId: "bus" }] },
+      createDefaultTrack("bus", "Return", "#fff", "bus"),
+    ] }));
+    const channels = vi.spyOn(nativeBridge, "setTrackChannelCount").mockResolvedValue(true);
+    const fx = vi.spyOn(nativeBridge, "addTrackBuiltInFX").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "replaceTrackSends").mockImplementation(async id => id !== "source");
+    const toast = vi.spyOn(useDAWStore.getState(), "showToast");
+    expect(await useDAWStore.getState().loadProject("C:/routing.osproj")).toBe(true);
+    expect(channels).toHaveBeenCalledWith("source", 4);
+    expect(channels.mock.invocationCallOrder[0]).toBeLessThan(fx.mock.invocationCallOrder[0]);
+    expect(useDAWStore.getState().tracks[0].sends).toEqual([]);
+    expect(useDAWStore.getState().isModified).toBe(true);
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("routing"), "error");
+  });
+  it("restores legacy routing defaults without disabling the master", async () => {
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify({ tracks: [{ id: "old", name: "Old" }] }));
+    expect(await useDAWStore.getState().loadProject("C:/old.osproj")).toBe(true);
+    expect(useDAWStore.getState().tracks[0]).toMatchObject({ stereoWidth: 100, masterSendEnabled: true,
+      playbackOffsetMs: 0, phaseInverted: false, outputStartChannel: 0, outputChannelCount: 2,
+      activeTakeIndex: 0, trackChannelCount: 2 });
+  });
+  it("reports native routing rejection and keeps the document dirty", async () => {
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify({ tracks: [createDefaultTrack("t", "Track")] }));
+    vi.spyOn(nativeBridge, "setTrackStereoWidth").mockResolvedValue(false);
+    const toast = vi.spyOn(useDAWStore.getState(), "showToast");
+    await useDAWStore.getState().loadProject("C:/routing.osproj");
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("routing"), "error");
+    expect(useDAWStore.getState().isModified).toBe(true);
+  });
   it("clears dirty only for the document actually saved", async () => {
     expect(await useDAWStore.getState().saveProject()).toBe(true);
     expect(useDAWStore.getState().isModified).toBe(false);

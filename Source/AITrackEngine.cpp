@@ -1,9 +1,10 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #endif
+#include "RuntimeLocation.h"
+#include "AIHardwareProbe.h"
 #include "AITrackEngine.h"
 #include "AIManagedRuntime.h"
-#include "RuntimeAssetRoot.h"
 #include "RecoveryJournal.h"
 #include "JsonEnvelope.h"
 
@@ -40,7 +41,7 @@ juce::String createSafeMusicGenerationTimestamp()
 
 juce::File getApplicationRuntimeDirectory()
 {
-    auto executableDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    auto executableDir = OpenStudioRuntime::executableFile()
         .getParentDirectory();
 
    #if JUCE_MAC
@@ -49,7 +50,7 @@ juce::File getApplicationRuntimeDirectory()
         return resourcesDir;
    #endif
 
-    return OpenStudioRuntimeAssets::preferAppImageRoot(executableDir);
+    return executableDir;
 }
 
 juce::File findPythonInRuntimeRoot(const juce::File& runtimeRoot)
@@ -449,7 +450,7 @@ juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
     if (!request.getFile().replaceWithText(juce::JSON::toString(juce::var(input))))
         return unavailable("Could not prepare the hardware check.");
     OwnedChildProcess process;
-    juce::StringPairArray environment;
+    auto environment = OpenStudioAI::runtimeEnvironment();
     environment.set("HF_HUB_OFFLINE", "1");
     environment.set("TRANSFORMERS_OFFLINE", "1");
     if (cancelled() || !process.start({ python.getFullPathName(), script.getFullPathName(),
@@ -708,7 +709,7 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             currentProgress_.failureDetail.clear();
         }
 
-        if (! nextWorker->start(command))
+        if (! nextWorker->start(command, 3, OpenStudioAI::runtimeEnvironment()))
         {
             const juce::ScopedLock sl(lock_);
             workerProcess_.reset();

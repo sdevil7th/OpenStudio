@@ -9,7 +9,10 @@ public:
     BuiltInSynthCCMacros(){reset();}
     void reset() noexcept
     {
-        for(auto& value:overrides)value.store(-1);senders={};clearRequests.store(0);lastEvent.store(0);
+        for(auto& value:overrides)value.store(-1);
+        senders={};
+        clearRequests.store(0);
+        lastEvent.store(0);
     }
     void clear(size_t slot) noexcept { clearRequests.fetch_or(1u<<slot); }
     void configure(const std::array<int,4>& nextCC,const std::array<int,4>& nextChannel) noexcept

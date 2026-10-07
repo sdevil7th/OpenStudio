@@ -10,7 +10,8 @@ inline juce::var checkReverbHoldPolicies()
         auto reverb=std::make_unique<OpenStudioReverb>(true);reverb->selectAlgorithm(type);reverb->wetLevel.store(1);reverb->dryLevel.store(0);
         reverb->decayTime.store(.15f);reverb->damping.store(0);reverb->earlyLevel.store(0);reverb->preDelay.store(0);
         reverb->holdInputModes[static_cast<size_t>(type)].store(infinite?1.0f:0.0f);reverb->plateModulation.store(0);
-        for(auto& value:reverb->studioModulation)value.store(0);for(auto& bank:reverb->spatialControls){bank[0].store(0);bank[1].store(0);bank[5].store(0);}
+        for(auto& value:reverb->studioModulation)value.store(0);
+        for(auto& bank:reverb->spatialControls){bank[0].store(0);bank[1].store(0);bank[5].store(0);}
         reverb->prepareToPlay(rate,blockSize);
         const int startHold=juce::roundToInt(rate*.15),extraStart=juce::roundToInt(rate*.4),extraEnd=juce::roundToInt(rate*.5),releaseHold=juce::roundToInt(rate*1.2),length=juce::roundToInt(rate*2);
         juce::AudioBuffer<float> output(2,length),block(2,blockSize);juce::MidiBuffer midi;juce::uint32 random=123;

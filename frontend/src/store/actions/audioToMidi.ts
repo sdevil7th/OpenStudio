@@ -185,6 +185,10 @@ export const audioToMidiActions = (set: SetFn, get: GetFn) => ({
     const generatedClipId = crypto.randomUUID();
     const sourceName = current.clip.name || "Audio";
     const events = mapPolyNotesToMIDIEvents(analysis.notes || [], clipDuration);
+    if (events.length === 0) {
+      get().showToast?.("No notes were detected in this audio clip.", "info");
+      return null;
+    }
     const generatedTrack = {
       ...createGeneratedMIDITrack(
         generatedTrackId,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# package-linux-release.sh — Build a portable AppImage for OpenStudio on Linux.
+# package-linux-release.sh — Build an AppImage using the host GTK/WebKit stack.
 #
 # Usage:
 #   bash tools/package-linux-release.sh [version] [build_dir] [notes_file]
@@ -21,6 +21,15 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 VERSION="${VERSION#v}"
 NOTES_FILE="${3:-docs/releases/$VERSION.md}"
 python3 "$ROOT_DIR/tools/validate-release-notes.py" --version "$VERSION" --notes-file "$NOTES_FILE"
+python3 - "$ROOT_DIR/$BUILD_DIR" "$SCRIPT_DIR/package-linux-native.py" <<'PYCODE'
+import importlib.util
+import sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("native_packaging", sys.argv[2])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.validate_ai_release_configuration(Path(sys.argv[1]))
+PYCODE
 
 BINARY="$ROOT_DIR/$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio"
 APPDIR="$ROOT_DIR/dist/linux/OpenStudio.AppDir"
@@ -64,6 +73,13 @@ for item in "$RELEASE_ASSET_DIR"/*; do
     [ -f "$item" ] && [ "$(basename "$item")" != "OpenStudio" ] && cp "$item" "$APPDIR/usr/bin/"
 done
 
+# linuxdeploy rewrites the executable's RUNPATH to $ORIGIN/../lib. Keep the
+# pinned private runtime there; exclude host GTK/WebKit libraries below.
+mkdir -p "$APPDIR/usr/lib"
+for item in "$APPDIR/usr/bin"/libonnxruntime.so*; do
+    [ ! -f "$item" ] || cp -a "$item" "$APPDIR/usr/lib/"
+done
+
 # ── Desktop entry + icon ───────────────────────────────────────────────────────
 cp "$TOOLS_DIR/OpenStudio.desktop" "$APPDIR/OpenStudio.desktop"
 cp "$TOOLS_DIR/OpenStudio.desktop" "$APPDIR/usr/share/applications/OpenStudio.desktop"
@@ -91,28 +107,46 @@ if [ ! -f "$LINUXDEPLOY" ]; then
     chmod +x "$LINUXDEPLOY"
 fi
 
+# Reject payloads newer than the declared Ubuntu 22.04 ABI baseline, including
+# helper executables and prebuilt libraries. This does not provision host WebKit.
+python3 "$TOOLS_DIR/validate-linux-abi.py" --root "$APPDIR" --max-glibc 2.35 \
+    --report "$OUT_DIR/OpenStudio-${VERSION}-payload-abi.json"
+
 # ── Build AppImage ─────────────────────────────────────────────────────────────
+# WebKit is loaded dynamically. Bundling only JavaScriptCore/GLib and their
+# transitive dependencies breaks compatibility with newer host WebKit/GTK.
+# Keep the system stack on the host; pinned ONNX Runtime is already copied
+# into usr/lib above. Native .deb/.rpm packages provision dependencies;
+# AppImage remains an optional download for prepared Linux installations.
 export APPIMAGE_EXTRACT_AND_RUN=1
 
-cd "$ROOT_DIR"
+# Isolate output discovery from earlier builds in the checkout.
+PACKAGE_WORK="$(mktemp -d)"
+trap 'rm -rf -- "$PACKAGE_WORK"' EXIT
+cd "$PACKAGE_WORK"
 "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/OpenStudio" \
     --desktop-file "$APPDIR/OpenStudio.desktop" \
     --icon-file "$APPDIR/OpenStudio.png" \
+    --exclude-library '*' \
     --output appimage
 
-# linuxdeploy names the output using the AppDir Name field — move it to dist/
-APPIMAGE_PATTERN="OpenStudio-*.AppImage"
-BUILT_APPIMAGE=$(ls $APPIMAGE_PATTERN 2>/dev/null | head -1 || true)
-if [ -z "$BUILT_APPIMAGE" ]; then
-    # Fallback: linuxdeploy may have placed it differently
-    BUILT_APPIMAGE=$(ls *.AppImage 2>/dev/null | grep -i openstudio | head -1 || true)
-fi
-
-if [ -n "$BUILT_APPIMAGE" ]; then
+# Accept exactly one fresh output; never reuse an older AppImage by glob order.
+shopt -s nullglob
+BUILT_APPIMAGES=(OpenStudio*.AppImage)
+if [ "${#BUILT_APPIMAGES[@]}" -eq 1 ]; then
+    BUILT_APPIMAGE="${BUILT_APPIMAGES[0]}"
     OUTPUT_NAME="OpenStudio-${VERSION}-linux-x86_64.AppImage"
     mv "$BUILT_APPIMAGE" "$OUT_DIR/$OUTPUT_NAME"
+    python3 "$TOOLS_DIR/validate-linux-abi.py" --root "$APPDIR" --max-glibc 2.35 \
+        --report "$OUT_DIR/OpenStudio-${VERSION}-appdir-abi.json"
+    # Validate the finished launcher, including its rewritten library paths.
+    # This is an asset/prerequisite check, not the separate boot-ready UI gate.
+    REPORT="$OUT_DIR/OpenStudio-${VERSION}-AppImage-startup.txt"
+    rm -f "$REPORT"
+    "$OUT_DIR/$OUTPUT_NAME" --startup-self-test --report "$REPORT"
+    grep -q '^shellReady=true' "$REPORT"
     echo ""
     echo "AppImage created: dist/linux/$OUTPUT_NAME"
 else

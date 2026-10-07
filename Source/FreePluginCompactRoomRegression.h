@@ -21,7 +21,8 @@ inline juce::var checkCompactStudioRoom()
         int originalOnset=-1,compactOnset=-1;double difference=0,spillEnergy=0;
         for(int i=0;i<compact.getNumSamples();++i)
         {
-            if(originalOnset<0&&std::abs(original.getSample(0,i))>1e-7f)originalOnset=i;if(compactOnset<0&&std::abs(compact.getSample(0,i))>1e-7f)compactOnset=i;
+            if(originalOnset<0&&std::abs(original.getSample(0,i))>1e-7f)originalOnset=i;
+            if(compactOnset<0&&std::abs(compact.getSample(0,i))>1e-7f)compactOnset=i;
             for(int ch=0;ch<2;++ch){const double value=compact.getSample(ch,i);finite=finite&&std::isfinite(value)&&std::abs(value)<4;partition=juce::jmax(partition,std::abs(value-other.getSample(ch,i)));difference+=std::abs(value-original.getSample(ch,i));if(i>rate*.2){retained=retained&&spill.getSample(ch,i)==changed.getSample(ch,i);spillEnergy+=std::pow(spill.getSample(ch,i),2);}}
         }
         distinct=distinct&&difference>.1;earlier=earlier&&compactOnset>=0&&compactOnset<originalOnset;retained=retained&&spillEnergy>1e-8;

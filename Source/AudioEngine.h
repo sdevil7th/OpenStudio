@@ -94,7 +94,8 @@ public:
         const juce::String& output,
         double sampleRate,
         int bufferSize,
-        std::function<void(bool, const juce::String&)> completion = {});
+        std::function<void(bool, const juce::String&)> completion = {},
+        bool useDefaultDevices = false);
     int getNAMRackOversamplingFactor() const noexcept;
     bool setNAMRackOversamplingFactor(int factor);
     
@@ -968,7 +969,8 @@ private:
         const juce::String& output,
         double sampleRate,
         int bufferSize,
-        juce::String& errorMessage);
+        juce::String& errorMessage,
+        bool useDefaultDevices);
     juce::File getDeviceSettingsFile() const;
     void resetAudioCallbackWindowTelemetry() noexcept;
     void recordAudioCallbackTiming(double callbackProcessMs,

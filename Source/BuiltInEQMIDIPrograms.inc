@@ -132,7 +132,9 @@ void OpenStudioEQ::restoreMIDIPrograms(const juce::ValueTree& state)
         }
     }
     if(valid)try {valid=prepareMIDIPrograms(*next);}catch(...){valid=false;}
-    if(!valid)next.reset();midiProgramRestoreRejected.store(!valid);publishMIDIPrograms(std::move(next));
+    if(!valid)next.reset();
+    midiProgramRestoreRejected.store(!valid);
+    publishMIDIPrograms(std::move(next));
 }
 void OpenStudioEQ::observeMIDIProgram(int bank,int program,int channel,int status) noexcept
 {

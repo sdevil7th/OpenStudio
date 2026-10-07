@@ -1531,6 +1531,7 @@ export interface DAWState {
   // AI Tools Setup Modal
   showAiToolsSetup: boolean;
   aiToolsSetupRequestedFeature: AiFeatureId | null;
+  aiToolsSetupRequestedModelId: AiMusicModelId | null;
 
   // Stem Separation Modal
   showStemSeparation: boolean;
@@ -2426,7 +2427,7 @@ export interface DAWActions {
   toggleGettingStarted: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
-  openAiToolsSetup: (requestedFeature?: AiFeatureId) => void;
+  openAiToolsSetup: (requestedFeature?: AiFeatureId, modelId?: AiMusicModelId) => void;
   closeAiToolsSetup: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
@@ -3484,6 +3485,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showScriptConsole: false,
     showAiToolsSetup: false,
     aiToolsSetupRequestedFeature: null,
+    aiToolsSetupRequestedModelId: null,
     showStemSeparation: false,
     stemSepTrackId: null,
     stemSepClipId: null,

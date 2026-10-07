@@ -82,7 +82,8 @@ public:
     }
     void reset() noexcept
     {
-        for(auto& channel:springs)for(auto& spring:channel)spring.reset();for(auto& line:pre)line.reset();
+        for(auto& channel:springs)for(auto& spring:channel)spring.reset();
+        for(auto& line:pre)line.reset();
         inputLow={};wetLow={};wetHigh={};dcInput={};dcOutput={};phase=0;initialized=false;awake=enabled=false;weight.setCurrentAndTargetValue(0);retirement.reset({weight});
     }
     double retiringTailSeconds()const noexcept{return retirement.retiringTailSeconds();}

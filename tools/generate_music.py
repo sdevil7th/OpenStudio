@@ -33,6 +33,7 @@ from ai_runtime_probe import (
     DEFAULT_MUSIC_GEN_MODEL,
     DEFAULT_MUSIC_GEN_MODEL_REPO,
     resolve_music_gen_checkpoint_root,
+    resolve_music_gen_snapshot,
 )
 
 
@@ -961,7 +962,6 @@ class DiffusersAcePipelineManager:
                 reporter.update("loading", 0.08, phase="loading_model", message="Loading ACE-Step Diffusers pipeline.")
 
             self.cache_root.mkdir(parents=True, exist_ok=True)
-            os.environ.setdefault("HF_HOME", str(self.cache_root))
             os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
             from diffusers import AceStepPipeline
@@ -973,18 +973,14 @@ class DiffusersAcePipelineManager:
                 require_int8_device(torch)
                 self.quantization, self.placement = "int8", "resident"
             dtype = torch.bfloat16 if self.device.startswith("cuda") and torch.cuda.is_bf16_supported() else torch.float32
+            local_snapshot = Path(self.model_id) if Path(self.model_id).is_dir() else resolve_music_gen_snapshot(self.cache_root, self.model_id)
+            if local_snapshot is None:
+                raise ValueError("ACE-Step model files are missing or incomplete. Run Audio Generation setup.")
             if dtype == torch.float32:
                 from ai_execution_policy import check_host_capacity
-                local_root = Path(self.model_id)
-                if not local_root.is_dir():
-                    from huggingface_hub import try_to_load_from_cache
-                    cached_index = try_to_load_from_cache(self.model_id, "model_index.json", cache_dir=str(self.cache_root))
-                    if isinstance(cached_index, str):
-                        local_root = Path(cached_index).parent
-                check_host_capacity(local_root, float_bytes=4)
-
+                check_host_capacity(local_snapshot, float_bytes=4)
             pipe = AceStepPipeline.from_pretrained(
-                self.model_id,
+                str(local_snapshot),
                 torch_dtype=dtype,
                 cache_dir=str(self.cache_root),
                 local_files_only=True,

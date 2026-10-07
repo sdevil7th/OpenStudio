@@ -1,6 +1,7 @@
 import { nativeBridge, type NativeGlobalShortcutEvent } from "../services/NativeBridge";
 import {
   getRegisteredAction,
+  hasActiveScopedActionExecutor,
   getRegisteredActions,
   getActionShortcutScopes,
   type ActionDef,
@@ -49,6 +50,7 @@ export interface GlobalShortcutPayload extends NativeGlobalShortcutEvent {
   isComposing?: boolean;
   getModifierState?: (keyArg: string) => boolean;
   targetIsEditable?: boolean;
+  targetIsModal?: boolean;
   targetIsNonTextControl?: boolean;
   preventDefault?: () => void;
   stopPropagation?: () => void;
@@ -352,6 +354,15 @@ export function dispatchGlobalShortcut(
     if (payload.getModifierState?.("AltGraph")) return false;
   } catch {
     // Some synthetic/native events cannot answer modifier-state queries.
+  }
+  // A dialog may own local editor/browser actions and transport, but must not
+  // let application editing shortcuts mutate the obscured project. DOM ownership
+  // keeps this policy out of unrelated native plugin-window shortcut messages.
+  if (payload.targetIsModal) {
+    const canHandle = options.canHandleAction;
+    options = { ...options, canHandleAction: action =>
+      (action.id.startsWith("transport.") || hasActiveScopedActionExecutor(action.id))
+      && (canHandle ? canHandle(action) : !action.canHandleShortcut || action.canHandleShortcut()) };
   }
   const role = options.role ?? windowRole;
   if (payload.source === "pluginWindow"

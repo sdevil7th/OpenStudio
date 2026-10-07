@@ -85,7 +85,7 @@ juce::var AudioEngine::gainPhaseAlignment(const juce::String& action,const juce:
         if(index<0)return fail("An alignment instance was removed");
         auto owner=getPublishedBuiltInProcessor(track,chain,index);auto* utility=dynamic_cast<OpenStudioUtilityEffect*>(owner.processor.get());
         if(!utility||utility->kind!=OpenStudioUtilityEffect::Kind::GainPhase||!utility->alignmentCapture)return fail("A selected processor is not Gain Phase");
-        identities.add(identity);members.push_back({addressFor(track,chain,index,identity),valuesFor(*utility),entry,std::move(owner),utility});
+        identities.add(identity);members.push_back({addressFor(track,chain,index,identity),valuesFor(*utility),entry,std::move(owner),utility,{}});
         auto& member=members.back();member.captureIndex=members.size()-1;member.capturedPDC=member.owner.track?member.owner.track->getPDCDelay():0;
         if(!member.owner.track)return fail("Alignment track was removed");
         const auto route=describeAlignmentRoute(*member.owner.track,utility);member.route=juce::JSON::toString(route,true);
@@ -161,6 +161,7 @@ juce::var AudioEngine::gainPhaseAlignment(const juce::String& action,const juce:
     const int window=juce::jlimit(4096,continuous?28672:BuiltInAlignmentCapture::capacity,juce::roundToInt(rate*.5));
     const auto span=static_cast<juce::int64>(std::llround(rate*requestedSeconds));
     const int length=projectSpan?window*16:sparse?window*3:juce::jmin(multipleSections?BuiltInAlignmentCapture::maximumCapture:BuiltInAlignmentCapture::capacity,juce::roundToInt(rate*requestedSeconds));
+    if(length<4096)return fail("Alignment needs at least 4096 samples at this sample rate; choose 2 seconds or longer");
     struct Abort { std::vector<Member>& members;~Abort(){for(auto& member:members)member.utility->alignmentCapture->abort();} } abort{members};
     for(auto& member:members)if(!(continuous?member.utility->alignmentCapture->armContinuous(start,span,window,rate):sparse?member.utility->alignmentCapture->armSparse(start,span,window,rate):member.utility->alignmentCapture->arm(start,length,rate)))return fail("An alignment capture is busy or the sample rate changed");
     BuiltInContinuousAlignment stream(members.size());std::vector<BuiltInAlignmentCapture*> captures;

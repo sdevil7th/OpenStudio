@@ -4,12 +4,15 @@
 #include "BuiltInAllPassFit.h"
 #include "BuiltInSpectralPhaseFit.h"
 #include "BuiltInInstrumentPreviewBindings.h"
+#include "RuntimeLocation.h"
 #include "AudioEngine.h"
+#include "RegressionMessagePump.h"
 #include "PluginParameterIdentity.h"
 #include "MicrophoneAccess.h"
 #include "AudioInputPolicy.h"
 #include "ASIOCapabilities.h"
 #include "WindowsAudioDefaultRate.h"
+#include "AudioDeviceConfiguration.h"
 #include "RecordingDestination.h"
 #include "ExportQuantizer.h"
 #include "AppPaths.h"
@@ -30,7 +33,6 @@
 #include "PitchResynthesizer.h"
 #include "CrashDiagnostics.h"
 #include "FFmpegLocator.h"
-#include "RuntimeAssetRoot.h"
 #include "NAM/dsp.h"
 #include <algorithm>
 #include <chrono>
@@ -281,8 +283,7 @@ juce::File getPreferredAppDataDirectory() { return AppPaths::documents(); }
 juce::File getPreferredApplicationDataDirectory() { return AppPaths::applicationData(); }
 juce::File getApplicationRuntimeDirectory()
 {
-    return OpenStudioRuntimeAssets::preferAppImageRoot(
-        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
+    return OpenStudioRuntime::executableFile().getParentDirectory();
 }
 
 int midiNoteFromFrequencyHz (float frequencyHz)
@@ -1106,14 +1107,6 @@ double getCommitStartSec (const std::vector<PitchCommitRange>& ranges)
 double getCommitEndSec (const std::vector<PitchCommitRange>& ranges)
 {
     return ranges.empty() ? 0.0 : ranges.back().endSec;
-}
-
-double getCommitDurationSec (const std::vector<PitchCommitRange>& ranges)
-{
-    double duration = 0.0;
-    for (const auto& range : ranges)
-        duration += std::max (0.0, range.endSec - range.startSec);
-    return duration;
 }
 
 double getAudibleCommitStartSec (const std::vector<PitchCommitRange>& ranges)
@@ -3056,28 +3049,6 @@ static void applyGainToDoubleBuffer(juce::AudioBuffer<double>& buffer,
         auto* data = buffer.getWritePointer(ch);
         for (int sample = 0; sample < numSamples; ++sample)
             data[sample] *= gain;
-    }
-}
-
-static void applyStereoPanToDoubleBuffer(juce::AudioBuffer<double>& buffer, int numSamples,
-                                         double leftGain, double rightGain)
-{
-    if (buffer.getNumChannels() < 2)
-        return;
-    if (leftGain == 1.0 && rightGain == 1.0)
-        return;
-
-    auto* left = buffer.getWritePointer(0);
-    auto* right = buffer.getWritePointer(1);
-    if (leftGain != 1.0)
-    {
-        for (int sample = 0; sample < numSamples; ++sample)
-            left[sample] *= leftGain;
-    }
-    if (rightGain != 1.0)
-    {
-        for (int sample = 0; sample < numSamples; ++sample)
-            right[sample] *= rightGain;
     }
 }
 
@@ -8670,17 +8641,18 @@ void AudioEngine::setAudioDeviceSetup(
     const juce::String& output,
     double sampleRate,
     int bufferSize,
-    std::function<void(bool, const juce::String&)> completion)
+    std::function<void(bool, const juce::String&)> completion,
+    bool useDefaultDevices)
 {
    #if JUCE_MAC
     if (input.trim().isNotEmpty() && ! isMicrophonePermissionGrantedForInput())
     {
         juce::Logger::writeToLog("AudioEngine: audio input setup requested before macOS microphone permission was granted.");
         requestMicrophonePermissionIfNeeded(
-            [this, lifetime = deferredCallbacks.token(), type, input, output, sampleRate, bufferSize, completion = std::move(completion)] (bool granted) mutable
+            [this, lifetime = deferredCallbacks.token(), type, input, output, sampleRate, bufferSize, useDefaultDevices, completion = std::move(completion)] (bool granted) mutable
         {
             juce::MessageManager::callAsync(
-                [this, lifetime, type, input, output, sampleRate, bufferSize, granted, completion = std::move(completion)] () mutable
+                [this, lifetime, type, input, output, sampleRate, bufferSize, useDefaultDevices, granted, completion = std::move(completion)] () mutable
             {
                 if (!MessageThreadLifetime::accepts(lifetime)) return;
                 juce::String errorMessage;
@@ -8688,7 +8660,7 @@ void AudioEngine::setAudioDeviceSetup(
                 if (granted)
                 {
                     applied = applyAudioDeviceSetup(
-                        type, input, output, sampleRate, bufferSize, errorMessage);
+                        type, input, output, sampleRate, bufferSize, errorMessage, useDefaultDevices);
                 }
                 else
                 {
@@ -8706,7 +8678,7 @@ void AudioEngine::setAudioDeviceSetup(
 
     juce::String errorMessage;
     const bool applied = applyAudioDeviceSetup(
-        type, input, output, sampleRate, bufferSize, errorMessage);
+        type, input, output, sampleRate, bufferSize, errorMessage, useDefaultDevices);
     if (completion)
         completion(applied, errorMessage);
 }
@@ -8717,7 +8689,8 @@ bool AudioEngine::applyAudioDeviceSetup(
     const juce::String& output,
     double sampleRate,
     int bufferSize,
-    juce::String& errorMessage)
+    juce::String& errorMessage,
+    bool useDefaultDevices)
 {
     juce::Logger::writeToLog("AudioEngine: Setting Audio Device...");
 
@@ -8731,93 +8704,31 @@ bool AudioEngine::applyAudioDeviceSetup(
         errorMessage = "Sample rate and buffer size must be positive, or Automatic.";
         return false;
     }
-    bool typeExists = false;
-    for (auto* availableType : deviceManager.getAvailableDeviceTypes())
-        typeExists = typeExists || availableType->getTypeName() == type;
-    if (!typeExists)
-    {
-        errorMessage = "The requested audio system is unavailable.";
-        return false;
-    }
-    const auto previousType = deviceManager.getCurrentAudioDeviceType();
-    juce::AudioDeviceManager::AudioDeviceSetup previousSetup;
-    deviceManager.getAudioDeviceSetup(previousSetup);
-    const bool hadDevice = deviceManager.getCurrentAudioDevice() != nullptr;
-    const auto restorePrevious = [&]()
-    {
-        if (deviceManager.getCurrentAudioDeviceType() != previousType)
-            deviceManager.setCurrentAudioDeviceType(previousType, true);
-        const auto restoreError = deviceManager.setAudioDeviceSetup(previousSetup, true);
-        if (!hadDevice) deviceManager.closeAudioDevice();
-        if (restoreError.isNotEmpty()) errorMessage += " Previous setup could not be restored: " + restoreError;
-        refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
-        return false;
-    };
 
-    // 1. Change Type if needed
-    if (deviceManager.getCurrentAudioDeviceType() != type)
-    {
-        if (!isMicrophonePermissionGrantedForInput())
-        {
-            // Switching type normally restores JUCE's last per-type input mask.
-            // Install an output-only configuration before that device can open.
-            juce::XmlElement effective("DEVICESETUP");
-            effective.setAttribute("deviceType", type);
-            effective.setAttribute("audioOutputDeviceName", output);
-            AudioInputPolicy::suppressInput(effective);
-            errorMessage = deviceManager.initialise(0, 2, &effective, false);
-            if (errorMessage.isNotEmpty()) return restorePrevious();
-        }
-        // Update JUCE's in-memory choice as well: an identical subsequent setup
-        // short-circuits before JUCE updates that XML. Disk persistence happens
-        // only below after success; recovery restores the previous choice too.
-        else deviceManager.setCurrentAudioDeviceType(type, true);
-    }
-
-    // 2. Setup Config
     juce::AudioDeviceManager::AudioDeviceSetup setup;
-    deviceManager.getAudioDeviceSetup(setup);
-
     setup.inputDeviceName = input;
     setup.outputDeviceName = output;
-    // JUCE 9 maps a zero request to the smallest advertised value, not the
-    // driver's default. Use conservative targets for an uninspected ASIO driver.
+    // JUCE 9 maps zero to the smallest advertised value rather than the driver's
+    // default. Preserve Automatic's conservative targets before the transaction.
     setup.sampleRate = sampleRate > 0 ? sampleRate : 48000.0;
     setup.bufferSize = bufferSize > 0 ? bufferSize : 512;
-    // Default to the first stereo pair, expanding only through the highest
-    // explicitly routed track channel. This preserves physical channel indices
-    // without paying ASIO conversion/callback overhead for every interface I/O.
-    const int minimumInputChannels =
-        input.trim().isNotEmpty()
-            && isMicrophonePermissionGrantedForInput()
-        ? 2
-        : 0;
-    const int minimumOutputChannels =
-        output.trim().isNotEmpty() ? 2 : 0;
-    applyRoutedDeviceChannelPolicy(
-        setup,
-        minimumInputChannels,
-        minimumOutputChannels);
-
-    // Apply (treat errors softly by logging)
-    // JUCE updates its chosen-setup XML only after a successful device open.
-    errorMessage = deviceManager.setAudioDeviceSetup(setup, true);
+    errorMessage = AudioDeviceConfiguration::apply(
+        deviceManager, type, setup, useDefaultDevices,
+        isMicrophonePermissionGrantedForInput(),
+        [this] (auto& requested) {
+            // Expand the first stereo pair only through explicitly routed I/O.
+            applyRoutedDeviceChannelPolicy(
+                requested, requested.inputDeviceName.isNotEmpty() ? 2 : 0,
+                requested.outputDeviceName.isNotEmpty() ? 2 : 0);
+        });
+    // Failed opens may stop the callback; publish the rolled-back setup too.
+    refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
     if (errorMessage.isNotEmpty())
     {
         juce::Logger::writeToLog("AudioEngine: Error setting device: " + errorMessage);
-        return restorePrevious();
+        return false;
     }
-
-    refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
     saveDeviceSettings();
-    if (auto* appliedDevice = deviceManager.getCurrentAudioDevice())
-    {
-        juce::Logger::writeToLog(
-            "AudioEngine: Audio settings applied; requested buffer="
-            + juce::String(bufferSize)
-            + " actual buffer="
-            + juce::String(appliedDevice->getCurrentBufferSizeSamples()));
-    }
     return true;
 }
 
@@ -10036,6 +9947,7 @@ juce::var AudioEngine::runReleaseGuardrails()
         obj->setProperty("pass", pass);
         obj->setProperty("detail", detail);
         checks.add(juce::var(obj));
+        pumpRegressionMessages();
         if (!pass)
             overallPass = false;
     };
@@ -10220,6 +10132,7 @@ juce::var AudioEngine::runCleanGuitarPitchBendRegression()
         if (! value.isVoid())
             obj->setProperty("value", value);
         checks.add(juce::var(obj));
+        pumpRegressionMessages();
     };
 
     auto makeProbeVar = [] (const GuitarProbe& probe)
@@ -10531,6 +10444,7 @@ juce::var AudioEngine::runNAMRackRegression()
         if (! value.isVoid())
             obj->setProperty("value", value);
         checks.add(juce::var(obj));
+        pumpRegressionMessages();
     };
 
     auto makeProbeVar = [] (const RackProbe& probe)
@@ -10554,7 +10468,7 @@ juce::var AudioEngine::runNAMRackRegression()
     {
         juce::Array<juce::File> roots;
         const auto cwd = juce::File::getCurrentWorkingDirectory();
-        const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+        const auto exeDir = OpenStudioRuntime::executableFile().getParentDirectory();
 
         roots.add(cwd);
         roots.add(exeDir);
@@ -17439,6 +17353,8 @@ juce::var AudioEngine::runNAMRackRegression()
                 rack.chaosTone.store(0.58f);
                 rack.chaosMix.store(1.0f);
                 rack.chaosLevelDb.store(0.0f);
+                // This diagnostic feeds a mono buffer; negotiate that layout.
+                rack.setPlayConfigDetails(1, 1, sampleRate, 128);
                 rack.prepareToPlay(sampleRate, 128);
                 juce::MidiBuffer midi;
                 for (int cursor = 0; cursor < totalSamples; cursor += 128)
@@ -17633,6 +17549,8 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.chaosTone.store(0.58f);
             rack.chaosMix.store(1.0f);
             rack.chaosLevelDb.store(0.0f);
+            // This diagnostic feeds a mono buffer; negotiate that layout.
+            rack.setPlayConfigDetails(1, 1, sampleRate, 128);
             rack.prepareToPlay(sampleRate, 128);
             juce::MidiBuffer midi;
             for (int cursor = 0; cursor < totalSamples; cursor += 128)
@@ -17815,6 +17733,8 @@ juce::var AudioEngine::runNAMRackRegression()
                 rack.chaosGate.store(0.0f);
                 rack.chaosMix.store(1.0f);
                 rack.chaosLevelDb.store(0.0f);
+                // This diagnostic feeds a mono buffer; negotiate that layout.
+                rack.setPlayConfigDetails(1, 1, sampleRate, blockSize);
                 rack.prepareToPlay(sampleRate, blockSize);
 
                 double inputEnergy = 0.0;
@@ -17947,6 +17867,8 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.precisionDriveAttack.store(0.18f);
             rack.precisionDriveGate.store(0.0f);
             rack.precisionDriveVolumeDb.store(0.0f);
+            // This diagnostic feeds a mono buffer; negotiate that layout.
+            rack.setPlayConfigDetails(1, 1, sampleRate, fixtureBlockSize);
             rack.prepareToPlay(
                 sampleRate, fixtureBlockSize);
 
@@ -18401,6 +18323,8 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.chaosGate.store(0.0f);
             rack.chaosMix.store(1.0f);
             rack.chaosLevelDb.store(0.0f);
+            // This diagnostic feeds a mono buffer; negotiate that layout.
+            rack.setPlayConfigDetails(1, 1, sampleRate, 128);
             rack.prepareToPlay(sampleRate, 128);
             result.latencySamples = rack.getLatencySamples();
 
@@ -20415,6 +20339,8 @@ juce::var AudioEngine::runNAMRackRegression()
             rack.chaosGate.store(0.0f, std::memory_order_relaxed);
             rack.chaosMix.store(1.0f, std::memory_order_relaxed);
             rack.chaosLevelDb.store(0.0f, std::memory_order_relaxed);
+            // This diagnostic feeds a mono buffer; negotiate that layout.
+            rack.setPlayConfigDetails(1, 1, sampleRate, 128);
             rack.prepareToPlay(sampleRate, 128);
             juce::MidiBuffer midi;
             int cursor = 0;
@@ -57627,6 +57553,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
         if (! value.isVoid())
             obj->setProperty("value", value);
         checks.add(juce::var(obj));
+        pumpRegressionMessages();
     };
 
     auto statsToVar = [] (const BufferStats& stats)
@@ -57885,7 +57812,7 @@ juce::var AudioEngine::runNAMRackDIRegression(const juce::File& inputFile,
     {
         juce::Array<juce::File> roots;
         const auto cwd = juce::File::getCurrentWorkingDirectory();
-        const auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+        const auto exeDir = OpenStudioRuntime::executableFile().getParentDirectory();
 
         roots.add(cwd);
         roots.add(exeDir);
@@ -61103,16 +61030,20 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
 
     auto releaseGuardrails = runReleaseGuardrails();
     auto* root = new juce::DynamicObject();
+    root->setProperty("deviceSampleRate", currentSampleRate);
+    root->setProperty("deviceBlockSize", currentBlockSize);
     juce::Array<juce::var> suites;
     bool overallPass = true;
 
-    auto addSuite = [&suites, &overallPass](const juce::String& id, bool pass, const juce::String& detail)
+    auto addSuite = [this, &suites, &overallPass](const juce::String& id, bool pass, const juce::String& detail)
     {
         auto* obj = new juce::DynamicObject();
         obj->setProperty("id", id);
         obj->setProperty("pass", pass);
         obj->setProperty("detail", detail);
         suites.add(juce::var(obj));
+        if (! isPlaying.load())
+            pumpRegressionMessages();
         if (!pass)
             overallPass = false;
         juce::Logger::writeToLog(
@@ -62015,8 +61946,12 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
     }
 
     {
-        const double fixtureSampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
-        const int fixtureBlockSize = juce::jmax(512, currentBlockSize);
+        // This isolated response fixture probes up to 14 kHz. A null or
+        // telephony device may run at 8 kHz, where those probes alias. Keep
+        // the deterministic filter test independent of the active device;
+        // low-rate preparation safety is exercised separately.
+        constexpr double fixtureSampleRate = 48000.0;
+        constexpr int fixtureBlockSize = 512;
 
         auto eq = std::make_unique<OpenStudioEQ>();
         eq->bands[1].enabled.store(1.0f);
@@ -62476,25 +62411,36 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                     && hasMidiOut;
         }
 
-        pitch->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
         pitch->bypass.store(1.0f);
-        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
+        pitch->prepareToPlay(fixtureSampleRate, fixtureBlockSize);
+        juce::AudioBuffer<float> original(2, fixtureBlockSize);
         for (int sample = 0; sample < fixtureBlockSize; ++sample)
         {
             const float t = static_cast<float>(static_cast<double>(sample) / fixtureSampleRate);
-            const float left = std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.25f;
-            const float right = std::sin(juce::MathConstants<float>::twoPi * 330.0f * t) * 0.18f;
-            buffer.setSample(0, sample, left);
-            buffer.setSample(1, sample, right);
+            original.setSample(0, sample, std::sin(juce::MathConstants<float>::twoPi * 220.0f * t) * 0.25f);
+            original.setSample(1, sample, std::sin(juce::MathConstants<float>::twoPi * 330.0f * t) * 0.18f);
         }
-        juce::AudioBuffer<float> original;
-        original.makeCopyOf(buffer);
+        juce::AudioBuffer<float> buffer(2, fixtureBlockSize);
         juce::MidiBuffer midi;
-        pitch->processBlock(buffer, midi);
         float maxDiff = 0.0f;
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-                maxDiff = juce::jmax(maxDiff, std::abs(buffer.getSample(ch, sample) - original.getSample(ch, sample)));
+        const int bypassLatency = pitch->getLatencySamples();
+        const int blocks = (bypassLatency + 2 * fixtureBlockSize - 1) / fixtureBlockSize;
+        for (int block = 0; block < blocks; ++block)
+        {
+            if (block == 0)
+                buffer.makeCopyOf(original);
+            else
+                buffer.clear();
+            pitch->processBlock(buffer, midi);
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                {
+                    const int sourceSample = block * fixtureBlockSize + sample - bypassLatency;
+                    const float expected = sourceSample >= 0 && sourceSample < fixtureBlockSize
+                        ? original.getSample(ch, sourceSample) : 0.0f;
+                    maxDiff = juce::jmax(maxDiff, std::abs(buffer.getSample(ch, sample) - expected));
+                }
+        }
         pitch->releaseResources();
 
         const bool pitchPass = setOk
@@ -62509,6 +62455,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
                  "setOk=" + juce::String(setOk ? "true" : "false")
                      + ", schemaOk=" + juce::String(schemaOk ? "true" : "false")
                      + ", parameterCount=" + juce::String(parameterCount)
+                     + ", bypassLatency=" + juce::String(bypassLatency)
                      + ", maxBypassDiff=" + juce::String(maxDiff, 9));
     }
 
@@ -62636,7 +62583,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         if (it != trackMap.end() && it->second != nullptr)
         {
             auto* track = it->second;
-            const int blockSize = juce::jmax(512, currentBlockSize);
+            const int blockSize = juce::jmax(1, currentBlockSize);
             const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
             juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
             fixtureBuffer.clear();
@@ -62700,7 +62647,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         if (it != trackMap.end() && it->second != nullptr)
         {
             auto* track = it->second;
-            const int blockSize = juce::jmax(512, currentBlockSize);
+            const int blockSize = juce::jmax(1, currentBlockSize);
             const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
             juce::MidiBuffer drainQueuedResetMidi;
             track->buildMidiBuffer(drainQueuedResetMidi, 0.0, blockSize, sampleRate, false);
@@ -62803,7 +62750,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         if (it != trackMap.end() && it->second != nullptr)
         {
             auto* track = it->second;
-            const int blockSize = juce::jmax(512, currentBlockSize);
+            const int blockSize = juce::jmax(1, currentBlockSize);
             const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
             juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
             fixtureBuffer.clear();
@@ -62893,7 +62840,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         if (it != trackMap.end() && it->second != nullptr)
         {
             auto* track = it->second;
-            const int blockSize = juce::jmax(512, currentBlockSize);
+            const int blockSize = juce::jmax(1, currentBlockSize);
             juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
             fixtureBuffer.clear();
             juce::MidiBuffer fixtureMidi;
@@ -62956,7 +62903,7 @@ juce::var AudioEngine::runAutomatedRegressionSuite()
         if (it != trackMap.end() && it->second != nullptr)
         {
             auto* track = it->second;
-            const int blockSize = juce::jmax(512, currentBlockSize);
+            const int blockSize = juce::jmax(1, currentBlockSize);
             const double sampleRate = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
             juce::AudioBuffer<float> fixtureBuffer(2, blockSize);
             fixtureBuffer.clear();
@@ -64915,9 +64862,13 @@ static juce::var describeBuiltInProcessorUnchecked(juce::AudioProcessor* process
             addToggleParam(params,"plateOutputCutOff","Output low-pass off",tone[2].load(),0,"plateTone");
         }
         if(reverb->standaloneBanking)
+        {
             for(size_t i=0;i<BuiltInModalPlate::materialCount;++i)
+            {
                 if(i==0)addEnumParam(params,BuiltInModalPlate::materialIds[i],BuiltInModalPlate::materialNames[i],reverb->modalMaterialControls[i].load(),0,makeEnumOptions({"Coefficient","Material"}),"configuration",false);
                 else addContinuousParam(params,BuiltInModalPlate::materialIds[i],BuiltInModalPlate::materialNames[i],reverb->modalMaterialControls[i].load(),BuiltInModalPlate::materialMinima[i],BuiltInModalPlate::materialMaxima[i],BuiltInModalPlate::materialDefaults[i],i==1?"GPa":i==2?"kg/m^3":i==3?"ratio":i>=4?"mm":"","configuration",false);
+            }
+        }
         if(reverb->standaloneBanking)
         {
             auto types=makeEnumOptions({"Room","Hall","Plate","Chamber","Spring","Shimmer","Nonlinear","Convolution","Church","Ambience","Vintage hall","Vintage random","Contour room","Open hall","Diffuse loop","Magnetic heads","Positioned room","Rising space","Bloom field","Cloud field","Vowel hall","Drifting hall","Drifting chamber","Drifting diffuse","Clear plate","Clear room","Clear random","Radiant hall","Diffuse plate","Compact room","Cross chamber","Ensemble space","Reflection field","Vault","Grain hall","Grain plate","Shaped reflections","Long nave","Grand gallery","Aperture chamber","Aperture hall"});
@@ -66354,7 +66305,6 @@ bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::Str
     prepareHostedProcessorForPrecision(plugin.get(), sr, bs, processingPrecisionMode);
 
     bool success = false;
-    int fxIndex = -1;
     {
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         auto it = trackMap.find(trackId);
@@ -66363,14 +66313,12 @@ bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::Str
             if (isInputFX)
             {
                 success = it->second->addInputFX(std::move(plugin), sr, bs);
-                if (success)
-                    fxIndex = it->second->getNumInputFX() - 1;
+
             }
             else
             {
                 success = it->second->addTrackFX(std::move(plugin), sr, bs);
-                if (success)
-                    fxIndex = it->second->getNumTrackFX() - 1;
+
             }
         }
     }
@@ -71093,7 +71041,7 @@ bool AudioEngine::replaceTrackSends(const juce::String& sourceTrackId, const juc
         if ((object->hasProperty("trimDB") && !numeric(entry["trimDB"])) || !std::isfinite(trimDB) || trimDB < -60.0 || trimDB > 12.0) return false;
         replacement.push_back({ destination, static_cast<float>(static_cast<double>(entry["level"])),
             static_cast<float>(static_cast<double>(entry["pan"])), static_cast<bool>(entry["enabled"]),
-            static_cast<bool>(entry["preFader"]), static_cast<bool>(entry["phaseInvert"]), static_cast<int>(channel), static_cast<float>(trimDB) });
+            static_cast<bool>(entry["preFader"]), static_cast<bool>(entry["phaseInvert"]), static_cast<int>(channel), static_cast<float>(trimDB), {} });
         destinations.add(destination);
     }
     for (const auto& destination : destinations)
@@ -75057,6 +75005,8 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         if (! diagnostic.isVoid())
             check->setProperty("diagnostic", diagnostic);
         checks.add(juce::var(check));
+        if (! isPlaying.load())
+            pumpRegressionMessages();
         overallPass = overallPass && pass;
     };
 
@@ -75149,13 +75099,30 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         deviceManager.removeAudioCallback(this);
         const auto playingBefore=isPlaying.exchange(true),loopBefore=isLooping.exchange(false),renderBefore=isRendering.exchange(false);
         const auto positionBefore=currentSamplePosition.exchange(0);
-        const double captureRate=currentSampleRate;left->alignmentCapture->prepare(captureRate);right->alignmentCapture->prepare(captureRate);
+        // Injected captures use a fixed analysis rate independently of the
+        // physical device (ALSA's null device can negotiate only 8 kHz).
+        const double rateBefore=currentSampleRate;
+        constexpr double captureRate=48000;
+        currentSampleRate=captureRate;
+        left->alignmentCapture->prepare(captureRate);right->alignmentCapture->prepare(captureRate);
         auto* captureRequest=new juce::DynamicObject();captureRequest->setProperty("entries",alignEntries);captureRequest->setProperty("captureSeconds",30);const juce::var captureRequestValue(captureRequest);
+        currentSampleRate=8000;left->alignmentCapture->prepare(8000);right->alignmentCapture->prepare(8000);
+        captureRequest->setProperty("captureSeconds",.5);
+        const auto shortLowRateCapture=gainPhaseAlignment("capture",captureRequestValue);
+        addCheck("alignment_short_low_rate_capture_guard",!static_cast<bool>(shortLowRateCapture["success"])
+            &&shortLowRateCapture["error"].toString().contains("at least 4096 samples")
+            &&left->alignmentCapture->state.load()!=1&&right->alignmentCapture->state.load()!=1,
+            "A half-second capture at 8 kHz rejects insufficient analysis evidence before arming either recorder; longer capture durations remain available.");
+        currentSampleRate=captureRate;left->alignmentCapture->prepare(captureRate);right->alignmentCapture->prepare(captureRate);
+        captureRequest->setProperty("captureSeconds",30);
         juce::AudioBuffer<float> a(2,512),b(2,512);juce::int64 position=0;double observedProgress=0;
         const auto signal=[](juce::int64 sample){auto value=static_cast<juce::uint32>(sample);value^=value>>16;value*=0x7feb352dU;value^=value>>15;value*=0x846ca68bU;value^=value>>16;return (static_cast<float>(value&65535)/65535.0f-.5f)*.2f;};
         const auto feedAlignmentCapture=[&]{
             if(left->alignmentCapture->state.load()==1&&right->alignmentCapture->state.load()==1)
-                for(int block=0;block<(static_cast<bool>(captureRequestValue["projectSpan"])?8:64)&&left->alignmentCapture->state.load()==1;++block)
+                // Continuous analysis calls the cancellation probe inside its
+                // FFT loops too. Advance one block per probe so the synthetic
+                // producer cannot outrun the bounded stream consumer.
+                for(int block=0;block<(static_cast<bool>(captureRequestValue["projectSpan"])?1:64)&&left->alignmentCapture->state.load()==1;++block)
                 {
                     for(int i=0;i<512;++i)for(int ch=0;ch<2;++ch){a.setSample(ch,i,signal(position+i-trackMap[alignTrackA]->getPDCDelay()));b.setSample(ch,i,-signal(position+i-37-trackMap[alignTrackB]->getPDCDelay()));}
                     left->alignmentCapture->process(a,position,true);right->alignmentCapture->process(b,position,true);position+=512;
@@ -75221,6 +75188,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             &&static_cast<double>(getBuiltInPluginState(alignTrackA,"track",0)["values"]["delayL"])==0,
             "Cancel aborts every armed recorder and leaves plugin state/history untouched.");
         isPlaying.store(playingBefore);isLooping.store(loopBefore);isRendering.store(renderBefore);currentSamplePosition.store(positionBefore);
+        currentSampleRate=rateBefore;
         deviceManager.addAudioCallback(this);
     }
     removeTrack(alignTrackB);auto* removedRequest=new juce::DynamicObject();removedRequest->setProperty("entries",applied["after"]);const auto removed=gainPhaseAlignment("apply",juce::var(removedRequest));
@@ -75992,6 +75960,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         afterCancel.getFullPathName(), "wav", 48000, 24, 2, false, false, 0),
         "A cancelled transaction restores processing and leaves the next render usable.");
 
+#if JUCE_WINDOWS
     if (trackAdded && trackMap.count(trackId))
     {
         juce::PluginDescription description;
@@ -76019,6 +75988,15 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             "A pass-through isolated child must render aligned with the unhosted baseline and restore live mode.", difference);
         if (mounted) trackMap[trackId]->removeTrackFX(0);
     }
+#else
+    // The worker transport is currently Windows-only. Keep this coverage gap
+    // visible instead of reporting an unsupported feature as a render failure.
+    auto* isolationCheck = new juce::DynamicObject();
+    isolationCheck->setProperty("id", "isolated_plugin_render_pdc_parity");
+    isolationCheck->setProperty("status", "not_asserted");
+    isolationCheck->setProperty("detail", "Plugin isolation is currently supported only on Windows.");
+    checks.add(juce::var(isolationCheck));
+#endif
     const auto externalPlugin = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_FX_REGRESSION_PLUGIN", "");
     if (trackAdded && externalPlugin.isNotEmpty())
     {
@@ -79857,7 +79835,6 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
     juce::String pitchRenderBackendFailureCode;
     juce::var pitchRenderBackendCapabilities;
     juce::var pitchRenderBackendDiagnostics;
-    bool pitchRenderBackendAvailable = false;
     juce::String pitchRenderCommitPolicy;
     int pitchRenderDryProtectedSamples = 0;
     double pitchRenderContextDurationSec = 0.0;
@@ -80025,7 +80002,6 @@ juce::var AudioEngine::applyPitchCorrection(const juce::String& trackId, const j
                 pitchRenderProductPath = "native_vsf_note_hq";
                 pitchRenderBackendId = "native_vsf";
                 pitchRenderBackendVersion = "vsf_default";
-                pitchRenderBackendAvailable = true;
                 pitchRenderCommitPolicy = "dry_protect_commit_ranges";
                 logPitchEditorFormant ("phrase HQ using native VSF renderer clip=" + clipId);
             }
@@ -81348,8 +81324,11 @@ juce::var AudioEngine::analyzePolyphonic(const juce::String& trackId, const juce
         const juce::ScopedLock lock(polyAnalysisLock);
         result = polyPitchDetector.analyze(mono.getReadPointer(0), numSamples,
                                            reader->sampleRate, clipId);
-        // Cache result for reuse in polyphonic editing
-        polyAnalysisCache[clipId] = result;
+        // Failed analysis must not become a usable polyphonic editing cache.
+        if (result.error.isEmpty())
+            polyAnalysisCache[clipId] = result;
+        else
+            polyAnalysisCache.erase(clipId);
     }
 
     return PolyPitchDetector::resultToJSON(result);

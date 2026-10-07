@@ -67,6 +67,37 @@ function timing(owner: RecordValue, key: string, fallback = 0) {
   if (typeof owner[key] !== "number" || !Number.isFinite(owner[key]) || owner[key] < 0 || owner[key] > 1e9)
     throw new Error(`Invalid clip ${key}`);
 }
+function midiNumber(event: RecordValue, key: string, min: number, max: number, required = false) {
+  if (!required && event[key] === undefined) return;
+  const value = event[key];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max)
+    throw new Error(`Invalid MIDI ${key}`);
+}
+function validateMIDI(owner: RecordValue) {
+  for (const value of list(owner, "events", 1_000_000)) {
+    const event = object(value, "MIDI event");
+    midiNumber(event, "timestamp", 0, 1e9, true);
+    if (!["noteOn", "noteOff", "cc", "pitchBend", "programChange", "channelPressure", "polyPressure"].includes(String(event.type)))
+      throw new Error("Invalid MIDI event type");
+    midiNumber(event, "channel", 1, 16);
+    midiNumber(event, "note", 0, 127, ["noteOn", "noteOff", "polyPressure"].includes(String(event.type)));
+    midiNumber(event, "controller", 0, 127, event.type === "cc");
+    midiNumber(event, "value", 0, event.type === "pitchBend" ? 16383 : 127, event.type === "cc");
+    for (const key of ["velocity", "releaseVelocity"]) midiNumber(event, key, 0, 127);
+    midiNumber(event, "pitchBend", -1, 1);
+    for (const key of ["pressure", "slide", "probability"]) midiNumber(event, key, 0, 1);
+    midiNumber(event, "chance", 0, 100);
+    for (const key of ["playCount", "velocityVariance", "centOffset"])
+      midiNumber(event, key, key === "centOffset" ? -1e9 : 0, 1e9);
+  }
+  for (const value of list(owner, "ccEvents", 1_000_000)) {
+    const event = object(value, "MIDI CC event");
+    midiNumber(event, "time", 0, 1e9, true);
+    midiNumber(event, "cc", 0, 127, true);
+    midiNumber(event, "value", 0, 127, true);
+    midiNumber(event, "channel", 1, 16);
+  }
+}
 function inspectEnvelope(root: unknown) {
   const stack = [{ value: root, depth: 0 }];
   let nodes = 0;
@@ -106,7 +137,9 @@ export function parseValidatedProject(json: string): RecordValue & { tracks: Rec
     optionalText(clip, "filePath"); optionalText(clip, "name");
     if (clip.sampleRate != null) bounded(clip, "sampleRate", 44100, 8000, 384000);
     if (clip.playbackRate != null) bounded(clip, "playbackRate", 1, 0.01, 100);
-    for (const key of ["notes", "events", "ccEvents", "pitchBendEvents"]) {
+    validateMIDI(clip);
+    if (clip.quantizeBackup != null) validateMIDI(object(clip.quantizeBackup, "MIDI quantize backup"));
+    for (const key of ["notes", "pitchBendEvents"]) {
       for (const event of list(clip, key, 1_000_000)) object(event, `MIDI ${key}`);
     }
     return clip;
@@ -143,12 +176,26 @@ export function parseValidatedProject(json: string): RecordValue & { tracks: Rec
         throw new Error("Invalid send output pair");
       bounded(send, "level", 0.5, 0, 4); bounded(send, "pan", 0, -1, 1);
       bounded(send, "trimDB", 0, -60, 12);
+      for (const [key, fallback] of [["enabled", true], ["preFader", false], ["phaseInvert", false]] as const) {
+        if (send[key] == null) send[key] = fallback;
+        if (typeof send[key] !== "boolean") throw new Error(`Invalid send ${key}`);
+      }
     }
     track.sends = sends;
     bounded(track, "volume", 1, 0, 16); bounded(track, "volumeDB", 0, -150, 24);
     bounded(track, "pan", 0, -1, 1);
     bounded(track, "inputChannelCount", 2, 1, 64); bounded(track, "inputStartChannel", 0, 0, 1023);
     bounded(track, "trackChannelCount", 2, 1, 64);
+    bounded(track, "stereoWidth", 100, 0, 200);
+    bounded(track, "outputStartChannel", 0, 0, 1023);
+    bounded(track, "outputChannelCount", 2, 1, 64);
+    bounded(track, "playbackOffsetMs", 0, -1e9, 1e9);
+    bounded(track, "activeTakeIndex", 0, 0, (track.takes as unknown[]).length);
+    for (const [key, fallback] of [["masterSendEnabled", true], ["phaseInverted", false], ["recordSafe", false]] as const) {
+      if (track[key] == null) track[key] = fallback;
+      if (typeof track[key] !== "boolean") throw new Error(`Invalid track ${key}`);
+    }
+    optionalText(track, "notes");
     pluginFields(track);
   }
   const problem = graphProblem(tracks as unknown as GraphTrack[]);

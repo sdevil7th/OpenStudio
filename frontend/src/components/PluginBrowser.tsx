@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { createPortal } from "react-dom";
+import { Dialog, DialogPanel, DialogTitle } from "@headlessui/react";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import { routeModalShortcutEvent } from "../utils/modalShortcutScope";
 import { useShallow } from "zustand/shallow";
 import {
   X,
@@ -489,7 +491,7 @@ export function PluginBrowser({
   };
 
   browserActionExecutorRef.current = (actionId) => {
-    if (actionId === "browser.close") {
+    if (actionId === "browser.close" || (!embedded && actionId === "modal.close")) {
       onClose();
       return "handled";
     }
@@ -537,6 +539,7 @@ export function PluginBrowser({
       (actionId) => browserActionExecutorRef.current(actionId),
       [
         "browser.close",
+        ...(!embedded ? ["modal.close"] : []),
         "browser.focusSearch",
         "browser.toggleFavorites",
         "browser.openUserEffectsFolder",
@@ -554,7 +557,7 @@ export function PluginBrowser({
       unregisterActions();
       unregisterSurface();
     };
-  }, [currentInstrumentPlugin, targetChain]);
+  }, [currentInstrumentPlugin, targetChain, embedded]);
 
   const handleRetryBlacklistedPlugin = async (path: string) => {
     setRetryingBlacklistedPlugin(path);
@@ -1333,37 +1336,42 @@ export function PluginBrowser({
     );
   }
 
-  return createPortal(
-    <div
+  return (
+    <Dialog open onClose={onClose}
       className="fixed inset-0 bg-black/80 flex items-center justify-center z-[10000]"
       data-modal-root="true"
       {...modalPointerBoundaryProps}
       onPointerDownCapture={() => activateShortcutContext({ kind: "browser" })}
       onFocusCapture={() => activateShortcutContext({ kind: "browser" })}
       data-shortcut-context="browser"
-      onClick={onClose}
+      onKeyDown={(event) => {
+        const routed = routeModalShortcutEvent(event.nativeEvent, undefined,
+          matchesActionShortcut(event.nativeEvent, "browser.close") ? "browser.close" : "modal.close");
+        if (routed.result !== "unmatched") event.preventDefault();
+        if (routed.result !== "unmatched" || routed.suppressedHeadlessEscape) event.stopPropagation();
+      }}
       onContextMenu={guardModalContextMenu}
     >
-      <div
+      <DialogPanel
         className="bg-neutral-900 border border-neutral-700 rounded-lg w-[90%] max-w-[800px] max-h-[80vh] flex flex-col shadow-xl"
         onClick={(e) => e.stopPropagation()}
         onContextMenu={guardModalContextMenu}
       >
         <div className="flex justify-between items-center p-4 border-b border-neutral-700">
-          <h2 className="m-0 text-lg text-white font-semibold">
+          <DialogTitle className="m-0 text-lg text-white font-semibold">
             {targetChain === "instrument" ? "Instrument Browser" : `Plugin Browser - ${targetChain.toUpperCase()} FX`}
-          </h2>
+          </DialogTitle>
           <Button
             variant="ghost"
             size="icon-md"
             onClick={onClose}
+            aria-label="Close plugin browser"
           >
             <X size={18} />
           </Button>
         </div>
         {content}
-      </div>
-    </div>,
-    document.body
+      </DialogPanel>
+    </Dialog>
   );
 }

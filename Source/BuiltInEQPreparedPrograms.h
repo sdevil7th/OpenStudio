@@ -21,7 +21,8 @@ struct BuiltInEQPreparedPrograms
                     const float output=valid>=delay?alignment.getSample(channel,position):0;
                     alignment.setSample(channel,position,input);audio.setSample(channel,sample,output);
                 }
-                if(++position==delay)position=0;valid=juce::jmin(delay,valid+1);
+                if(++position==delay)position=0;
+                valid=juce::jmin(delay,valid+1);
             }
         }
     };
@@ -31,6 +32,10 @@ struct BuiltInEQPreparedPrograms
     double tailSeconds=0;
     void reset() noexcept
     {
-        for(auto& voice:voices)voice.reset();active=displayed.load();pending=queued=-1;previewVoice.store(-1);warmRemaining=fadePosition=0;
+        for(auto& voice:voices)voice.reset();
+        active=displayed.load();
+        pending=queued=-1;
+        previewVoice.store(-1);
+        warmRemaining=fadePosition=0;
     }
 };

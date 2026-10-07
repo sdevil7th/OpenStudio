@@ -87,7 +87,7 @@ inline juce::var checkVendorRenderDiagnostic()
             if(!pass)first.makeCopyOf(output);
             else {
                 juce::Array<juce::var> windows;
-                for(const auto bounds : {std::pair<double,double>{.5,1.5},{3.,4.},{6.,7.5}}) {
+                for(const auto& bounds : {std::pair<double,double>{.5,1.5},{3.,4.},{6.,7.5}}) {
                     double before=0,after=0,maxError=0;
                     for(int channel=0;channel<2;++channel)for(int sample=juce::roundToInt(bounds.first*rate);sample<juce::roundToInt(bounds.second*rate);++sample) {
                         const double a=first.getSample(channel,sample),b=output.getSample(channel,sample);before+=a*a;after+=b*b;maxError=juce::jmax(maxError,std::abs(a-b));

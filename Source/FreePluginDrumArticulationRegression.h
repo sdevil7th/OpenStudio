@@ -9,7 +9,8 @@ inline juce::var checkDrumArticulations()
     const auto render=[](double rate,int blockSize,int note,int map,float engine,float decay,int target=-2,int pressureChannel=0,bool changeMap=false)
     {
         auto drums=std::make_unique<OpenStudioDrumInstrument>();drums->articulationEngine.store(engine);drums->mapPreset.store(static_cast<float>(map));drums->ambience.store(0);drums->outputGain.store(-24);drums->stereoWidth.store(1);
-        for(auto& value:drums->pieceDecay)value.store(decay);if(target>=-1){drums->customMapEnabled.store(1);drums->noteMap[static_cast<size_t>(note)].store(static_cast<float>(target));}
+        for(auto& value:drums->pieceDecay)value.store(decay);
+        if(target>=-1){drums->customMapEnabled.store(1);drums->noteMap[static_cast<size_t>(note)].store(static_cast<float>(target));}
         drums->prepareToPlay(rate,blockSize);const int count=juce::roundToInt(rate*.4),change=juce::roundToInt(rate*.12);juce::AudioBuffer<float> output(2,count),block(2,blockSize);juce::MidiBuffer midi;
         for(int start=0;start<count;){int size=juce::jmin(blockSize,count-start);if(start<change)size=juce::jmin(size,change-start);block.setSize(2,size,false,false,true);block.clear();midi.clear();if(start==0)midi.addEvent(juce::MidiMessage::noteOn(10,note,.8f),0);
             if(start==change){if(changeMap){drums->customMapEnabled.store(1);drums->noteMap[static_cast<size_t>(note)].store(38);}if(pressureChannel)midi.addEvent(juce::MidiMessage::aftertouchChange(pressureChannel,note,127),0);}drums->processBlock(block,midi);for(int ch=0;ch<2;++ch)output.copyFrom(ch,start,block,ch,0,size);start+=size;}
@@ -28,7 +29,8 @@ inline juce::var checkDrumArticulations()
         choke=choke&&difference(kept,unrelated)==0&&energy(stopped,static_cast<int>(rate*.15))==0&&energy(kept,static_cast<int>(rate*.15))>1e-5;
     }
     auto drums=std::make_unique<OpenStudioDrumInstrument>(),copy=std::make_unique<OpenStudioDrumInstrument>();state=setFreePluginParamForRegression(*drums,"articulationEngine",1)&&setFreePluginParamForRegression(*drums,"drumMapAll",2)&&setFreePluginParamForRegression(*drums,"customMapEnabled",1);
-    for(int i=0;i<128;++i)state=setFreePluginParamForRegression(*drums,"noteMap"+juce::String(i),static_cast<float>(127-i))&&state;for(int i=0;i<8;++i)state=setFreePluginParamForRegression(*drums,"pieceDecay"+juce::String(i),.2f+static_cast<float>(i)*.3f)&&state;
+    for(int i=0;i<128;++i)state=setFreePluginParamForRegression(*drums,"noteMap"+juce::String(i),static_cast<float>(127-i))&&state;
+    for(int i=0;i<8;++i)state=setFreePluginParamForRegression(*drums,"pieceDecay"+juce::String(i),.2f+static_cast<float>(i)*.3f)&&state;
     juce::MemoryBlock bytes,again;drums->getStateInformation(bytes);copy->setStateInformation(bytes.getData(),static_cast<int>(bytes.getSize()));copy->getStateInformation(again);state=state&&bytes==again;
     auto old=juce::ValueTree::readFromData(bytes.getData(),bytes.getSize());old.removeProperty("articulationEngine",nullptr);old.removeProperty("customMapEnabled",nullptr);old.setProperty("mapPreset",0,nullptr);for(int i=0;i<128;++i)old.removeProperty("noteMap"+juce::String(i),nullptr);for(int i=0;i<8;++i)old.removeProperty("pieceDecay"+juce::String(i),nullptr);bytes.reset();{juce::MemoryOutputStream stream(bytes,false);old.writeToStream(stream);}copy->setStateInformation(bytes.getData(),static_cast<int>(bytes.getSize()));state=state&&copy->articulationEngine.load()==0&&copy->customMapEnabled.load()==0;for(size_t i=0;i<128;++i)state=state&&copy->noteMap[i].load()==static_cast<float>(i);for(const auto& value:copy->pieceDecay)state=state&&value.load()==1;
     const auto schema=describeFreePluginForRegression(*drums);state=state&&schema["parameters"][33]["id"].toString()=="articulationEngine"&&schema["parameters"][34]["id"].toString()=="drumMapAll"&&static_cast<float>(schema["parameters"][9]["max"])==1;

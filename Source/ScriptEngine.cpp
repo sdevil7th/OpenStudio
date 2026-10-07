@@ -1,8 +1,8 @@
+#include "RuntimeLocation.h"
 #include "AppPaths.h"
 #include "ScriptEngine.h"
 #include "AudioEngine.h"
 #include "OpenStudioScriptWindow.h"
-#include "RuntimeAssetRoot.h"
 
 // Lua is compiled as C, so we need extern "C" linkage
 extern "C" {
@@ -1401,8 +1401,8 @@ juce::File ScriptEngine::getUserScriptsDirectory()
 
 juce::File ScriptEngine::getStockScriptsDirectory()
 {
-    auto exeDir = OpenStudioRuntimeAssets::preferAppImageRoot(
-        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory());
+    auto exeDir = OpenStudioRuntime::executableFile()
+        .getParentDirectory();
 
    #if JUCE_MAC
     auto bundleResources = exeDir.getParentDirectory().getChildFile("Resources").getChildFile("scripts");

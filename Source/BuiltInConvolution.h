@@ -126,7 +126,11 @@ public:
     }
     void reset()
     {
-        if(active)active->reset();if(fading)fading->reset();equalizer.reset();previousEqualizer.reset();eqFade.setCurrentAndTargetValue(1);
+        if(active)active->reset();
+        if(fading)fading->reset();
+        equalizer.reset();
+        previousEqualizer.reset();
+        eqFade.setCurrentAndTargetValue(1);
         validPre=0;position=0;low={};high={};initialized=false;
         drainRemaining=0;processedFrames=0;
     }
@@ -447,7 +451,8 @@ private:
         next.end=next.end==0?fullDuration:juce::jmin(next.end,fullDuration);if(next.end<=next.start)return false;
         float peak=0;for(int ch=0;ch<samples.getNumChannels();++ch)for(int i=0;i<samples.getNumSamples();++i){if((i&4095)==0&&progress&&progress->isCancelled())return false;const float v=samples.getSample(ch,i);if(!std::isfinite(v)||std::abs(v)>16)return false;peak=juce::jmax(peak,std::abs(v));}if(peak<1e-9f)return false;
         juce::MemoryBlock bytes;juce::MemoryOutputStream stream(bytes,false);stream.writeInt(0x4f534952);stream.writeDouble(sourceRate);stream.writeInt(samples.getNumChannels());stream.writeInt(samples.getNumSamples());
-        for(int ch=0;ch<samples.getNumChannels();++ch)for(int i=0;i<samples.getNumSamples();++i)stream.writeFloat(samples.getSample(ch,i));stream.flush();
+        for(int ch=0;ch<samples.getNumChannels();++ch)for(int i=0;i<samples.getNumSamples();++i)stream.writeFloat(samples.getSample(ch,i));
+        stream.flush();
         if(progress&&!progress->advance(BuiltInIRPreparation::shaping))return false;
         const juce::ScopedLock preparationGuard(preparationLock);collect();
         bool unchangedIR=false,unchangedEq=false,unchangedAnalysis=false;BuiltInIRDecay nextDecay;double nextDuration=0;std::array<float,96> envelope{};

@@ -44,11 +44,16 @@ private:
             if(mode<2)for(auto& line:lines)line.prepare(static_cast<int>(fs*.42));
             else for(auto& channel:diffusers)for(auto& line:channel)line.prepare(static_cast<int>(fs*.12));
             for(auto* value:{&sizeValue,&feedback,&damping,&diffusion,&depth,&speed,&width,&freeze,&holdSend,&amount,&density,&lowPole,&highPole,&lowEnable,&highEnable,&shelfGain})value->reset(fs,.05);
-            for(auto& value:lengths)value.reset(fs,.1);for(auto& value:losses)value.reset(fs,.1);reset();frames=0;
+            for(auto& value:lengths)value.reset(fs,.1);
+            for(auto& value:losses)value.reset(fs,.1);
+            reset();
+            frames=0;
         }
         void reset()noexcept
         {
-            for(auto& delay:pre)delay.reset();for(auto& line:lines)line.reset();for(auto& channel:diffusers)for(auto& line:channel)line.reset();
+            for(auto& delay:pre)delay.reset();
+            for(auto& line:lines)line.reset();
+            for(auto& channel:diffusers)for(auto& line:channel)line.reset();
             dampState={};lowState={};highState={};inputLowState={};inputHighState={};inputShelfState={};feedbackShelfState={};phase=0;limiterGain=1;delayBlend=1;initialized=false;
         }
         void configure(Settings next)

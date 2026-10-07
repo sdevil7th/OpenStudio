@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "UpdateInstaller.h"
 #include "UpdateManifest.h"
 #include <juce_cryptography/juce_cryptography.h>
@@ -246,7 +247,7 @@ bool validTransaction(const juce::File& transaction)
 juce::File installedApplication()
 {
    #if JUCE_MAC
-    const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto exe = OpenStudioRuntime::executableFile();
     const auto bundle = exe.getParentDirectory().getParentDirectory().getParentDirectory();
     return bundle.hasFileExtension("app") ? bundle : juce::File();
    #else
@@ -254,7 +255,7 @@ juce::File installedApplication()
     const auto appDir = juce::SystemStats::getEnvironmentVariable("APPDIR", {});
     if (!juce::File::isAbsolutePath(path) || !juce::File::isAbsolutePath(appDir)) return {};
     // Only the AppImage runtime's installed image is eligible; never /usr/bin.
-    const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto exe = OpenStudioRuntime::executableFile();
     return exe.isAChildOf(juce::File(appDir)) && path.endsWithIgnoreCase(".AppImage") ? juce::File(path) : juce::File();
    #endif
 }
@@ -294,7 +295,7 @@ bool prepare(const juce::File& package, const juce::var& envelope,
     request.getDynamicObject()->setProperty("envelope", envelope);
     request.getDynamicObject()->setProperty("parent", static_cast<int>(::getpid()));
     request.getDynamicObject()->setProperty("currentVersion", OPENSTUDIO_INSTALLER_VERSION);
-    const auto currentExe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto currentExe = OpenStudioRuntime::executableFile();
     const auto source = macOS ? currentExe.getParentDirectory().getParentDirectory().getChildFile("Helpers/OpenStudioUpdateInstaller")
                                 : currentExe.getSiblingFile("OpenStudioUpdateInstaller");
     const auto helper = transaction.getChildFile("helper");

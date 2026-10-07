@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "IsolatedPlugin.h"
 #include "IsolatedPluginProtocol.h"
 #include "OwnedChildProcess.h"
@@ -263,7 +264,7 @@ struct IsolatedPlugin::Impl
             if (!directory.createDirectory()) { error = "Cannot create isolated plugin state folder"; return false; }
             stateFile = directory.getChildFile("state.bin");
         }
-        if (!child.start({ juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName(),
+        if (!child.start({ OpenStudioRuntime::executableFile().getFullPathName(),
                            "--isolated-plugin-worker", mappingName }, 0))
         { error = "Cannot launch isolated plugin worker"; return false; }
         shared->rate = rate; shared->quantum = static_cast<uint32_t>(quantum);

@@ -19,7 +19,7 @@ export function DDPExportModal({ isOpen, onClose }: DDPExportModalProps) {
   const [catalogNumber, setCatalogNumber] = useState("");
 
   const handleSelectSource = async () => {
-    const path = await nativeBridge.showOpenDialog("Select Red Book WAV (44.1kHz/16-bit)");
+    const path = await nativeBridge.showOpenDialog("Select Red Book WAV (44.1kHz/16-bit)", "*.wav");
     if (path) setSourceWav(path);
   };
 
@@ -28,7 +28,7 @@ export function DDPExportModal({ isOpen, onClose }: DDPExportModalProps) {
       setResult("Please select a source WAV file first.");
       return;
     }
-    const dir = await nativeBridge.showSaveDialog(undefined, "Select DDP Output Directory");
+    const dir = await nativeBridge.browseForFolder("Select DDP Output Directory");
     if (!dir) return;
 
     setIsExporting(true);

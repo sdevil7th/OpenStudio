@@ -1,5 +1,10 @@
+#include "ExpectedWavFailureLog.h"
+#include "RuntimeLocation.h"
+#include "AudioDeviceConfigurationRegression.h"
 #include "RuntimeSafetyRegression.h"
 #include "StemSeparator.h"
+#include "BasicPitchRegression.h"
+#include "AIHardwareProbe.h"
 #include "FieldTestRegression.h"
 #include "TrackProcessor.h"
 #include "BuiltInEffects2.h"
@@ -32,6 +37,21 @@
 
 namespace
 {
+class ScopedAssertionLog final : public juce::Logger
+{
+public:
+    ScopedAssertionLog() : previous(juce::Logger::getCurrentLogger())
+    { juce::Logger::setCurrentLogger(this); }
+    ~ScopedAssertionLog() override { juce::Logger::setCurrentLogger(previous); }
+    void logMessage(const juce::String& message) override
+    {
+        if (message.contains("Assertion failure")) ++assertions;
+        juce::Logger::outputDebugString(message);
+    }
+    std::atomic<int> assertions{0};
+private:
+    juce::Logger* previous;
+};
 class StorageFaultStream final : public juce::OutputStream
 {
 public:
@@ -121,6 +141,89 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         passed = passed && success;
     };
     juce::MidiBuffer midi;
+    AudioDeviceConfigurationRegression::run(check);
+#if JUCE_LINUX
+    check("linux_https_transport_enabled_for_managed_ai_downloads", JUCE_USE_CURL != 0);
+    check("failed_gpu_probe_output_is_not_hardware_evidence",
+          !OpenStudioAI::commandOutputContains({ "/bin/sh", "-c", "printf NVIDIA; exit 1" }, "NVIDIA"));
+    check("successful_gpu_probe_preserves_argv_and_output",
+          OpenStudioAI::commandOutputContains({ "/bin/sh", "-c", "printf '%s' \"$1\"", "probe", "NVIDIA GPU" }, "NVIDIA GPU"));
+#endif
+    {
+        TrackProcessor track;
+        track.prepareToPlay(48000.0, 256);
+        check("direct_track_prepare_publishes_rate_and_block", track.getSampleRate() == 48000.0 && track.getBlockSize() == 256);
+        track.prepareToPlay(44100.0, 512);
+        check("direct_track_reprepare_updates_rate_and_block", track.getSampleRate() == 44100.0 && track.getBlockSize() == 512);
+    }
+    {
+        TrackProcessor track;
+        track.prepareToPlay(48000.0, 64);
+        track.setVolume(1.0f);
+        track.setPan(0.0f);
+        track.addSend("stereo-isolation-probe");
+        juce::AudioBuffer<float> block(2, 64);
+        for (int activeChannel : {0, 1})
+        {
+            block.clear();
+            juce::FloatVectorOperations::fill(block.getWritePointer(activeChannel), 0.125f, 64);
+            const bool accepted = track.tryProcessBlock(block, midi);
+            check(activeChannel == 0 ? "stereo_left_only_output_preserved" : "stereo_right_only_output_preserved",
+                accepted && block.getMagnitude(activeChannel, 0, 64) > 0.01f
+                && block.getMagnitude(1 - activeChannel, 0, 64) == 0.0f);
+            const auto& send = track.getPreFaderBuffer();
+            check(activeChannel == 0 ? "stereo_left_only_prefader_send_preserved" : "stereo_right_only_prefader_send_preserved",
+                send.getMagnitude(activeChannel, 0, 64) > 0.01f
+                && send.getMagnitude(1 - activeChannel, 0, 64) == 0.0f);
+        }
+        fill(block);
+        check("dual_mono_remains_centered", track.tryProcessBlock(block, midi)
+            && block.getMagnitude(0, 0, 64) > 0.01f
+            && block.getSample(0, 32) == block.getSample(1, 32));
+        track.addTrackFX(std::make_unique<FaultProbe>(1), 48000, 64);
+        block.clear();
+        juce::FloatVectorOperations::fill(block.getWritePointer(0), 0.125f, 64);
+        check("declared_mono_plugin_output_remains_centered", track.tryProcessBlock(block, midi)
+            && block.getMagnitude(0, 0, 64) > 0.01f
+            && block.getSample(0, 32) == block.getSample(1, 32));
+    }
+#if JUCE_LINUX || JUCE_MAC
+    {
+        const auto probeDirectory = directory.getChildFile(juce::String::fromUTF8("AI paths 音"));
+        probeDirectory.createDirectory();
+        const auto launcher = probeDirectory.getChildFile("python probe");
+        launcher.replaceWithText("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.arguments\"\n"
+            "printf '%s\\n' '{\"baseRuntimeReady\":true,\"runtimeReady\":true,\"selectedBackend\":\"cpu\"}'\n", false, false, "\n");
+        launcher.setExecutePermission(true);
+        StemSeparator separator;
+        const auto modelDirectory = probeDirectory.getChildFile("models with spaces");
+        const auto capabilities = separator.probeRuntimeCapabilities(launcher, modelDirectory, "model with spaces", "cpu-only");
+        const auto arguments = juce::StringArray::fromLines(launcher.getSiblingFile("python probe.arguments").loadFileAsString());
+        check("ai_runtime_probe_preserves_unquoted_paths_and_arguments", capabilities.runtimeReady
+            && arguments.size() >= 11 && arguments[1] == "--models-dir"
+            && arguments[2] == modelDirectory.getFullPathName() && arguments[4] == "model with spaces"
+            && arguments[0] == separator.findRuntimeProbeScript().getFullPathName());
+    }
+#endif
+    {
+        StemSeparator separator;
+        separator.installStartedTimeMs = juce::Time::getMillisecondCounterHiRes() - 2000.0;
+        separator.aiToolsInstallWorkInProgress = true;
+        separator.lastAiToolsStatus.state = "downloading_runtime";
+        const auto downloading = separator.getCachedAiToolsStatusSnapshot();
+        check("ai_download_elapsed_starts_before_python_launch", downloading.elapsedMs >= 2000);
+        separator.installLaunchTimeMs = juce::Time::getMillisecondCounterHiRes();
+        const auto installing = separator.getCachedAiToolsStatusSnapshot();
+        check("ai_elapsed_does_not_reset_at_python_launch", installing.elapsedMs >= downloading.elapsedMs);
+        separator.aiToolsInstallWorkInProgress = false;
+    }
+    {
+        const juce::String cpu = "Agent 1\nDevice Type: CPU\nSegment: GLOBAL; FLAGS: FINE GRAINED\nSize: 127098492(0x0) KB\nAllocatable: TRUE\n";
+        const juce::String gpu = "Agent 2\nDevice Type: GPU\nSegment: GLOBAL; FLAGS: COARSE GRAINED\nSize: 102400000(0x0) KB\nAllocatable: TRUE\nSegment: GLOBAL; FLAGS: EXTENDED FINE GRAINED\nSize: 102400000(0x0) KB\nAllocatable: TRUE\n";
+        check("rocm_shared_memory_excludes_cpu_and_aliases", OpenStudioAI::rocmGpuPoolMemoryMb(cpu + gpu) == 100000);
+        check("rocm_cpu_pools_are_not_gpu_memory", OpenStudioAI::rocmGpuPoolMemoryMb(cpu) == 0);
+    }
+    runBasicPitchRegression(directory, check);
     runFieldTestRegression(directory, check);
     runAudioFileConversionRegression(directory, check);
     runRecordingRecoveryRegression(directory, check);
@@ -170,7 +273,29 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("removed_plugin_cannot_emit_stale_automation", edits.isEmpty() && track.getNumTrackFX() == 0);
     }
     {
+        ScopedAssertionLog assertionLog;
         OpenStudioNAMRack rack;
+        juce::AudioBuffer<float> lowRateProbe(2, 256);
+        bool finiteLowRate = true;
+        for (const auto rate : {8000.0, 22050.0, 44100.0, 48000.0})
+        {
+            rack.prepareToPlay(rate, 256);
+            rack.preEqEnabled.store(1.0f);
+            rack.eqEnabled.store(1.0f);
+            for (int block = 0; block < 32; ++block)
+            {
+                rack.preEqLPFHz.store(block < 16 ? 20000.0f : 3000.0f);
+                rack.eqLPFHz.store(block < 16 ? 20000.0f : 3000.0f);
+                fill(lowRateProbe);
+                rack.processBlock(lowRateProbe, midi);
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < 256; ++sample)
+                        finiteLowRate = finiteLowRate && std::isfinite(lowRateProbe.getSample(channel, sample));
+            }
+            rack.releaseResources();
+        }
+        check("nam_low_rate_tone_filter_output_is_finite", finiteLowRate);
+        check("nam_rate_changes_and_cutoff_smoothing_do_not_assert", assertionLog.assertions.load() == 0);
         OpenStudioBuiltInAutomationDescriptor descriptor;
         check("nam_gain_is_automatable", getOpenStudioBuiltInAutomationDescriptor(&rack, "ampGainDb", descriptor));
         setOpenStudioBuiltInParameterValue(&rack, "ampGainDb", 7.5f);
@@ -806,18 +931,25 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("finite_double_cannot_overflow_float_output", !barrier.process(probe, block, midi)
             && ProcessorSafety::isFinite(block));
     }
+    for (const bool inputEffect : {false, true})
     {
+        ScopedAssertionLog assertionLog;
         TrackProcessor track;
         track.setRateAndBufferSizeDetails(48000, 64);
         track.prepareToPlay(48000, 64);
         auto effect = std::make_unique<FaultProbe>(0);
         auto* probe = effect.get();
-        track.addTrackFX(std::move(effect), 48000, 64);
+        if (inputEffect) track.addInputFX(std::move(effect), 48000, 64);
+        else track.addTrackFX(std::move(effect), 48000, 64);
         juce::AudioBuffer<float> block(2, 64);
         fill(block);
+        track.setInputMonitoring(true);
         track.processBlock(block, midi);
-        check("zero_bus_midi_effect_is_not_a_channel_fault", probe->calls == 1
-            && track.getProcessorFault(false, 0) == 0 && ProcessorSafety::isFinite(block));
+        check(inputEffect ? "zero_bus_input_midi_effect_preserves_bus_count" : "zero_bus_midi_effect_is_not_a_channel_fault",
+            probe->getBusCount(true) == 0 && probe->getBusCount(false) == 0
+            && (inputEffect || probe->calls == 1)
+            && assertionLog.assertions.load() == 0
+            && track.getProcessorFault(inputEffect, 0) == 0 && ProcessorSafety::isFinite(block));
     }
     {
         const auto recoveryRoot = directory.getChildFile("discovery");
@@ -895,7 +1027,11 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("recording_header_flush_is_loadable_before_close", flushed
             && status->writtenSamples.load() == 128 && reader && reader->lengthInSamples == 128);
         disk->mode = failureMode;
-        const bool rejected = failureMode == 1 ? !writer->writeFromAudioSampleBuffer(block, 0, 128) : !writer->flush();
+        bool rejected = false;
+        {
+            ExpectedWavFailureLog expectedSeekFailure(failureMode == 2);
+            rejected = failureMode == 1 ? !writer->writeFromAudioSampleBuffer(block, 0, 128) : !writer->flush();
+        }
         check(failureMode == 1 ? "injected_storage_write_failure_observed" : "injected_storage_seek_flush_failure_observed",
             rejected && status->fault.load() != RecordingWriteStatus::none);
         disk->mode = 0;
@@ -907,7 +1043,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     {
         const auto environmentDirectory = directory.getChildFile("owned-environment");
         environmentDirectory.createDirectory();
-        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto executable = OpenStudioRuntime::executableFile();
         const auto original = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PROCESS_ENV_TEST", "missing");
         juce::StringPairArray environment;
         environment.set("OPENSTUDIO_PROCESS_ENV_TEST", "one-child-only");
@@ -969,7 +1105,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     {
         const auto workerDirectory = directory.getChildFile("owned-worker");
         workerDirectory.createDirectory();
-        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto executable = OpenStudioRuntime::executableFile();
         OwnedChildProcess independent;
         check("independent_worker_started", independent.start({ executable.getFullPathName(), "--owned-worker-fixture", workerDirectory.getFullPathName(), "--owned-worker-leaf" }));
         unsigned long descendantPid = 0;
@@ -1004,7 +1140,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         const auto workerDirectory = directory.getChildFile("cancel-worker");
         workerDirectory.createDirectory();
         generation.workerProcess_ = std::make_unique<OwnedChildProcess>();
-        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto executable = OpenStudioRuntime::executableFile();
         check("cancellation_fixture_worker_started", generation.workerProcess_->start({ executable.getFullPathName(), "--owned-worker-fixture", workerDirectory.getFullPathName(), "--owned-worker-leaf" }));
         std::atomic<bool> retained { false };
         generation.generationThread_ = std::thread([&] {
@@ -1021,7 +1157,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     {
         AITrackEngine generation;
         generation.workerProcess_ = std::make_unique<OwnedChildProcess>();
-        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto executable = OpenStudioRuntime::executableFile();
         const bool started = generation.workerProcess_->start({ executable.getFullPathName(), "--owned-worker-fixture",
             directory.getFullPathName(), "--owned-worker-leaf" });
         generation.currentProgress_.state = "error";
@@ -1036,7 +1172,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     {
         AITrackEngine generation;
         generation.workerProcess_ = std::make_unique<OwnedChildProcess>();
-        const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+        const auto executable = OpenStudioRuntime::executableFile();
         const bool started = generation.workerProcess_->start({ executable.getFullPathName(), "--owned-worker-fixture",
             directory.getFullPathName(), "--owned-worker-leaf" });
         generation.currentProgress_.state = "done";

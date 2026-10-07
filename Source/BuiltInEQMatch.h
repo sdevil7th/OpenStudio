@@ -119,7 +119,8 @@ inline Fit fit(const Curve& current,const Curve& reference,double rate,int maxim
         if(winner)for(double offset:{-1.0,-.5,0.0,.5,1.0})
         {
             auto band=winner->band;band.gain=juce::jlimit(-gainLimit,gainLimit,winnerGain+offset);auto curve=response(band,hz,rate,analog);
-            for(size_t i=0;i<hz.size();++i)curve[i]+=result.curve[i];const double score=error(curve);
+            for(size_t i=0;i<hz.size();++i)curve[i]+=result.curve[i];
+            const double score=error(curve);
             if(score<bestError){bestError=score;best=band;bestCurve=curve;improved=true;}
         }
         for(const auto& candidate:cuts)

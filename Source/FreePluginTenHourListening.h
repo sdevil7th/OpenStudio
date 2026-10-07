@@ -22,7 +22,9 @@ inline juce::var renderTenHourListeningExamples()
         juce::AudioBuffer<float> output(2,length),block(2,512);juce::MidiBuffer midi;
         for(int start=0;start<length;)
         {
-            if(change)change(start);int count=juce::jmin(512,length-start);for(int edge:edges)if(edge>start)count=juce::jmin(count,edge-start);
+            if(change)change(start);
+            int count=juce::jmin(512,length-start);
+            for(int edge:edges)if(edge>start)count=juce::jmin(count,edge-start);
             block.setSize(2,count,false,false,true);block.clear();midi.clear();midi.addEvents(events,start,count,-start);
             if(audioInput)for(int ch=0;ch<2;++ch)block.copyFrom(ch,0,source,ch,start,count);
             processor->processBlock(block,midi);for(int ch=0;ch<2;++ch)output.copyFrom(ch,start,block,ch,0,count);start+=count;

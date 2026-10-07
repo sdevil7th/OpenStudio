@@ -34,7 +34,9 @@ private:
         {
             fs=rate;mode=selected;bassPole=static_cast<float>(1-std::exp(-juce::MathConstants<double>::twoPi*250/fs));rampPole=static_cast<float>(1-std::exp(-1/(fs*.003)));formantSmoothing=1-std::exp(-1/(fs*.02));for(auto& line:tank)line.prepare(static_cast<int>(fs*.45));for(auto& channel:diffusers)for(auto& line:channel)line.prepare(static_cast<int>(fs*.45));for(auto& line:pre)line.prepare(static_cast<int>(fs*.51));
             for(auto* value:{&decay,&dampPole,&dampMix,&diffusion,&preTime,&width,&rise,&length,&bloomFeedback,&depth,&speed,&hold,&send,&lowPole,&highPole,&lowMix,&highMix,&drySwell})value->reset(fs,.05);
-            for(auto* values:{&lengths,&losses,&bassLosses})for(auto& value:*values)value.reset(fs,.1);reset();frames=0;
+            for(auto* values:{&lengths,&losses,&bassLosses})for(auto& value:*values)value.reset(fs,.1);
+            reset();
+            frames=0;
         }
         void reset(){for(auto& line:tank)line.reset();for(auto& channel:diffusers)for(auto& line:channel)line.reset();for(auto& line:pre)line.reset();dampState={};bassState={};bloomMemory={};lowState={};highState={};formantState={};phase=0;ramp=rampGain=0;silence=0;triggered=started=formantInitialized=false;initialized=false;formantCountdown=0;random=1;vowelA=0;vowelB=1;}
         void configure(Settings next)
@@ -58,7 +60,8 @@ private:
             }
             formantInitialized=true;for(size_t band=0;band<3;++band){formantG[band]+=formantSmoothing*(targetG[band]-formantG[band]);formantK[band]+=formantSmoothing*(targetK[band]-formantK[band]);}
             Pair output{};constexpr std::array<double,3> levels{.7,.25,.1};
-            for(size_t ch=0;ch<2;++ch)for(size_t band=0;band<3;++band){auto& state=formantState[ch][band];const double g=formantG[band],k=formantK[band],h=1/(1+g*(g+k)),v1=h*(state[0]+g*(input[ch]-state[1])),v2=state[1]+g*v1;state[0]=2*v1-state[0];state[1]=2*v2-state[1];output[ch]+=static_cast<float>(v1*k*levels[band]*1.5);}return output;
+            for(size_t ch=0;ch<2;++ch)for(size_t band=0;band<3;++band){auto& state=formantState[ch][band];const double g=formantG[band],k=formantK[band],h=1/(1+g*(g+k)),v1=h*(state[0]+g*(input[ch]-state[1])),v2=state[1]+g*v1;state[0]=2*v1-state[0];state[1]=2*v2-state[1];output[ch]+=static_cast<float>(v1*k*levels[band]*1.5);}
+            return output;
         }
         std::array<float,4> process(Pair source,bool active)
         {

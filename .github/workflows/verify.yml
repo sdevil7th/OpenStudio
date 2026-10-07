@@ -27,10 +27,18 @@ jobs:
       - name: Check first-party product names
         run: python3 tools/check-product-naming.py
 
+      - name: Check UI coverage inventory
+        run: python3 tools/check-ui-coverage-inventory.py
+
       - name: Run Python tooling unit tests
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_linux_qualification
+          tests.test_linux_native_packaging
+          tests.test_linux_abi
+          tests.test_ai_model_cache
+          tests.test_stem_model_downloads
           tests.test_updater_manifest
           tests.test_store_submission
           tests.test_ai_runtime_dependency_pins
@@ -62,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14]
+        os: [windows-latest, macos-14, ubuntu-24.04]
     defaults:
       run:
         working-directory: frontend
@@ -81,20 +89,34 @@ jobs:
       - name: Run frontend unit tests
         run: npm test
 
-      - name: Install Playwright Chromium
-        run: npx playwright install chromium
+      - name: Install browsers on Linux
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Install browsers on Windows and macOS
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium webkit
 
       - name: Run shortcut and input-profile browser tests
         run: npm run test:e2e
 
-      - name: Upload browser failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Check controls in the system WebKitGTK
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libxtst6 xvfb xauth
+          npm run build
+          xvfb-run -a -s '-screen 0 1440x1000x24' /usr/bin/python3 ../tools/run-linux-control-ui.py --frontend-dir dist --output ../output/linux-control-ui
+
+      - name: Retain UI qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: input-profile-browser-${{ matrix.os }}-${{ github.run_attempt }}
-          path: output/playwright/test-results
+          name: control-ui-${{ matrix.os }}
+          path: |
+            output/playwright/test-results
+            output/linux-control-ui
           if-no-files-found: ignore
-          retention-days: 7
 
   verify-windows:
     runs-on: windows-latest
@@ -421,10 +443,10 @@ jobs:
           if-no-files-found: warn
 
   verify-linux:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
-      VERSION: 0.1.02
+      VERSION: 0.1.04
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
@@ -438,7 +460,7 @@ jobs:
         shell: bash
         run: |
           bash ./tools/setup-linux-prereqs.sh
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb xauth openbox
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -501,6 +523,17 @@ jobs:
           xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
           "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
 
+      - name: Test native package construction
+        run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v
+
+      - name: Build and install Ubuntu package
+        shell: bash
+        run: |
+          python3 tools/package-linux-native.py --format deb --version "$VERSION" --build-dir "$BUILD_DIR"
+          sudo apt-get install -y ./dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native --desktop --render --features --nam-fixtures "$BUILD_DIR/_deps/neural_amp_modeler_core-src/example_models"
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native-safe --desktop --safe-mode
+
       - name: Package AppImage
         shell: bash
         run: |
@@ -528,3 +561,24 @@ jobs:
             -BundlePath "$EXTRACT_ROOT/squashfs-root/usr/bin" \
             -ExpectedVersion "$VERSION" \
             -EnforceLeanBundle
+
+      - name: Launch packaged AppImage with a window manager
+        run: python3 tools/smoke-linux-appimage.py "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Exercise final AppImage launcher and native windows
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop
+
+      - name: Retain Linux qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-qualification
+          path: |
+            output/linux-native
+            output/linux-native-safe
+            output/linux-appimage
+          if-no-files-found: warn

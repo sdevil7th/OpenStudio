@@ -47,7 +47,8 @@ OpenStudio is a desktop DAW built with a JUCE C++ audio backend and a React/Type
 **Minimum requirements:**
 
 - Windows 10 or later (64-bit), a supported macOS release, or an x86-64 Linux
-  desktop capable of running AppImage packages
+  desktop with GTK 3 and WebKitGTK 4.1 (2.40 or later); use the package built
+  and qualified for your distribution/version
 - WebView2 Runtime on Windows (typically pre-installed on Windows 10/11)
 - Audio interface with ASIO, WASAPI, or DirectSound drivers on Windows
 - 4 GB RAM (8 GB or more recommended)
@@ -81,6 +82,35 @@ on `PATH`; the AppImage does not bundle an arbitrary host FFmpeg binary.
 Launch the AppImage file itself; copying only its internal `OpenStudio` executable
 leaves out the `webui`, effects, and script assets it needs to start.
 
+**Linux native installers (development candidate, not yet publicly released):**
+Ubuntu, Debian and Mint use `.deb`; Fedora uses `.rpm`. Open the matching package
+with the desktop software installer, approve normal administrator authentication,
+then launch **OpenStudio** from the application menu. The package manager installs
+runtime dependencies, including FFmpeg and credential-storage tools. Development
+headers are not required. Native-package updates use the matching package again;
+**Help > Check for Updates...** links to the download page. Do not run the app as root.
+
+If double-clicking a `.deb` opens **Archive Manager**, close that window; do not
+extract the package. In Files, right-click the downloaded `.deb`, choose **Open
+With Other Application**, select **Software Install**, then click **Select**.
+Click **Install** and authenticate when prompted. To make future double-clicks
+use the installer, open the file's **Properties > Open With**, select **Software
+Install**, and choose **Set as default**. Labels vary by desktop; Debian may call
+the application **Software**, and Mint uses **Package Installer**. If no package
+installer appears, it must first be installed through the distribution's software
+center. This one-time desktop setup is part of the supported installation guidance.
+
+To upgrade, open the newer matching package and complete its Install/Upgrade
+action; uninstalling first is unnecessary. To remove OpenStudio, find it under
+the software center's installed applications and choose **Uninstall** or the
+trash button. On Debian/Ubuntu/Mint, `sudo apt remove openstudio` is an alternative;
+this removes the application rather than projects saved in your home directory.
+
+Qualification is in progress. Revision 5 passed installed native checks in
+Ubuntu 22.04, Debian 13, Fedora 44 and a Mint 22.3 live session, with the exact
+desktop and lifecycle limits recorded in the
+[Linux installation and qualification plan](linux-installation-and-qualification-plan.md).
+
 OpenStudio also includes automatic update checks. Open **Help > Check for
 Updates...** to check immediately and choose when to download/install. See
 [in-app updates](#in-app-updates) for platform requirements and older-client migration.
@@ -99,9 +129,9 @@ When you first open OpenStudio, you should configure your audio settings:
 1. Open the Audio Settings dialog:
    - Go to **View > Audio Settings...** in the menu bar, or
    - Click the **gear icon** in the Main Toolbar.
-2. Select your preferred **Audio System** (ASIO recommended for lowest latency).
+2. Select your preferred **Audio System** (ASIO on Windows; ALSA or a configured JACK service on Linux).
 3. If using ASIO, select your **ASIO Driver** from the dropdown.
-4. If using WASAPI or DirectSound, select your **Input Device** and **Output Device**.
+4. For other audio systems, select your **Input Device** and **Output Device**.
 5. Choose a **Sample Rate** (44100 Hz or 48000 Hz are standard).
 6. Set a **Buffer Size** (lower values reduce latency but increase CPU load; 256 or 512 samples is a good starting point).
 7. Click **Apply** to activate the settings and inspect the accepted values without
@@ -121,6 +151,24 @@ of fabricated options. Rate-dependent restrictions are verified by the driver at
 Apply; the displayed applied values reflect what it accepted. WASAPI Shared,
 Exclusive, and Shared Low Latency remain subject to the selected device's limits.
 These development changes have not yet been qualified on all hardware/platforms.
+
+**Linux audio (working-tree candidate):** switching audio systems selects that
+system's default devices. A failed switch displays the driver error and restores
+the previous setup where possible. JACK requires a running JACK server or
+configured PipeWire JACK compatibility; installing the JACK client library alone
+is insufficient. ALSA can list both direct hardware devices and desktop-server
+routes for the same interface.
+
+For the Audient iD14 MKII, the direct ALSA entry on the qualification machine is
+**Audient iD14, USB Audio; Direct hardware device without any conversions**.
+Select it for both input and output, start at 48 kHz / 512 samples, and route a
+mono audio track to Input 1 or Input 2. Arm that track to record; enable its input
+monitoring when software monitoring is wanted. Hardware minimum channel counts
+may activate all 12 capture and 6 playback channels even when only the first two
+are routed. Ten-second writer/device captures passed at 44.1/48 kHz on Ubuntu
+26.04; installed track routing, listening, latency and sustained operation are
+still qualification gates. An application holding the device may prevent another
+application from opening the direct hardware route.
 
 ### 1.4 Creating Your First Project
 
@@ -1040,7 +1088,9 @@ The Master channel strip is always visible on the left side of the Mixer:
 ### 8.4 Volume and Pan
 
 **Volume:**
-- Drag the fader or use the track header volume knob.
+- Drag the mixer fader upward to raise volume and downward to lower it, or use
+  the track header volume knob. A completed drag is one undoable edit. With a
+  fader focused, Up/Down adjust the value and Home/End select its minimum/maximum.
 - Range: -60 dB (silence) to +12 dB.
 - Double-click the fader to reset to 0 dB (unity gain).
 - Volume changes are smooth (no zipper noise) due to pre-computed gain caching.
@@ -1404,7 +1454,7 @@ Convolution **Decay > Band** selects Broadband, Low, Mid or High. Low/Mid/High u
 
 **Align tracks (development):** Add Gain Phase to two to eight related tracks, open Align tracks, choose a reference and select the group. Play a continuous section with looping off, then Analyze inputs. Review the L/R delay and polarity proposals before Apply group. Hear before/Hear aligned auditions the whole group; editor Undo/Redo restores all members together. Analysis captures the selected duration at each utility input, before its own controls but after upstream FX. All members are delayed to the latest arrival, so the reference can receive delay. Apply replaces timing/polarity, enables processing and uses the accepted optional all-pass fit, otherwise turning manual phase rotation off; gain stays unchanged. Weak/repetitive signals, changed controls, missing members and excessive delay spread reject the operation. Match is a correlation heuristic, not confidence in acoustic correctness. Independent L/R can change stereo arrival differences; Stereo linked applies one common offset/polarity and preserves the captured input timing relation. Downstream FX/PDC are excluded; the separate Spectral FIR option is described below. Capture/group selection is temporary; applied controls retain ordinary project/preset/Compare storage. Live-device and listening qualification remain open.
 
-Align tracks Capture offers Short (up to 0.5 s), 2 s or 4 s. Longer captures compare beginning, middle and end windows, each limited to 65,536 samples. All three must be measurable, agree in polarity and have lags within one sample; individual lags appear in the result. This catches changing offsets and inconsistent sections. Short capture retains its 65,536-sample limit, so it is shorter than 0.5 s at high sample rates; the actual duration is shown. Capture buffers are prepared before recording and retained for reuse. Changing duration invalidates a proposal; changing sample rate during analysis or before initial Apply rejects it. Undo/Redo clears stale proposal/audition status. Group selection and analysis preferences are temporary; applied controls keep normal project storage.
+Align tracks Capture offers Short (up to 0.5 s), 2 s or 4 s. Longer captures compare beginning, middle and end windows, each limited to 65,536 samples. All three must be measurable, agree in polarity and have lags within one sample; individual lags appear in the result. This catches changing offsets and inconsistent sections. Short capture retains its 65,536-sample limit, so it is shorter than 0.5 s at high sample rates; the actual duration is shown. At least 4,096 samples are required: at an 8 kHz device rate, choose 2 s or longer because the half-second option is rejected before capture. Capture buffers are prepared before recording and retained for reuse. Changing duration invalidates a proposal; changing sample rate during analysis or before initial Apply rejects it. Undo/Redo clears stale proposal/audition status. Group selection and analysis preferences are temporary; applied controls keep normal project storage.
 
 Gain Phase > Align tracks adds optional Fit all-pass phase. After a timing estimate passes its existing confidence checks, it searches the existing one-corner filter (one to four first-order stages) and a small timing adjustment. Broadband coherent evidence must improve in both capture halves; Stereo linked applies a common filter and rejects a fit that worsens either measurable channel. The result shows the corner/stages and phase agreement, or why time-only was retained. This percentage is a heuristic, not a probability of acoustic correctness. Analysis leaves audio unchanged; Apply group replaces manual phase settings with the fit or Off, and before/aligned audition and Undo/Redo restore the complete group. This bounded original fit is not arbitrary spectral correction or proprietary reference emulation. Downstream FX/PDC and listening/device qualification remain outside the analysis.
 
@@ -1928,6 +1978,12 @@ For complex multi-region, multi-format rendering, use **File > Region Render Mat
 
 For CD mastering, use **File > DDP Disc Image Export...** to create a DDP (Disc Description Protocol) disc image suitable for CD replication.
 
+Supply a rendered 44.1 kHz, 16-bit stereo WAV and project regions for the track
+markers. The current source checkout filters the source picker to WAV and asks
+for an output **folder** when exporting; these picker corrections are in the
+unpublished Linux revision 8 candidate. Cancelling folder selection cancels the
+export. Validate the resulting disc image before delivery.
+
 ---
 
 ## 13. Project Management
@@ -2294,6 +2350,11 @@ Open **Options > Preferences** (`Ctrl+,`) to access the full preferences dialog:
 - SMPTE frame rate (24, 25, 29.97, 30 fps)
 - UI Font Scale (75% to 150%, for accessibility)
 - Panel visibility settings
+
+In the development checkout, toolbar and transport groups wrap when larger fonts
+need more room. Track controls scroll inside their lane when they exceed its
+height; the track name remains at the top. This change still requires release
+packaging before it is available in downloaded installers.
 
 **Mouse tab:**
 - Choose the active **Mouse & scroll profile** independently from the keyboard map.
@@ -2730,6 +2791,23 @@ Stable Audio requires access approval on its Hugging Face model page, including 
 
 **Import Local Model** remains available for existing downloads. A failed or cancelled setup leaves the previous installed model in place. Retrying a download reuses completed Hugging Face cache files. Generation uses the installed model locally; it does not upload your audio to Hugging Face.
 
+**Stem model download recovery (development checkout):** setup retries empty
+checkpoint or configuration files and rejects empty or truncated downloads.
+Healthy cached files remain available. If the install log reports a directory
+where a model file should be, move that directory out of the reported model path
+and retry setup; OpenStudio preserves it instead of deleting it automatically.
+These checks establish file/download completeness, not model quality or a
+checksum guarantee for every existing cache file.
+
+
+**Linux qualification status (2026-10-01 development checkout):** installed
+Basic Pitch conversion passes on Ubuntu 22.04, 24.04 and 26.04 in the local
+candidate. Setup navigation and download-time reporting have also been corrected.
+The separate Linux CPU runtime 0.0.14 is published with Python 3.11.15; the app
+fixes remain unpublished. Native ACE-Step generation/import/undo/redo passes on
+the Ubuntu 26.04 Radeon 8060S host using ROCm and shared GPU memory. This does not
+qualify NVIDIA INT8, every model, other GPU/OS combinations or subjective quality.
+See [the dated Ubuntu AI report](ai-ubuntu-qualification-2026-10-01.md).
 
 ### 18.2 AI Tracks
 
@@ -2763,6 +2841,8 @@ Stem separation splits a source clip into component tracks for remixing, cleanup
 - Vocals
 - Drums
 - Bass
+- Guitar
+- Piano
 - Other
 
 The resulting stems are imported back into the session as editable clips.
@@ -2770,6 +2850,13 @@ The resulting stems are imported back into the session as editable clips.
 ### 18.5 Audio to MIDI
 
 The audio-to-MIDI workflow uses Basic Pitch / ONNX plumbing where available to extract MIDI note data from audio. Use it when you want to turn a recorded or imported performance into MIDI material for editing, layering, or replacement.
+
+**Development correction:** Basic Pitch uses fixed inference windows and named
+model outputs. Invalid input or inference failures report an error; no-note
+results do not create empty MIDI tracks. Installed conversion, undo/redo and
+saved MIDI reopening pass for the synthetic test on Ubuntu 22.04/24.04/26.04.
+These changes are not yet in a public application release. Transcription accuracy
+on arbitrary music still needs musical evaluation.
 
 ### 18.6 Model Controls, Progress, and Memory
 
