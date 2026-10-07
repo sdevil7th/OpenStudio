@@ -35,6 +35,38 @@ lives in [Testing](testing.md) and the
 
 ## Next: DAW foundations
 
+- Qualify the [automation contracts](automation-host-review.md) across platforms, vendor
+  CLAP editors and physical vendor controls. Target routes, Safe, Touch return, range
+  tools, realtime volume/send Trim, Preview/Capture/range Commit, realtime
+  Punch/AutoJoin, write-to-start/end, manual/after-pass/on-exit Trim coalescing,
+  Cross-Over/Touch-Latch, unavailable-FX recovery and dynamic JSFX/CLAP metadata
+  handling are implemented in the development tree. Native/isolated VST3 and CLAP SDK
+  offsets are retained where supplied; ordinary GUI timing remains estimated. The latest
+  native Punch/AutoJoin writing run timed out after entering Preview; earlier gain
+  checks do not clear that failure. Diagnose native/UI responsiveness and the Preview
+  queue before repeating that run. Wider physical-control, loop/recording and
+  cross-platform qualification remains pending.
+- Resolve the installed AmpliTube 5 cold-instance offline-export discrepancy.
+  Host-exposed parameters now survive export, but the first guitar render still differs
+  from subsequent renders; passing native parameter checks do not establish render
+  parity.
+- Qualify project-read recovery under longer sessions. Concurrent chunked reads now
+  serialize their snapshot lifetime and failed reads report explicit native errors
+  before project replacement. The original intermittent copied-project restore failure
+  remains unconfirmed despite passing subsequent native frontend runs.
+- Qualify the implemented [built-in plugin suite](free-plugins.md), including
+  exact-artifact listening, reference calibration, extreme controls and real
+  device/Release/multi-DPI behavior. The guide retains named extension decisions
+  for EQ, dynamics, Delay, alignment, pitch and instruments. Drum auxiliary sends,
+  four-output convolution, prepared EQ MIDI recall, continuous alignment and the
+  approved editors are implemented; they are not outstanding feature work.
+- Complete [audio-device capability work](runtime-hardening.md#audio-device-configuration):
+  rate-specific queries/hot-plug generations, explicit I/O masks, format/latency
+  display, project-rate override and advanced scheduling/format controls.
+- Qualify [native pitch ownership and workstation workflows](runtime-hardening.md#detached-pitch-session-ownership)
+  across installed Windows, macOS and Linux. Complete real monitor/DPI transitions,
+  sustained microphone capture, device loss/permissions and independent-clock
+  measurements using the [acceptance matrix](testing.md#desktop-and-recording-acceptance).
 - Finish the remaining MIDI playback, routing, note-lifecycle, hardware-output,
   and plug-in-generated MIDI workflows across live playback and offline render.
 - Bring CLAP instrument/event handling and state restoration to the same

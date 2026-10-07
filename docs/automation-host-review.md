@@ -1,57 +1,150 @@
-# Automation and plugin state review — 2026-09-16
+# Automation and plugin state
 
-Development working tree based on `7f59cff`; not a release qualification. Windows Debug only. The user-requested vendor set is AmpliTube, Archetype Misha Mansoor, Archetype Nolly, One Kit Wonder Metal and Komplete Kontrol. NAM Rack is an OpenStudio built-in.
+This guide describes the development source checkout, not an existing installer.
+It consolidates the September host review and October FX/automation audit and
+checkpoint. User workflows belong in the [manual](USER_MANUAL.md); executable
+checks belong in [testing](testing.md#free-plugin-processing-and-editor-checks).
+Plugin DSP/editor contracts live in [free plugins](free-plugins.md), window and
+device contracts in [runtime hardening](runtime-hardening.md), and open work in
+the [roadmap](roadmap.md).
 
-## Supported targets
+## Supported targets and identity
 
-| Target | Support in this checkout |
-|---|---|
-| Track | Volume, pan, width, mute, trim volume |
-| Instrument/bus pre-FX | Volume, pan, width |
+| Target | Contract |
+| --- | --- |
+| Track/master | Volume, pan, width/mute where supported, and separate volume Trim |
+| Instrument/bus pre-FX | Volume, pan and width |
 | MIDI/instrument | Velocity, pitch bend, channel pressure and MIDI CC |
-| Input FX and track FX | Host-exposed automatable parameters; routes follow reorder and are removed with their plugin |
-| Dedicated instrument slot | Host-exposed parameters, separate from track FX; recording and removal/undo included |
-| Built-in FX / NAM Rack | Eligible continuous, toggle and enum DSP controls; nonlinear NAM mappings shared with its editor |
-| Master | Volume and pan |
+| Sends | Level, pan, mute and level Trim; identities use escaped destination IDs |
+| Input/track FX and dedicated instrument | Eligible host-exposed parameters; removal/reorder/Undo preserve ownership |
+| Master/monitor FX | Persistent instance UUIDs and plugin fingerprints; monitoring remains outside export |
+| Built-in FX and NAM | Eligible scalar, toggle and choice controls from the native schema |
+| JSFX/CLAP | Numeric/choice sliders and SDK parameter identities; supported change notifications refresh metadata |
 
-NAM model/IR files, calibration, presets and topology/configuration controls are not envelope targets. Master/monitor FX automation, JSFX slider envelopes and CLAP editor-event capture are outside the implemented path. Vendor controls that are not exposed to the host cannot be recorded as envelopes. Kontakt libraries require host-automation assignments where the library has not provided them; a loaded One Kit Wonder instrument was not exercised. Komplete Kontrol nested controls depend on its mappings.
+File/model/IR loading, calibration, presets, MIDI mapping, prepared
+latency/topology settings, inactive configuration banks and read-only meters are
+not scalar envelope targets. Realtime Pitch Correct FX automation is separate
+from graphical pitch editing, which renders clip audio and has its own history.
+Free instruments use the track-FX route on MIDI tracks; the fallback instrument
+has its own parameter contract.
 
-## Corrected behavior
+Saved lanes retain native labels, ranges, units, choices and meaning metadata.
+Compatible SDK identity changes rebind to the current parameter index. Missing or
+incompatible targets retain inert points rather than controlling a different
+parameter. Explicit CLAP reference clearing retires the old generation, including
+queued MIDI Learn updates; Undo cannot revive that runtime generation. Legacy
+documents without saved identity retain their documented index fallback. An
+isolated plugin's parameter-contract change requires a worker reload.
 
-- Native JUCE parameter notifications reach the main project's automation writer, including parameter/gesture events forwarded from isolated workers. Parameter callbacks only publish atomics; UI event construction happens on the control thread. Native instrument slots have a distinct route identity.
-- Built-in editor gestures, including detached NAM Rack editors, use the same writer. Short begin/value/end edits are recorded even between writer ticks. Automation passes remain undoable.
-- Read does not reset an empty plugin lane or a control in Off/Write/active Touch. Populated Read curves reclaim manually edited knobs, including constant curves. Touch suppresses playback immediately in the native host before the frontend receives the gesture.
-- Track and master Read can be armed before creating a lane. Enabling Write also enables Read; disabling Write retains Read. Cubase-profile F6 opens the envelope panel; Alt/Option+R and Alt/Option+W uniformly toggle all tracks. Master remains separately controlled. Existing custom profile/scope rules still apply.
-- Saving requests fresh native plugin/instrument state. A missing FX identity fails the save instead of shifting the following slot's state. Instrument snapshot errors are no longer silently discarded. Plugin load/state-rejection errors appear in the project-open result.
-- Stopped VST3 changes exposed a real persistence defect in vendor checks. A pinned, fail-closed JUCE patch flushes pending changes and includes host-normalized values keyed by stable VST3 ParamID alongside the vendor chunks. The optional snapshot is restored after the vendor state. Old chunks without this child still load. No project or NAM DSP schema version changed.
-- Existing FX removal closes native editors synchronously before releasing their processors; detached built-in window teardown is covered by the window lifecycle harness. Instrument automation is also retired on removal/replacement and restored with undo.
+Vendor controls must be exposed or assigned by the plugin. AmpliTube's assignable
+slots do not establish automation for every internal amp/pedal knob. Loaded
+Kontakt libraries and Komplete Kontrol nested controls depend on their mappings.
+Optional isolation rejects layouts beyond its 32-channel/16-bus-per-direction
+IPC capacity; this affects installed Kontakt 7/8 layouts, while ordinary hosting
+remains available. JSFX scripts must publish edit intent with `slider_automate()`.
 
-## Verification scope
+## Writing, reading and history
 
-| Check | Result |
-|---|---|
-| Frontend suite | **pass** — 189 files, 2,314 tests |
-| Browser automation/shortcut suites | **pass** — 14 tests; Cubase Alt+W, Alt+R and F6 also exercised through the visible DOM with a screenshot |
-| Native runtime safety | **pass** — 240 checks, including NAM state and hosted/instrument automation |
-| Isolated worker suite | **pass** — 35 headless checks, including parameter gestures and state without an audio packet |
-| Native window lifecycle | **pass** — 42 checks; removal closes track/input/master/monitor built-in editors and cancels queued reopening |
-| AmpliTube 5, Misha Mansoor X, Nolly X, Komplete Kontrol, Kontakt 8 | **pass** — 48 checks per vendor run, including changed host values in fresh track/input instances and legacy/current state compatibility |
-| Extra isolated-editor exercise | **fail** — foreground-focus assertion; opening/closing the editor and worker survival passed. Native isolated-window shortcut focus remains unqualified |
-| Builds | **pass** — frontend production assets and CMake Debug, no C++ warnings; packaged index matches `frontend/dist`; website guide TypeScript check passed |
+- Visibility and Read are independent. Explicit lane Read enables its owner gate;
+  Write enables Read, and disabling Write retains Read. An empty lane does not
+  reset the manual value. Populated Read curves reclaim manual edits.
+- Continuous curves use linear interpolation; discrete controls hold the previous
+  value until their next point. Manual discrete edits snap to known choices.
+- Touch owns the control until release, with optional 100 ms–5 s return to its
+  continuous curve. Explicit begin/end takes precedence over the 180 ms fallback
+  for value-only notifications. Native echoes cannot end a held frontend gesture.
+- Touch/Latch uses Touch for main volume and Latch for other controls. Cross-Over
+  latches after release and punches out when a second touch crosses the original
+  curve. These behaviors do not claim complete Cubase or Pro Tools parity.
+- Range Trim/Fill and bounded thinning are stopped-transport edits with a visual
+  preview, preserved boundary values and one Undo. Realtime dB Trim is separate;
+  manual, after-pass and stopped on-exit coalescing retain one Undo. Failed
+  coalescing preserves both curves.
+- Audible Preview holds eligible non-MIDI controls. Cancel restores normal
+  playback/manual state; Capture is temporary, and stopped range Commit is one
+  Undo. Punch writes only previewed controls without changing ordinary Write arm.
+- AutoJoin remembers the actual native stop position for latched controls and
+  schedules up to 128 held values when playback restarts earlier. Touch, changed
+  curves/targets, protection changes and project replacement invalidate joins.
+  A loop must contain the join point. Remembered joins and live Preview values
+  are temporary; the enabled preference and coalescing policy are saved.
+- Write to start/end fills controls already writing within the current pass.
+  The writer uses one epoch clock. Stop records the held value at native stop
+  time even if there is no final animation frame.
 
-The isolated editor exercise returned `openAck=1`, `visible=1`, `focus=0`, then `afterCloseVisible=0` in all three cycles. Evidence: `output/review/isolation-Debug-20260916-083937-68be36/result.json`. Do not treat the headless suite or main-window browser shortcuts as proof of foreground shortcut routing in a real isolated vendor editor. This needs an interactive check with the plugin clicked into focus.
+Native capture queues are bounded. Supported VST3/CLAP SDK sample offsets and
+isolated event packets are retained; ordinary GUI gestures use estimated timing.
+Callbacks publish realtime-safe data; frontend events are built off the audio
+thread. Stop halts native audio/recording immediately and drains final main or
+detached editor writes, with a bounded warning path.
 
-Evidence is local under `output/automation-*-tests.log`, `output/review/` and `output/automation-panel.png`. Vendor checks instantiate fresh plugins, change one exposed normalized parameter, serialize, remove, recreate and restore in both input and track FX. They also load legacy opaque state with the optional snapshot removed. This is objective host/state verification, not a sweep of every vendor knob or a user project reopened in the visible app.
+Every async mutation must recheck project/session ownership after bridge waits.
+Stage edits cannot mutate or install snapshots into a replacement project.
+Structural send changes preserve live envelopes and unrelated level/pan/Trim
+gestures; only removed destinations belong to that command's lane history.
+Rejected changes create neither history nor mute automation. Delayed Pause/Stop
+responses cannot close a newer write session.
 
-Native editor capture is delivered at control rate through the main WebView, not sample-accurate gesture capture. Value-only plugins use a short touch timeout. Minimized/hidden main-window automation and every vendor's custom GUI gestures are not qualified here. Cubase Cross-over and advanced fill/trim workflows are not implemented. One Kit Wonder content, loaded Komplete Kontrol instruments, macOS/Linux hosting, Release packaging and subjective audio quality are **not_asserted**.
+## State, recovery and export
 
-## Local handoff
+Saving requires fresh processor/instrument state, stable slot identity and native
+readback where needed. Snapshot failures cannot overwrite the previous document.
+Automation Safe retains its own SDK/meaning contracts even without an envelope,
+across track/input/instrument/master/monitor scopes. Changed protection blocks
+restore and Save.
 
-Run `python build.py dev --run`; the Debug build and packaged frontend have been refreshed. No pre-running server is required. Task-owned browsers/servers were stopped and port 5183 was free at handoff. For the outstanding focus check, use the Cubase profile, click into an isolated plugin editor, and verify the intended host shortcut is either consumed by that editor or forwarded according to the plugin-window focus rules. Save/reopen your actual instrument presets and One Kit Wonder kit for content-specific confirmation.
+Unavailable FX retain opaque state, order, envelopes, Safe and MIDI mappings.
+Stopped Retry and stage Undo restore processors, resolve fresh SDK bindings and
+then resume Read. Incompatible protection rolls back and rebinds the current
+stage; failed rollback blocks Save. State/preset recall invalidates Read caches
+without recording recall notifications. The pinned JUCE VST3 patch preserves
+host-normalized values alongside vendor state; legacy opaque state still loads.
+No persistence schema or DSP version was bumped for this work.
 
-## Reference behavior
+Project reads serialize begin/chunk/release around one native immutable snapshot.
+Chunks are bounded to 8,192 characters and preserve Unicode boundaries. Explicit
+read errors stop before project replacement; older backends retain their legacy
+contract. JUCE calls preserve the receiver and use monotonic request IDs.
+Native long-operation timeout policy covers hosted insertion/state/preparation
+and Freeze without weakening ordinary read deadlines.
 
-- [Steinberg Cubase automation shortcuts](https://www.steinberg.help/r/cubase-pro/15.0/en/cubase_nuendo/topics/key_commands/key_commands_automation_category_c.html).
-- [Cubase Read/Write](https://www.steinberg.help/r/cubase-pro/15.0/en/cubase_nuendo/topics/automation/automation_writeread_automation_c.html) and [automation modes](https://www.steinberg.help/r/cubase-pro/15.0/en/cubase_nuendo/topics/automation/automation_automation_modes_c.html).
-- [VST3 host/plugin parameter communication](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Communication.html) and [state persistence](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Persistence.html).
-- [Kontakt host automation](https://docs.native-instruments.com/ni-tech-manuals/kontakt-manual/en/classic-view) and [Komplete Kontrol plug-in mappings](https://docs.native-instruments.com/ni-tech-manuals/komplete-kontrol-manual/en/using-plug-ins).
+Export and Freeze provide an advancing offline playhead at the output sample
+rate with integrated tempo-map musical position, and restore the live clock on
+exit. Hosted state/setup/reset run on the message thread; audio rendering remains
+on its worker. Neither correct clocks nor restored parameters prove identical
+vendor audio across cold and repeated exports.
+
+## UI ownership
+
+Portal dialogs must stop pointer propagation at their roots without cancelling
+normal control actions. Sortable track headers also reject targets outside their
+own DOM. This prevents FX dragging from sorting the underlying track; cancelled
+drags clear their pending source. Envelope Manager rejects stale parameter fetches
+and refreshes on topology changes. Its bounded list separates visibility, Read
+and protection controls and keeps advanced writing tools collapsible.
+
+Shared editor control utilities live in `PluginEditorControls.ts`; processor
+artwork remains in its own stylesheet. Typed CSS variables carry runtime geometry.
+Control styling must not depend on importing another processor's scene.
+
+## Qualification limits
+
+Automated results establish only their asserted routing/state/timing/geometry
+invariants. Sound quality and commercial-product parity remain **not_asserted**.
+Use real played signal before/during/after an edit; the local guitar fixture's
+first two bars contain a quiet lead-in and cannot prove an audible effect.
+
+| Open qualification | Current evidence and next step |
+| --- | --- |
+| Native played-guitar Punch/AutoJoin | **fail / needs diagnosis**: the latest October 6 job timed out three times after `change_preview`. An earlier 49-check gain run passed, but static exports and frontend tests do not clear the later failure. Collect native/UI responsiveness and Preview queue evidence before another writing run; the repeated approach was stopped under AGENTS.md. |
+| AmpliTube cold/repeated export | Repeat parity remains **unresolved**; the latest wet comparison differed by about 0.595 dB at 5.5–6.5 s. Direct SDK/state-order/overlay and preroll diagnostics did not establish parity. Waveform comparisons are **diagnostic_only**, not vendor-fault evidence. Continue with the user's working preset in a copied project; no sleep, sacrificial render or relaxed threshold is a fix. |
+| Long-session project recovery | Serialized chunk reads fix a definite overlap race. The original intermittent copied-project restore failure remains **unconfirmed** after subsequent passing runs. |
+| Physical vendor controls | Loaded Kontakt/Komplete content, every vendor assignment, CLAP GUI capture, isolated-editor foreground shortcut focus and sustained loop/recording AutoJoin remain **not_asserted**. |
+| Platform/device/release | Installed Windows Release, clean install/update/rollback, device sleep/wake, mixed DPI, macOS/Linux and signing/reputation acceptance require the release checklist. Debug readiness is not installed-release qualification. |
+
+Historical raw reports and private audio remain under ignored `output/review/`.
+The superseded audit/checkpoint text is preserved locally under
+`output/review/pr-readiness-archive/`; do not publish private projects, vendor
+presets or WAVs. Keep current validation with the PR and run logs rather than
+appending another dated implementation diary. A release still requires reviewed
+version-specific notes and all applicable [smoke gates](release-smoke-checklist.md).

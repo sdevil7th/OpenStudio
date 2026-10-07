@@ -76,6 +76,12 @@ If an optional dependency is missing:
 - setup/download should run in the background when supported
 - the main app thread must remain responsive
 
+## Active Windows AI runtime selection
+
+Downloaded-runtime DirectML fallback is prepared in a separate `stem-runtime-directml-<32 hex digits>` sibling. The active runtime stays in use while the candidate is installed and probed. Only a successful final verification publishes `stem-runtime-active.txt` through an atomic replacement. Both native callers use `AIManagedRuntime.h`; malformed/out-of-root names and missing candidates fall back to `stem-runtime`. Do not patch loaded runtime DLLs in place or redirect arbitrary directories through the marker.
+
+Failed candidates are cleaned up; reset removes the base runtime, selected candidate, matching fallback slots and marker within the app's user-data root. The installer repair tests exercise publication and rejection, not the availability/performance of a physical GPU backend. These additions remain development behavior until release qualification.
+
 ## Platform Rules
 
 ### Windows

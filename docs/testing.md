@@ -1,4 +1,48 @@
-# NAM and Audio QA
+# Audio and Runtime QA
+
+## Click-only metronome shortcut
+
+`frontend/src/__tests__/metronomeShortcut.test.ts` checks the dedicated
+**Ctrl+Shift+Space** binding in all 19 keyboard profiles on Windows, Linux and
+fallback platforms, and **Cmd+Shift+Space** on macOS. It covers exact modifiers,
+repeat suppression, project-loading/pending gates, custom overrides/unbinding,
+composition ownership and detached-window routing. Executing the action must
+leave transport, recording, tracks and metronome Enable unchanged.
+
+With a disposable app Vite browser session, run `playwright-cli run-code
+--filename tools/check-metronome-hotkey.js`. The actual App dispatcher and
+controls receive trusted keyboard input. Native acceptance is mocked: check
+button/hotkey parity, settings open/closed, all profiles, focus, repeat,
+remapping, unbinding, pending requests, failure feedback and Command Palette
+discovery. These are `pass` UI contracts, not hardware/platform qualification.
+Native metronome contracts remain covered by the separate headless suite below;
+timing measurements are `diagnostic_only`, and listening quality is `not_asserted`.
+
+## Metronome sounds
+
+The metronome-only native suite uses `OPENSTUDIO_METRONOME_FIXTURES_ONLY=1`
+with `OpenStudio.exe --automated-regression-headless --report <path>`. It opens
+no audio device or app window. Alongside clock and practice checks, it covers
+custom attack alignment at 8/44.1/48/96/192 kHz, anti-phase stereo, DC, silence,
+clipping, invalid samples, slow attacks, multiple hits, distinct built-in sounds,
+stable prepared-copy recall, source deletion and device-rate changes. Generated
+prepared fixtures use the local app-data MetronomeSounds cache.
+
+The real browser modal check is `playwright-cli run-code --filename
+tools/check-metronome-sounds.js` after opening the Vite dev page. Native file I/O
+is mocked; the actual store, modal and controls verify collapsed defaults,
+keyboard expansion, selections, upload cancellation/rejection, cached-copy paths,
+and geometry at 390/760/1440 px. Screenshots are saved under `output/playwright`.
+Audio timbre, subjective timing and device latency still require audition.
+
+For the cowbell comparison, run `tools/run-metronome-regression.ps1 -SkipBuild
+-AuditionDirectory <absolute-output-folder>`. This exports `cowbell-before.wav`,
+`cowbell-revised.wav`, and `cowbell-before-then-revised.wav` at 24-bit/48 kHz.
+Each version plays two 4/4 bars at 120 BPM; the combined file separates them by
+one second. The revised WAV uses actual native callback output. The previous
+approximation exists only in the audition fixture. The suite checks bounded
+audio, 1 ms attack alignment, same-pitch accent gain and small-buffer parity;
+`cowbellTimbre` remains `not_asserted` until the user auditions that artifact.
 
 OpenStudio separates deterministic engineering evidence from listening
 judgment. Every result must be reported as:
@@ -27,6 +71,29 @@ npm run build
 npm run test:e2e
 ```
 
+For the clip click/drag regression, start `npm run dev` in `frontend/`, then
+run these commands from the repository root (requires Node/npm and Chromium):
+
+```powershell
+npx --yes --package @playwright/cli playwright-cli -s=clip-pointer open http://127.0.0.1:5183
+npx --yes --package @playwright/cli playwright-cli -s=clip-pointer run-code --filename tools/check-timeline-clip-pointer.js
+npx --yes --package @playwright/cli playwright-cli -s=clip-pointer close
+```
+
+The real Timeline/store fixture checks off-grid audio and MIDI clicks, pointer
+jitter, edge clicks, modifier selection, double-clicks, snap modes, moves,
+copies, trims, multi-selection, undo/redo, ruler coordinates, outside release,
+and cancellation. Backend calls are mocked; audio-device recording and native
+WebView behavior require separate app qualification. Stop the dev server after
+the check.
+
+For playhead zoom regressions, use the same CLI workflow with
+`tools/check-playhead-zoom.js` as the `--filename`. Its real Playhead/React/Konva
+fixture checks stopped pointer-anchored zoom up to 1000 pixels per second,
+zoom-only visibility changes, viewport edges, resizing, seeks, and transport
+updates with follow scrolling. It asserts both Konva geometry/visibility and
+the painted canvas pixels, and saves a screenshot under `output/playwright/`.
+
 From the repository root:
 
 ```powershell
@@ -52,6 +119,22 @@ an OpenStudio window. `tools/nam-rack-visual-harness.mjs` is retained for
 targeted browser/layout capture; generated screenshots and reports are ignored.
 
 ## Runtime safety and recovery
+
+Detached pitch checks are documented in
+[desktop and recording acceptance](#desktop-and-recording-acceptance).
+`frontend/e2e/detached-pitch.spec.ts` runs the main owner and detached proxy in
+separate pages, including history, docking, canvas/UUID fallbacks and isolation
+of a secondary UI failure. Native lifecycle checks additionally require actual
+analysis, relative pitch editing, rendered-file publication and Undo with the
+main window minimized. Browser mocks do not qualify a native platform backend.
+
+For focused synthetic recording interruption/file-finalization checks, set
+`OPENSTUDIO_RECORDING_FIXTURES_ONLY=1` when launching the current executable with
+`--automated-regression-headless --report <absolute-json-path>`. Remove that
+variable before requesting the broad regression suite. Physical microphone
+capture uses `tools/evaluate-recording-qualification.py` with before/after
+telemetry and the original PCM WAV; synthetic tests cannot establish microphone
+routing, clock drift or listening quality.
 
 `tools/run-runtime-safety-regression.ps1` runs isolated contract, interrupted
 recovery, owned-worker, recording-write fault, crash and hang fixtures. Use
@@ -307,3 +390,84 @@ transport takeover. Practice alone must leave the playhead and recording state
 unchanged. Timing is diagnostic only: passing generator tests does not prove that
 an arbitrary low-buffer ASIO session or third-party plugin chain is crackle-free.
 See [the runtime contract](runtime-hardening.md#metronome-practice-contract).
+
+
+## Free-plugin processing and editor checks
+
+The [plugin maintenance guide](free-plugins.md) records supported behavior, compatibility rules, reference sources and open calibration work. Build the current frontend and Debug binary before running:
+
+```powershell
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1
+# A focused group does not count as a full-suite run:
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName original-colour
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName guitar-performance
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName automation-registry
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName mute-point-timing
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName send-automation
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName fallback-automation
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName jsfx-automation
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName clap-automation
+powershell -NoProfile -File tools/run-free-plugin-headless-regression.ps1 -CaseName stage-automation
+```
+
+For installed-vendor coverage, set `OPENSTUDIO_FX_REGRESSION_PLUGIN` to an absolute
+VST3 path, run the focused `vendor-automation` case, then remove the variable.
+The current AmpliTube 5 check covers its exposed slots, not assignments for every
+internal amp/pedal control.
+
+`tools/fx-chain-drag-browser-regression.js` and
+`tools/free-plugin-automation-browser-regression.js` run through playwright-cli
+`run-code --filename` on a disposable Vite browser session. The latter requires
+the `editor-schemas` export saved as
+`output/review/fx-automation/native-editor-schemas-current.json`, temporarily served
+on port 5191. The editor runner also checks all dedicated editor hosts at 640, 820, 1040 and
+1440 pixels for horizontal overflow and visible keyboard focus.
+Both use fixture bridge data with production components/store;
+they are not DSP evidence. `tools/native-plugin-automation-browser-regression.js`
+instead runs on an open built-in editor in the task-owned native WebView2 CDP
+session, with the main page's `nativeAutomationQA` binding to its actual
+`useDAWStore` and `nativeBridge`. Use a project copy, disarm recording and mute live
+output. It asserts held/released Touch and normalized points, not sound quality.
+See [automation and plugin state](automation-host-review.md#qualification-limits)
+for current contracts and unresolved native qualification. Frontend tests must
+delay bridge responses across project replacement, newer transport requests and
+concurrent send gestures. Include rejected routing, lane restoration and Undo/Redo
+in `sendAutomation`, `pluginOutputRouting`, `stageFXAutomation` and
+`transportUpdateOrdering`; a passing UI fixture does not clear a native audio
+failure.
+
+The runner opens neither an app window nor an audio device. `Source/FreePluginRegression.cpp` registers the current cases; do not keep an obsolete group count as an execution contract. Missing legacy fixtures fail closed. The source-owned `.state` files under `tests/fixtures/free-plugins/legacy/` are compatibility inputs, not disposable generated artifacts.
+
+Cover factory/legacy/non-default state, block/rate/channel variation, finite extremes, phase/latency/dry-wet and bypass, independent final-output reconstruction, IR portability/failure, hold/tail retirement, MIDI ordering/repeated notes/pedals/chase, voice allocation, instrument release bounds and realtime cost/allocation diagnostics. Scalar tests alone do not establish project, native-host or offline behavior.
+
+For actual host/export integration, run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/run-render-export-headless-regression.ps1`. This includes complete send publication, auxiliary outputs, processor preparation/PDC, full-state/factory/preset recall and actual exported release tails. Use the native lifecycle harness for real WebView boot/geometry/teardown. Browser fixtures separately establish layout, focus, gestures and callback pairing; mocked data is not audio evidence. Run the NAM headless suite after shared processor changes.
+
+The opt-in native `-CaseName ten-hour-listening` retains its historical command name and produces deterministic source/settings/WAV artifacts. `python tools/create-free-suite-listening-preview.py --help` documents the local preview builder. Preview gain changes are recorded; original files remain unchanged. Listen to those exact artifacts before making a subjective claim. Fixtures and finite alias/peak tests do not prove commercial emulation, complete BS.1770/EBU conformance or arbitrary-input behavior.
+
+Keep generated JSON, WAV, screenshots, hashes and failed/intermediate runs under ignored `output/`. Store lasting contracts in the maintenance guide and executable tests. The 3 October development baseline passed 2,480 frontend tests, 168 native groups and 233 host checks; current source still requires appropriately scoped checks after changes.
+
+## Desktop and recording acceptance
+
+Build packaged assets before native UI qualification. `tools/run-window-lifecycle-smoke.ps1` forces the packaged frontend; a running Vite must not influence the result. Use `-AppPath` for the exact Debug, Release or installed executable being tested. On an idle interactive Windows desktop, explicitly opt into physical mouse input and repeated pitch windows:
+
+```powershell
+$env:OPENSTUDIO_WINDOW_INPUT = '1'
+$env:OPENSTUDIO_WINDOW_CYCLES = '50'
+./tools/run-window-lifecycle-smoke.ps1 -AppPath build/OpenStudio_artefacts/Debug/OpenStudio.exe -ReportPath "$PWD/output/review/windows.json" -TimeoutSeconds 600
+Remove-Item Env:OPENSTUDIO_WINDOW_INPUT
+Remove-Item Env:OPENSTUDIO_WINDOW_CYCLES
+```
+
+Record physical rectangles and DPI; verify title-bar movement, resize, minimize/restore, native close/reopen, main-window inactivity, target/project replacement and owner-loss checkpoint recovery. Repeat actual 100/125/150/200% scaling and monitor moves. A CSS viewport or direct native bounds setter does not prove OS gestures or mixed-DPI behavior. The 29 September build-tree Windows Release run passed 50 pitch reopen cycles; it did not qualify an installed artifact or other platforms. Later source changes require new relevant evidence.
+
+Release gates install/test the Windows EXE, exercise the mounted macOS DMG and launch the Linux AppImage under Xvfb/Openbox. AppImage runtime assets resolve from a validated `APPDIR/usr/bin` when launched through AppImage. Xvfb/Openbox qualifies X11/XWayland, not native Wayland. Pipeline definitions alone are not executed platform results.
+
+For each physical recording configuration, start with 60 seconds then a 30-minute sustained capture. Exercise the actual interface (including supported ASIO small buffers), WASAPI USB/webcam input/output pairs, Core Audio permission/aggregate configurations and Linux's shipped audio backend. Save `getAudioDebugSnapshot()` immediately before and after the take plus the original PCM WAV:
+
+```text
+python tools/evaluate-recording-qualification.py --before before.json --after after.json --audio take.wav --seconds 60 --report qualification.json
+```
+
+The evaluator rejects missing/reset/unsupported counters as proof of a clean take. Record requested/accepted rate/channels/buffer, frames, drops, lock misses, disk errors, xruns when supported, and device events. Test privacy denial/regrant, unplug/reconnect, sleep/wake, endpoint changes and competing exclusive clients. Device loss must finalize the take once without silent input substitution.
+
+Use a known loopback/acoustic source and periodic markers to measure drift; establish tolerances from the measurement setup first. Equal nominal input/output rates and a wall-clock timer are insufficient. Prefer OS-supported synchronization; a Windows adaptive FIFO/resampler would be separate implementation work. Physical microphone identity, clock drift and listening remain separate from synthetic recorder tests. Investigate route/render state first if live playback and exported audio disagree.

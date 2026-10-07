@@ -159,6 +159,35 @@ expose normalized parameter values. Offline export must retain latency alignment
   its identity, exact OS/build and root cause remain unverified. Original logs were
   unavailable. Do not attribute the crash to NAM or repeat requests for those logs.
 
+## Audio device configuration
+
+Keep applied device state, pending form values and capabilities for that exact draft separate. `AudioSettingsSession` versions asynchronous responses; Cancel must discard a draft without touching the running device. Apply refreshes the accepted native values and keeps the dialog open; OK applies and closes. Driver/device changes request that device's defaults instead of carrying an incompatible old rate/buffer. Do not fabricate options when discovery fails or no device exists.
+
+Inactive Windows ASIO discovery uses the driver control interface without creating buffers, starting the stream or setting its rate. WASAPI Shared/Exclusive/Shared Low Latency are distinct modes; the endpoint mix format supplies the preferred rate. Rate-dependent restrictions and external control-panel changes can still require activation. Apply is authoritative and must preserve/recover the previous configuration on failure. Recording/render guards and rollback include NAM oversampling; a failed device change must not leave that separate setting partially applied. The toolbar reports the actual active rate/buffer, independently of the modal draft.
+
+Remaining device work: rate-specific platform capability queries and hot-plug generations; explicit disabled I/O/manual channel-count policy integrated with track routing; negotiated format/latency display; project sample-rate override; advanced format/scheduling controls. Keep unsupported combinations unavailable with an actionable error. Independent input/output devices need measured clock-drift handling; equal nominal rates do not synchronize their clocks.
+
+Sources: `Source/ASIOCapabilities.h`, `WindowsAudioDefaultRate.h`, `AudioEngine.cpp`, `frontend/src/utils/audioSettingsSession.ts`, `SettingsModal.tsx` and `AudioDeviceStatus.tsx`. Use `OpenStudio.exe --asio-capability-probe --driver "<driver name>" --report "<absolute report path>"` for control-interface inspection. This is a driver query, not proof of stable streaming at its smallest buffer.
+
+## Detached pitch session ownership
+
+The main frontend owns one authoritative graphical pitch session: analysis, notes, preview and project Undo. The native `pitchEditor` window renders the same `PitchEditorLowerZone`; it submits sequenced commands and receives bounded snapshots. Native-bound view identities, project epochs and clip/source-region revisions reject stale requests. Coalesce unsent note previews, preserve terminal command ordering and publish contour data only when it changes. Do not create a second history or a second pitch canvas.
+
+Dock, native close/reopen, target replacement, locks and source changes explicitly preserve or revoke ownership. Undo restores musical edits without rewinding view geometry. Native checkpoints distinguish committed notes from unfinished gestures. Owner-heartbeat loss stops preview, retires the secondary view and preserves accepted notes. Recovery is explicit, requires a matching saved project/clip/source region and original-file size/modification time, and creates a new undoable edit. It cannot reconstruct an unsaved project's graph or terminated command closures. Never auto-reload a project while recording.
+
+Preserve the shared browser factory, boot watchdog, writable user data and delayed retirement for all five roles: main, mixer, MIDI, pitch and built-in editor. Canvas rendering falls back from OffscreenCanvas to HTML canvas and responds to device-pixel-ratio changes. The startup UUID fallback uses Web Crypto random values when `randomUUID` is unavailable on the custom resource origin.
+
+The lifecycle harness checks actual analysis, a relative +4 edit, rendered-file publication and Undo while main is minimized, plus owner-loss recovery. Optional physical input and 50 reopen cycles qualify only the recorded desktop/build. Installed Windows, macOS/WKWebView, Linux/WebKitGTK, native Wayland, snap and mixed-DPI transitions remain separate gates. See [desktop and recording acceptance](testing.md#desktop-and-recording-acceptance).
+
+## Workstation state contracts
+
+- Native title bars own OS movement/resize. Restore secondary bounds within the relevant display's work area. Windows dark-frame attributes defer to high-contrast settings; other platform chrome stays OS-managed. Do not reintroduce startup size nudges as a readiness workaround.
+- File import captures the insertion cursor before the chooser, creates compatible tracks through the existing undoable import actions and preserves asynchronous decoded metadata for Redo. Global Lock/project replacement invalidates pending import. Separate Audio/MIDI actions follow keyboard profiles; source MIDI tracks are currently merged per file and source media remains referenced in place.
+- Solo Safe is a saved, undoable flag independent of Solo, shared with detached controls and live/export routing. Track duplication, project restore and history must preserve it.
+- Practice Countdown/Stopwatch follows the audio sample clock with pause/reset and transport handover. Closing settings does not stop it; device loss or transport takeover interrupts it, and expiry never stops a recording. Keep the existing metronome enable/click-only contract below.
+- Metronome sound Choose opens the native chooser; Cancel preserves the current sound, failure is visible and Reset is explicit per sound. Menu/submenu and expanded settings content must stay keyboard-accessible within the available viewport.
+- Recorder device loss latches the interrupted take, rejects subsequent samples from a replacement device and finalizes once on the message thread. Reconnect must not silently restart recording/monitoring. Preserve lock-miss, dropped-frame, disk-failure and supported xrun telemetry; unsupported counters remain unknown.
+
 ## Repeatable qualification
 
 Run checks against the exact configuration being reviewed. Generated results must

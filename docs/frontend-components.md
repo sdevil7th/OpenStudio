@@ -25,6 +25,7 @@ inside `ErrorBoundary`:
 | main (default)                          | `App.tsx`                 | Full DAW shell                              |
 | `mixer`                                 | `MixerWindowApp.tsx`      | `MixerPanel` in a detached window           |
 | `midiEditor`                            | `MidiEditorWindowApp.tsx` | `PianoRoll` in a detached window            |
+| `pitchEditor`                           | `PitchEditorWindowApp.tsx` | Existing `PitchEditorLowerZone`, synchronized with the main owner |
 | `pluginEditor`                          | `PluginEditorWindowApp.tsx` | `BuiltInPluginPanel` (NAM Rack etc.) detached |
 | safe startup (overrides any window role) | `components/StartupRecoveryApp.tsx` | Recovery UI                        |
 
@@ -205,11 +206,19 @@ the top-level TSX components and group the MIDI editor's smaller sections.
 | Component | Mounted by | Depends on |
 | --- | --- | --- |
 | `FXChainPanel` (+ `FXChainPanel.css`) | `TrackHeader`, `MasterTrackHeader`, `ChannelStrip`, `AITrackHeader` | store, bridge, `BuiltInPluginPanel`, `MIDIFXControls`, `PitchCorrectorPanel`, `ParametricGraph` |
-| `BuiltInPluginPanel` | `FXChainPanel`, `PluginEditorWindowApp` | bridge, `NAMRackPanel`, `ParametricGraph` |
+| `BuiltInPluginPanel` | `FXChainPanel`, `PluginEditorWindowApp` | bridge, `NAMRackPanel`, dedicated `EQEditor`, `builtin/editorRegistry`, complete-state history and shared telemetry providers |
 | `PluginBrowser` | `App`, `TrackHeader` | store, action registry, bridge (plugin catalogue) |
 | `MIDIFXControls` | `FXChainPanel` | store |
 | `PitchCorrectorPanel` (+ `pitchCorrectorPresets.ts`) | `FXChainPanel` | bridge, local React state, shared UI |
 | `ParametricGraph/*` | `FXChainPanel`, `BuiltInPluginPanel` | `utils/parameterWheel` (wheel only) |
+
+The non-NAM suite uses fifteen dedicated editors under `components/builtin/`.
+`SuiteParameter` owns shared profiled gestures; `EQToolbar` owns preset, history,
+Compare and host-bypass controls. `SuiteEditor` is only the parameter fallback,
+including compatible realtime pitch settings. `PitchFXEditorEntry` opens the
+existing clip editor. Fast metering belongs in subscribed display leaves, separate
+from parameter/schema rendering. See the [plugin maintenance guide](free-plugins.md)
+for source ownership, state invariants and capability boundaries.
 
 ### 4.5 NAM Rack (guitar/bass amp workspace)
 
@@ -267,7 +276,7 @@ The `PianoRoll*` family includes `PianoRollToolbar`, `PianoRollStatusStrip`,
 
 | Component | Mounted by | Depends on |
 | --- | --- | --- |
-| `PitchEditorLowerZone` | `App` (lazy) | main and pitch stores, action/shortcut helpers, `PitchEditorCanvas`, `NoteInspector`, `CorrectPitchModal`; native apply/analysis is routed through the pitch store |
+| `PitchEditorLowerZone` | `App` (lazy), `PitchEditorWindowApp` | main and pitch stores, action/shortcut helpers, `PitchEditorCanvas`, `NoteInspector`, `CorrectPitchModal`; native apply/analysis is routed through the main-owned pitch session |
 | `PitchEditorCanvas.ts` | `PitchEditorLowerZone` | Imperative 2D canvas renderer (RAF loop) for note blobs and contour |
 | `NoteInspector` | `PitchEditorLowerZone` | pitch store, bridge |
 | `CorrectPitchModal` | `PitchEditorLowerZone` | pitch store, shared `Modal` |

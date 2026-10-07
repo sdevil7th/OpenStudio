@@ -38,8 +38,20 @@ release-candidate platform.
 | Main shell | Cold launch, close, relaunch | `boot-ready` and responsive UI |
 | Detached Mixer | Detach/open, close, reopen | `boot-ready`; audio continues |
 | Detached MIDI editor | Detach, dock/close, reopen; repeat with two different MIDI sessions | `boot-ready`; the correct session returns |
+| Detached pitch editor | Detach, edit, Undo/Redo, dock, native close/reopen; replace source/project | `boot-ready` plus hydrated canvas; one edit/history owner; stale commands rejected |
 | Built-in effect editor | Open, close during load, reopen | `boot-ready`; controls and audio recover |
 | Third-party plug-in editor | Open, close, reopen at least one available native editor | Native editor paints; audio continues without a blank or hung window |
+
+For the main, mixer, MIDI, pitch and built-in effect windows, verify native
+title-bar movement, resize, minimize/restore, snap and mixed-DPI monitor moves.
+On an idle Windows desktop, opt into actual mouse input with
+`OPENSTUDIO_WINDOW_INPUT=1`; use `OPENSTUDIO_WINDOW_CYCLES=50` for repeated pitch
+close/reopen and a 600-second harness timeout. Confirm no secondary browser
+components survive final retirement. Repeat against the installed Release app;
+build-tree evidence does not qualify installation or first-launch permissions.
+See [desktop qualification](testing.md#desktop-and-recording-acceptance)
+for checkpoint recovery and sustained microphone capture acceptance. Treat
+Linux Xvfb/Openbox evidence as X11/XWayland, not native Wayland qualification.
 
 ## Windows
 

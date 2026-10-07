@@ -17,10 +17,13 @@ that an existing installer contains those changes.
 - [In-app updates](USER_MANUAL.md#in-app-updates) — installation, unsigned macOS behavior, and recovery.
 - [Updater security and migration](updater-security-and-migration.md) — signed metadata, replacement safeguards, older clients, and qualification limits.
 - [Implemented features](implemented_features.md) — current feature inventory and caveats.
+- [Built-in effects and instruments](free-plugins.md) - architecture, compatibility, reference research and remaining qualification.
+- [Automation and plugin state](automation-host-review.md) - supported targets, writing/history, persistence, recovery and remaining native qualification.
+- [Runtime hardening](runtime-hardening.md) - audio-device, window/session, recording and failure-recovery contracts.
 - [NAM Rack](nam-rack.md) — Guitar/Bass capture workflow, multi-capture selection, DSP/state contract, TONE3000 integration, and release acceptance.
 - [Keyboard and mouse profiles](input-profiles.md) — built-in DAW profiles, independent keyboard/mouse selection, scoped bindings, and custom profile import/export.
 - [MIDI editor](midi-editor.md) — supported editing contract and manual acceptance.
-- [NAM and audio QA](testing.md) — deterministic checks and manual release acceptance.
+- [Audio and runtime QA](testing.md) — deterministic checks and manual release acceptance.
 - [Release roadmap](roadmap.md) — only work that is still open or deliberately deferred.
 - [Release runbook](release-runbook.md) — packaging and publication.
 - [Release smoke checklist](release-smoke-checklist.md) — final build acceptance.
