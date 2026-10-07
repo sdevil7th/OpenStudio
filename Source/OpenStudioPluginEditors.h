@@ -129,8 +129,6 @@ public:
 
 private:
     OpenStudioEQ& eqProcessor;
-    std::array<float, OpenStudioEQ::fftSize / 2> preSpectrum {};
-    std::array<float, OpenStudioEQ::fftSize / 2> postSpectrum {};
     float smoothedPre[OpenStudioEQ::fftSize / 2] = {};
     float smoothedPost[OpenStudioEQ::fftSize / 2] = {};
     bool hasData = false;

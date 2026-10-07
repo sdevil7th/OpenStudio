@@ -1661,6 +1661,9 @@ Local `.nam` loading works without TONE3000. Public-build TONE3000 availability
 depends on the partner-approved integration and release configuration. On
 Linux, sign-in also requires `secret-tool` (usually installed by the
 `libsecret-tools` package) and an available Secret Service/keyring.
+Closing a detached window cancels its pending credential requests, including
+when another window is waiting for a slow or unavailable keyring. A credential
+error still needs the keyring service to be restored before sign-in can succeed.
 
 **TONE3000 presentation, development checkout, October 4, 2026:** the capture/IR
 library displays the official logo, connected account identity, creator avatars,

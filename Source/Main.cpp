@@ -1353,9 +1353,9 @@ public:
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
 
-        const auto reportFile = juce::File(startupSelfTestReportPath.trim().unquoted());
+        const auto startupLogReportFile = juce::File(startupSelfTestReportPath.trim().unquoted());
         auto logFile = startupSelfTestReportPath.isNotEmpty()
-            ? reportFile.withFileExtension(pluginScanProbePath.isNotEmpty() ? "log" : "startup.log")
+            ? startupLogReportFile.withFileExtension(pluginScanProbePath.isNotEmpty() ? "log" : "startup.log")
             : getWritableStartupLogFile();
         startupLogger = std::make_unique<juce::FileLogger>(logFile, "OpenStudio Startup Log");
         juce::Logger::setCurrentLogger(startupLogger.get());

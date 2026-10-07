@@ -1362,21 +1362,123 @@ bool sleepForTone3000Task(int milliseconds)
     return ! isTone3000TaskCancelled();
 }
 
+struct ScopedTone3000TaskCancellation
+{
+    explicit ScopedTone3000TaskCancellation(
+        const std::atomic<bool>* cancellation)
+        : previous(activeTone3000TaskCancellation)
+    {
+        activeTone3000TaskCancellation = cancellation;
+    }
+
+    ~ScopedTone3000TaskCancellation()
+    {
+        activeTone3000TaskCancellation = previous;
+    }
+
+    const std::atomic<bool>* previous = nullptr;
+};
+
+struct ScopedTone3000CredentialStorageLock
+{
+    explicit ScopedTone3000CredentialStorageLock(
+        std::mutex& mutex, int maximumWaitMs = 30000)
+        : firstLock(mutex, std::defer_lock)
+    {
+        acquire([this] { return firstLock.try_lock(); }, maximumWaitMs);
+    }
+
+    ScopedTone3000CredentialStorageLock(
+        std::mutex& first, std::mutex& second,
+        int maximumWaitMs = 30000)
+        : firstLock(first, std::defer_lock),
+          secondLock(second, std::defer_lock)
+    {
+        acquire([this]
+        {
+            // A failed attempt releases both locks; a waiting dual transaction
+            // must never retain one mutex while another owner finishes its I/O.
+            return std::try_lock(firstLock, secondLock) == -1;
+        }, maximumWaitMs);
+    }
+
+    template <typename TryLock>
+    void acquire(TryLock&& tryLock, int maximumWaitMs)
+    {
+        const auto deadline = juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! isTone3000TaskCancelled())
+        {
+            if (tryLock())
+            {
+                if (isTone3000TaskCancelled())
+                {
+                    if (secondLock.owns_lock()) secondLock.unlock();
+                    if (firstLock.owns_lock()) firstLock.unlock();
+                    return;
+                }
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(25))
+                return;
+        }
+    }
+
+    std::unique_lock<std::mutex> firstLock;
+    std::unique_lock<std::mutex> secondLock;
+    bool locked = false;
+};
+
 struct ScopedTone3000CredentialProcessLock
 {
-    ScopedTone3000CredentialProcessLock()
-        : locked(tone3000CredentialProcessLock.enter(30000))
+    explicit ScopedTone3000CredentialProcessLock(
+        const ScopedTone3000CredentialStorageLock& storageGuard,
+        juce::InterProcessLock& processLockIn = tone3000CredentialProcessLock,
+        int maximumWaitMs = 30000)
+        : processLock(processLockIn)
     {
+        if (! storageGuard.locked)
+            return;
+        const auto deadline = juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! isTone3000TaskCancelled())
+        {
+            // JUCE holds its own process-local CriticalSection during enter().
+            // A long timeout here would also block another canceled worker.
+            if (processLock.enter(0))
+            {
+                if (isTone3000TaskCancelled())
+                {
+                    processLock.exit();
+                    return;
+                }
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(25))
+                return;
+        }
     }
 
     ~ScopedTone3000CredentialProcessLock()
     {
         if (locked)
-            tone3000CredentialProcessLock.exit();
+            processLock.exit();
     }
 
+    juce::InterProcessLock& processLock;
     bool locked = false;
 };
+
+juce::String getTone3000CredentialLockError()
+{
+    return isTone3000TaskCancelled()
+        ? juce::String("The TONE3000 credential operation was canceled.")
+        : juce::String("Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+}
 
 struct ScopedTone3000CatalogRefreshLock
 {
@@ -2607,13 +2709,13 @@ juce::var makeTone3000AuthStatus()
     juce::String error;
     juce::var stored;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
             stored = loadProtectedJson(getTone3000TokenFile(), error);
         else
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
     }
     juce::DynamicObject::Ptr status = new juce::DynamicObject();
     status->setProperty("success", true);
@@ -2678,13 +2780,13 @@ juce::String getStoredTone3000AccessToken()
     juce::String error;
     juce::var stored;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
             stored = loadProtectedJson(getTone3000TokenFile(), error);
         else
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
     }
     if (auto* object = stored.getDynamicObject())
     {
@@ -3544,7 +3646,7 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
 
     juce::String error;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
         if (isTone3000TaskCancelled())
         {
@@ -3557,11 +3659,11 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
             return makeTone3000Error(
                 "This TONE3000 sign-in request was superseded by a newer credential action.");
         }
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (! processGuard.locked)
         {
             return makeTone3000Error(
-                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+                getTone3000CredentialLockError());
         }
         juce::String existingError;
         const auto existingPending = loadProtectedJson(
@@ -3600,9 +3702,9 @@ bool deleteTone3000PendingAuthIfCurrent(
     const juce::String& expectedState,
     juce::uint64 expectedEpoch)
 {
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
         return false;
     juce::String error;
@@ -3639,9 +3741,9 @@ bool tone3000PendingAuthStillCurrent(
     const juce::String& expectedState,
     juce::uint64 expectedEpoch)
 {
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
         return false;
 
@@ -3672,9 +3774,9 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
     juce::String error;
     juce::var pending;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             pending = loadProtectedJson(
@@ -3682,7 +3784,7 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
         }
         else
         {
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
         }
     }
     auto* pendingObject = pending.getDynamicObject();
@@ -3712,13 +3814,13 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
     const auto requestAgeMs = juce::Time::getCurrentTime().toMilliseconds() - createdAtMs;
     if (createdAtMs <= 0 || requestAgeMs < 0 || requestAgeMs > kTone3000LoopbackTimeoutMs)
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (! processGuard.locked)
         {
             return makeTone3000Error(
-                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+                getTone3000CredentialLockError());
         }
         juce::String currentError;
         const auto currentPending = loadProtectedJson(
@@ -3780,14 +3882,14 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
             return tokenPayload;
     }
 
-    std::scoped_lock storageGuards(
+    const ScopedTone3000CredentialStorageLock storageGuards(
         tone3000TokenStorageMutex,
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuards);
     if (! processGuard.locked)
     {
         return makeTone3000Error(
-            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+            getTone3000CredentialLockError());
     }
     juce::String currentPendingError;
     const auto currentPending = loadProtectedJson(
@@ -4075,9 +4177,9 @@ juce::var cancelTone3000AuthFlow()
     bool pendingAuthDeleted = false;
     bool pendingAuthCleanupComplete = false;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             juce::String loadError;
@@ -4129,10 +4231,10 @@ juce::var clearTone3000Auth()
     bool pendingAuthClearComplete = false;
     bool tokenWasPresent = false;
     {
-        std::scoped_lock storageGuards(
+        const ScopedTone3000CredentialStorageLock storageGuards(
             tone3000TokenStorageMutex,
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuards);
         if (processGuard.locked)
         {
             juce::String tokenLoadError;
@@ -4243,9 +4345,9 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
     juce::var stored;
     juce::uint64 snapshotEpoch = 0;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             stored = loadProtectedJson(
@@ -4255,7 +4357,7 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
         }
         else
         {
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
         }
     }
     auto* object = stored.getDynamicObject();
@@ -4294,9 +4396,9 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
                 bool currentTokenPresent = false;
                 bool snapshotStillCurrent = false;
                 {
-                    const std::lock_guard<std::mutex> storageGuard(
+                    const ScopedTone3000CredentialStorageLock storageGuard(
                         tone3000TokenStorageMutex);
-                    const ScopedTone3000CredentialProcessLock processGuard;
+                    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
                     if (processGuard.locked)
                     {
                         juce::String currentError;
@@ -4347,13 +4449,13 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
             tokenObject->setProperty("refresh_token", refreshToken);
     }
 
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000TokenStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
     {
         return makeTone3000Error(
-            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+            getTone3000CredentialLockError());
     }
     juce::String currentError;
     const auto currentStored = loadProtectedJson(
@@ -5030,6 +5132,296 @@ juce::var runNAMCatalogNativeRegressionImpl()
         "token_refresh_threads_are_process_local_single_flight",
         tokenRefreshSerializationPass,
         "Concurrent refresh workers in one process must serialize before attempting the separately configured inter-process token-rotation lock.");
+
+    // Reproduce a closing window whose status job is waiting on a live peer.
+    // The peer retains the real credential mutex until after the cancellation
+    // gate, so a passing status request cannot reach OS credential storage.
+    {
+        juce::WaitableEvent peerEntered;
+        juce::WaitableEvent releasePeer;
+        juce::WaitableEvent statusStarted;
+        std::atomic<bool> peerHolding { false };
+        std::atomic<bool> statusCancelled { false };
+        juce::var statusResult;
+        const auto originalEpoch = tone3000CredentialEpoch.load(
+            std::memory_order_acquire);
+        std::thread peer([&]
+        {
+            const ScopedTone3000CredentialStorageLock lock(
+                tone3000TokenStorageMutex, 2000);
+            peerHolding.store(lock.locked, std::memory_order_release);
+            peerEntered.signal();
+            if (lock.locked)
+                releasePeer.wait();
+            peerHolding.store(false, std::memory_order_release);
+        });
+        const bool peerReady = peerEntered.wait(2500)
+            && peerHolding.load(std::memory_order_acquire);
+        juce::ThreadPool statusPool { 1 };
+        statusPool.addJob(std::function<void()>([&]
+        {
+            const ScopedTone3000TaskCancellation cancellation(
+                &statusCancelled);
+            statusStarted.signal();
+            if (peerHolding.load(std::memory_order_acquire))
+                statusResult = makeTone3000AuthStatus();
+        }));
+        const bool statusJobStarted = statusStarted.wait(2000);
+        statusCancelled.store(true, std::memory_order_release);
+        const bool drainedWhilePeerHeld = statusPool.removeAllJobs(true, 1000)
+            && peerHolding.load(std::memory_order_acquire);
+
+        // Release the blocker even when the gate fails, then finish ownership
+        // cleanup before the result/cancellation objects leave this scope.
+        releasePeer.signal();
+        peer.join();
+        const bool statusCleanupComplete = statusPool.removeAllJobs(true, 2000);
+        const bool noCredentialPublication =
+            tone3000CredentialEpoch.load(std::memory_order_acquire)
+                == originalEpoch
+            && ! static_cast<bool>(statusResult.getProperty(
+                "authenticated", false))
+            && statusResult.getProperty("error", {}).toString()
+                == "The TONE3000 credential operation was canceled.";
+        addCheck(
+            "canceled_auth_status_pool_drains_while_live_peer_holds_credentials",
+            peerReady && statusJobStarted && drainedWhilePeerHeld
+                && statusCleanupComplete && noCredentialPublication,
+            "A canceled real auth-status job must leave its owned pool within one second while a live peer still holds the actual token mutex, without reading or changing OS credentials or the credential epoch.");
+    }
+
+    {
+        std::mutex storageMutex;
+        juce::WaitableEvent contenderStarted;
+        std::atomic<bool> contenderEntered { false };
+        auto holder = std::make_unique<ScopedTone3000CredentialStorageLock>(
+            storageMutex, 2000);
+        std::thread contender([&]
+        {
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(storageMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+        });
+        const bool started = contenderStarted.wait(2000);
+        juce::Thread::sleep(50);
+        const bool serialized = holder->locked
+            && ! contenderEntered.load(std::memory_order_acquire);
+        holder.reset();
+        contender.join();
+        addCheck(
+            "credential_single_mutex_uncanceled_waiter_remains_serialized",
+            started && serialized
+                && contenderEntered.load(std::memory_order_acquire),
+            "An uncanceled credential waiter must retain mutual exclusion and acquire the same mutex after the current owner releases it.");
+    }
+
+    {
+        std::mutex tokenMutex;
+        std::mutex pendingMutex;
+        juce::WaitableEvent contenderStarted;
+        std::atomic<bool> contenderEntered { false };
+        std::unique_lock<std::mutex> pendingHolder(pendingMutex);
+        std::thread contender([&]
+        {
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(
+                tokenMutex, pendingMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+        });
+        const bool started = contenderStarted.wait(2000);
+        // A blocked dual transaction must release its available token mutex.
+        // Retain it here while releasing the pending mutex to verify that the
+        // contender can only publish after it owns both locks together.
+        auto tokenProbe = std::make_unique<ScopedTone3000CredentialStorageLock>(
+            tokenMutex, 500);
+        const bool partialLockReleased = tokenProbe->locked
+            && ! contenderEntered.load(std::memory_order_acquire);
+        pendingHolder.unlock();
+        juce::Thread::sleep(50);
+        const bool bothRequired = ! contenderEntered.load(
+            std::memory_order_acquire);
+        tokenProbe.reset();
+        contender.join();
+        addCheck(
+            "credential_dual_mutex_wait_is_all_or_none_and_serialized",
+            started && partialLockReleased && bothRequired
+                && contenderEntered.load(std::memory_order_acquire),
+            "A dual credential transaction must retain neither partial lock while blocked, then acquire token and pending mutexes together before publication.");
+    }
+
+    {
+        std::mutex tokenMutex;
+        std::mutex pendingMutex;
+        juce::WaitableEvent contenderStarted;
+        juce::WaitableEvent contenderFinished;
+        std::atomic<bool> cancelled { false };
+        std::atomic<bool> contenderEntered { false };
+        std::unique_lock<std::mutex> pendingHolder(pendingMutex);
+        std::thread contender([&]
+        {
+            const ScopedTone3000TaskCancellation cancellation(&cancelled);
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(
+                tokenMutex, pendingMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+            contenderFinished.signal();
+        });
+        const bool started = contenderStarted.wait(2000);
+        cancelled.store(true, std::memory_order_release);
+        const bool canceledBeforePeerRelease = contenderFinished.wait(1000)
+            && pendingHolder.owns_lock()
+            && ! contenderEntered.load(std::memory_order_acquire);
+        pendingHolder.unlock();
+        contender.join();
+        addCheck(
+            "credential_dual_mutex_cancellation_does_not_wait_for_live_peer",
+            started && canceledBeforePeerRelease,
+            "Cancellation must abort a dual credential waiter while the live peer still owns its pending mutex, without acquiring or changing either credential record.");
+    }
+
+#if JUCE_LINUX
+    {
+        // A second JUCE lock object in this process cannot prove POSIX lock
+        // contention. Use a child holding the real F_SETLK lock on a unique
+        // fixture file, with no JUCE/allocator calls after fork in the child.
+        const auto lockName = "OpenStudio.CredentialRegression."
+            + juce::Uuid().toString();
+        const juce::File lockDirectory(
+            juce::File("/var/tmp").isDirectory() ? "/var/tmp" : "/tmp");
+        const auto lockFile = lockDirectory.getChildFile(lockName);
+        const auto lockPath = lockFile.getFullPathName().toUTF8();
+        const auto* childLockPath = lockPath.getAddress();
+        int readyPipe[2] { -1, -1 };
+        int releasePipe[2] { -1, -1 };
+        const bool pipesReady = ::pipe(readyPipe) == 0
+            && ::pipe(releasePipe) == 0;
+        pid_t child = pipesReady ? ::fork() : -1;
+        if (child == 0)
+        {
+            ::close(readyPipe[0]);
+            ::close(releasePipe[1]);
+            const int descriptor = ::open(childLockPath, O_CREAT | O_RDWR, 0600);
+            struct flock childLock {};
+            childLock.l_whence = SEEK_SET;
+            childLock.l_type = F_WRLCK;
+            const char ready = descriptor >= 0
+                && ::fcntl(descriptor, F_SETLK, &childLock) == 0 ? '1' : '0';
+            (void) ::write(readyPipe[1], &ready, 1);
+            char released = 0;
+            if (ready == '1')
+            {
+                while (::read(releasePipe[0], &released, 1) < 0 && errno == EINTR) {}
+            }
+            ::_exit(ready == '1' ? 0 : 1);
+        }
+
+        bool ready = false;
+        bool timedOut = false;
+        bool canceledWhileChildHeld = false;
+        bool reaped = false;
+        bool acquiredAfterPeerRelease = false;
+        std::atomic<bool> canceled { false };
+        std::atomic<bool> processAcquired { false };
+        juce::WaitableEvent contenderStarted;
+        juce::WaitableEvent contenderFinished;
+        std::thread contender;
+        if (child > 0)
+        {
+            ::close(readyPipe[1]); readyPipe[1] = -1;
+            ::close(releasePipe[0]); releasePipe[0] = -1;
+            if (::fcntl(readyPipe[0], F_SETFL, O_NONBLOCK) >= 0)
+            {
+                const auto readyDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+                char state = 0;
+                while (::read(readyPipe[0], &state, 1) != 1
+                       && juce::Time::getMillisecondCounterHiRes() < readyDeadline)
+                    juce::Thread::sleep(5);
+                ready = state == '1';
+            }
+            if (ready)
+            {
+                std::mutex storageMutex;
+                juce::InterProcessLock processLock(lockName);
+                {
+                    const ScopedTone3000CredentialStorageLock storageGuard(
+                        storageMutex, 2000);
+                    const auto waitStarted = juce::Time::getMillisecondCounterHiRes();
+                    const ScopedTone3000CredentialProcessLock processGuard(
+                        storageGuard, processLock, 100);
+                    const auto elapsed = juce::Time::getMillisecondCounterHiRes() - waitStarted;
+                    timedOut = storageGuard.locked && ! processGuard.locked
+                        && elapsed >= 100 && elapsed < 1000;
+                }
+                contender = std::thread([&]
+                {
+                    const ScopedTone3000TaskCancellation cancellation(&canceled);
+                    const ScopedTone3000CredentialStorageLock storageGuard(
+                        storageMutex, 2000);
+                    contenderStarted.signal();
+                    const ScopedTone3000CredentialProcessLock processGuard(
+                        storageGuard, processLock, 2000);
+                    processAcquired.store(processGuard.locked, std::memory_order_release);
+                    contenderFinished.signal();
+                });
+                const bool started = contenderStarted.wait(2000);
+                canceled.store(true, std::memory_order_release);
+                canceledWhileChildHeld = started && contenderFinished.wait(1000)
+                    && ! processAcquired.load(std::memory_order_acquire);
+                // EOF releases the child even on failure, before joining the
+                // contender or destroying its captured mutex/lock objects.
+                ::close(releasePipe[1]); releasePipe[1] = -1;
+                contender.join();
+            }
+            if (releasePipe[1] >= 0)
+            {
+                ::close(releasePipe[1]); releasePipe[1] = -1;
+            }
+            const auto reapDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+            while (juce::Time::getMillisecondCounterHiRes() < reapDeadline)
+            {
+                const auto waited = ::waitpid(child, nullptr, WNOHANG);
+                if (waited == child || (waited < 0 && errno == ECHILD))
+                {
+                    reaped = true;
+                    break;
+                }
+                juce::Thread::sleep(5);
+            }
+            if (! reaped)
+            {
+                ::kill(child, SIGKILL);
+                const auto killDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+                while (juce::Time::getMillisecondCounterHiRes() < killDeadline)
+                {
+                    const auto waited = ::waitpid(child, nullptr, WNOHANG);
+                    if (waited == child || (waited < 0 && errno == ECHILD))
+                    {
+                        reaped = true;
+                        break;
+                    }
+                    juce::Thread::sleep(5);
+                }
+            }
+            if (reaped && ready)
+            {
+                std::mutex storageMutex;
+                juce::InterProcessLock processLock(lockName);
+                const ScopedTone3000CredentialStorageLock storageGuard(storageMutex, 2000);
+                const ScopedTone3000CredentialProcessLock processGuard(storageGuard, processLock, 500);
+                acquiredAfterPeerRelease = processGuard.locked;
+            }
+        }
+        for (const int descriptor : { readyPipe[0], readyPipe[1], releasePipe[0], releasePipe[1] })
+            if (descriptor >= 0) ::close(descriptor);
+        const bool fixtureRemoved = (child <= 0 || reaped)
+            && (! lockFile.existsAsFile() || lockFile.deleteFile());
+        addCheck(
+            "credential_process_contention_timeout_and_cancel_use_real_child",
+            ready && timedOut && canceledWhileChildHeld && reaped
+                && acquiredAfterPeerRelease && fixtureRemoved,
+            "A uniquely named real POSIX credential lock held by another process must honor both an uncanceled bounded wait and cancellation before peer release; the owned child and lock fixture must be cleaned up.");
+    }
+#endif
 
     const bool retryAfterPass =
         std::abs(parseTone3000RetryAfterSeconds({}) - 15.0) < 0.001
@@ -8671,20 +9063,8 @@ void MainComponent::runTone3000NativeTask(
                 return;
             }
 
-            struct ScopedTaskCancellation
-            {
-                explicit ScopedTaskCancellation(
-                    const std::atomic<bool>* cancellationIn)
-                    : previous(activeTone3000TaskCancellation)
-                {
-                    activeTone3000TaskCancellation = cancellationIn;
-                }
-                ~ScopedTaskCancellation()
-                {
-                    activeTone3000TaskCancellation = previous;
-                }
-                const std::atomic<bool>* previous = nullptr;
-            } scopedCancellation(cancellation.get());
+            const ScopedTone3000TaskCancellation scopedCancellation(
+                cancellation.get());
 
             juce::var result;
             try
@@ -12032,7 +12412,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                         completion(true);
                     })
-                    .withNativeFunction ("cancelWaveformPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("cancelWaveformPreview", [
+#if JUCE_WINDOWS
+                        this
+#endif
+                    ] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 1 && args[0].isString())
                         {
 #if JUCE_WINDOWS

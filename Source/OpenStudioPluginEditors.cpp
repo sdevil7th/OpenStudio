@@ -1236,7 +1236,6 @@ namespace
     constexpr int knobW = 70;
     constexpr int knobH = 80;
     constexpr int headerH = 32;
-    constexpr int modeToggleH = 24;
     constexpr int sectionPadding = 8;
 
     void layoutKnobRow(juce::Rectangle<int>& area, std::initializer_list<juce::Component*> knobs, int height = knobH)

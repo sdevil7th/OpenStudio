@@ -691,11 +691,7 @@ juce::var NAMDelayRegression::runDelayV10AudioProbe()
     constexpr double renderSampleRate = 48000.0;
     constexpr int maximumBlockSize = 64;
     constexpr int renderSamples = 24000;
-    const auto renderMode = [
-        &configureDelay,
-        renderSampleRate,
-        maximumBlockSize,
-        renderSamples] (
+    const auto renderMode = [&configureDelay] (
         int mode,
         const std::array<int, 6>& blockPattern)
     {

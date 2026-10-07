@@ -5,8 +5,10 @@
 static constexpr double kModelSampleRate = 22050.0;
 static constexpr int    kHopSize         = 256;    // ~11.6ms at 22050 Hz
 static constexpr int    kNoteBins        = 88;     // A0 (MIDI 21) to C8 (MIDI 108)
-static constexpr int    kContourBins     = 264;    // 88 * 3 (1/3 semitone resolution)
 static constexpr int    kMidiOffset      = 21;     // MIDI note of lowest bin (A0)
+
+#if OPENSTUDIO_HAS_ONNXRUNTIME
+static constexpr int kContourBins = 264;    // 88 * 3 (1/3 semitone resolution)
 
 // Fixed waveform contract of the bundled Spotify NMP model.
 static constexpr int kWindowSamples = 43844;
@@ -16,6 +18,7 @@ static constexpr int kKeptFrames = kWindowFrames - 2 * kContextFrames;
 // Keep the stride on the 256-sample frame grid so successive windows cannot
 // accumulate a timestamp drift. Discard context predictions at both edges.
 static constexpr int kWindowStride = kKeptFrames * kHopSize;
+#endif
 
 PolyPitchDetector::PolyPitchDetector()
 {

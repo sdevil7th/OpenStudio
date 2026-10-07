@@ -26,7 +26,7 @@ struct OpenStudioBuiltInAutomationDescriptor
 inline float openStudioChorusRateFromNormalized(float normalized) noexcept
 {
     constexpr float curveK = 0.37784223634921743f;
-    const auto curveUnit = [curveK] (float value) noexcept
+    const auto curveUnit = [] (float value) noexcept
     {
         const float x = juce::jlimit(0.0f, 1.0f, value);
         return x + curveK * x * (1.0f - x);
@@ -41,7 +41,7 @@ inline float openStudioChorusRateFromNormalized(float normalized) noexcept
 inline float openStudioChorusRateToNormalized(float rateHz) noexcept
 {
     constexpr float curveK = 0.37784223634921743f;
-    const auto inverseCurveUnit = [curveK] (float value) noexcept
+    const auto inverseCurveUnit = [] (float value) noexcept
     {
         const float y = juce::jlimit(0.0f, 1.0f, value);
         const float onePlusK = 1.0f + curveK;

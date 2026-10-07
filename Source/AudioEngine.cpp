@@ -15458,7 +15458,7 @@ juce::var AudioEngine::runNAMRackRegression()
         const bool pass = inExpectedRange(clean)
             && inExpectedRange(ensemble);
 
-        auto makeRenderValue = [impulseSample] (
+        auto makeRenderValue = [] (
             const DelayRangeRender& result)
         {
             auto* object = new juce::DynamicObject();
@@ -43621,7 +43621,7 @@ juce::var AudioEngine::runNAMRackRegression()
             { 7000, 20.0f, 20000.0f, 1.0f }
         }};
 
-        const auto fillSource = [sampleRate] (
+        const auto fillSource = [] (
             juce::AudioBuffer<float>& block,
             int absoluteStart)
         {
@@ -44181,7 +44181,7 @@ juce::var AudioEngine::runNAMRackRegression()
         };
 
         auto fillControlInput =
-            [controlSampleRate, warmupSamples] (
+            [warmupSamples] (
                 juce::AudioBuffer<float>& block,
                 int absoluteStartSample,
                 const ControlCase& controlCase)
@@ -60651,7 +60651,7 @@ static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
         monoSource, sourceSamples, sourceSampleRate, monoFixtureFile);
 
     const auto writeOversizedSparseWav =
-        [&oversizedFile, sourceSampleRate] ()
+        [&oversizedFile] ()
     {
         oversizedFile.deleteFile();
         std::unique_ptr<juce::FileOutputStream> stream(

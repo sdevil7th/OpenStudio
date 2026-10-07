@@ -1389,7 +1389,7 @@ NAMPolyOctaver::SelfTestResult NAMPolyOctaver::runDeterministicSelfTest(
     const std::size_t toneAnalysisBegin = static_cast<std::size_t>(
         juce::jlimit(0, toneSampleCount - 1,
                      static_cast<int>(std::ceil(safeSampleRate * 0.5))));
-    auto renderTone = [safeSampleRate, toneSampleCount, twoPi](
+    auto renderTone = [safeSampleRate, toneSampleCount](
         double frequency,
         std::vector<float>& down,
         std::vector<float>& up,

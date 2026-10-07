@@ -269,10 +269,10 @@ private:
         }
         else if (plugin != nullptr)
         {
-            const auto* timers = static_cast<const clap_plugin_timer_support_t*>(
+            const auto* timerSupport = static_cast<const clap_plugin_timer_support_t*>(
                 plugin->get_extension(plugin, CLAP_EXT_TIMER_SUPPORT));
-            if (timers != nullptr && timers->on_timer != nullptr)
-                timers->on_timer(plugin, static_cast<clap_id>(id));
+            if (timerSupport != nullptr && timerSupport->on_timer != nullptr)
+                timerSupport->on_timer(plugin, static_cast<clap_id>(id));
         }
     }
 };

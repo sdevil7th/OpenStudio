@@ -173,6 +173,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
             APPEND PROPERTY COMPILE_OPTIONS "-Wno-stringop-overflow")
     endif()
 endif()
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+    # The pinned VST3 wrapper intentionally discards warnOnFailure's Release
+    # expression. Keep the diagnostic exception on JUCE's aggregates only.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-value")
+endif()
 if(MSVC)
     # JUCE's VST3 wrapper has two benign C4458 warnings in vendor code.
     set_source_files_properties(
@@ -242,6 +250,31 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET ysfx-private)
     set_property(SOURCE "${ysfx_SOURCE_DIR}/sources/ysfx.cpp"
         TARGET_DIRECTORY ysfx-private
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-ignored-attributes")
+endif()
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$" AND TARGET lice)
+    # Pinned WDL/SWELL supports legacy AppKit APIs, and stb's writer uses
+    # sprintf internally. Limit deprecation exceptions to their vendor sources;
+    # OpenStudio and the rest of YSFX retain normal compiler diagnostics.
+    foreach(_openstudio_swell_source IN ITEMS
+            swell-appstub.mm swell-dlg.mm swell-gdi.mm swell-kb.mm
+            swell-menu.mm swell-misc.mm swell-miscdlg.mm swell-modstub.mm
+            swell-wnd.mm swell-ini.cpp)
+        set_property(SOURCE
+            "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/${_openstudio_swell_source}"
+            TARGET_DIRECTORY lice
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-deprecated-declarations")
+    endforeach()
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/sources/lice_stb/lice_stb_write.cpp"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-deprecated-declarations")
+    # WDL records the native drag mask for compatibility without consuming it.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-dlg.mm"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-but-set-variable")
+    # WDL's key mapper uses Clang's supported variable-length array extension.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-kb.mm"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-vla-extension")
 endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)

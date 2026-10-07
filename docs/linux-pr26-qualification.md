@@ -26,9 +26,10 @@ Release-note and pinned-dependency gates remain enabled.
 
 ## Qualification status
 
-Linux qualification is complete for production source `348ad87`. The CI-only
-macOS keyboard policy correction preserves application code and all assertions;
-its hosted outcome is linked from the PR description.
+Linux installation and AI qualification below are pinned to production source
+`348ad87`. The macOS keyboard policy correction preserves application code and
+all assertions. Subsequent compiler-warning cleanup and canceled credential-worker
+repair rebuild/requalify Debug; final hosted outcomes are linked from the PR.
 
 | Area | Result and exact scope |
 | --- | --- |
@@ -227,13 +228,78 @@ only that key afterward. All 45 modal Tab/Shift-Tab assertions, background-edit
 protection and Escape checks remain. No production component, timeout, retry or
 fixture assertion changes. The four-transition local Linux probe verifies script
 execution; only the hosted macOS preflight/modal run can confirm the Apple policy.
-The linked PR records that outcome separately from this original failed run.
+On `3b5e333`, the actual hosted macOS preflight passes all four transitions, followed
+by all 194 configured browser cases, including both unchanged modal flows.
+Windows and Ubuntu also pass all 194 configured cases and 2,832 unit tests;
+Ubuntu's actual system WebKitGTK checks pass 44/44. These hosted browser runs use
+mock bridges and cover 136 Chromium plus 58 selected WebKit cases; they are
+distinct from the complete local Linux 272-case Chromium/WPE WebKit run.
+The browser-scoped all-controls macOS preference is explicit; the default
+button-skipping preference remains outside that keyboard-navigation assertion.
+
+## Compiler warnings and canceled credential workers
+
+The final macOS ARM build-log audit found 17 unique first-party AppleClang
+warnings despite passing native lifecycle: unnecessary scalar lambda captures,
+an unused platform-specific capture, unused constants and two dead editor buffers.
+The cleanup removes only redundant compile-time scalar captures and unused
+storage. The Windows callback retains its required `this` capture; ONNX-only
+constants remain available when that backend is enabled. Four focused compiler
+checks pass, including PolyPitchDetector with ONNX both enabled and disabled.
+No DSP, automation, project schema or preset changes.
+The Windows log audit additionally found nine MSVC shadowing warnings: eight
+inner report paths shadowed the startup report path, and a CLAP extension pointer
+shadowed JUCE's timer storage. Two identifier-only renames preserve every use.
+
+Pinned WDL/SWELL still uses legacy AppKit APIs and stb's internal writer uses
+`sprintf`. AppleClang deprecation exceptions apply only to those vendor source
+files in the `lice` target. One WDL drag-mask diagnostic is scoped to
+`swell-dlg.mm`; the pinned JUCE VST3 ignored-expression exception applies only to
+its vendor aggregates. The WDL key mapper's variable-length array exception is
+limited to `swell-kb.mm`, using the compatible parent
+[Clang diagnostic group](https://clang.llvm.org/docs/DiagnosticsReference.html#wvla-extension).
+First-party warning checks remain enabled. Actual hosted
+compiler logs determine the final macOS warning outcome; no successful CI exit
+alone is treated as proof of zero warnings.
+
+The fresh Debug run passed 74 lifecycle, 239 render, 294 runtime and all 40 engine
+suites, but failed its strict gate with 174 message-queue overflow assertions
+(duplicated across startup/main logs).
+Both original logs and the failing binary are retained. Two focused GDB traces
+identify the actual chain: a retired mixer's `MainComponent` destructor drains its
+canceled NAM/TONE3000 pool while an auth-status job blocks on the global credential
+mutex. Another still-live window's worker holds that mutex during a slow Secret
+Service lookup. The lookup itself is asynchronous and polls cancellation; the
+blocking lock wait cannot observe the closing window's cancellation. The UI
+thread stalls and JUCE's timer messages overflow the bounded queue.
+
+The repair makes credential single/dual mutex and process-lock waits observe
+cancellation while retaining the complete protected read/revalidate/write
+transaction. Worker pools remain owned and drained; no destructor pumps the UI,
+no worker is detached, and no queue assertion or capacity gate is weakened.
+Deterministic contention tests and the original unavailable-service native
+lifecycle determine acceptance; this failure is not waived because functional
+checks or hosted Release builds passed.
+
+The repaired Debug binary passes the original unavailable-service normal run:
+74 lifecycle, 239 render/export, 294 runtime checks and all 40 engine suites,
+with zero unexpected assertions/leaks. Its nested NAM catalog regression has
+21 passing checks, including all five new cancellation/serialization/real-child
+process-contention checks. Safe Mode separately passes all 65 lifecycle checks
+and three startup/path checks with clean diagnostics under the same environment.
+The real status-job pool drains while its live peer
+still holds the actual credential mutex; no OS credential read or epoch change
+is needed for that acceptance.
 
 ## Evidence, isolation and remaining coverage
 
 Local retained evidence lives under `output/merge-pr26/`: frontend/Python/build
 logs, `system-webkitgtk/`, `native-debug-verified/` (earlier failed diagnostics),
 `native-debug-final-348ad87/`, `native-debug-safe-348ad87/`,
+`native-debug-warning-cleanup-normal/`, `native-debug-warning-cleanup-safe/`,
+`native-debug-warning-cleanup-final-normal/`,
+`native-debug-warning-cleanup-final-safe/`, `warning-queue-gdb/`,
+`warning-queue-gdb-deep/`, `warning-queue-reproducer/`,
 `ubuntu22-final-installed-normal/`, `ubuntu22-final-installed-safe/`,
 `ubuntu22-final-installed-free-plugins/`, `ubuntu22-final-appimage-normal/`,
 `ubuntu22-final-appimage-safe/`, `native-ai-autoenv/`,
@@ -267,12 +333,12 @@ findings remain outside a claim of resolution.
 
 ## Final source and artifact record
 
-The final production source is [348ad87](https://github.com/sdevil7th/OpenStudio/commit/348ad87174612537693beb55a7e38d4f900c40ca),
+The production installation/AI evidence is pinned to [348ad87](https://github.com/sdevil7th/OpenStudio/commit/348ad87174612537693beb55a7e38d4f900c40ca),
 after integration `ca097b3` and qualification corrections `12fa3c3`/`364e7f9`.
 The full optimized 170-group effects run uses SHA256
 `1574ab966204b907bc1ab708ad3f5eeeb8f2f69f3286bf543b2d3b1bdd5b7d0f`;
 its components predate the MIDI-event ownership and stem-readiness corrections,
-which do not change effects processing. Final Debug SHA256 is
+which do not change effects processing. The qualified `348ad87` Debug SHA256 is
 `5406beeb17ab4e5f6169bc53be1db01f34ff8e305c8e33d6e776539015f3751f`;
 final Ubuntu 22.04 Release SHA256 is
 `3bc85a2681f76be7ab42333fd6630c2dc747c81df9b981ac86fa0b7a2e46bfb5`.
@@ -298,5 +364,15 @@ files and restores the exact final executable and probe. All task browsers,
 servers, displays and the guest VM are stopped; ports 5183/5184/22240/5990 are
 free. Native/browser hosted results, including the macOS keyboard-policy preflight,
 are linked from [PR 26](https://github.com/sdevil7th/OpenStudio/pull/26). The
-report is committed with that CI-only correction; the production native/frontend
-source and artifact pins above remain unchanged.
+final branch includes the keyboard-policy correction, compiler-warning cleanup
+and cancellation-aware credential-lock repair. The latter changes window teardown
+behavior; the installation/AI artifact pins above describe their prior production
+source rather than this later repair. The rebuilt Debug SHA256 is
+`c874a06fec66ce3fadbdfebf536b5f6919537bb4ce1f60b95d3c630c92d6e9e3`.
+It builds with zero warnings/errors, all 147 packaged frontend files match, and
+the copied AI probe retains the recorded source hash. Fresh normal/Safe Mode
+Debug qualification passes normal 74/74, Safe Mode 65/65, render/export
+239/239, runtime 294/294 and all 40 engine suites, with zero unexpected
+assertions/leaks. All five new credential checks pass within the 21-check NAM
+catalog fixture. Final hosted native results are retained separately and linked
+from the PR description.
