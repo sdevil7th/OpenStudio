@@ -23398,6 +23398,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 {
                     const auto namFixture_rack = std::make_unique<OpenStudioNAMRack>();
                     auto& rack = *namFixture_rack;
+                    rack.setPlayConfigDetails(channels, channels, sampleRate, blockSize);
                     rack.prepareToPlay(sampleRate, blockSize);
                     configureDrivenRack(rack);
                     int nonFiniteCount = 0;
@@ -78404,7 +78405,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
                 continue;
             }
 
-            auto* evtObj = new juce::DynamicObject();
+            juce::DynamicObject::Ptr evtObj = new juce::DynamicObject();
             evtObj->setProperty("timestamp", msg.getTimeStamp());
 
             if (msg.isNoteOn())
@@ -78448,7 +78449,7 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
                 continue;
             }
 
-            eventsArray.add(juce::var(evtObj));
+            eventsArray.add(juce::var(evtObj.get()));
         }
 
         int dominantChannel = 0;

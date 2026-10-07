@@ -129,6 +129,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEVST3StatePatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEAutomationPatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELV2IdentifierPatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELinuxBrowserPatch.cmake")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" "-DJUCE_SOURCE_DIR=${juce_SOURCE_DIR}"
@@ -156,6 +157,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # iterator paths; keep these exceptions out of first-party translation units.
     set_property(SOURCE
         "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-multichar;-Wno-unused-value")
     if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
         set_property(SOURCE

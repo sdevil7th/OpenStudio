@@ -4,6 +4,7 @@ endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEVST3StatePatch.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEAutomationPatch.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCELV2IdentifierPatch.cmake")
 
 set(JUCE_ASIO_DEVICE_SOURCE
     "${JUCE_SOURCE_DIR}/modules/juce_audio_devices/native/juce_ASIO_windows.cpp")

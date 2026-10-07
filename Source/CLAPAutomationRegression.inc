@@ -334,16 +334,24 @@ juce::var runOpenStudioCLAPAutomationRegression()
         producers[producer] = std::thread([&, producer] {
             for (size_t sequence = 0; sequence < eventsPerProducer; ++sequence)
             {
-                PluginAutomationCapturedEvent event; event.parameter = static_cast<int>(producer); event.sequence = sequence;
+                PluginAutomationCapturedEvent event;
+                event.parameter = static_cast<int>(producer);
+                // The queue owns sequence as its global accepted-write ticket.
+                // Preserve the producer-local ordinal in unused fixture data.
+                event.listenerGeneration = sequence;
                 if (concurrentQueue.push(event)) ++accepted[producer]; else ++lost[producer];
             }
             finished.fetch_add(1, std::memory_order_release);
         });
     bool concurrentPass = true;
+    uint64_t previousGlobalSequence = 0;
     const auto consume = [&](const PluginAutomationCapturedEvent& event) {
-        const size_t producer = static_cast<size_t>(event.parameter), sequence = static_cast<size_t>(event.sequence);
+        const size_t producer = static_cast<size_t>(event.parameter), sequence = static_cast<size_t>(event.listenerGeneration);
         if (producer >= producerCount || sequence >= eventsPerProducer) { concurrentPass = false; return; }
-        concurrentPass = concurrentPass && !seen[producer][sequence] && static_cast<int64_t>(sequence) > previous[producer];
+        concurrentPass = concurrentPass && !seen[producer][sequence]
+            && static_cast<int64_t>(sequence) > previous[producer]
+            && event.sequence == previousGlobalSequence + 1;
+        previousGlobalSequence = event.sequence;
         seen[producer][sequence] = true; previous[producer] = static_cast<int64_t>(sequence); ++consumed[producer];
     };
     while (finished.load(std::memory_order_acquire) != producerCount)

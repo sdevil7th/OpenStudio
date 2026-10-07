@@ -638,22 +638,19 @@ test("approved Cabinet keeps IR format and Room ambience as separate control gro
   });
 });
 
-test("Amp, Cab, EQ, EQ Boost, and Drive hardware remain inside their painted borders at every supported host size", async ({ page }) => {
-  // This matrix performs 20 full detached-editor navigations (four rack
-  // sections at five viewport sizes). Cold Windows CI workers can complete
-  // every mount and assertion correctly while exceeding Playwright's 30 s
-  // default whole-test budget.
-  test.setTimeout(90_000);
+for (const viewport of [
+  { width: 920, height: 760 },
+  { width: 1024, height: 700 },
+  { width: 1366, height: 768 },
+  { width: 1920, height: 1080 },
+  { width: 3840, height: 2160 },
+]) {
+  test(`Amp, Cab, EQ, EQ Boost, and Drive hardware remain inside their painted borders at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    // Each viewport owns four detached-editor navigations. Keep the existing
+    // budget per independent case so expensive 4K WebKit image decoding and
+    // tracing do not consume the budget for all five viewport cases.
+    test.setTimeout(90_000);
 
-  const viewports = [
-    { width: 920, height: 760 },
-    { width: 1024, height: 700 },
-    { width: 1366, height: 768 },
-    { width: 1920, height: 1080 },
-    { width: 3840, height: 2160 },
-  ];
-
-  for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await openRackSection(page, "amp");
     expect(
@@ -718,8 +715,8 @@ test("Amp, Cab, EQ, EQ Boost, and Drive hardware remain inside their painted bor
       labelOverlaps: [],
       textOverflow: [],
     });
-  }
-});
+  });
+}
 
 test("compact-height hosts keep the rack frame symmetric without losing vertical scrolling", async ({ page }) => {
   for (const height of [688, 699, 700]) {

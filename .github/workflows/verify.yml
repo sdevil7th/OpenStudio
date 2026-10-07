@@ -34,6 +34,8 @@ jobs:
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_build_process_lifecycle
+          tests.test_juce_lv2_identifier_patch
           tests.test_linux_qualification
           tests.test_linux_native_packaging
           tests.test_linux_abi
@@ -70,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14, ubuntu-24.04]
+        os: [windows-latest, macos-15, ubuntu-24.04]
     defaults:
       run:
         working-directory: frontend
@@ -334,7 +336,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: window-lifecycle-windows-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          path: |
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
       - name: Run NAM Rack deterministic regression
@@ -439,7 +443,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: window-lifecycle-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          path: |
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
   verify-linux:
