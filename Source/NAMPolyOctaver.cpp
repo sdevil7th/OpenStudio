@@ -1121,7 +1121,7 @@ NAMPolyOctaver::SelfTestResult NAMPolyOctaver::runDeterministicSelfTest(
     const double safeSampleRate = sampleRate > 1000.0
         ? sampleRate
         : 48000.0;
-    constexpr double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    static constexpr double twoPi = 2.0 * juce::MathConstants<double>::pi;
 
     {
         constexpr int sampleCount = 257;

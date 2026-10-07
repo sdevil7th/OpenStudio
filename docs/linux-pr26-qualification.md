@@ -29,7 +29,8 @@ Release-note and pinned-dependency gates remain enabled.
 Linux installation and AI qualification below are pinned to production source
 `348ad87`. The macOS keyboard policy correction preserves application code and
 all assertions. Subsequent compiler-warning cleanup and canceled credential-worker
-repair rebuild/requalify Debug; final hosted outcomes are linked from the PR.
+repair and portable constant-storage correction rebuild/requalify Debug; final
+hosted outcomes are linked from the PR.
 
 | Area | Result and exact scope |
 | --- | --- |
@@ -270,6 +271,21 @@ in the new regression fixture; the fixture now checks its return, retries
 Actual hosted compiler logs determine the final warning outcome; no successful
 CI exit alone is treated as proof of zero warnings.
 
+The `0a3191a` hosted Linux and macOS ARM builds subsequently compile with zero
+warnings and pass their native gates. Windows instead fails compilation with
+MSVC C3493 after the automatic `constexpr` captures were removed; its native
+checks do not run. Twelve C4244 warnings are cascading diagnostics from those
+failed lambdas. The repair gives exactly ten existing constants static storage
+across `BuiltInParameterSupport`, `NAMPolyOctaver`, `NAMDelayRegression` and
+`AudioEngine`. Every type and initializer is unchanged, and constant initialization
+requires no runtime guard or mutable shared state. Real delay/octaver translation
+units pass focused `-Werror` compilation. An independent compiled chorus helper
+probe compares the earlier captured implementation against the repair: 300,012
+forward and 400,011 inverse comparisons have zero bit differences. Endpoints,
+clamping, split continuity, monotonicity, finiteness and explicit inverse-error
+bounds pass. Probe setup failures are retained separately. This local GCC evidence
+does not replace the fresh hosted MSVC build linked from the PR.
+
 The fresh Debug run passed 74 lifecycle, 239 render, 294 runtime and all 40 engine
 suites, but failed its strict gate with 174 message-queue overflow assertions
 (duplicated across startup/main logs).
@@ -308,7 +324,10 @@ logs, `system-webkitgtk/`, `native-debug-verified/` (earlier failed diagnostics)
 `native-debug-warning-cleanup-final-normal/`,
 `native-debug-warning-cleanup-final-safe/`,
 `native-debug-apple-vendor-final-normal/`,
-`native-debug-apple-vendor-final-safe/`, `warning-queue-gdb/`,
+`native-debug-apple-vendor-final-safe/`,
+`native-debug-msvc-portability-final-normal/`,
+`native-debug-msvc-portability-final-safe/`, `chorus-portability-probe/`,
+`warning-queue-gdb/`,
 `warning-queue-gdb-deep/`, `warning-queue-reproducer/`,
 `ubuntu22-final-installed-normal/`, `ubuntu22-final-installed-safe/`,
 `ubuntu22-final-installed-free-plugins/`, `ubuntu22-final-appimage-normal/`,
@@ -377,8 +396,11 @@ are linked from [PR 26](https://github.com/sdevil7th/OpenStudio/pull/26). The
 final branch includes the keyboard-policy correction, compiler-warning cleanup
 and cancellation-aware credential-lock repair. The latter changes window teardown
 behavior; the installation/AI artifact pins above describe their prior production
-source rather than this later repair. The rebuilt Debug SHA256 is
-`fe64de359a30bf6e8dbb2cfe887a4cbbd87e411bf34f6da780c93b354ddef36b`.
+source rather than this later repair. The `0a3191a` Linux Debug artifact
+`fe64de359a30bf6e8dbb2cfe887a4cbbd87e411bf34f6da780c93b354ddef36b`
+passes the same strict gates but predates the MSVC portability correction. The
+rebuilt portable Debug SHA256 is
+`d8edf68be4bbf9d878ff19d6918e06ee0521aeed7277e5beb0f2ad201b5b229b`.
 It builds with zero warnings/errors, all 147 packaged frontend files match, and
 the copied AI probe retains the recorded source hash. Fresh normal/Safe Mode
 Debug qualification passes normal 74/74, Safe Mode 65/65, render/export

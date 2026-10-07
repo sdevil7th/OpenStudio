@@ -15343,7 +15343,7 @@ juce::var AudioEngine::runNAMRackRegression()
     auto runChorusDelayClampProbe = [&] ()
     {
         constexpr int totalSamples = 8192;
-        constexpr int impulseSample = 2048;
+        static constexpr int impulseSample = 2048;
         constexpr float impulseLevel = 0.50f;
         constexpr float minimumAllowedDelayMs = 6.5f;
 
@@ -43596,7 +43596,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
     auto runNAMRackGraphicEqEdgeTransitionProbe = [] ()
     {
-        constexpr double sampleRate = 48000.0;
+        static constexpr double sampleRate = 48000.0;
         constexpr int preparedBlockSize = 512;
         constexpr int totalSamples = 8192;
         struct EdgeEvent
@@ -43839,7 +43839,7 @@ juce::var AudioEngine::runNAMRackRegression()
     auto runStandaloneBuiltInControlDiscontinuityProbe =
         [&] ()
     {
-        constexpr double controlSampleRate = 48000.0;
+        static constexpr double controlSampleRate = 48000.0;
         constexpr int controlBlockSize = 16;
         constexpr double warmupSeconds = 0.22;
         constexpr double observationSeconds = 0.18;
@@ -60609,7 +60609,7 @@ struct RealtimeSafetyFixtureResult
 
 static RealtimeSafetyFixtureResult runPlaybackBoundedStreamingFixture()
 {
-    constexpr double sourceSampleRate = 48000.0;
+    static constexpr double sourceSampleRate = 48000.0;
     constexpr double resampledRate = 44100.0;
     constexpr int sourceSamples = 4096;
     constexpr int outputSamples = 1536;
