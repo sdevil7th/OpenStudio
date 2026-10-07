@@ -17933,6 +17933,11 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     const double embeddedDriveSampleRate =
         cachedSampleRate
         * static_cast<double>(embeddedDriveOversamplingFactor);
+    rackChaos.setPlayConfigDetails(
+        preparedChannels,
+        preparedChannels,
+        embeddedDriveSampleRate,
+        embeddedDriveHighRateCapacity);
     rackChaos.prepareToPlay(
         embeddedDriveSampleRate,
         embeddedDriveHighRateCapacity);

@@ -3900,6 +3900,7 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     if (selectedCase.isNotEmpty())
     {
         const std::map<juce::String, std::function<juce::var()>> focused {
+            {"plugin-discovery-identities", PluginManager::runDiscoveryIdentityRegression},
             {"low-rate-channel-safety", checkLowRateChannelSafety},
             {"automation-registry", checkFreePluginAutomationRegistry},
             {"mute-point-timing", checkTrackMutePointTiming},
@@ -3956,6 +3957,9 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     const auto lowRateChannels = checkLowRateChannelSafety();
     passed = passed && static_cast<bool>(lowRateChannels["pass"]);
     results.add(lowRateChannels);
+    const auto discoveryIdentities = PluginManager::runDiscoveryIdentityRegression();
+    passed = passed && static_cast<bool>(discoveryIdentities["pass"]);
+    results.add(discoveryIdentities);
     const auto eqContract = checkEQEditorContract();
     passed = passed && static_cast<bool>(eqContract["pass"]);
     results.add(eqContract);

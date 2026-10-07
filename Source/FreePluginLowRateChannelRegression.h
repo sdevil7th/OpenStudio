@@ -120,15 +120,20 @@ inline juce::var checkLowRateChannelSafety()
             processor->precisionDriveEnabled.store(1.0f);
             processor->chaosEnabled.store(1.0f);
             processor->chaosMix.store(1.0f);
+            processor->chaosMode.store(1.0f);
+            processor->chaosDrive.store(0.75f);
+            processor->chaosTone.store(0.55f);
+            processor->chaosWeight.store(0.50f);
             processor->prepareToPlay(48000.0, blockSize);
             juce::AudioBuffer<float> buffer(channels, blockSize);
             juce::MidiBuffer midi;
-            for (int block = 0; block < 12; ++block)
+            for (int block = 0; block < 24; ++block)
             {
                 for (int channel = 0; channel < channels; ++channel)
                     for (int sample = 0; sample < blockSize; ++sample)
                         buffer.setSample(channel, sample, static_cast<float>(
-                            0.2 * std::sin((block * blockSize + sample) * 0.071 + channel * 0.31)));
+                            (block < 12 ? 0.2 : 1.0e-7)
+                                * std::sin((block * blockSize + sample) * 0.071 + channel * 0.31)));
                 processor->processBlock(buffer, midi);
                 for (int channel = 0; channel < channels; ++channel)
                     for (int sample = 0; sample < blockSize; ++sample)

@@ -12,6 +12,24 @@ spec.loader.exec_module(qualification)
 
 
 class NativeDiagnosticsTests(unittest.TestCase):
+    def test_safe_recovery_boot_cannot_stand_in_for_normal_pitch_editing(self):
+        report = {
+            'startupMode': 'safe', 'success': True,
+            'checks': [{'id': name, 'status': 'pass'} for name in (
+                'main_frontend_ready', 'mixer_frontend_ready', 'mixer_reopened_frontend_ready',
+                'midi_frontend_ready', 'midi_reopened_frontend_ready',
+                'plugin_frontend_ready', 'plugin_reopened_frontend_ready',
+                'plugin_removed_editor_stays_closed', 'pitch_safe_cycle_1_frontend_ready',
+                'pitch_safe_cycle_2_frontend_ready')],
+        }
+        self.assertEqual(qualification.window_lifecycle_check(report, 0, True)['status'], 'pass')
+        normal = qualification.window_lifecycle_check(report, 0, False)
+        self.assertEqual(normal['status'], 'fail')
+        self.assertIn('pitch_native_relative_shift_committed', normal['missingChecks'])
+        self.assertFalse(normal['startupModeMatches'])
+        report['checks'].pop()
+        self.assertEqual(qualification.window_lifecycle_check(report, 0, True)['status'], 'fail')
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux process-group cleanup')
     def test_child_cleanup_survives_parent_exit_and_ignored_sigterm(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1353,8 +1353,9 @@ public:
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
 
-        auto logFile = pluginScanProbePath.isNotEmpty() && startupSelfTestReportPath.isNotEmpty()
-            ? juce::File(startupSelfTestReportPath.trim().unquoted()).withFileExtension("log")
+        const auto reportFile = juce::File(startupSelfTestReportPath.trim().unquoted());
+        auto logFile = startupSelfTestReportPath.isNotEmpty()
+            ? reportFile.withFileExtension(pluginScanProbePath.isNotEmpty() ? "log" : "startup.log")
             : getWritableStartupLogFile();
         startupLogger = std::make_unique<juce::FileLogger>(logFile, "OpenStudio Startup Log");
         juce::Logger::setCurrentLogger(startupLogger.get());
@@ -2592,98 +2593,123 @@ private:
             return mixerWindowManager != nullptr && mixerWindowManager->close();
         }});
 
-        const auto pitchFixture = reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-pitch.wav").getNonexistentSibling();
-        steps->push_back({ "pitch_fixture_setup", 500, [this, pitchFixture]() {
-            juce::AudioBuffer<float> samples(1, 144000);
-            for (int sample = 0; sample < samples.getNumSamples(); ++sample)
-                samples.setSample(0, sample, 0.15f * std::sin(juce::MathConstants<float>::twoPi * 220.0f * static_cast<float>(sample) / 48000.0f));
-            juce::WavAudioFormat wav;
-            std::unique_ptr<juce::OutputStream> output = pitchFixture.createOutputStream();
-            if (!output) return false;
-            auto writer = wav.createWriterFor(output, juce::AudioFormatWriterOptions()
-                .withSampleRate(48000.0).withNumChannels(1).withBitsPerSample(16));
-            if (!writer || !writer->writeFromAudioSampleBuffer(samples, 0, samples.getNumSamples())) return false;
-            writer.reset();
-            audioEngine->addTrack("window-lifecycle-pitch");
-            audioEngine->addPlaybackClip("window-lifecycle-pitch", pitchFixture.getFullPathName(), 0, 3, 0, 0, 0, 0, "window-lifecycle-pitch-clip");
-            auto* payload = new juce::DynamicObject();
-            payload->setProperty("filePath", pitchFixture.getFullPathName());
-            MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchEditorHarness", juce::var(payload));
-            return true;
-        } });
-        steps->push_back({ "pitch_analysis_hydrated", 0, [this]() {
-            const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
-            return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
-                && pitch.getProperty("contour", {}).isObject() && !static_cast<bool>(pitch.getProperty("isAnalyzing", true));
-        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
-        const int pitchCycles = juce::jlimit(2, 50, juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_CYCLES", "2").getIntValue());
-        for (int cycle = 0; cycle < pitchCycles; ++cycle)
+        if (startupMode == MainComponent::StartupMode::normal)
         {
-            const auto prefix = "pitch_cycle_" + juce::String(cycle + 1);
-            steps->push_back({ prefix + "_open", 700, [this]() {
-                return static_cast<bool>(handlePitchEditorSession("open", {}, MainComponent::WindowRole::main, {}));
+            const auto pitchFixture = reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-pitch.wav").getNonexistentSibling();
+            steps->push_back({ "pitch_fixture_setup", 500, [this, pitchFixture]() {
+                juce::AudioBuffer<float> samples(1, 144000);
+                for (int sample = 0; sample < samples.getNumSamples(); ++sample)
+                    samples.setSample(0, sample, 0.15f * std::sin(juce::MathConstants<float>::twoPi * 220.0f * static_cast<float>(sample) / 48000.0f));
+                juce::WavAudioFormat wav;
+                std::unique_ptr<juce::OutputStream> output = pitchFixture.createOutputStream();
+                if (!output) return false;
+                auto writer = wav.createWriterFor(output, juce::AudioFormatWriterOptions()
+                    .withSampleRate(48000.0).withNumChannels(1).withBitsPerSample(16));
+                if (!writer || !writer->writeFromAudioSampleBuffer(samples, 0, samples.getNumSamples())) return false;
+                writer.reset();
+                audioEngine->addTrack("window-lifecycle-pitch");
+                audioEngine->addPlaybackClip("window-lifecycle-pitch", pitchFixture.getFullPathName(), 0, 3, 0, 0, 0, 0, "window-lifecycle-pitch-clip");
+                auto* payload = new juce::DynamicObject();
+                payload->setProperty("filePath", pitchFixture.getFullPathName());
+                MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchEditorHarness", juce::var(payload));
+                return true;
             } });
-            steps->push_back({ prefix + "_interactive_ready", 0, [this]() {
-                return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady() && pitchEditorInteractive;
+            steps->push_back({ "pitch_analysis_hydrated", 0, [this]() {
+                const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
+                return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
+                    && pitch.getProperty("contour", {}).isObject() && !static_cast<bool>(pitch.getProperty("isAnalyzing", true));
             }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
-            if (cycle == 0) {
-                steps->push_back({ "pitch_edit_with_main_minimized", 500, [this]() {
-                    mainWindow->setMinimised(true);
-                    MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "relative+4");
-                    return true;
+            const int pitchCycles = juce::jlimit(2, 50, juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_CYCLES", "2").getIntValue());
+            for (int cycle = 0; cycle < pitchCycles; ++cycle)
+            {
+                const auto prefix = "pitch_cycle_" + juce::String(cycle + 1);
+                steps->push_back({ prefix + "_open", 700, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("open", {}, MainComponent::WindowRole::main, {}));
                 } });
-                steps->push_back({ "pitch_native_relative_shift_committed", 0, [this]() {
-                    const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
-                    if (!notes.isArray() || notes.size() == 0) return false;
-                    for (const auto& note : *notes.getArray())
-                        if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
-                            - static_cast<double>(note.getProperty("detectedPitch", 0)) - 4.0) > 1.0e-6) return false;
-                    return true;
+                steps->push_back({ prefix + "_interactive_ready", 0, [this]() {
+                    return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady() && pitchEditorInteractive;
                 }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
-                steps->push_back({ "pitch_native_correction_file_published", 0, [this, pitchFixture]() {
-                    const auto tracks = pitchEditorCheckpoint.getProperty("daw", {}).getProperty("tracks", {});
-                    if (!tracks.isArray() || tracks.size() == 0) return false;
-                    const auto clips = tracks[0].getProperty("clips", {});
-                    if (!clips.isArray() || clips.size() == 0) return false;
-                    const auto path = clips[0].getProperty("filePath", {}).toString();
-                    return path.isNotEmpty() && path != pitchFixture.getFullPathName() && juce::File(path).existsAsFile();
-                }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
-                steps->push_back({ "pitch_native_undo", 500, []() {
-                    MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "undo");
-                    return true;
+                if (cycle == 0) {
+                    steps->push_back({ "pitch_edit_with_main_minimized", 500, [this]() {
+                        mainWindow->setMinimised(true);
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "relative+4");
+                        return true;
+                    } });
+                    steps->push_back({ "pitch_native_relative_shift_committed", 0, [this]() {
+                        const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
+                        if (!notes.isArray() || notes.size() == 0) return false;
+                        for (const auto& note : *notes.getArray())
+                            if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
+                                - static_cast<double>(note.getProperty("detectedPitch", 0)) - 4.0) > 1.0e-6) return false;
+                        return true;
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    steps->push_back({ "pitch_native_correction_file_published", 0, [this, pitchFixture]() {
+                        const auto tracks = pitchEditorCheckpoint.getProperty("daw", {}).getProperty("tracks", {});
+                        if (!tracks.isArray() || tracks.size() == 0) return false;
+                        const auto clips = tracks[0].getProperty("clips", {});
+                        if (!clips.isArray() || clips.size() == 0) return false;
+                        const auto path = clips[0].getProperty("filePath", {}).toString();
+                        return path.isNotEmpty() && path != pitchFixture.getFullPathName() && juce::File(path).existsAsFile();
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    steps->push_back({ "pitch_native_undo", 500, []() {
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "undo");
+                        return true;
+                    } });
+                    steps->push_back({ "pitch_native_undo_preserved", 0, [this]() {
+                        const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
+                        if (!notes.isArray() || notes.size() == 0) return false;
+                        for (const auto& note : *notes.getArray())
+                            if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
+                                - static_cast<double>(note.getProperty("detectedPitch", 0))) > 1.0e-6) return false;
+                        mainWindow->setMinimised(false);
+                        return true;
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                   #if JUCE_WINDOWS
+                    addInputChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                   #endif
+                }
+                steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("close", {}, MainComponent::WindowRole::main, {}));
                 } });
-                steps->push_back({ "pitch_native_undo_preserved", 0, [this]() {
-                    const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
-                    if (!notes.isArray() || notes.size() == 0) return false;
-                    for (const auto& note : *notes.getArray())
-                        if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
-                            - static_cast<double>(note.getProperty("detectedPitch", 0))) > 1.0e-6) return false;
-                    mainWindow->setMinimised(false);
-                    return true;
-                }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
-                addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
-               #if JUCE_WINDOWS
-                addInputChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
-               #endif
             }
-            steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
-                return static_cast<bool>(handlePitchEditorSession("close", {}, MainComponent::WindowRole::main, {}));
+            steps->push_back({ "pitch_checkpoint_preserved", 0, [this]() {
+                const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
+                return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
+                    && pitch.getProperty("contour", {}).isObject() && !pitchEditorInteractive;
             } });
-        }
-        steps->push_back({ "pitch_checkpoint_preserved", 0, [this]() {
-            const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
-            return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
-                && pitch.getProperty("contour", {}).isObject() && !pitchEditorInteractive;
-        } });
 
-        steps->push_back({ "pitch_owner_loss_retains_checkpoint", 0, [this]() {
-            pitchOwnerHeartbeat = juce::Time::getMillisecondCounterHiRes() - 16000.0;
-            handlePitchEditorSession("tick", {}, MainComponent::WindowRole::main, {});
-            const bool retained = pitchRecoveryCheckpoint.getProperty("committedNotes", {}).isArray()
-                && pitchRecoveryFileOverride.existsAsFile();
-            handlePitchEditorSession("discardRecovery", {}, MainComponent::WindowRole::main, {});
-            return retained;
-        } });
+            steps->push_back({ "pitch_owner_loss_retains_checkpoint", 0, [this]() {
+                pitchOwnerHeartbeat = juce::Time::getMillisecondCounterHiRes() - 16000.0;
+                handlePitchEditorSession("tick", {}, MainComponent::WindowRole::main, {});
+                const bool retained = pitchRecoveryCheckpoint.getProperty("committedNotes", {}).isArray()
+                    && pitchRecoveryFileOverride.existsAsFile();
+                handlePitchEditorSession("discardRecovery", {}, MainComponent::WindowRole::main, {});
+                return retained;
+            } });
+
+        }
+        else
+        {
+            // Safe Mode mounts recovery UI in each browser role. It cannot
+            // acknowledge normal pitch analysis/editing session messages.
+            const int pitchCycles = juce::jlimit(2, 50, juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_CYCLES", "2").getIntValue());
+            for (int cycle = 0; cycle < pitchCycles; ++cycle)
+            {
+                const auto prefix = "pitch_safe_cycle_" + juce::String(cycle + 1);
+                steps->push_back({ prefix + "_open", 700, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("open", {}, MainComponent::WindowRole::main, {}));
+                } });
+                steps->push_back({ prefix + "_frontend_ready", 0, [this]() {
+                    return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady();
+                }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                if (cycle == 0)
+                    addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("close", {}, MainComponent::WindowRole::main, {}));
+                } });
+            }
+        }
 
         steps->push_back({ "midi_prewarm", 700, [this, midiSessionId, midiBounds]()
         {
@@ -2908,6 +2934,8 @@ private:
                 const bool success = ! hasFailedHarnessCheck(*checks);
                 auto* root = new juce::DynamicObject();
                 root->setProperty("harnessMode", "window_lifecycle");
+                root->setProperty("startupMode", startupMode == MainComponent::StartupMode::safe ? "safe" : "normal");
+                root->setProperty("pitchEditing", startupMode == MainComponent::StartupMode::safe ? "not_asserted: recovery UI only" : "objective normal-mode editing checks");
                 root->setProperty("success", success);
                 root->setProperty("checks", juce::var(*checks));
                 root->setProperty("nativeBrowserComponents", MainComponent::getBrowserInstanceCounts());

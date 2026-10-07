@@ -8,6 +8,7 @@
 namespace OpenStudioRegression
 {
 inline thread_local bool messagePumpEnabled = false;
+inline thread_local juce::uint32 lastMessagePumpMs = 0;
 }
 
 class ScopedHeadlessRegressionMessages
@@ -32,7 +33,13 @@ inline void pumpRegressionMessages()
 {
     if (! OpenStudioRegression::messagePumpEnabled)
         return;
+    const auto now = juce::Time::getMillisecondCounter();
+    if (now - OpenStudioRegression::lastMessagePumpMs < 25)
+        return;
     if (auto* manager = juce::MessageManager::getInstanceWithoutCreating();
         manager != nullptr && manager->isThisTheMessageThread())
+    {
+        OpenStudioRegression::lastMessagePumpMs = now;
         manager->runDispatchLoopUntil(1);
+    }
 }

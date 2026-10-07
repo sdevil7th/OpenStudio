@@ -41,7 +41,9 @@
         for (const int badPair : {-2, 1, 64})
             atomicRestore = !replaceTrackSends(source, replacement(true, badPair))
                 && juce::JSON::toString(getTrackSends(source)) == disabledState && atomicRestore;
-        auto duplicate = replacement(true, 2); duplicate.append(duplicate[0]);
+        auto duplicate = replacement(true, 2);
+        const juce::var duplicateEntry = duplicate[0];
+        duplicate.append(duplicateEntry);
         atomicRestore = !replaceTrackSends(source, duplicate)
             && juce::JSON::toString(getTrackSends(source)) == disabledState && atomicRestore;
         atomicRestore = replaceTrackSends(source, replacement(true, 4)) && atomicRestore;

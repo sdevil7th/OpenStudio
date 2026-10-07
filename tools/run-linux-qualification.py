@@ -76,6 +76,25 @@ def qualification_environment(source):
     return env
 
 
+def window_lifecycle_check(data, code, safe_mode):
+    required = {'main_frontend_ready', 'mixer_frontend_ready', 'mixer_reopened_frontend_ready',
+                'midi_frontend_ready', 'midi_reopened_frontend_ready',
+                'plugin_frontend_ready', 'plugin_reopened_frontend_ready',
+                'plugin_removed_editor_stays_closed'}
+    required.update({'pitch_safe_cycle_1_frontend_ready', 'pitch_safe_cycle_2_frontend_ready'}
+                    if safe_mode else
+                    {'pitch_cycle_1_interactive_ready', 'pitch_cycle_2_interactive_ready',
+                     'pitch_native_relative_shift_committed', 'pitch_native_undo_preserved'})
+    passed = {c['id'] for c in data.get('checks', []) if c.get('status') == 'pass'}
+    mode_matches = data.get('startupMode') == ('safe' if safe_mode else 'normal')
+    okay = code == 0 and data.get('success') is True and required <= passed and mode_matches
+    return {'id': 'native-window-lifecycle', 'status': 'pass' if okay else 'fail',
+            'missingChecks': sorted(required - passed), 'startupModeMatches': mode_matches,
+            'exitCode': code, 'checkCount': len(data.get('checks', [])),
+            'testScope': 'native main/detached recovery lifecycle' if safe_mode
+                         else 'native main/detached lifecycle and objective pitch editing'}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--app', required=True, type=Path)
@@ -160,15 +179,7 @@ def main():
                             *(['--ui-safe-mode'] if args.safe_mode else [])],
                            output / 'window-lifecycle.log', test_env('windows'), 180)
             data = json.loads(report.read_text()) if report.exists() else {}
-            required = {'main_frontend_ready', 'mixer_frontend_ready', 'mixer_reopened_frontend_ready',
-                        'midi_frontend_ready', 'midi_reopened_frontend_ready',
-                        'plugin_frontend_ready', 'plugin_reopened_frontend_ready',
-                        'plugin_removed_editor_stays_closed'}
-            passed = {c['id'] for c in data.get('checks', []) if c.get('status') == 'pass'}
-            okay = code == 0 and data.get('success') is True and required <= passed
-            checks.append({'id': 'native-window-lifecycle', 'status': 'pass' if okay else 'fail',
-                           'missingChecks': sorted(required - passed), 'exitCode': code,
-                           'checkCount': len(data.get('checks', [])), 'testScope': 'native main/detached lifecycle'})
+            checks.append(window_lifecycle_check(data, code, args.safe_mode))
         if args.render:
             report = output / 'render-export.json'
             report.unlink(missing_ok=True)

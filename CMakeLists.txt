@@ -149,7 +149,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # JUCE's bundled libjpeg uses intentional C switch fallthrough. Restrict the
     # vendor diagnostic exception to its amalgamation, preserving app warnings.
     set_property(SOURCE
-        "${juce_SOURCE_DIR}/modules/juce_graphics/juce_graphics_libjpg.c"
+        "${juce_SOURCE_DIR}/modules/juce_graphics/juce_graphics_libjpg_1.c"
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-implicit-fallthrough")
     # Vendor aggregates contain intentional VST FOURCCs and a Release-only
     # warnOnFailure expression. GCC 11 also warns across Lilv/HarfBuzz enum and
@@ -714,6 +714,9 @@ target_compile_definitions(OpenStudio PRIVATE
     JUCE_PLUGINHOST_VST=0
     # Required for JSFX gfx_showmenu() synchronous popup menus
     JUCE_MODAL_LOOPS_PERMITTED=1
+    # Route Debug assertions through Logger so native regression observers and
+    # narrowly scoped injected-I/O diagnostics see the actual JUCE failures.
+    $<$<CONFIG:Debug>:JUCE_LOG_ASSERTIONS=1>
     OPENSTUDIO_UPDATE_MANIFEST_URL="${OPENSTUDIO_UPDATE_MANIFEST_URL_VALUE}"
     OPENSTUDIO_UPDATE_APPCAST_URL="${OPENSTUDIO_UPDATE_APPCAST_URL_VALUE}"
     OPENSTUDIO_RELEASES_PAGE_URL="${OPENSTUDIO_RELEASES_PAGE_URL_VALUE}"

@@ -10422,6 +10422,15 @@ juce::var AudioEngine::runNAMRackRegression()
     constexpr double signalDurationSec = 0.22;
     constexpr double totalDurationSec = 0.85;
 
+    // Dispatch only between completed fixture blocks. Batch timing diagnostics
+    // retain wall time and report dispatch separately from measured DSP work.
+    const auto measureNAMDispatchMilliseconds = []
+    {
+        const double start = juce::Time::getMillisecondCounterHiRes();
+        pumpRegressionMessages();
+        return juce::Time::getMillisecondCounterHiRes() - start;
+    };
+
     struct RackProbe
     {
         float peak = 0.0f;
@@ -10648,6 +10657,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
             juce::MidiBuffer midi;
             rack.processBlock(buffer, midi);
+            pumpRegressionMessages();
 
             const int blockStart = block * fixtureBlockSize;
             probe.peak = juce::jmax(probe.peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
@@ -10706,6 +10716,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
             juce::MidiBuffer midi;
             rack.processBlock(buffer, midi);
+            pumpRegressionMessages();
 
             const int destStart = block * fixtureBlockSize;
             for (int ch = 0; ch < captured.getNumChannels(); ++ch)
@@ -17109,6 +17120,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     block.setSample(1, sample, right);
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0; channel < 2; ++channel)
                     result.audio.copyFrom(channel, cursor, block, channel, 0, count);
                 cursor += count;
@@ -17371,6 +17383,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                 * fundamental * time)));
                     }
                     rack.processBlock(block, midi);
+                    pumpRegressionMessages();
                     capture.copyFrom(0, cursor, block, 0, 0, count);
                 }
                 return capture;
@@ -17574,6 +17587,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                 * secondToneHz * time)));
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 capture.copyFrom(0, cursor, block, 0, 0, count);
             }
             return capture;
@@ -17768,6 +17782,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
 
                     rack.processBlock(block, midi);
+                    pumpRegressionMessages();
                     for (int sample = 0; sample < count; ++sample)
                     {
                         const int absoluteSample = cursor + sample;
@@ -17913,6 +17928,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         0, sample, input);
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 capture.copyFrom(
                     0,
                     cursor,
@@ -18344,6 +18360,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         source[static_cast<size_t>(cursor + sample)]);
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0; sample < count; ++sample)
                 {
                     const float output = block.getSample(0, sample);
@@ -19031,6 +19048,7 @@ juce::var AudioEngine::runNAMRackRegression()
                                             block.setSample(
                                                 0, 0, impulseAmplitude);
                                         rack.processBlock(block, midi);
+                                        pumpRegressionMessages();
                                         for (int sample = 0;
                                              sample < count;
                                              ++sample)
@@ -19670,6 +19688,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             * 997.0 * time + 0.23)));
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0; channel < 2; ++channel)
                 {
                     result.audio.copyFrom(
@@ -19886,6 +19905,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             + 0.23)));
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0; channel < 2; ++channel)
                 {
                     result.audio.copyFrom(
@@ -20362,6 +20382,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             + 0.19)));
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0; sample < count; ++sample)
                 {
                     const float output = block.getSample(0, sample);
@@ -20725,6 +20746,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 block.setSample(1, sample, input);
             }
             rack.processBlock(block, midi);
+            pumpRegressionMessages();
             for (int channel = 0; channel < 2; ++channel)
                 result.audio.copyFrom(
                     channel, cursor, block, channel, 0, blockSize);
@@ -23725,16 +23747,25 @@ juce::var AudioEngine::runNAMRackRegression()
             block, 0, benchmarkSampleRate);
         juce::MidiBuffer midi;
         for (int warmup = 0; warmup < 64; ++warmup)
+        {
             rack.processBlock(block, midi);
+            pumpRegressionMessages();
+        }
 
+        double messageDispatchMs = 0.0;
         const double startMs =
             juce::Time::getMillisecondCounterHiRes();
         for (int blockIndex = 0;
              blockIndex < benchmarkBlocks;
              ++blockIndex)
+        {
             rack.processBlock(block, midi);
-        const double elapsedMs =
+            messageDispatchMs += measureNAMDispatchMilliseconds();
+        }
+        const double wallElapsedMs =
             juce::Time::getMillisecondCounterHiRes() - startMs;
+        const double elapsedMs =
+            juce::jmax(0.0, wallElapsedMs - messageDispatchMs);
         const double audioDurationMs =
             static_cast<double>(
                 benchmarkBlocks * benchmarkBlockSize)
@@ -23754,6 +23785,9 @@ juce::var AudioEngine::runNAMRackRegression()
             "blocks", benchmarkBlocks);
         value->setProperty(
             "elapsedMs", elapsedMs);
+        value->setProperty("wallElapsedMs", wallElapsedMs);
+        value->setProperty("messageDispatchMs", messageDispatchMs);
+        value->setProperty("timingScope", "diagnostic_only: elapsedMs excludes headless message dispatch; wallElapsedMs includes it");
         value->setProperty(
             "audioDurationMs", audioDurationMs);
         value->setProperty(
@@ -23901,8 +23935,10 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 restoreSource();
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
             }
 
+            double messageDispatchMs = 0.0;
             const double startMs =
                 juce::Time::getMillisecondCounterHiRes();
             for (int blockIndex = 0;
@@ -23911,9 +23947,11 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 restoreSource();
                 rack.processBlock(block, midi);
+                messageDispatchMs += measureNAMDispatchMilliseconds();
             }
-            const double elapsedMs =
+            const double wallElapsedMs =
                 juce::Time::getMillisecondCounterHiRes() - startMs;
+            const double elapsedMs = juce::jmax(0.0, wallElapsedMs - messageDispatchMs);
             const double audioDurationMs =
                 static_cast<double>(
                     benchmarkBlocks * benchmarkBlockSize)
@@ -23927,6 +23965,9 @@ juce::var AudioEngine::runNAMRackRegression()
             auto* value = new juce::DynamicObject();
             value->setProperty("id", id);
             value->setProperty("elapsedMs", elapsedMs);
+            value->setProperty("wallElapsedMs", wallElapsedMs);
+            value->setProperty("messageDispatchMs", messageDispatchMs);
+            value->setProperty("timingScope", "diagnostic_only: elapsedMs excludes headless message dispatch; wallElapsedMs includes it");
             value->setProperty(
                 "averageCallbackMs",
                 elapsedMs
@@ -24006,7 +24047,7 @@ juce::var AudioEngine::runNAMRackRegression()
         "Machine/build-specific isolated Rack timing for neutral, Precision Drive, high-gain Distortion, Chorus, Reverb, and native Shimmer Reverb configurations at 48 kHz / 128 samples; copy/setup cost is shared with the neutral baseline.",
         namFxModuleCpuDiagnostic);
 
-    auto runReverbV4HugeCpuDiagnostic = [] ()
+    auto runReverbV4HugeCpuDiagnostic = [&] ()
     {
         constexpr double benchmarkSampleRate = 48000.0;
         constexpr double benchmarkSeconds = 2.0;
@@ -24141,6 +24182,7 @@ juce::var AudioEngine::runNAMRackRegression()
             juce::MidiBuffer midi;
             std::array<double, 3>
                 elapsedMilliseconds {};
+            juce::Array<juce::var> timingRuns;
             float outputPeak = 0.0f;
             double outputChecksum = 0.0;
 
@@ -24180,8 +24222,10 @@ juce::var AudioEngine::runNAMRackRegression()
                     restoreSource();
                     reverb.processBlock(
                         block, midi);
+                    pumpRegressionMessages();
                 }
 
+                double messageDispatchMs = 0.0;
                 const double startMs =
                     juce::Time::
                         getMillisecondCounterHiRes();
@@ -24192,12 +24236,17 @@ juce::var AudioEngine::runNAMRackRegression()
                     restoreSource();
                     reverb.processBlock(
                         block, midi);
+                    messageDispatchMs += measureNAMDispatchMilliseconds();
                 }
-                elapsedMilliseconds[
-                    static_cast<size_t>(repeat)] =
-                    juce::Time::
-                        getMillisecondCounterHiRes()
-                    - startMs;
+                const double wallElapsedMs =
+                    juce::Time::getMillisecondCounterHiRes() - startMs;
+                const double elapsedMs = juce::jmax(0.0, wallElapsedMs - messageDispatchMs);
+                elapsedMilliseconds[static_cast<size_t>(repeat)] = elapsedMs;
+                auto* timing = new juce::DynamicObject();
+                timing->setProperty("wallElapsedMs", wallElapsedMs);
+                timing->setProperty("messageDispatchMs", messageDispatchMs);
+                timing->setProperty("elapsedMs", elapsedMs);
+                timingRuns.add(juce::var(timing));
                 outputPeak = juce::jmax(
                     outputPeak,
                     peakFromFloatBuffer(
@@ -24245,6 +24294,8 @@ juce::var AudioEngine::runNAMRackRegression()
             value->setProperty(
                 "medianElapsedMs",
                 medianElapsedMs);
+            value->setProperty("timingRuns", timingRuns);
+            value->setProperty("timingScope", "diagnostic_only: elapsedMs excludes headless message dispatch; wallElapsedMs includes it");
             value->setProperty(
                 "minimumElapsedMs",
                 elapsedMilliseconds.front());
@@ -26265,6 +26316,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
 
                     reverb.processBlock(block, midi);
+                    pumpRegressionMessages();
                     for (int sample = 0;
                          sample < blockSize;
                          ++sample)
@@ -26728,6 +26780,7 @@ juce::var AudioEngine::runNAMRackRegression()
                         1, sample, right);
                 }
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 capture.copyFrom(
                     0, cursor, block, 0, 0, blockSize);
                 capture.copyFrom(
@@ -28029,6 +28082,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
 
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0;
                      channel < 2;
                      ++channel)
@@ -29778,6 +29832,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     block.setSample(1, sample, right);
                 }
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0; sample < blockSamples; ++sample)
                 {
                     const float left = block.getSample(0, sample);
@@ -30265,6 +30320,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
                 }
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0; sample < blockSamples; ++sample)
                 {
                     const size_t outputIndex =
@@ -30725,6 +30781,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
                 midi.clear();
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0; sample < samplesThisBlock; ++sample)
                 {
                     const auto outputIndex = static_cast<size_t>(
@@ -31920,6 +31977,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
                 midi.clear();
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0;
                      sample < samplesThisBlock;
                      ++sample)
@@ -33005,6 +33063,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
                 midi.clear();
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int sample = 0;
                      sample < samplesThisBlock;
                      ++sample)
@@ -33532,6 +33591,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
 
                 reverb.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0;
                      channel < 2;
                      ++channel)
@@ -34420,6 +34480,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     *blocks[caseIndex];
                 reverbs[caseIndex]->processBlock(
                     block, midi);
+                pumpRegressionMessages();
 
                 std::array<float, 2>
                     currentBlockRms {};
@@ -35146,6 +35207,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             reverb.processBlock(block, midi);
+            pumpRegressionMessages();
             processedSamples = cursor + blockSamples;
 
             float blockPeak = 0.0f;
@@ -35596,6 +35658,7 @@ juce::var AudioEngine::runNAMRackRegression()
 
             midi.clear();
             reverb.processBlock(block, midi);
+            pumpRegressionMessages();
             for (int channel = 0;
                  channel < 2;
                  ++channel)
@@ -36525,6 +36588,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     const double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
                     maxProcessMs = juce::jmax(maxProcessMs, elapsedMs);
                     totalProcessMs += elapsedMs;
+                    pumpRegressionMessages();
                     peak = juce::jmax(peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
 
                     int blockNonFinite = 0;
@@ -36753,6 +36817,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 }
 
                 handoffRack.processBlock(buffer, midi);
+                pumpRegressionMessages();
 
                 if (observeHandoffMute)
                 {
@@ -37651,6 +37716,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     2,
                     blockSamples);
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 cursor += blockSamples;
                 ++partitionIndex;
             }
@@ -38522,6 +38588,7 @@ juce::var AudioEngine::runNAMRackRegression()
         auto& timingRack = *namFixture_timingRack;
         const bool timingRackLoaded =
             configureModelRack(timingRack, false);
+        std::array<double, 2> timingWallElapsedMs {}, timingMessageDispatchMs {};
         const auto measureEightSampleProcessing = [&] (
             int routedChannels)
         {
@@ -38557,9 +38624,11 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 refillInput();
                 timingRack.processBlock(block, midi);
+                pumpRegressionMessages();
             }
 
             constexpr int iterations = 2048;
+            double messageDispatchMs = 0.0;
             const auto start =
                 juce::Time::getHighResolutionTicks();
             for (int iteration = 0;
@@ -38568,12 +38637,15 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 refillInput();
                 timingRack.processBlock(block, midi);
+                messageDispatchMs += measureNAMDispatchMilliseconds();
             }
             const auto end =
                 juce::Time::getHighResolutionTicks();
-            return 1000000.0
-                * juce::Time::highResolutionTicksToSeconds(
-                    end - start)
+            const double wallElapsedMs =
+                juce::Time::highResolutionTicksToSeconds(end - start) * 1000.0;
+            timingWallElapsedMs[static_cast<size_t>(routedChannels - 1)] = wallElapsedMs;
+            timingMessageDispatchMs[static_cast<size_t>(routedChannels - 1)] = messageDispatchMs;
+            return 1000.0 * juce::jmax(0.0, wallElapsedMs - messageDispatchMs)
                 / static_cast<double>(iterations);
         };
         const double singleMicroseconds =
@@ -38732,6 +38804,11 @@ juce::var AudioEngine::runNAMRackRegression()
             deadlineMicroseconds);
         value->setProperty(
             "timingStatus", "diagnostic_only");
+        value->setProperty("singleEightSampleWallElapsedMs", timingWallElapsedMs[0]);
+        value->setProperty("dualEightSampleWallElapsedMs", timingWallElapsedMs[1]);
+        value->setProperty("singleEightSampleMessageDispatchMs", timingMessageDispatchMs[0]);
+        value->setProperty("dualEightSampleMessageDispatchMs", timingMessageDispatchMs[1]);
+        value->setProperty("timingScope", "diagnostic_only: mean microseconds exclude headless message dispatch; wall elapsed includes it");
         value->setProperty("pass", pass);
         return juce::var(value);
     };
@@ -41482,6 +41559,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 referenceRack.processBlock(
                     referenceBlock,
                     referenceMidi);
+                pumpRegressionMessages();
 
                 for (int channel = 0;
                      channel < 2;
@@ -44404,6 +44482,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 referenceProcessor->processBlock(
                     referenceBlock,
                     referenceMidi);
+                pumpRegressionMessages();
 
                 for (int channel = 0;
                      channel < 2;
@@ -45121,6 +45200,7 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 copyInput();
                 benchmarkRack.processBlock(block, midi);
+                pumpRegressionMessages();
             }
 
             const int benchmarkBlocks = juce::jmax(
@@ -45139,6 +45219,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 juce::Time::getMillisecondCounterHiRes()
                 - copyStartMs;
 
+            double messageDispatchMs = 0.0;
             const double processStartMs =
                 juce::Time::getMillisecondCounterHiRes();
             for (int blockIndex = 0;
@@ -45147,12 +45228,13 @@ juce::var AudioEngine::runNAMRackRegression()
             {
                 copyInput();
                 benchmarkRack.processBlock(block, midi);
+                messageDispatchMs += measureNAMDispatchMilliseconds();
             }
             const double processAndCopyElapsedMs =
                 juce::Time::getMillisecondCounterHiRes()
                 - processStartMs;
             const double processElapsedMs = juce::jmax(
-                0.0, processAndCopyElapsedMs - copyElapsedMs);
+                0.0, processAndCopyElapsedMs - copyElapsedMs - messageDispatchMs);
             const double audioDurationMs =
                 static_cast<double>(benchmarkBlocks * blockSize)
                 / lowBlockBenchmarkSampleRate * 1000.0;
@@ -45184,6 +45266,7 @@ juce::var AudioEngine::runNAMRackRegression()
                             - callbackStartMs);
                 callbackProcessTimesMs.push_back(
                     callbackProcessMs);
+                pumpRegressionMessages();
                 if (callbackProcessMs > callbackBudgetMs)
                     ++overBudgetCallbacks;
             }
@@ -45273,6 +45356,9 @@ juce::var AudioEngine::runNAMRackRegression()
                 "blocks", benchmarkBlocks);
             run->setProperty(
                 "processElapsedMs", processElapsedMs);
+            run->setProperty("processWallElapsedMs", processAndCopyElapsedMs);
+            run->setProperty("messageDispatchMs", messageDispatchMs);
+            run->setProperty("timingScope", "diagnostic_only: processElapsedMs excludes input copy and message dispatch; processWallElapsedMs includes both");
             run->setProperty(
                 "averageProcessMs",
                 processElapsedMs
@@ -45481,6 +45567,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 fillContinuousInput(block, absoluteSample);
                 absoluteSample += blockSize;
                 benchmarkRack.processBlock(block, midi);
+                pumpRegressionMessages();
             }
 
             const int benchmarkBlocks = juce::jmax(
@@ -45516,6 +45603,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 totalProcessMs += processMs;
                 maxProcessMs = juce::jmax(
                     maxProcessMs, processMs);
+                pumpRegressionMessages();
                 if (processMs > callbackBudgetMs)
                     ++overBudgetCallbacks;
 
@@ -45648,6 +45736,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 juce::AudioBuffer<float> block(2, blockSize);
                 fillContinuousInput(block, writePosition);
                 benchmarkRack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0;
                      channel < capture.getNumChannels();
                      ++channel)
@@ -45865,6 +45954,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     benchmarkSampleRate);
                 absoluteSample += benchmarkBlockSize;
                 benchmarkRack.processBlock(block, midi);
+                pumpRegressionMessages();
             }
 
             std::vector<double> callbackMicroseconds(
@@ -45893,6 +45983,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 callbackMicroseconds[static_cast<size_t>(blockIndex)] =
                     callbackTimeMicroseconds;
                 elapsedMicroseconds += callbackTimeMicroseconds;
+                pumpRegressionMessages();
                 if (callbackTimeMicroseconds
                     > callbackDeadlineMicroseconds)
                 {
@@ -46524,6 +46615,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     block.setSample(1, sample, input);
                 }
                 dualRack.processBlock(block, midi);
+                pumpRegressionMessages();
                 for (int channel = 0;
                      channel < 2;
                      ++channel)
@@ -47134,6 +47226,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 buffer.clear();
                 juce::MidiBuffer midi;
                 probeRack.processBlock(buffer, midi);
+                pumpRegressionMessages();
                 probe.peak = juce::jmax(probe.peak, peakFromFloatBuffer(buffer, buffer.getNumSamples()));
                 for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
                 {
@@ -47716,6 +47809,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     }
                     sourceFrame += lowLiveBlockSize;
                     lowBufferRack.processBlock(buffer, midi);
+                    pumpRegressionMessages();
 
                     if (blockIndex < warmupBlocks)
                         continue;
@@ -52101,6 +52195,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 block.setSample(1, sample, 0.0f);
             }
             voiceRack.processBlock(block, midi);
+            pumpRegressionMessages();
             for (int sample = 0; sample < blockSamples; ++sample)
             {
                 const float left = block.getSample(0, sample);
@@ -52379,6 +52474,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     inputEnergy += static_cast<double>(input) * input;
             }
             probeRack.processBlock(block, midi);
+            pumpRegressionMessages();
             for (int sample = 0; sample < blockSamples; ++sample)
             {
                 const int position = absoluteSample + sample;
@@ -52791,6 +52887,7 @@ juce::var AudioEngine::runNAMRackRegression()
             }
 
             rack.processBlock(block, midi);
+            pumpRegressionMessages();
             for (int sample = 0; sample < blockSamples; ++sample)
             {
                 const int position = absoluteSample + sample;
@@ -53653,6 +53750,7 @@ juce::var AudioEngine::runNAMRackRegression()
                     block.setSample(1, sample, value);
                 }
                 rack.processBlock(block, midi);
+                pumpRegressionMessages();
                 cursor += blockSize;
                 ++partitionIndex;
             }
@@ -54414,6 +54512,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 block.setSample(1, sample, right);
             }
             invariantRack.processBlock(block, midi);
+            pumpRegressionMessages();
             capture.copyFrom(0, cursor, block, 0, 0, blockSamples);
             capture.copyFrom(1, cursor, block, 1, 0, blockSamples);
             cursor += blockSamples;
@@ -54541,6 +54640,7 @@ juce::var AudioEngine::runNAMRackRegression()
                 block.setSample(1, sample, value);
             }
             parallelRack.processBlock(block, midi);
+            pumpRegressionMessages();
             capture.copyFrom(0, cursor, block, 0, 0, blockSamples);
             capture.copyFrom(1, cursor, block, 1, 0, blockSamples);
             cursor += blockSamples;
