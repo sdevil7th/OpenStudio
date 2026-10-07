@@ -44,7 +44,7 @@ juce::var AudioEngine::eqMatch(const juce::String& action,const juce::var& reque
         const double rate=reader->sampleRate;
         if(offset>=reader->lengthInSamples/rate)return fail("Reference start is beyond the file");
         const auto first=static_cast<juce::int64>(offset*rate);
-        const auto length=juce::jmin<juce::int64>(reader->lengthInSamples-first,static_cast<juce::int64>(rate*4));
+        const auto length=juce::jmin(reader->lengthInSamples-first,static_cast<juce::int64>(rate*4));
         if(length<BuiltInEQMatch::fftSize)return fail("Reference section is shorter than one analysis window");
         auto capture=std::make_unique<BuiltInAlignmentCapture>();capture->prepare(rate);
         BuiltInEQMatch::Learner learner;
@@ -53,7 +53,7 @@ juce::var AudioEngine::eqMatch(const juce::String& action,const juce::var& reque
         while(position+BuiltInEQMatch::fftSize<=length)
         {
             if(keepRunning&&!keepRunning())return fail("Reference learning cancelled");
-            const int count=static_cast<int>(juce::jmin<juce::int64>(BuiltInAlignmentCapture::capacity,length-position));
+            const int count=static_cast<int>(juce::jmin(static_cast<juce::int64>(BuiltInAlignmentCapture::capacity),length-position));
             chunk.setSize(2,count,false,false,true);
             if(!reader->read(&chunk,0,count,first+position,true,true))return fail("Could not read the reference section");
             if(reader->numChannels==1)chunk.copyFrom(1,0,chunk,0,0,count);
