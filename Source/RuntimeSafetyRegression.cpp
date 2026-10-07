@@ -207,6 +207,43 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
 #endif
     {
         StemSeparator separator;
+        const auto modelDirectory = directory.getChildFile("stem-model-readiness");
+        const auto checkpoint = modelDirectory.getChildFile("BS-Roformer-SW.ckpt");
+        const auto configuration = modelDirectory.getChildFile("BS-Roformer-SW.yaml");
+        check("ai_stem_missing_directory_not_installed", !separator.hasRequiredModel(modelDirectory));
+        modelDirectory.createDirectory();
+        checkpoint.getSiblingFile("BS-Roformer-SW.ckpt.part").replaceWithText("pending weights");
+        configuration.getSiblingFile("BS-Roformer-SW.yaml.part").replaceWithText("pending configuration");
+        check("ai_stem_partial_downloads_not_installed", !separator.hasRequiredModel(modelDirectory));
+        configuration.replaceWithText("healthy configuration");
+        check("ai_stem_missing_checkpoint_not_installed", !separator.hasRequiredModel(modelDirectory));
+        checkpoint.create();
+        check("ai_stem_empty_checkpoint_not_installed", !separator.hasRequiredModel(modelDirectory));
+        checkpoint.deleteFile();
+        checkpoint.createDirectory();
+        check("ai_stem_checkpoint_directory_not_installed", !separator.hasRequiredModel(modelDirectory));
+        checkpoint.deleteRecursively();
+        checkpoint.replaceWithText("healthy weights");
+        configuration.deleteFile();
+        check("ai_stem_missing_configuration_not_installed", !separator.hasRequiredModel(modelDirectory));
+        configuration.create();
+        check("ai_stem_empty_configuration_not_installed", !separator.hasRequiredModel(modelDirectory));
+        configuration.deleteFile();
+        configuration.createDirectory();
+        check("ai_stem_configuration_directory_not_installed", !separator.hasRequiredModel(modelDirectory));
+        configuration.deleteRecursively();
+        configuration.replaceWithText("healthy configuration");
+        check("ai_stem_complete_checkpoint_and_configuration_installed", separator.hasRequiredModel(modelDirectory));
+        const auto checkpointBytes = checkpoint.loadFileAsString();
+        const auto configurationBytes = configuration.loadFileAsString();
+        check("ai_stem_readiness_does_not_modify_healthy_cache", separator.hasRequiredModel(modelDirectory)
+            && checkpoint.loadFileAsString() == checkpointBytes
+            && configuration.loadFileAsString() == configurationBytes);
+        configuration.deleteFile();
+        check("ai_stem_removed_configuration_retires_readiness", !separator.hasRequiredModel(modelDirectory));
+    }
+    {
+        StemSeparator separator;
         separator.installStartedTimeMs = juce::Time::getMillisecondCounterHiRes() - 2000.0;
         separator.aiToolsInstallWorkInProgress = true;
         separator.lastAiToolsStatus.state = "downloading_runtime";

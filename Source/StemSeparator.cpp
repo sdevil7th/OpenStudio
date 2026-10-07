@@ -10,6 +10,7 @@
 namespace
 {
 constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
+constexpr auto kStemModelConfigName = "BS-Roformer-SW.yaml";
 constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
@@ -704,7 +705,10 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
 
 bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
 {
-    return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
+    const auto checkpoint = modelsDir.getChildFile(kStemModelName);
+    const auto configuration = modelsDir.getChildFile(kStemModelConfigName);
+    return checkpoint.existsAsFile() && checkpoint.getSize() > 0
+        && configuration.existsAsFile() && configuration.getSize() > 0;
 }
 
 juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId) const
@@ -1345,7 +1349,10 @@ void StemSeparator::scheduleStatusRefresh()
         auto runtimeCapabilities = installedPython.existsAsFile()
             ? probeRuntimeCapabilities(installedPython, modelsDir, kStemModelName, "auto")
             : RuntimeCapabilities{};
-        const auto modelInstalled = runtimeCapabilities.runtimeReady && (runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir));
+        // Recheck both files after the probe; a stale cache or partial download
+        // must not override the worker's failed model-readiness result.
+        const auto modelInstalled = runtimeCapabilities.runtimeReady
+            && runtimeCapabilities.modelInstalled && hasRequiredModel(modelsDir);
         const auto runtimeInstalled = runtimeCapabilities.baseRuntimeReady || installedPython.existsAsFile();
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
         refreshedStatus.requestedModelId = previousStatus.requestedModelId;

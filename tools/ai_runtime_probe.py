@@ -530,7 +530,12 @@ def probe_runtime_capabilities(
     }
 
     if models_dir and model_name:
-        report["modelInstalled"] = is_nonempty_model_file(Path(models_dir) / model_name)
+        model_path = Path(models_dir) / model_name
+        report["modelInstalled"] = is_nonempty_model_file(model_path)
+        if model_name == "BS-Roformer-SW.ckpt":
+            report["modelInstalled"] = report["modelInstalled"] and is_nonempty_model_file(
+                model_path.with_suffix(".yaml")
+            )
 
     runtime_profiles = get_music_runtime_profiles(music_checkpoint_root)
     report["musicGenerationRuntimeProfiles"] = runtime_profiles["profiles"]

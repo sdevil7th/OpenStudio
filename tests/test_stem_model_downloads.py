@@ -85,6 +85,31 @@ class StemModelDownloadsTests(unittest.TestCase):
         with patch.object(Path, "is_file", side_effect=PermissionError("denied")):
             self.assertFalse(probe.is_nonempty_model_file(model))
 
+    def test_probe_requires_bs_roformer_configuration_regular_nonempty(self):
+        model = self.root / "BS-Roformer-SW.ckpt"
+        configuration = model.with_suffix(".yaml")
+        model.write_bytes(b"complete model fixture")
+        (self.root / "BS-Roformer-SW.yaml.part").write_bytes(b"pending configuration")
+        for kind in ("missing", "empty", "directory", "healthy", "removed"):
+            if kind == "empty":
+                configuration.touch()
+            elif kind == "directory":
+                configuration.unlink()
+                configuration.mkdir()
+            elif kind == "healthy":
+                configuration.rmdir()
+                configuration.write_bytes(b"complete configuration fixture")
+            elif kind == "removed":
+                configuration.unlink()
+            with (self.subTest(kind=kind),
+                  patch.object(probe, "resolve_music_gen_snapshot", return_value=None),
+                  patch.dict(sys.modules, {"torch": None})):
+                report = probe.probe_runtime_capabilities(
+                    models_dir=str(self.root), model_name=model.name,
+                    music_checkpoint_root=str(self.root / "ace"), acceleration_mode="cpu-only",
+                )
+                self.assertEqual(report["modelInstalled"], kind == "healthy")
+
     def test_empty_or_truncated_response_preserves_existing_file_and_removes_partial(self):
         for body, length in ((b"", None), (b"short", 100)):
             with self.subTest(body=body, length=length):
