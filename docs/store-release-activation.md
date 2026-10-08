@@ -1,8 +1,47 @@
 # Microsoft Store activation plan
 
-Status recorded: September 16, 2026.
+Status recorded: October 8, 2026.
 
-## Current status and the evidence still needed
+## October 8 readiness check for 0.1.04
+
+The GitHub repository has `OPENSTUDIO_STORE_ENABLED=true`, all three required
+`MS_STORE_*` environment secrets, and a `microsoft-store` environment restricted
+to `v*` tags. There are no required environment reviewers. A matching stable tag
+therefore starts the credentialed Store preflight and, after GitHub publication,
+the Store submission without a GitHub approval prompt. Branch-based dispatches
+do not submit to the Store.
+
+Partner Center's read-only published view confirms submission
+`1152921505701841400` is in Microsoft Store with
+`OpenStudio-0.1.3.0-x64.msix`. The overview offers **Start update**, with no pending
+update displayed. This supplies the published baseline required for the next
+`0.1.4.0` package. The published baseline's saved mode is **Don't publish this
+submission until I select Publish now**. The owner explicitly chose automatic
+publication after certification for 0.1.04. The reviewed
+`packaging/msix/release-publishing.json` opts only `v0.1.04` into API
+`targetPublishMode=Immediate`; other tags retain their saved mode. Microsoft must
+still approve certification before the new version can become public.
+
+The 0.1.04 preparation separates website dispatch from Store submission and
+checks the saved package, English notes and retained listing/settings before
+uploading or committing a retried draft. The tag's live preflight must still
+verify current API access and Store state. No new draft, upload, certification
+commit or release tag was created by this readiness check. A successful live
+upload/commit, certification and Store-installed upgrade remain unverified for
+0.1.04.
+
+The published Submission Options view also displays an **834/500** warning in
+the `runFullTrust` explanation, which includes historical release metadata.
+This read-only warning is not evidence that the published version failed
+certification. Keep capability justification separate from API
+`notesForCertification`; if Microsoft requires a new explanation, use the short
+capability-only text in the runbook. Do not mix portal edits into an API-created
+pending submission.
+
+The checkpoints below describe earlier states; they are not current activation
+requirements or evidence that automated submission has succeeded.
+
+## September 16 submission checkpoint
 
 PR #20 merged at `3aaf47e324461ca7b63848b0be10327e8305cf4f` and the
 `v0.1.03` tag points to that commit. All three platform builds and GitHub

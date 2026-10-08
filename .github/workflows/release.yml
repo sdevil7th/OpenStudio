@@ -415,7 +415,7 @@ jobs:
 
       - name: Build validated Microsoft Store package
         # Always retain a tag-built MSIX for the first manual Store submission.
-        # OPENSTUDIO_STORE_ENABLED gates only the credentialed submit-store job.
+        # OPENSTUDIO_STORE_ENABLED gates the credentialed Store jobs.
         shell: pwsh
         env:
           RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
@@ -908,6 +908,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-prepublish.json --preflight
       - name: Retain sanitized readiness evidence
         if: always()
@@ -944,8 +945,6 @@ jobs:
       RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_RELEASE_TAG }}
-      WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
-      WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -1142,6 +1141,16 @@ jobs:
             dist/release-publish-assets/OpenStudio-appcast-macos-stable.xml
             dist/release-publish-assets/OpenStudio-appcast-linux-stable.xml
 
+  publish-website:
+    name: Trigger website release publication
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
+      WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
+    steps:
       - name: Verify website dispatch configuration
         shell: bash
         env:
@@ -1202,6 +1211,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-preflight.json --preflight
 
       - name: Submit the exact release package and notes
@@ -1213,6 +1223,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-submission.json --submit
 
       - name: Retain sanitized submission status
