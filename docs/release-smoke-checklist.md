@@ -169,7 +169,7 @@ Linux Xvfb/Openbox evidence as X11/XWayland, not native Wayland qualification.
 - Verify GitHub provenance with `gh attestation verify <installer> --repo
   sdevil7th/OpenStudio` after the release workflow runs. Record RPM/repository key
   identity separately; provenance does not remove the OS local-package warning.
-- New AppImages use `OpenStudio-<version>-x86_64.AppImage`. Keep old assets and
+- AppImages use `OpenStudio-<version>-linux-x86_64.AppImage`. Keep old assets and
   update-feed contracts intact. The current host-WebKit approach still needs
   prerequisites and a separate Ubuntu 22.04 catalog/Firejail test; a native
   package pass does not establish AppImage self-containment.
