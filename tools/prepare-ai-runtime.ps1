@@ -357,10 +357,12 @@ function Get-PipInstallArguments {
 
     $onlyBinaryPackages = switch ($TargetPlatform) {
         "windows" { "diffq-fixed" }
-        "macos"   { "diffq" }
         default   { "" }
     }
 
+    # Upstream diffq has no macOS wheels for supported Python 3.11/3.12.
+    # Its declared PEP 517 build dependencies compile the Cython extension on
+    # the macOS build host; prefer wheels elsewhere without rejecting this sdist.
     $arguments = @(
         "-m",
         "pip",

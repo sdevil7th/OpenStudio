@@ -47,6 +47,7 @@ jobs:
           tests.test_ai_runtime_dependency_pins
           tests.test_release_ai_runtime
           tests.test_ai_runtime_release
+          tests.test_prepare_ai_runtime_pip
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
           tests.test_prepare_diffusers_audio
@@ -68,6 +69,48 @@ jobs:
         run: python -m pip install numpy==2.4.2 soundfile==0.13.1
       - name: Verify device budgets and model routing without GPU dependencies
         run: python -m unittest tests.test_ai_execution_policy tests.test_ai_benchmark tests.test_diffusers_memory_policy tests.test_ace_diffusers_generation tests.test_ai_generation_preflight
+
+      - name: Cache macOS standalone Python and AI wheels
+        if: runner.os == 'macOS'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/ai-runtime
+            ~/Library/Caches/pip
+          key: macos-ai-smoke-3.11.15-20260325-${{ hashFiles('tools/ai-runtime-requirements-macos.txt', 'tools/prepare-ai-runtime.ps1') }}
+
+      - name: Prepare and validate relocatable macOS AI archive
+        if: runner.os == 'macOS'
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/ai-runtime/reports | Out-Null
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP "openstudio-ai-runtime-macos-arm64-smoke"
+          ./tools/prepare-ai-runtime.ps1 `
+            -Platform macos -RuntimeRoot $runtimeRoot -Architecture arm64 `
+            -RuntimeFamily "macos-arm64" -RequirementsFile "tools/ai-runtime-requirements-macos.txt" `
+            -ExpectedRuntimeVersion "0.0.0" -StandaloneReleaseTag "20260325" `
+            -StandalonePythonVersion "3.11.15" -StandaloneFlavor "install_only" `
+            -StandaloneCacheDir ".cache/ai-runtime" `
+            -SizeReportPath "dist/ai-runtime/reports/macos-arm64-size-report.json"
+          $runtimePython = Join-Path $runtimeRoot "python/bin/python3"
+          & $runtimePython -c "import importlib.machinery, torch; from diffq import bitpack; assert any(bitpack.__file__.endswith(s) for s in importlib.machinery.EXTENSION_SUFFIXES), 'diffq.bitpack is not a compiled extension'; source=torch.arange(257, dtype=torch.int16).remainder(16); packed=bitpack.pack(source, nbits=4); restored=bitpack.unpack(packed, length=source.numel()); assert packed.dtype == torch.int64; assert restored.dtype == torch.int16; assert torch.equal(restored, source), 'diffq bitpack round trip mismatch'; print('diffq.bitpack native round trip passed')"
+          if ($LASTEXITCODE -ne 0) { throw "Compiled diffq extension round trip failed." }
+          ./tools/package-ai-runtime.ps1 `
+            -Platform macos -RuntimeRoot $runtimeRoot `
+            -OutputPath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip" `
+            -ExpectedRuntimeVersion "0.0.0" -MaxArtifactSizeBytes 2100000000
+          python -c "import sys; from pathlib import Path; sys.path.insert(0, 'tools'); from release_ai_runtime import validate_archive_metadata; validate_archive_metadata(Path('dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip'), 'macos')"
+
+      - name: Retain qualified macOS AI smoke archive
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-ai-runtime-smoke
+          path: |
+            dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip
+            dist/ai-runtime/reports/macos-arm64-size-report.json
+          if-no-files-found: error
 
   verify-input-profiles:
     name: Input profiles (${{ matrix.os }})
