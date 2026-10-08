@@ -2,9 +2,12 @@
 
 import ast
 import json
+import os
 from pathlib import Path
 import re
 import shlex
+import shutil
+import subprocess
 import unittest
 
 import yaml
@@ -112,10 +115,49 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
     def test_skipped_store_gate_only_allows_non_store_publication(self):
         results = {"preflight-store": "skipped"}
         self.assertTrue(self.job_runs("publish", results, enabled="false"))
-        self.assertTrue(self.job_runs("publish", results, ref="refs/heads/develop"))
+        self.assertFalse(self.job_runs("publish", results, ref="refs/heads/develop"))
+        self.assertTrue(self.job_runs("publish", results, enabled="false", ref="refs/heads/develop"))
         for status in ("failure", "cancelled"):
             with self.subTest(status=status):
                 self.assertFalse(self.job_runs("publish", {"preflight-store": status}, enabled="false"))
+
+    def test_enabled_store_requires_matching_tag_before_notes_or_builds(self):
+        steps = self.jobs["validate-release-notes"]["steps"]
+        guard = next(step for step in steps if step.get("name") == "Require exact release tag when Store is enabled")
+        self.assertEqual(guard["shell"], "bash")
+        self.assertLess(steps.index(guard), next(index for index, step in enumerate(steps) if step.get("id") == "notes"))
+        for enabled, expected in (("true", True), ("false", False), ("", False)):
+            with self.subTest(enabled=enabled):
+                self.assertEqual(evaluate_condition(guard["if"], {
+                    "vars.OPENSTUDIO_STORE_ENABLED": enabled,
+                }), expected)
+        for name in ("build-windows", "build-macos", "build-linux"):
+            self.assertEqual(self.jobs[name]["needs"], "validate-release-notes")
+
+        if os.name == "nt":
+            git = shutil.which("git")
+            bash = Path(git).resolve().parent.parent / "bin/bash.exe" if git else None
+            if bash is None or not bash.is_file():
+                self.skipTest("Git Bash is required to execute the release tag guard on Windows")
+        else:
+            bash = shutil.which("bash")
+            if bash is None:
+                self.skipTest("Bash is required to execute the release tag guard")
+        cases = (
+            ("refs/tags/v0.1.04", "0.1.04", True),
+            ("refs/tags/v0.1.04", "v0.1.04", True),
+            ("refs/heads/develop", "0.1.04", False),
+            ("refs/tags/v0.1.03", "0.1.04", False),
+            ("refs/tags/v0.1.04", "0.1.03", False),
+        )
+        for ref, version, expected in cases:
+            with self.subTest(ref=ref, version=version):
+                result = subprocess.run(
+                    [str(bash), "--noprofile", "--norc", "-eo", "pipefail", "-c", guard["run"]],
+                    env={**os.environ, "GITHUB_REF": ref, "VERSION": version},
+                    text=True, capture_output=True, timeout=15,
+                )
+                self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
 
     def test_each_failed_build_or_notes_gate_blocks_publication(self):
         for dependency in ("validate-release-notes", "build-windows", "build-macos", "build-linux"):

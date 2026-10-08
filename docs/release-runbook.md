@@ -629,8 +629,12 @@ Microsoft tenant or approve the initial Store listing. It stays inactive until:
    `true` before the release tag. The job's mandatory live preflight must pass
    before submission can mutate the draft. The app identity is fixed to Store ID
    `9N3MQ442VXGW` and the reserved publisher. Restrict the `microsoft-store`
-   environment to `v*` tags; branch runs cannot access its credentials. The job
-   also rejects a manually dispatched version that differs from its tag.
+   environment to `v*` tags; branch runs cannot access its credentials. When Store
+   automation is enabled, initial validation rejects branch dispatches and tag
+   refs that differ from the requested version before any build begins. Select
+   the matching existing release tag when dispatching manually. Branch dispatch
+   remains available when Store automation is disabled; an enabled Store gate
+   cannot be skipped to publish a GitHub-only release.
 5. Push the normal stable release tag. The `submit-store` job follows `publish`.
    To require a human gate, configure required reviewers on the `microsoft-store`
    environment. With no reviewer gate, submission is automatic. The existing

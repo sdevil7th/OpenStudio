@@ -8,8 +8,9 @@ The GitHub repository has `OPENSTUDIO_STORE_ENABLED=true`, all three required
 `MS_STORE_*` environment secrets, and a `microsoft-store` environment restricted
 to `v*` tags. There are no required environment reviewers. A matching stable tag
 therefore starts the credentialed Store preflight and, after GitHub publication,
-the Store submission without a GitHub approval prompt. Branch-based dispatches
-do not submit to the Store.
+the Store submission without a GitHub approval prompt. With Store automation
+enabled, branch-based dispatches and mismatched tag/version inputs are rejected
+before building, so they cannot publish a GitHub release while skipping Store.
 
 Partner Center's read-only published view confirms submission
 `1152921505701841400` is in Microsoft Store with
