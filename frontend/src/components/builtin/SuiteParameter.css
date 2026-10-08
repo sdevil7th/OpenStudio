@@ -1,0 +1,91 @@
+/* Shared parameter controls, owned by SuiteParameter. */
+.suite-select {
+  min-height: 38px;
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--color-daw-border-light);
+  border-radius: 6px;
+  background: var(--color-daw-lighter);
+  color: var(--color-daw-text);
+  padding: 6px 24px 6px 10px;
+  font: inherit;
+}
+.suite-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 11px;
+  border: 1px solid var(--color-daw-border-light);
+  border-radius: 6px;
+  background: var(--color-daw-lighter);
+  color: var(--color-daw-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.suite-button[aria-pressed=true] {
+  border-color: var(--color-daw-accent);
+  background: color-mix(in srgb,var(--color-daw-accent) 18%,var(--color-daw-panel));
+  color: #9ed0f4;
+}
+.suite-button:disabled {
+  opacity: .4;
+  cursor: default;
+}
+.suite-button:hover:not(:disabled) {
+  filter: brightness(1.2);
+}
+.suite-knob {
+  width: 56px;
+  height: 56px;
+  position: relative;
+  border-radius: 50%;
+  touch-action: none;
+  cursor: ns-resize;
+  background: conic-gradient(from 225deg,var(--suite-accent) 0deg,var(--suite-accent) var(--suite-sweep),#414141 var(--suite-sweep),#414141 270deg,transparent 270deg);
+}
+.suite-knob::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border: 5px solid var(--suite-surface);
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 25%,#404954,#202730 70%);
+  box-shadow: inset 0 1px 1px #ffffff20,0 2px 5px #0008;
+}
+/* The pivot is at 50%: 22% top + 112% of the 25%-high pointer. */
+.suite-knob::after {
+  content: '';
+  position: absolute;
+  left: calc(50% - 1px);
+  top: 22%;
+  width: 2px;
+  height: 25%;
+  background: #e0e0e0;
+  transform-origin: 1px 112%;
+  transform: rotate(var(--suite-rotation));
+}
+.suite-value {
+  appearance: textfield;
+  min-height: 32px;
+  width: 72px;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-daw-text);
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.suite-value:hover {
+  border-color: var(--color-daw-border-light);
+}
+.suite-value:focus {
+  background: var(--color-daw-dark);
+}
+.suite-value::-webkit-inner-spin-button {
+  appearance: none;
+}
+/* Short reverb windows retain the labelled numeric editor for every control. */

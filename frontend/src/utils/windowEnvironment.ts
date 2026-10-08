@@ -27,7 +27,6 @@ export const startupMode = searchParams.get("startup") ?? "normal";
 export const hostPlatform =
   searchParams.get("platform") ?? detectHostPlatform();
 export const windowChrome =
-  searchParams.get("windowChrome") ??
-  (hostPlatform === "macos" ? "native" : "custom");
+  searchParams.get("windowChrome") ?? "native";
 export const usesNativeWindowChrome = windowChrome === "native";
 export const isMacOS = hostPlatform === "macos";

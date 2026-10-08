@@ -1175,6 +1175,18 @@ export async function maybeRunPitchRegressionDriver() {
   }
 
   try {
+    // The explicit native frontend fixture reuses job loading/reporting only;
+    // it does not analyze, modify, or render pitch-editor clip audio.
+    if (job.jobType === "automation_audio") {
+      const { runAutomationAudioRegression } = await import("./automationAudioRegressionDriver");
+      await reportRegressionResult(await runAutomationAudioRegression(job));
+      return;
+    }
+    if (job.jobType === "automation_editor_flush") {
+      const { runAutomationEditorFlushRegression } = await import("./automationEditorRegressionDriver");
+      await reportRegressionResult(await runAutomationEditorFlushRegression(job));
+      return;
+    }
     const result = job.jobType === "analysis"
       ? await runAnalysisRegressionJob(job)
       : job.jobType === "scrub"

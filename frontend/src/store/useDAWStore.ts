@@ -1,3 +1,5 @@
+import type { FXStageSlotState } from "../services/fxStageState";
+import { type DitherType } from "../utils/renderDither";
 import { create } from "zustand";
 import { getProjectEpoch } from "../utils/projectLifetime";
 import { projectNativeQueue } from "../utils/projectNativeQueue";
@@ -25,6 +27,8 @@ import { mixerActions } from "./actions/mixer";
 import { timelineActions } from "./actions/timeline";
 import { trackActions } from "./actions/tracks";
 import { automationActions } from "./actions/automation";
+import { automationTrimActions } from "./actions/automationTrim";
+import { automationPreviewActions } from "./actions/automationPreview";
 import { renderingActions } from "./actions/rendering";
 import { projectActions } from "./actions/project";
 import { midiActions } from "./actions/midi";
@@ -486,7 +490,7 @@ export interface MIDIRangeClipboard {
 // Supports built-in params plus plugin params like "plugin_0_3" (fxIndex_paramIndex)
 export type AutomationParam = "volume" | "pan" | "mute" | (string & {});
 export type AutomationModeType = "off" | "read" | "write" | "touch" | "latch";
-export type AutomationWriteBehavior = "touch" | "latch" | "overwrite";
+export type AutomationWriteBehavior = "touch" | "latch" | "overwrite" | "touch-latch" | "cross-over";
 export const AUTOMATION_LANE_HEIGHT = 60; // px per visible automation lane
 export const MIN_AUTOMATION_LANE_HEIGHT = 24;
 export const MAX_AUTOMATION_LANE_HEIGHT = 240;
@@ -504,6 +508,9 @@ export interface AutomationPoint {
 
 export interface AutomationLane {
   id: string;
+  label?: string;
+  metadata?: import("./automationParams").AutomationParameterMetadata;
+  unavailableParameter?: { param: string; pluginPath: string; fxKey?: string; safe?: boolean; parameterOnly?: boolean; manualRecoveryRequired?: boolean };
   param: AutomationParam;
   points: AutomationPoint[];
   visible: boolean;
@@ -520,6 +527,33 @@ export interface AutomationSuspendSnapshot {
   automationWriteEnabled?: boolean;
   automationEnabled?: boolean;
   lanes: Record<string, { visible: boolean; armed: boolean; mode: AutomationModeType; readEnabled?: boolean }>;
+}
+
+export interface AutomationPreviewValue {
+  laneId: string;
+  param: string;
+  label: string;
+  value: number;
+  originalValue: number;
+  revision: number;
+  pending: boolean;
+  beforePoints: string;
+  metadataKey: string;
+}
+export interface AutomationPreviewSession {
+  id: string;
+  trackId: string;
+  projectEpoch: number;
+  phase: "active" | "punching" | "writing" | "restoring";
+  values: Record<string, AutomationPreviewValue>;
+}
+
+export interface AutomationJoinSession {
+  projectEpoch:number;
+  time:number;
+  prepared?:boolean;
+  preparing?:boolean;
+  entries:Array<{trackId:string;laneId:string;param:string;value:number;metadataKey:string;pointsKey:string;punched:boolean}>;
 }
 
 /** Runtime editor ownership for a track or master automation lane/point. */
@@ -799,6 +833,7 @@ export interface Track {
   // States
   muted: boolean;
   soloed: boolean;
+  soloSafe?: boolean;
   armed: boolean;
   monitorEnabled: boolean;
   recordSafe: boolean; // Phase 3.3 — prevents arming
@@ -833,9 +868,13 @@ export interface Track {
 
   // Automation
   automationLanes: AutomationLane[];
+  automationSafeParams?: string[];
+  unavailableFX?: import("../utils/automationRecovery").UnavailableFXSlot[];
   showAutomation: boolean;
   automationReadEnabled: boolean;
   automationWriteEnabled: boolean;
+  automationTrimWriteEnabled?: boolean;
+  trimVolumeDB?: number;
   automationEnabled: boolean;
   suspendedAutomationState?: AutomationSuspendSnapshot | null;
 
@@ -860,6 +899,8 @@ export interface Track {
     enabled: boolean;
     preFader: boolean;
     phaseInvert: boolean;
+    sourceChannel?: number; // Zero-based start of a stereo plugin-output pair; old projects use 0.
+    trimDB?: number;
   }>;
 
   // Routing (Track IO)
@@ -871,6 +912,7 @@ export interface Track {
   playbackOffsetMs: number;
   trackChannelCount: number;     // 1-8
   midiOutputDevice: string;
+  midiOutputMergeKeys?: boolean;
 
   // Visual
   icon?: string; // Track icon ID (microphone, guitar, bass-guitar, drums, keys, bus, master, midi, folder, piano)
@@ -1250,7 +1292,7 @@ export interface RenderJob {
     regions?: Region[];
     selectedRegionIds?: string[];
     razorEdits?: Array<{ trackId: string; start: number; end: number }>;
-    ditherType?: "none" | "tpdf" | "shaped";
+    ditherType?: DitherType;
     secondaryOutputEnabled?: boolean;
     secondaryOutputFormat?: string;
     secondaryOutputBitDepth?: number;
@@ -1263,7 +1305,7 @@ export type RenderSource = "master" | "selected_tracks" | "stems" | "selected_it
 export type RenderBounds = "entire" | "custom" | "time_selection" | "project_regions" | "selected_regions";
 export type AudioFormat = "wav" | "aiff" | "flac" | "mp3" | "ogg" | "raw";
 export type SampleRate = 44100 | 48000 | 88200 | 96000 | 192000;
-export type BitDepth = 16 | 24 | 32;
+export type BitDepth = 16 | 18 | 20 | 22 | 24 | 32;
 
 export interface RenderDialogOptions {
   source: RenderSource;
@@ -1312,7 +1354,7 @@ export interface ProjectTemplate {
 // Store State Interface
 // ============================================
 
-interface DAWState {
+export interface DAWState {
   // Tracks
   tracks: Track[];
   selectedTrackId: string | null; // Legacy single selection
@@ -1374,12 +1416,50 @@ interface DAWState {
   isMasterMuted: boolean;
   masterMono: boolean;
   masterAutomationLanes: AutomationLane[];
+  lastTouchedAutomationParameter?: { trackId: string; param: string; name?: string; value?: number } | null;
   showMasterAutomation: boolean;
   masterAutomationReadEnabled: boolean;
   masterAutomationWriteEnabled: boolean;
+  masterAutomationTrimWriteEnabled?: boolean;
+  masterTrimVolumeDB?: number;
+  automationTrimLiveValues?: Record<string, number>;
+  automationPreviewSession?: AutomationPreviewSession | null;
+  automationCapturedPreview?: AutomationPreviewSession | null;
+  beginAutomationPreview: (trackId: string, laneId: string) => Promise<boolean>;
+  setAutomationPreviewValue: (trackId: string, param: string, value: number) => Promise<boolean>;
+  captureAutomationPreview: () => Promise<boolean>;
+  cancelAutomationPreview: () => Promise<boolean>;
+  discardAutomationPreviewCapture: () => void;
+  commitAutomationPreview: () => Promise<boolean>;
+  punchAutomationPreview: () => Promise<boolean>;
+  writeAutomationToBoundary: (boundary: "start" | "end") => boolean;
+  automationAutoJoinEnabled?:boolean;
+  automationJoinSession?:AutomationJoinSession|null;
+  setAutomationAutoJoin: (enabled:boolean) => void;
+  prepareAutomationAutoJoin: (startTime:number) => Promise<boolean>;
+  setAutomationTrimWrite: (trackId: string, enabled: boolean) => void;
+  beginAutomationTrimEdit: (trackId: string, param?: string) => void;
+  setAutomationTrimValue: (trackId: string, db: number, param?: string) => void;
+  commitAutomationTrimEdit: (trackId: string, param?: string) => void;
+  restoreAutomationTrimLiveValues: () => void;
+  freezeAutomationTrim: (trackId: string, param?: string, options?: { undoable?: boolean; disarm?: boolean }) => boolean;
+  setAutomationTrimCoalesce: (policy: "manual" | "after-pass" | "on-exit") => void;
   masterAutomationEnabled: boolean;
   suspendedMasterAutomationState: AutomationSuspendSnapshot | null;
   automationWriteBehavior: AutomationWriteBehavior;
+  masterAutomationSafeParams?: string[];
+  masterAutomationSafeParameters?: import("../utils/automationRecovery").SavedSafeParameter[];
+  unavailableFXStages?: Partial<Record<"master" | "monitor", FXStageSlotState[]>>;
+  retryUnavailableFXStage: (chain: "master" | "monitor") => Promise<boolean>;
+  automationTouchReturnSeconds?: number;
+  automationTrimCoalesce?: "manual" | "after-pass" | "on-exit";
+  automationRecoveryBusy?: boolean;
+  retryUnavailableFX: (trackId: string, key: string) => Promise<boolean>;
+  refreshPluginAutomationParameters: (trackId: string, prefix: string, parameters: import("../services/NativeBridge").PluginParameterInfo[], pluginPath: string) => void;
+  retirePluginAutomationReferences: (trackId: string, param: string) => void;
+  setPluginAutomationSafe: (trackId: string, params: string[], safe: boolean) => void;
+  setAutomationTouchReturnSeconds: (seconds: number) => void;
+  applyAutomationEnvelopeEdit: (trackId: string, laneId: string, points: { id?: string; time: number; value: number }[], description: string) => boolean;
   selectedAutomationTarget: AutomationSelectionTarget | null;
 
   // Meter state — stored separately from `tracks` so that 10Hz meter updates
@@ -1451,6 +1531,7 @@ interface DAWState {
   // AI Tools Setup Modal
   showAiToolsSetup: boolean;
   aiToolsSetupRequestedFeature: AiFeatureId | null;
+  aiToolsSetupRequestedModelId: AiMusicModelId | null;
 
   // Stem Separation Modal
   showStemSeparation: boolean;
@@ -1545,6 +1626,7 @@ interface DAWState {
 
   // Project Loading
   isProjectLoading: boolean;
+  projectRestoreError?: string;
   projectLoadingMessage: string;
 
   // Toast notifications
@@ -1600,9 +1682,9 @@ interface DAWState {
   // Phase 9: Audio Engine Enhancements
   showDynamicSplit: boolean;
   dynamicSplitClipId: string | null;
-  metronomeClickPath: string; // Custom click sound path (empty = default)
-  metronomeAccentPath: string; // Custom accent sound path (empty = default)
-  ditherType: "none" | "tpdf" | "shaped"; // Render dither setting
+  metronomeClickPath: string; // Prepared local sample or builtin:<id>; empty = original
+  metronomeAccentPath: string;
+  ditherType: DitherType; // Render dither setting
   resampleQuality: "fast" | "good" | "best"; // Render resample quality
 
   // Phase 10: Render Pipeline Expansion
@@ -1762,7 +1844,7 @@ interface DAWState {
 // Store Actions Interface
 // ============================================
 
-interface DAWActions {
+export interface DAWActions {
   // Toast
   showToast: (message: string, type?: "success" | "error" | "info") => void;
 
@@ -1937,6 +2019,7 @@ interface DAWActions {
   setTrackPan: (id: string, pan: number) => Promise<void>;
   toggleTrackMute: (id: string) => Promise<void>;
   toggleTrackSolo: (id: string) => Promise<void>;
+  toggleTrackSoloSafe: (id: string) => void;
   toggleTrackArmed: (id: string) => Promise<void>;
   toggleTrackFXBypass: (id: string) => Promise<void>;
   toggleTrackMonitor: (id: string) => Promise<void>;
@@ -1972,7 +2055,7 @@ interface DAWActions {
   cancelClipVolumeEdit: (clipId: string) => boolean;
 
   // FX undo/redo actions
-  addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track") => Promise<boolean>;
+  addTrackFXWithUndo: (trackId: string, pluginPath: string, chainType: "input" | "track", pluginType?: "jsfx") => Promise<boolean>;
   addTrackBuiltInFXWithUndo: (trackId: string, effectName: string, chainType: "input" | "track") => Promise<boolean>;
   reorderTrackFXWithUndo: (
     trackId: string,
@@ -1982,6 +2065,7 @@ interface DAWActions {
   ) => Promise<boolean>;
   removeTrackFXWithUndo: (trackId: string, fxIndex: number, chainType: "input" | "track") => Promise<boolean>;
   removeMasterFXWithUndo: (fxIndex: number) => Promise<boolean>;
+  setSidechainSourceWithUndo: (trackId: string, fxIndex: number, sourceTrackId: string) => Promise<boolean>;
   setFXSlotBypassedWithUndo: (
     trackId: string,
     fxIndex: number,
@@ -2032,6 +2116,7 @@ interface DAWActions {
   setLoopToSelection: () => void;
   toggleMetronome: () => void;
   setMetronomePracticeEnabled: (enabled: boolean) => Promise<boolean>;
+  toggleMetronomePractice: () => Promise<boolean>;
   setMetronomeVolume: (volume: number) => Promise<void>;
   setMetronomeAccentBeats: (accentBeats: boolean[]) => void;
   setTimeSignature: (numerator: number, denominator: number) => void;
@@ -2055,7 +2140,7 @@ interface DAWActions {
   setMasterAutomationWrite: (enabled: boolean) => void;
   toggleMasterAutomationWrite: () => void;
   toggleMasterAutomationEnabled: () => void;
-  addMasterAutomationLane: (param: string) => string | null;
+  addMasterAutomationLane: (param: string, label?: string, metadata?: AutomationLane["metadata"], options?: import("./automationParams").AutomationLaneCreationOptions) => string | null;
   toggleMasterAutomationLaneVisibility: (laneId: string) => void;
   setMasterAutomationLaneRead: (laneId: string, enabled: boolean) => void;
   toggleMasterAutomationLaneRead: (laneId: string) => void;
@@ -2251,7 +2336,7 @@ interface DAWActions {
   setTrackAutomationWrite: (trackId: string, enabled: boolean) => void;
   toggleTrackAutomationWrite: (trackId: string) => void;
   toggleTrackAutomationEnabled: (trackId: string) => void;
-  addAutomationLane: (trackId: string, param: AutomationParam, label?: string) => string | null;
+  addAutomationLane: (trackId: string, param: AutomationParam, label?: string, metadata?: AutomationLane["metadata"], options?: import("./automationParams").AutomationLaneCreationOptions) => string | null;
   addAutomationPoint: (trackId: string, laneId: string, time: number, value: number) => void;
   removeAutomationPoint: (trackId: string, laneId: string, pointIndex: number) => void;
   moveAutomationPoint: (trackId: string, laneId: string, pointIndex: number, time: number, value: number) => void;
@@ -2280,11 +2365,11 @@ interface DAWActions {
   disarmAllAutomationLanes: (trackId: string) => void;
   showAllActiveEnvelopes: (trackId: string) => void;
   hideAllEnvelopes: (trackId: string) => void;
-  recordAutomationWriteTick: (nowMs?: number) => void;
-  endAutomationWriteSession: () => void;
-  setAutomationWriteValue: (trackId: string, param: string, value: number) => void;
-  beginAutomationParamTouch: (trackId: string, param: string) => void;
-  endAutomationParamTouch: (trackId: string, param: string) => void;
+  recordAutomationWriteTick: (nowMs?: number, capture?: { trackId: string; param: string; time: number; allowStopped?: boolean; deferSync?: boolean }) => void;
+  endAutomationWriteSession: (stopTime?: number) => void;
+  setAutomationWriteValue: (trackId: string, param: string, value: number, capture?: { time: number; allowStopped?: boolean }) => void;
+  beginAutomationParamTouch: (trackId: string, param: string, capture?: { time: number; allowStopped?: boolean; initialValue?: number }) => void;
+  endAutomationParamTouch: (trackId: string, param: string, capture?: { time: number; allowStopped?: boolean }) => void;
 
   // Strip Silence (Phase 3.12)
   stripSilence: (clipId: string, thresholdDb: number, minSilenceMs: number,
@@ -2342,7 +2427,7 @@ interface DAWActions {
   toggleGettingStarted: () => void;
   togglePreferences: () => void;
   toggleScriptConsole: () => void;
-  openAiToolsSetup: (requestedFeature?: AiFeatureId) => void;
+  openAiToolsSetup: (requestedFeature?: AiFeatureId, modelId?: AiMusicModelId) => void;
   closeAiToolsSetup: () => void;
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) => void;
   closeStemSeparation: () => void;
@@ -2456,7 +2541,7 @@ interface DAWActions {
   setMetronomeClickSound: (filePath: string) => Promise<boolean>;
   setMetronomeAccentSound: (filePath: string) => Promise<boolean>;
   resetMetronomeSounds: () => Promise<boolean>;
-  setDitherType: (type: "none" | "tpdf" | "shaped") => void;
+  setDitherType: (type: DitherType) => void;
   setResampleQuality: (quality: "fast" | "good" | "best") => void;
 
   // Phase 11: Send/Bus Routing
@@ -2471,6 +2556,7 @@ interface DAWActions {
   setTrackSendEnabled: (sourceTrackId: string, sendIndex: number, enabled: boolean) => Promise<void>;
   setTrackSendPreFader: (sourceTrackId: string, sendIndex: number, preFader: boolean) => Promise<void>;
   setTrackSendPhaseInvert: (sourceTrackId: string, sendIndex: number, invert: boolean) => Promise<void>;
+  setTrackSendSourceChannel: (sourceTrackId: string, sendIndex: number, sourceChannel: number) => Promise<void>;
   setTrackPhaseInvert: (trackId: string, invert: boolean) => Promise<void>;
   beginTrackStereoWidthEdit: (trackId: string) => void;
   setTrackStereoWidth: (trackId: string, widthPercent: number) => Promise<void>;
@@ -2480,6 +2566,7 @@ interface DAWActions {
   setTrackPlaybackOffset: (trackId: string, offsetMs: number) => Promise<void>;
   setTrackChannelCount: (trackId: string, numChannels: number) => Promise<void>;
   setTrackMIDIOutput: (trackId: string, deviceName: string) => Promise<void>;
+  setTrackMIDIOutputMergeKeys: (trackId: string, merge: boolean) => Promise<void>;
 
   // Phase 11B: Routing Matrix
   toggleRoutingMatrix: () => void;
@@ -2860,6 +2947,7 @@ export const createDefaultTrack = (
   pan: 0,
   muted: false,
   soloed: false,
+  soloSafe: false,
   armed: false,
   recordSafe: false,
   monitorEnabled: false,
@@ -2889,6 +2977,8 @@ export const createDefaultTrack = (
   showAutomation: false,
   automationReadEnabled: false,
   automationWriteEnabled: false,
+  automationTrimWriteEnabled: false,
+  trimVolumeDB: 0,
   automationEnabled: false,
   suspendedAutomationState: null,
   frozen: false,
@@ -2903,6 +2993,7 @@ export const createDefaultTrack = (
   playbackOffsetMs: 0,
   trackChannelCount: 2,
   midiOutputDevice: "",
+  midiOutputMergeKeys: false,
   aiMusicModelId: DEFAULT_AI_MUSIC_MODEL_ID,
   aiWorkflow: "text-to-music",
   aiWorkflowParams: getDefaultWorkflowParams("text-to-music", DEFAULT_AI_MUSIC_MODEL_ID),
@@ -3067,11 +3158,21 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     showMasterAutomation: false,
     masterAutomationReadEnabled: false,
     masterAutomationWriteEnabled: false,
+    masterAutomationTrimWriteEnabled: false,
+    masterTrimVolumeDB: 0,
+    automationTrimLiveValues: {},
+    automationPreviewSession: null,
+    automationCapturedPreview: null,
     masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
     automationWriteBehavior: "touch",
     selectedAutomationTarget: null,
     projectPath: null,
+    automationRecoveryBusy: false,
+    unavailableFXStages: {},
+    masterAutomationSafeParams: [],
+    masterAutomationSafeParameters: [],
+    projectRestoreError: "",
     isModified: false,
     projectName: "Untitled Project",
     projectPersistentId: crypto.randomUUID(),
@@ -3319,11 +3420,21 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showMasterAutomation: false,
     masterAutomationReadEnabled: false,
     masterAutomationWriteEnabled: false,
+    masterAutomationTrimWriteEnabled: false,
+    masterTrimVolumeDB: 0,
+    automationTrimLiveValues: {},
+    automationPreviewSession: null,
+    automationCapturedPreview: null,
     masterAutomationEnabled: false,
     suspendedMasterAutomationState: null,
     automationWriteBehavior: "touch",
     selectedAutomationTarget: null,
     meterLevels: {},
+    automationRecoveryBusy: false,
+    unavailableFXStages: {},
+    masterAutomationSafeParams: [],
+    masterAutomationSafeParameters: [],
+    projectRestoreError: "",
     midiInputLevels: {},
     peakLevels: {},
     clippingStates: {},
@@ -3374,6 +3485,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     showScriptConsole: false,
     showAiToolsSetup: false,
     aiToolsSetupRequestedFeature: null,
+    aiToolsSetupRequestedModelId: null,
     showStemSeparation: false,
     stemSepTrackId: null,
     stemSepClipId: null,
@@ -5958,6 +6070,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...timelineActions(set, get),
     ...trackActions(set, get),
     ...automationActions(set, get),
+    ...automationTrimActions(set, get),
+    ...automationPreviewActions(set, get),
     ...renderingActions(set, get),
     ...projectActions(set, get),
     ...routingActions(set, get),

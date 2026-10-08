@@ -1,3 +1,4 @@
+import { activeDitherType, type DitherType } from "../../utils/renderDither";
 import { nativeBridge } from "../../services/NativeBridge";
 import { joinNativePath } from "../../utils/nativePath";
 import { prepareForManualRender } from "../../utils/renderPreparation";
@@ -26,7 +27,7 @@ type RenderQueueState = {
   selectedRegionIds: string[];
   razorEdits: RazorReference[];
   syncClipsWithBackend: () => Promise<void>;
-  ditherType: "none" | "tpdf" | "shaped";
+  ditherType: DitherType;
   secondaryOutputFormat: string;
   projectName: string;
   showRenderQueue: boolean;
@@ -234,7 +235,7 @@ export const renderQueueActions = (set: SetFn, get: GetFn) => ({
           const success = shouldDither
             ? await nativeBridge.renderProjectWithDither({
                 ...params,
-                ditherType: (options.ditherType ?? currentState.ditherType) === "shaped" ? "shaped" : "tpdf",
+                ditherType: activeDitherType(options.ditherType ?? currentState.ditherType),
               })
             : await nativeBridge.renderProject(params);
           if (!success) {

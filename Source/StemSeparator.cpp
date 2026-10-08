@@ -1,4 +1,7 @@
+#include "RuntimeLocation.h"
 #include "StemSeparator.h"
+#include "AIManagedRuntime.h"
+#include "AIHardwareProbe.h"
 
 #if JUCE_MAC || JUCE_LINUX
  #include <sys/stat.h>
@@ -7,6 +10,7 @@
 namespace
 {
 constexpr auto kStemModelName = "BS-Roformer-SW.ckpt";
+constexpr auto kStemModelConfigName = "BS-Roformer-SW.yaml";
 constexpr auto kPinnedMusicGenerationModelId = "ace-step-v15-xl-turbo";
 constexpr auto kPinnedMusicGenerationModelRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
 constexpr auto kPinnedMusicGenerationSharedRepoId = "ACE-Step/acestep-v15-xl-turbo-diffusers";
@@ -50,11 +54,6 @@ bool isDiffusersSetupFailure(const StemSeparator::AiToolsStatus& status)
         && (status.lastPhase == "stable_audio_import"
             || status.requestedModelId == kStableAudioModelId
             || status.requestedModelId == kMiniMaxAudioModelId);
-}
-
-juce::String makePythonImportCommand()
-{
-    return "-c \"import audio_separator.separator; print('ok')\"";
 }
 
 juce::String quoteCommandPart(const juce::String& value)
@@ -185,17 +184,9 @@ bool hasNativeMusicProfile (const StemSeparator::AiToolsStatus& status)
         || status.musicGenerationAvailableProfiles.contains("ace-diffusers");
 }
 
-juce::String sanitiseArchiveEntryName (juce::String name)
-{
-    name = name.replaceCharacter('\\', '/').trim();
-    while (name.startsWithChar('/'))
-        name = name.substring(1);
-    return name;
-}
-
 juce::File getApplicationRuntimeDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    return OpenStudioRuntime::executableFile().getParentDirectory();
 }
 
 juce::String makeIsoTimestamp()
@@ -221,7 +212,7 @@ juce::String makeAiLogEvent (const juce::String& component,
     return juce::JSON::toString(juce::var(payload.release()), true);
 }
 
-bool isLikelyNvidiaWindowsMachine()
+[[maybe_unused]] bool isLikelyNvidiaWindowsMachine()
 {
 #if JUCE_WINDOWS
     juce::ChildProcess probe;
@@ -233,27 +224,18 @@ bool isLikelyNvidiaWindowsMachine()
 }
 
 #if JUCE_LINUX
-bool linuxCommandOutputContains (const juce::String& command, const juce::String& needle)
-{
-    juce::ChildProcess probe;
-    if (probe.start(command) && probe.waitForProcessToFinish(8000))
-        return probe.readAllProcessOutput().containsIgnoreCase(needle);
-
-    return false;
-}
-
 bool isLikelyNvidiaLinuxMachine()
 {
     return juce::File("/proc/driver/nvidia/version").exists()
         || juce::File("/dev/nvidiactl").exists()
-        || linuxCommandOutputContains("sh -c \"command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L\"", "nvidia");
+        || OpenStudioAI::commandOutputContains({ "nvidia-smi", "-L" }, "nvidia");
 }
 
 bool isLikelyRocmLinuxMachine()
 {
     return juce::File("/opt/rocm").isDirectory()
-        || linuxCommandOutputContains("sh -c \"command -v rocminfo >/dev/null 2>&1 && rocminfo\"", "AMD")
-        || linuxCommandOutputContains("sh -c \"command -v rocm-smi >/dev/null 2>&1 && rocm-smi\"", "GPU");
+        || OpenStudioAI::commandOutputContains({ "rocminfo" }, "AMD")
+        || OpenStudioAI::commandOutputContains({ "rocm-smi" }, "GPU");
 }
 #endif
 }
@@ -300,7 +282,7 @@ juce::File StemSeparator::getUserDataRoot() const
 
 juce::File StemSeparator::getUserRuntimeRoot() const
 {
-    return getUserDataRoot().getChildFile("stem-runtime");
+    return AIManagedRuntime::getActiveStemRuntimeRoot(getUserDataRoot());
 }
 
 juce::File StemSeparator::getStableAudioRuntimeRoot() const
@@ -406,7 +388,7 @@ juce::File StemSeparator::findSystemPython() const
             return false;
 
         juce::ChildProcess versionProbe;
-        if (! versionProbe.start(quoteCommandPart(candidate.getFullPathName()) + " --version")
+        if (! versionProbe.start(juce::StringArray { candidate.getFullPathName(), "--version" })
             || ! versionProbe.waitForProcessToFinish(5000))
             return false;
 
@@ -632,7 +614,8 @@ bool StemSeparator::canImportAudioSeparator(const juce::File& python) const
         return false;
 
     juce::ChildProcess check;
-    const auto cmd = quoteCommandPart(python.getFullPathName()) + " " + makePythonImportCommand();
+    const juce::StringArray cmd { python.getFullPathName(), "-c",
+                                  "import audio_separator.separator; print('ok')" };
 
     if (check.start(cmd) && check.waitForProcessToFinish(15000))
         return check.readAllProcessOutput().trim().contains("ok");
@@ -662,45 +645,20 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
         return capabilities;
     }
 
-    juce::ChildProcess probe;
-    const auto command = quoteCommandPart (python.getFullPathName())
-        + " " + quoteCommandPart (probeScript.getFullPathName())
-        + " --models-dir " + quoteCommandPart (modelsDir.getFullPathName())
-        + " --model " + quoteCommandPart (modelName)
-        + " --music-gen-checkpoint-root " + quoteCommandPart (getMusicGenerationCheckpointRoot().getFullPathName())
-        + " --music-gen-model " + quoteCommandPart (kPinnedMusicGenerationModelId)
-        + " --acceleration-mode " + quoteCommandPart (accelerationMode);
-
-    if (! probe.start (command))
+    const juce::StringArray command { python.getFullPathName(), probeScript.getFullPathName(),
+        "--models-dir", modelsDir.getFullPathName(), "--model", modelName,
+        "--music-gen-checkpoint-root", getMusicGenerationCheckpointRoot().getFullPathName(),
+        "--music-gen-model", kPinnedMusicGenerationModelId, "--acceleration-mode", accelerationMode };
+    juce::String output;
+    if (! OpenStudioAI::readCommandOutput(command, output, OpenStudioAI::runtimeEnvironment(), 30000.0)
+        || output.trim().isEmpty())
     {
-        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
-            [&] (juce::DynamicObject& o)
-            {
-                o.setProperty ("reason", "child process failed to start");
-                o.setProperty ("python", python.getFullPathName());
-            }));
+        appendAiToolsLogLine(makeAiLogEvent("host", "probe", "probe_failed", "",
+            [&] (juce::DynamicObject& o) { o.setProperty("reason", "runtime probe failed or timed out");
+                                          o.setProperty("outputSnippet", output.substring(0, 300)); }));
         return capabilities;
     }
-
-    if (! probe.waitForProcessToFinish (30000))
-    {
-        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
-            [] (juce::DynamicObject& o) { o.setProperty ("reason", "probe timed out after 30 s"); }));
-        return capabilities;
-    }
-
-    auto output = probe.readAllProcessOutput().trim();
-    if (probe.getExitCode() != 0 || output.isEmpty())
-    {
-        appendAiToolsLogLine (makeAiLogEvent ("host", "probe", "probe_failed", "",
-            [&] (juce::DynamicObject& o)
-            {
-                o.setProperty ("reason", "non-zero exit code or empty output");
-                o.setProperty ("exitCode", static_cast<int> (probe.getExitCode()));
-                o.setProperty ("outputSnippet", output.substring (0, 300));
-            }));
-        return capabilities;
-    }
+    output = output.trim();
 
     const auto lastLine = output.fromLastOccurrenceOf("\n", false, false).trim();
     const auto json = juce::JSON::parse(lastLine.isNotEmpty() ? lastLine : output);
@@ -747,7 +705,10 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
 
 bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
 {
-    return modelsDir.isDirectory() && modelsDir.getChildFile(kStemModelName).existsAsFile();
+    const auto checkpoint = modelsDir.getChildFile(kStemModelName);
+    const auto configuration = modelsDir.getChildFile(kStemModelConfigName);
+    return checkpoint.existsAsFile() && checkpoint.getSize() > 0
+        && configuration.existsAsFile() && configuration.getSize() > 0;
 }
 
 juce::StringArray StemSeparator::getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId) const
@@ -913,39 +874,21 @@ StemSeparator::HardwareStatus StemSeparator::probeHardwareStatus() const
 #if JUCE_LINUX
     if (hardware.gpuBackend == "none")
     {
-        juce::ChildProcess probe;
-        if (probe.start("rocm-smi --showmeminfo vram") && probe.waitForProcessToFinish(5000) && probe.getExitCode() == 0)
+        juce::String output;
+        juce::int64 memoryMb = 0;
+        if (OpenStudioAI::readCommandOutput({ "rocminfo" }, output))
+            memoryMb = OpenStudioAI::rocmGpuPoolMemoryMb(output);
+        if (memoryMb == 0 && OpenStudioAI::readCommandOutput({ "rocm-smi", "--showmeminfo", "vram" }, output))
+            for (const auto& line : juce::StringArray::fromLines(output))
+                if (line.contains("VRAM Total Memory (B):"))
+                    memoryMb = juce::jmax(memoryMb, line.fromLastOccurrenceOf(":", false, false).trim().getLargeIntValue() / (1024 * 1024));
+        if (memoryMb > 0)
         {
-            const auto output = probe.readAllProcessOutput();
-            juce::int64 bestMemoryMb = 0;
-            juce::String digits;
-            for (auto i = 0; i < output.length(); ++i)
-            {
-                const auto ch = output[i];
-                if (juce::CharacterFunctions::isDigit(ch))
-                {
-                    digits += juce::String::charToString(ch);
-                    continue;
-                }
-
-                if (digits.isNotEmpty())
-                {
-                    auto value = digits.getLargeIntValue();
-                    if (value > 1024 * 1024)
-                        value /= 1024 * 1024;
-                    bestMemoryMb = juce::jmax(bestMemoryMb, value);
-                    digits.clear();
-                }
-            }
-
-            if (bestMemoryMb >= kMinAudioGpuMemoryMb)
-            {
-                hardware.gpuBackend = "rocm";
-                hardware.gpuName = "AMD ROCm GPU";
-                hardware.gpuMemoryMb = bestMemoryMb;
-                hardware.gpuMemoryDetected = true;
-                hardware.audioGenerationGpuSupported = true;
-            }
+            hardware.gpuBackend = "rocm";
+            hardware.gpuName = "AMD ROCm GPU";
+            hardware.gpuMemoryMb = memoryMb;
+            hardware.gpuMemoryDetected = true;
+            hardware.audioGenerationGpuSupported = true;
         }
     }
 #endif
@@ -1263,6 +1206,9 @@ void StemSeparator::updateCachedAiToolsStatus (const std::function<void (AiTools
 {
     const juce::ScopedLock lock (aiToolsStatusLock);
     updater (lastAiToolsStatus);
+    const auto startedAt = installStartedTimeMs.load();
+    if (aiToolsInstallWorkInProgress.load() && startedAt > 0.0)
+        lastAiToolsStatus.elapsedMs = static_cast<juce::int64>(juce::Time::getMillisecondCounterHiRes() - startedAt);
     ++aiToolsStatusRevision;
 }
 
@@ -1285,8 +1231,9 @@ StemSeparator::AiToolsStatus StemSeparator::getCachedAiToolsStatusSnapshot() con
         if (status.stepLabel.isEmpty())
             status.stepLabel = status.message;
 
-        if (installLaunchTimeMs > 0.0)
-            status.elapsedMs = static_cast<juce::int64>(juce::Time::getMillisecondCounterHiRes() - installLaunchTimeMs);
+        const auto startedAt = installStartedTimeMs.load();
+        if (startedAt > 0.0)
+            status.elapsedMs = static_cast<juce::int64>(juce::Time::getMillisecondCounterHiRes() - startedAt);
     }
 
     if (status.requiresExternalPython && status.helpUrl.isEmpty())
@@ -1402,7 +1349,10 @@ void StemSeparator::scheduleStatusRefresh()
         auto runtimeCapabilities = installedPython.existsAsFile()
             ? probeRuntimeCapabilities(installedPython, modelsDir, kStemModelName, "auto")
             : RuntimeCapabilities{};
-        const auto modelInstalled = runtimeCapabilities.runtimeReady && (runtimeCapabilities.modelInstalled || hasRequiredModel(modelsDir));
+        // Recheck both files after the probe; a stale cache or partial download
+        // must not override the worker's failed model-readiness result.
+        const auto modelInstalled = runtimeCapabilities.runtimeReady
+            && runtimeCapabilities.modelInstalled && hasRequiredModel(modelsDir);
         const auto runtimeInstalled = runtimeCapabilities.baseRuntimeReady || installedPython.existsAsFile();
         auto refreshedStatus = buildAiToolsStatus (systemPython, script, installerScript, runtimeInstalled, modelInstalled);
         refreshedStatus.requestedModelId = previousStatus.requestedModelId;
@@ -1742,7 +1692,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
     if (! findPythonInRuntimeRoot(sourceRoot).existsAsFile())
     {
         juce::Array<juce::File> childDirs;
-        for (const auto entry : juce::RangedDirectoryIterator(extractionRoot, false, "*", juce::File::findDirectories))
+        for (const auto& entry : juce::RangedDirectoryIterator(extractionRoot, false, "*", juce::File::findDirectories))
             childDirs.add(entry.getFile());
 
         if (childDirs.size() == 1 && findPythonInRuntimeRoot(childDirs.getReference(0)).existsAsFile())
@@ -1819,7 +1769,7 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
         // xattr is a system tool always present on macOS; failure here is non-fatal because
         // the chmod step above is the primary fix.
         juce::ChildProcess xattr;
-        xattr.start ("xattr -rd com.apple.quarantine " + quoteCommandPart (destinationRoot.getFullPathName()));
+        xattr.start (juce::StringArray { "xattr", "-rd", "com.apple.quarantine", destinationRoot.getFullPathName() });
         xattr.waitForProcessToFinish (10000);
        #endif
     }
@@ -2177,6 +2127,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         }
 
         aiToolsCancelRequested = false;
+        installStartedTimeMs = juce::Time::getMillisecondCounterHiRes();
         aiToolsInstallWorkInProgress = true;
         updateCachedAiToolsStatus([&] (AiToolsStatus& status)
         {
@@ -2316,7 +2267,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                     installLastObservedPhase = "stable_audio_runtime";
                 }
 
-                juce::StringPairArray environment;
+                auto environment = OpenStudioAI::runtimeEnvironment();
                 if (downloadCommand && accessToken.isNotEmpty()) environment.set("HF_TOKEN", accessToken);
                 environment.set("PYTHONUNBUFFERED", "1");
                 if (! process->start(command, 3, environment))
@@ -2854,6 +2805,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
     const auto devFallbackEnabled = isExternalPythonFallbackEnabled();
     aiToolsCancelRequested = false;
+    installStartedTimeMs = juce::Time::getMillisecondCounterHiRes();
     aiToolsInstallWorkInProgress = true;
 
     updateCachedAiToolsStatus ([&] (AiToolsStatus& status)
@@ -2887,7 +2839,9 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         const auto installerScript = findInstallerScript();
         const auto systemPython = findSystemPython();
         const auto logFile = getAiToolsInstallLogFile();
-        const auto runtimeRoot = getUserRuntimeRoot();
+        // A new install is prepared in the base slot while the active runtime
+        // can remain usable until the installer verifies a replacement.
+        const auto runtimeRoot = getUserDataRoot().getChildFile("stem-runtime");
         const auto modelsDir = getUserModelsDir();
         const auto musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot();
         const auto downloadsDir = getAiRuntimeDownloadsDir();
@@ -3056,7 +3010,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         }
 
         juce::File launcherPython;
-        juce::String launchMode;
+        juce::StringArray launchArguments;
 
         if (devFallbackEnabled)
         {
@@ -3076,7 +3030,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             }
 
             launcherPython = systemPython;
-            launchMode = " --bootstrap-with " + quoteCommandPart(systemPython.getFullPathName());
+            launchArguments = { "--bootstrap-with", systemPython.getFullPathName() };
             selectedRuntimeCandidate = "external-python";
             selectedBackendRequested.clear();
             updateStep("checking", 0.05f, "Using the system Python fallback for this dev build", kInstallSourceExternalPython);
@@ -3585,11 +3539,10 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 #endif
 
                 runtimePrepared = true;
-                launchMode = juce::String(" --verify-existing-runtime")
-                    + " --session-id " + quoteCommandPart(sessionId)
-                    + " --runtime-candidate " + quoteCommandPart(candidate.key);
+                launchArguments = { "--verify-existing-runtime", "--session-id", sessionId,
+                                    "--runtime-candidate", candidate.key };
                 if (fallbackAttempted)
-                    launchMode += " --fallback-attempted";
+                    launchArguments.add("--fallback-attempted");
 
                 updateStep(candidate.backendRequested.isNotEmpty() ? "verifying_base_runtime" : "verifying_runtime",
                            0.8f,
@@ -3616,20 +3569,20 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
         // Launch the installer directly via ChildProcess. Do not append shell
         // redirection here; those tokens would be passed through as literal argv.
-        auto cmd = quoteCommandPart(launcherPython.getFullPathName())
-            + " " + quoteCommandPart(installerScript.getFullPathName())
-            + " --runtime-root " + quoteCommandPart(runtimeRoot.getFullPathName())
-            + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
-            + " --model " + quoteCommandPart(kStemModelName)
-            + " --music-gen-model " + quoteCommandPart(kPinnedMusicGenerationModelId)
-            + " --music-gen-checkpoint-root " + quoteCommandPart(musicGenerationCheckpointRoot.getFullPathName())
-            + " --log-path " + quoteCommandPart(logFile.getFullPathName())
-            + " --features " + quoteCommandPart(installFeatureArg)
-            + launchMode;
+        juce::StringArray arguments { launcherPython.getFullPathName(), installerScript.getFullPathName(),
+            "--runtime-root", runtimeRoot.getFullPathName(), "--models-dir", modelsDir.getFullPathName(),
+            "--model", kStemModelName, "--music-gen-model", kPinnedMusicGenerationModelId,
+            "--music-gen-checkpoint-root", musicGenerationCheckpointRoot.getFullPathName(),
+            "--log-path", logFile.getFullPathName(), "--features", installFeatureArg };
+        arguments.addArray(launchArguments);
         if (selectedBackendRequested.isNotEmpty())
-            cmd += " --backend-requested " + quoteCommandPart(selectedBackendRequested);
+            arguments.addArray({ "--backend-requested", selectedBackendRequested });
         if (selectedBackendInstallPlanFile.existsAsFile())
-            cmd += " --backend-install-plan " + quoteCommandPart(selectedBackendInstallPlanFile.getFullPathName());
+            arguments.addArray({ "--backend-install-plan", selectedBackendInstallPlanFile.getFullPathName() });
+        juce::StringArray displayArguments;
+        for (const auto& argument : arguments)
+            displayArguments.add(quoteCommandPart(argument));
+        const auto cmd = displayArguments.joinIntoString(" "); // Diagnostic only, never parsed for launch.
 
         appendAiToolsLogLine("launcherPython=" + launcherPython.getFullPathName());
         appendAiToolsLogLine("runtimeRoot=" + runtimeRoot.getFullPathName());
@@ -3648,8 +3601,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                                 obj.setProperty("command", cmd);
                                             }));
 
-        auto nextInstallProcess = std::make_shared<juce::ChildProcess>();
-        if (! nextInstallProcess->start(cmd))
+        auto nextInstallProcess = std::make_shared<OwnedChildProcess>();
+        if (! nextInstallProcess->start(arguments, 3, OpenStudioAI::runtimeEnvironment()))
         {
             finishWithStatus("error", 0.0f,
                              "Failed to start the AI tools installer.",
@@ -3740,7 +3693,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 void StemSeparator::pollInstallProgress()
 {
     bool shouldRefreshAfterExit = false;
-    std::shared_ptr<juce::ChildProcess> process;
+    std::shared_ptr<OwnedChildProcess> process;
     juce::int64 logReadOffset = 0;
 
     {
@@ -3751,6 +3704,18 @@ void StemSeparator::pollInstallProgress()
 
     if (! process)
         return;
+
+    // The installer writes structured status to its log, but also writes stdout/stderr.
+    // Drain the nonblocking pipe so a long download cannot stall on a full pipe.
+    // Keep unexpected Python errors in a separate diagnostic log.
+    const auto processLog = getAiToolsInstallLogFile().getSiblingFile("AiToolsProcess.log");
+    char captured[4096];
+    for (int chunk = 0; chunk < 32; ++chunk)
+    {
+        const auto bytes = process->readProcessOutput(captured, sizeof(captured));
+        if (bytes <= 0) break;
+        processLog.appendData(captured, static_cast<size_t>(bytes));
+    }
 
     juce::String newlyReadOutput;
     bool sawNewOutput = false;
@@ -3862,7 +3827,7 @@ void StemSeparator::pollInstallProgress()
         const auto nowMs = juce::Time::getMillisecondCounterHiRes();
         if (process->isRunning() && nowMs - installLastHeartbeatTimeMs >= kInstallerHeartbeatMs)
         {
-            lastAiToolsStatus.elapsedMs = static_cast<juce::int64>(nowMs - installLaunchTimeMs);
+            lastAiToolsStatus.elapsedMs = static_cast<juce::int64>(nowMs - installStartedTimeMs.load());
             installLastHeartbeatTimeMs = nowMs;
 
             if (installFirstOutputTimeMs > 0.0
@@ -4280,22 +4245,18 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
 
     outputDir.createDirectory();
 
-    juce::String cmd = quoteCommandPart(python.getFullPathName())
-        + " " + quoteCommandPart(script.getFullPathName())
-        + " --input " + quoteCommandPart(inputFile.getFullPathName())
-        + " --output-dir " + quoteCommandPart(outputDir.getFullPathName())
-        + " --model " + quoteCommandPart(modelName)
-        + " --models-dir " + quoteCommandPart(modelsDir.getFullPathName())
-        + " --stems " + stemNames.joinIntoString(",")
-        + " --acceleration-mode " + quoteCommandPart(accelerationMode);
+    const juce::StringArray arguments { python.getFullPathName(), script.getFullPathName(),
+        "--input", inputFile.getFullPathName(), "--output-dir", outputDir.getFullPathName(),
+        "--model", modelName, "--models-dir", modelsDir.getFullPathName(),
+        "--stems", stemNames.joinIntoString(","), "--acceleration-mode", accelerationMode };
 
-    juce::Logger::writeToLog("StemSeparator: Starting: " + cmd);
+    juce::Logger::writeToLog("StemSeparator: Starting worker for " + inputFile.getFullPathName());
 
     outputBuffer.clear();
     lastProgress = { "loading", 0.0f, {}, {} };
 
-    childProcess = std::make_unique<juce::ChildProcess>();
-    if (! childProcess->start(cmd))
+    childProcess = std::make_unique<OwnedChildProcess>();
+    if (! childProcess->start(arguments, 3, OpenStudioAI::runtimeEnvironment()))
     {
         lastProgress = { "error", 0.0f, {}, "Failed to start Python process." };
         childProcess.reset();
@@ -4477,7 +4438,8 @@ juce::var StemSeparator::resetAiTools()
     cancelAiToolsInstall();
     cancel();
 
-    const auto runtimeRoot = getUserRuntimeRoot();
+    const auto runtimeRoot = getUserDataRoot().getChildFile("stem-runtime");
+    const auto activeRuntimeRoot = getUserRuntimeRoot();
     const auto modelsDir = getUserModelsDir();
     const auto checkpointRoot = getMusicGenerationCheckpointRoot();
     const auto hubCacheDir = checkpointRoot.getParentDirectory().getChildFile(".hub-cache");
@@ -4500,6 +4462,12 @@ juce::var StemSeparator::resetAiTools()
     };
 
     deletePath(runtimeRoot);
+    if (activeRuntimeRoot != runtimeRoot)
+        deletePath(activeRuntimeRoot);
+    for (const auto& candidate : getUserDataRoot().findChildFiles(
+             juce::File::findDirectories, false, "stem-runtime-directml-*"))
+        deletePath(candidate);
+    deletePath(getUserDataRoot().getChildFile("stem-runtime-active.txt"));
     deletePath(modelsDir);
     deletePath(checkpointRoot);
     deletePath(hubCacheDir);

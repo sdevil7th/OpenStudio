@@ -652,11 +652,13 @@ describe("automation selection and recorded passes", () => {
     expect(commandManager.getUndoStack()[0]?.type).toBe("RECORD_AUTOMATION_WRITE_PASS");
     expect(trackLane()?.points.map(({ time, value }) => ({ time, value }))).toEqual([
       { time: 0, value: 0.2 },
+      { time: 1.999999, value: 0.2 },
       { time: 2, value: 0.7 },
     ]);
     expect(useDAWStore.getState().masterAutomationLanes[0].points
       .map(({ time, value }) => ({ time, value }))).toEqual([
       { time: 0, value: 0.4 },
+      { time: 1.999999, value: 0.4 },
       { time: 2, value: 0.8 },
     ]);
 

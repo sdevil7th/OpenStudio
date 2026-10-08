@@ -103,6 +103,7 @@ export const DETACHED_MAIN_ACTION_IDS = new Set<string>([
   "track.deleteSelected",
   "track.toggleSelectedMute",
   "track.toggleSelectedSolo",
+  "track.toggleSelectedSoloSafe",
   "track.duplicateSelected",
   "track.toggleSelectedArm",
   "track.linkSelected",

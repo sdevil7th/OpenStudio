@@ -1,0 +1,35 @@
+#pragma once
+inline juce::var checkIRBrightness()
+{
+    auto* result=new juce::DynamicObject();result->setProperty("plugin","Prepared adaptive synthetic IR brightness");
+    bool bypass=true,deterministic=true,causal=true,finite=true,energy=true,highBand=true;juce::Array<juce::var> cases;
+    const auto fixture=[](double rate,int channels)
+    {
+        juce::AudioBuffer<float> audio(channels,static_cast<int>(rate*.4));audio.clear();
+        for(int ch=0;ch<channels;++ch){audio.setSample(ch,static_cast<int>(rate*.001),.4f);for(int i=static_cast<int>(rate*.03);i<audio.getNumSamples();++i)audio.setSample(ch,i,static_cast<float>((ch+1)*.015*std::sin(juce::MathConstants<double>::twoPi*(350+ch*75)*i/rate)*std::exp(-6.9*(i/rate-.03)/.35)));}return audio;
+    };
+    for(const double rate:{44100.0,48000.0,96000.0,192000.0})
+    {
+        const auto input=fixture(rate,2);auto off=input,a=input,b=input;BuiltInIRBrightness::apply(off,rate,0,.005);BuiltInIRBrightness::apply(a,rate,1,.005);BuiltInIRBrightness::apply(b,rate,1,.005);
+        double original=0,added=0,lowEnergy=0,highEnergy=0;const auto lowPass=juce::dsp::IIR::Coefficients<double>::makeLowPass(rate,3000.0);juce::dsp::IIR::Filter<double> low;low.coefficients=lowPass;
+        for(int ch=0;ch<2;++ch){low.reset();for(int i=0;i<input.getNumSamples();++i){const double x=input.getSample(ch,i),delta=a.getSample(ch,i)-x;const double l=low.processSample(delta);bypass=bypass&&off.getSample(ch,i)==input.getSample(ch,i);deterministic=deterministic&&a.getSample(ch,i)==b.getSample(ch,i);finite=finite&&std::isfinite(a.getSample(ch,i))&&std::abs(a.getSample(ch,i))<2;if(i<rate*.03)causal=causal&&delta==0;if(i>=rate*.005)original+=x*x;added+=delta*delta;lowEnergy+=l*l;highEnergy+=std::pow(delta-l,2);}}
+        energy=energy&&std::abs(added/original-.25)<1e-5;highBand=highBand&&highEnergy>lowEnergy*2;
+        auto* row=new juce::DynamicObject();row->setProperty("sampleRate",rate);row->setProperty("addedToEarlyTailEnergy",added/original);row->setProperty("highToLowDiagnostic",highEnergy/juce::jmax(1e-20,lowEnergy));cases.add(row);
+    }
+    const auto file=juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("openstudio-bright-"+juce::Uuid().toString()+".wav");const auto raw=fixture(48000,4);auto shaped=raw;BuiltInIRBrightness::apply(shaped,48000,.8,.005);
+    auto source=std::make_unique<OpenStudioReverb>(true);source->selectAlgorithm(7);bool portable=writeProbeWave(file,raw,48000)&&source->convolutionSpace.loadFile(file);file.deleteFile();juce::ValueTree original("Original");source->convolutionSpace.save(original);
+    const auto edit=[](std::initializer_list<std::pair<const char*,juce::var>> values){auto* object=new juce::DynamicObject();for(const auto& v:values)object->setProperty(v.first,v.second);return juce::var(object);};
+    portable=source->convolutionSpace.edit(edit({{"brightness",.8},{"normalise",false}}))&&portable;juce::ValueTree state("State");source->convolutionSpace.save(state);portable=portable&&original["irData"]==state["irData"];
+    const auto render=[&](int block,int channel)
+    {
+        BuiltInConvolution convolution;portable=convolution.restore(state)&&portable;convolution.prepare(48000,block);juce::AudioBuffer<float> output(2,raw.getNumSamples()+512),buffer(2,block);
+        for(int start=0;start<output.getNumSamples();start+=block){const int count=juce::jmin(block,output.getNumSamples()-start);buffer.setSize(2,count,false,false,true);buffer.clear();if(start==0)buffer.setSample(channel,0,.1f);convolution.process(buffer,0,20,20000,1,true,false);for(int ch=0;ch<2;++ch)output.copyFrom(ch,start,buffer,ch,0,count);}return output;
+    };
+    double matrixError=0,partitionError=0;for(int channel=0;channel<2;++channel){const auto a=render(127,channel),b=render(512,channel);for(int ch=0;ch<2;++ch)for(int i=0;i<a.getNumSamples();++i){const double expected=i<shaped.getNumSamples()?shaped.getSample(channel*2+ch,i)*.1:0;matrixError=juce::jmax(matrixError,std::abs(a.getSample(ch,i)-expected));partitionError=juce::jmax(partitionError,std::abs(static_cast<double>(a.getSample(ch,i)-b.getSample(ch,i))));}}
+    auto audition=renderBuiltInIRAudition(source->convolutionSpace,48000,0,1,{});double auditionError=0;bool auditionPass=audition.error.isEmpty();if(auditionPass)for(int ch=0;ch<2;++ch)for(int i=0;i<shaped.getNumSamples();++i)auditionError=juce::jmax(auditionError,std::abs(audition.audio.getSample(ch,480+i)-shaped.getSample(ch,i)*.1));
+    juce::MemoryBlock saved,again;source->getStateInformation(saved);auto copy=std::make_unique<OpenStudioReverb>(true);copy->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));copy->getStateInformation(again);bool recall=saved==again&&std::abs(static_cast<double>(copy->convolutionSpace.info()["shape"]["brightness"])-.8)<1e-12;
+    const bool invalid=!source->convolutionSpace.edit(edit({{"brightness",1.1}}));juce::MemoryBlock afterInvalid;source->getStateInformation(afterInvalid);recall=recall&&saved==afterInvalid;
+    auto tree=juce::ValueTree::readFromData(saved.getData(),saved.getSize());const auto shapeVar=tree["irShape"];const auto* bytes=shapeVar.getBinaryData();auto oldShape=juce::ValueTree::readFromData(bytes->getData(),bytes->getSize());oldShape.removeProperty("brightness",nullptr);juce::MemoryBlock oldShapeBytes;{juce::MemoryOutputStream stream(oldShapeBytes,false);oldShape.writeToStream(stream);}tree.setProperty("irShape",juce::var(oldShapeBytes),nullptr);juce::MemoryBlock old;{juce::MemoryOutputStream stream(old,false);tree.writeToStream(stream);}copy->setStateInformation(old.getData(),static_cast<int>(old.getSize()));recall=recall&&static_cast<double>(copy->convolutionSpace.info()["shape"]["brightness"])==0;
+    BuiltInIRPreparation cancelled;cancelled.cancel();auto cancelledAudio=raw;const bool cancellation=!BuiltInIRBrightness::apply(cancelledAudio,48000,1,.005,&cancelled);
+    result->setProperty("pass",bypass&&deterministic&&causal&&finite&&energy&&highBand&&portable&&matrixError<2e-6&&partitionError<2e-6&&auditionPass&&auditionError<2e-6&&recall&&invalid&&cancellation);result->setProperty("zeroExactParity",bypass);result->setProperty("deterministic",deterministic);result->setProperty("noEarlySyntheticArrival",causal);result->setProperty("finite",finite);result->setProperty("definedAddedEnergy",energy);result->setProperty("highBandEnergy",highBand);result->setProperty("portableOriginalBytes",portable);result->setProperty("matrixMaximumError",matrixError);result->setProperty("partitionMaximumError",partitionError);result->setProperty("auditionMaximumError",auditionError);result->setProperty("auditionValid",auditionPass);result->setProperty("stateAndLegacyDefaults",recall);result->setProperty("invalidRejected",invalid);result->setProperty("cancellation",cancellation);result->setProperty("cases",cases);result->setProperty("schema",describeFreePluginForRegression(*source));result->setProperty("audioQuality","not_asserted");result->setProperty("acousticDecayAndVendorFidelity","not_asserted");return result;
+}

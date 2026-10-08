@@ -60,9 +60,8 @@ export function cloneMIDIEvents(events: MIDIEvent[] = []): MIDIEvent[] {
 
 export function sortMIDIEvents(events: MIDIEvent[]): MIDIEvent[] {
   return cloneMIDIEvents(events).sort((a, b) => {
-    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
-    if (a.type === b.type) return 0;
-    return a.type === "noteOff" ? 1 : -1;
+    // Equal-time RPN/expression/note order is meaningful; modern JS sort is stable.
+    return a.timestamp - b.timestamp;
   });
 }
 

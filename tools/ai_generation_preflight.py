@@ -42,14 +42,13 @@ def request_duration(model, workflow, params):
 
 
 def resolve_root(root, model):
-    if (root / "model_index.json").is_file() or (model == "minimax-music-3" and (root / "modular_model_index.json").is_file()):
-        return root
     if model == "ace-step-v15-xl-turbo":
-        from huggingface_hub import try_to_load_from_cache
-        from ai_runtime_probe import DEFAULT_MUSIC_GEN_MODEL_REPO
-        cached = try_to_load_from_cache(DEFAULT_MUSIC_GEN_MODEL_REPO, "model_index.json", cache_dir=str(root))
-        if isinstance(cached, str):
-            return Path(cached).parent
+        from ai_runtime_probe import resolve_music_gen_snapshot
+        snapshot = resolve_music_gen_snapshot(root)
+        if snapshot is not None:
+            return snapshot
+    elif (root / "model_index.json").is_file() or (model == "minimax-music-3" and (root / "modular_model_index.json").is_file()):
+        return root
     raise ValueError("The selected local model snapshot is unavailable.")
 
 

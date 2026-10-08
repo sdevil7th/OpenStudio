@@ -81,6 +81,8 @@ Ratings:
 
 ## Plugins / FX / Scripting
 
+See [built-in plugin contracts and limits](free-plugins.md); implemented features do not establish commercial-reference fidelity.
+
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Plugin scanning/loading for hosted FX formats, primarily VST3 with CLAP/LV2 code paths | H | H |
@@ -94,6 +96,9 @@ Ratings:
 | Processing precision override / hybrid precision support | M | H |
 | Plugin capability matrix, guardrails, release benchmark hooks | M | H |
 | Built-in EQ, compressor, gate, limiter, delay, reverb, chorus, saturator | H | H |
+| Fifteen dedicated non-NAM effect/instrument editors with profiled gestures, full-state presets/Compare and separate host bypass | H | H |
+| Prepared dynamic/spectral EQ, 32-slot configuration-changing MIDI recall, portable convolution and continuous alignment | H | H |
+| Independent drum output pairs and four-output convolution through complete atomic send restoration | H | H |
 | Built-in real-time pitch corrector FX | H | H |
 | Built-in FX editors and oversampling controls | M | H |
 | NAM Rack A1/A2 pedal, amp, and full-rig capture hosting | H | H |
@@ -128,6 +133,7 @@ Ratings:
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Monophonic pitch analysis with YIN contour and note segmentation | H | H |
+| Single-owner docked/detached pitch editor shared by clip and Pitch FX entry, with checkpoint recovery | H | H |
 | Graphical pitch editor with blobs, contour, piano grid, zoom/scroll | H | H |
 | Pitch tools: pitch, drift, vibrato, transition, draw, split | H | H |
 | Scale/key snapping, chromatic snap, correct-pitch macro, scale detection | H | H |

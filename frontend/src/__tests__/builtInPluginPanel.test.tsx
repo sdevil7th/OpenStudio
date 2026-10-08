@@ -505,7 +505,7 @@ describe("BuiltInPluginPanel schema model", () => {
     expect(renderToStaticMarkup(<BuiltInParamControl param={toggle} onChange={() => undefined} />)).toContain('aria-pressed="true"');
   });
 
-  it("renders every built-in panel kind with visual, macro, and grouped responsive containers", () => {
+  it("renders every legacy schema with its shared toolbar and editable native parameters", () => {
     for (const panelSchema of panelSchemas) {
       const html = renderToStaticMarkup(
         <BuiltInPluginPanel
@@ -516,10 +516,18 @@ describe("BuiltInPluginPanel schema model", () => {
       );
 
       expect(html).toContain(`data-kind="${getPluginKind(panelSchema)}"`);
-      expect(html).toContain("builtin-visual");
-      expect(html).toContain("builtin-macro-strip");
-      expect(html).toContain("builtin-param-groups");
-      expect(html).toContain("builtin-control");
+      if (getPluginKind(panelSchema) === "eq") {
+        expect(html).toContain('aria-label="Plugin toolbar"');
+        expect(html).toContain('aria-label="Preset"');
+        expect(html).toContain('aria-label="Band inspector"');
+        expect(html).not.toContain("More controls");
+      } else {
+        expect(html).toContain('aria-label="Plugin toolbar"');
+        expect(html).toContain('approved-effect-editor');
+        expect(html).not.toContain("More controls");
+      }
+      expect(html).toContain("data-param=");
+
       expect(html).not.toContain("builtin-param-row");
     }
   });

@@ -3,6 +3,15 @@ import { expect, test, type Page } from "@playwright/test";
 const PROFILE_SETTINGS_KEY = "openstudio.inputProfiles.v1";
 const PRIMARY_KEY = process.platform === "darwin" ? "Meta" : "Control";
 
+test.beforeEach(async ({ page }) => {
+  // Establish a first-run profile before the module graph loads. An immediate
+  // reload after goto can interrupt Vite requests on busy Windows runners.
+  await page.addInitScript((settingsKey) => {
+    localStorage.removeItem(settingsKey);
+    localStorage.removeItem("openstudio_essentialControlsDismissed");
+  }, PROFILE_SETTINGS_KEY);
+});
+
 async function timelineCanvasPatchHash(
   page: Page,
   clientX: number,
@@ -42,11 +51,6 @@ async function timelineCanvasPatchHash(
 
 test("real automation lane owns point drag, Delete, and atomic undo", async ({ page }) => {
   await page.goto("/");
-  await page.evaluate((settingsKey) => {
-    localStorage.removeItem(settingsKey);
-    localStorage.removeItem("openstudio_essentialControlsDismissed");
-  }, PROFILE_SETTINGS_KEY);
-  await page.reload();
 
   await page.getByLabel("Keyboard profile").selectOption("ableton_live");
   await page.getByLabel("Mouse & scroll profile").selectOption("ableton_live");
@@ -117,11 +121,6 @@ test("real automation lane owns point drag, Delete, and atomic undo", async ({ p
 
 test("real MIDI track automation lane creates, deletes, and restores a pitch-bend point", async ({ page }) => {
   await page.goto("/");
-  await page.evaluate((settingsKey) => {
-    localStorage.removeItem(settingsKey);
-    localStorage.removeItem("openstudio_essentialControlsDismissed");
-  }, PROFILE_SETTINGS_KEY);
-  await page.reload();
 
   await page.getByLabel("Keyboard profile").selectOption("ableton_live");
   await page.getByLabel("Mouse & scroll profile").selectOption("ableton_live");
@@ -163,11 +162,6 @@ test("real MIDI track automation lane creates, deletes, and restores a pitch-ben
 
 test("Space stops an active recording instead of leaving transport paused", async ({ page }) => {
   await page.goto("/");
-  await page.evaluate((settingsKey) => {
-    localStorage.removeItem(settingsKey);
-    localStorage.removeItem("openstudio_essentialControlsDismissed");
-  }, PROFILE_SETTINGS_KEY);
-  await page.reload();
 
   await page.getByLabel("Keyboard profile").selectOption("openstudio");
   await page.getByLabel("Mouse & scroll profile").selectOption("openstudio");

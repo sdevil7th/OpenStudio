@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Transport actions — play, record, stop, pause, seek, tempo, loop, punch,
  * time selection, record modes, playhead behavior.
@@ -6,9 +5,13 @@
  */
 
 import { nativeBridge } from "../../services/NativeBridge";
+import type { StoreApi } from "zustand";
+import type { DAWState, DAWActions, AudioClip, RecordingClip, MIDIClip, MIDIEvent, Track } from "../useDAWStore";
 import { commandManager } from "../commands";
+import type { Command } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { resetSyncCache } from "./clips";
+import { getProjectEpoch } from "../../utils/projectLifetime";
 
 const AUDIO_TRANSPORT_LOG_PREFIX = "[audio.transport]";
 const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
@@ -17,7 +20,7 @@ let recordStartInFlight = false;
 let recordStartToken = 0;
 let playRequestToken = 0;
 
-function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength: number) {
+function quantizeRecordedMIDIEvents(events: MIDIEvent[], gridSeconds: number, strength: number) {
   const grid = Math.max(0.001, gridSeconds || 0.125);
   const amount = Math.max(0, Math.min(1, strength ?? 1));
   if (!events.length || amount <= 0) {
@@ -28,7 +31,7 @@ function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength
   const noteOnStacks = new Map<string, number[]>();
   const moveRanges: Array<{ start: number; end: number; delta: number }> = [];
 
-  const noteKey = (event: any) => `${event.note ?? -1}`;
+  const noteKey = (event: MIDIEvent) => `${event.note ?? -1}`;
   nextEvents.forEach((event, index) => {
     if (event.note === undefined) return;
     const key = noteKey(event);
@@ -71,16 +74,17 @@ function quantizeRecordedMIDIEvents(events: any[], gridSeconds: number, strength
   }).sort((a, b) => a.timestamp - b.timestamp);
 }
 
-function asArray(value: any): any[] {
+function asArray<T>(value: ArrayLike<T> | null | undefined): T[] {
   if (Array.isArray(value)) return value;
   if (value && typeof value.length === "number") return Array.from(value);
   return [];
 }
 
-async function syncArmedTracksBeforeRecording(armedTracks: Array<{ track: any }>) {
+async function syncArmedTracksBeforeRecording(armedTracks: Array<{ track: Track }>) {
   for (const { track } of armedTracks) {
     await nativeBridge.addTrack(track.id, track.type).catch(logBridgeError("sync"));
-    await nativeBridge.setTrackType(track.id, track.type).catch(logBridgeError("sync"));
+    if (track.type !== "bus")
+      await nativeBridge.setTrackType(track.id, track.type).catch(logBridgeError("sync"));
     await nativeBridge.setTrackRecordArm(track.id, track.armed).catch(logBridgeError("sync"));
     await nativeBridge.setTrackInputMonitoring(track.id, track.monitorEnabled).catch(logBridgeError("sync"));
     await nativeBridge.setTrackInputChannels(
@@ -99,11 +103,11 @@ async function syncArmedTracksBeforeRecording(armedTracks: Array<{ track: any }>
   }
 }
 
-function isMidiInputTrack(track: any) {
+function isMidiInputTrack(track: Track) {
   return track.type === "midi" || track.type === "instrument" || track.inputType === "midi";
 }
 
-async function ensureMIDIInputsReadyForRecording(armedMidiTracks: any[], get: () => any) {
+async function ensureMIDIInputsReadyForRecording(armedMidiTracks: Track[], get: GetFn) {
   if (armedMidiTracks.length === 0) return;
 
   let availableDevices: string[] = [];
@@ -186,15 +190,14 @@ async function clearPitchRoutesForCorrectedSourcesBeforePlayback(reason: string)
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SetFn = (...args: any[]) => void;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type GetFn = () => any;
+type SetFn = StoreApi<DAWState & DAWActions>["setState"];
+type GetFn = StoreApi<DAWState & DAWActions>["getState"];
 
 export const transportActions = (set: SetFn, get: GetFn) => ({
     play: async () => {
       const requestToken = ++playRequestToken;
-      const isCurrentPlayRequest = () => requestToken === playRequestToken;
+      const projectEpoch = getProjectEpoch();
+      const isCurrentPlayRequest = () => requestToken === playRequestToken && projectEpoch === getProjectEpoch();
       const { transport, syncClipsWithBackend, pixelsPerSecond, timeSelection } = get();
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} play:start`, {
         transportBefore: transport,
@@ -233,6 +236,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       }
 
       // Store the start position for stop behavior
+      if(!await get().prepareAutomationAutoJoin(startTime) || !isCurrentPlayRequest())return;
       set({ playStartPosition: startTime });
 
       // Scroll timeline so playhead is visible (position it ~100px from left edge)
@@ -370,6 +374,8 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
       const currentTime = wasAlreadyPlaying ? clickedPlayheadTime : get().transport.currentTime;
 
+      if(!wasAlreadyPlaying && (!await get().prepareAutomationAutoJoin(currentTime) || recordToken !== recordStartToken))return;
+
       // Store the start position for stop behavior (only if not already playing)
       if (!wasAlreadyPlaying) {
         set({ playStartPosition: currentTime });
@@ -483,22 +489,28 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       }
     },
 
-    pause: () => {
-      playRequestToken += 1;
+    pause: async () => {
+      const pauseRequestToken = ++playRequestToken;
+      const projectEpoch = getProjectEpoch();
+      const isCurrentPause = () => pauseRequestToken === playRequestToken && projectEpoch === getProjectEpoch();
+      const pauseTime = get().transport.currentTime;
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} pause`, {
         transportBefore: get().transport,
       });
       set((state) => ({
         transport: { ...state.transport, isPlaying: false, isPaused: true },
       }));
-      get().endAutomationWriteSession?.();
-      nativeBridge.setTransportPlaying(false).then((result) => {
-        console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} pause:setTransportPlaying`, { result });
-      });
+      const result = await nativeBridge.setTransportPlaying(false);
+      if (!result || !isCurrentPause()) return;
+      const automationStopTime = nativeBridge.hasNativeBackend() ? await nativeBridge.getTransportPosition() : pauseTime;
+      if (!isCurrentPause()) return;
+      get().endAutomationWriteSession?.(automationStopTime);
+      console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} pause:setTransportPlaying`, { result });
     },
 
     stop: async () => {
-      playRequestToken += 1;
+      const stopRequestToken = ++playRequestToken;
+      const stopProjectEpoch = getProjectEpoch();
       const { playStartPosition, transport, addClip, playheadStopBehavior } = get();
       const activeRecordSession = get().recordSession;
       if (recordStartInFlight) {
@@ -558,11 +570,19 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
       // Stop playback and recording
       const playingResult = await nativeBridge.setTransportPlaying(false);
+      // An editor drain may overlap a fresh Play or replacement project.
+      // Its old Stop must not seek or close that new automation session.
+      if (stopRequestToken !== playRequestToken || stopProjectEpoch !== getProjectEpoch()) return;
+      if (!playingResult) return;
       const recordingResult = await nativeBridge.setTransportRecording(false);
+      if (stopRequestToken !== playRequestToken || stopProjectEpoch !== getProjectEpoch()) return;
       console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} stop:native`, { playingResult, recordingResult });
+      const automationStopTime = nativeBridge.hasNativeBackend() ? await nativeBridge.getTransportPosition() : transport.currentTime;
+      if (stopRequestToken !== playRequestToken || stopProjectEpoch !== getProjectEpoch()) return;
       await nativeBridge.setTransportPosition(intendedStopTime).catch(logBridgeError("stop:setTransportPositionEarly"));
+      if (stopRequestToken !== playRequestToken || stopProjectEpoch !== getProjectEpoch()) return;
       console.log("[useDAWStore] STOP Native transport stopped.");
-      get().endAutomationWriteSession?.();
+      get().endAutomationWriteSession?.(automationStopTime);
       await clipSyncResetBarrier;
 
       // If we were recording, fetch the new clips and add them to the tracks
@@ -940,6 +960,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       // If playing, pause first
       if (wasPlaying) {
         const pauseResult = await nativeBridge.setTransportPlaying(false);
+        get().endAutomationWriteSession?.();
         console.log(`${AUDIO_TRANSPORT_LOG_PREFIX} seek:pauseForSeek`, { pauseResult });
         if (wasRecording) {
           const recordingPauseResult = await nativeBridge.setTransportRecording(false);
@@ -1272,4 +1293,4 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
 
-});
+} satisfies Partial<DAWActions>);

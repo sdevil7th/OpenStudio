@@ -81,14 +81,19 @@ const platformKeys = (
   linux: readonly string[] = [],
 ): PlatformShortcutBindings => ({ common, macos, windows, linux });
 
-export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
+export const CLICK_ONLY_METRONOME_SHORTCUT = "Ctrl+Shift+Space";
+
+const SOURCE_KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
   {
     id: "openstudio",
     name: "OpenStudio",
     shortName: "OpenStudio",
     description: "The complete OpenStudio key map, designed to be portable across macOS and Windows.",
     nativePlatforms: ["macos", "windows", "linux"],
-    bindings: {},
+    bindings: {
+      "file.importAudio": keys("Ctrl+I"),
+      "file.importMIDI": keys("Ctrl+Alt+I"),
+    },
   },
   {
     id: "pro_tools",
@@ -97,6 +102,9 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Pro Tools 2026.4-style editing and navigation, with OpenStudio fallbacks for unmapped commands.",
     nativePlatforms: ["macos", "windows"],
     bindings: {
+      "file.importAudio": keys("Ctrl+Shift+I"),
+      "file.importMIDI": keys("Ctrl+Alt+I"),
+      "insert.quickAddInstrument": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("Ctrl+Space", "F12", "Numpad3"),
       "transport.rewind": keys("Enter"),
@@ -135,6 +143,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Cubase/Nuendo 15 transport, tool, quantize, snap, and window conventions.",
     nativePlatforms: ["macos", "windows"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.openPanel": keys("F6"),
       "automation.allTracks.toggleRead": platformKeys([], ["Option+R"], ["Alt+R"], ["Alt+R"]),
       "automation.allTracks.toggleWrite": platformKeys([], ["Option+W"], ["Alt+W"], ["Alt+W"]),
@@ -179,6 +189,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "REAPER 7.79 default mnemonic editing, track, marker, snap, and render conventions.",
     nativePlatforms: ["macos", "windows", "linux"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("Ctrl+R"),
       "transport.rewind": keys("W"),
@@ -222,6 +234,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Audacity transport, selection, split, label, and zoom conventions.",
     nativePlatforms: ["macos", "windows", "linux"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("R"),
       "transport.pause": keys("P"),
@@ -257,6 +271,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.toggleSelectedMute": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "transport.record": keys("R"),
       "track.toggleSelectedArm": keys(),
       "midi.tool.range": keys(),
@@ -385,6 +401,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "view.toggleSnap": ["global"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("R"),
       "track.toggleSelectedArm": keys(),
@@ -496,6 +514,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.toggleSelectedSolo": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "transport.record": keys("F9"),
       "transport.loop": keys("Ctrl+L"),
       "view.setLoopToSelection": keys(),
@@ -546,6 +566,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.toggleSelectedAutomation": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "transport.record": keys("NumpadMultiply"),
       "transport.loop": keys("NumpadDivide"),
       "transport.rewind": keys("NumpadComma"),
@@ -592,6 +614,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Bitwig Studio transport, tool, duplication, quantize, and editor conventions.",
     nativePlatforms: ["macos", "windows", "linux"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("R"),
       "track.toggleSelectedArm": keys(),
@@ -618,6 +642,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Reason sequencer transport, loop, snap, metronome, and zoom conventions.",
     nativePlatforms: ["macos", "windows"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("NumpadMultiply"),
       "transport.loop": keys("L"),
@@ -660,6 +686,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.toggleSelectedAutomation": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("R"),
       "transport.loop": keys("L"),
@@ -718,6 +746,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.duplicateSelected": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "transport.record": keys("R"),
       "transport.loop": keys("C"),
       "midi.stepInputC": keys(),
@@ -825,13 +855,15 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     id: "digital_performer",
     name: "Digital Performer",
     shortName: "Digital Performer",
-    description: "Digital Performer wheel behavior with a strict keyboard map: unsourced OpenStudio fallback keys are disabled because DP's published key map is user-assignable; Escape is retained only as an OpenStudio dialog-safety command.",
+    description: "Digital Performer wheel behavior with a strict keyboard map: unsourced OpenStudio fallback keys are disabled because DP's published key map is user-assignable; Escape and the click-only metronome shortcut remain available as OpenStudio commands.",
     nativePlatforms: ["macos", "windows"],
     fallbackPolicy: "strict",
     // DP key commands are broadly customizable. The official material used
     // for this profile documents assignment capacity, not a stable default
     // command table that maps safely onto OpenStudio actions.
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       // OpenStudio app safety only, not a claim about Digital Performer: strict
       // profiles must still leave users a reliable way to dismiss our dialogs.
       "modal.close": keys("Esc"),
@@ -845,6 +877,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Ardour editor tools, split, snap, zoom, and transport conventions.",
     nativePlatforms: ["macos", "windows", "linux"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("Shift+Space"),
       "tools.selectTool": keys("G"),
@@ -925,6 +959,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     description: "Adobe Audition 26.3+ editor navigation, marker, nudge, and zoom conventions.",
     nativePlatforms: ["macos", "windows"],
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.rewind": keys("Home"),
       "insert.marker": keys("M", "NumpadMultiply"),
@@ -966,6 +1002,8 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
       "track.toggleSelectedSolo": ["timeline"],
     },
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       "automation.toggleArrangementView": keys(),
       "transport.record": keys("R", "Ctrl+R"),
       "transport.loop": keys("L"),
@@ -1035,10 +1073,12 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     id: "waveform",
     name: "Waveform",
     shortName: "Waveform",
-    description: "Strict Waveform 14 quick-start map: only documented split, record, zoom, fit, playback, and wheel commands are enabled; unsourced OpenStudio fallbacks are disabled, except Escape retained solely for OpenStudio dialog safety.",
+    description: "Strict Waveform 14 quick-start map: only documented split, record, zoom, fit, playback, and wheel commands are enabled; unsourced OpenStudio fallbacks are disabled. Escape and the click-only metronome shortcut remain available as OpenStudio commands.",
     nativePlatforms: ["macos", "windows", "linux"],
     fallbackPolicy: "strict",
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       // OpenStudio app safety only, not a source-DAW shortcut claim.
       "modal.close": keys("Esc"),
       "automation.toggleArrangementView": keys(),
@@ -1056,10 +1096,12 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     id: "renoise",
     name: "Renoise",
     shortName: "Renoise",
-    description: "Strict Renoise tracker map: only documented portable commands are enabled; focus-dependent tracker keys and unsourced OpenStudio fallbacks are disabled, except Escape retained solely inside OpenStudio dialogs for app safety.",
+    description: "Strict Renoise tracker map: only documented portable commands are enabled; focus-dependent tracker keys and unsourced OpenStudio fallbacks are disabled. Escape inside dialogs and the click-only metronome shortcut remain available as OpenStudio commands.",
     nativePlatforms: ["macos", "windows", "linux"],
     fallbackPolicy: "strict",
     bindings: {
+      "file.importAudio": keys(),
+      "file.importMIDI": keys(),
       // This modal-scoped safety binding does not project Renoise's tracker
       // Edit Mode semantics into OpenStudio's editors.
       "modal.close": keys("Esc"),
@@ -1088,6 +1130,14 @@ export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
     },
   },
 ] as const;
+
+// This OpenStudio-specific command has no source-DAW counterpart. Give every
+// profile an explicit binding, including strict profiles, while preserving
+// profile-specific assignments and the user's custom override/unbind layer.
+export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = SOURCE_KEYBOARD_SHORTCUT_PROFILES.map(profile => ({
+  ...profile,
+  bindings: { "transport.metronomePractice": keys(CLICK_ONLY_METRONOME_SHORTCUT), ...profile.bindings },
+}));
 
 const PROFILE_BY_ID = new Map<KeyboardShortcutProfileId, KeyboardShortcutProfile>(
   KEYBOARD_SHORTCUT_PROFILES.map((profile) => [profile.id, profile]),

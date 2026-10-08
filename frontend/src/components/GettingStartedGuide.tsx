@@ -36,7 +36,7 @@ import {
 } from "../utils/inputProfileHelp";
 import { getShortcutPlatform } from "../utils/platform";
 import { getMouseBehaviorProfile } from "../utils/mouseBehaviorProfiles";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import {
   routeModalShortcutEvent,
   useModalShortcutScope,
@@ -368,6 +368,7 @@ export function GettingStartedGuide() {
     <div
       className="fixed inset-0 z-[10000] flex items-center justify-center p-4"
       data-modal-root="true"
+      {...modalPointerBoundaryProps}
       onContextMenu={guardModalContextMenu}
       onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
       onFocusCapture={() => activateShortcutContext({ kind: "modal" })}

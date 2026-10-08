@@ -52,8 +52,9 @@ export interface ModalShortcutRouteResult {
 export function routeModalShortcutEvent(
   event: ModalShortcutEventLike,
   platform?: ShortcutPlatform,
+  closeActionId = MODAL_CLOSE_ACTION_ID,
 ): ModalShortcutRouteResult {
-  const matched = matchesActionShortcut(event, MODAL_CLOSE_ACTION_ID, platform);
+  const matched = matchesActionShortcut(event, closeActionId, platform);
   const preservedEditableCommand = matched
     && isEditableShortcutTarget(event.target ?? null)
     // Escape has no text-editing default; once it is the user's effective
@@ -68,7 +69,7 @@ export function routeModalShortcutEvent(
     return {
       matched: true,
       preservedEditableCommand: false,
-      result: executeActiveScopedAction(MODAL_CLOSE_ACTION_ID),
+      result: executeActiveScopedAction(closeActionId),
       suppressedHeadlessEscape: event.key === "Escape",
     };
   }

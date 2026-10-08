@@ -3,11 +3,14 @@
 #include "ProjectFileStore.h"
 #include "RecoveryJournal.h"
 #include "OwnedBackgroundTasks.h"
+#include "MessageMutationQueue.h"
+#include "BuiltInAlignmentJob.h"
 
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "AppUpdater.h"
 #include <functional>
+#include <atomic>
 #include <map>
 #include <set>
 #include <utility>
@@ -33,6 +36,7 @@ public:
         main,
         mixer,
         midiEditor,
+        pitchEditor,
         pluginEditor
     };
 
@@ -56,6 +60,7 @@ public:
     struct WindowCallbacks
     {
         std::function<void()> requestAppClose;
+        std::function<juce::var(const juce::String&, const juce::var&, WindowRole, const juce::String&)> pitchEditorSession;
         std::function<bool(const juce::var&)> openMixerWindow;
         std::function<bool()> closeMixerWindow;
         std::function<juce::var()> getMixerWindowState;
@@ -94,9 +99,11 @@ public:
     bool hasFrontendStartupSucceeded() const;
     bool hasFrontendStartupReachedTerminalState() const;
     juce::String getFrontendStartupStateDescription() const;
+    int getFrontendDocumentRequestCount() const noexcept;
 
     static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
+    static juce::var getBrowserInstanceCounts();
     static juce::var buildStartupSelfTestReport();
     static bool writeStartupSelfTestReport(const juce::File& reportFile);
     static juce::var runNAMCatalogNativeRegression();
@@ -133,6 +140,7 @@ private:
     void relaunchApplication(StartupMode targetMode);
     void repairInstalledApplication();
     void repairWindowsPrerequisites();
+    void pollWindowsPrerequisiteRepair();
     juce::var buildStartupDiagnostics() const;
     void initializePitchRegressionJob(const juce::String& pitchRegressionJobPathIn);
     bool completePitchRegressionJob(const juce::var& result);
@@ -179,12 +187,30 @@ private:
     //==============================================================================
     // Your private member variables go here...
     AudioEngine& audioEngine;
+    // Main-thread request ordering prevents queued transport echoes from undoing
+    // a frontend seek/start/stop before its native operation has completed.
+    juce::String transportRequestToken;
+    juce::uint64 transportRequestSequence = 0;
+    struct AutomationEditorFlush;
+    static std::shared_ptr<AutomationEditorFlush> pendingAutomationEditorFlush;
+    static void finishAutomationEditorFlush(const std::shared_ptr<AutomationEditorFlush>& request,
+                                           bool timedOut = false, bool cancelled = false);
+    void flushEditorsAfterTransportStop(const juce::String& token, juce::uint64 sequence,
+                                       bool wasRolling, double stoppedPosition,
+                                       juce::WebBrowserComponent::NativeFunctionCompletion completion);
+    void acknowledgeAutomationEditorFlush(const juce::String& token, bool success);
+    void publishBuiltInParameterEdit(juce::var event);
+    void cancelAutomationEditorFlush();
     AppUpdater& appUpdater;
     StartupMode startupMode = StartupMode::normal;
     WindowRole windowRole = WindowRole::main;
     juce::String windowInstanceId;
     WindowCallbacks windowCallbacks;
     juce::File webuiDir;
+    std::atomic<int> frontendDocumentRequestCount { 0 };
+    juce::Array<juce::var> deferredNativeFunctionNames;
+    MessageMutationQueue messageMutations;
+    juce::WebBrowserComponent::NativeFunction deferNativeMutation(const juce::String&, juce::WebBrowserComponent::NativeFunction);
     juce::WebBrowserComponent webView;
     bool embeddedBrowserFocusRequestPending = false;
     juce::Label startupStatusMessage;
@@ -216,6 +242,7 @@ private:
     OwnedBackgroundTasks aiPreflightOperations;
     // File jobs must finish before the WebView and completion owner disappear.
     juce::ThreadPool projectFilePool { 1 };
+    juce::String projectReadToken, projectReadJSON;
     ProjectFileStore::RecoverySession projectRecovery;
     RecoveryJournal workRecovery;
     juce::ThreadPool clipPeakAnalysisPool {
@@ -243,6 +270,15 @@ private:
     // Model/IR parsing and prewarming can be CPU- and memory-intensive. Keep
     // this single mutation worker below the audio callback's scheduling class
     // so a model load cannot steal a 16-sample deadline.
+    // Accessed only on the message thread; worker tickets contain atomics.
+    std::map<juce::String,std::shared_ptr<BuiltInIRPreparation>> irPreparationJobs;
+    std::map<juce::String,std::shared_ptr<BuiltInAlignmentJob>> alignmentJobs;
+    std::map<juce::String,std::shared_ptr<BuiltInWorkerJob>> reverbResponseJobs;
+    struct EQDraftJob { std::shared_ptr<BuiltInWorkerJob> ticket; juce::var request; };
+    std::map<juce::String,EQDraftJob> eqDraftJobs;
+    juce::ThreadPool reverbResponsePool { 1, juce::Thread::osDefaultStackSize, juce::Thread::Priority::low };
+    // Waiting for playback must not block ordinary plugin state edits/imports.
+    juce::ThreadPool alignmentCapturePool { 1, juce::Thread::osDefaultStackSize, juce::Thread::Priority::low };
     juce::ThreadPool builtInStateMutationPool {
         1,
         juce::Thread::osDefaultStackSize,
@@ -262,9 +298,15 @@ private:
     bool startupFallbackVisible = false;
     bool startupWatchdogActive = false;
     uint64_t lastProcessorFaultGeneration = 0;
+    bool pendingRecordingDeviceInterruption = false;
     bool attemptedPackagedFrontendFallbackAfterLocalTimeout = false;
     bool secondaryWindowClosing = false;
     StartupRepairAction startupRepairAction = StartupRepairAction::none;
+#if JUCE_WINDOWS
+    bool prerequisiteRepairInProgress = false;
+    std::unique_ptr<juce::ChildProcess> webView2RepairProcess;
+    std::unique_ptr<juce::ChildProcess> vcRedistRepairProcess;
+#endif
     juce::String lastAiToolsStatusDigest;
     double lastAiToolsStatusEmitMs = 0.0;
     double lastAiToolsStatusPollMs = 0.0;

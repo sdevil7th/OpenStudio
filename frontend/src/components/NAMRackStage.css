@@ -2268,7 +2268,7 @@
     -webkit-overflow-scrolling: touch;
   }
   .nam-rack-design-port::-webkit-scrollbar { width: 0; height: 0; }
-  .nam-rack-design-port .premium-nam-shell {
+  .nam-rack-design-port:not(.nam-rack-source-flow-design-port) .premium-nam-shell {
     position: relative;
     inset: auto;
     width: calc(100% - 8px);

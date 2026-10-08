@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release', 'ASan')] [string]$Configuration = 'Debug',
     [string]$Label = 'qualification',
+    [string]$AuditionDirectory = '',
     [switch]$SkipBuild,
     [switch]$AllowFailure
 )
@@ -24,6 +25,9 @@ $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
 $start.EnvironmentVariables['OPENSTUDIO_METRONOME_FIXTURES_ONLY'] = '1'
+if ($AuditionDirectory) {
+    $start.EnvironmentVariables['OPENSTUDIO_METRONOME_AUDITION_DIR'] = [System.IO.Path]::GetFullPath($AuditionDirectory)
+}
 $process = [System.Diagnostics.Process]::Start($start)
 $outTask = $process.StandardOutput.ReadToEndAsync()
 $errTask = $process.StandardError.ReadToEndAsync()

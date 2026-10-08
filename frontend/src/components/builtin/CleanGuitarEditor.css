@@ -1,0 +1,84 @@
+.instrument-guitar {
+  --instrument-accent: #c1b281;
+}
+.guitar-play-layout {
+  grid-template-columns: minmax(145px,.72fr) minmax(0,1.7fr) minmax(170px,.86fr);
+}
+.guitar-two-columns {
+  grid-template-columns: 1.25fr 1fr;
+}
+.guitar-articulations>button {
+  display: flex;
+  justify-content: space-between;
+  gap: 5px;
+  align-items: center;
+  min-height: 35px;
+  border: 1px solid #3b4850;
+  background: #202a30;
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 12px;
+  text-align: left;
+}
+.guitar-articulations>button[aria-pressed=true] {
+  background: #c1b28118;
+  border-color: var(--instrument-accent);
+  color: var(--instrument-accent);
+}
+.guitar-articulations>button:disabled {
+  opacity: .45;
+}
+.guitar-articulations small {
+  font-size: 10px;
+  color: var(--instrument-muted);
+  white-space: nowrap;
+}
+.guitar-position {
+  height: 135px;
+  margin: 20px 0;
+}
+.guitar-neck {
+  fill: #292f2c;
+  stroke: #737562;
+}
+.guitar-fret {
+  stroke: #727f7f;
+  stroke-width: 1.3;
+}
+.guitar-string {
+  stroke: #cecec0;
+  stroke-width: 1;
+  opacity: .65;
+}
+.guitar-pickup {
+  fill: #253139;
+  stroke: #bdbba7;
+  stroke-width: 2;
+}
+.guitar-pick {
+  fill: var(--instrument-accent);
+}
+.guitar-live-string {
+  border-color: #344248;
+}
+.guitar-live-string-name {
+  width: 64px;
+  color: var(--instrument-accent);
+}
+@container(max-width:790px) {
+  .guitar-play-layout {
+    grid-template-columns: minmax(140px,.7fr) minmax(0,1.4fr);
+  }
+  .guitar-play-layout>.instrument-section:last-child {
+    grid-column: 1/-1;
+  }
+  .guitar-two-columns {
+    grid-template-columns: 1fr;
+  }
+  .guitar-articulations>button {
+    padding-inline: 7px;
+  }
+  .guitar-position {
+    height: 110px;
+  }
+}

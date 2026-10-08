@@ -94,61 +94,6 @@ body {
   animation: recording-pulse 1s ease-in-out infinite;
 }
 
-/* Vertical Fader Styling */
-.vertical-fader {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-.vertical-fader::-webkit-slider-runnable-track {
-  width: 6px;
-  height: 100%;
-  background: linear-gradient(to top, #1a1a1a, #252525);
-  border: 1px solid #333;
-  border-radius: 3px;
-}
-
-.vertical-fader::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 18px;
-  height: 10px;
-  background: linear-gradient(to bottom, #555, #333);
-  border: 1px solid #666;
-  border-radius: 2px;
-  cursor: grab;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  margin-left: -6px;
-}
-
-.vertical-fader::-webkit-slider-thumb:hover {
-  background: linear-gradient(to bottom, #666, #444);
-}
-
-.vertical-fader::-webkit-slider-thumb:active {
-  cursor: grabbing;
-  background: linear-gradient(to bottom, #777, #555);
-}
-
-/* Firefox */
-.vertical-fader::-moz-range-track {
-  width: 6px;
-  background: linear-gradient(to top, #1a1a1a, #252525);
-  border: 1px solid #333;
-  border-radius: 3px;
-}
-
-.vertical-fader::-moz-range-thumb {
-  width: 18px;
-  height: 10px;
-  background: linear-gradient(to bottom, #555, #333);
-  border: 1px solid #666;
-  border-radius: 2px;
-  cursor: grab;
-}
-
 /* App Layout Classes (Restored) */
 .app-container {
   position: relative;

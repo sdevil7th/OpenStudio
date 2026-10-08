@@ -32,6 +32,7 @@ public:
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
     void releaseResources() override;
+    void reset() override;
 
     const juce::String getName() const override { return "OpenStudio Pitch Correct"; }
     bool hasEditor() const override { return true; }
@@ -88,6 +89,7 @@ public:
     std::atomic<float> mix { 1.0f }; // 0=dry, 1=100% corrected
 
     // Detection parameters
+    std::atomic<float> detectionSource { 0.0f }; // 0=Left, 1=Right, 2=Mid; mono uses its only input
     std::atomic<float> sensitivity { 0.15f }; // YIN threshold (lower = more sensitive)
     std::atomic<float> minFreqParam { 80.0f };
     std::atomic<float> maxFreqParam { 1000.0f };
@@ -102,25 +104,39 @@ private:
     signalsmith::stretch::SignalsmithStretch<float> stretcher;
 
     double cachedSampleRate = 44100.0;
-    float lastDetectedHz = 0.0f;
-    float lastCorrectedHz = 0.0f;
+    std::atomic<float> lastDetectedHz { 0.0f };
+    std::atomic<float> lastCorrectedHz { 0.0f };
 
     // Pre-allocated buffers/vectors for processBlock — sized in prepareToPlay,
     // reused every callback to avoid heap allocation on the audio thread.
     juce::AudioBuffer<float>  dryBuffer;       // dry copy for wet/mix blend
+    juce::AudioBuffer<float> dryDelay;
+    juce::AudioBuffer<float> detectionBuffer;
+    int activeDetectionSource = 0;
+    int dryDelayPosition = 0;
+    juce::SmoothedValue<float> wetMix;
     std::vector<const float*> inPtrs;          // Signalsmith input channel pointers
     std::vector<float*>       outPtrs;         // Signalsmith output channel pointers
     juce::AudioBuffer<float>  stretchOutputBuf; // Signalsmith output staging buffer
 
-    // Pitch history for UI — lock-free single-writer (audio thread) / single-reader (UI).
-    // Audio thread writes at writePos then increments with release semantics.
-    // UI thread loads writePos with acquire, then reads older indices without a lock.
+    // Ring slots can be overwritten while the UI copies them. Atomic fields
+    // avoid a data race; an even, unchanged generation identifies one frame.
+    // The reader skips a busy slot rather than making the audio thread wait.
     static constexpr int maxPitchHistory = 512;
-    std::vector<PitchHistoryFrame> pitchHistory;
+    struct PublishedPitchFrame
+    {
+        std::atomic<unsigned int> generation { 0 };
+        std::atomic<float> detectedMidi { 0.0f };
+        std::atomic<float> correctedMidi { 0.0f };
+        std::atomic<float> confidence { 0.0f };
+    };
+    std::array<PublishedPitchFrame, maxPitchHistory> pitchHistory;
     std::atomic<int> pitchHistoryWritePos { 0 };
 
     // MIDI output state
     int currentMidiNote = -1;       // Currently sounding note (-1 = none)
+    int currentMidiChannel = 1;
+    bool midiResetPending = false;
     int currentMidiVelocity = 0;
     float midiNoteHoldTime = 0.0f;  // Time current note has been held
     static constexpr float midiMinHoldTime = 0.03f; // Min note duration (30ms)

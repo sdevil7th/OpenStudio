@@ -3,7 +3,7 @@ import { nativeBridge } from "../services/NativeBridge";
 export type FXChainType = "input" | "track" | "master";
 export interface FXChainChangeDetail {
   trackId: string;
-  chainType: FXChainType;
+  chainType: FXChainType | "monitor";
 }
 
 export interface InstrumentChangeDetail {
@@ -84,7 +84,12 @@ export function notifyFXChainChanged(detail: FXChainChangeDetail) {
 export function subscribeToFXChainChanged(
   callback: (detail: FXChainChangeDetail) => void,
 ): () => void {
-  return subscribeToFrontendEvent(FX_CHAIN_CHANGED_EVENT, callback);
+  const stopLocal = subscribeToFrontendEvent(FX_CHAIN_CHANGED_EVENT, callback);
+  const stopNative = nativeBridge.subscribe("builtInHostBypassChanged", payload => {
+    if (payload && ["input", "track", "master"].includes(payload.chain))
+      callback({ trackId: payload.chain === "master" ? "master" : payload.trackId, chainType: payload.chain });
+  });
+  return () => { stopLocal(); stopNative(); };
 }
 
 export function notifyInstrumentChanged(detail: InstrumentChangeDetail) {

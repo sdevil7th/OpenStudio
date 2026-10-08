@@ -1,4 +1,22 @@
 #pragma once
+#include "BuiltInDrumArticulations.h"
+#include "BuiltInSpringReverb.h"
+#include "BuiltInSaturationColour.h"
+#include "BuiltInVoiceAllocation.h"
+#include "BuiltInSynthModulation.h"
+#include "BuiltInSynthCCMacros.h"
+#include "BuiltInMIDIChannelMix.h"
+#include "BuiltInSynthMatrix.h"
+#include "BuiltInSynthOscillators.h"
+#include "BuiltInSynthMPE.h"
+#include "BuiltInPluckedLoop.h"
+#include "BuiltInCoupledBody.h"
+#include "BuiltInReverbWorkflow.h"
+#include "BuiltInPeakHold.h"
+#include "BuiltInReverbPeakMeter.h"
+#include "BuiltInDelayDiffusion.h"
+#include "BuiltInInstrumentPerformance.h"
+#include "BuiltInGuitarPerformance.h"
 
 #include <JuceHeader.h>
 #include "BuiltInEffects.h"
@@ -32,9 +50,12 @@ class AudioEngine;
 class OpenStudioDelay : public juce::AudioProcessor
 {
 public:
-    explicit OpenStudioDelay(float maximumSupportedDelaySeconds = 24.1f);
+    explicit OpenStudioDelay(float maximumSupportedDelaySeconds = 24.1f, bool standalone = false);
     ~OpenStudioDelay() override = default;
     float getMaximumSupportedDelaySeconds() const noexcept { return maximumDelaySeconds; }
+    // Callback-published telemetry; zero means no processed block yet.
+    std::atomic<float> effectiveDelayMsL {0}, effectiveDelayMsR {0}, editorTempoBpm {0};
+    std::atomic<int> editorTempoSource {0}; // 0 fallback, 1 current host, 2 retained host
 
     // Parameters
     std::atomic<float> delayTimeL { 250.0f };   // 1-2000 ms
@@ -86,6 +107,33 @@ public:
     std::atomic<float> unityDry          { 0.0f };
     std::atomic<float> directGainOverride { -1.0f };
 
+    const bool standaloneControls;
+    std::atomic<float> customMotion {0}, standaloneWowDepth {.45f};
+    std::atomic<float> diffusionAmount {0}, diffusionSpanMs {40};
+    struct StandaloneControl { const char* id; const char* label; float minimum,maximum,initial; const char* unit; std::atomic<float> OpenStudioDelay::* member; };
+    static constexpr std::array<StandaloneControl,19> standaloneParameters {{
+        {"topologyControl","Topology",0,1,.18f,"",&OpenStudioDelay::topologyControl},
+        {"multiFeedback","Head feedback",0,.95f,.2112f,"",&OpenStudioDelay::multiFeedback},
+        {"dualTimeRatio","B time ratio",.5f,1,.59f,"x",&OpenStudioDelay::dualTimeRatio},
+        {"dualFeedback","B feedback",0,.95f,.185152f,"",&OpenStudioDelay::dualFeedback},
+        {"dualLowPassHz","B low pass",200,20000,8260,"Hz",&OpenStudioDelay::dualLowPassHz},
+        {"dualHighPassHz","B high pass",20,2000,85.7f,"Hz",&OpenStudioDelay::dualHighPassHz},
+        {"dualSaturation","B saturation",0,1,.234f,"",&OpenStudioDelay::dualSaturation},
+        {"dualModDepthMs","B motion",0,4,.255f,"ms",&OpenStudioDelay::dualModDepthMs},
+        {"dualModRateHz","B motion rate",.01f,4,.235f,"Hz",&OpenStudioDelay::dualModRateHz},
+        {"customMotion","Custom wow",0,1,0,"",&OpenStudioDelay::customMotion},
+        {"wowDepthMs","Wow depth",0,4,.45f,"ms",&OpenStudioDelay::standaloneWowDepth},
+        {"wowRateHz","Wow rate",.01f,4,.37f,"Hz",&OpenStudioDelay::wowRateHz},
+        {"flutterDepthMs","Flutter depth",0,1,0,"ms",&OpenStudioDelay::flutterDepthMs},
+        {"flutterRateHz","Flutter rate",1,16,6.4f,"Hz",&OpenStudioDelay::flutterRateHz},
+        {"duckAttackMs","Duck attack",1,100,8,"ms",&OpenStudioDelay::duckAttackMs},
+        {"duckReleaseMs","Duck release",20,2000,180,"ms",&OpenStudioDelay::duckReleaseMs},
+        {"duckMaxReduction","Duck limit",0,.95f,.82f,"",&OpenStudioDelay::duckMaxReduction},
+        {"diffusionAmount","Diffusion",0,1,0,"",&OpenStudioDelay::diffusionAmount},
+        {"diffusionSpanMs","Diffusion span",5,200,40,"ms",&OpenStudioDelay::diffusionSpanMs}
+    }};
+    bool setStandaloneControl(const juce::String& id,float value) noexcept;
+
     // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
@@ -130,6 +178,7 @@ private:
     friend class AudioEngine;
     friend class NAMDelayRegression;
     float maximumDelaySeconds = 24.1f;
+    BuiltInDelayDiffusion wetDiffusion;
     int maxDelaySamples = 2;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLineL { 1 };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLineR { 1 };
@@ -268,17 +317,61 @@ private:
 // ============================================================================
 // OpenStudioReverb -- Multi-algorithm reverb
 // ============================================================================
+#include "BuiltInAdditionalReverbs.h"
+#include "BuiltInConvolution.h"
+#include "BuiltInConvolutionMotion.h"
+#include "BuiltInConvolutionExtension.h"
+#include "BuiltInPlateReverb.h"
+#include "BuiltInModalPlate.h"
+#include "BuiltInPlateColour.h"
+#include "BuiltInStudioReverb.h"
+#include "BuiltInVintageReverb.h"
+#include "BuiltInDriftingReverb.h"
+#include "BuiltInClearReverb.h"
+#include "BuiltInRetroReverb.h"
+#include "BuiltInSpatialReverb.h"
+#include "BuiltInEchoRoom.h"
+#include "BuiltInAmbientReverb.h"
+
 class OpenStudioReverb : public juce::AudioProcessor
 {
 public:
-    OpenStudioReverb();
+    explicit OpenStudioReverb(bool standalone = false);
     ~OpenStudioReverb() override = default;
 
     // Algorithm selector
-    enum class Algorithm : int { Room = 0, Hall, Plate, Chamber };
+    enum class Algorithm : int { Room = 0, Hall, Plate, Chamber, Spring, Shimmer, Nonlinear, Convolution };
 
     // Parameters
     std::atomic<float> algorithm  { 0.0f };    // Algorithm as float
+    const bool standaloneBanking;
+    BuiltInPeakHold peakHold;
+    BuiltInReverbPeakMeter reconstructedPeakMeter;
+    std::atomic<float> reconstructedPeaks {0};
+    std::array<std::atomic<float>,2> inputPeaksDb {{-100.0f,-100.0f}}, outputPeaksDb {{-100.0f,-100.0f}};
+    BuiltInConvolution convolutionSpace;
+    static constexpr int legacyBankControlCount = 10;
+    static constexpr int bankControlCount = 14;
+    static constexpr std::array<float, bankControlCount> bankMinima { 0, 0, 0, 0, 20, 1000, 0, .1f, 0, 0, -24, -24, 0, 0 };
+    static constexpr std::array<float, bankControlCount> bankMaxima { 1, 1, 500, 1, 500, 20000, 1, 20, 1, 1, 24, 24, 1, 7 };
+    static constexpr std::array<float, bankControlCount> bankDefaults { .5f, .5f, 0, .5f, 20, 20000, .5f, 2, 0, .5f, 12, 7, 0, 0 };
+    static constexpr int originalTypeCount = 8; // Frozen descriptor prefix.
+    static constexpr int preVintageTypeCount = 10; // Frozen timing-control descriptor prefix.
+    static constexpr int preSpatialTypeCount = 12;
+    static constexpr int preEchoTypeCount = 15;
+    static constexpr int preAmbientTypeCount = 17;
+    static constexpr int preDriftingTypeCount = 21; // Frozen expanded selector and descriptor prefix.
+    static constexpr int preClearTypeCount = 24; // Frozen Drifting descriptor prefix.
+    static constexpr int preRetroTypeCount = 27; // Frozen Clear/material descriptor prefix.
+    static constexpr int standaloneTypeCount = 41;
+    static float bankDefault(int bank, int control) noexcept;
+    std::array<std::array<std::atomic<float>, bankControlCount>, standaloneTypeCount> typeBanks {};
+    std::atomic<float> sendMode { 0.0f }, mixLock { 0.0f }, insertWet { 0.33f }, insertDry { 0.7f };
+    std::array<std::atomic<float>*, bankControlCount> bankControls();
+    void selectAlgorithm(int index);
+    void selectSendMode(bool send);
+    float getBankValue(int bank, int control);
+    void setBankValue(int bank, int control, float value);
     std::atomic<float> roomSize   { 0.5f };    // 0-1
     std::atomic<float> damping    { 0.5f };    // 0-1
     std::atomic<float> wetLevel   { 0.33f };   // 0-1
@@ -292,6 +385,100 @@ public:
     std::atomic<float> earlyLevel { 0.5f };    // 0-1 early reflections level
     std::atomic<float> decayTime  { 2.0f };    // 0.1-20 seconds
     std::atomic<float> shimmerAmount { 0.0f }; // 0-1, +12 semitone reinjection
+    // Appended standalone controls. Defaults preserve the original single
+    // octave voice and rising Nonlinear response when restoring older states.
+    std::atomic<float> shimmerPitchA { 12.0f }, shimmerPitchB { 7.0f }, shimmerVoiceMix { 0.0f };
+    std::atomic<float> nonlinearShape { 0.0f };
+    std::atomic<float> nonlinearModulation {0}, nonlinearRate {.7f};
+    std::atomic<float> springHold {0}, magneticHold {0}, nonlinearHold {0}, positionedHold {0};
+    std::atomic<float> tailSpillover {0};
+    std::atomic<float> irModDepth {0}, irModRate {.3f};
+    std::array<std::atomic<float>,6> irExtensionControls{{0,2,2,2,250,4000}};
+    std::atomic<double> retiringReverbTailSeconds {0};
+    double getSelectedTailLengthSeconds() const;
+    std::atomic<float> shimmerHold {0}; // opt-in; old creative Freeze state was inactive
+    std::array<std::atomic<float>, standaloneTypeCount> holdInputModes {};
+    size_t holdSlot() const noexcept { return static_cast<size_t>(juce::jlimit(0, standaloneTypeCount - 1, juce::roundToInt(algorithm.load()))); }
+    bool holdAcceptsInput() const noexcept { return holdInputModes[holdSlot()].load() >= .5f; }
+    static constexpr std::array<const char*, 5> creativeIds { "shimmerRouting", "nonlinearFeedback", "nonlinearLateDecay", "nonlinearLateLevel", "nonlinearDiffusion" };
+    static constexpr std::array<float, 5> creativeMin { 0, 0, .1f, 0, 0 }, creativeMax { 2, .95f, 20, 1, 1 }, creativeDefaults { 0, 0, 2, 0, 0 };
+    std::array<std::atomic<float>, 5> creativeControls { 0, 0, 2, 0, 0 };
+    // Independent Room/Hall/Chamber compatibility and tone memories.
+    std::array<std::atomic<float>,5> studioEngines {};
+    std::atomic<float> roomCharacter{0};
+    static constexpr std::array<const char*,3> studioToneIds {"studioDecayFilter","studioDecayCutoff","studioOutputCutOff"};
+    static constexpr std::array<float,3> studioToneMin {0,200,0},studioToneMax {2,20000,1},studioToneDefaults {0,8000,0};
+    std::array<std::array<std::atomic<float>,3>,5> studioToneControls {};
+    static constexpr std::array<const char*,3> plateToneIds {"plateDecayFilter","plateDecayCutoff","plateOutputCutOff"};
+    std::array<std::atomic<float>,3> plateToneControls {};
+    std::array<std::atomic<float>,5> studioModulation { .15f, .3f, .1f, .2f, .05f };
+    std::array<std::atomic<float>,5> studioBassRatio { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    static constexpr std::array<const char*,7> driftingIds {"driftDrive", "driftWow", "driftFlutter", "driftRate", "driftEmphasis", "driftBassRatio", "driftBassFrequency"};
+    static constexpr std::array<float,7> driftingMin {0,0,0,.05f,0,.25f,100}, driftingMax {24,1,1,2,1,4,10000}, driftingDefaults {6,.2f,.1f,.3f,.5f,1,500};
+    std::array<std::array<std::atomic<float>,7>,3> driftingControls {};
+    bool isDriftingSpace() const noexcept { return algorithm.load() >= 21 && algorithm.load() <= 23; }
+    size_t driftingSlot() const noexcept { return static_cast<size_t>(juce::jlimit(0,2,juce::roundToInt(algorithm.load())-21)); }
+    static constexpr std::array<const char*,6> clearIds {"clearInputDiffusion","clearOnset","clearDepth","clearRate","clearBassRatio","clearBassFrequency"};
+    static constexpr std::array<float,6> clearMin {0,0,0,.05f,.25f,100}, clearMax {1,300,1,2,4,10000}, clearDefaults {.65f,40,.25f,.3f,1,500};
+    std::array<std::array<std::atomic<float>,6>,3> clearControls {};
+    bool isClearSpace() const noexcept {return algorithm.load()>=24&&algorithm.load()<=26;}
+    size_t clearSlot() const noexcept {return static_cast<size_t>(juce::jlimit(0,2,juce::roundToInt(algorithm.load())-24));}
+    std::array<std::array<std::atomic<float>,BuiltInRetroReverb::controlCount>,BuiltInRetroReverb::count> retroControls {};
+    bool isRetroSpace() const noexcept {return algorithm.load()>=27&&algorithm.load()<=40;}
+    size_t retroSlot() const noexcept {return static_cast<size_t>(juce::jlimit(0,13,juce::roundToInt(algorithm.load())-27));}
+    std::array<std::atomic<float>,2> vintageConversion { 0, 0 }, vintageTankRate { 0, 0 };
+    std::array<std::atomic<float>,2> vintageBuildUp { 0, 0 }, vintageInputDiffusion { .5f, .5f };
+    std::array<std::atomic<float>,2> vintageBassRatio { 1, 1 }, vintageBassFrequency { 500, 500 };
+    std::array<std::atomic<float>,2> vintageColour { 0, 0 }, vintageModulation { .35f, .35f }, vintageRate { .3f, .3f };
+    static constexpr std::array<const char*,8> spatialIds{"spatialDelay","spatialFeedback","spatialSync","spatialDivision","spatialDensity","spatialModulation","spatialRate","spatialAmount"};
+    static constexpr std::array<float,8> spatialMin{0,0,0,0,0,0,.05f,0},spatialMax{2000,1,1,14,1,1,20,1},spatialDefaults{80,.2f,0,8,1,.25f,.4f,1};
+    std::array<std::array<std::atomic<float>,8>,3> spatialControls{};
+    std::array<std::atomic<float>,3> spatialLowShelf{0,0,0};
+    std::array<std::atomic<float>,3> spatialDelayCapacity{0,0,0};
+    bool setSpatialDelayCapacity(size_t index,float value);
+    float spatialCapacityMs() const noexcept{return BuiltInSpatialReverb::capacitySeconds(spatialDelayCapacity[spatialSlot()].load())*1000;}
+    static constexpr std::array<const char*,8> echoRoomIds{"headTime","headCount","headSpacing","headFeedback","headMotion","roomShape","sourceX","sourceY"};
+    static constexpr std::array<float,8> echoRoomMin{200,0,0,0,0,0,0,0},echoRoomMax{1500,2,1,.98f,1,2,1,1},echoRoomDefaults{600,1,0,.35f,.1f,0,.5f,.5f};
+    std::array<std::array<std::atomic<float>,8>,2> echoRoomControls{};
+    static constexpr std::array<const char*,11> ambientIds{"ambRise","ambSwellMode","ambLength","ambFeedback","ambDepth","ambRate","ambVowel","ambResonance","ambCloudDecay","ambHold","ambBass"};
+    static constexpr std::array<float,11> ambientMin{.01f,0,.02f,0,0,.05f,0,0,1,0,.5f},ambientMax{5,1,2,.95f,1,2,6,2,50,2,2},ambientDefaults{.5f,0,.8f,.3f,.3f,.2f,0,1,10,0,1};
+    std::array<std::array<std::atomic<float>,11>,4> ambientControls{};
+    static constexpr std::array<const char*,7> springIds{"springEngine","springCount","springDwell","springDispersion","springTension","springBass","springMotion"};
+    static constexpr std::array<float,7> springMin{0,0,0,0,0,-10,0},springMax{1,2,3,1,1,10,1},springDefaults{0,1,0,.6f,.5f,0,.2f};
+    std::array<std::atomic<float>,7> springControls{};
+
+    bool isAmbientSpace()const noexcept{return algorithm.load()>=17&&algorithm.load()<=20;}
+    size_t ambientSlot()const noexcept{return static_cast<size_t>(juce::jlimit(0,3,juce::roundToInt(algorithm.load())-17));}
+    bool isEchoRoom()const noexcept{return algorithm.load()>=15&&algorithm.load()<=16;}
+    size_t echoRoomSlot()const noexcept{return algorithm.load()>=16?1:0;}
+    bool isSpatialSpace()const noexcept{return algorithm.load()>=12&&algorithm.load()<=14;}
+    size_t spatialSlot()const noexcept{return static_cast<size_t>(juce::jlimit(0,2,juce::roundToInt(algorithm.load())-12));}
+    float requestedSpatialDelay()const noexcept{const auto& p=spatialControls[spatialSlot()];return p[2].load()>=.5f?BuiltInSpatialReverb::delayMilliseconds(workflowTempo.load(),p[3].load()):p[0].load();}
+    size_t vintageSlot() const noexcept { return algorithm.load() == 11 ? 1 : 0; }
+    bool isVintageSpace() const noexcept { return algorithm.load() == 10 || algorithm.load() == 11; }
+    size_t studioSlot() const noexcept { const int type = static_cast<int>(algorithm.load()); return type == 8 ? 3 : (type == 9 ? 4 : (type == 1 ? 1 : (type == 3 ? 2 : 0))); }
+    int studioTopology() const noexcept { return algorithm.load()==0 && roomCharacter.load()>=.5f ? 5 : static_cast<int>(studioSlot()); }
+    bool isStudioSpace() const noexcept { const float value = algorithm.load(); return value == 0 || value == 1 || value == 3 || value == 8 || value == 9; }
+    std::atomic<float> predelayCapacity {0};
+    bool setPredelayCapacity(float value);
+    float predelayCapacityMs() const noexcept { return BuiltInReverbWorkflow::capacitySeconds(predelayCapacity.load()) * 1000; }
+    std::atomic<float> predelaySync {0}, predelayDivision {4}, wetDuckDepth {0}, wetDuckThreshold {-24}, wetDuckRelease {250};
+    std::atomic<float> workflowTempo {120}, workflowReduction {0}, workflowSampleRate {44100};
+    float enginePredelay() const noexcept { return standaloneBanking && predelaySync.load() >= .5f ? 0.0f : preDelay.load(); }
+    float effectivePredelay() const noexcept { if(isSpatialSpace())return juce::jmin(spatialCapacityMs(),requestedSpatialDelay());return standaloneBanking && predelaySync.load() >= .5f
+        ? juce::jmin(predelayCapacityMs(), BuiltInReverbWorkflow::milliseconds(workflowTempo.load(),predelayDivision.load())) : preDelay.load(); }
+    std::atomic<float> plateEngine { 0.0f }, plateCharacter { 1.0f }, plateModulation { .25f };
+    std::array<std::atomic<float>,BuiltInModalPlate::controlCount> modalControls {};
+    std::array<std::atomic<float>,BuiltInModalPlate::materialCount> modalMaterialControls {};
+    BuiltInModalPlate::Material modalMaterialSettings() const noexcept;
+    bool setModalMaterialControl(size_t index,float value);
+    bool setModalControl(size_t index,float value);
+    std::array<float,BuiltInModalPlate::controlCount> modalSettings() const noexcept;
+    static constexpr std::array<const char*,10> plateColourIds{"plateDrive","plateInputCut","plateChorus","plateChorusPosition","plateChorusAmount","plateEQOn","plateLowFrequency","plateLowGain","plateHighFrequency","plateHighGain"};
+    static constexpr std::array<float,10> plateColourMin{0,20,0,0,0,0,20,-24,200,-24},plateColourMax{36,700,1,1,1,1,2000,24,20000,24},plateColourDefaults{0,20,0,0,.5f,0,20,0,20000,0};
+    std::array<std::atomic<float>,10> plateColourControls;
+
+    std::atomic<float> shimmerVoiceEngine { 0.0f }; // 0 legacy octave, 1 spectral dual voice
     std::atomic<float> ducking       { 0.12f }; // 0-1 wet ducking
     std::atomic<float> bassDecay     { 0.70f }; // 0-1 low-band RT ratio
     std::atomic<float> movement      { 0.35f }; // 0-1 late-field modulation
@@ -440,12 +627,34 @@ public:
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
+    void restoreStateTree(const juce::ValueTree& tree, bool restoreConvolution);
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
     bool isOpenStudioBuiltIn() const { return true; }
     void resetTailState() noexcept;
 
 private:
+    BuiltInAdditionalReverbs additionalSpaces;
+    BuiltInPlateReverb plateSpace;
+    BuiltInModalPlate modalPlate;
+    BuiltInPlateColour plateColour;
+    BuiltInSpringReverb springSpace;
+    BuiltInStudioReverb studioSpace;
+    BuiltInVintageReverb vintageSpace;
+    BuiltInDriftingReverb driftingSpace;
+    BuiltInClearReverb clearSpace;
+    std::unique_ptr<BuiltInRetroReverb> retroSpace;
+    BuiltInSpatialReverb spatialSpace;
+    BuiltInEchoRoom echoRoom;
+    BuiltInAmbientReverb ambientSpace;
+    juce::AudioBuffer<float> additionalDry, convolutionWet;
+    juce::SmoothedValue<float> convolutionWeight;
+    BuiltInReverbRetirement<1> convolutionRetirement;
+    std::array<float,12> convolutionOuterSettings {0,20,20000,1,0,.3f};
+    BuiltInConvolutionMotion convolutionMotion, convolutionCrossMotion;
+    BuiltInConvolutionExtension convolutionExtension, convolutionCrossExtension;
+    BuiltInReverbWorkflow workflow, convolutionCrossWorkflow;
+    void processSelectedEngine(juce::AudioBuffer<float>&, juce::MidiBuffer&);
     static constexpr int lateLineCount = 8;
     static constexpr int v2LateLineCount = 16;
     static constexpr int v2DiffusionStageCount = 4;
@@ -758,6 +967,11 @@ public:
     std::atomic<float> spread   { 0.5f };    // 0-1 stereo spread
     std::atomic<float> highCut  { 20000.0f }; // 200-20000 Hz wet signal
     std::atomic<float> lowCut   { 20.0f };    // 20-2000 Hz wet signal
+    std::atomic<float> syncDivision { 7.0f };
+    std::atomic<float> effectiveRateHz { 1.0f };
+    std::atomic<double> hostTempoBpm { 120.0 };
+    static constexpr std::array<double, 10> cycleBeats { .25, 1.0/3.0, .5, .75, 2.0/3.0, 1, 2, 4, 8, 16 };
+    float resolveLFORate() noexcept;
     std::atomic<float> tempoSync { 0.0f };   // 0 = off, 1 = on
     std::atomic<float> characterMode { 0.0f }; // 0=Clean, 1=Ensemble
     std::atomic<float> randomBlend { 0.0f };  // 0=smooth LFO, 1=sample-and-hold
@@ -912,6 +1126,9 @@ public:
     std::atomic<float> asymmetry  { 0.0f };     // -1 to 1 (asymmetric clipping)
     std::atomic<float> oversampleMode { 1.0f }; // 0=off, 1=2x, 2=4x
 
+    std::atomic<float> colourEngine {0}, inputTrim {0}, boostDrive {0}, driveCompensation {1}, colourTone {0}, cornerBump {0}, colourDynamics {1}, steepCut {0};
+    std::atomic<float> inputLevelDb {-100}, outputLevelDb {-100}, drivenLevelDb {-100};
+
     // AudioProcessor overrides
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
@@ -982,6 +1199,9 @@ public:
     void resetRealtimeStateForEmbeddedBypass() noexcept;
 
 private:
+    BuiltInSaturationColour colour;
+    int activeColourEngine=0;
+    void publishColourMeters(const juce::AudioBuffer<float>&);
     static constexpr int maximumOversamplingLatencySamples = 512;
     juce::dsp::IIR::Filter<float> toneFilterL, toneFilterR;
     juce::dsp::IIR::Filter<float> lowCutFilterL, lowCutFilterR;
@@ -2701,10 +2921,12 @@ private:
 class OpenStudioBasicSynthInstrument : public juce::AudioProcessor
 {
 public:
+    BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioBasicSynthInstrument();
     ~OpenStudioBasicSynthInstrument() override = default;
 
     std::atomic<float> attackMs { 8.0f };
+    std::atomic<float> decayMs { 250.0f }, sustain { .75f }, oscillatorBlend { .5f };
     std::atomic<float> releaseMs { 180.0f };
     std::atomic<float> brightness { 0.62f };
     std::atomic<float> detuneCents { 7.0f };
@@ -2712,9 +2934,104 @@ public:
     std::atomic<float> noiseLevel { 0.015f };
     std::atomic<float> outputGain { -15.0f };
 
+    std::atomic<float> filterMode { 0 }, filterCutoff { 4000 }, filterQ { .707f }, filterKeyTrack { 0 }, filterEnvelope { 0 };
+    std::atomic<float> lfoDestination { 0 }, lfoRate { 1 }, lfoDepth { 0 }, lfoShape { 0 };
+    std::atomic<float> filterEnvelopeSource { 0 }, filterAttackMs { 10 }, filterDecayMs { 300 }, filterSustain { .25f }, filterReleaseMs { 250 }, filterVelocity { 0 };
+    std::atomic<float> lfoMode{0},wheelMode{0};
+    std::atomic<float> oscillatorAShape{0},oscillatorBShape{1};
+    std::atomic<float> matrix1Source{0},matrix1Target{0},matrix1Amount{0};
+    std::atomic<float> matrix2Source{0},matrix2Target{0},matrix2Amount{0};
+    std::atomic<float> matrix3Source{0},matrix3Target{0},matrix3Amount{0};
+    std::atomic<float> matrix4Source{0},matrix4Target{0},matrix4Amount{0};
+    std::atomic<float> matrix5Source{0},matrix5Target{0},matrix5Amount{0};
+    std::atomic<float> matrix6Source{0},matrix6Target{0},matrix6Amount{0};
+    std::atomic<float> matrix7Source{0},matrix7Target{0},matrix7Amount{0};
+    std::atomic<float> matrix8Source{0},matrix8Target{0},matrix8Amount{0};
+    std::atomic<float> macro1{0},macro2{0},macro3{0},macro4{0};
+    std::atomic<float> macro1CC{0},macro2CC{0},macro3CC{0},macro4CC{0};
+    std::atomic<float> macro1Channel{0},macro2Channel{0},macro3Channel{0},macro4Channel{0};
+    BuiltInSynthCCMacros ccMacros;
+    void configureCCMacros() noexcept;
+
+    struct ModulationControl { const char* id; const char* label; const char* unit; float minimum, maximum, initial; std::atomic<float> OpenStudioBasicSynthInstrument::* member; };
+    std::atomic<float> mpeEnabled { 0 }, mpeLowerMembers { 15 }, mpeUpperMembers { 0 };
+    std::atomic<float> mpeLowerBend { 48 }, mpeLowerMasterBend { 2 }, mpeUpperBend { 48 }, mpeUpperMasterBend { 2 };
+    static constexpr std::array<ModulationControl, 54> modulationControls {{
+        { "filterMode", "Filter", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::filterMode },
+        { "filterCutoff", "Cutoff", "Hz", 20, 20000, 4000, &OpenStudioBasicSynthInstrument::filterCutoff },
+        { "filterQ", "Resonance", "Q", .5f, 12, .707f, &OpenStudioBasicSynthInstrument::filterQ },
+        { "filterKeyTrack", "Key track", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::filterKeyTrack },
+        { "filterEnvelope", "Envelope", "oct", -4, 4, 0, &OpenStudioBasicSynthInstrument::filterEnvelope },
+        { "lfoDestination", "Destination", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::lfoDestination },
+        { "lfoRate", "LFO rate", "Hz", .05f, 20, 1, &OpenStudioBasicSynthInstrument::lfoRate },
+        { "lfoDepth", "LFO depth", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::lfoDepth },
+        { "lfoShape", "LFO shape", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::lfoShape },
+        { "filterEnvelopeSource", "Envelope source", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::filterEnvelopeSource },
+        { "filterAttackMs", "Filter attack", "ms", .1f, 5000, 10, &OpenStudioBasicSynthInstrument::filterAttackMs },
+        { "filterDecayMs", "Filter decay", "ms", 1, 5000, 300, &OpenStudioBasicSynthInstrument::filterDecayMs },
+        { "filterSustain", "Filter sustain", "", 0, 1, .25f, &OpenStudioBasicSynthInstrument::filterSustain },
+        { "filterReleaseMs", "Filter release", "ms", 1, 10000, 250, &OpenStudioBasicSynthInstrument::filterReleaseMs },
+        { "filterVelocity", "Velocity depth", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::filterVelocity },
+        { "lfoMode", "LFO phase", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::lfoMode },
+        { "wheelMode", "Wheel behavior", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::wheelMode },
+        { "matrix1Source", "Route 1 Source", "", 0, 8, 0, &OpenStudioBasicSynthInstrument::matrix1Source },
+        { "matrix1Target", "Route 1 Destination", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::matrix1Target },
+        { "matrix1Amount", "Route 1 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix1Amount },
+        { "matrix2Source", "Route 2 Source", "", 0, 8, 0, &OpenStudioBasicSynthInstrument::matrix2Source },
+        { "matrix2Target", "Route 2 Destination", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::matrix2Target },
+        { "matrix2Amount", "Route 2 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix2Amount },
+        { "matrix3Source", "Route 3 Source", "", 0, 8, 0, &OpenStudioBasicSynthInstrument::matrix3Source },
+        { "matrix3Target", "Route 3 Destination", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::matrix3Target },
+        { "matrix3Amount", "Route 3 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix3Amount },
+        { "mpeEnabled", "MIDI expression", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::mpeEnabled },
+        { "mpeLowerMembers", "Lower members", "", 0, 15, 15, &OpenStudioBasicSynthInstrument::mpeLowerMembers },
+        { "mpeUpperMembers", "Upper members", "", 0, 15, 0, &OpenStudioBasicSynthInstrument::mpeUpperMembers },
+        { "mpeLowerBend", "Lower note bend", "st", 0, 96, 48, &OpenStudioBasicSynthInstrument::mpeLowerBend },
+        { "mpeLowerMasterBend", "Lower master bend", "st", 0, 96, 2, &OpenStudioBasicSynthInstrument::mpeLowerMasterBend },
+        { "mpeUpperBend", "Upper note bend", "st", 0, 96, 48, &OpenStudioBasicSynthInstrument::mpeUpperBend },
+        { "mpeUpperMasterBend", "Upper master bend", "st", 0, 96, 2, &OpenStudioBasicSynthInstrument::mpeUpperMasterBend },
+        { "oscillatorAShape", "Oscillator A", "", 0, 3, 0, &OpenStudioBasicSynthInstrument::oscillatorAShape },
+        { "oscillatorBShape", "Oscillator B", "", 0, 3, 1, &OpenStudioBasicSynthInstrument::oscillatorBShape },
+        { "matrix4Source", "Route 4 Source", "", 0, 12, 0, &OpenStudioBasicSynthInstrument::matrix4Source },
+        { "matrix4Target", "Route 4 Destination", "", 0, 7, 0, &OpenStudioBasicSynthInstrument::matrix4Target },
+        { "matrix4Amount", "Route 4 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix4Amount },
+        { "matrix5Source", "Route 5 Source", "", 0, 12, 0, &OpenStudioBasicSynthInstrument::matrix5Source },
+        { "matrix5Target", "Route 5 Destination", "", 0, 7, 0, &OpenStudioBasicSynthInstrument::matrix5Target },
+        { "matrix5Amount", "Route 5 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix5Amount },
+        { "matrix6Source", "Route 6 Source", "", 0, 12, 0, &OpenStudioBasicSynthInstrument::matrix6Source },
+        { "matrix6Target", "Route 6 Destination", "", 0, 7, 0, &OpenStudioBasicSynthInstrument::matrix6Target },
+        { "matrix6Amount", "Route 6 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix6Amount },
+        { "matrix7Source", "Route 7 Source", "", 0, 12, 0, &OpenStudioBasicSynthInstrument::matrix7Source },
+        { "matrix7Target", "Route 7 Destination", "", 0, 7, 0, &OpenStudioBasicSynthInstrument::matrix7Target },
+        { "matrix7Amount", "Route 7 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix7Amount },
+        { "matrix8Source", "Route 8 Source", "", 0, 12, 0, &OpenStudioBasicSynthInstrument::matrix8Source },
+        { "matrix8Target", "Route 8 Destination", "", 0, 7, 0, &OpenStudioBasicSynthInstrument::matrix8Target },
+        { "matrix8Amount", "Route 8 Amount", "", -1, 1, 0, &OpenStudioBasicSynthInstrument::matrix8Amount },
+        { "macro1", "Macro 1", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::macro1 },
+        { "macro2", "Macro 2", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::macro2 },
+        { "macro3", "Macro 3", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::macro3 },
+        { "macro4", "Macro 4", "", 0, 1, 0, &OpenStudioBasicSynthInstrument::macro4 }
+    }};
+    std::array<float, 9> modulationValues() const noexcept;
+    std::array<float, 11> matrixValues() const noexcept;
+    std::array<float, 19> extendedMatrixValues() const noexcept;
+    static constexpr std::array<ModulationControl,8> macroMappings {{
+        {"macro1CC","Macro 1 controller","",0,120,0,&OpenStudioBasicSynthInstrument::macro1CC},
+        {"macro1Channel","Macro 1 channel","",0,16,0,&OpenStudioBasicSynthInstrument::macro1Channel},
+        {"macro2CC","Macro 2 controller","",0,120,0,&OpenStudioBasicSynthInstrument::macro2CC},
+        {"macro2Channel","Macro 2 channel","",0,16,0,&OpenStudioBasicSynthInstrument::macro2Channel},
+        {"macro3CC","Macro 3 controller","",0,120,0,&OpenStudioBasicSynthInstrument::macro3CC},
+        {"macro3Channel","Macro 3 channel","",0,16,0,&OpenStudioBasicSynthInstrument::macro3Channel},
+        {"macro4CC","Macro 4 controller","",0,120,0,&OpenStudioBasicSynthInstrument::macro4CC},
+        {"macro4Channel","Macro 4 channel","",0,16,0,&OpenStudioBasicSynthInstrument::macro4Channel}
+    }};
+    BuiltInSynthMPE::Configuration mpeValues() const noexcept;
+    bool setModulationControl(const juce::String& id, float value);
+
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
+    void reset() override { clearVoices(); }
 
     const juce::String getName() const override { return "OpenStudio Basic Synth"; }
     bool hasEditor() const override { return true; }
@@ -2722,7 +3039,9 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 2.0; }
+    // Finite decay after note-off and pedal release, not held-note duration.
+    double getTailLengthSeconds() const override;
+    double getMaximumTailLengthSeconds() const noexcept;
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -2738,6 +3057,22 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    std::atomic<double> tailSampleRate {192000.0};
+    float releaseModulationBound() const noexcept;
+    BuiltInSynthModulation modulation;
+    BuiltInSynthMatrix matrix;
+    std::array<std::array<BuiltInSynthMatrix::Destinations,16>,16> previousRoutes {};
+    std::array<std::array<float,16>,16> sharedLfoOffset {};
+    BuiltInSynthOscillators oscillators;
+    BuiltInSynthMPE mpe;
+    BuiltInSynthModulation::Voice globalModulationVoice;
+    static_assert(BuiltInVoiceAllocation::voicesPerChannel==16);
+    juce::SmoothedValue<float> filterEnvelopeBlend;
+    std::array<std::array<BuiltInSynthEnvelope, 128>, 16> filterEnvelopes {};
+    std::array<std::array<BuiltInSynthModulation::Voice, 128>, 16> modulationVoices {};
+    BuiltInVoiceAllocation voicePool;
+    BuiltInMIDIChannelMix channelMix;
+    std::array<std::array<bool, 128>, 16> decaying {};
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<bool, 128>, 16> releasing {};
     std::array<std::array<float, 128>, 16> phaseA {};
@@ -2751,7 +3086,7 @@ private:
     std::array<float, 16> modWheel {};
     double cachedSampleRate = 44100.0;
 
-    void clearVoices();
+    void clearVoices(bool resetMPE = true);
     void handleMidi(const juce::MidiMessage& message);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioBasicSynthInstrument)
@@ -2763,6 +3098,7 @@ private:
 class OpenStudioPianoInstrument : public juce::AudioProcessor
 {
 public:
+    BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioPianoInstrument();
     ~OpenStudioPianoInstrument() override = default;
 
@@ -2775,9 +3111,28 @@ public:
     std::atomic<float> stereoWidth { 0.62f };
     std::atomic<float> model { 0.0f }; // 0=Studio Grand, 1=Bright Upright, 2=Soft Felt
 
+    std::atomic<float> performanceMode { 0 }, velocityCurve { 0 }, strikeColour { .7f }, releaseVelocity { .5f }, damperCurve { 2 }, softPedalDepth { .6f };
+    struct PerformanceControl { const char* id; const char* label; float minimum, maximum, initial; std::atomic<float> OpenStudioPianoInstrument::* member; };
+    static constexpr std::array<PerformanceControl, 6> performanceControls {{
+        { "performanceMode", "Performance", 0, 1, 0, &OpenStudioPianoInstrument::performanceMode },
+        { "velocityCurve", "Velocity curve", -1, 1, 0, &OpenStudioPianoInstrument::velocityCurve },
+        { "strikeColour", "Strike colour", 0, 1, .7f, &OpenStudioPianoInstrument::strikeColour },
+        { "releaseVelocity", "Release velocity", 0, 1, .5f, &OpenStudioPianoInstrument::releaseVelocity },
+        { "damperCurve", "Damper curve", 1, 4, 2, &OpenStudioPianoInstrument::damperCurve },
+        { "softPedalDepth", "Soft pedal", 0, 1, .6f, &OpenStudioPianoInstrument::softPedalDepth }
+    }};
+    std::atomic<float> coupledBody{0}, bodyCoupling{.35f}, bodyDecay{2};
+    static constexpr std::array<PerformanceControl,3> coupledBodyControls {{
+        {"coupledBody","Coupled body",0,1,0,&OpenStudioPianoInstrument::coupledBody},
+        {"bodyCoupling","String coupling",0,1,.35f,&OpenStudioPianoInstrument::bodyCoupling},
+        {"bodyDecay","Body decay",.2f,8,2,&OpenStudioPianoInstrument::bodyDecay},
+    }};
+    bool setPerformanceControl(const juce::String& id, float value);
+
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
+    void reset() override { clearVoices(); }
 
     const juce::String getName() const override { return "OpenStudio Piano"; }
     bool hasEditor() const override { return true; }
@@ -2785,7 +3140,8 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 4.0; }
+    double getTailLengthSeconds() const override;
+    double getMaximumTailLengthSeconds() const noexcept;
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -2801,6 +3157,17 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    std::atomic<double> tailSampleRate {192000.0};
+    BuiltInCoupledBody coupledNetwork;
+    juce::SmoothedValue<float> coupledAmount;
+    std::array<std::array<bool, 128>, 16> expressiveVoice {}, sostenutoVoice {};
+    std::array<std::array<float, 128>, 16> strikeGain {}, strikeTime {}, releaseSpeed {};
+    std::array<std::array<double, 128>, 16> naturalDecay {};
+    std::array<bool, 16> sostenutoPedal {};
+    std::array<juce::SmoothedValue<float>, 16> continuousPedal, continuousSoft;
+    juce::SmoothedValue<float> smoothedDamperCurve, smoothedSoftDepth;
+    BuiltInVoiceAllocation voicePool;
+    BuiltInMIDIChannelMix channelMix;
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<bool, 128>, 16> releasing {};
     std::array<std::array<bool, 128>, 16> sustained {};
@@ -2823,6 +3190,8 @@ private:
 class OpenStudioCleanGuitarInstrument : public juce::AudioProcessor
 {
 public:
+    BuiltInInstrumentPerformance performanceTelemetry;
+    BuiltInGuitarPerformance guitarPerformance;
     OpenStudioCleanGuitarInstrument();
     ~OpenStudioCleanGuitarInstrument() override = default;
 
@@ -2836,9 +3205,41 @@ public:
     std::atomic<float> bendRangeSemitones { 2.0f };
     std::atomic<float> outputGain { -14.0f };
 
+    std::atomic<float> stringEngine { 0 }, stringDecay { 3 }, stringDamping { .35f }, pickPosition { .2f }, pickHardness { .5f }, pickupPosition { .15f }, palmMute { 0 };
+    std::atomic<float> chorusMix { 0 }, chorusRate { .8f }, chorusDepth { 2.5f };
+    struct StringControl { const char* id; const char* label; const char* unit; float minimum, maximum, initial; std::atomic<float> OpenStudioCleanGuitarInstrument::* member; };
+    static constexpr std::array<StringControl, 10> stringControls {{
+        { "stringEngine", "Engine", "", 0, 1, 0, &OpenStudioCleanGuitarInstrument::stringEngine },
+        { "stringDecay", "Nominal decay", "s", .2f, 8, 3, &OpenStudioCleanGuitarInstrument::stringDecay },
+        { "stringDamping", "String damping", "", 0, 1, .35f, &OpenStudioCleanGuitarInstrument::stringDamping },
+        { "pickPosition", "Pick position", "", .05f, .5f, .2f, &OpenStudioCleanGuitarInstrument::pickPosition },
+        { "pickHardness", "Pick hardness", "", 0, 1, .5f, &OpenStudioCleanGuitarInstrument::pickHardness },
+        { "pickupPosition", "Pickup position", "", .05f, .5f, .15f, &OpenStudioCleanGuitarInstrument::pickupPosition },
+        { "palmMute", "Palm mute", "", 0, 1, 0, &OpenStudioCleanGuitarInstrument::palmMute },
+        { "chorusMix", "Chorus mix", "", 0, 1, 0, &OpenStudioCleanGuitarInstrument::chorusMix },
+        { "chorusRate", "Chorus rate", "Hz", .05f, 5, .8f, &OpenStudioCleanGuitarInstrument::chorusRate },
+        { "chorusDepth", "Chorus depth", "ms", 0, 6, 2.5f, &OpenStudioCleanGuitarInstrument::chorusDepth }
+    }};
+    std::atomic<float> articulation{0},articulationKeys{0},slideTime{90},harmonicNode{2};
+    static constexpr std::array<StringControl,4> articulationControls {{
+        {"articulation","Articulation","",0,8,0,&OpenStudioCleanGuitarInstrument::articulation},
+        {"articulationKeys","Keyswitches","",0,1,0,&OpenStudioCleanGuitarInstrument::articulationKeys},
+        {"slideTime","Slide time","ms",5,500,90,&OpenStudioCleanGuitarInstrument::slideTime},
+        {"harmonicNode","Harmonic node","",2,6,2,&OpenStudioCleanGuitarInstrument::harmonicNode}
+    }};
+    std::atomic<float> coupledBody{0}, bodyCoupling{.35f}, bodyDecay{2};
+    static constexpr std::array<StringControl,3> coupledBodyControls {{
+        {"coupledBody","Coupled body","",0,1,0,&OpenStudioCleanGuitarInstrument::coupledBody},
+        {"bodyCoupling","String coupling","",0,1,.35f,&OpenStudioCleanGuitarInstrument::bodyCoupling},
+        {"bodyDecay","Body decay","s",.2f,8,2,&OpenStudioCleanGuitarInstrument::bodyDecay},
+    }};
+    bool setStringControl(const juce::String& id, float value);
+    BuiltInPluckedLoop::Parameters loopParameters() const noexcept;
+
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
+    void reset() override { clearVoices(); }
 
     const juce::String getName() const override { return "OpenStudio Clean Guitar"; }
     bool hasEditor() const override { return true; }
@@ -2846,7 +3247,8 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 1.5; }
+    double getTailLengthSeconds() const override;
+    double getMaximumTailLengthSeconds() const noexcept;
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -2862,6 +3264,21 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    std::atomic<double> tailSampleRate {192000.0};
+    BuiltInCoupledBody coupledNetwork;
+    juce::SmoothedValue<float> coupledAmount;
+    BuiltInPluckedLoop pluckedLoop;
+    std::array<int,16> liveArticulation {};
+    std::array<std::array<int,16>,16> voiceArticulation {};
+    std::array<std::array<float,16>,16> articulationMute {};
+    std::array<std::array<bool,16>,16> slideOutStarted {};
+    std::array<std::array<juce::SmoothedValue<float>,16>,16> articulationPitch;
+    void beginSlideOut(size_t channel,size_t slot) noexcept;
+    BuiltInGuitarChorus delayChorus;
+    std::array<std::array<bool, 128>, 16> loopVoice {};
+    std::array<juce::SmoothedValue<float>, 5> loopSmoothers;
+    BuiltInVoiceAllocation voicePool;
+    BuiltInMIDIChannelMix channelMix;
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<bool, 128>, 16> releasing {};
     std::array<std::array<float, 128>, 16> phase {};
@@ -2880,6 +3297,7 @@ private:
     void clearVoices();
     void handleMidi(const juce::MidiMessage& message);
     int chooseStringForNote(int note, int midiChannel) const;
+    void publishGuitarPerformance() noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenStudioCleanGuitarInstrument)
 };
@@ -2890,9 +3308,21 @@ private:
 class OpenStudioDrumInstrument : public juce::AudioProcessor
 {
 public:
+    BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioDrumInstrument();
     ~OpenStudioDrumInstrument() override = default;
 
+    std::array<std::atomic<float>, 8> pieceGain {}; // dB: kick, snare, closed/open hats, low/high toms, crash, ride
+    std::array<std::atomic<float>, 8> pieceTuning {}, piecePan {};
+    std::array<std::atomic<float>, 8> pieceDecay {};
+    std::array<std::atomic<float>, 8> pieceOutput {}; // 0=main; 1..8=exclusive stereo output pairs.
+    std::atomic<float> articulationEngine {0}, customMapEnabled {0};
+    std::array<std::atomic<float>,128> noteMap {};
+    std::atomic<juce::uint32> observedNoteEvent {0};
+    BuiltInDrumArticulations::Voice articulationForInput(int note) const noexcept;
+    static int pieceForNote(int note);
+    int mappedNote(int note) const { return mapIncomingNote(note); }
+    juce::var describeMapping() const;
     std::atomic<float> kit { 0.0f };       // 0=Studio, 1=Rock, 2=Electronic
     std::atomic<float> tuning { 0.0f };    // semitones
     std::atomic<float> ambience { 0.18f };
@@ -2901,11 +3331,12 @@ public:
     std::atomic<float> mapPreset { 0.0f }; // 0=GM, 1=Roland TD
     std::atomic<float> punch { 0.55f };
     std::atomic<float> stereoWidth { 0.7f };
-    std::atomic<float> velocityCurve { 0.0f }; // -1=soft, 0=linear, 1=hard
+    std::atomic<float> velocityCurve { 0.0f }; // Legacy exponent: -1=1.65, 0=1.135, +1=.62
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
+    void reset() override { clearVoices(); }
 
     const juce::String getName() const override { return "OpenStudio Drums"; }
     bool hasEditor() const override { return true; }
@@ -2913,7 +3344,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 2.0; }
+    double getTailLengthSeconds() const override { float maximum=1;for(const auto& value:pieceDecay)maximum=juce::jmax(maximum,value.load());return articulationEngine.load()>=.5f||maximum>1?14.0*maximum:2.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -2929,6 +3360,16 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative>, 8> pieceTuneSmoothers;
+    std::array<juce::SmoothedValue<float>, 8> piecePanSmoothers;
+    std::array<juce::SmoothedValue<float>, 8> pieceDecaySmoothers;
+    std::array<std::array<BuiltInDrumArticulations::Voice,128>,16> voiceArticulations {};
+    std::array<std::array<std::array<float,4>,128>,16> partialPhases {};
+    std::array<std::array<int,128>,16> inputKeys {};
+    BuiltInVoiceAllocation voicePool;
+    BuiltInMIDIChannelMix channelMix;
+    std::array<std::array<float, 128>, 16> chokeGain {};
+    std::array<std::array<bool, 128>, 16> choking {};
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<float, 128>, 16> phase {};
     std::array<std::array<float, 128>, 16> velocity {};

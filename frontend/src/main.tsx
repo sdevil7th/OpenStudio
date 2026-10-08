@@ -1,8 +1,10 @@
+import "./utils/webViewCompatibility";
 import { AppDialogHost } from "./components/AppDialogHost";
 import React, { useLayoutEffect, useRef } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 import { startupMode, windowRole } from "./utils/windowEnvironment";
+import { nextNativeRequestId } from "./utils/nativeRequestId";
 
 const isSafeStartup = startupMode === "safe";
 const isPackagedResourceProviderOrigin =
@@ -36,11 +38,11 @@ async function invokeNativeFunction<T>(
     return undefined;
   }
 
-  const emitEvent = backend.emitEvent;
-  const addEventListener = backend.addEventListener;
-  const removeEventListener = backend.removeEventListener;
+  const emitEvent = backend.emitEvent.bind(backend);
+  const addEventListener = backend.addEventListener.bind(backend);
+  const removeEventListener = backend.removeEventListener?.bind(backend);
 
-  const resultId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  const resultId = nextNativeRequestId(backend);
 
   return await new Promise<T | undefined>((resolve, reject) => {
     let token = "";
@@ -253,6 +255,13 @@ function stopNativeRuntimeAfterFrontendFailure() {
   }
 
   nativeRuntimeStopRequested = true;
+  // A failed secondary view must not stop another window's recording or FX.
+  if (windowRole !== "main") {
+    void invokeNativeFunction("closeWindow").catch((error) => {
+      console.error("[RuntimeGuard] Failed to close the failed secondary view:", error);
+    });
+    return;
+  }
   void invokeNativeFunction("setTransportRecording", false).catch((error) => {
     console.error("[RuntimeGuard] Failed to stop recording after frontend failure:", error);
   });
@@ -300,7 +309,7 @@ function StartupReadySentinel() {
       finishStartup("boot-ready", detail);
     };
 
-    if (isSafeStartup || windowRole === "midiEditor" || windowRole === "mixer" || windowRole === "pluginEditor") {
+    if (isSafeStartup || windowRole === "pitchEditor" || windowRole === "midiEditor" || windowRole === "mixer" || windowRole === "pluginEditor") {
       reportReady(
         isSafeStartup ? "safe-startup-ui-mounted" : `${windowRole}-root-mounted`,
       );
@@ -369,6 +378,9 @@ async function bootstrap() {
     RootComponent = rootModule.StartupRecoveryApp;
   } else if (windowRole === "mixer") {
     const rootModule = await import("./MixerWindowApp.tsx");
+    RootComponent = rootModule.default;
+  } else if (windowRole === "pitchEditor") {
+    const rootModule = await import("./PitchEditorWindowApp");
     RootComponent = rootModule.default;
   } else if (windowRole === "midiEditor") {
     const rootModule = await import("./MidiEditorWindowApp.tsx");

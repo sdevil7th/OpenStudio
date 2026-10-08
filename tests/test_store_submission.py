@@ -73,8 +73,8 @@ class StoreSubmissionTests(unittest.TestCase):
                      lambda **values: self.report.update(values), sleep=lambda _: None, **kwargs)
 
     def pending(self, status="PendingCommit"):
-        value = baseline()
-        value.update(id="200", status=status, notesForCertification=self.expected,
+        value = store.prepare_submission(baseline(), self.package, self.notes, self.expected)
+        value.update(id="200", status=status,
                      fileUploadUrl="https://test.blob.core.windows.net/upload?sig=SECRET")
         return value
 
@@ -109,7 +109,8 @@ class StoreSubmissionTests(unittest.TestCase):
     def test_create_upload_commit_order_and_sanitized_report(self):
         api = FakeApi(statuses=["CommitStarted", "Certification"])
         self.run_submit(api)
-        self.assertEqual([method for method, _, _ in api.calls], ["GET", "GET", "POST", "PUT", "POST", "GET", "GET"])
+        self.assertEqual([method for method, _, _ in api.calls],
+                         ["GET", "GET", "POST", "GET", "PUT", "GET", "GET", "POST", "GET", "GET"])
         self.assertEqual(api.uploads[0][1:], ([self.package.name], b"tested package"))
         self.assertEqual(self.report["status"], "Certification")
         self.assertNotIn("SECRET", json.dumps(self.report))
@@ -141,6 +142,275 @@ class StoreSubmissionTests(unittest.TestCase):
         self.run_submit(api)
         self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
         self.assertFalse(api.uploads)
+
+    def test_update_retry_refuses_changed_packages_notes_and_settings(self):
+        def mutate(pending, change):
+            if change == "missing_upload":
+                pending["applicationPackages"].pop()
+            elif change == "old_not_deleted":
+                pending["applicationPackages"][0]["fileStatus"] = "Uploaded"
+            elif change == "filename":
+                pending["applicationPackages"][-1]["fileName"] = "unrelated.msix"
+            elif change == "extra_package":
+                pending["applicationPackages"].append(copy.deepcopy(pending["applicationPackages"][-1]))
+            elif change == "retained_package":
+                pending["applicationPackages"][0]["version"] = "0.1.0.0"
+            elif change == "notes":
+                pending["listings"]["en-us"]["baseListing"]["releaseNotes"] = "Edited notes"
+            elif change == "artwork":
+                pending["listings"]["en-us"]["baseListing"]["images"][0]["id"] = "edited"
+            elif change == "hold":
+                pending["targetPublishMode"] = "Immediate"
+            elif change == "audience":
+                pending["visibility"] = "Public"
+            elif change == "price":
+                pending["pricing"]["priceId"] = "Tier1"
+            elif change == "certification_notes":
+                pending["notesForCertification"] = self.expected
+            elif change == "identity":
+                pending["id"] = "999"
+        for preflight in (False, True):
+            for change in ("missing_upload", "old_not_deleted", "filename", "extra_package", "retained_package",
+                           "notes", "artwork", "hold", "audience", "price", "certification_notes", "identity"):
+                api = FakeApi(pending=self.pending())
+                mutate(api.pending, change)
+                before = copy.deepcopy(api.pending)
+                with self.subTest(preflight=preflight, change=change), self.assertRaises(store.StoreError):
+                    self.run_submit(api, preflight_only=preflight)
+                self.assertEqual(api.pending, before)
+                self.assertFalse(api.uploads)
+                self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_update_ambiguous_put_resumes_without_replacing_draft(self):
+        api = FakeApi()
+        request = api.request
+        def ambiguous(method, path, body=None):
+            result = request(method, path, body)
+            if method == "PUT":
+                raise store.StoreError("Timed out after PUT")
+            return result
+        with patch.object(api, "request", side_effect=ambiguous), self.assertRaises(store.StoreError):
+            self.run_submit(api)
+        self.assertFalse(api.uploads)
+        self.assertTrue(store.owns(api.pending, self.expected))
+        api.calls.clear()
+        self.run_submit(api, preflight_only=True)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        self.assertFalse(api.uploads)
+        api.calls.clear()
+        self.run_submit(api)
+        self.assertFalse(any(method == "PUT" or (method == "POST" and path.endswith("/submissions"))
+                             for method, path, _ in api.calls))
+        self.assertEqual(len(api.uploads), 1)
+
+    def test_update_readback_refuses_changes_before_put_or_upload(self):
+        for phase in ("before_put", "after_put"):
+            for change in ("settings", "notes", "package"):
+                api = FakeApi()
+                request = api.request
+                draft_reads = 0
+                def changing(method, path, body=None):
+                    nonlocal draft_reads
+                    if method == "GET" and path.endswith("/200"):
+                        draft_reads += 1
+                        if draft_reads == (1 if phase == "before_put" else 2):
+                            if change == "settings":
+                                api.pending["visibility"] = "Public"
+                            elif change == "notes":
+                                api.pending["listings"]["en-us"]["baseListing"]["releaseNotes"] = "Edited notes"
+                            else:
+                                api.pending["applicationPackages"][-1]["fileName"] = "unrelated.msix"
+                    return request(method, path, body)
+                with self.subTest(phase=phase, change=change), \
+                        patch.object(api, "request", side_effect=changing), self.assertRaises(store.StoreError):
+                    self.run_submit(api)
+                self.assertFalse(api.uploads)
+                self.assertFalse(any(method == "POST" and path.endswith("/commit") for method, path, _ in api.calls))
+                if phase == "before_put":
+                    self.assertFalse(any(method == "PUT" for method, _, _ in api.calls))
+
+    def test_update_preserves_immediate_mode_audience_and_retained_architectures(self):
+        api = FakeApi()
+        api.published.update(targetPublishMode="Immediate", visibility="Public", friendlyName="Published release")
+        api.published["opaqueExistingSettings"] = {"capabilityExplanation": "Reviewed native capability explanation"}
+        api.published["applicationPackages"].append({"fileName": "arm.msix", "version": "0.1.1.0",
+            "architecture": "ARM64", "fileStatus": "Uploaded"})
+        request = api.request
+        def server_metadata(method, path, body=None):
+            result = request(method, path, body)
+            if method == "POST" and path.endswith("/submissions"):
+                api.pending["friendlyName"] = "New release"
+                result["friendlyName"] = "New release"
+            if method == "GET" and path.endswith("/200"):
+                result["fileUploadUrl"] = "https://fresh.blob.core.windows.net/upload?sig=SECRET"
+                if result["applicationPackages"][-1]["fileStatus"] == "PendingUpload":
+                    result["applicationPackages"][-1]["id"] = "server-assigned"
+            return result
+        with patch.object(api, "request", side_effect=server_metadata):
+            self.run_submit(api)
+        self.assertEqual(api.pending["targetPublishMode"], "Immediate")
+        self.assertEqual(api.pending["visibility"], "Public")
+        self.assertEqual(api.pending["opaqueExistingSettings"], api.published["opaqueExistingSettings"])
+        self.assertEqual(api.pending["applicationPackages"][1], api.published["applicationPackages"][1])
+        self.assertEqual(api.uploads[0][0], "https://fresh.blob.core.windows.net/upload?sig=SECRET")
+
+    def test_update_edits_during_upload_stop_before_commit(self):
+        for change in ("settings", "notes", "package", "state"):
+            api = FakeApi(pending=self.pending())
+            upload = api.upload
+            def edit_during_upload(url, archive):
+                upload(url, archive)
+                if change == "settings":
+                    api.pending["targetPublishMode"] = "Immediate"
+                elif change == "notes":
+                    api.pending["listings"]["en-us"]["baseListing"]["releaseNotes"] = "Edited notes"
+                elif change == "package":
+                    api.pending["applicationPackages"][-1]["fileName"] = "unrelated.msix"
+                else:
+                    api.pending["status"] = "CommitStarted"
+            with self.subTest(change=change), patch.object(api, "upload", side_effect=edit_during_upload), \
+                    self.assertRaises(store.StoreError):
+                self.run_submit(api)
+            self.assertEqual(len(api.uploads), 1)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_update_ambiguous_commit_resumes_without_reupload_or_recommit(self):
+        api = FakeApi()
+        request = api.request
+        def ambiguous(method, path, body=None):
+            result = request(method, path, body)
+            if path.endswith("/commit"):
+                raise store.StoreError("Timed out after commit")
+            return result
+        with patch.object(api, "request", side_effect=ambiguous), self.assertRaises(store.StoreError):
+            self.run_submit(api)
+        api.calls.clear()
+        self.run_submit(api)
+        self.assertEqual(len(api.uploads), 1)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def publishing_config(self):
+        return {"appId": store.APP_ID, "releaseTag": "v0.1.2", "targetPublishMode": "Immediate"}
+
+    def test_exact_tag_publishing_policy_changes_only_requested_mode(self):
+        for preflight in (True, False):
+            api = FakeApi()
+            before = copy.deepcopy(api.published)
+            self.run_submit(api, publishing_config=self.publishing_config(), release_tag="v0.1.2",
+                            preflight_only=preflight)
+            self.assertEqual(api.published, before)
+            self.assertEqual(self.report["targetPublishMode"], "Immediate")
+            self.assertEqual(self.report["publishingPolicyTag"], "v0.1.2")
+            if preflight:
+                self.assertIsNone(api.pending)
+                self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+                self.assertFalse(api.uploads)
+            else:
+                self.assertEqual(api.pending["targetPublishMode"], "Immediate")
+                for key in ("visibility", "pricing", "allowMicrosoftDecideAppAvailabilityToFutureDeviceFamilies"):
+                    self.assertEqual(api.pending[key], before[key])
+                self.assertEqual(api.pending["listings"]["en-us"]["baseListing"]["images"],
+                                 before["listings"]["en-us"]["baseListing"]["images"])
+                bodies = [body for method, _, body in api.calls if method == "PUT"]
+                self.assertEqual(bodies[0]["targetPublishMode"], "Immediate")
+
+    def test_other_tags_preserve_saved_publishing_mode(self):
+        api = FakeApi()
+        self.run_submit(api, publishing_config=self.publishing_config(), release_tag="v0.1.02")
+        self.assertEqual(api.pending["targetPublishMode"], "Manual")
+        self.assertEqual(self.report["targetPublishMode"], "Manual")
+        self.assertNotIn("publishingPolicyTag", self.report)
+
+    def test_initial_draft_cannot_override_manual_publishing_hold(self):
+        api = self.initial_api()
+        before = copy.deepcopy(api.pending)
+        with self.assertRaisesRegex(store.StoreError, "published baseline"):
+            self.run_initial(api, publishing_config=self.publishing_config() | {"releaseTag": "v0.1.02"})
+        self.assertEqual(api.pending, before)
+        self.assertFalse(api.uploads)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_publishing_policy_retry_rejects_changed_mode(self):
+        api = FakeApi()
+        with patch.object(api, "upload", side_effect=store.StoreError("Interrupted upload")), \
+                self.assertRaises(store.StoreError):
+            self.run_submit(api, publishing_config=self.publishing_config(), release_tag="v0.1.2")
+        self.assertEqual(api.pending["targetPublishMode"], "Immediate")
+        api.pending["targetPublishMode"] = "Manual"
+        for preflight in (False, True):
+            api.calls.clear()
+            with self.subTest(preflight=preflight), self.assertRaises(store.StoreError):
+                self.run_submit(api, publishing_config=self.publishing_config(), release_tag="v0.1.2",
+                                preflight_only=preflight)
+            self.assertFalse(api.uploads)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_published_same_artifact_different_mode_does_not_claim_policy_success(self):
+        api = FakeApi()
+        api.published["notesForCertification"] = self.expected
+        with self.assertRaisesRegex(store.StoreError, "different publishing mode"):
+            self.run_submit(api, publishing_config=self.publishing_config(), release_tag="v0.1.2")
+        self.assertNotEqual(self.report.get("status"), "Published")
+        self.assertNotIn("alreadySubmitted", self.report)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_publishing_config_strict_schema_app_tag_and_mode(self):
+        actual = store.load_publishing_config(store.ROOT / "packaging/msix/release-publishing.json")
+        self.assertEqual(actual, self.publishing_config() | {"releaseTag": "v0.1.04"})
+        invalid = [self.publishing_config() | change for change in (
+            {"appId": "other"}, {"releaseTag": "0.1.2"}, {"releaseTag": "v0.1.2-beta"},
+            {"releaseTag": "v0.1.2.1"}, {"targetPublishMode": "SpecificDate"},
+            {"targetPublishMode": "Unknown"}, {"targetPublishMode": 1}, {"extra": "field"})]
+        invalid += [{"appId": store.APP_ID}, [], None]
+        for index, config in enumerate(invalid):
+            path = self.directory / "publishing.json"
+            path.write_text(json.dumps(config))
+            with self.subTest(index=index), self.assertRaises(store.StoreError):
+                store.load_publishing_config(path)
+
+    def test_cli_publishing_policy_reports_exact_tag_immediate_and_other_tag_manual(self):
+        for tag, package_version, notes_file in (
+                ("v0.1.04", "0.1.4.0", "0.1.04.md"), ("v0.1.02", "0.1.2.0", "0.1.02.md")):
+            for mode in ("--preflight", "--submit"):
+                self.create_package(version=package_version)
+                api = FakeApi()
+                report_path = self.directory / "publishing-report.json"
+                summary_path = self.directory / "publishing-summary.md"
+                summary_path.write_text("")
+                with self.subTest(tag=tag, mode=mode), patch.object(store, "StoreApi", return_value=api), \
+                        patch.dict(store.os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}), \
+                        patch("sys.argv", ["submit_store_release.py", "--version", tag,
+                            "--package-dir", str(self.directory), "--notes-file",
+                            str(store.ROOT / "docs/releases" / notes_file), "--publishing-config",
+                            str(store.ROOT / "packaging/msix/release-publishing.json"),
+                            "--report", str(report_path), mode]):
+                    self.assertEqual(store.main(), 0)
+                report = json.loads(report_path.read_text())
+                expected_mode = "Immediate" if tag == "v0.1.04" else "Manual"
+                self.assertEqual(report["targetPublishMode"], expected_mode)
+                self.assertIn(f"Publishing mode: {expected_mode}", summary_path.read_text())
+                self.assertNotIn("SECRET", report_path.read_text() + summary_path.read_text())
+                if expected_mode == "Immediate":
+                    self.assertEqual(report["publishingPolicyTag"], tag)
+                else:
+                    self.assertNotIn("publishingPolicyTag", report)
+                if mode == "--preflight":
+                    self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+                    self.assertFalse(api.uploads)
+                else:
+                    self.assertEqual(api.pending["targetPublishMode"], expected_mode)
+
+    def test_invalid_publishing_config_cli_never_initializes_store_api(self):
+        self.create_package()
+        config = self.directory / "publishing.json"
+        config.write_text(json.dumps(self.publishing_config() | {"targetPublishMode": "unexpected"}))
+        report_path = self.directory / "publishing-report.json"
+        with patch.object(store, "StoreApi", side_effect=AssertionError("Invalid config contacted API")), \
+                patch("sys.argv", ["submit_store_release.py", "--version", "v0.1.02", "--package-dir",
+                    str(self.directory), "--notes-file", str(store.ROOT / "docs/releases/0.1.02.md"),
+                    "--publishing-config", str(config), "--report", str(report_path), "--submit"]):
+            self.assertEqual(store.main(), 1)
+        self.assertEqual(json.loads(report_path.read_text())["status"], "Failed")
 
     def test_already_published_same_artifact_is_idempotent(self):
         api = FakeApi()
@@ -191,14 +461,14 @@ class StoreSubmissionTests(unittest.TestCase):
         self.assertTrue(result.endswith("/releases/tag/v0.1.2"))
         self.assertIn("tested improvement.", result)
 
-    def create_package(self, **identity):
-        attrs = {"Name": store.IDENTITY, "Publisher": store.PUBLISHER, "Version": "0.1.2.0", "ProcessorArchitecture": "x64"} | identity
+    def create_package(self, *, version="0.1.2.0", **identity):
+        attrs = {"Name": store.IDENTITY, "Publisher": store.PUBLISHER, "Version": version, "ProcessorArchitecture": "x64"} | identity
         xml = '<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"><Identity '
         xml += " ".join(f'{key}="{value}"' for key, value in attrs.items())
         xml += '/><Dependencies><TargetDeviceFamily Name="Windows.Desktop" /></Dependencies></Package>'
         with zipfile.ZipFile(self.package, "w") as archive:
             archive.writestr("AppxManifest.xml", xml)
-        report = {"version": "0.1.2.0", "sha256": store.digest(self.package), "packageValidation": "pass", "payloadRoundTrip": "pass"}
+        report = {"version": version, "sha256": store.digest(self.package), "packageValidation": "pass", "payloadRoundTrip": "pass"}
         (self.directory / "package-report.json").write_text(json.dumps(report))
 
     def test_package_identity_and_hash(self):

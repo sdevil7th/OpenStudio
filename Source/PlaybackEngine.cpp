@@ -1247,6 +1247,7 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
         + " duration=" + juce::String(duration, 3)
         + " offset=" + juce::String(effectiveOffset, 3)
         + " totalClips=" + juce::String(totalClipCount));
+    juce::ignoreUnused(totalClipCount); // The diagnostic macro is disabled in Release.
 }
 
 void PlaybackEngine::removeClip(const juce::String& trackId, const juce::String& filePath)

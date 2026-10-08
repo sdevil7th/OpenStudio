@@ -21,6 +21,7 @@ import { DetachablePanel } from "./DetachablePanel";
 import { useDAWStore, Track, MixerSnapshot } from "../store/useDAWStore";
 import { useShallow } from "zustand/react/shallow";
 import { nativeBridge } from "../services/NativeBridge";
+import { editFXStage } from "../utils/stageFXHistory";
 import { Button } from "./ui";
 import { PluginActivity } from "./PluginActivity";
 import { paintPluginActivity, waitForPluginEditor } from "../utils/pluginActivity";
@@ -188,7 +189,7 @@ export function MixerPanel({
     setMonitorActivity(`Loading ${availablePlugins.find(p => (p.identifier || p.fileOrIdentifier) === pluginPath)?.name || "monitor effect"}…`);
     try {
       await paintPluginActivity();
-      const success = await nativeBridge.addMonitoringFX(pluginPath);
+      const success = await editFXStage("monitor", "Add monitoring FX", () => nativeBridge.addMonitoringFX(pluginPath));
       if (success) {
         await refreshMonitorFX();
         closeMonitorPluginPicker();
@@ -207,7 +208,7 @@ export function MixerPanel({
 
   const handleRemoveMonitorFX = useCallback(async (fxIndex: number) => {
     try {
-      await nativeBridge.removeMonitoringFX(fxIndex);
+      await editFXStage("monitor", "Remove monitoring FX", () => nativeBridge.removeMonitoringFX(fxIndex));
       await refreshMonitorFX();
     } catch (e) {
       console.error("[MixerPanel] Failed to remove monitoring FX:", e);
@@ -216,7 +217,7 @@ export function MixerPanel({
 
   const handleBypassMonitorFX = useCallback(async (fxIndex: number, bypassed: boolean) => {
     try {
-      await nativeBridge.bypassMonitoringFX(fxIndex, bypassed);
+      await editFXStage("monitor", "Bypass monitoring FX", () => nativeBridge.bypassMonitoringFX(fxIndex, bypassed));
       await refreshMonitorFX();
     } catch (e) {
       console.error("[MixerPanel] Failed to bypass monitoring FX:", e);
@@ -263,10 +264,13 @@ export function MixerPanel({
 
   const refreshAvailableMonitorPlugins = useCallback(async () => {
     setMonitorCatalogLoading(true);
-    const builtInPlugins = [{ name: "OpenStudio NAM Rack", fileOrIdentifier: "OpenStudio NAM Rack", identifier: "OpenStudio NAM Rack" }];
+    let builtInPlugins = [{ name: "OpenStudio NAM Rack", fileOrIdentifier: "OpenStudio NAM Rack", identifier: "OpenStudio NAM Rack" }];
     setAvailablePlugins(builtInPlugins);
     try {
-      const plugins = await nativeBridge.getAvailablePlugins();
+      const [builtIns, external] = await Promise.allSettled([nativeBridge.getAvailableBuiltInFX(), nativeBridge.getAvailablePlugins()]);
+      if (builtIns.status === "fulfilled") builtInPlugins = builtIns.value.filter(plugin => !plugin.isInstrument)
+        .map(plugin => ({ name: plugin.name, fileOrIdentifier: plugin.name, identifier: plugin.name }));
+      const plugins = external.status === "fulfilled" ? external.value : [];
       setAvailablePlugins(
         [...builtInPlugins, ...plugins
           .filter((p: any) => !p.isInstrument)
@@ -276,11 +280,12 @@ export function MixerPanel({
             identifier: p.identifier,
           }))]
       );
+      if (external.status === "rejected") useDAWStore.getState().showToast("Could not load external plugins. Built-in monitoring effects are available.", "error");
       const configuration = await nativeBridge.getPluginScanConfiguration();
       if (configuration.settingsError) useDAWStore.getState().showToast(configuration.settingsError, "error");
     } catch (e) {
       console.error("[MixerPanel] Failed to load plugins for monitor FX:", e);
-      useDAWStore.getState().showToast("Could not load the external plugin list. The built-in NAM Rack is still available.", "error");
+      useDAWStore.getState().showToast("Could not refresh monitoring plugins. Try opening the list again.", "error");
     } finally {
       setMonitorCatalogLoading(false);
     }

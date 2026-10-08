@@ -1,8 +1,10 @@
+#include "RuntimeLocation.h"
 #include "RecordingRecoveryRegression.h"
 #include "RecordingRecovery.h"
 #include "AudioRecorder.h"
 #include "OwnedChildProcess.h"
 #include "ProjectFileStore.h"
+#include "ExpectedWavFailureLog.h"
 
 namespace
 {
@@ -60,7 +62,10 @@ void checkFinalizationRecovery(const juce::File& directory, const std::function<
             for (int sample = 0; sample < 128; ++sample) samples.setSample(0, sample, 0.25f);
             wrote = writer->writeFromAudioSampleBuffer(samples, 0, 128) && wrote;
             control->failure = healthy ? 0 : fixture / 2 + 1;
-            writer.reset();
+            {
+                ExpectedWavFailureLog expectedSeekFailure(control->failure == 2);
+                writer.reset();
+            }
             check((label + "_pcm_written").toRawUTF8(), wrote && !id.isEmpty());
             const auto saved = juce::JSON::parse(journalFile.loadFileAsString());
             check((label + "_journal_status").toRawUTF8(), status->finished.load()
@@ -131,7 +136,7 @@ void runRecordingRecoveryRegression(const juce::File& directory, const std::func
     root.createDirectory();
     const auto journals = root.getChildFile("journals");
     OwnedChildProcess child;
-    const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     bool started = child.start({ executable.getFullPathName(), "--recording-recovery-fixture", root.getFullPathName() });
     const auto began = juce::Time::getMillisecondCounterHiRes();
     while (started && child.isRunning() && !root.getChildFile("ready").existsAsFile()

@@ -1,0 +1,165 @@
+.saturator-approved {
+  --suite-accent: #d7ad77;
+  --suite-surface: #21292e;
+  background: radial-gradient(ellipse at 50% 50%,#46342028,transparent 70%),#1a2227;
+}
+.saturator-approved .core-effect-face {
+  padding: 23px 25px;
+  gap: 23px;
+}
+.saturator-voices .effect-mode-switch {
+  gap: 8px;
+}
+.saturator-voices .effect-mode-switch button {
+  flex-direction: column;
+  padding: 13px 5px;
+  gap: 9px;
+  min-height: 66px;
+}
+.saturator-voices .effect-mode-switch button[aria-pressed=true] {
+  border-color: #9b8059;
+  background: #3b342a;
+  color: #e8c99d;
+}
+.saturator-main {
+  min-height: 240px;
+  flex-basis: 265px;
+  flex-grow: 1;
+}
+.saturator-drive,.saturator-output {
+  width: 140px;
+  flex-shrink: 0;
+}
+.saturator-main .core-signal-levels {
+  min-height: 218px;
+  align-self: stretch;
+}
+.saturator-output .core-detail-note {
+  font-size: 10px;
+  text-align: center;
+}
+.saturator-output .suite-button {
+  font-size: 11px;
+}
+.saturator-bottom {
+  padding-top: 20px;
+  border-top: 1px solid #3e4446;
+}
+.saturator-quality {
+  padding-left: 20px;
+  border-left: 1px solid #3e4446;
+}
+.saturator-quality>label {
+  width: 100px;
+}
+.saturator-tone .suite-parameter {
+  min-width: 62px;
+}
+.saturator-tone .suite-value,.saturator-quality .suite-value {
+  font-size: 17px;
+  width: 62px;
+}
+.saturator-tone .suite-parameter>span:first-child {
+  font-size: 12px;
+}
+.saturator-detail>summary {
+  cursor: pointer;
+  color: #aabfc9;
+  padding: 11px 14px;
+  font-size: 12px;
+}
+.saturator-caption {
+  font-size: 11px;
+}
+@container core-effect (max-width:800px) {
+  .saturator-approved .core-effect-face {
+    padding: 16px;
+    gap: 17px;
+  }
+  .saturator-voices .effect-mode-switch {
+    gap: 4px;
+  }
+  .saturator-voices .effect-mode-switch button {
+    font-size: 11px;
+    gap: 7px;
+    min-height: 49px;
+    padding: 10px 4px;
+  }
+  .saturator-voices .effect-mode-switch small {
+    display: none;
+  }
+  .saturator-main {
+    gap: 12px;
+    min-height: 215px;
+    flex-basis: 230px;
+  }
+  .saturator-drive,.saturator-output {
+    width: 104px;
+  }
+  .saturator-main .core-signal-levels {
+    min-height: 190px;
+  }
+  .saturator-main .core-signal-row {
+    grid-template-columns: 43px minmax(25px,1fr) 69px;
+    gap: 7px;
+    font-size: 10px;
+  }
+  .saturator-main .core-chart-heading {
+    font-size: 9px;
+    padding-inline: 9px;
+  }
+  .saturator-tone {
+    gap: 10px;
+  }
+  .saturator-bottom {
+    gap: 12px;
+    padding-top: 15px;
+    flex-wrap: wrap;
+  }
+  .saturator-quality {
+    gap: 15px;
+    padding-left: 12px;
+  }
+  .saturator-quality>label {
+    width: 92px;
+  }
+  .saturator-tone .suite-knob,.saturator-quality .suite-knob {
+    width: 44px;
+    height: 44px;
+  }
+  .saturator-tone .suite-value,.saturator-quality .suite-value {
+    font-size: 15px;
+    width: 52px;
+  }
+  .saturator-tone .suite-parameter>span:first-child {
+    font-size: 11px;
+  }
+  .saturator-tone {
+    flex-basis: 100%;
+  }
+  .saturator-quality {
+    border-left: 0;
+    padding-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+@container core-effect (max-height:560px) {
+  .saturator-approved .core-effect-face {
+    padding-block: 13px;
+    gap: 14px;
+  }
+  .saturator-main {
+    min-height: 196px;
+    flex-basis: 196px;
+  }
+  .saturator-main .core-signal-levels {
+    min-height: 186px;
+  }
+  .saturator-bottom {
+    padding-top: 12px;
+  }
+  .saturator-caption {
+    font-size: 10px;
+  }
+}

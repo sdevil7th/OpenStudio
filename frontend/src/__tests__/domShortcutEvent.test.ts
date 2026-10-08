@@ -163,6 +163,12 @@ describe("DOM shortcut event adapter", () => {
     expect(payload.targetIsNonTextControl).toBe(false);
   });
 
+  it("marks dialog descendants and shadow paths as modal keyboard owners", () => {
+    const direct = toGlobalShortcutPayload(keyboardEvent({ target: targetMatching('[aria-modal="true"]') }));
+    const shadow = toGlobalShortcutPayload(keyboardEvent({ composedPath: () => [targetMatching('[data-modal-root="true"]')] }));
+    expect((direct as any).targetIsModal).toBe(true);
+    expect((shadow as any).targetIsModal).toBe(true);
+  });
   it("gates detached shortcuts on document focus, OS window focus, and visibility", () => {
     expect(browserShortcutWindowIsActive({
       documentFocused: true,

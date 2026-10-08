@@ -1,0 +1,79 @@
+/* WebKitGTK can ignore vertical writing modes on native range controls.
+ * Keep the native input horizontal, then rotate its entire hit area and artwork.
+ * The containing block owns the available fader length, including after resize. */
+.slider-vertical-control {
+  container-type: size;
+}
+
+.slider-vertical-input {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100cqh;
+  height: 18px;
+  margin: 0;
+  writing-mode: horizontal-tb;
+  direction: ltr;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  touch-action: none;
+}
+
+.slider-vertical-input:focus-visible {
+  outline: none;
+}
+
+/* Outlining the rotated native input can hide its thumb in WebKitGTK. */
+.slider-vertical-control:focus-within {
+  outline: 2px solid var(--color-daw-accent, #0078d4);
+  outline-offset: -2px;
+}
+
+.slider-vertical-input::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 6px;
+  background: linear-gradient(to right, #1a1a1a, #252525);
+  border: 1px solid #333;
+  border-radius: 3px;
+}
+
+.slider-vertical-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 10px;
+  height: 18px;
+  margin-top: -7px;
+  background: linear-gradient(to left, #555, #333);
+  border: 1px solid #666;
+  border-radius: 2px;
+  cursor: grab;
+  box-shadow: -1px 0 3px rgb(0 0 0 / 50%);
+}
+
+.slider-vertical-input::-webkit-slider-thumb:hover {
+  background: linear-gradient(to left, #666, #444);
+}
+
+.slider-vertical-input::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  background: linear-gradient(to left, #777, #555);
+}
+
+.slider-vertical-input::-moz-range-track {
+  width: 100%;
+  height: 6px;
+  background: linear-gradient(to right, #1a1a1a, #252525);
+  border: 1px solid #333;
+  border-radius: 3px;
+}
+
+.slider-vertical-input::-moz-range-thumb {
+  width: 10px;
+  height: 18px;
+  background: linear-gradient(to left, #555, #333);
+  border: 1px solid #666;
+  border-radius: 2px;
+  cursor: grab;
+}

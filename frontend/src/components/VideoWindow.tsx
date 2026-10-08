@@ -1,3 +1,4 @@
+import { VIDEO_FILE_FILTER } from "../utils/fileDialogFilters";
 import { useEffect, useRef, useCallback } from "react";
 import { X, FolderOpen } from "lucide-react";
 import { useDAWStore } from "../store/useDAWStore";
@@ -64,7 +65,7 @@ export function VideoWindow() {
   }, [isPlaying, videoInfo, showVideoWindow, drawFrame]);
 
   const handleOpenVideo = async () => {
-    const filePath = await nativeBridge.showOpenDialog("Open Video File");
+    const filePath = await nativeBridge.showOpenDialog("Open Video File", VIDEO_FILE_FILTER);
     if (filePath) {
       useDAWStore.getState().openVideoFile(filePath);
     }
@@ -77,7 +78,7 @@ export function VideoWindow() {
   const displayHeight = Math.round(displayWidth / aspectRatio);
 
   return (
-    <div className="fixed right-4 top-16 z-1000 bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl overflow-hidden"
+    <div className="fixed right-4 top-16 z-[2500] bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl overflow-hidden"
       style={{ width: displayWidth }}
     >
       {/* Header */}

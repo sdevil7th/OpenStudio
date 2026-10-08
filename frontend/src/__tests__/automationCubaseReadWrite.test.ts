@@ -64,6 +64,20 @@ afterEach(() => {
 });
 
 describe("Cubase-style automation read/write state", () => {
+
+  it("toggles mixed-mode tracks using the selected behavior without throwing, with one Undo", () => {
+    const track = makeTrack({ automationReadEnabled: true, automationWriteEnabled: true,
+      automationLanes: [volumeLane({ mode: "touch" }), volumeLane({ id: "pan", param: "pan", mode: "latch" })] });
+    loadTrack(track);
+    useDAWStore.setState({ automationWriteBehavior: "latch" });
+    commandManager.clear();
+    expect(() => useDAWStore.getState().toggleTracksAutomationModes([track.id], "off", "read")).not.toThrow();
+    expect(useDAWStore.getState().tracks[0]).toMatchObject({ automationReadEnabled: true, automationWriteEnabled: false });
+    expect(useDAWStore.getState().tracks[0].automationLanes.map(lane => lane.mode)).toEqual(["read", "read"]);
+    useDAWStore.getState().undo();
+    expect(useDAWStore.getState().tracks[0].automationLanes.map(lane => lane.mode)).toEqual(["touch", "latch"]);
+    expect(commandManager.canUndo()).toBe(false);
+  });
   it("new tracks start without readable automation", () => {
     const track = makeTrack();
 
@@ -181,7 +195,7 @@ describe("Cubase-style automation read/write state", () => {
     expect(updated.automationLanes).toHaveLength(1);
     expect(updated.automationLanes[0].readEnabled).toBe(true);
     expect(updated.automationLanes[0].mode).toBe("off");
-    expectStablePointValues(updated.automationLanes[0].points, [{ time: 2, value: 0.75 }]);
+    expectStablePointValues(updated.automationLanes[0].points, [{ time: 0, value: 60 / 72 }, { time: 1.999999, value: 60 / 72 }, { time: 2, value: 0.75 }]);
   });
 
   it("write enabled with no touched parameter writes no points", () => {
@@ -262,7 +276,7 @@ describe("Cubase-style automation read/write state", () => {
     expect(updated.showAutomation).toBe(true);
     expect(lane?.visible).toBe(true);
     expect(lane?.readEnabled).toBe(true);
-    expectStablePointValues(lane?.points, [{ time: 3, value: 0.75 }]);
+    expectStablePointValues(lane?.points, [{ time: 0, value: 60 / 72 }, { time: 2.999999, value: 60 / 72 }, { time: 3, value: 0.75 }]);
   });
 
   it("continuous touch writing simplifies simple ramps into sparse points", () => {
@@ -420,7 +434,7 @@ describe("Cubase-style automation read/write state", () => {
     const updated = useDAWStore.getState().tracks[0];
     const muteLane = updated.automationLanes.find((lane) => lane.param === "mute");
     expect(updated.muted).toBe(true);
-    expectStablePointValues(muteLane?.points, [{ time: 5, value: 1 }]);
+    expectStablePointValues(muteLane?.points, [{ time: 0, value: 0 }, { time: 4.999999, value: 0 }, { time: 5, value: 1 }]);
   });
 
   it("toggle mute does not create write data while stopped", async () => {
@@ -461,8 +475,8 @@ describe("Cubase-style automation read/write state", () => {
     useDAWStore.getState().endAutomationParamTouch("master", "volume");
 
     const lane = useDAWStore.getState().masterAutomationLanes.find((candidate) => candidate.param === "volume");
-    expect(lane?.points[0].time).toBe(6);
-    expect(lane?.points[0].value).toBeCloseTo((20 * Math.log10(0.5) + 60) / 72, 6);
+    expect(lane?.points.find(point => point.time === 6)?.time).toBe(6);
+    expect(lane?.points.find(point => point.time === 6)?.value).toBeCloseTo((20 * Math.log10(0.5) + 60) / 72, 6);
   });
 
   it("master pan write records normalized pan automation", async () => {
@@ -486,7 +500,7 @@ describe("Cubase-style automation read/write state", () => {
     useDAWStore.getState().endAutomationParamTouch("master", "pan");
 
     const lane = useDAWStore.getState().masterAutomationLanes.find((candidate) => candidate.param === "pan");
-    expectStablePointValues(lane?.points, [{ time: 7, value: 0.625 }]);
+    expectStablePointValues(lane?.points, [{ time: 0, value: .5 }, { time: 6.999999, value: .5 }, { time: 7, value: 0.625 }]);
   });
 
   it("master write while stopped does not create automation lanes", async () => {
@@ -536,6 +550,6 @@ describe("Cubase-style automation read/write state", () => {
     expect(state.masterAutomationReadEnabled).toBe(false);
     expect(state.masterAutomationWriteEnabled).toBe(true);
     expect(lane?.mode).toBe("off");
-    expectStablePointValues(lane?.points, [{ time: 9, value: 60 / 72 }]);
+    expectStablePointValues(lane?.points, [{ time: 0, value: 60 / 72 }, { time: 8.999999, value: 60 / 72 }, { time: 9, value: 60 / 72 }]);
   });
 });

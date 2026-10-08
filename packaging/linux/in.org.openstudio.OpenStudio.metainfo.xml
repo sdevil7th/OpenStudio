@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>in.org.openstudio.OpenStudio</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <name>OpenStudio</name>
+  <summary>Record, edit and mix audio and MIDI</summary>
+  <developer id="openstudio.org.in">
+    <name>OpenStudio</name>
+  </developer>
+  <description>
+    <p>OpenStudio is a digital audio workstation for recording, editing and mixing music.</p>
+    <p>Work with audio and MIDI tracks, edit notes in a piano roll, apply effects,
+       and export finished mixes. Optional AI features require additional models
+       and runtime downloads.</p>
+  </description>
+  <launchable type="desktop-id">OpenStudio.desktop</launchable>
+  <url type="homepage">https://openstudio.org.in</url>
+  <url type="bugtracker">https://github.com/sdevil7th/OpenStudio/issues</url>
+  <url type="help">https://github.com/sdevil7th/OpenStudio/blob/develop/docs/USER_MANUAL.md</url>
+  <provides>
+    <binary>OpenStudio</binary>
+    <mediatype>application/x-openstudio-project</mediatype>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+</component>

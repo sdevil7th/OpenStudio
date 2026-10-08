@@ -1,0 +1,18 @@
+.eq-grab-peak {
+  cursor: grab;
+  touch-action: none;
+}
+.eq-grab-peak:active {
+  cursor: grabbing;
+}
+.eq-grab-peak[aria-disabled=true] {
+  opacity: .4;
+  cursor: default;
+}
+.eq-editor .eq-spectrum-grab .eq-grab-peak:focus-visible {
+  outline: none;
+}
+.eq-grab-peak:focus-visible circle {
+  stroke: #58b6ff;
+  stroke-width: 4px;
+}

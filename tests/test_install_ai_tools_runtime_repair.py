@@ -188,5 +188,62 @@ class RepairWindowsReusedRuntimeTests(unittest.TestCase):
             run_step.assert_not_called()
 
 
+class WindowsBackendFallbackTests(unittest.TestCase):
+    def tearDown(self):
+        installer.cleanup_pending_runtime_candidate()
+
+    def test_directml_candidate_preserves_source_runtime_until_activation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "stem-runtime"
+            python = root / "python" / "python.exe"
+            dll = root / "python" / "Lib" / "site-packages" / "onnxruntime" / "capi" / "onnxruntime_providers_shared.dll"
+            dll.parent.mkdir(parents=True)
+            python.touch()
+            dll.write_bytes(b"original CUDA runtime")
+
+            with patch.object(installer, "log_event", Mock()):
+                candidate, candidate_python = installer.prepare_windows_fallback_runtime(root, python)
+
+            self.assertNotEqual(candidate, root)
+            self.assertTrue(candidate_python.is_file())
+            (candidate / dll.relative_to(root)).write_bytes(b"DirectML runtime")
+            self.assertEqual(dll.read_bytes(), b"original CUDA runtime")
+            self.assertFalse((Path(temp_dir) / "stem-runtime-active.txt").exists())
+
+            with (
+                patch.object(installer.platform, "system", return_value="Windows"),
+                patch.object(installer, "log_event", Mock()),
+            ):
+                installer.activate_windows_runtime(root, candidate)
+
+            self.assertEqual(
+                (Path(temp_dir) / "stem-runtime-active.txt").read_text().strip(),
+                candidate.name,
+            )
+            self.assertIsNone(installer.PENDING_RUNTIME_CANDIDATE)
+
+    def test_activation_failure_keeps_previous_selection_and_cleans_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "stem-runtime"
+            python = root / "python" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            marker = Path(temp_dir) / "stem-runtime-active.txt"
+            marker.write_text("stem-runtime\n")
+            with patch.object(installer, "log_event", Mock()):
+                candidate, _ = installer.prepare_windows_fallback_runtime(root, python)
+
+            with (
+                patch.object(installer.platform, "system", return_value="Windows"),
+                patch.object(installer.os, "replace", side_effect=PermissionError("locked")),
+            ):
+                with self.assertRaises(installer.InstallerStepError):
+                    installer.activate_windows_runtime(root, candidate)
+
+            self.assertEqual(marker.read_text(), "stem-runtime\n")
+            installer.cleanup_pending_runtime_candidate()
+            self.assertFalse(candidate.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

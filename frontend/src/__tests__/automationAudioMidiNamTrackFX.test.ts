@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fxChainPanelSource from "../components/FXChainPanel.tsx?raw";
 import { nativeBridge } from "../services/NativeBridge";
 import { commandManager } from "../store/commands";
+import { advanceProjectEpoch } from "../utils/projectLifetime";
 import {
   createDefaultTrack,
   type AutomationLane,
@@ -143,6 +144,54 @@ describe("audio and MIDI track automation flows", () => {
 });
 
 describe("NAM Rack automation in a track FX chain", () => {
+  it("serializes rapid FX undo/redo while a native reply is pending", async () => {
+    let slots: Array<{ index: number; name: string; pluginPath: string; type: string }> = [];
+    vi.spyOn(nativeBridge, "getTrackFX").mockImplementation(async () => structuredClone(slots));
+    vi.spyOn(nativeBridge, "addTrackBuiltInFX").mockImplementation(async (_trackId, name) => {
+      slots.push({ index: slots.length, name, pluginPath: name, type: "builtin" }); return true;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const remove = vi.spyOn(nativeBridge, "removeTrackFX").mockImplementation(async (_trackId, index) => {
+      if (index === 1) await gate;
+      if (!slots[index]) return false;
+      slots.splice(index, 1); slots.forEach((slot, slotIndex) => { slot.index = slotIndex; }); return true;
+    });
+    resetStore([makeTrack("queue-track", "audio")]);
+    await useDAWStore.getState().addTrackBuiltInFXWithUndo("queue-track", "OpenStudio Delay", "track");
+    await useDAWStore.getState().addTrackBuiltInFXWithUndo("queue-track", "OpenStudio Reverb", "track");
+    useDAWStore.getState().undo(); useDAWStore.getState().undo();
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledTimes(1));
+    expect(useDAWStore.getState().automationRecoveryBusy).toBe(true);
+    release();
+    await vi.waitFor(() => { expect(slots).toEqual([]); expect(useDAWStore.getState().automationRecoveryBusy).toBe(false); });
+    expect(remove.mock.calls.map(call => call[1])).toEqual([1, 0]);
+    useDAWStore.getState().redo(); useDAWStore.getState().redo();
+    await vi.waitFor(() => { expect(slots.map(slot => slot.name)).toEqual(["OpenStudio Delay", "OpenStudio Reverb"]); expect(useDAWStore.getState().automationRecoveryBusy).toBe(false); });
+  });
+  it("abandons queued FX replay when its project was replaced", async () => {
+    let slots: Array<{ index: number; name: string; pluginPath: string; type: string }> = [];
+    const read = vi.spyOn(nativeBridge, "getTrackFX").mockImplementation(async () => structuredClone(slots));
+    const add = vi.spyOn(nativeBridge, "addTrackBuiltInFX").mockImplementation(async (_trackId, name) => {
+      slots.push({ index: slots.length, name, pluginPath: name, type: "builtin" }); return true;
+    });
+    vi.spyOn(nativeBridge, "removeTrackFX").mockImplementation(async (_trackId, index) => { slots.splice(index, 1); return true; });
+    resetStore([makeTrack("queue-track", "audio")]);
+    await useDAWStore.getState().addTrackBuiltInFXWithUndo("queue-track", "OpenStudio Delay", "track");
+    await useDAWStore.getState().addTrackBuiltInFXWithUndo("queue-track", "OpenStudio Reverb", "track");
+    useDAWStore.getState().undo(); useDAWStore.getState().undo();
+    await vi.waitFor(() => expect(useDAWStore.getState().automationRecoveryBusy).toBe(false));
+    let release!: (value: typeof slots) => void;
+    read.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    useDAWStore.getState().redo(); useDAWStore.getState().redo();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    advanceProjectEpoch(); slots = [{ index: 0, name: "Replacement", pluginPath: "Replacement", type: "builtin" }];
+    useDAWStore.setState({ tracks: [makeTrack("queue-track", "audio")], automationRecoveryBusy: false });
+    release([]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(add).toHaveBeenCalledTimes(2); expect(slots[0].name).toBe("Replacement");
+    expect(useDAWStore.getState().tracks[0].trackFxCount).toBe(0);
+  });
   it("routes add and reorder UI operations through undo-aware store actions", () => {
     expect(fxChainPanelSource).toContain("addTrackBuiltInFXWithUndo(");
     expect(fxChainPanelSource).toContain("reorderTrackFXWithUndo(");
@@ -252,13 +301,22 @@ describe("NAM Rack automation in a track FX chain", () => {
     const reorderedLane = structuredClone(
       useDAWStore.getState().tracks[0].automationLanes[0],
     );
+    const removedMapping = { ccNumber: 74, trackId: track.id, chainType: "track" as const, pluginIndex: 1, paramIndex: -1, builtIn: true, paramId: "ampGainDb" };
+    const otherMapping = { ccNumber: 75, trackId: "other-track", chainType: "input" as const, pluginIndex: 0, paramIndex: 0 };
+    let mappings = [removedMapping, otherMapping];
+    vi.spyOn(nativeBridge, "getMIDILearnMappings").mockImplementation(async () => structuredClone(mappings));
+    const restoreMappings = vi.spyOn(nativeBridge, "setMIDILearnMappings").mockImplementation(async values => { mappings = structuredClone(values) as typeof mappings; return true; });
     expect(await useDAWStore.getState().removeTrackFXWithUndo(track.id, 1, "track")).toBe(true);
+    // The native removal retires this instance's MIDI Learn references.
+    mappings = [otherMapping];
     expect(slots.map((slot) => slot.name)).toEqual(["OpenStudio Delay"]);
     expect(useDAWStore.getState().tracks[0].automationLanes).toEqual([]);
     expect(commandManager.getUndoStack()).toHaveLength(1);
 
     useDAWStore.getState().undo();
-    await vi.waitFor(() => expect(slots.map((slot) => slot.name)).toEqual(["OpenStudio Delay", "OpenStudio NAM Rack"]));
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks[0].automationLanes[0]?.id).toBe(namLaneId));
+    expect(slots.map((slot) => slot.name)).toEqual(["OpenStudio Delay", "OpenStudio NAM Rack"]);
+    expect(restoreMappings).toHaveBeenLastCalledWith([otherMapping, removedMapping]);
     expect(useDAWStore.getState().tracks[0].automationLanes[0]).toMatchObject({
       id: namLaneId,
       param: "builtin_track_1_ampGainDb",

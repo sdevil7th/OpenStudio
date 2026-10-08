@@ -13,4 +13,6 @@ export interface ProfiledRangeInputProps extends Omit<
   onBeginEdit?: () => void;
   onCommitEdit?: () => void;
   wheelSubtarget?: WheelSubtarget;
+  /** Viewport navigation must not inherit DSP parameter-wheel bindings. */
+  wheelPolicy?: "parameter" | "navigation";
 }

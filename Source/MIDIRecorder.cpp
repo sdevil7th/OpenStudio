@@ -167,7 +167,7 @@ std::vector<MIDIRecorder::CompletedMIDIRecording> MIDIRecorder::finalizeDetached
             continue;
 
         // Sort events by timestamp
-        std::sort(state.events.begin(), state.events.end(),
+        std::stable_sort(state.events.begin(), state.events.end(),
             [](const MIDIEvent& a, const MIDIEvent& b) { return a.timestamp < b.timestamp; });
 
         // Calculate duration from last event

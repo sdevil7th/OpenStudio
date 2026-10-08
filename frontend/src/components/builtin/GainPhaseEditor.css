@@ -1,0 +1,108 @@
+.gain-phase-editor {
+  container: gain-phase / size;
+  --suite-accent: #96b8d5;
+  --suite-surface: #1d252d;
+  background: #172027;
+  color: #e1e7eb;
+  color-scheme: dark;
+}
+.gain-phase-heading {
+  padding: 18px 24px;
+  border-bottom: 1px solid #35424d;
+}
+.gain-phase-heading h2 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 3px;
+  font-weight: 650;
+}
+.gain-phase-heading p {
+  margin: 7px 0 0;
+  color: #91a3b0;
+  font-size: 12px;
+}
+.gain-phase-mark {
+  font-size: 32px;
+  font-weight: 300;
+  color: #a8bfd0;
+}
+.gain-phase-manual {
+  padding: 24px;
+  background: linear-gradient(105deg,#25313b,#1c252d);
+  border-bottom: 1px solid #35424d;
+}
+.gain-phase-channel {
+  border-left: 1px solid #45515c;
+  padding-left: 16px;
+}
+.gain-phase-channel h3 {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #9aafbc;
+  margin: 0;
+}
+.gain-phase-tabs {
+  padding: 0 20px;
+  background: #131b20;
+  border-bottom: 1px solid #35424d;
+}
+.gain-phase-tabs button {
+  min-height: 40px;
+  padding: 8px 18px;
+  color: #8e9faa;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+}
+.gain-phase-tabs button[aria-selected=true] {
+  color: #dbe9f1;
+  border-color: #9bc2dd;
+  background: #26333b;
+}
+.gain-phase-workspace {
+  background: #1b242b;
+}
+.gain-phase-correlation {
+  padding: 12px 15px;
+  border: 1px solid #3f5260;
+  border-radius: 3px;
+  background: #121b21;
+}
+.gain-phase-correlation meter {
+  height: 16px;
+}
+.gain-phase-editor :is(button,input,select,summary):focus-visible {
+  outline: 2px solid #b3d7ed;
+  outline-offset: 2px;
+}
+@container gain-phase (max-width:760px) {
+  .gain-phase-heading {
+    padding: 10px 16px;
+  }
+  .gain-phase-heading p {
+    display: none;
+  }
+  .gain-phase-manual {
+    padding: 12px;
+    gap: 12px;
+  }
+  .gain-phase-channel {
+    padding-left: 10px;
+    gap: 5px;
+  }
+  .gain-phase-channel .suite-parameter {
+    gap: 4px;
+  }
+  .gain-phase-manual .suite-knob {
+    display: none;
+  }
+  .gain-phase-tabs {
+    padding: 0 8px;
+  }
+  .gain-phase-tabs button {
+    padding: 7px 12px;
+  }
+  .gain-phase-manual .suite-value {
+    font-size: 16px;
+    width: 58px;
+  }
+}

@@ -386,7 +386,7 @@ export default function AIClipGenerationModal() {
       return;
     }
     if (!isModelReady) {
-      openAiToolsSetup("audioGeneration");
+      openAiToolsSetup("audioGeneration", aiClipGenerationModelId);
       return;
     }
     if (stableSourcePromptMissing) {
@@ -622,7 +622,7 @@ export default function AIClipGenerationModal() {
                 <div>
                   <p className="text-sm font-semibold text-yellow-200">{model.shortLabel} needs setup</p>
                   <p className="mt-1 text-sm leading-6 text-daw-text-secondary">{modelBlockedMessage}</p>
-                  <Button className="mt-3" variant="secondary" size="sm" onClick={() => openAiToolsSetup("audioGeneration")}>
+                  <Button className="mt-3" variant="secondary" size="sm" onClick={() => openAiToolsSetup("audioGeneration", aiClipGenerationModelId)}>
                     Set Up {model.shortLabel}
                   </Button>
                 </div>

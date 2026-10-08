@@ -1,25 +1,29 @@
-// @ts-nocheck
 import {
   applyTheme,
   createDefaultRenderDialogOptions,
   createDefaultTrack,
   type AudioClip,
   type Track,
+  type DAWState,
+  type DAWActions,
+  type MIDIClip,
 } from "../useDAWStore";
-import { usePitchEditorStore } from "../pitchEditorStore";
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SetFn = (...args: any[]) => void;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type GetFn = () => any;
+import type { StoreApi } from "zustand";
+import { usePitchEditorStore, cancelPitchEditorGesture } from "../pitchEditorStore";
+type SetFn = StoreApi<DAWState & DAWActions>["setState"];
+type GetFn = StoreApi<DAWState & DAWActions>["getState"];
 
 /**
  * Render pipeline, engine enhancements, send/bus routing.
  * Extracted from useDAWStore.ts.
  */
 import { nativeBridge } from "../../services/NativeBridge";
-import { graphProblem } from "../../utils/projectValidation";
+import { editTrackSends } from "../../utils/trackSendHistory";
+import { sendAutomationParamId } from "../automationParams";
 import { commandManager } from "../commands";
+import type { Command } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
+import { getProjectEpoch } from "../../utils/projectLifetime";
 import { prepareForManualRender } from "../../utils/renderPreparation";
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 import {
@@ -27,21 +31,18 @@ import {
   cloneTracksForTimelineUndo,
 } from "./clipEditing";
 import { isClipEditLocked } from "../../utils/clipEditLock";
+import { resolvePitchClipTarget } from "../../utils/pitchEditorEntry";
 import {
   persistMouseModifierOverrides,
   withMouseModifierOverride,
 } from "../../utils/mouseModifierPersistence";
 
 interface TakeClipEntry {
-  track: {
-    id: string;
-    frozen?: boolean;
-    clips: AudioClip[];
-  };
+  track: Track;
   clip: AudioClip;
 }
 
-function findTakeClipEntry(state: any, clipId: string): TakeClipEntry | null {
+function findTakeClipEntry(state: Pick<DAWState, "tracks">, clipId: string): TakeClipEntry | null {
   if (typeof clipId !== "string" || clipId.length === 0) return null;
   for (const track of state.tracks || []) {
     const clip = (track.clips || []).find((candidate: AudioClip) => candidate.id === clipId);
@@ -69,7 +70,7 @@ function isValidTakeTree(clip: AudioClip | undefined): clip is AudioClip {
     && (!Array.isArray(clip.takes) || clip.takes.every((take) => isValidTakeTree(take)));
 }
 
-function isTakeItemEditLocked(state: any, entry: TakeClipEntry | null) {
+function isTakeItemEditLocked(state: Pick<DAWState, "globalLocked" | "lockSettings">, entry: TakeClipEntry | null) {
   return !entry
     || Boolean(state.globalLocked)
     || Boolean(state.lockSettings?.items)
@@ -77,7 +78,7 @@ function isTakeItemEditLocked(state: any, entry: TakeClipEntry | null) {
     || Boolean(entry.clip.locked);
 }
 
-export function canExplodeClipTakes(state: any, clipId: string) {
+export function canExplodeClipTakes(state: Pick<DAWState, "tracks" | "globalLocked" | "lockSettings">, clipId: string) {
   const entry = findTakeClipEntry(state, clipId);
   return !isTakeItemEditLocked(state, entry)
     && Number.isFinite(entry?.clip.startTime)
@@ -86,7 +87,7 @@ export function canExplodeClipTakes(state: any, clipId: string) {
     && entry.clip.takes.every((take) => isValidTakeTree(take));
 }
 
-function getImplodeTakeEntries(state: any, clipIds: readonly string[]) {
+function getImplodeTakeEntries(state: Pick<DAWState, "tracks" | "globalLocked" | "lockSettings">, clipIds: readonly string[]) {
   if (Boolean(state.globalLocked) || Boolean(state.lockSettings?.items)) return [];
   const seen = new Set<string>();
   const entries: TakeClipEntry[] = [];
@@ -104,7 +105,7 @@ function getImplodeTakeEntries(state: any, clipIds: readonly string[]) {
   return entries;
 }
 
-export function canImplodeSelectedClipTakes(state: any, clipIds: readonly string[]) {
+export function canImplodeSelectedClipTakes(state: Pick<DAWState, "tracks" | "globalLocked" | "lockSettings">, clipIds: readonly string[]) {
   return getImplodeTakeEntries(state, clipIds).length >= 2;
 }
 
@@ -125,7 +126,7 @@ function flattenTakeSnapshots(clip: AudioClip): AudioClip[] {
   ];
 }
 
-function cloneTakeSelection(state: any) {
+function cloneTakeSelection(state: Pick<DAWState, "selectedClipId" | "selectedClipIds" | "selectedTrackId" | "selectedTrackIds" | "lastSelectedTrackId">) {
   return {
     selectedClipId: state.selectedClipId,
     selectedClipIds: [...(state.selectedClipIds || [])],
@@ -210,18 +211,18 @@ async function applyTrackSendLevel(
 ) {
   const nextLevel = normalizeTrackSendLevel(level);
   if (nextLevel === null) return false;
-  const track = get().tracks.find((candidate: any) => candidate.id === sourceTrackId);
+  const track = get().tracks.find((candidate) => candidate.id === sourceTrackId);
   const send = track?.sends?.[sendIndex];
   if (!send || (expectedDestTrackId && send.destTrackId !== expectedDestTrackId)) {
     return false;
   }
   if (send.level === nextLevel) return false;
 
-  set((state: any) => ({
-    tracks: state.tracks.map((candidate: any) => candidate.id === sourceTrackId
+  set((state) => ({
+    tracks: state.tracks.map((candidate) => candidate.id === sourceTrackId
       ? {
           ...candidate,
-          sends: candidate.sends.map((candidateSend: any, index: number) => index === sendIndex
+          sends: candidate.sends.map((candidateSend, index: number) => index === sendIndex
             ? { ...candidateSend, level: nextLevel }
             : candidateSend),
         }
@@ -244,18 +245,18 @@ async function applyTrackSendPan(
 ) {
   const nextPan = normalizeTrackSendPan(pan);
   if (nextPan === null) return false;
-  const track = get().tracks.find((candidate: any) => candidate.id === sourceTrackId);
+  const track = get().tracks.find((candidate) => candidate.id === sourceTrackId);
   const send = track?.sends?.[sendIndex];
   if (!send || (expectedDestTrackId && send.destTrackId !== expectedDestTrackId)) {
     return false;
   }
   if (send.pan === nextPan) return false;
 
-  set((state: any) => ({
-    tracks: state.tracks.map((candidate: any) => candidate.id === sourceTrackId
+  set((state) => ({
+    tracks: state.tracks.map((candidate) => candidate.id === sourceTrackId
       ? {
           ...candidate,
-          sends: candidate.sends.map((candidateSend: any, index: number) => index === sendIndex
+          sends: candidate.sends.map((candidateSend, index: number) => index === sendIndex
             ? { ...candidateSend, pan: nextPan }
             : candidateSend),
         }
@@ -276,10 +277,10 @@ async function applyTrackStereoWidth(
 ) {
   if (typeof widthPercent !== "number" || !Number.isFinite(widthPercent)) return false;
   const nextWidth = Math.max(0, Math.min(200, widthPercent));
-  const track = get().tracks.find((candidate: any) => candidate.id === trackId);
+  const track = get().tracks.find((candidate) => candidate.id === trackId);
   if (!track || track.stereoWidth === nextWidth) return false;
-  set((state: any) => ({
-    tracks: state.tracks.map((candidate: any) => candidate.id === trackId
+  set((state) => ({
+    tracks: state.tracks.map((candidate) => candidate.id === trackId
       ? { ...candidate, stereoWidth: nextWidth }
       : candidate),
     isModified: true,
@@ -453,18 +454,35 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
 
     // 9C: Custom Metronome Sounds
     setMetronomeClickSound: async (filePath: string) => {
+      const epoch = getProjectEpoch();
       const success = await nativeBridge.setMetronomeClickSound(filePath);
-      if (success) set({ metronomeClickPath: filePath });
+      const info = success ? await nativeBridge.getMetronomeSoundInfo(false) : null;
+      if (getProjectEpoch() !== epoch) return false;
+      if (success) {
+        set({ metronomeClickPath: info?.selection ?? filePath });
+        get().setModified(true);
+      }
       return success;
     },
     setMetronomeAccentSound: async (filePath: string) => {
+      const epoch = getProjectEpoch();
       const success = await nativeBridge.setMetronomeAccentSound(filePath);
-      if (success) set({ metronomeAccentPath: filePath });
+      const info = success ? await nativeBridge.getMetronomeSoundInfo(true) : null;
+      if (getProjectEpoch() !== epoch) return false;
+      if (success) {
+        set({ metronomeAccentPath: info?.selection ?? filePath });
+        get().setModified(true);
+      }
       return success;
     },
     resetMetronomeSounds: async () => {
+      const epoch = getProjectEpoch();
       const success = await nativeBridge.resetMetronomeSounds();
-      if (success) set({ metronomeClickPath: "", metronomeAccentPath: "" });
+      if (getProjectEpoch() !== epoch) return false;
+      if (success) {
+        set({ metronomeClickPath: "", metronomeAccentPath: "" });
+        get().setModified(true);
+      }
       return success;
     },
 
@@ -490,7 +508,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
 
       const busId = crypto.randomUUID();
       const busName = `Bus ${invocationState.tracks.filter((track) => track.type === "bus").length + 1}`;
-      const busTrack = {
+      const busTrack: Track = {
         ...createDefaultTrack(busId, busName, undefined, "bus", invocationState.tracks),
         id: busId,
         name: busName,
@@ -601,48 +619,32 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     },
 
     addTrackSend: async (sourceTrackId, destTrackId) => {
-      const state = get();
-      if (!state.tracks.some(track => track.id === sourceTrackId) || !state.tracks.some(track => track.id === destTrackId)) return;
-      const problem = graphProblem(state.tracks.map(track => track.id === sourceTrackId
-        ? { ...track, sends: [...track.sends, { destTrackId }] } : track));
-      if (problem) { state.showToast(problem, "error"); return; }
-      const index = await nativeBridge.addTrackSend(sourceTrackId, destTrackId);
-      if (index < 0) { get().showToast("The audio engine rejected this send", "error"); return; }
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === sourceTrackId
-            ? { ...t, sends: [...t.sends, { destTrackId, level: 0.5, pan: 0, enabled: true, preFader: false, phaseInvert: false }] }
-            : t
-        ),
-      }));
+      await editTrackSends(set, get, sourceTrackId, "Add send", sends => [...sends,
+        { destTrackId, level: .5, pan: 0, enabled: true, preFader: false, phaseInvert: false, sourceChannel: 0 }]);
     },
     removeTrackSend: async (sourceTrackId, sendIndex) => {
-      await nativeBridge.removeTrackSend(sourceTrackId, sendIndex);
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === sourceTrackId
-            ? { ...t, sends: t.sends.filter((_, i) => i !== sendIndex) }
-            : t
-        ),
-      }));
+      const destination = get().tracks.find(track => track.id === sourceTrackId)?.sends[sendIndex]?.destTrackId;
+      await editTrackSends(set, get, sourceTrackId, "Remove send", sends => sends.filter(send => send.destTrackId !== destination));
     },
     beginTrackSendLevelEdit: (sourceTrackId, sendIndex) => {
       const key = trackSendLevelEditKey(sourceTrackId, sendIndex);
       if (trackSendLevelEditSnapshots.has(key)) return;
       const send = get().tracks
-        .find((track: any) => track.id === sourceTrackId)
+        .find((track) => track.id === sourceTrackId)
         ?.sends?.[sendIndex];
       if (!send) return;
       trackSendLevelEditSnapshots.set(key, {
         destTrackId: send.destTrackId,
         oldLevel: send.level,
       });
+      get().beginAutomationParamTouch(sourceTrackId, sendAutomationParamId(send.destTrackId, "level"));
     },
     setTrackSendLevel: async (sourceTrackId, sendIndex, level) => {
       const key = trackSendLevelEditKey(sourceTrackId, sendIndex);
       const hadActiveEdit = trackSendLevelEditSnapshots.has(key);
       if (!hadActiveEdit) get().beginTrackSendLevelEdit(sourceTrackId, sendIndex);
       const snapshot = trackSendLevelEditSnapshots.get(key);
+      if (snapshot) get().setAutomationWriteValue(sourceTrackId, sendAutomationParamId(snapshot.destTrackId, "level"), Math.max(0, Math.min(1, level)));
       const backendUpdate = applyTrackSendLevel(
         set,
         get,
@@ -660,8 +662,9 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const snapshot = trackSendLevelEditSnapshots.get(key);
       trackSendLevelEditSnapshots.delete(key);
       if (!snapshot) return;
+      get().endAutomationParamTouch(sourceTrackId, sendAutomationParamId(snapshot.destTrackId, "level"));
       const send = get().tracks
-        .find((track: any) => track.id === sourceTrackId)
+        .find((track) => track.id === sourceTrackId)
         ?.sends?.[sendIndex];
       if (
         !send
@@ -708,19 +711,21 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const key = trackSendLevelEditKey(sourceTrackId, sendIndex);
       if (trackSendPanEditSnapshots.has(key)) return;
       const send = get().tracks
-        .find((track: any) => track.id === sourceTrackId)
+        .find((track) => track.id === sourceTrackId)
         ?.sends?.[sendIndex];
       if (!send) return;
       trackSendPanEditSnapshots.set(key, {
         destTrackId: send.destTrackId,
         oldPan: send.pan,
       });
+      get().beginAutomationParamTouch(sourceTrackId, sendAutomationParamId(send.destTrackId, "pan"));
     },
     setTrackSendPan: async (sourceTrackId, sendIndex, pan) => {
       const key = trackSendLevelEditKey(sourceTrackId, sendIndex);
       const hadActiveEdit = trackSendPanEditSnapshots.has(key);
       if (!hadActiveEdit) get().beginTrackSendPanEdit(sourceTrackId, sendIndex);
       const snapshot = trackSendPanEditSnapshots.get(key);
+      if (snapshot) get().setAutomationWriteValue(sourceTrackId, sendAutomationParamId(snapshot.destTrackId, "pan"), Math.max(0, Math.min(1, (pan + 1) / 2)));
       const backendUpdate = applyTrackSendPan(
         set,
         get,
@@ -738,8 +743,9 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const snapshot = trackSendPanEditSnapshots.get(key);
       trackSendPanEditSnapshots.delete(key);
       if (!snapshot) return;
+      get().endAutomationParamTouch(sourceTrackId, sendAutomationParamId(snapshot.destTrackId, "pan"));
       const send = get().tracks
-        .find((track: any) => track.id === sourceTrackId)
+        .find((track) => track.id === sourceTrackId)
         ?.sends?.[sendIndex];
       if (
         !send
@@ -783,34 +789,30 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       });
     },
     setTrackSendEnabled: async (sourceTrackId, sendIndex, enabled) => {
-      await nativeBridge.setTrackSendEnabled(sourceTrackId, sendIndex, enabled);
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === sourceTrackId
-            ? { ...t, sends: t.sends.map((sd, i) => i === sendIndex ? { ...sd, enabled } : sd) }
-            : t
-        ),
-      }));
+      const epoch = getProjectEpoch();
+      const destination = get().tracks.find(track => track.id === sourceTrackId)?.sends[sendIndex]?.destTrackId;
+      const accepted = await editTrackSends(set, get, sourceTrackId, "Change send enabled", sends => sends.map(send => send.destTrackId === destination ? { ...send, enabled } : send));
+      const current = get().tracks.find(track => track.id === sourceTrackId)?.sends.find(send => send.destTrackId === destination);
+      if (accepted && epoch === getProjectEpoch() && destination && current?.enabled === enabled) {
+        const param = sendAutomationParamId(destination, "mute");
+        get().beginAutomationParamTouch(sourceTrackId, param);
+        get().setAutomationWriteValue(sourceTrackId, param, enabled ? 0 : 1);
+        get().recordAutomationWriteTick(Date.now());
+        get().endAutomationParamTouch(sourceTrackId, param);
+      }
     },
     setTrackSendPreFader: async (sourceTrackId, sendIndex, preFader) => {
-      await nativeBridge.setTrackSendPreFader(sourceTrackId, sendIndex, preFader);
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === sourceTrackId
-            ? { ...t, sends: t.sends.map((sd, i) => i === sendIndex ? { ...sd, preFader } : sd) }
-            : t
-        ),
-      }));
+      const destination = get().tracks.find(track => track.id === sourceTrackId)?.sends[sendIndex]?.destTrackId;
+      await editTrackSends(set, get, sourceTrackId, "Change send fader position", sends => sends.map(send => send.destTrackId === destination ? { ...send, preFader } : send));
     },
-    setTrackSendPhaseInvert: async (sourceTrackId, sendIndex, invert) => {
-      await nativeBridge.setTrackSendPhaseInvert(sourceTrackId, sendIndex, invert);
-      set((s) => ({
-        tracks: s.tracks.map((t) =>
-          t.id === sourceTrackId
-            ? { ...t, sends: t.sends.map((sd, i) => i === sendIndex ? { ...sd, phaseInvert: invert } : sd) }
-            : t
-        ),
-      }));
+    setTrackSendSourceChannel: async (sourceTrackId, sendIndex, sourceChannel) => {
+      if (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 62 || sourceChannel % 2 !== 0) return;
+      const destination = get().tracks.find(track => track.id === sourceTrackId)?.sends[sendIndex]?.destTrackId;
+      await editTrackSends(set, get, sourceTrackId, "Change send output pair", sends => sends.map(send => send.destTrackId === destination ? { ...send, sourceChannel } : send));
+    },
+    setTrackSendPhaseInvert: async (sourceTrackId, sendIndex, phaseInvert) => {
+      const destination = get().tracks.find(track => track.id === sourceTrackId)?.sends[sendIndex]?.destTrackId;
+      await editTrackSends(set, get, sourceTrackId, "Change send phase", sends => sends.map(send => send.destTrackId === destination ? { ...send, phaseInvert } : send));
     },
     setTrackPhaseInvert: async (trackId, invert) => {
       const track = get().tracks.find((candidate) => candidate.id === trackId);
@@ -842,7 +844,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     },
     beginTrackStereoWidthEdit: (trackId) => {
       if (trackStereoWidthEditSnapshots.has(trackId)) return;
-      const track = get().tracks.find((candidate: any) => candidate.id === trackId);
+      const track = get().tracks.find((candidate) => candidate.id === trackId);
       if (!track) return;
       trackStereoWidthEditSnapshots.set(trackId, track.stereoWidth);
     },
@@ -863,7 +865,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const oldWidth = trackStereoWidthEditSnapshots.get(trackId);
       trackStereoWidthEditSnapshots.delete(trackId);
       if (oldWidth === undefined) return;
-      const track = get().tracks.find((candidate: any) => candidate.id === trackId);
+      const track = get().tracks.find((candidate) => candidate.id === trackId);
       if (!track || track.stereoWidth === oldWidth) return;
       const newWidth = track.stereoWidth;
 
@@ -919,6 +921,22 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         tracks: s.tracks.map((t) => t.id === trackId ? { ...t, trackChannelCount: numChannels } : t),
       }));
     },
+    setTrackMIDIOutputMergeKeys: async (trackId, merge) => {
+      const track = get().tracks.find(candidate => candidate.id === trackId);
+      if (!track || get().globalLocked || Boolean(track.midiOutputMergeKeys) === merge) return;
+      const before = Boolean(track.midiOutputMergeKeys);
+      const projectEpoch = getProjectEpoch();
+      try {
+        if (!await nativeBridge.setTrackMIDIOutputMergeKeys(trackId, merge)) throw Error("Native MIDI output policy was rejected");
+      } catch (error) { get().showToast("Could not change MIDI output overlap policy", "error"); logBridgeError("MIDI overlap policy")(error); return; }
+      if (projectEpoch !== getProjectEpoch() || !get().tracks.some(candidate => candidate.id === trackId)) return;
+      if (get().globalLocked) { void nativeBridge.setTrackMIDIOutputMergeKeys(trackId, before).catch(logBridgeError("MIDI overlap rollback")); return; }
+      const update = (value: boolean) => set(state => ({ tracks: state.tracks.map(candidate => candidate.id === trackId ? { ...candidate, midiOutputMergeKeys: value } : candidate), isModified: true }));
+      const replay = (value: boolean) => { if (projectEpoch !== getProjectEpoch() || !get().tracks.some(candidate => candidate.id === trackId)) return; update(value); void nativeBridge.setTrackMIDIOutputMergeKeys(trackId, value).catch(logBridgeError("MIDI overlap history")); };
+      update(merge);
+      commandManager.push({ type: "SET_TRACK_MIDI_OVERLAP", description: `MIDI key overlap for ${track.name}`, timestamp: Date.now(), execute: () => replay(merge), undo: () => replay(before) });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
+    },
     setTrackMIDIOutput: async (trackId, deviceName) => {
       await nativeBridge.setTrackMIDIOutput(trackId, deviceName);
       set((s) => ({
@@ -961,7 +979,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         }];
       });
       const after = [...retainedGroups, group];
-      const applyGroups = (trackGroups) => set({
+      const applyGroups = (trackGroups: DAWState["trackGroups"]) => set({
         trackGroups: trackGroups.map((candidate) => ({
           ...candidate,
           memberTrackIds: [...candidate.memberTrackIds],
@@ -1020,7 +1038,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         memberTrackIds: updates.memberTrackIds ? [...updates.memberTrackIds] : before.memberTrackIds,
         linkedParams: updates.linkedParams ? [...updates.linkedParams] : before.linkedParams,
       };
-      const applyGroup = (group) => set((state) => ({
+      const applyGroup = (group: DAWState["trackGroups"][number]) => set((state) => ({
         trackGroups: state.trackGroups.map((candidate) => candidate.id === groupId ? group : candidate),
         isModified: true,
       }));
@@ -1059,7 +1077,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
           || next.memberTrackIds.some((id, memberIndex) => id !== group.memberTrackIds[memberIndex]);
       }) || before.length !== after.length;
       if (!changed) return;
-      const applyGroups = (trackGroups) => set({
+      const applyGroups = (trackGroups: DAWState["trackGroups"]) => set({
         trackGroups: trackGroups.map((group) => ({
           ...group,
           memberTrackIds: [...group.memberTrackIds],
@@ -1202,7 +1220,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
           selectedClipId: state.selectedClipId,
           selectedClipIds: [...state.selectedClipIds],
         };
-        const applyClips = (clips, selection) => {
+        const applyClips = (clips: AudioClip[], selection: Pick<DAWState, "selectedClipId" | "selectedClipIds">) => {
           set((current) => ({
             tracks: current.tracks.map((candidate) => candidate.id === trackId
               ? { ...candidate, clips }
@@ -1514,7 +1532,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const oldShape = clip.fadeInShape ?? 0;
       const nextShape = Math.max(0, Math.min(4, Math.round(shape)));
       if (oldShape === nextShape) return;
-      const applyShape = (fadeInShape) => set((state) => ({
+      const applyShape = (fadeInShape: number) => set((state) => ({
         tracks: state.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((candidate) => candidate.id === clipId
@@ -1538,7 +1556,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const oldShape = clip.fadeOutShape ?? 0;
       const nextShape = Math.max(0, Math.min(4, Math.round(shape)));
       if (oldShape === nextShape) return;
-      const applyShape = (fadeOutShape) => set((state) => ({
+      const applyShape = (fadeOutShape: number) => set((state) => ({
         tracks: state.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((candidate) => candidate.id === clipId
@@ -1617,7 +1635,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
         return newTrack;
       });
       const nextTracks = cloneTracksForTimelineUndo([
-        ...state.tracks.map((track: any) => ({
+        ...state.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((clip: AudioClip) => clip.id === source.clip.id
             ? { ...cloneTimelineClipDeep(clip), takes: undefined, activeTakeIndex: undefined }
@@ -1647,7 +1665,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
             addedTracks.push(track);
           }
           for (const track of newTracks) {
-            const index = nextTracks.findIndex((candidate: any) => candidate.id === track.id);
+            const index = nextTracks.findIndex((candidate) => candidate.id === track.id);
             const reordered = index >= 0 && await nativeBridge.reorderTrack(track.id, index);
             if (!reordered) {
               throw new Error(`Backend could not position exploded take track ${track.id}`);
@@ -1753,7 +1771,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const selectionBefore = cloneTakeSelection(state);
       const selectionAfter = {
         ...selectionBefore,
-        selectedClipId: removedIds.has(selectionBefore.selectedClipId)
+        selectedClipId: selectionBefore.selectedClipId !== null && removedIds.has(selectionBefore.selectedClipId)
           ? main.clip.id
           : selectionBefore.selectedClipId,
         selectedClipIds: selectionBefore.selectedClipIds.filter((id: string) => !removedIds.has(id)),
@@ -1764,7 +1782,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       ) {
         selectionAfter.selectedClipIds.push(main.clip.id);
       }
-      const nextTracks = cloneTracksForTimelineUndo(state.tracks.map((track: any) => ({
+      const nextTracks = cloneTracksForTimelineUndo(state.tracks.map((track) => ({
         ...track,
         clips: track.clips
           .filter((clip: AudioClip) => !removedIds.has(clip.id))
@@ -1779,7 +1797,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const backendQueue = { current: Promise.resolve() };
 
       const applyImplodedState = (
-        tracks: any[],
+        tracks: Track[],
         selection: ReturnType<typeof cloneTakeSelection>,
         context: string,
       ) => {
@@ -2043,12 +2061,24 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
     },
     // toggleScriptEditor → store/actions/uiState.ts
     openPitchEditor: (trackId, clipId, fxIndex) => {
+      if (!resolvePitchClipTarget(get(), { trackId, clipId })) {
+        get().showToast("Choose an available, unlocked audio clip on an unfrozen track to edit pitch.", "info");
+        return;
+      }
+      const epoch = getProjectEpoch();
       set({ showPitchEditor: true, pitchEditorTrackId: trackId, pitchEditorClipId: clipId, pitchEditorFxIndex: fxIndex });
       usePitchEditorStore.getState().open(trackId, clipId, fxIndex);
+      void nativeBridge.pitchEditorSession("status").then((status) => {
+        const current = get();
+        if (epoch !== getProjectEpoch() || !current.showPitchEditor
+          || current.pitchEditorTrackId !== trackId || current.pitchEditorClipId !== clipId) return;
+        if (status && typeof status === "object" && "state" in status && status.state === "visible")
+          void nativeBridge.pitchEditorSession("open");
+      }).catch(() => {});
     },
     closePitchEditor: () => {
       set({ showPitchEditor: false, pitchEditorTrackId: null, pitchEditorClipId: null, pitchEditorFxIndex: 0 });
-      usePitchEditorStore.getState().close();
+      cancelPitchEditorGesture();
     },
     setLowerZoneHeight: (h) => {
       const viewportHeight = typeof window !== "undefined" ? window.innerHeight : 900;
@@ -2186,11 +2216,11 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       try {
         const regions = get().regions;
         // Convert regions to DDP track format: { startTime, endTime, title, isrc }
-        const tracks = regions.map((r: any) => ({
-          startTime: r.startTime ?? r.time ?? 0,
-          endTime: r.endTime ?? (r.time + (r.duration ?? 0)),
-          title: r.name ?? r.label ?? "",
-          isrc: r.isrc ?? "",
+        const tracks = regions.map((r) => ({
+          startTime: r.startTime,
+          endTime: r.endTime,
+          title: r.name,
+          isrc: "",
         }));
         return await nativeBridge.exportDDP(sourceWavPath, outputDir, tracks, catalogNumber);
       } catch (err) {
@@ -2199,4 +2229,4 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       }
     },
 
-});
+} satisfies Partial<DAWActions>);

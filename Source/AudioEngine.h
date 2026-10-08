@@ -1,7 +1,10 @@
+#include "BuiltInIRPreparation.h"
 #pragma once
 
 #include <JuceHeader.h>
 #include "TrackProcessor.h"
+#include "BuiltInInstrumentPreview.h"
+#include "BuiltInIRPreview.h"
 #include "MessageThreadLifetime.h"
 #include "AudioRecorder.h"
 #include "MIDIRecorder.h"
@@ -61,10 +64,10 @@ public:
                                                int processedOrder[], int& orderCount, int maxTracks);
     void processMasterFXChain (const ActiveFXStage* rtMasterFX,
                                float* const* outputChannelData, int numOutputChannels,
-                               int numSamples, bool useHybrid64Summing);
+                               int numSamples, bool useHybrid64Summing, double automationTimeSeconds = 0.0);
     void processMonitoringFXChain (const ActiveFXStage* rtMonitoringFX,
                                    float* const* outputChannelData, int numOutputChannels,
-                                   int numSamples, bool hybrid64PostChainActive);
+                                   int numSamples, bool hybrid64PostChainActive, double automationTimeSeconds = 0.0);
     void applyMasterGainPanMono (float* const* outputChannelData, int numOutputChannels,
                                  int numSamples, double currentTimeSeconds,
                                  bool hybrid64PostChainActive);
@@ -83,6 +86,7 @@ public:
 
     // Device Management
     juce::var getAudioDeviceSetup();
+    juce::var queryAudioDeviceSetup(const juce::var& request);
     juce::var openAudioDeviceControlPanel();
     void setAudioDeviceSetup(
         const juce::String& type,
@@ -90,7 +94,8 @@ public:
         const juce::String& output,
         double sampleRate,
         int bufferSize,
-        std::function<void(bool, const juce::String&)> completion = {});
+        std::function<void(bool, const juce::String&)> completion = {},
+        bool useDefaultDevices = false);
     int getNAMRackOversamplingFactor() const noexcept;
     bool setNAMRackOversamplingFactor(int factor);
     
@@ -108,6 +113,7 @@ public:
     void setTrackPan(const juce::String& trackId, float pan);
     void setTrackMute(const juce::String& trackId, bool muted);
     void setTrackSolo(const juce::String& trackId, bool soloed);
+    void setTrackSoloSafe(const juce::String& trackId, bool safe);
     
     // Transport control (Phase 2)
     void setTransportPlaying(bool playing);
@@ -118,6 +124,8 @@ public:
     void requestAudioInputAccess(std::function<void(bool)> completion);
     bool isTransportPlaying() const { return isPlaying; }
     bool isTransportRecording() const { return isRecordMode; }
+    bool finalizeInterruptedRecording(); // Message thread; never re-route an in-flight take.
+
     void setLoopMode(bool loop)
     {
         isLooping.store(loop, std::memory_order_release);
@@ -158,6 +166,11 @@ public:
     bool isMetronomeEnabled() const;
     bool setMetronomePracticeEnabled(bool enabled);
     bool isMetronomePracticeEnabled() const { return metronome.isPracticeEnabled(); }
+    bool controlPracticeTimer(const juce::String& action, double duration) {
+        if ((action == "start" || action == "resume") && isTransportPlaying()) return false;
+        return metronome.controlPracticeTimer(action, duration);
+    }
+    juce::var getPracticeTimer() const { return metronome.getPracticeTimer(); }
     void setTimeSignature(int numerator, int denominator);
     void getTimeSignature(int& numerator, int& denominator) const;
 
@@ -168,6 +181,7 @@ public:
     bool setMetronomeClickSound(const juce::String& filePath);
     bool setMetronomeAccentSound(const juce::String& filePath);
     void resetMetronomeSounds();
+    juce::var getMetronomeSoundInfo(bool accent) const { return metronome.getSoundInfo(accent); }
 
     // Get clips that were completed in the last recording session
     std::vector<AudioRecorder::CompletedRecording> getLastCompletedClips();
@@ -223,6 +237,7 @@ public:
     
     // Built-in FX Preset System
     juce::var getBuiltInFXPresets(const juce::String& pluginName);
+    juce::var eqPresetLibrary(const juce::String& action, const juce::var& request);
     bool saveBuiltInFXPreset(const juce::String& trackId, const juce::String& chainType, int fxIndex,
                              const juce::String& presetName, bool isFactory = false);
     bool loadBuiltInFXPreset(const juce::String& trackId, const juce::String& chainType, int fxIndex,
@@ -265,6 +280,11 @@ public:
     void setTrackType(const juce::String& trackId, const juce::String& type); // 'audio', 'midi', 'instrument'
     void setTrackMIDIInput(const juce::String& trackId, const juce::String& deviceName, int channel);
     void setTrackMIDIClips(const juce::String& trackId, const juce::String& clipsJSON);
+    int resolveBuiltInPluginRoute(const juce::String&, const juce::String&, int, const juce::String&);
+    BuiltInInstrumentPreview instrumentPreview;
+    BuiltInIRPreview irPreview;
+    juce::var prepareIRAudition(const juce::var&, BuiltInIRPreview::Ticket, const std::function<bool()>&);
+    bool sendBuiltInPreview(const juce::String&, const juce::String&, int, const juce::String&, int, bool);
     bool sendMidiNote(const juce::String& trackId, int note, int velocity, bool isNoteOn);
     juce::var getTrackMIDINoteActivity(const juce::String& trackId, int maxAgeMs = 1200) const;
     bool panicMIDI();
@@ -293,8 +313,19 @@ public:
     juce::var getTrackInputFX(const juce::String& trackId);
     juce::var getTrackFX(const juce::String& trackId);
     juce::var getPluginParameters(const juce::String& trackId, int fxIndex, bool isInputFX);
+    juce::var getFXStageState(const juce::String& chain);
+    bool setFXStageState(const juce::String& chain, const juce::String& json);
+    juce::var runFXStageAutomationRegression();
+    juce::var runAutomationTrimRegression();
+    juce::var runAutomationPreviewRegression();
+    juce::String getAutomationValueText(const juce::String& trackId, const juce::String& param, float value);
     bool setPluginParameter(const juce::String& trackId, int fxIndex, bool isInputFX, int paramIndex, float value);
     juce::var getBuiltInPluginSchema(const juce::String& trackId, const juce::String& chainType, int fxIndex);
+    juce::var eqMatch(const juce::String& action, const juce::var& request, const std::function<bool()>& keepRunning = {});
+    juce::var eqDraftAudition(const juce::String& action, const juce::var& request, const std::function<bool()>& keepRunning = {});
+    juce::var reverbResponse(const juce::var& request, const std::function<bool()>& keepRunning = {}, const std::function<void(int,double)>& progress = {});
+    juce::var gainPhaseAlignment(const juce::String& action, const juce::var& request, const std::function<bool()>& keepRunning = {}, const std::function<void(int,double)>& progress = {});
+    juce::var getBuiltInPluginMeters(const juce::String& trackId, const juce::String& chainType, int fxIndex, int analyzerSize = 0, int analyzerSource = 0);
     juce::var getNAMRackDiagnostics(const juce::String& trackId,
                                     const juce::String& chainType,
                                     int fxIndex);
@@ -303,7 +334,8 @@ public:
                                const juce::String& paramId, float value);
     bool setBuiltInPluginState(const juce::String& trackId, const juce::String& chainType, int fxIndex,
                                const juce::String& stateJSON,
-                               const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
+                               const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {},
+                               const std::shared_ptr<BuiltInIRPreparation>& irPreparation = {});
     bool removeTrackInputFX(const juce::String& trackId, int fxIndex);
     bool removeTrackFX(const juce::String& trackId, int fxIndex);
     void bypassTrackInputFX(const juce::String& trackId, int fxIndex, bool bypassed);
@@ -324,6 +356,9 @@ public:
     void openMonitoringFXEditor(int fxIndex);
     void bypassMonitoringFX(int fxIndex, bool bypassed);
     void setMasterVolume(float volume);
+    void setMasterMute(bool muted) { masterMuted.store(muted, std::memory_order_release); }
+    bool setAutomationTrimValue(const juce::String& trackId, float db, const juce::String& parameterId = "trim_volume");
+    float getAutomationTrimValue(const juce::String& trackId) const;
     float getMasterVolume() const
     {
         return masterVolume.load(std::memory_order_relaxed);
@@ -420,12 +455,14 @@ public:
     bool getTrackDCOffset(const juce::String& trackId) const;
 
     // Sidechain Routing (Phase 4.4)
-    void setSidechainSource(const juce::String& destTrackId, int pluginIndex, const juce::String& sourceTrackId);
-    void clearSidechainSource(const juce::String& destTrackId, int pluginIndex);
+    bool setSidechainSource(const juce::String& destTrackId, int pluginIndex, const juce::String& sourceTrackId);
+    bool clearSidechainSource(const juce::String& destTrackId, int pluginIndex);
     juce::String getSidechainSource(const juce::String& destTrackId, int pluginIndex);
 
     // Send/Bus Routing (Phase 11)
+    bool replaceTrackSends(const juce::String& sourceTrackId, const juce::var& configuration);
     int addTrackSend(const juce::String& sourceTrackId, const juce::String& destTrackId);
+    bool setTrackSendSourceChannel(const juce::String& sourceTrackId, int sendIndex, int sourceChannel);
     void removeTrackSend(const juce::String& sourceTrackId, int sendIndex);
     void setTrackSendLevel(const juce::String& sourceTrackId, int sendIndex, float level);
     void setTrackSendPan(const juce::String& sourceTrackId, int sendIndex, float pan);
@@ -447,6 +484,7 @@ public:
     void setTrackChannelCount(const juce::String& trackId, int numChannels);
     int getTrackChannelCount(const juce::String& trackId) const;
     void setTrackMIDIOutput(const juce::String& trackId, const juce::String& deviceName);
+    bool setTrackMIDIOutputMergeKeys(const juce::String& trackId,bool merge);
     juce::String getTrackMIDIOutput(const juce::String& trackId) const;
     juce::var getTrackRoutingInfo(const juce::String& trackId);
 
@@ -473,11 +511,20 @@ public:
     juce::String getAutomationMode(const juce::String& trackId, const juce::String& parameterId);
     // Clear automation for a track parameter
     void clearAutomation(const juce::String& trackId, const juce::String& parameterId);
+    bool setAutomationPreview(const juce::String& trackId, const juce::String& parameterId, float value, const juce::String& expectedMeaning = {}, int64_t expectedReferenceGeneration = -1);
+    bool clearAutomationPreviews();
+    juce::var punchAutomationPreviews(const juce::String& trackId, juce::uint64 expectedGeneration);
+    bool setAutomationWriteHold(const juce::String& trackId, const juce::String& parameterId, float value, double startTime, const juce::String& meaning, int64_t referenceGeneration);
+    bool clearAutomationWriteHold(const juce::String& trackId, const juce::String& parameterId);
+    juce::uint64 takeAutomationPreviewCleared() { return automationPreviewCleared.exchange(0); }
+    juce::uint64 getAutomationPreviewGeneration() const { return automationPreviewGeneration.load(); }
+    juce::var getAutomationCurrentValue(const juce::String& trackId, const juce::String& parameterId);
     // Touch begin/end (for touch/latch recording modes)
     void beginTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
-    juce::var takePluginParameterEdits();
+    juce::var takePluginParameterEdits(bool finishing = false);
     juce::var builtInParameterEdit(const juce::String& trackId, const juce::String& chain,
-                                  int index, const juce::String& param, const juce::String& phase);
+                                  int index, const juce::String& param, const juce::String& phase,
+                                  std::optional<float> appliedValue = std::nullopt);
     void endTouchAutomation(const juce::String& trackId, const juce::String& parameterId);
 
     // Tempo Map (Phase 1.2)
@@ -689,6 +736,7 @@ private:
         std::shared_ptr<juce::AudioBuffer<float>> sidechainOutputBuffer;
         std::shared_ptr<juce::AudioBuffer<float>> sendAccumBuffer;
         std::vector<juce::String> sidechainSourceIds;
+        TrackProcessor::SidechainRoutes sidechainRoutes;
         std::vector<std::shared_ptr<juce::AudioBuffer<float>>>
             sidechainSourceBuffers;
         std::vector<RealtimeResolvedSend> sends;
@@ -698,6 +746,7 @@ private:
     struct DesiredFXStageSlot
     {
         int slotId = 0;
+        juce::String automationKey = juce::Uuid().toString();
         juce::String name;
         juce::String type;
         juce::String pluginPath;
@@ -727,9 +776,22 @@ private:
         bool latencyInitialised = false;
     };
 
+    struct StageAutomationRoute
+    {
+        juce::String id, builtInParam, editorParam;
+        int index = -1;
+        juce::String parameterMeaning;
+        uint64_t referenceGeneration = 0;
+        std::shared_ptr<AutomationList> list;
+        OpenStudioBuiltInAutomationDescriptor descriptor;
+        std::shared_ptr<PluginParameterCapture::State> editorState;
+        std::atomic<float> lastApplied { std::numeric_limits<float>::quiet_NaN() };
+    };
+
     struct ActiveFXStageSlot
     {
         int slotId = 0;
+        juce::String automationKey, automationPrefix;
         juce::String name;
         juce::String type;
         juce::String pluginPath;
@@ -738,6 +800,8 @@ private:
         bool forceFloat = false;
         bool supportsDouble = false;
         std::shared_ptr<juce::AudioProcessor> processor;
+        std::shared_ptr<PluginParameterCapture> parameterCapture;
+        std::vector<std::shared_ptr<StageAutomationRoute>> automationRoutes;
         std::shared_ptr<ProcessorSafety> safety = std::make_shared<ProcessorSafety>();
         std::shared_ptr<StageFXBypassDelayStorage>
             bypassDelay;
@@ -814,6 +878,7 @@ private:
         std::shared_ptr<juce::AudioProcessor> processor;
         std::shared_ptr<const RealtimeTrackSnapshot> trackSnapshot;
         TrackProcessor* track = nullptr;
+        bool bypassed = false;
     };
     using RealtimeRoutingBufferMap =
         std::map<juce::String,
@@ -829,10 +894,16 @@ private:
         std::vector<RealtimeTrackEntry>& trackSnapshot,
         const RealtimeRoutingBufferMap& sidechainBuffers,
         const RealtimeRoutingBufferMap& sendBuffers);
+    juce::CriticalSection reverbResponseOperationLock;
+    juce::CriticalSection alignmentOperationLock, eqMatchOperationLock;
     PublishedBuiltInProcessorOwner getPublishedBuiltInProcessor(
         const juce::String& trackId,
         const juce::String& chainType,
         int fxIndex) const;
+    void synchroniseBuiltInConfiguration(
+        const PublishedBuiltInProcessorOwner& owner,
+        const juce::String& chainType);
+    void invalidateStageAutomationAfterRecall(juce::AudioProcessor* processor);
     void publishRealtimeTrackSnapshot(
         std::shared_ptr<const RealtimeTrackSnapshot> snapshot);
     void publishRealtimeMasterSnapshot(
@@ -898,7 +969,8 @@ private:
         const juce::String& output,
         double sampleRate,
         int bufferSize,
-        juce::String& errorMessage);
+        juce::String& errorMessage,
+        bool useDefaultDevices);
     juce::File getDeviceSettingsFile() const;
     void resetAudioCallbackWindowTelemetry() noexcept;
     void recordAudioCallbackTiming(double callbackProcessMs,
@@ -959,7 +1031,9 @@ private:
     PlaybackEngine playbackEngine;
     PeakCache peakCache;
     std::atomic<bool> isPlaying { false };
+    std::shared_ptr<PluginAutomationClock> pluginAutomationClock = std::make_shared<PluginAutomationClock>();
     std::atomic<bool> isRecordMode { false };
+    std::atomic<bool> recordingDeviceInterrupted { false };
     std::atomic<bool> isRendering { false };  // Blocks audio callback during offline render
     juce::CriticalSection offlineRenderTransactionLock;
     std::atomic<bool> isLooping { false };
@@ -1073,7 +1147,7 @@ private:
 
     // Tempo map — sorted list of {timeSeconds, bpm} markers. The normal
     // no-marker callback path avoids its lock entirely.
-    struct TempoMarker { double timeSeconds; double bpm; };
+    struct TempoMarker { double timeSeconds; double bpm; double ppqFromFirstMarker = 0.0; };
     std::vector<TempoMarker> tempoMarkers;
     mutable juce::CriticalSection tempoMapLock;
     std::atomic<bool> hasTempoMarkers { false };
@@ -1151,10 +1225,42 @@ private:
 
     // Master automation (volume/pan curves)
     AutomationList masterVolumeAutomation;
+    AutomationList masterTrimVolumeAutomation;
+    std::atomic<float> masterTrimVolumeDB { 0.0f }, masterTrimGain { 1.0f };
+    juce::AudioBuffer<float> reusableMasterAutomationBuffer;
     AutomationList masterPanAutomation;
+    std::map<juce::String, std::shared_ptr<AutomationList>> stageAutomationLists;
+    juce::CriticalSection stageAutomationBindingLock;
+    void bindStageAutomation(ActiveFXStageSlot&, bool monitoring);
+    void handlePluginParameterReferenceClear(const juce::var& edit);
+    void remapMIDILearnFX(const juce::String& trackId, const juce::String& chain, int fromIndex, int toIndex, bool removed);
+    AutomationList* resolveMasterAutomation(const juce::String& id) const;
+    float stageAutomationDefault(const juce::String& id) const;
+    struct AutomationPreviewState
+    {
+        juce::String trackId, parameterId, meaning;
+        float originalValue = 0.0f;
+        AutomationMode originalMode = AutomationMode::Off;
+        bool writing = false;
+        uint64_t referenceGeneration = 0;
+        AutomationList* list = nullptr;
+        TrackProcessor* trackOwner = nullptr;
+        juce::AudioProcessorGraph::Node::Ptr nodeOwner;
+        std::shared_ptr<void> auxiliaryOwner;
+        std::shared_ptr<juce::AudioProcessor> processorOwner;
+        std::shared_ptr<AutomationList> listOwner;
+        std::shared_ptr<const ActiveFXStage> stageOwner;
+    };
+    std::map<juce::String, AutomationPreviewState> automationPreviews;
+    juce::CriticalSection automationPreviewLock;
+    std::atomic<juce::uint64> automationPreviewCleared { 0 }, automationPreviewGeneration { 0 };
+    std::optional<AutomationPreviewState> resolveAutomationPreview(const juce::String& trackId, const juce::String& parameterId);
+    bool applyAutomationPreviewManualValue(const AutomationPreviewState& target, float value);
+    void applyStageAutomation(const ActiveFXStageSlot&, double timeSeconds, int numSamples = 0, double sampleRate = 44100.0);
 
     // Master mono downmix
     std::atomic<bool> masterMono { false };
+    std::atomic<bool> masterMuted { false };
 
     // Lua Scripting
     ScriptEngine scriptEngine;
@@ -1229,6 +1335,7 @@ private:
     juce::String midiLearnBuiltInParamId;
     std::vector<MIDILearnMapping> midiLearnMappings;
     juce::CriticalSection midiLearnLock;
+    std::atomic<uint64_t> midiLearnEpoch { 1 };
 
     // A/B Comparison (Phase 19.16)
     struct StoredPluginABState

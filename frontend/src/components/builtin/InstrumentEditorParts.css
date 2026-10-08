@@ -1,0 +1,220 @@
+.approved-instrument-editor {
+  --instrument-accent: #d7b993;
+  --instrument-line: #35414a;
+  --instrument-muted: #9baab4;
+  --suite-accent: var(--instrument-accent);
+  --suite-surface: #1a2229;
+  container-type: inline-size;
+  color: #e5eaed;
+  background: #192126;
+}
+.approved-instrument-editor :is(button,select,input,[tabindex]):focus-visible {
+  outline: 2px solid var(--instrument-accent);
+  outline-offset: 3px;
+}
+.instrument-tabs {
+  background: #171e23;
+  border-bottom: 1px solid var(--instrument-line);
+}
+.instrument-tabs>button {
+  min-height: 42px;
+  padding: 0 17px;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  color: var(--instrument-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.instrument-tabs>button[aria-pressed=true] {
+  color: var(--instrument-accent);
+  border-bottom-color: var(--instrument-accent);
+}
+.instrument-tab-indicator {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--instrument-accent);
+  vertical-align: middle;
+}
+.instrument-workspace {
+  background: linear-gradient(155deg,#232d33,#182026);
+}
+.instrument-section {
+  border: 1px solid var(--instrument-line);
+  border-radius: 7px;
+  background: #1a2229;
+}
+.instrument-section h3 {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .04em;
+}
+.instrument-section header>span,.instrument-help,.instrument-subtle {
+  color: var(--instrument-muted);
+  font-size: 12px;
+}
+.instrument-controls>* {
+  flex: 1 1 65px;
+  max-width: 155px;
+}
+.approved-instrument-editor .suite-knob {
+  width: 55px;
+  height: 55px;
+  --suite-knob-size: 55px;
+}
+.approved-instrument-editor .suite-parameter[data-large=true] .suite-knob {
+  width: 70px;
+  height: 70px;
+}
+.approved-instrument-editor .suite-value {
+  max-width: 65px;
+}
+.approved-instrument-editor .suite-select {
+  width: 100%;
+  min-height: 32px;
+  background: #131c22;
+  border-color: #43515c;
+  font-size: 12px;
+}
+.approved-instrument-editor .suite-button {
+  min-height: 34px;
+}
+.instrument-keyboard-section {
+  background: #161e24;
+  border-top: 1px solid var(--instrument-line);
+}
+.instrument-text-button {
+  min-height: 28px;
+  color: var(--instrument-accent);
+}
+.instrument-output-control {
+  width: 200px;
+  max-width: 40%;
+}
+.instrument-output-control .instrument-slider {
+  gap: 3px;
+}
+.instrument-output-control input[type=range] {
+  height: 10px;
+}
+.instrument-keyboard {
+  height: 62px;
+  border: 1px solid #536069;
+  border-radius: 4px;
+  isolation: isolate;
+}
+.instrument-key-cell {
+  height: 100%;
+}
+.instrument-key {
+  position: absolute;
+  top: 0;
+  text-align: left;
+  font-size: 10px;
+}
+.instrument-white-key {
+  width: 100%;
+  height: 100%;
+  padding: 0 3px 4px;
+  display: flex;
+  align-items: flex-end;
+  color: #596068;
+  border-right: 1px solid #9caaa9;
+  background: linear-gradient(#dbe3de,#f0f0e5);
+  border-radius: 0 0 3px 3px;
+}
+.instrument-black-key {
+  z-index: 2;
+  right: -29%;
+  width: 58%;
+  height: 63%;
+  border: 1px solid #060c10;
+  border-radius: 0 0 3px 3px;
+  background: linear-gradient(#111b22,#253038);
+  box-shadow: 0 3px 3px #0009;
+}
+.instrument-white-key[aria-pressed=true] {
+  background: #d2b088;
+}
+.instrument-black-key[aria-pressed=true] {
+  background: #956e44;
+}
+.instrument-performance {
+  border-top: 1px solid var(--instrument-line);
+  color: var(--instrument-muted);
+  background: #192129;
+}
+.instrument-pedal-readout i {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  border-radius: 2px;
+  background: #64717b;
+}
+.instrument-pedal-readout[data-down=true] i {
+  background: var(--instrument-accent);
+}
+.instrument-pedal-readout b {
+  font-weight: 500;
+  color: #dde4e8;
+}
+.instrument-wave {
+  height: 42px;
+  margin-top: 8px;
+  border: 1px solid #35434d;
+  border-radius: 4px;
+  background: #131c22;
+}
+.instrument-gridline {
+  fill: none;
+  stroke: #34444f;
+  stroke-width: 1;
+  opacity: .65;
+}
+.instrument-curve {
+  fill: none;
+  stroke: var(--instrument-accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.instrument-envelope {
+  height: 104px;
+  margin: 8px 0;
+}
+.instrument-envelope-fill {
+  fill: #d7b99315;
+}
+.approved-instrument-editor svg text {
+  fill: var(--instrument-muted);
+  font: 10px ui-monospace,monospace;
+}
+@container(max-width:690px) {
+  .instrument-tabs {
+    padding-inline: 8px;
+  }
+  .instrument-tabs>button {
+    padding-inline: 11px;
+  }
+  .instrument-workspace {
+    padding: 10px;
+  }
+  .instrument-section {
+    padding: 11px;
+  }
+  .instrument-keyboard {
+    height: 52px;
+  }
+  .instrument-keyboard-section {
+    padding: 8px 10px;
+  }
+  .instrument-performance {
+    padding-inline: 10px;
+  }
+  .approved-instrument-editor .suite-knob {
+    width: 49px;
+    height: 49px;
+  }
+}

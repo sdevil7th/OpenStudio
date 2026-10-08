@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RuntimeLocation.h"
 #include <JuceHeader.h>
 
 namespace OpenStudioFFmpeg
@@ -16,8 +17,7 @@ inline juce::String executableName()
 inline juce::Array<juce::File> bundledCandidates()
 {
     const auto executableDirectory =
-        juce::File::getSpecialLocation(
-            juce::File::currentExecutableFile)
+        OpenStudioRuntime::executableFile()
             .getParentDirectory();
     const auto name = executableName();
     juce::Array<juce::File> candidates;

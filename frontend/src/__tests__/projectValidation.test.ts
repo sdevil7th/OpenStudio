@@ -38,6 +38,35 @@ describe("project input boundary", () => {
     expect(data.tracks[0]).toMatchObject({ type: "audio", clips: [], midiClips: [], sends: [] });
     expect(parse(data)).toEqual(data);
   });
+  it.each([
+    { type: "noteOn", note: 60, velocity: 96 },
+    { type: "noteOn", timestamp: null, note: 60, velocity: 96 },
+    { type: "noteOn", timestamp: -1, note: 60, velocity: 96 },
+    { type: "noteOn", timestamp: 0, note: 128, velocity: 96 },
+    { type: "cc", timestamp: 0, controller: 1, value: "bad" },
+    { type: "unknown", timestamp: 0 },
+  ])("rejects malformed MIDI before closing the open project: %j", async event => {
+    const kept = createDefaultTrack("keep", "Keep");
+    useDAWStore.setState({ tracks: [kept], isModified: true });
+    const data = { tracks: [track("m", { midiClips: [{ id: "midi", events: [event] }] })] };
+    vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(JSON.stringify(data));
+    const reset = vi.spyOn(useDAWStore.getState(), "newProject");
+    expect(await useDAWStore.getState().loadProject("/invalid.osproj")).toBe(false);
+    expect(reset).not.toHaveBeenCalled();
+    expect(useDAWStore.getState().tracks).toEqual([kept]);
+    expect(useDAWStore.getState().isModified).toBe(true);
+  });
+  it("preserves valid MIDI boundaries and CC lane time", () => {
+    const events = [
+      { type: "noteOn", timestamp: 0, note: 0, velocity: 127, channel: 1 },
+      { type: "noteOff", timestamp: 1, note: 0, channel: 16 },
+      { type: "cc", timestamp: 0, controller: 127, value: 0 },
+      { type: "pitchBend", timestamp: 0, value: 16383 },
+    ];
+    const clip = { id: "midi", events, ccEvents: [{ time: 0, cc: 1, value: 127 }] };
+    const result = parse({ tracks: [track("m", { midiClips: [clip] })] });
+    expect((result.tracks[0].midiClips as any[])[0]).toMatchObject(clip);
+  });
   it("bounds nested object structures", () => {
     let nested: unknown = 1;
     for (let i = 0; i < 70; ++i) nested = { child: nested };

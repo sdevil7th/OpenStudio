@@ -57,7 +57,7 @@ Default release model:
 
 - Normal app releases reuse an already-published AI runtime release.
 - Rebuild/publish AI runtimes only when runtime dependencies, packaging scripts, or runtime metadata actually changed.
-- The app release workflow expects `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and `OPENSTUDIO_AI_RUNTIME_VERSION` to point at a real runtime release, and it now fails early if that runtime release is missing.
+- The app release workflow selects published archives using `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and the optional Linux-specific tag. `OPENSTUDIO_AI_RUNTIME_VERSION` labels the combined runtime catalog. Missing releases, unexpected assets or mismatched archive hashes stop publication.
 
 Use this flow instead:
 
@@ -112,8 +112,20 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - Windows setup, CMake configuration, and runtime validation fail if any pinned
   FFmpeg runtime, manifest, source-lock, license, or provenance file is absent
   or altered.
-- Linux release automation extracts the completed AppImage and reruns the
-  runtime-bundle contract against its packaged `usr/bin` payload.
+- Linux release/verification workflows now target Ubuntu 22.04 and audit the
+  complete AppDir's ELF dependencies with a glibc 2.35 ceiling. Native `.deb`
+  installation, packaged window/render/engine checks, and finished-AppImage
+  window tests accompany the existing runtime-bundle contract. These workflow
+  edits require a successful remote run before release qualification.
+- Linux build provenance is produced by the pinned GitHub attestation action.
+  Verify an actual published artifact with `gh attestation verify <artifact>
+  --repo sdevil7th/OpenStudio`. This authenticates build provenance, not a
+  malware-free promise or an Ubuntu local-file publisher badge. Production RPM
+  and repository signing and the Snap publisher account remain separate gates.
+- The AppImage name retains `linux` and the existing x86_64 suffix. The
+  updater's manifest/appcast fields and Linux stable redirect keep their existing
+  AppImage meaning. Native download choices must be qualified and exposed
+  separately rather than redirecting an old AppImage client to a `.deb`.
 
 ## Dependency contract
 
@@ -201,7 +213,7 @@ If you want one command for the full guarded Windows path, use:
 7. Package the installer: `./tools/package-windows-release.ps1 -Version 1.0.0 -SourceDir build-release-windows/OpenStudio_artefacts/Release`
    Optional signing: `./tools/package-windows-release.ps1 -Version 1.0.0 -CertificateFile C:\path\to\codesign.pfx -CertificatePassword <password>`
 8. Prepare and package the Windows AI base runtime archive:
-   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows-base -Architecture x64 -RequirementsFile tools/ai-runtime-requirements-windows-base.txt -RuntimeFamily windows-base-x64 -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/prepare-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows-base -Architecture x64 -RequirementsFile tools/ai-runtime-requirements-windows-base.txt -RuntimeFamily windows-base-x64 -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.11.15`
    `./tools/package-ai-runtime.ps1 -Platform windows -RuntimeRoot build-ai-runtime/windows-base -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -ExpectedRuntimeVersion 1.0.0`
 9. Generate updater metadata:
    `./tools/generate-release-metadata.ps1 -Version 1.0.0 -Channel stable -ReleasePageUrl https://github.com/<org>/<repo>/releases/tag/v1.0.0 -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsAssetUrl https://github.com/<org>/<repo>/releases/download/v1.0.0/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsBaseAiRuntimeAssetUrl https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json -AiRuntimeVersion 1.0.0`
@@ -225,7 +237,7 @@ If you want one command for the guarded macOS path, use:
    If `MACOS_CODESIGN_IDENTITY` is set, the script verifies both the app bundle and DMG with `codesign`. If notarization credentials are present, it also staples and validates the notarized DMG and requires Gatekeeper (`spctl`) acceptance.
    For the zero-cost v1 path, leave those signing variables unset, publish the generated SHA-256 checksum, and document Apple's per-app **Privacy & Security > Open Anyway** flow. Recursive quarantine removal is a diagnostic fallback, not the normal installation path.
 5. Prepare and package the macOS AI runtime archive for Apple Silicon:
-   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements-macos.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.10.20`
+   `./tools/prepare-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -Architecture arm64 -RequirementsFile tools/ai-runtime-requirements-macos.txt -ExpectedRuntimeVersion 1.0.0 -StandaloneReleaseTag 20260325 -StandalonePythonVersion 3.11.15`
    `./tools/package-ai-runtime.ps1 -Platform macos -RuntimeRoot build-ai-runtime/macos-arm64 -OutputPath dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip -ExpectedRuntimeVersion 1.0.0`
    Intel macOS AI runtime support is currently disabled because the pinned `audio-separator` dependency stack does not publish a satisfiable Intel macOS wheel set for the release path.
 6. Generate updater metadata with the DMG path and URL included.
@@ -252,6 +264,10 @@ That publish-asset set contains:
 
 The website repo should fetch those assets after the desktop release publishes, place them into its deploy-input area, and then deploy `openstudio.org.in`.
 
+The `publish-website` job dispatches that work after successful GitHub publication.
+It runs independently of `submit-store`, so a website credential or dispatch failure
+remains a visible workflow failure without suppressing the Store submission.
+
 ## Manual fallback
 
 Use `tools/prepare-public-release.ps1` only when GitHub Actions is unavailable or you need an emergency manual release bundle.
@@ -270,7 +286,7 @@ The default base app no longer bundles the optional stem-separation Python runti
 ## Secrets expected by GitHub Actions
 
 For the current release path, `OPENSTUDIO_WEBSITE_DISPATCH_TOKEN` must be set
-directly as a GitHub Actions secret because the publish job intentionally does
+directly as a GitHub Actions secret because the website dispatch job intentionally does
 not receive Doppler credentials. `DOPPLER_TOKEN` is an optional bootstrap for
 the allowlisted build/signing values used inside their specific build steps; it
 does not replace the website dispatch secret. Signing/notarization secrets stay
@@ -299,6 +315,7 @@ Optional repository variables:
 
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
 - `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG`
+- `OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR`
@@ -307,6 +324,29 @@ Optional repository variables:
 
 The default website repo target is `sdevil7th/OpenStudioWebsite`.
 The default dispatch event type is `openstudio_release_published`.
+
+`OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` selects the Windows/macOS archives and also
+Linux when no override is configured. `OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG`
+selects a separately published Linux archive without replacing the other
+platforms. `OPENSTUDIO_AI_RUNTIME_VERSION` is the combined catalog revision;
+installed status reads each archive's actual version from its runtime metadata.
+Before 0.1.04, publish and qualify `ai-runtime-v0.0.16` with Python 3.11.15,
+then select catalog revision `0.0.16` and that tag for Windows/macOS. Keep
+`ai-runtime-linux-v0.0.14` for the already-qualified Linux archive. The old
+Windows 0.0.13 base uses Python 3.10.20 and cannot satisfy Audio Generation;
+the downloaded-runtime installer does not migrate that interpreter.
+The 0.0.15 attempt failed before publication because macOS preparation required
+a diffq wheel that upstream does not provide for Python 3.11 ARM. Keep that tag
+unchanged. PR CI must qualify the corrected source with a macOS archive smoke
+build before creating the new component tag.
+The release workflow verifies selected published asset identities, sizes and
+SHA-256 values, then checks the downloaded bytes before generating metadata.
+
+The AI Runtime Release workflow validates `docs/releases/ai-runtime-<version>.md`
+before any build, binds the normalized runtime tag to the checked-out commit,
+and publishes only after all three platform archive checks pass. Its component
+release must not replace the application's GitHub latest release. Runtime
+archive validation does not qualify device-specific inference or model setup.
 
 GitHub-hosted Windows releases no longer require a pre-existing committed `tools/python`
 tree. The release workflow now downloads a relocatable standalone Python runtime, layers the
@@ -318,6 +358,10 @@ tree. The release workflow now builds the downloadable AI runtime for Apple Sili
 from the same relocatable standalone Python source on GitHub-hosted macOS runners. Intel macOS
 machines can still run the base app, but AI Tools remain unsupported there until the pinned
 dependency stack publishes a satisfiable Intel macOS wheel set for release builds.
+The managed Apple Silicon AI archive requires macOS 14 or later: its bundled
+NumPy, SciPy and ONNX Runtime wheels target that OS range. The base app targets
+macOS 12 or later; the managed archive is not qualified for macOS 12/13. The
+published 0.0.13 archive already has this macOS 14 minimum through NumPy/SciPy.
 
 Optional future additions:
 
@@ -518,7 +562,8 @@ Implement it as a dependent job in the existing Release workflow, not a second
 trigger another workflow). Use the same source and Release binaries as the desktop
 release. Submit only after the GitHub release job succeeds. Preserve the Store's
 existing audience, publishing schedule, privacy URL, ratings, screenshots and
-other listing settings. Publishing a GitHub release does not skip certification.
+other listing settings, except an explicitly reviewed publication-mode override.
+Publishing a GitHub release does not skip certification.
 
 1. Validate a stable numeric version and exact-version release notes.
 2. Build the MSIX from the Windows release payload using the existing pinned
@@ -546,12 +591,12 @@ release job, so a missing Store artifact cannot silently pass the release gate.
 ### First Store release from a tag
 
 The `v0.1.03` initial-draft attempt failed its live state check and was completed
-through the portal using the exact tag-built MSIX. It is not proof that the API
-can adopt this portal draft. Leave its current certification intact; see the
-[current activation status and acceptance criteria](store-release-activation.md)
-before another tag. The initial path below is a guarded capability, not a verified
-live result. Subsequent releases use the published-baseline path once the first
-version is deliberately published.
+through the portal using the exact tag-built MSIX. The 2026-10-08 read-only check
+records that version as Published; see the
+[current activation status and acceptance criteria](store-release-activation.md).
+It is not proof that the API can adopt a portal draft. The initial path below is
+historical guidance and a guarded capability, not a verified live result.
+`v0.1.04` uses the published-baseline path and its reviewed publishing policy.
 
 1. Merge the release and any release-preparation follow-up only after CI passes.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
@@ -612,12 +657,17 @@ Microsoft tenant or approve the initial Store listing. It stays inactive until:
    `true` before the release tag. The job's mandatory live preflight must pass
    before submission can mutate the draft. The app identity is fixed to Store ID
    `9N3MQ442VXGW` and the reserved publisher. Restrict the `microsoft-store`
-   environment to `v*` tags; branch runs cannot access its credentials. The job
-   also rejects a manually dispatched version that differs from its tag.
+   environment to `v*` tags; branch runs cannot access its credentials. When Store
+   automation is enabled, initial validation rejects branch dispatches and tag
+   refs that differ from the requested version before any build begins. Select
+   the matching existing release tag when dispatching manually. Branch dispatch
+   remains available when Store automation is disabled; an enabled Store gate
+   cannot be skipped to publish a GitHub-only release.
 5. Push the normal stable release tag. The `submit-store` job follows `publish`.
    To require a human gate, configure required reviewers on the `microsoft-store`
    environment. With no reviewer gate, submission is automatic. The existing
-   Partner Center publish mode remains authoritative after certification.
+   Partner Center publish mode remains authoritative after certification, except
+   for an explicitly reviewed release override described below.
 
 Once automation adopts the initial draft, make further updates through the API.
 Do not edit an API-created pending submission in Partner Center: Microsoft warns
@@ -627,12 +677,29 @@ On timeout/failure, the job records the submission ID and status without tokens
 or SAS upload URLs. Rerun failed jobs to resume the same release artifact. A new
 package with a different hash requires a new version, not an overwrite.
 
+### Publication after certification
+
+The owner approved automatic publication for `v0.1.04`.
+`packaging/msix/release-publishing.json` pins that tag and Store app to API
+`targetPublishMode=Immediate`. Both live preflights and submission use the same
+config. This changes only the matching update's publication timing; pricing,
+audience, artwork and other listing settings stay as saved. Other tags preserve
+their baseline mode. Initial unpublished drafts still require their manual hold.
+Review any future override as part of that release rather than reusing this pin.
+
+`Immediate` means publication after Microsoft certification, not skipping it.
+The submission job reports accepted ingestion; monitor Partner Center for final
+certification/publication and verify the Store-installed upgrade separately.
+See Microsoft's [publication options](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/manage-submission-options#publishing-hold-options)
+and [API publish modes](https://learn.microsoft.com/en-us/windows/uwp/monetize/manage-app-submissions#app-submission-resource).
+
 ### Package-page warning
 
 `runFullTrust` is required by this packaged Win32 DAW. It runs at the user's
 normal medium-integrity level, not as administrator. Saving the package section
 is safe; the warning requires an explanation/approval during certification.
-Suggested explanation for the restricted-capability/Notes for certification field:
+Suggested explanation for the restricted-capability justification field (keep
+it within the portal's 500-character limit):
 
 > OpenStudio is a JUCE-based Win32 digital audio workstation packaged as MSIX.
 > It requires runFullTrust to run its native audio/MIDI engine, access user-selected
@@ -640,6 +707,14 @@ Suggested explanation for the restricted-capability/Notes for certification fiel
 > and crash-reporting helper processes. The application runs as the signed-in user
 > at medium integrity and does not require administrator elevation. Microsoft Store
 > installations use Store APIs for application updates.
+
+The capability justification is separate from **Notes for certification** and
+the API's `notesForCertification` field. Put release metadata and automation
+markers in certification notes, never in the capability justification. The
+submission API does not document a capability-justification field; do not guess
+one or edit an API-created draft in the portal. If Microsoft requests renewed
+capability approval, resolve that request deliberately before retrying submission.
+Microsoft documents [capability approval separately from certification notes](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/manage-submission-options#restricted-capabilities).
 
 Keep Windows Desktop selected. Other device families are not qualified. The
 AArch32 notice is unrelated to this x64 package. The separate future-device-family

@@ -1,5 +1,12 @@
 export type TimelineClipGestureKind = "move" | "resize-left" | "resize-right";
 
+export const TIMELINE_CLIP_DRAG_THRESHOLD_PX = 4;
+
+/** Use screen pixels, independent of zoom; match Konva's drag activation rule. */
+export function hasTimelineClipDragStarted(deltaX: number, deltaY: number): boolean {
+  return Math.max(Math.abs(deltaX), Math.abs(deltaY)) >= TIMELINE_CLIP_DRAG_THRESHOLD_PX;
+}
+
 export interface TimelineResizeInput {
   kind: Extract<TimelineClipGestureKind, "resize-left" | "resize-right">;
   isMidi: boolean;

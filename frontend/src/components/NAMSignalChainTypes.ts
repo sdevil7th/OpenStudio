@@ -41,6 +41,8 @@ export function rackSectionForModule(moduleId: RackModuleId): RackSectionId {
 }
 
 export type NAMSignalChainRouteModule = {
+  toneOrigin?: import("./TONE3000Branding").TONE3000ToneOrigin;
+  onToneDetails?: () => void;
   id: string;
   label: string;
   caption: string;

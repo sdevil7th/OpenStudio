@@ -14,6 +14,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { MetronomeSettings } from "./MetronomeSettings";
 import { MetronomeControls } from "./MetronomeControls";
+import { PracticeTimerStatus } from "./PracticeTimer";
 import { Button, Input, TimeSignatureInput } from "./ui";
 import { formatShortcut } from "../utils/platform";
 
@@ -213,7 +214,7 @@ export function TransportBar() {
 
   return (
     <>
-      <div className="h-10 bg-neutral-900 border-t border-neutral-700 border-b border-b-neutral-950 flex items-center px-4 justify-between shrink-0">
+      <div className="min-h-10 flex-wrap gap-x-3 gap-y-1 py-1 bg-neutral-900 border-t border-neutral-700 border-b border-b-neutral-950 flex items-center px-4 justify-between shrink-0">
         <div className="flex items-center gap-2 font-mono">
           <DualTimeDisplay />
           <div
@@ -309,6 +310,7 @@ export function TransportBar() {
           </Button>
           <div className="w-2" />
           <MetronomeControls compact />
+          <PracticeTimerStatus onOpen={() => setShowMetronomeSettings(true)} />
         </div>
 
         <div className="flex items-center gap-4 text-xs">

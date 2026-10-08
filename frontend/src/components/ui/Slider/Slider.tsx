@@ -1,6 +1,7 @@
 import classNames from 'classnames';
 import { forwardRef, useRef, useCallback, useEffect } from 'react';
 import { SliderProps } from './Slider.types';
+import './Slider.css';
 import {
   accumulateParameterWheelGesture,
   getParameterWheelValue,
@@ -169,7 +170,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
     };
 
     const handleDoubleClick = (e: React.MouseEvent) => {
-      if (defaultValue === undefined || !onChange) return;
+      if (rest.disabled || defaultValue === undefined || !onChange) return;
       e.preventDefault();
       e.stopPropagation();
       applyDiscreteValue(defaultValue);
@@ -192,6 +193,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
     }, []);
 
     const handlePanPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+      if (rest.disabled || e.button !== 0) return;
       if ((e.ctrlKey || e.metaKey) && defaultValue !== undefined && onChange) {
         e.preventDefault();
         e.stopPropagation();
@@ -206,13 +208,13 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
       e.currentTarget.setPointerCapture(e.pointerId);
       const val = getValueFromPointerEvent(e);
       if (val !== undefined && onChange) onChange(val);
-    }, [applyDiscreteValue, defaultValue, getValueFromPointerEvent, onBeginEdit, onChange, onCommitEdit]);
+    }, [applyDiscreteValue, defaultValue, getValueFromPointerEvent, onBeginEdit, onChange, onCommitEdit, rest.disabled]);
 
     const handlePanPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-      if (!draggingRef.current || !pointerEditRef.current.active) return;
+      if (rest.disabled || !draggingRef.current || !pointerEditRef.current.active) return;
       const nextValue = getValueFromPointerEvent(event);
       if (nextValue !== undefined && onChange) onChange(nextValue);
-    }, [getValueFromPointerEvent, onChange]);
+    }, [getValueFromPointerEvent, onChange, rest.disabled]);
 
     const handlePanPointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -273,7 +275,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           )}
           <div
             ref={trackRef}
-            className="relative w-full h-2 rounded cursor-pointer select-none"
+            className={classNames('relative w-full h-2 rounded select-none', rest.disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer')}
             style={{ background: '#3a3a3a' }}
             onPointerDown={handlePanPointerDown}
             onPointerMove={handlePanPointerMove}
@@ -289,7 +291,9 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
             aria-valuemax={max}
             aria-valuenow={currentVal}
             aria-label={rest['aria-label'] as string}
-            tabIndex={0}
+            aria-orientation="horizontal"
+            aria-disabled={rest.disabled || undefined}
+            tabIndex={rest.disabled ? -1 : (rest.tabIndex ?? 0)}
           >
             {/* Center line */}
             <div
@@ -322,9 +326,8 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
     // --- Standard native slider for fader/default ---
     const sliderClasses = classNames(
       'cursor-pointer transition-opacity',
-      orientation === 'vertical' && 'vertical-fader',
+      orientation === 'vertical' && 'slider-vertical-input',
       orientation === 'horizontal' && 'w-full h-2 rounded',
-      variant === 'fader' && 'vertical-fader',
       variant === 'default' && 'accent-blue-600',
       className
     );
@@ -337,14 +340,6 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
       ...(orientation === 'horizontal' && {
         width: width || '100%',
         height: height || 'auto',
-      }),
-    };
-
-    const inputStyle: React.CSSProperties = {
-      ...(orientation === 'vertical' && {
-        writingMode: 'vertical-lr' as const,
-        direction: 'rtl' as const,
-        height: '100%',
       }),
     };
 
@@ -367,7 +362,8 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           </div>
         )}
 
-        <input
+        <div className={orientation === 'vertical' ? 'slider-vertical-control relative flex-1 min-h-0 w-full' : 'w-full'}>
+          <input
           ref={ref}
           type="range"
           min={min}
@@ -384,12 +380,13 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(
           onPointerCancel={handleNativePointerCancel}
           onBlur={handleNativeBlur}
           className={sliderClasses}
-          style={inputStyle}
+          aria-orientation={orientation}
           aria-valuemin={min}
           aria-valuemax={max}
           aria-valuenow={value}
           {...rest}
         />
+        </div>
       </div>
     );
   }

@@ -30,6 +30,12 @@ afterEach(() => {
 });
 
 describe("TONE3000 live search request snapshots", () => {
+  it("isolates the same account collection query between connected sessions", () => {
+    const firstAccount = snapshot({ tab: "account-favorites", accountKey: "user-1:session-1" });
+    const secondAccount = snapshot({ tab: "account-favorites", accountKey: "user-2:session-2" });
+    expect(firstAccount.cacheKey).not.toBe(secondAccount.cacheKey);
+    expect(firstAccount.signature).not.toBe(secondAccount.signature);
+  });
   it("trims text and honors the chosen sort for non-empty queries", () => {
     const request = snapshot({ query: "  mesa lead  ", requestedSort: "newest" });
 

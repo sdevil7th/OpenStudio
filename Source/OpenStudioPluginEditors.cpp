@@ -395,7 +395,7 @@ OpenStudioSpectrumDisplay::OpenStudioSpectrumDisplay(OpenStudioEQ& eq) : eqProce
 
 void OpenStudioSpectrumDisplay::timerCallback()
 {
-    auto data = eqProcessor.getSpectrumData();
+    auto data = eqProcessor.getSpectrumData(OpenStudioEQ::fftSize);
     if (data.ready)
     {
         const float smoothing = 0.7f;
@@ -546,7 +546,7 @@ OpenStudioParametricEQGraph::OpenStudioParametricEQGraph(OpenStudioEQ& eq) : eqP
 
 void OpenStudioParametricEQGraph::timerCallback()
 {
-    auto data = eqProcessor.getSpectrumData();
+    auto data = eqProcessor.getSpectrumData(OpenStudioEQ::fftSize);
     if (data.ready)
     {
         const float smoothing = 0.7f;
@@ -1236,7 +1236,6 @@ namespace
     constexpr int knobW = 70;
     constexpr int knobH = 80;
     constexpr int headerH = 32;
-    constexpr int modeToggleH = 24;
     constexpr int sectionPadding = 8;
 
     void layoutKnobRow(juce::Rectangle<int>& area, std::initializer_list<juce::Component*> knobs, int height = knobH)

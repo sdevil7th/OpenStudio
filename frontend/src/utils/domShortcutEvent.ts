@@ -54,6 +54,11 @@ export function toGlobalShortcutPayload(
     isComposing: event.isComposing || event.keyCode === 229,
     getModifierState: modifierState,
     source: options.source ?? "browser",
+    targetIsModal: [event.target, ...composedPath].some(target => {
+      const element = target as Element | null;
+      return typeof element?.closest === "function"
+        && Boolean(element.closest('[data-modal-root="true"], [aria-modal="true"]'));
+    }),
     targetIsEditable: options.targetIsEditable
       ?? isEditableShortcutTarget(event.target, composedPath),
     targetIsNonTextControl: options.targetIsNonTextControl

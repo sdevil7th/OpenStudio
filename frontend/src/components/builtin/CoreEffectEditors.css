@@ -1,0 +1,300 @@
+.core-effect-editor {
+  container-type: size;
+  container-name: core-effect;
+  --suite-accent: #d9b17d;
+  --suite-surface: #20292f;
+  --color-daw-text: #dce2e5;
+  --color-daw-text-muted: #9aadb9;
+  background: #20292f;
+  color: #dce2e5;
+  color-scheme: dark;
+}
+.core-effect-editor :is(button,input,select,summary,[tabindex]):focus-visible {
+  outline: 2px solid #a5cee6;
+  outline-offset: 2px;
+}
+.core-effect-topline {
+  min-height: 44px;
+}
+.core-effect-topline>label {
+  min-width: 130px;
+  max-width: 200px;
+}
+.core-effect-topline .effect-range {
+  width: 180px;
+}
+.effect-range input {
+  width: 100%;
+  accent-color: var(--suite-accent);
+}
+.core-effect-editor .effect-mode-switch button {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: #1b242b;
+  border: 1px solid #38434a;
+  border-radius: 4px;
+  color: #acbbc5;
+  font-size: 12px;
+  padding: 10px 7px;
+  cursor: pointer;
+}
+.core-effect-editor .effect-mode-switch button[aria-pressed=true] {
+  background: #383329;
+  border-color: #796b50;
+  color: #e5c89b;
+}
+.core-effect-editor .effect-mode-switch strong {
+  font-weight: 600;
+}
+.core-effect-editor .effect-mode-switch small {
+  font-size: 10px;
+  font-weight: 400;
+  opacity: .8;
+}
+.core-effect-editor .effect-mode-switch i {
+  display: none;
+}
+.core-effect-stat>span {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #8fa7b6;
+}
+.core-effect-stat strong {
+  display: block;
+  font-size: 27px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.core-effect-stat small {
+  font-size: 10px;
+  color: #98a9b3;
+  margin-left: 5px;
+}
+.core-effect-history {
+  background: #15232c;
+  border: 1px solid #334651;
+  min-height: 144px;
+}
+.core-chart-heading {
+  color: #9db7c7;
+}
+.core-chart-heading>span:last-child {
+  color: #d9b17d;
+}
+.core-effect-history svg {
+  min-height: 86px;
+}
+.core-effect-history text {
+  font: 12px 'Segoe UI',sans-serif;
+  fill: #8ea6b4;
+}
+.core-chart-grid {
+  stroke: #31414d;
+  stroke-width: .7;
+}
+.core-chart-level {
+  stroke: #82bcda;
+  fill: none;
+  stroke-width: 1.7;
+}
+.core-chart-reduction {
+  stroke: #e0b479;
+  fill: none;
+  stroke-width: 2;
+}
+.core-chart-threshold {
+  stroke: #a5bac5;
+  stroke-dasharray: 4 6;
+  stroke-width: 1;
+}
+.core-chart-caption {
+  color: #8fa4af;
+}
+.core-main-controls .suite-parameter[data-large=true] .suite-knob {
+  width: 80px;
+  height: 80px;
+}
+.core-main-controls .suite-parameter[data-large=true] .suite-value {
+  font-size: 22px;
+}
+.core-effect-editor .suite-knob::before {
+  background: radial-gradient(circle at 35% 25%,#4e5149,#212924);
+  border-color: var(--suite-surface);
+}
+.core-detail {
+  border: 1px solid #3b4952;
+  border-radius: 5px;
+  background: #1c252c;
+}
+.core-detail-tabs {
+  border-bottom: 1px solid #3b4952;
+}
+.core-detail-tabs button {
+  padding: 10px 13px;
+  min-height: 36px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #98acb9;
+  font-size: 12px;
+  cursor: pointer;
+}
+.core-detail-tabs button[aria-pressed=true] {
+  border-bottom-color: #d9b17d;
+  color: #e4caa6;
+}
+.core-detail-content>label {
+  min-width: 125px;
+  max-width: 180px;
+}
+.core-detail-content .suite-parameter {
+  min-width: 72px;
+}
+.core-detail-note {
+  color: #9bafba;
+}
+.core-effect-error {
+  color: #ffc491;
+}
+.core-panel-label {
+  color: #a5bac5;
+}
+.core-chart-level-point {
+  fill: #82bcda;
+}
+.core-chart-reduction-point {
+  fill: #e0b479;
+}
+.core-signal-levels {
+  background: #16242c;
+  border: 1px solid #354752;
+  min-height: 180px;
+}
+.core-signal-row {
+  grid-template-columns: 60px minmax(30px,1fr) 90px;
+}
+.core-signal-row>span {
+  letter-spacing: 1px;
+  color: #96aeba;
+}
+.core-signal-row meter {
+  width: 100%;
+  height: 16px;
+}
+.core-signal-row output {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.core-signal-levels>p {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a4b6bf;
+  padding: 0 14px 12px;
+}
+@container core-effect (max-width:800px) {
+  .core-effect-face {
+    padding: 12px 15px;
+    gap: 12px;
+  }
+  .core-effect-editor .effect-mode-switch button {
+    font-size: 10px;
+    padding: 9px 5px;
+    gap: 4px;
+  }
+  .core-effect-topline {
+    gap: 10px;
+  }
+  .core-effect-topline>label {
+    min-width: 105px;
+    max-width: 160px;
+  }
+  .core-effect-topline .effect-range {
+    width: 130px;
+  }
+  .core-main-controls {
+    padding: 4px;
+    gap: 12px;
+  }
+  .core-main-controls .suite-parameter[data-large=true] .suite-knob {
+    width: 64px;
+    height: 64px;
+  }
+  .core-main-controls .suite-parameter>span:first-child {
+    font-size: 11px;
+  }
+  .core-main-controls .suite-value {
+    width: 55px;
+    font-size: 17px;
+  }
+  .core-main-controls .suite-parameter[data-large=true] .suite-value {
+    font-size: 19px;
+  }
+  .core-detail-content {
+    padding: 12px;
+    gap: 14px;
+  }
+  .core-detail-content>label {
+    min-width: 105px;
+    max-width: 150px;
+  }
+  .core-detail-content .suite-parameter {
+    min-width: 66px;
+  }
+  .core-effect-stat strong {
+    font-size: 23px;
+  }
+}
+@container core-effect (max-height:560px) {
+  .core-effect-face {
+    padding-block: 10px;
+    gap: 10px;
+  }
+  .core-effect-history {
+    min-height: 120px;
+  }
+  .core-effect-history svg {
+    min-height: 64px;
+  }
+  .core-chart-heading {
+    padding: 7px 10px;
+  }
+  .core-chart-caption {
+    padding: 2px 10px 6px;
+  }
+  .core-main-controls .suite-knob {
+    width: 44px;
+    height: 44px;
+  }
+  .core-main-controls .suite-parameter[data-large=true] .suite-knob {
+    width: 56px;
+    height: 56px;
+  }
+  .core-main-controls .suite-parameter {
+    gap: 5px;
+  }
+  .core-detail-content .suite-knob {
+    width: 40px;
+    height: 40px;
+  }
+  .core-detail-content .suite-value {
+    font-size: 16px;
+    width: 55px;
+  }
+  .core-detail-note {
+    font-size: 11px;
+  }
+  .core-detail-content {
+    padding-block: 10px;
+  }
+}
+.core-advanced>summary {
+  cursor: pointer;
+  color: #aabfc9;
+  padding: 11px 14px;
+  font-size: 12px;
+}

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { MIDITrackEffect, Track, useDAWStore } from "../store/useDAWStore";
 import { Button } from "./ui";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 
 interface MIDIFXControlsProps {
   readonly track: Track;
@@ -174,11 +174,13 @@ export function MIDIFXControls({ track }: MIDIFXControlsProps) {
         <div
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/45"
           data-modal-root="true"
+          {...modalPointerBoundaryProps}
           role="dialog"
           aria-modal="true"
           aria-labelledby="midi-fx-dialog-title"
           onContextMenu={guardModalContextMenu}
           onMouseDown={(event) => {
+            event.stopPropagation();
             if (event.target === event.currentTarget) setDialog(null);
           }}
         >

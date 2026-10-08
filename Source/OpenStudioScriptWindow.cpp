@@ -1,3 +1,4 @@
+#include "NativeWindowTheme.h"
 #include "OpenStudioScriptWindow.h"
 
 //==============================================================================
@@ -57,6 +58,7 @@ OpenStudioScriptWindow::OpenStudioScriptWindow(const juce::String& title, int wi
 {
     setUsingNativeTitleBar(true);
     setResizable(true, false);
+    applyNativeWindowTheme(*this);
 
     canvas = std::make_unique<Canvas>(*this);
     canvas->setSize(width, height);

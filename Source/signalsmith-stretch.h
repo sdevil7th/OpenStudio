@@ -1,3 +1,3 @@
 #pragma once
 
-#include "../thirdparty/signalsmith/signalsmith-stretch.h"
+#include <signalsmith/signalsmith-stretch.h>

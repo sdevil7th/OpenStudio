@@ -5,7 +5,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 import { nativeBridge } from "../services/NativeBridge";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import {
   registerScopedActionExecutor,
   type ScopedActionExecutor,
@@ -170,6 +170,7 @@ export function ScriptEditor() {
     <div
       className="fixed inset-8 z-[10000] bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl flex flex-col overflow-hidden"
       data-modal-root="true"
+      {...modalPointerBoundaryProps}
       onContextMenu={guardModalContextMenu}
       onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
       onFocusCapture={() => activateShortcutContext({ kind: "modal" })}

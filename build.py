@@ -42,19 +42,60 @@ def mask_command_for_log(command):
     return command
 
 def kill_process_tree(pid):
-    """Kill a process and all its child processes (Windows: taskkill /T)"""
+    """Retain the Windows orphan-instance cleanup contract."""
     if platform.system() == "Windows":
         # /T = kill child processes, /F = force
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def start_owned_process(command, **kwargs):
+    """Give each POSIX app/server a separate group owned by this invocation."""
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs)
+
+
+def stop_owned_process(process, timeout_seconds=5):
+    """Stop an owned group even when its original parent has already exited."""
+    if os.name == "nt":
+        if process.poll() is None:
+            kill_process_tree(process.pid)
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
+
+    # start_owned_process makes the child's PID its process-group ID. Do not
+    # look it up after exit, when a helper may be the only group member left.
+    group = process.pid
+    if group == os.getpgrp():
+        raise RuntimeError("Refusing to stop the builder's own process group")
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        process.poll()  # Reap the group leader without blocking on descendants.
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
     else:
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
             pass
+    process.wait()
 
 def kill_orphaned_openstudio():
-    """Kill any leftover OpenStudio and its child processes from previous runs"""
+    """Windows retains its historical orphan-instance check."""
     if platform.system() == "Windows":
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq OpenStudio.exe", "/FO", "CSV", "/NH"],
@@ -68,27 +109,18 @@ def kill_orphaned_openstudio():
                     print(f"  Killing orphaned OpenStudio.exe (PID {pid}) and its child processes...")
                     kill_process_tree(int(pid))
                     time.sleep(0.5)
-    elif platform.system() == "Linux":
-        subprocess.run(["pkill", "-x", "OpenStudio"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def cleanup():
     """Kill background processes on exit (including child process trees)"""
     global vite_process, cpp_process
-    if cpp_process and cpp_process.poll() is None:
+    if cpp_process is not None:
         print("\nStopping C++ app (and WebView2 child processes)...")
-        kill_process_tree(cpp_process.pid)
-        try:
-            cpp_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-    if vite_process and vite_process.poll() is None:
+        stop_owned_process(cpp_process)
+        cpp_process = None
+    if vite_process is not None:
         print("Stopping Vite dev server...")
-        kill_process_tree(vite_process.pid)
-        try:
-            vite_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+        stop_owned_process(vite_process)
+        vite_process = None
 
 # Register cleanup handler
 atexit.register(cleanup)
@@ -178,6 +210,9 @@ def build_backend(mode="debug", app_version=None):
     # Configure CMake. On single-config generators (Linux/macOS Make/Ninja)
     # CMAKE_BUILD_TYPE must be set at configure time, not just at build time.
     cmd = ["cmake", "-B", build_dir]
+    # Production installs must fetch the managed runtime, never depend on system Python.
+    cmd.append("-DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK="
+               + ("ON" if mode == "debug" else "OFF"))
     if app_version:
         cmd.append(f"-DOPENSTUDIO_APP_VERSION={app_version}")
     if platform.system() != "Windows":
@@ -199,7 +234,7 @@ def start_vite_server():
     global vite_process
     frontend_dir = os.path.join(os.getcwd(), "frontend")
     print("\n--- Starting Vite Dev Server ---")
-    vite_process = subprocess.Popen(
+    vite_process = start_owned_process(
         [
             get_npm_executable(),
             "run",
@@ -231,7 +266,7 @@ def run_cpp_app():
         sys.exit(1)
 
     print(f"\n--- Launching {exe_path} ---")
-    cpp_process = subprocess.Popen([exe_path])
+    cpp_process = start_owned_process([exe_path])
     
     # Wait for C++ app to finish
     try:

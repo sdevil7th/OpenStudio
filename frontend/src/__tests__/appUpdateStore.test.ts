@@ -13,6 +13,17 @@ describe("in-app update workflow", () => {
     useAppUpdateStore.getState().acceptStatus({ ...offer, status: "incompatible", message: "A newer OS is required." });
     expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: false, offer: null, status: { status: "incompatible" } });
   });
+  it("native Linux packages discard AppImage offers and skip automatic installer updates", async () => {
+    useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready", platform: "linux" });
+    useAppUpdateStore.getState().acceptStatus({ status: "manual-update", message: "Use the matching .deb installer", updateSource: "linux-package" });
+    expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: false, offer: null });
+    await useAppUpdateStore.getState().check(false);
+    await useAppUpdateStore.getState().download();
+    await useAppUpdateStore.getState().install();
+    expect(nativeBridge.checkForUpdates).not.toHaveBeenCalled();
+    expect(nativeBridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(nativeBridge.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
   it("restored verified downloads are ready without another transfer", async () => {
     useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready" });
     await useAppUpdateStore.getState().check(false);

@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "AppPaths.h"
 #include "CrashDiagnostics.h"
 
@@ -60,7 +61,7 @@ volatile LONG crashStarted = 0;
 bool launchExternalReporter()
 {
     if (selfTestReporterUnavailable) return false;
-    const auto helper = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    const auto helper = OpenStudioRuntime::executableFile()
         .getSiblingFile("OpenStudioCrashReporter.exe");
     if (!helper.existsAsFile() || reporterMapping == nullptr) return false;
     SECURITY_ATTRIBUTES security { sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE };

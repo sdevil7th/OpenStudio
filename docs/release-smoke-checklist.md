@@ -38,8 +38,20 @@ release-candidate platform.
 | Main shell | Cold launch, close, relaunch | `boot-ready` and responsive UI |
 | Detached Mixer | Detach/open, close, reopen | `boot-ready`; audio continues |
 | Detached MIDI editor | Detach, dock/close, reopen; repeat with two different MIDI sessions | `boot-ready`; the correct session returns |
+| Detached pitch editor | Detach, edit, Undo/Redo, dock, native close/reopen; replace source/project | `boot-ready` plus hydrated canvas; one edit/history owner; stale commands rejected |
 | Built-in effect editor | Open, close during load, reopen | `boot-ready`; controls and audio recover |
 | Third-party plug-in editor | Open, close, reopen at least one available native editor | Native editor paints; audio continues without a blank or hung window |
+
+For the main, mixer, MIDI, pitch and built-in effect windows, verify native
+title-bar movement, resize, minimize/restore, snap and mixed-DPI monitor moves.
+On an idle Windows desktop, opt into actual mouse input with
+`OPENSTUDIO_WINDOW_INPUT=1`; use `OPENSTUDIO_WINDOW_CYCLES=50` for repeated pitch
+close/reopen and a 600-second harness timeout. Confirm no secondary browser
+components survive final retirement. Repeat against the installed Release app;
+build-tree evidence does not qualify installation or first-launch permissions.
+See [desktop qualification](testing.md#desktop-and-recording-acceptance)
+for checkpoint recovery and sustained microphone capture acceptance. Treat
+Linux Xvfb/Openbox evidence as X11/XWayland, not native Wayland qualification.
 
 ## Windows
 
@@ -131,6 +143,36 @@ release-candidate platform.
 
 ## Linux
 
+- Build the portable baseline on Ubuntu 22.04; do not relabel a newer-host binary.
+  Run `python3 tools/validate-linux-abi.py --root <payload> --max-glibc 2.35
+  --require-os ubuntu:22.04 --report <evidence.json>` on that baseline. Retain
+  each executable/library's hash and loader/version checks, including ONNX.
+- For every advertised Ubuntu/Debian/Mint/Fedora version, download its exact
+  `.deb`/`.rpm` in a clean desktop, double-click it, authenticate normally, launch
+  from the menu, and reboot/relaunch. Verify dependency resolution without
+  development packages. CLI installation in CI is additional evidence only.
+- Exercise upgrade/reinstall/removal with a project, recordings and presets
+  present, and verify their preservation. Test `.osproj` double-click from a
+  path with spaces/non-ASCII characters. Native updates must not replace managed
+  files with an AppImage.
+- Run `python3 tools/run-linux-qualification.py --app <installed-executable>
+  --output <fresh-directory> --desktop --render --features`. WebKit data/cache
+  are isolated per check; pinned JUCE configuration and host audio remain shared.
+  Repeat normal/safe startup under load and archive every failed attempt.
+- Record known Audient analog sources through the installed track graph and
+  audition monitoring/playback/export. Repeat supported buffers/rates, sustained
+  audio, unplug/reconnect, and suspend/resume. Silent probe captures do not pass
+  physical source, subjective quality, or latency gates.
+- Test actual external VST3/CLAP/LV2 processing, editor lifecycle and state recall;
+  successful discovery alone does not qualify these workflows. Test optional AI
+  in its managed runtime with real models separately from base-app startup.
+- Verify GitHub provenance with `gh attestation verify <installer> --repo
+  sdevil7th/OpenStudio` after the release workflow runs. Record RPM/repository key
+  identity separately; provenance does not remove the OS local-package warning.
+- AppImages use `OpenStudio-<version>-linux-x86_64.AppImage`. Keep old assets and
+  update-feed contracts intact. The current host-WebKit approach still needs
+  prerequisites and a separate Ubuntu 22.04 catalog/Firejail test; a native
+  package pass does not establish AppImage self-containment.
 - Validate both the raw Release output and the extracted AppImage payload with
   `tools/validate-runtime-bundle.ps1 -Platform linux -ExpectedVersion <version>
   -EnforceLeanBundle`.
