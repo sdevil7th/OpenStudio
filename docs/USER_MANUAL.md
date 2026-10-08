@@ -1187,7 +1187,7 @@ OpenStudio supports three FX chain positions per track:
 
 OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `OpenStudio` effect names are still accepted for compatibility in older projects and scripts.
 
-**Approved editor redesign, development working tree, October 3, 2026:** fifteen effect/instrument faces use the approved layouts. Pitch Correct opens the existing clip Edit Pitch workflow; it does not create a second graphical editor. These changes are uncommitted and are not a released-feature claim. NAM Rack retains its separate editor. Main controls remain visible in compact windows; detail panels scroll within the editor.
+**Approved editor redesign, 0.1.04 release candidate, October 8, 2026:** fifteen effect/instrument faces use the approved layouts. Pitch Correct opens the existing clip Edit Pitch workflow; it does not create a second graphical editor. These changes are included in the reviewed release candidate and are not yet published. NAM Rack retains its separate editor. Main controls remain visible in compact windows; detail panels scroll within the editor.
 
 | Plugin | Editor |
 |---|---|

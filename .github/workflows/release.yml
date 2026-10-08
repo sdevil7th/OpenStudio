@@ -952,6 +952,7 @@ jobs:
       RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_RELEASE_TAG }}
+      AI_RUNTIME_LINUX_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -960,26 +961,25 @@ jobs:
         run: |
           echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
           echo "AI_RUNTIME_VERSION=${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
-          if [ -n "${AI_RUNTIME_RELEASE_TAG}" ]; then
-            echo "AI_RUNTIME_RELEASE_TAG=${AI_RUNTIME_RELEASE_TAG}" >> "$GITHUB_ENV"
-          else
-            echo "AI_RUNTIME_RELEASE_TAG=ai-runtime-v${AI_RUNTIME_VERSION#v}" >> "$GITHUB_ENV"
-          fi
 
-      - name: Verify AI runtime release exists
+      - name: Select and verify published AI runtime releases
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$AI_RUNTIME_RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Using AI runtime release tag: $AI_RUNTIME_RELEASE_TAG"
-            exit 0
-          fi
-
-          echo "Configured AI runtime release '$AI_RUNTIME_RELEASE_TAG' was not found in ${{ github.repository }}." >&2
-          echo "App releases now reuse an existing AI runtime release by default." >&2
-          echo "Either run .github/workflows/ai-runtime-release.yml first, or point OPENSTUDIO_AI_RUNTIME_RELEASE_TAG / OPENSTUDIO_AI_RUNTIME_VERSION at an existing runtime release." >&2
-          exit 1
+          python3 tools/release_ai_runtime.py plan \
+            --repository "${{ github.repository }}" \
+            --runtime-version "${AI_RUNTIME_VERSION#v}" \
+            --release-tag "$AI_RUNTIME_RELEASE_TAG" \
+            --linux-release-tag "$AI_RUNTIME_LINUX_RELEASE_TAG" \
+            --output dist/ai-runtime/selection.json
+          mkdir -p dist/ai-runtime/releases
+          while IFS= read -r tag; do
+            gh api "repos/${{ github.repository }}/releases/tags/$tag" \
+              > "dist/ai-runtime/releases/$tag.json"
+          done < <(jq -r '.platforms[].releaseTag' dist/ai-runtime/selection.json | sort -u)
+          python3 tools/release_ai_runtime.py verify \
+            --plan dist/ai-runtime/selection.json --releases-dir dist/ai-runtime/releases
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1001,19 +1001,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p dist/ai-runtime
-          echo "AI runtime release assets available on $AI_RUNTIME_RELEASE_TAG:"
-          gh release view "$AI_RUNTIME_RELEASE_TAG" \
-            --repo "${{ github.repository }}" \
-            --json assets \
-            --jq '.assets[].name' \
-            | sort
-          gh release download "$AI_RUNTIME_RELEASE_TAG" \
-            --repo "${{ github.repository }}" \
-            --pattern "OpenStudio-AI-Runtime-windows-base-x64.zip" \
-            --pattern "OpenStudio-AI-Runtime-macos-arm64.zip" \
-            --pattern "OpenStudio-AI-Runtime-linux-cpu-x64.zip" \
-            --dir dist/ai-runtime
+          while IFS=$'\t' read -r tag filename; do
+            gh release download "$tag" \
+              --repo "${{ github.repository }}" --pattern "$filename" --dir dist/ai-runtime
+          done < <(jq -r '.platforms[] | [.releaseTag, .fileName] | @tsv' dist/ai-runtime/selection.json)
+          python3 tools/release_ai_runtime.py verify \
+            --plan dist/ai-runtime/selection.json --releases-dir dist/ai-runtime/releases \
+            --asset-dir dist/ai-runtime
 
       - name: Verify downloaded release assets
         shell: pwsh
@@ -1045,9 +1039,10 @@ jobs:
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
           $windowsUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-Setup-x64.exe"
           $macosUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-macOS.dmg"
-          $windowsBaseAiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-windows-base-x64.zip"
-          $macosArm64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-macos-arm64.zip"
-          $linuxX64AiRuntimeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:AI_RUNTIME_RELEASE_TAG/OpenStudio-AI-Runtime-linux-cpu-x64.zip"
+          $runtimeSelection = Get-Content "dist/ai-runtime/selection.json" -Raw | ConvertFrom-Json
+          $windowsBaseAiRuntimeUrl = $runtimeSelection.platforms.windows.url
+          $macosArm64AiRuntimeUrl = $runtimeSelection.platforms.macos.url
+          $linuxX64AiRuntimeUrl = $runtimeSelection.platforms.linux.url
           $linuxUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/OpenStudio-$env:VERSION-linux-x86_64.AppImage"
           ./tools/generate-release-metadata.ps1 `
             -Version $env:VERSION `

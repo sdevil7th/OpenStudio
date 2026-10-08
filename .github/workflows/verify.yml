@@ -45,6 +45,7 @@ jobs:
           tests.test_store_submission
           tests.test_store_release_workflow
           tests.test_ai_runtime_dependency_pins
+          tests.test_release_ai_runtime
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
           tests.test_prepare_diffusers_audio

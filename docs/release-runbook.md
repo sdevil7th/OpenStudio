@@ -57,7 +57,7 @@ Default release model:
 
 - Normal app releases reuse an already-published AI runtime release.
 - Rebuild/publish AI runtimes only when runtime dependencies, packaging scripts, or runtime metadata actually changed.
-- The app release workflow expects `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and `OPENSTUDIO_AI_RUNTIME_VERSION` to point at a real runtime release, and it now fails early if that runtime release is missing.
+- The app release workflow selects published archives using `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` and the optional Linux-specific tag. `OPENSTUDIO_AI_RUNTIME_VERSION` labels the combined runtime catalog. Missing releases, unexpected assets or mismatched archive hashes stop publication.
 
 Use this flow instead:
 
@@ -74,7 +74,7 @@ Use this flow instead:
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-x86_64.AppImage`
+   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-linux-x86_64.AppImage`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-macos-arm64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-cpu-x64.zip`
@@ -122,7 +122,7 @@ If a release page shows only GitHub's default source archives, treat that as a f
   --repo sdevil7th/OpenStudio`. This authenticates build provenance, not a
   malware-free promise or an Ubuntu local-file publisher badge. Production RPM
   and repository signing and the Snap publisher account remain separate gates.
-- The new AppImage name omits `linux`; old release assets are unchanged. The
+- The AppImage name retains `linux` and the existing x86_64 suffix. The
   updater's manifest/appcast fields and Linux stable redirect keep their existing
   AppImage meaning. Native download choices must be qualified and exposed
   separately rather than redirecting an old AppImage client to a `.deb`.
@@ -315,6 +315,7 @@ Optional repository variables:
 
 - `OPENSTUDIO_AI_RUNTIME_VERSION`
 - `OPENSTUDIO_AI_RUNTIME_RELEASE_TAG`
+- `OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION`
 - `OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR`
@@ -323,6 +324,16 @@ Optional repository variables:
 
 The default website repo target is `sdevil7th/OpenStudioWebsite`.
 The default dispatch event type is `openstudio_release_published`.
+
+`OPENSTUDIO_AI_RUNTIME_RELEASE_TAG` selects the Windows/macOS archives and also
+Linux when no override is configured. `OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG`
+selects a separately published Linux archive without replacing the other
+platforms. `OPENSTUDIO_AI_RUNTIME_VERSION` is the combined catalog revision;
+installed status reads each archive's actual version from its runtime metadata.
+For 0.1.04, preserve the published catalog revision `0.0.14`, select
+`ai-runtime-v0.0.13` for Windows/macOS and `ai-runtime-linux-v0.0.14` for Linux.
+The release workflow verifies selected published asset identities, sizes and
+SHA-256 values, then checks the downloaded bytes before generating metadata.
 
 GitHub-hosted Windows releases no longer require a pre-existing committed `tools/python`
 tree. The release workflow now downloads a relocatable standalone Python runtime, layers the
