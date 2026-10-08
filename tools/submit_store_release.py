@@ -275,7 +275,32 @@ def update_settings_digest(submission: dict) -> str:
     # actual listing/settings changes still need to match the published baseline.
     settings = copy.deepcopy(submission)
     settings.pop("friendlyName", None)
+    pricing = settings.get("pricing")
+    if isinstance(pricing, dict) and "isAdvancedPricingModel" in pricing:
+        # Microsoft documents this as read-only account pricing-tier capability:
+        # https://learn.microsoft.com/windows/uwp/monetize/manage-app-submissions#pricing-resource
+        # PUT/readback can change the boolean without changing the selected
+        # price, markets or trial. Preserve its presence and reject other types;
+        # every writable and unknown pricing field remains part of the digest.
+        if type(pricing["isAdvancedPricingModel"]) is not bool:
+            raise StoreError("Store returned an invalid read-only pricing capability flag.")
+        pricing["isAdvancedPricingModel"] = False
     return initial_settings_digest(settings)
+
+
+def update_package_matches(item: dict, target: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    for key, value in target.items():
+        # The API can omit this optional server metadata on the package marked
+        # for deletion. Its actual coverage/version/identity still must match.
+        # A present targetPlatform value, retained packages and unknown fields
+        # remain strict; no other missing field is normalized.
+        if key == "targetPlatform" and key not in item and target.get("fileStatus") == "PendingDelete":
+            continue
+        if key not in item or json_digest(item[key]) != json_digest(value):
+            return False
+    return True
 
 
 def validate_update_resume(pending: dict, published: dict, submission_id: str,
@@ -294,7 +319,7 @@ def validate_update_resume(pending: dict, published: dict, submission_id: str,
         # Preserve every existing package and require the upload ZIP's exact
         # filename. The server may add metadata to the new pending-upload entry.
         if len(packages) != len(wanted) or any(
-                sum(all(item.get(key) == value for key, value in target.items()) for item in packages) != 1
+                sum(update_package_matches(item, target) for item in packages) != 1
                 for target in wanted):
             raise StoreError("Update submission package replacement changed; refusing to upload or commit.")
 

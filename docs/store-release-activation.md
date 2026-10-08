@@ -19,10 +19,32 @@ The hotfix makes script dialogs suppressible with explicit safe defaults and
 returns a nonzero installer result for failed post-install validation. Actual
 compiled unattended installer/uninstaller regressions run before Windows builds.
 Installed-release CI qualification is bounded and retains its diagnostic logs.
-The follow-up `v0.1.05` policy requests `targetPublishMode=Immediate` for Store
-package `0.1.5.0`, retaining the owner's automatic-publication intent. All live
-API access, state, upload/commit, certification and Store-installed upgrade
-checks still require evidence from that release; none is asserted here.
+The follow-up [v0.1.05 application release](https://github.com/sdevil7th/OpenStudio/releases/tag/v0.1.05)
+was published from `649012c77f86eb9cbfee616bd16a588576c63112`. All three platform
+release jobs passed, including actual installed Windows lifecycle and silent
+uninstall, and the website deployed the matching update feeds. Both live Store
+preflights authenticated and passed for package `0.1.5.0` with publication mode
+`Immediate`.
+
+The automatic submission created draft `1152921505702075647`, then its read-back
+preservation guard stopped before commit. A hash-verified, GET-only diagnostic
+found one preserved-settings difference: Partner Center changed the read-only
+`pricing.isAdvancedPricingModel` boolean. Identity, ownership marker, release
+notes, actual pricing fields and publication mode matched. The server also
+omitted the deleted old package's optional `targetPlatform` metadata. The draft
+remains intact. Upload completion, certification and Store-installed upgrade
+are not asserted from this failed attempt.
+
+The automation follow-up normalizes only the documented read-only pricing
+boolean and tolerates only the observed missing metadata on a deleted package;
+changed prices, unknown fields, retained packages and present changed metadata
+still fail. Its separate recovery workflow reuses the exact qualified MSIX from
+run `37790026737` and can only resume the existing draft. It cannot create,
+update or delete submissions or replace application release assets. A reviewed
+`v-store-recovery-0.1.05-<attempt>` tag triggers that workflow; numeric
+application tags trigger the application Release workflow. Both use the existing
+tag-only Store environment. The diagnostic's temporary exact-develop access
+was removed immediately after it completed.
 
 The readiness check below records the earlier 0.1.04 preparation. Its tag/policy
 statements are historical; the current policy file pins only the reviewed

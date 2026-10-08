@@ -1,6 +1,7 @@
 """Exercise the release workflow's Store dependency graph and safety gates."""
 
 import ast
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -85,7 +86,13 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
     def test_tag_push_triggers_release_without_manual_dispatch(self):
         # PyYAML's YAML 1.1 loader recognizes the unquoted key `on` as True.
         triggers = self.workflow.get("on", self.workflow.get(True))
-        self.assertEqual(triggers["push"]["tags"], ["v*"])
+        patterns = triggers["push"]["tags"]
+        for tag in ("v0.1.05", "v1.2.3", "v10.20.30"):
+            with self.subTest(tag=tag):
+                self.assertTrue(any(fnmatch.fnmatchcase(tag, pattern) for pattern in patterns))
+        for tag in ("v-store-recovery-0.1.05-1", "ai-runtime-v0.0.16", "v-unreviewed-component"):
+            with self.subTest(tag=tag):
+                self.assertFalse(any(fnmatch.fnmatchcase(tag, pattern) for pattern in patterns))
         self.assertIn("workflow_dispatch", triggers)
 
     def test_enabled_tag_automatically_preflights_and_submits(self):

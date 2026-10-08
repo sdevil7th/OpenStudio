@@ -1,0 +1,68 @@
+name: Resume the published Store release
+
+on:
+  push:
+    tags:
+      - v-store-recovery-0.1.05-*
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resume:
+    name: Resume the exact existing 0.1.05 Store draft
+    if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: microsoft-store
+    concurrency:
+      group: openstudio-microsoft-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Require a recovery tag for the immutable published release
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF" =~ ^refs/tags/v-store-recovery-0\.1\.05-[1-9][0-9]*$ ]]; then
+            echo "This recovery is limited to the published 0.1.05 Store package." >&2
+            exit 1
+          fi
+
+      - name: Retrieve the qualified package from the original release run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: microsoft-store-package
+          path: dist/store
+          run-id: 37790026737
+          github-token: ${{ github.token }}
+
+      - name: Check the existing draft and exact release package without mutations
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        run: python3 tools/resume_store_release.py --package-dir dist/store --report output/store-recovery-preflight.json --preflight
+
+      - name: Resume upload and commit of the verified existing draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        run: python3 tools/resume_store_release.py --package-dir dist/store --report output/store-recovery-submission.json --submit
+
+      - name: Retain sanitized recovery status
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microsoft-store-recovery-${{ github.run_attempt }}
+          path: |
+            output/store-recovery-preflight.json
+            output/store-recovery-submission.json
+          if-no-files-found: warn
+          retention-days: 30
