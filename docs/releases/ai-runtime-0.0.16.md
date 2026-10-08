@@ -3,7 +3,7 @@
 Optional AI runtime candidate for application 0.1.04. The application, model
 weights and device-specific accelerator packages remain separate downloads.
 The [review in application PR #27](https://github.com/sdevil7th/OpenStudio/pull/27)
-covers the [range since the last published all-platform runtime](https://github.com/sdevil7th/OpenStudio/compare/ai-runtime-v0.0.13...f3952cabce44896ffb1e6cb139b628e2292ebcfa)
+covers the [range since the last published all-platform runtime](https://github.com/sdevil7th/OpenStudio/compare/ai-runtime-v0.0.13...fb5eb2dfbe6995bec9ffedd980520e18165f78b7)
 and the macOS preparation correction. The separate
 [Linux 0.0.14 hotfix](https://github.com/sdevil7th/OpenStudio/compare/ai-runtime-v0.0.13...ai-runtime-linux-v0.0.14)
 remains the selected Linux archive for this application candidate.
