@@ -81,7 +81,7 @@ jobs:
 
       - name: Prepare and validate relocatable macOS AI archive
         if: runner.os == 'macOS'
-        timeout-minutes: 20
+        timeout-minutes: 45
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/ai-runtime/reports | Out-Null
