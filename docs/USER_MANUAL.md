@@ -2795,6 +2795,7 @@ Use **AI Tools Setup** when a generation or stem workflow reports that its runti
 - The installer prepares optional local runtime assets instead of making the base DAW download huge.
 - Installation can be cancelled, reset, or retried from the setup modal.
 - On Windows, a CUDA-to-DirectML fallback prepares a separate runtime and selects it only after validation; an unsuccessful fallback leaves the runtime selection and downloaded models unchanged.
+- The downloadable managed macOS AI runtime requires Apple Silicon and macOS 14 or later because of its bundled numerical-library wheels. The base app targets macOS 12 or later; the managed AI archive is not qualified for macOS 12/13.
 - Generated audio is imported back into the project as normal clips/tracks.
 
 **Downloading models:** BS-Roformer and ACE-Step download automatically when you install their feature. For Stable Audio 3 Medium or MiniMax Music 3, select the model, review and accept its license, then choose **Download and Set Up**. OpenStudio downloads the required files from Hugging Face into managed storage. Stable Audio is converted automatically to Diffusers format; MiniMax downloads its Diffusers components without the duplicate legacy weights. Allow extra disk space and time for downloads and Stable Audio conversion.

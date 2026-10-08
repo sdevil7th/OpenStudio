@@ -46,6 +46,10 @@ remains the selected Linux archive for this application candidate.
 
 ## Known Issues
 
+- The downloadable macOS AI archive requires Apple Silicon and macOS 14 or
+  later because its bundled numerical-library wheels target that OS range.
+  This was already true of runtime 0.0.13; the base app's macOS 12 minimum
+  does not establish compatibility of the managed AI archive on macOS 12/13.
 - Physical GPU execution, clean on-device package/model installation and
   generated-audio quality remain separate hardware qualification. Interpreter
   compatibility alone does not establish those results.

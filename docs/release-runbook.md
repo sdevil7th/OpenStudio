@@ -358,6 +358,10 @@ tree. The release workflow now builds the downloadable AI runtime for Apple Sili
 from the same relocatable standalone Python source on GitHub-hosted macOS runners. Intel macOS
 machines can still run the base app, but AI Tools remain unsupported there until the pinned
 dependency stack publishes a satisfiable Intel macOS wheel set for release builds.
+The managed Apple Silicon AI archive requires macOS 14 or later: its bundled
+NumPy, SciPy and ONNX Runtime wheels target that OS range. The base app targets
+macOS 12 or later; the managed archive is not qualified for macOS 12/13. The
+published 0.0.13 archive already has this macOS 14 minimum through NumPy/SciPy.
 
 Optional future additions:
 
