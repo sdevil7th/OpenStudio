@@ -1,0 +1,46 @@
+name: Store read-only diagnosis
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - .github/workflows/store-diagnosis.yml
+      - tools/diagnose_store_submission.py
+      - tests/test_store_diagnosis.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    name: Inspect the existing Store draft without mutations
+    if: github.ref == 'refs/heads/develop' && github.sha == vars.OPENSTUDIO_STORE_DIAGNOSIS_SHA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: microsoft-store
+    concurrency:
+      group: openstudio-microsoft-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Compare the fixed published baseline and failed release draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        run: python3 tools/diagnose_store_submission.py --report output/store-diagnosis.json
+
+      - name: Retain the sanitized read-only comparison
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microsoft-store-read-only-diagnosis-${{ github.run_attempt }}
+          path: output/store-diagnosis.json
+          if-no-files-found: error
+          retention-days: 30
