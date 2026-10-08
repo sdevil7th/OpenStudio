@@ -331,7 +331,7 @@ selects a separately published Linux archive without replacing the other
 platforms. `OPENSTUDIO_AI_RUNTIME_VERSION` is the combined catalog revision;
 installed status reads each archive's actual version from its runtime metadata.
 The published and qualified `ai-runtime-v0.0.16` uses Python 3.11.15.
-The corrected 0.1.05 candidate selects catalog revision `0.0.16` and that tag
+The published 0.1.05 release selects catalog revision `0.0.16` and that tag
 for Windows/macOS. Keep
 `ai-runtime-linux-v0.0.14` for the already-qualified Linux archive. The old
 Windows 0.0.13 base uses Python 3.10.20 and cannot satisfy Audio Generation;
@@ -599,8 +599,10 @@ It is not proof that the API can adopt a portal draft. The initial path below is
 historical guidance and a guarded capability, not a verified live result.
 The `v0.1.04` application publication was stopped in Windows unattended
 uninstall qualification; no Store update was submitted. Its tag is retained.
-The corrected `v0.1.05` candidate uses the published-baseline path and its
-reviewed publishing policy.
+The published `v0.1.05` release uses the published-baseline path and its reviewed
+publishing policy. Both live preflights passed, but submission stopped before
+commit when Partner Center changed a documented read-only pricing boolean.
+The existing draft is preserved; see the [recorded diagnosis](store-release-activation.md).
 
 1. Merge the release and any release-preparation follow-up only after CI passes.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
@@ -680,6 +682,26 @@ pending, resolve it deliberately; automation leaves it intact and fails visibly.
 On timeout/failure, the job records the submission ID and status without tokens
 or SAS upload URLs. Rerun failed jobs to resume the same release artifact. A new
 package with a different hash requires a new version, not an overwrite.
+
+### Recover the published 0.1.05 Store draft
+
+The original application tag and assets are immutable. Rerunning its failed
+submission job would still execute the old validator. After merging the reviewed
+automation hotfix from `develop` and passing CI, tag that merged automation
+revision `v-store-recovery-0.1.05-1`. This tag runs `store-recovery.yml`, which
+uses the existing tag-only `microsoft-store` environment and serialized Store
+submission concurrency. It does not run the numeric-tag application Release
+workflow or rebuild application packages.
+
+`tools/resume_store_release.py` first verifies the published release, original
+source/run/job outcomes, qualified package artifact and exact release notes.
+It validates the original MSIX identity, version and SHA-256, then performs a
+read-only preflight against the fixed published baseline and existing marked
+draft. The submission step rechecks those conditions before upload and commit.
+The API wrapper permits GETs of those fixed resources, upload of the verified
+package, and commit of that draft; create, update and delete requests are refused.
+The retained report distinguishes accepted ingestion from final certification
+and publication. Inspect any failure before another recovery attempt.
 
 ### Publication after certification
 

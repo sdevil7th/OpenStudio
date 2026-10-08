@@ -78,13 +78,19 @@ def line_endings_equal(left, right):
 
 
 class GitHubReads:
-    def __init__(self):
+    def __init__(self, *, allowed_paths=None):
+        paths = frozenset(GITHUB_PATHS if allowed_paths is None else allowed_paths)
+        require(bool(paths) and all(isinstance(path, str) and path.startswith("/")
+            and not path.startswith("//") and ".." not in path
+            and re.fullmatch(r"/[A-Za-z0-9_./?=&+-]+", path) for path in paths),
+            "Release provenance paths must be fixed relative repository API routes.")
+        self.allowed_paths = paths
         self.token = os.environ.get("GITHUB_TOKEN", "")
         require(bool(self.token), "GITHUB_TOKEN is required for release provenance reads.")
         self.opener = urllib.request.build_opener(store.NoRedirect())
 
     def get(self, path):
-        require(path in GITHUB_PATHS, "Only fixed release provenance GET requests are allowed.")
+        require(path in self.allowed_paths, "Only fixed release provenance GET requests are allowed.")
         request = urllib.request.Request("https://api.github.com/repos/" + REPOSITORY + path,
             method="GET", headers={"Authorization": "Bearer " + self.token,
                 "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})

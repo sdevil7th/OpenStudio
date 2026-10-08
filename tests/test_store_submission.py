@@ -254,6 +254,199 @@ class StoreSubmissionTests(unittest.TestCase):
         self.assertEqual(api.pending["applicationPackages"][1], api.published["applicationPackages"][1])
         self.assertEqual(api.uploads[0][0], "https://fresh.blob.core.windows.net/upload?sig=SECRET")
 
+    def canonicalizing_update_api(self):
+        api = FakeApi()
+        api.published["pricing"].update(isAdvancedPricingModel=True, marketSpecificPricings={"US": "Free"},
+            sales=[], trialPeriod="NoFreeTrial", opaquePricePolicy={"reviewed": True})
+        api.published["opaqueExistingSettings"] = {"reviewed": "keep"}
+        api.published["applicationPackages"][0].update(id="old-package", targetPlatform="Windows10",
+            languages=["en-US"], capabilities=["runFullTrust"], opaquePackagePolicy=None)
+        api.published["applicationPackages"].append({"fileName": "arm.msix", "id": "retained-package",
+            "version": "0.1.1.0", "architecture": "ARM64", "fileStatus": "Uploaded", "targetPlatform": "Windows10",
+            "targetDeviceFamilies": ["Windows.Desktop min version 10.0.19041.0"]})
+
+        def normalize_pending():
+            api.pending["pricing"]["isAdvancedPricingModel"] = False
+            for item in api.pending["applicationPackages"]:
+                if item["fileStatus"] == "PendingDelete":
+                    item.pop("targetPlatform", None)
+                elif item["fileStatus"] == "PendingUpload":
+                    item.update(languages=[], capabilities=[], targetDeviceFamilies=[])
+
+        request = api.request
+
+        def canonicalize(method, path, body=None):
+            result = request(method, path, body)
+            if method == "PUT":
+                normalize_pending()
+                result = copy.deepcopy(api.pending)
+            return result
+
+        api.request = canonicalize
+        return api, normalize_pending
+
+    def test_update_actual_readonly_boolean_and_deleted_package_roundtrip(self):
+        api, _ = self.canonicalizing_update_api()
+        original = copy.deepcopy(api.published)
+        policy = {"publishing_config": self.publishing_config(), "release_tag": "v0.1.2"}
+        self.run_submit(api, preflight_only=True, **policy)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        api.calls.clear()
+        self.run_submit(api, **policy)
+        self.assertEqual(api.published, original)
+        body = next(body for method, _, body in api.calls if method == "PUT")
+        self.assertIs(body["pricing"]["isAdvancedPricingModel"], True)
+        self.assertIs(api.pending["pricing"]["isAdvancedPricingModel"], False)
+        self.assertEqual(api.pending["targetPublishMode"], "Immediate")
+        self.assertNotIn("targetPlatform", api.pending["applicationPackages"][0])
+        self.assertEqual(api.pending["applicationPackages"][1], original["applicationPackages"][1])
+        self.assertEqual(len(api.uploads), 1)
+        self.assertEqual(api.uploads[0][1], [self.package.name])
+        self.assertEqual(api.uploads[0][2], self.package.read_bytes())
+        self.assertEqual(self.report["status"], "PreProcessing")
+        self.assertEqual(sum(method == "POST" and path.endswith("/commit") for method, path, _ in api.calls), 1)
+
+    def test_update_canonicalized_owned_draft_preflight_and_resume_reuse_same_draft(self):
+        api, normalize = self.canonicalizing_update_api()
+        policy = {"publishing_config": self.publishing_config(), "release_tag": "v0.1.2"}
+        api.pending = store.prepare_submission(api.published, self.package, self.notes, self.expected, target_publish_mode="Immediate")
+        api.pending.update(id="200", status="PendingCommit", fileUploadUrl="https://test.blob.core.windows.net/upload?sig=SECRET")
+        normalize()
+        original = copy.deepcopy(api.pending)
+        self.run_submit(api, preflight_only=True, **policy)
+        self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+        self.assertFalse(api.uploads)
+        self.assertEqual(api.pending, original)
+        api.calls.clear()
+        self.run_submit(api, **policy)
+        self.assertFalse(any(method == "PUT" or (method == "POST" and path.endswith("/submissions"))
+            for method, path, _ in api.calls))
+        self.assertEqual(len(api.uploads), 1)
+        self.assertEqual(self.report["submissionId"], "200")
+
+    def test_update_readonly_flag_normalization_preserves_presence_type_and_initial_binding(self):
+        original = baseline()
+        original["pricing"]["isAdvancedPricingModel"] = True
+        canonical = copy.deepcopy(original)
+        canonical["pricing"]["isAdvancedPricingModel"] = False
+        self.assertEqual(store.update_settings_digest(original), store.update_settings_digest(canonical))
+        self.assertNotEqual(store.initial_settings_digest(original), store.initial_settings_digest(canonical))
+        missing = copy.deepcopy(original)
+        del missing["pricing"]["isAdvancedPricingModel"]
+        self.assertNotEqual(store.update_settings_digest(original), store.update_settings_digest(missing))
+        for value in (None, 0, 1, "false", [], {}):
+            invalid = copy.deepcopy(original)
+            invalid["pricing"]["isAdvancedPricingModel"] = value
+            with self.subTest(value=value), self.assertRaises(store.StoreError):
+                store.update_settings_digest(invalid)
+
+    def test_update_canonicalization_keeps_all_actual_pricing_and_unknown_settings_strict(self):
+        for phase in ("after_put", "during_upload", "resume"):
+            for field in ("priceId", "marketSpecificPricings", "sales", "trialPeriod", "opaquePricePolicy", "opaqueExistingSettings"):
+                api, normalize = self.canonicalizing_update_api()
+
+                def edit():
+                    if field == "opaqueExistingSettings":
+                        api.pending[field]["reviewed"] = "changed"
+                    else:
+                        values = {"priceId": "Tier2", "marketSpecificPricings": {"US": "Tier2"},
+                            "sales": [{"name": "Unexpected sale", "basePriceId": "Tier2"}], "trialPeriod": "OneDay",
+                            "opaquePricePolicy": {"reviewed": False}}
+                        api.pending["pricing"][field] = values[field]
+
+                if phase == "resume":
+                    api.pending = store.prepare_submission(api.published, self.package, self.notes, self.expected)
+                    api.pending.update(id="200", status="PendingCommit")
+                    normalize()
+                    edit()
+                elif phase == "after_put":
+                    request = api.request
+
+                    def mutate_put(method, path, body=None):
+                        result = request(method, path, body)
+                        if method == "PUT":
+                            edit()
+                        return result
+
+                    api.request = mutate_put
+                else:
+                    upload = api.upload
+
+                    def mutate_upload(url, archive):
+                        upload(url, archive)
+                        edit()
+
+                    api.upload = mutate_upload
+                with self.subTest(phase=phase, field=field), self.assertRaises(store.StoreError):
+                    self.run_submit(api, preflight_only=phase == "resume")
+                self.assertFalse(any(method == "POST" and path.endswith("/commit") for method, path, _ in api.calls))
+                self.assertEqual(len(api.uploads), 1 if phase == "during_upload" else 0)
+                if phase == "resume":
+                    self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_update_package_platform_drop_does_not_relax_identity_coverage_or_unknown_metadata(self):
+        changes = {
+            "version": lambda p: p[0].update(version="0.0.1.0"),
+            "architecture": lambda p: p[0].update(architecture="ARM64"),
+            "families": lambda p: p[0].update(targetDeviceFamilies=["Windows.Xbox min version 10.0.19041.0"]),
+            "id": lambda p: p[0].update(id="other-package"),
+            "filename": lambda p: p[0].update(fileName="unrelated.msix"),
+            "presentPlatform": lambda p: p[0].update(targetPlatform="Windows81"),
+            "presentNullPlatform": lambda p: p[0].update(targetPlatform=None),
+            "unknownMissing": lambda p: p[0].pop("opaquePackagePolicy"),
+            "unknownChanged": lambda p: p[0].update(opaquePackagePolicy=False),
+            "retainedVersion": lambda p: p[1].update(version="0.0.1.0"),
+            "retainedArchitecture": lambda p: p[1].update(architecture="X64"),
+            "retainedId": lambda p: p[1].update(id="other-package"),
+            "retainedFilename": lambda p: p[1].update(fileName="unrelated.msix"),
+            "retainedFamilies": lambda p: p[1].update(targetDeviceFamilies=[]),
+            "retainedPlatformMissing": lambda p: p[1].pop("targetPlatform"),
+            "newFilename": lambda p: p[-1].update(fileName="unrelated.msix"),
+        }
+        for name, change in changes.items():
+            api, normalize = self.canonicalizing_update_api()
+            api.pending = store.prepare_submission(api.published, self.package, self.notes, self.expected)
+            api.pending.update(id="200", status="PendingCommit")
+            normalize()
+            change(api.pending["applicationPackages"])
+            with self.subTest(change=name), self.assertRaises(store.StoreError):
+                self.run_submit(api, preflight_only=True)
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+            self.assertFalse(api.uploads)
+
+    def test_update_package_unknown_boolean_integer_metadata_types_remain_strict(self):
+        target = {"fileStatus": "PendingDelete", "opaquePackagePolicy": {"reviewed": False}}
+        self.assertFalse(store.update_package_matches({"fileStatus": "PendingDelete", "opaquePackagePolicy": {"reviewed": 0}}, target))
+
+    def test_update_readonly_pricing_flag_missing_or_malformed_stops_before_commit(self):
+        for phase in ("resume", "during_upload"):
+            for value in ("missing", None, 0, "false"):
+                api, normalize = self.canonicalizing_update_api()
+
+                def edit():
+                    if value == "missing":
+                        api.pending["pricing"].pop("isAdvancedPricingModel")
+                    else:
+                        api.pending["pricing"]["isAdvancedPricingModel"] = value
+
+                if phase == "resume":
+                    api.pending = store.prepare_submission(api.published, self.package, self.notes, self.expected)
+                    api.pending.update(id="200", status="PendingCommit")
+                    normalize()
+                    edit()
+                else:
+                    upload = api.upload
+
+                    def mutate_upload(url, archive):
+                        upload(url, archive)
+                        edit()
+
+                    api.upload = mutate_upload
+                with self.subTest(phase=phase, value=value), self.assertRaises(store.StoreError):
+                    self.run_submit(api, preflight_only=phase == "resume")
+                self.assertFalse(any(method == "POST" and path.endswith("/commit") for method, path, _ in api.calls))
+                self.assertEqual(len(api.uploads), 1 if phase == "during_upload" else 0)
+
     def test_update_edits_during_upload_stop_before_commit(self):
         for change in ("settings", "notes", "package", "state"):
             api = FakeApi(pending=self.pending())

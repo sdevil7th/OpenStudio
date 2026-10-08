@@ -10,9 +10,12 @@ import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 
+import yaml
+
 from tools import diagnose_store_submission as diagnosis
 from tools import submit_store_release as store
 from tests.test_store_submission import baseline
+from tests.test_store_release_workflow import evaluate_condition
 
 
 class StoreDiagnosisTests(unittest.TestCase):
@@ -254,6 +257,29 @@ class StoreDiagnosisTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--report", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_workflow_runs_only_the_pinned_develop_source_with_protected_read_permissions(self):
+        workflow = yaml.safe_load((diagnosis.ROOT / ".github/workflows/store-diagnosis.yml").read_text(encoding="utf-8"))
+        job = workflow["jobs"]["diagnose"]
+        for ref, source, approved, expected in (
+            ("refs/heads/develop", "a" * 40, "a" * 40, True),
+            ("refs/heads/develop", "a" * 40, "b" * 40, False),
+            ("refs/heads/develop", "a" * 40, "", False),
+            ("refs/heads/main", "a" * 40, "a" * 40, False),
+            ("refs/tags/v0.1.05", "a" * 40, "a" * 40, False),
+        ):
+            with self.subTest(ref=ref, approved=approved):
+                self.assertEqual(evaluate_condition(job["if"], {"github.ref": ref, "github.sha": source,
+                    "vars.OPENSTUDIO_STORE_DIAGNOSIS_SHA": approved}), expected)
+        self.assertEqual(workflow["permissions"], {"contents": "read", "actions": "read"})
+        self.assertEqual(job["environment"], "microsoft-store")
+        self.assertLessEqual(job["timeout-minutes"], 5)
+        release = yaml.safe_load((diagnosis.ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+        self.assertEqual(job["concurrency"], release["jobs"]["submit-store"]["concurrency"])
+        self.assertFalse(job["steps"][0]["with"]["persist-credentials"])
+        steps = [step for step in job["steps"] if "run" in step]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["run"].split(), ["python3", "tools/diagnose_store_submission.py", "--report", "output/store-diagnosis.json"])
 
 
 if __name__ == "__main__":

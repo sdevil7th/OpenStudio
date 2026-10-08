@@ -45,6 +45,7 @@ jobs:
           tests.test_updater_manifest
           tests.test_store_submission
           tests.test_store_diagnosis
+          tests.test_store_recovery
           tests.test_store_release_workflow
           tests.test_ai_runtime_dependency_pins
           tests.test_release_ai_runtime
