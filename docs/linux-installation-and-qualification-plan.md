@@ -198,7 +198,7 @@ None of those newer-host passes establishes catalog/Ubuntu 22.04 compatibility.
 | `GLIBCXX_3.4.32` missing from libstdc++ | The executable also requires a newer C++ runtime than the test environment provides. |
 | `ALSA_1.2.10` missing from libasound | There is a separate ALSA library ABI mismatch; solving glibc alone is insufficient. This does not establish an Audient-specific driver failure. |
 | Bundled JavaScriptCore, ICU, GLib, systemd, mount and SELinux libraries also require newer glibc symbols | The compatibility audit must include every bundled ELF dependency, not only OpenStudio. |
-| Filename contains `linux` | Catalog naming warning, separate from the loader failure; use `OpenStudio-<version>-x86_64.AppImage` for the next corrected artifact. |
+| Filename contains `linux` | Catalog naming warning, separate from the loader failure. Removing it was a proposed catalog fix; the current release retains `OpenStudio-<version>-linux-x86_64.AppImage` to preserve the published download contract. A renamed catalog artifact remains unqualified. |
 | Catalog also applied `not-upstream` | The PR body cites the README phrase “community package,” which described the unsigned macOS v1 package. This appears to be a discovery heuristic false positive, not evidence of a third-party Linux binary. |
 
 The observed failure occurs in the dynamic loader before application startup;

@@ -14,21 +14,36 @@ permissions:
   contents: read
 
 jobs:
-  build-windows-runtime-base:
-    runs-on: windows-latest
+  validate-ai-runtime-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
+      runtime_tag: ${{ steps.validate.outputs.runtime_tag }}
+      notes_file: ${{ steps.validate.outputs.notes_file }}
     env:
       VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate AI runtime version, source, publication and reviewed notes
+        id: validate
+        shell: bash
+        run: >-
+          python3 tools/ai_runtime_release.py --version "$VERSION"
+          --git-ref "$GITHUB_REF" --repository "$GITHUB_REPOSITORY"
+          --source-sha "$(git rev-parse HEAD)" --github-output "$GITHUB_OUTPUT"
+
+  build-windows-runtime-base:
+    needs: validate-ai-runtime-release
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.validate-ai-runtime-release.outputs.version }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.11.15' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Normalize runtime version
-        shell: pwsh
-        run: |
-          $version = "${env:VERSION}" -replace '^ai-runtime-v', '' -replace '^v', ''
-          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache standalone Python and wheels
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -71,18 +86,15 @@ jobs:
           if-no-files-found: error
 
   build-macos-runtime-arm64:
+    needs: validate-ai-runtime-release
     runs-on: macos-14
     env:
-      VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
+      VERSION: ${{ needs.validate-ai-runtime-release.outputs.version }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.11.15' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Normalize runtime version
-        shell: bash
-        run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
       - name: Cache standalone Python and wheels
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -126,6 +138,13 @@ jobs:
             -ExpectedRuntimeVersion $env:VERSION `
             -MaxArtifactSizeBytes 2100000000
 
+      - name: Validate prepared or cached macOS runtime
+        shell: pwsh
+        run: >-
+          ./tools/validate-ai-runtime-package.ps1 -Platform macos
+          -ArchivePath "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip"
+          -ExpectedRuntimeVersion $env:VERSION -ExpectedRuntimeFamily "macos-arm64"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-arm64-ai-runtime
@@ -135,18 +154,15 @@ jobs:
           if-no-files-found: error
 
   build-linux-runtime-cpu:
+    needs: validate-ai-runtime-release
     runs-on: ubuntu-24.04
     env:
-      VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
+      VERSION: ${{ needs.validate-ai-runtime-release.outputs.version }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
       AI_RUNTIME_STANDALONE_PYTHON_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_PYTHON_VERSION || '3.11.15' }}
       AI_RUNTIME_STANDALONE_FLAVOR: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_FLAVOR || 'install_only' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Normalize runtime version
-        shell: bash
-        run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
       - name: Cache standalone Python and wheels
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -190,20 +206,20 @@ jobs:
 
   publish-ai-runtime:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ai-runtime-publish-${{ needs.validate-ai-runtime-release.outputs.runtime_tag }}
+      cancel-in-progress: false
     needs:
+      - validate-ai-runtime-release
       - build-windows-runtime-base
       - build-macos-runtime-arm64
       - build-linux-runtime-cpu
     permissions:
       contents: write
     env:
-      VERSION: ${{ github.event.inputs.runtime_version || github.ref_name }}
+      VERSION: ${{ needs.validate-ai-runtime-release.outputs.version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Normalize runtime version
-        shell: bash
-        run: echo "VERSION=${VERSION#ai-runtime-v}" | sed 's/^VERSION=v/VERSION=/' >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -230,13 +246,24 @@ jobs:
           test -f "dist/ai-runtime/reports/macos-arm64-size-report.json"
           test -f "dist/ai-runtime/reports/linux-cpu-x64-size-report.json"
 
+      - name: Recheck runtime publication identity before publishing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 tools/ai_runtime_release.py --version "$VERSION"
+          --git-ref "$GITHUB_REF" --repository "$GITHUB_REPOSITORY"
+          --source-sha "$(git rev-parse HEAD)"
+
       - name: Publish AI runtime release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('ai-runtime-v{0}', github.event.inputs.runtime_version) }}
+          tag_name: ${{ needs.validate-ai-runtime-release.outputs.runtime_tag }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "false"
+          overwrite_files: false
           name: OpenStudio AI Runtime ${{ env.VERSION }}
-          body: |
-            OpenStudio AI base runtimes. Windows accelerator backends are installed on-device from the pinned install plans in the published runtime manifest.
+          body_path: ${{ needs.validate-ai-runtime-release.outputs.notes_file }}
           fail_on_unmatched_files: true
           files: |
             dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip

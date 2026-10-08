@@ -10,19 +10,9 @@ const PRIMARY_LABEL = IS_MAC_HOST ? "Cmd" : "Ctrl";
 const HOST_OVERRIDE_TARGET = IS_MAC_HOST ? "macos" : IS_LINUX_HOST ? "linux" : "windows";
 
 test.beforeEach(async ({ page }) => {
+  // Each test gets a fresh BrowserContext, so storage starts empty. Navigate
+  // once instead of reloading while Vite's module imports are still in flight.
   await page.goto("/");
-  await page.evaluate(({ settingsKey, customProfilesKey, mouseOverridesKey }) => {
-    localStorage.removeItem(settingsKey);
-    localStorage.removeItem(customProfilesKey);
-    localStorage.removeItem(mouseOverridesKey);
-    localStorage.removeItem("openstudio_essentialControlsDismissed");
-    localStorage.removeItem("openstudio_customShortcuts");
-  }, {
-    settingsKey: PROFILE_SETTINGS_KEY,
-    customProfilesKey: CUSTOM_KEYBOARD_PROFILES_KEY,
-    mouseOverridesKey: MOUSE_MODIFIER_OVERRIDES_KEY,
-  });
-  await page.reload();
   await expect(page.getByRole("heading", { name: "Make OpenStudio feel familiar" })).toBeVisible();
 });
 

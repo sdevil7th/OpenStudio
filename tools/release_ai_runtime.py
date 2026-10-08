@@ -5,6 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
+import zipfile
+import zlib
 
 
 ASSETS = {
@@ -12,6 +15,54 @@ ASSETS = {
     "macos": "OpenStudio-AI-Runtime-macos-arm64.zip",
     "linux": "OpenStudio-AI-Runtime-linux-cpu-x64.zip",
 }
+ARCHIVE_IDENTITIES = {
+    "windows": ("x64", "windows-base-x64"),
+    "macos": ("arm64", "macos-arm64"),
+    "linux": ("x64", "linux-cpu-x64"),
+}
+RUNTIME_METADATA_NAME = ".openstudio-ai-runtime.json"
+MAX_RUNTIME_METADATA_BYTES = 64 * 1024
+
+
+def validate_archive_metadata(path: Path, platform: str) -> None:
+    """Check declared runtime compatibility without extracting or running code."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = [entry for entry in archive.infolist()
+                       if Path(entry.filename.replace("\\", "/")).name == RUNTIME_METADATA_NAME]
+            if len(entries) != 1:
+                raise ValueError(f"Downloaded {platform} runtime must contain exactly one {RUNTIME_METADATA_NAME}")
+            entry = entries[0]
+            parts = entry.filename.replace("\\", "/").split("/")
+            if (entry.is_dir() or entry.flag_bits & 1 or stat.S_ISLNK(entry.external_attr >> 16)
+                    or parts[0] == "" or ".." in parts or ":" in parts[0]
+                    or not 0 < entry.file_size <= MAX_RUNTIME_METADATA_BYTES
+                    or entry.compress_size > MAX_RUNTIME_METADATA_BYTES + 1024):
+                raise ValueError(f"Downloaded {platform} runtime metadata entry is unsafe or exceeds the 64 KiB limit")
+            with archive.open(entry) as stream:
+                content = stream.read(MAX_RUNTIME_METADATA_BYTES + 1)
+            if len(content) != entry.file_size or len(content) > MAX_RUNTIME_METADATA_BYTES:
+                raise ValueError(f"Downloaded {platform} runtime metadata exceeds the 64 KiB limit")
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, zlib.error) as error:
+        raise ValueError(f"Downloaded {platform} runtime has invalid ZIP metadata") from error
+    try:
+        metadata = json.loads(content.decode("utf-8-sig"))
+    except (UnicodeError, ValueError, RecursionError) as error:
+        raise ValueError(f"Downloaded {platform} runtime metadata is not valid UTF-8 JSON") from error
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Downloaded {platform} runtime metadata must be a JSON object")
+    schema = metadata.get("schemaVersion")
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema < 2:
+        raise ValueError(f"Downloaded {platform} runtime metadata has an unsupported schemaVersion")
+    architecture, family = ARCHIVE_IDENTITIES[platform]
+    for field, expected in (("platform", platform), ("architecture", architecture), ("runtimeFamily", family)):
+        if metadata.get(field) != expected:
+            raise ValueError(f"Downloaded {platform} runtime metadata must declare {field}={expected}")
+    source = metadata.get("runtimeSource")
+    python_version = source.get("pythonVersion") if isinstance(source, dict) else None
+    if not isinstance(python_version, str) or not re.fullmatch(r"3\.(11|12)\.[0-9]+", python_version):
+        hint = repr(python_version[:80]) if isinstance(python_version, str) else "missing or invalid pythonVersion"
+        raise ValueError(f"Downloaded {platform} runtime requires metadata declaring Python 3.11 or 3.12; got {hint}")
 
 
 def validate_tag(value: str) -> str:
@@ -42,7 +93,11 @@ def build_plan(repository: str, runtime_version: str, release_tag: str = "", lin
 
 
 def validate_releases(plan: dict, releases: dict, asset_dir: Path | None = None) -> None:
+    if not isinstance(plan.get("platforms"), dict) or set(plan["platforms"]) != set(ASSETS):
+        raise ValueError("AI runtime selection must include exactly the Windows, macOS and Linux archives")
     for platform, expected in plan["platforms"].items():
+        if expected.get("fileName") != ASSETS[platform]:
+            raise ValueError(f"Unexpected selected {platform} runtime archive filename")
         tag = expected["releaseTag"]
         release = releases.get(tag)
         if not isinstance(release, dict) or release.get("tag_name") != tag:
@@ -69,6 +124,7 @@ def validate_releases(plan: dict, releases: dict, asset_dir: Path | None = None)
                 actual_hash = hashlib.file_digest(stream, "sha256").hexdigest()
             if actual_hash != digest.removeprefix("sha256:"):
                 raise ValueError(f"Downloaded {platform} runtime SHA-256 does not match its published asset")
+            validate_archive_metadata(path, platform)
 
 
 def main() -> None:
