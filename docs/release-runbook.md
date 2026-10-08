@@ -330,15 +330,16 @@ Linux when no override is configured. `OPENSTUDIO_AI_RUNTIME_LINUX_RELEASE_TAG`
 selects a separately published Linux archive without replacing the other
 platforms. `OPENSTUDIO_AI_RUNTIME_VERSION` is the combined catalog revision;
 installed status reads each archive's actual version from its runtime metadata.
-Before 0.1.04, publish and qualify `ai-runtime-v0.0.16` with Python 3.11.15,
-then select catalog revision `0.0.16` and that tag for Windows/macOS. Keep
+The published and qualified `ai-runtime-v0.0.16` uses Python 3.11.15.
+The corrected 0.1.05 candidate selects catalog revision `0.0.16` and that tag
+for Windows/macOS. Keep
 `ai-runtime-linux-v0.0.14` for the already-qualified Linux archive. The old
 Windows 0.0.13 base uses Python 3.10.20 and cannot satisfy Audio Generation;
 the downloaded-runtime installer does not migrate that interpreter.
 The 0.0.15 attempt failed before publication because macOS preparation required
 a diffq wheel that upstream does not provide for Python 3.11 ARM. Keep that tag
-unchanged. PR CI must qualify the corrected source with a macOS archive smoke
-build before creating the new component tag.
+unchanged. The corrected component passed its macOS archive smoke and all
+three platform publication checks before the 0.0.16 tag was selected.
 The release workflow verifies selected published asset identities, sizes and
 SHA-256 values, then checks the downloaded bytes before generating metadata.
 
@@ -596,7 +597,10 @@ records that version as Published; see the
 [current activation status and acceptance criteria](store-release-activation.md).
 It is not proof that the API can adopt a portal draft. The initial path below is
 historical guidance and a guarded capability, not a verified live result.
-`v0.1.04` uses the published-baseline path and its reviewed publishing policy.
+The `v0.1.04` application publication was stopped in Windows unattended
+uninstall qualification; no Store update was submitted. Its tag is retained.
+The corrected `v0.1.05` candidate uses the published-baseline path and its
+reviewed publishing policy.
 
 1. Merge the release and any release-preparation follow-up only after CI passes.
    Validate `docs/releases/<version>.md` on the final source, then push the stable
@@ -679,7 +683,9 @@ package with a different hash requires a new version, not an overwrite.
 
 ### Publication after certification
 
-The owner approved automatic publication for `v0.1.04`.
+The owner requested immediate release and automatic Store submission. After
+the unpublished `v0.1.04` attempt exposed an unattended-uninstall blocker,
+the reviewed follow-up policy applies that publication intent to `v0.1.05`.
 `packaging/msix/release-publishing.json` pins that tag and Store app to API
 `targetPublishMode=Immediate`. Both live preflights and submission use the same
 config. This changes only the matching update's publication timing; pricing,
