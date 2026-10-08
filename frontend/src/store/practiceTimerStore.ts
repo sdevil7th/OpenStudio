@@ -11,7 +11,14 @@ export const usePracticeTimerStore = create<PracticeTimerState & {
   refresh: async () => {
     if (get().pending) return;
     const request = ++revision;
-    try { const state = await nativeBridge.getPracticeTimer(); if (!get().pending && request === revision) set(state); }
+    try {
+      const state = await nativeBridge.getPracticeTimer();
+      if (!get().pending && request === revision) {
+        // Unchanged polls must not interrupt concurrent mounts elsewhere in the UI.
+        set(current => current.status === state.status && current.duration === state.duration && current.elapsed === state.elapsed
+          ? current : state);
+      }
+    }
     catch { /* A temporary UI disconnect must not invent timer progress. */ }
   },
   control: async (action, duration = 0) => {

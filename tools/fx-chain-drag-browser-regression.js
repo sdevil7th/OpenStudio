@@ -57,7 +57,11 @@ async page => {
   let dialog = page.getByRole('dialog', { name: 'FX chain for Drag one', exact: true });
   await dialog.locator('.fx-slot-item').nth(2).waitFor();
   const drag = async (from, to, outside = false) => {
-    const a = await dialog.getByTitle('Drag to reorder', { exact: true }).nth(from).boundingBox();
+    const handle = dialog.getByTitle('Drag to reorder', { exact: true }).nth(from);
+    // Raw mouse actions do not wait for the panel's enter transform to settle.
+    // Check actionability without clicking before reading gesture coordinates.
+    await handle.click({ trial: true });
+    const a = await handle.boundingBox();
     const z = outside ? { x: 10, y: 970, width: 0, height: 0 } : await dialog.locator('.fx-slot-item').nth(to).boundingBox();
     await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
     await page.mouse.down();
@@ -169,7 +173,9 @@ async page => {
   await dialog.getByRole('button', { name: 'Reorder OpenStudio Long FX 0', exact: true }).scrollIntoViewIfNeeded();
   check('Long FX list scroll viewport stays inside its panel', await dialog.locator('.fx-slots-list').evaluate(list =>
     list.scrollHeight > list.clientHeight && list.getBoundingClientRect().bottom <= list.closest('.fx-chain-panel-two-column').getBoundingClientRect().bottom + 1));
-  const longHandle = await dialog.getByRole('button', { name: 'Reorder OpenStudio Long FX 0', exact: true }).boundingBox();
+  const longHandleButton = dialog.getByRole('button', { name: 'Reorder OpenStudio Long FX 0', exact: true });
+  await longHandleButton.click({ trial: true });
+  const longHandle = await longHandleButton.boundingBox();
   const listBounds = await dialog.locator('.fx-slots-list').boundingBox();
   await page.mouse.move(longHandle.x + longHandle.width / 2, longHandle.y + longHandle.height / 2);
   await page.mouse.down();
