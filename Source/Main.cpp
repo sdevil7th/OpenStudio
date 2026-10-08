@@ -2354,13 +2354,30 @@ private:
 
         auto checks = std::make_shared<juce::Array<juce::var>>();
         auto inputEvidence = std::make_shared<juce::Array<juce::var>>();
+        auto frontendDocuments = std::make_shared<juce::Array<juce::var>>();
         auto steps = std::make_shared<std::vector<HarnessStep>>();
+        const auto addDocumentCheck = [steps, frontendDocuments](const juce::String& role,
+                                                               std::function<juce::DocumentWindow*()> getWindow)
+        {
+            steps->push_back({ role + "_single_frontend_document", 0, [getWindow, frontendDocuments, role]()
+            {
+                auto* window = getWindow();
+                auto* component = window != nullptr ? dynamic_cast<MainComponent*>(window->getContentComponent()) : nullptr;
+                const auto requests = component != nullptr ? component->getFrontendDocumentRequestCount() : -1;
+                auto* evidence = new juce::DynamicObject();
+                evidence->setProperty("role", role);
+                evidence->setProperty("documentRequests", requests);
+                frontendDocuments->add(juce::var(evidence));
+                return component != nullptr && component->hasFrontendStartupSucceeded() && requests == 1;
+            }});
+        };
 
         steps->push_back({ "main_frontend_ready", 0, [this]()
         {
             auto* component = mainWindow != nullptr ? mainWindow->getMainComponent() : nullptr;
             return component != nullptr && component->hasFrontendStartupSucceeded();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("main", [this]() { return mainWindow.get(); });
 
         const auto originalBounds = mainWindow->getBounds();
         const auto geometryBounds = originalBounds.withSizeKeepingCentre(1000, 700).translated(17, 13);
@@ -2444,6 +2461,17 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->prewarm(mixerBounds);
         }});
+       #if JUCE_MAC
+        // Exercise a document that actually began loading while hidden. Waiting
+        // only for readiness after show could miss the original cancellation.
+        steps->push_back({ "mixer_hidden_document_started", 0, [this]()
+        {
+            auto* window = mixerWindowManager != nullptr ? mixerWindowManager->getNativeWindow() : nullptr;
+            auto* component = window != nullptr ? dynamic_cast<MainComponent*>(window->getContentComponent()) : nullptr;
+            return window != nullptr && ! window->isVisible() && component != nullptr
+                && component->getFrontendDocumentRequestCount() == 1;
+        }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+       #endif
         steps->push_back({ "mixer_open", 700, [this, mixerBounds]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->open(mixerBounds);
@@ -2452,6 +2480,7 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("mixer", [this]() { return mixerWindowManager->getNativeWindow(); });
        #if JUCE_WINDOWS
         // Optional real desktop input: never infer this evidence from setBounds.
         const bool testDesktopInput = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_INPUT", "0") == "1";
@@ -2572,10 +2601,15 @@ private:
        #if JUCE_WINDOWS
         addInputChecks("mixer", [this]() { return mixerWindowManager->getNativeWindow(); });
        #endif
+        steps->push_back({ "mixer_hide", 300, [this]()
+        {
+            return mixerWindowManager != nullptr && mixerWindowManager->hide();
+        }});
         steps->push_back({ "mixer_focus", 300, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->focus();
         }});
+        addDocumentCheck("mixer_after_hide_show", [this]() { return mixerWindowManager->getNativeWindow(); });
         steps->push_back({ "mixer_close", 50, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->close();
@@ -2588,6 +2622,7 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("mixer_reopened", [this]() { return mixerWindowManager->getNativeWindow(); });
         steps->push_back({ "mixer_final_close", 2200, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->close();
@@ -2629,6 +2664,7 @@ private:
                 steps->push_back({ prefix + "_interactive_ready", 0, [this]() {
                     return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady() && pitchEditorInteractive;
                 }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                addDocumentCheck(prefix, [this]() { return pitchEditorWindowManager->getNativeWindow(); });
                 if (cycle == 0) {
                     steps->push_back({ "pitch_edit_with_main_minimized", 500, [this]() {
                         mainWindow->setMinimised(true);
@@ -2703,6 +2739,7 @@ private:
                 steps->push_back({ prefix + "_frontend_ready", 0, [this]() {
                     return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady();
                 }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                addDocumentCheck(prefix, [this]() { return pitchEditorWindowManager->getNativeWindow(); });
                 if (cycle == 0)
                     addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
                 steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
@@ -2726,6 +2763,7 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("midi", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
         addGeometryChecks("midi", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
        #if JUCE_WINDOWS
         addInputChecks("midi", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
@@ -2745,6 +2783,7 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("midi_reopened", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
         steps->push_back({ "midi_final_close", 2200, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -2784,6 +2823,7 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("plugin", [this, pluginSessionId]() { return pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow(); });
         steps->push_back({ "plugin_compact_native_resize", 900, [this, pluginSessionId, pluginBounds]()
         {
             auto* window = pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow();
@@ -2827,6 +2867,7 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addDocumentCheck("plugin_reopened", [this, pluginSessionId]() { return pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow(); });
         // Exercise the real engine removal paths while a different track's
         // editor stays open. Include an editor shifted by an earlier removal.
         for (const auto& chain : juce::StringArray { "track", "input", "master", "monitor" })
@@ -2922,7 +2963,7 @@ private:
         auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
         const std::weak_ptr<std::function<void()>> weakRunner = runner;
-        *runner = [this, reportFile, checks, inputEvidence, steps, stepIndex, stepAttempt, weakRunner, midiSessionId]() mutable
+        *runner = [this, reportFile, checks, inputEvidence, frontendDocuments, steps, stepIndex, stepAttempt, weakRunner, midiSessionId]() mutable
         {
             // Timers own the next invocation. The function must not own itself,
             // otherwise all check results survive application shutdown.
@@ -2940,6 +2981,7 @@ private:
                 root->setProperty("checks", juce::var(*checks));
                 root->setProperty("nativeBrowserComponents", MainComponent::getBrowserInstanceCounts());
                 root->setProperty("inputMeasurements", juce::var(*inputEvidence));
+                root->setProperty("frontendDocuments", juce::var(*frontendDocuments));
                 root->setProperty("platform", juce::SystemStats::getOperatingSystemName());
                 root->setProperty("multiMonitorDpi", "not_asserted");
                 root->setProperty("pitchState", handlePitchEditorSession("status", {}, MainComponent::WindowRole::main, {}));

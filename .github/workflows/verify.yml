@@ -36,6 +36,7 @@ jobs:
           tests.test_release_notes
           tests.test_build_process_lifecycle
           tests.test_juce_lv2_identifier_patch
+          tests.test_juce_mac_browser_navigation_patch
           tests.test_linux_qualification
           tests.test_linux_native_packaging
           tests.test_linux_abi

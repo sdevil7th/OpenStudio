@@ -10,6 +10,7 @@
 #include "AudioEngine.h"
 #include "AppUpdater.h"
 #include <functional>
+#include <atomic>
 #include <map>
 #include <set>
 #include <utility>
@@ -98,6 +99,7 @@ public:
     bool hasFrontendStartupSucceeded() const;
     bool hasFrontendStartupReachedTerminalState() const;
     juce::String getFrontendStartupStateDescription() const;
+    int getFrontendDocumentRequestCount() const noexcept;
 
     static void broadcastEventToAll(const juce::String& eventId, const juce::var& payload = {});
     static void broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload = {});
@@ -205,6 +207,7 @@ private:
     juce::String windowInstanceId;
     WindowCallbacks windowCallbacks;
     juce::File webuiDir;
+    std::atomic<int> frontendDocumentRequestCount { 0 };
     juce::Array<juce::var> deferredNativeFunctionNames;
     MessageMutationQueue messageMutations;
     juce::WebBrowserComponent::NativeFunction deferNativeMutation(const juce::String&, juce::WebBrowserComponent::NativeFunction);

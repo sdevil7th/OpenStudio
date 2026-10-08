@@ -9499,6 +9499,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        }
 
                        const auto mimeType = getMimeTypeForFrontendFile(requestedFile);
+                        if (relativePath == "index.html")
+                        {
+                            const auto documentRequest = frontendDocumentRequestCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                            juce::Logger::writeToLog("Frontend document served: role=" + getWindowRoleQueryValue(windowRole)
+                                                     + " count=" + juce::String(documentRequest));
+                        }
                        if (relativePath == "index.html" || relativePath.endsWith(".js") || relativePath.endsWith(".css"))
                            juce::Logger::writeToLog("Frontend resource served: " + relativePath + " (" + mimeType + ")");
 
@@ -16733,6 +16739,11 @@ bool MainComponent::hasFrontendStartupSucceeded() const
 juce::String MainComponent::getFrontendStartupStateDescription() const
 {
     return describeFrontendStartupState(frontendStartupState);
+}
+
+int MainComponent::getFrontendDocumentRequestCount() const noexcept
+{
+    return frontendDocumentRequestCount.load(std::memory_order_relaxed);
 }
 
 #if JUCE_WINDOWS

@@ -130,6 +130,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEVST3StatePatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEAutomationPatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELV2IdentifierPatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEMacBrowserNavigationPatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELinuxBrowserPatch.cmake")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" "-DJUCE_SOURCE_DIR=${juce_SOURCE_DIR}"
