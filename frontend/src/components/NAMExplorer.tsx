@@ -6979,8 +6979,6 @@ export function NAMExplorer({
     signedInUser: tone3000Session.user,
     actionBusy: rackActionsBusy,
     loading: liveBusy || catalogBusy || query !== committedQuery,
-    filterScopeDetail: sourceFlow !== "fx" && catalogMode === "live"
-      ? "Creator, license, instrument and character filters apply to loaded results." : undefined,
     searchLabel: sourceFlow === "fx" ? "Search OpenStudio FX" : sourceFlow === "ir" ? "Search IR sources" : sourceFlowConfig.searchPlaceholder,
     searchText: query.trim() || sourceFlowConfig.defaultQuery || sourceFlowConfig.searchPlaceholder,
     searchAction: sourceFlow === "fx" ? "Search FX" : sourceFlow === "ir" ? "Search IRs" : "Search Live",

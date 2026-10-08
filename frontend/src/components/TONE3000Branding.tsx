@@ -6,13 +6,13 @@ import mark from "../assets/tone3000/t3k-mark.svg";
 
 const logoSizes = {
   default: "h-6 w-[158px]",
-  small: "h-[18px] w-28",
+  small: "h-[18px] w-28 @max-[360px]/tone3000:h-3.5 @max-[360px]/tone3000:w-[88px]",
   source: "h-5 w-[126px]",
   introduction: "h-8 w-[210px]",
 } as const;
 
 export function TONE3000Logo({ compact = false, size = "default" }: { compact?: boolean; size?: keyof typeof logoSizes }) {
-  return <img className={`block max-w-full flex-none object-contain ${compact ? "t3k-mark h-4 w-[47px]" : `tone3000-logo ${logoSizes[size]}`}`} src={compact ? mark : logo} alt="TONE3000" />;
+  return <img className={`block max-w-full flex-none object-contain ${compact ? `t3k-mark ${size === "small" ? "h-3 w-9" : "h-4 w-[47px]"}` : `tone3000-logo ${logoSizes[size]}`}`} src={compact ? mark : logo} alt="TONE3000" />;
 }
 
 export function TONE3000Avatar({ username, url }: { username: string; url?: string | null }) {
@@ -23,20 +23,22 @@ export function TONE3000Avatar({ username, url }: { username: string; url?: stri
   </span>;
 }
 
-export function TONE3000Creator({ username, avatarUrl }: { username: string; avatarUrl?: string | null }) {
-  return <span className="tone3000-creator inline-flex min-w-0 items-center gap-1.5 text-[11px] text-[#c9d0db]"><TONE3000Avatar username={username} url={avatarUrl} /><span className="min-w-0 truncate" title={username}>@{username.replace(/^@/, "")}</span></span>;
+export function TONE3000Creator({ username, avatarUrl, account = false }: { username: string; avatarUrl?: string | null; account?: boolean }) {
+  const handle = `@${username.replace(/^@/, "")}`;
+  const label = account ? `Signed in to TONE3000 as ${handle}` : handle;
+  return <span className={`tone3000-creator inline-flex min-w-0 items-center gap-1.5 text-[11px] text-[#c9d0db] ${account ? "tone3000-account rounded-full border border-white/10 bg-white/5 py-1 pl-1 pr-2.5" : ""}`} role={account ? "group" : undefined} aria-label={account ? label : undefined} title={label}><TONE3000Avatar username={username} url={avatarUrl} /><span className="min-w-0 truncate">{handle}</span></span>;
 }
 
 export function TONE3000LibraryHeader({ user, connected, busy, onBrowse, embedded = false }: {
   user?: TONE3000User | null; connected: boolean; busy: boolean; onBrowse: () => void; embedded?: boolean;
 }) {
-  return <section className={`tone3000-library-header @container/tone3000 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-md text-[#f1f1f1] ${embedded ? "flex-1 py-1.5" : "border border-[#303741] bg-[#11151b] p-3"}`} aria-label="TONE3000 community library">
-    <div className="tone3000-library-identity flex min-w-0 max-w-full flex-wrap items-center gap-2.5">
-      <TONE3000Logo size={embedded ? "source" : "default"} />
-      {connected && user ? <TONE3000Creator username={user.username} avatarUrl={user.avatar_url} /> : <span className="text-xs text-neutral-400">{connected ? "Connected account" : "Community captures & IRs"}</span>}
+  return <section className={`tone3000-library-header @container/tone3000 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-md text-[#f1f1f1] ${embedded ? "ml-auto max-w-[28rem] flex-1 basis-[20rem] py-1.5" : "border border-[#303741] bg-[#11151b] p-3"}`} aria-label="TONE3000 community library">
+    <div className="tone3000-library-identity flex min-w-0 flex-1 basis-[12rem] items-center gap-2.5">
+      <TONE3000Logo size="small" />
+      {connected && user ? <TONE3000Creator account username={user.username} avatarUrl={user.avatar_url} /> : <span className="min-w-0 truncate text-[11px] text-neutral-400">{connected ? "Connected account" : "Community captures & IRs"}</span>}
     </div>
-    <button type="button" className="tone3000-browse-button flex min-h-11 flex-none items-center justify-center gap-2.5 rounded border border-[#525d69] bg-[#222a34] px-3 py-2 text-xs text-white enabled:cursor-pointer enabled:hover:bg-[#303a47] disabled:cursor-wait disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#80bdff] @max-[280px]/tone3000:w-full" onClick={onBrowse} disabled={busy} aria-busy={busy || undefined}>
-      <TONE3000Logo compact /><span>{busy ? "Opening library…" : "Browse TONE3000"}</span>
+    <button type="button" className="tone3000-browse-button ml-auto flex min-h-8 flex-none items-center justify-center gap-2 rounded border border-[#525d69] bg-[#222a34] px-2 py-1 text-[11px] text-white enabled:cursor-pointer enabled:hover:bg-[#303a47] disabled:cursor-wait disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#80bdff]" onClick={onBrowse} disabled={busy} aria-busy={busy || undefined} aria-label="Browse TONE3000" title={busy ? "Opening TONE3000 library…" : "Browse TONE3000"}>
+      <span>Browse</span><TONE3000Logo compact size="small" />
     </button>
   </section>;
 }

@@ -179,6 +179,11 @@
   cursor: grabbing;
 }
 
+.fx-slot-item.drop-target {
+  border-color: #22d3ee;
+  box-shadow: inset 0 0 0 1px #22d3ee;
+}
+
 .fx-drag-handle {
   color: #525252;
   font-size: 16px;
@@ -189,6 +194,27 @@
 
 .fx-drag-handle:hover {
   color: #a3a3a3;
+}
+
+.fx-reorder-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  touch-action: none;
+}
+
+.fx-reorder-handle:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 1px;
+}
+
+.fx-slot-item.dragging .fx-reorder-handle {
+  cursor: grabbing;
 }
 
 .fx-slot-info {

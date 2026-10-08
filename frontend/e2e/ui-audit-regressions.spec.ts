@@ -1,4 +1,25 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// Run the same real-browser regressions used during layout/interaction review.
+// Keeping one harness prevents local checks and hosted Chromium/WebKit checks
+// from drifting apart.
+for (const [name, filename] of [
+  ['FX pointer reordering synchronizes all chains and protects pending edits', 'fx-chain-drag-browser-regression.js'],
+  ['TONE3000 library fits desktop and compact hosts with accessible capture details', 'tone-library-layout-browser-regression.js'],
+]) {
+  test(name, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
+    await page.goto('/');
+    const source = readFileSync(resolve(testInfo.config.rootDir, '../../tools', filename), 'utf8');
+    const run = new Function(`return (${source}\n);`)() as (page: import('@playwright/test').Page) => Promise<{ status: string; checks: number }>;
+    const report = await run(page);
+    await testInfo.attach('browser-regression-report', { body: JSON.stringify(report, null, 2), contentType: 'application/json' });
+    expect(report.status).toBe('pass');
+    expect(report.checks).toBeGreaterThan(0);
+  });
+}
 
 async function ready(page: import('@playwright/test').Page) {
   await page.addInitScript(() => {

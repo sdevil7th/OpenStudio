@@ -236,6 +236,44 @@ juce::var AudioEngine::runFXStageAutomationRegression()
     const auto check = [&] (const char* name, bool pass) {
         auto* item = new juce::DynamicObject(); item->setProperty("name", name); item->setProperty("pass", pass); checks.add(juce::var(item));
     };
+    // Exercise the same public mutation/readback endpoints as the WebView,
+    // including the immutable processor lists acquired by audio callbacks.
+    const auto orderTrackId = addTrack("fx-order-regression", "audio");
+    for (const bool input : { false, true })
+    {
+        const bool inserted = addTrackBuiltInFX(orderTrackId, "OpenStudio Gain Phase", input)
+            && addTrackBuiltInFX(orderTrackId, "OpenStudio Delay", input);
+        auto* const orderTrack = trackMap.count(orderTrackId) ? trackMap.at(orderTrackId) : nullptr;
+        const auto snapshot = [&] {
+            return orderTrack == nullptr ? std::shared_ptr<const std::vector<std::shared_ptr<juce::AudioProcessor>>>()
+                : input ? orderTrack->getInputFXSnapshot() : orderTrack->getTrackFXSnapshot();
+        };
+        const auto reorder = [&] (int from, int to) {
+            return input ? reorderTrackInputFX(orderTrackId, from, to) : reorderTrackFX(orderTrackId, from, to);
+        };
+        const auto beforeOrder = snapshot();
+        const bool moved = inserted && reorder(0, 1);
+        const auto afterOrder = snapshot();
+        const auto readback = input ? getTrackInputFX(orderTrackId) : getTrackFX(orderTrackId);
+        const bool published = moved && beforeOrder && afterOrder
+            && beforeOrder->size() == 2 && afterOrder->size() == 2
+            && afterOrder->at(0) == beforeOrder->at(1)
+            && afterOrder->at(1) == beforeOrder->at(0)
+            && readback.size() == 2
+            && readback[0]["name"].toString() == afterOrder->at(0)->getName()
+            && readback[1]["name"].toString() == afterOrder->at(1)->getName();
+        check(input ? "input_reorder_publishes_processor_order" : "track_reorder_publishes_processor_order", published);
+        check(input ? "input_reorder_preserves_old_snapshot" : "track_reorder_preserves_old_snapshot",
+            published && beforeOrder->at(0)->getName() == "OpenStudio Gain Phase"
+                && beforeOrder->at(1)->getName() == "OpenStudio Delay");
+        const bool reversed = moved && reorder(1, 0);
+        const auto restoredOrder = snapshot();
+        check(input ? "input_reorder_inverse_restores_processors" : "track_reorder_inverse_restores_processors",
+            reversed && beforeOrder && restoredOrder && *beforeOrder == *restoredOrder);
+        check(input ? "input_reorder_rejects_invalid_indices" : "track_reorder_rejects_invalid_indices",
+            !reorder(-1, 0) && !reorder(0, 2) && snapshot() == restoredOrder);
+    }
+    removeTrack(orderTrackId);
     check("insert", addMasterBuiltInFX("OpenStudio Gain Phase") && addMasterBuiltInFX("OpenStudio Delay"));
     const auto params = getPluginParameters("master", 0, false);
     juce::String id;
@@ -254,7 +292,15 @@ juce::var AudioEngine::runFXStageAutomationRegression()
     const auto manualState = getMasterPluginState(0);
     apply(0.0, 0);
     check("recall_reclaims_constant_read", setMasterPluginState(0, manualState) && std::abs(apply(0.0, 0) - 0.25f) < 1.0e-5f);
+    const auto beforeMasterOrder = std::atomic_load(&realtimeMasterFXSnapshot);
     check("reorder", reorderMasterFX(0, 1) && std::abs(apply(0.0, 1) - 0.25f) < 1.0e-5f);
+    const auto afterMasterOrder = std::atomic_load(&realtimeMasterFXSnapshot);
+    check("master_reorder_publishes_slot_order", beforeMasterOrder && afterMasterOrder
+        && beforeMasterOrder->slots.size() == 2 && afterMasterOrder->slots.size() == 2
+        && afterMasterOrder->slots[0].slotId == beforeMasterOrder->slots[1].slotId
+        && afterMasterOrder->slots[1].slotId == beforeMasterOrder->slots[0].slotId
+        && afterMasterOrder->slots[0].name == "OpenStudio Delay"
+        && afterMasterOrder->slots[1].name == "OpenStudio Gain Phase");
     check("remove_inert", removeMasterFX(1) && resolveMasterAutomation(id) == nullptr);
     check("restore_identity", setFXStageState("master", juce::JSON::toString(before)) && std::abs(apply(1.0, 0) - 0.75f) < 1.0e-5f);
     beginTouchAutomation("master", id); setAutomationMode("master", id, "touch"); beginTouchAutomation("master", id);

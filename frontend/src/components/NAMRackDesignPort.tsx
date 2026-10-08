@@ -164,7 +164,6 @@ export type NAMSourceFlowDesignConfig = {
   authBusy?: boolean;
   actionBusy?: boolean;
   loading?: boolean;
-  filterScopeDetail?: string;
   statusAction?: { id: NAMSourceFlowDesignActionId; label: string };
   searchLabel: string;
   searchText: string;
@@ -6206,11 +6205,13 @@ function SourceFlowSurface({
   config: NAMSourceFlowDesignConfig;
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
+  const [compactDetailsOpen, setCompactDetailsOpen] = useState(false);
   const emit = (
     action: NAMSourceFlowDesignActionId,
     value = "",
     rowId = "",
   ) => {
+    if (action === "select-row") setCompactDetailsOpen(true);
     onAction({
       type: "nam-source-flow-design-port",
       instanceId: "native-source-flow",
@@ -6221,6 +6222,14 @@ function SourceFlowSurface({
   };
   const feedListRef = useRef<HTMLDivElement | null>(null);
   const appendSentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (config.captures?.items.length || config.captures?.busy || config.captures?.error)
+      setCompactDetailsOpen(true);
+  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error]);
+  const actionStyle: NativeStyle = {
+    "--tone-action-count": Math.max(1, config.actions.length),
+    "--tone-action-width": `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
+  };
   const architectureFilters = config.filters.filter((filter) =>
     filter.id.startsWith("arch-"),
   );
@@ -6374,10 +6383,7 @@ function SourceFlowSurface({
             <div
               className="tone-action-grid"
               aria-label={`Preview and use ${sourceResourceLabel} actions`}
-              style={{
-                gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
-                maxWidth: `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
-              }}
+              style={actionStyle}
             >
               {config.actions.map((action) => (
                 <button
@@ -6415,19 +6421,17 @@ function SourceFlowSurface({
           className="tone-browser-feed tone-library-panel"
           aria-label={`${config.sourceLabel} browse feed`}
         >
-          <div className="tone-library-heading">
+          <div className="tone-library-heading" title={resultSummary}>
             <div>
               <span>{sourceLibraryLabel}</span>
               <strong title={config.feedTitle}>{config.feedTitle}</strong>
             </div>
-            <em>{resultSummary}</em>
-          </div>
-          <div className="tone-connection-state" data-auth={config.authState} title={config.authDetail}>
-            <i /><span role="status">{config.authTitle}</span>
-            {config.statusAction && <button type="button" disabled={config.authBusy} onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>}
+            <div className="tone-connection-state" data-auth={config.authState} title={config.authDetail}>
+              <i /><span role="status">{config.authTitle}</span>
+              {config.statusAction && <button type="button" disabled={config.authBusy} onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>}
+            </div>
           </div>
           {config.authState !== "connected" && config.authState !== "local" && <p role="status" className="px-2 text-xs text-neutral-300">{config.authDetail}</p>}
-          {config.filterScopeDetail && <p className="px-2 text-[10px] text-neutral-400">{config.filterScopeDetail}</p>}
           <div className="tone-search-panel">
             <Search aria-hidden="true" />
             <input
@@ -6512,62 +6516,57 @@ function SourceFlowSurface({
             </select>
           </div>
           {config.selectedAvailable ? (
-            <div
+            <details
               className="tone-compact-selection"
-              aria-label={`Selected ${sourceResourceLabel} actions`}
+              open={compactDetailsOpen}
+              onToggle={(event) => setCompactDetailsOpen(event.currentTarget.open)}
             >
-              <div className="tone-compact-selection-copy">
-                <span>Selected</span>
-                <strong title={config.selectedName}>
-                  {config.selectedName}
-                </strong>
-              </div>
-              {config.mode !== "fx" && <div className="tone3000-compact-details col-span-full row-start-2 flex min-w-0 flex-wrap items-center gap-3">
-                {config.selectedArtUrl && <img className="size-14 shrink-0 rounded object-cover" src={config.selectedArtUrl} alt="" referrerPolicy="no-referrer" />}
-                <div className="flex min-w-0 flex-1 flex-col gap-2">
-                  {config.selectedCreator && <TONE3000Creator username={config.selectedCreator} avatarUrl={config.selectedCreatorAvatarUrl} />}
-                  <span className="text-xs text-neutral-300">{[config.selectedFormat, ...config.selectedTags].filter(Boolean).join(" · ")}</span>
+              <summary className="tone-compact-selection-summary" aria-label={`Show selected ${sourceResourceLabel} details and actions`}>
+                <span className="tone-compact-selection-copy">
+                  <span>Selected · details & actions</span>
+                  <strong title={config.selectedName}>{config.selectedName}</strong>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </summary>
+              <div className="tone-compact-selection-body flex min-w-0 flex-col gap-3 p-2.5">
+                {config.mode !== "fx" && <div className="tone3000-compact-details flex min-w-0 flex-wrap items-center gap-3">
+                  {config.selectedArtUrl && <img className="size-14 shrink-0 rounded object-cover" src={config.selectedArtUrl} alt="" referrerPolicy="no-referrer" />}
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    {config.selectedCreator && <TONE3000Creator username={config.selectedCreator} avatarUrl={config.selectedCreatorAvatarUrl} />}
+                    <span className="text-xs text-neutral-300">{[config.selectedFormat, ...config.selectedTags].filter(Boolean).join(" · ")}</span>
+                  </div>
+                  {config.selectedDescription && <details className="basis-full text-xs text-neutral-300"><summary className="cursor-pointer py-2">Creator’s description</summary><p className="whitespace-pre-wrap break-words leading-relaxed">{config.selectedDescription}</p></details>}
+                </div>}
+                <div className="tone-action-grid tone-compact-actions" style={actionStyle}>
+                  {config.actions.map((action) => (
+                    <button
+                      key={`compact-${action.id}-${action.label}`}
+                      type="button"
+                      disabled={action.disabled}
+                      data-primary={Boolean(action.primary)}
+                      data-source-flow-action={action.id}
+                      onClick={() => emit(action.id, "", config.selectedRowId || "")}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
                 </div>
-                {config.selectedDescription && <details className="basis-full text-xs text-neutral-300"><summary className="cursor-pointer py-2">Creator’s description</summary><p className="whitespace-pre-wrap break-words leading-relaxed">{config.selectedDescription}</p></details>}
-              </div>}
-              <div
-                className="tone-action-grid tone-compact-actions col-start-2 row-start-1"
-                style={{
-                  gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
-                }}
-              >
-                {config.actions.map((action) => (
-                  <button
-                    key={`compact-${action.id}-${action.label}`}
-                    type="button"
-                    disabled={action.disabled}
-                    data-primary={Boolean(action.primary)}
-                    data-source-flow-action={action.id}
-                    onClick={() =>
-                      emit(action.id, "", config.selectedRowId || "")
-                    }
-                  >
-                    {action.label}
-                  </button>
-                ))}
+                {config.captures ? <div className="tone-compact-capture-picker">
+                  <NAMToneCapturePicker
+                    title={config.captures.title}
+                    items={config.captures.items}
+                    selectedId={config.captures.selectedId}
+                    busy={config.captures.busy}
+                    error={config.captures.error}
+                    showUse
+                    compact
+                    onSelect={(rowId) => emit("select-capture", "", rowId)}
+                    onAudition={(rowId) => emit("preview", "", rowId)}
+                    onUse={(rowId) => emit("use-selection", "", rowId)}
+                  />
+                </div> : null}
               </div>
-            </div>
-          ) : null}
-          {config.selectedAvailable && config.captures ? (
-            <div className="tone-compact-capture-picker">
-              <NAMToneCapturePicker
-                title={config.captures.title}
-                items={config.captures.items}
-                selectedId={config.captures.selectedId}
-                busy={config.captures.busy}
-                error={config.captures.error}
-                showUse
-                compact
-                onSelect={(rowId) => emit("select-capture", "", rowId)}
-                onAudition={(rowId) => emit("preview", "", rowId)}
-                onUse={(rowId) => emit("use-selection", "", rowId)}
-              />
-            </div>
+            </details>
           ) : null}
           <div
             className="tone-feed-list"

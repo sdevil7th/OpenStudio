@@ -12,9 +12,9 @@ retain their creators' licenses.
 ## Sign in and browse
 
 Open the capture or IR library from the Amp, Pedal NAM, or Cab signal block.
-Choose **Browse TONE3000** or **Connect TONE3000**. A signed-out user sees the
-community introduction; **Continue** opens TONE3000 in the default browser to
-sign in and select a tone. The returned tone opens its capture details in the
+Choose **Browse** beside the T3K logo or **Connect TONE3000**. A signed-out user
+sees the community introduction; **Continue** opens TONE3000 in the default
+browser to sign in and select a tone. The returned tone opens its capture details in the
 rack. Choose the exact capture, then **Audition** or **Use**.
 Connecting does not block the rest of the rack. A release build includes the
 publisher's OAuth client configuration; musicians do **not** need an API key.
@@ -30,17 +30,23 @@ Typing starts a search after 400 ms; Enter submits immediately. Changing the
 query, architecture, source or sort cancels the previous search and prevents its
 results from replacing the latest request. A spinner also appears while updating
 an already populated list. Creator, license, instrument and character filters
-apply to the loaded results, as indicated in the UI. Relevance, newest and other
-provider-supported sorts are sent to TONE3000; local sort choices are labelled.
+apply to the loaded results. Relevance, newest and other provider-supported
+sorts are sent to TONE3000; local sort choices are labelled.
 
-### Community presentation (development checkout, October 4, 2026)
+### Community presentation (development checkout, October 8, 2026)
 
 The library uses TONE3000's supplied full logo at entry points and in its header,
-with the compact T3K mark for the persistent **Browse TONE3000** button and loaded
+with the compact T3K mark after **Browse** for the persistent button and on loaded
 tone attribution. Results and details show artwork, title, gear, NAM/IR format,
 creator username and avatar when supplied. Details also expose the creator's
 description and capture selector. The header shows the connected username and
-avatar, with a fallback when the profile or image is unavailable.
+avatar, with initials when the image is unavailable. A circle such as **AD** is
+the signed-in account's initials. The button retains **Browse TONE3000** as its
+accessible name. The header and library controls adapt to available width and
+height so the scrolling tone list has more room at compact window sizes.
+In compact library views, open **Selected · details & actions** for the selected
+tone and capture controls; loading captures opens it automatically. The library
+tabs scroll horizontally in narrow hosts, keeping all six views available.
 
 **Favorites**, **Created**, and **Downloaded** are the connected account's
 TONE3000 collections. **Installed** and **Local Favorites** refer to this
@@ -56,9 +62,12 @@ Older manifests without artwork use a placeholder. Click the loaded tone's
 attribution to reopen its details. The compact library retains these details
 and the capture selector in its scrolling panel.
 
-This follows the [TONE3000 design requirements](https://www.tone3000.com/api#design-requirements)
-using their [official logo assets](https://www.tone3000.com/TONE3000%20Logos.zip).
-It describes uncommitted development work, not a shipped release or partner
+The [TONE3000 design requirements](https://www.tone3000.com/api#design-requirements)
+require branding, creator attribution and the signed-in avatar and username on
+tone lists, while allowing layouts to match the host application. OpenStudio
+uses their [official logo assets](https://www.tone3000.com/TONE3000%20Logos.zip),
+including the compact T3K mark for small controls.
+This guide describes the development checkout, not a shipped release or partner
 approval. Local browser checks use deterministic fixtures; a real authenticated
 Select round trip and provider review remain release acceptance checks.
 

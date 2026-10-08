@@ -284,6 +284,22 @@ jobs:
           $process = Start-Process -FilePath $exe -ArgumentList @("--updater-self-test", "`"$report`"") -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Signed updater regression failed." }
 
+      - name: Verify native FX processing order and automation (Windows Release)
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_FXStageAutomationRegression.json"
+          ./tools/run-free-plugin-headless-regression.ps1 -AppPath $exe -ReportPath $report -CaseName stage-automation
+
+      - name: Retain native FX order regression evidence (Windows)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-windows-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
       - name: Run render and export regression matrix
         shell: pwsh
         run: |
@@ -463,6 +479,22 @@ jobs:
           "$APP_BUNDLE/Contents/MacOS/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
           "$APP_BUNDLE/Contents/Helpers/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
 
+      - name: Verify native FX processing order and automation (macOS Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_FXStageAutomationRegression.json"
+          "$APP_BUNDLE/Contents/MacOS/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
+
+      - name: Retain native FX order regression evidence (macOS)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
       - name: Run macOS native-window lifecycle smoke test
         shell: pwsh
         run: |
@@ -560,6 +592,22 @@ jobs:
         run: |
           xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
           "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
+
+      - name: Verify native FX processing order and automation (Linux Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_FXStageAutomationRegression.json"
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
+
+      - name: Retain native FX order regression evidence (Linux)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
 
       - name: Test native package construction
         run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v

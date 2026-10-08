@@ -48,6 +48,7 @@ import { editFXStage } from "../utils/stageFXHistory";
 import { useShallow } from "zustand/react/shallow";
 import { denormalizeParamValue } from "../utils/builtInParamValue";
 import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
+import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
 import {
   activateShortcutContext,
   getActiveShortcutContext,
@@ -244,6 +245,21 @@ export function FXChainPanel({
   const [fxSlots, setFxSlots] = useState<FXSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
+  const fxSlotsListRef = useRef<HTMLDivElement>(null);
+  const fxDragRef = useRef<{
+    pointerId: number;
+    fromIndex: number;
+    startX: number;
+    startY: number;
+    clientX: number;
+    clientY: number;
+    active: boolean;
+  } | null>(null);
+  const fxDragScrollFrameRef = useRef<number | null>(null);
+  const reorderingRef = useRef(false);
+  const [reordering, setReordering] = useState(false);
+  const reorderFocusRef = useRef<{ instanceId?: string; index: number } | null>(null);
   const [selectedFxIndex, setSelectedFxIndex] = useState<number | null>(null);
   const availablePluginSearchRef = useRef<HTMLInputElement>(null);
   const [addingPlugin, setAddingPlugin] = useState<string | null>(null);
@@ -923,7 +939,7 @@ export function FXChainPanel({
       onClose();
       return "handled";
     }
-    if (addingRef.current || openingRef.current) return "claimed_noop";
+    if (addingRef.current || openingRef.current || reorderingRef.current) return "claimed_noop";
     if (actionId === "track.openSelectedFxChain") {
       return chainType === "track" && useDAWStore.getState().selectedTrackId === trackId
         ? "handled"
@@ -1008,7 +1024,10 @@ export function FXChainPanel({
     const fallback = getActiveShortcutContext();
     const unregisterSurface = registerShortcutSurface(
       context,
-      () => "unmatched",
+      (event) => reorderingRef.current
+        && (matchesActionShortcut(event, "edit.undo") || matchesActionShortcut(event, "edit.redo"))
+        ? "claimed_noop"
+        : "unmatched",
       fallback,
     );
     const unregisterActions = registerScopedActionExecutor(
@@ -1083,29 +1102,20 @@ export function FXChainPanel({
     [chainType, trackId],
   );
 
-  const handleDragStart = (index: number) => {
-    setDraggedIndex(index);
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
-
-  const handleDrop = async (e: React.DragEvent, dropIndex: number) => {
-    e.preventDefault();
-    if (draggedIndex === null || draggedIndex === dropIndex) {
-      setDraggedIndex(null);
-      return;
-    }
-
+  const handleReorder = async (fromIndex: number, dropIndex: number) => {
+    if (reorderingRef.current || fromIndex === dropIndex) return;
+    reorderingRef.current = true;
+    setReordering(true);
+    const focusedHandle = document.activeElement?.matches(".fx-reorder-handle");
+    if (focusedHandle) reorderFocusRef.current = { instanceId: fxSlots.find(fx => fx.index === fromIndex)?.instanceId, index: fromIndex };
     try {
       let success = false;
       if (chainType === "master") {
-        success = await editFXStage("master", "Reorder master FX", () => nativeBridge.reorderMasterFX(draggedIndex, dropIndex));
+        success = await editFXStage("master", "Reorder master FX", () => nativeBridge.reorderMasterFX(fromIndex, dropIndex));
       } else {
         success = await reorderTrackFXWithUndo(
           trackId,
-          draggedIndex,
+          fromIndex,
           dropIndex,
           chainType,
         );
@@ -1113,16 +1123,130 @@ export function FXChainPanel({
 
       if (success) {
         console.log(
-          `[FXChain] Reordered ${chainType} FX from ${draggedIndex} to ${dropIndex}`,
+          `[FXChain] Reordered ${chainType} FX from ${fromIndex} to ${dropIndex}`,
         );
+        setSelectedFxIndex(dropIndex);
+        setExpandedJSFX(null);
+        setExpandedPitchCorrector(null);
+        setExpandedParamsFx(null);
+        setExpandedPresetsFx(null);
+        if (reorderFocusRef.current) reorderFocusRef.current.index = dropIndex;
         await loadPlugins();
         notifyFXChainChanged({ trackId, chainType });
+      } else {
+        useDAWStore.getState().showToast("Could not reorder the FX chain.", "error");
       }
     } catch (e) {
       console.error("[FXChain] Failed to reorder:", e);
+      useDAWStore.getState().showToast("Could not reorder the FX chain.", "error");
     } finally {
-      setDraggedIndex(null);
+      reorderingRef.current = false;
+      setReordering(false);
     }
+  };
+
+  useEffect(() => {
+    const focus = reorderFocusRef.current;
+    if (loading || reordering || !focus) return;
+    const index = focus.instanceId ? fxSlots.find(fx => fx.instanceId === focus.instanceId)?.index : focus.index;
+    if (index === undefined) return;
+    fxSlotsListRef.current?.querySelector<HTMLButtonElement>(`[data-fx-slot-index="${index}"] .fx-reorder-handle`)?.focus();
+    reorderFocusRef.current = null;
+  }, [fxSlots, loading, reordering]);
+
+  // Windows registers a file-only OLE drop target over the WebView. Internal
+  // HTML5 drag/drop is therefore rejected there; pointer capture stays in the
+  // WebView and also handles touch/pen without entering the OS drag loop.
+  const fxDropTargetAt = (clientX: number, clientY: number) => {
+    const row = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-fx-slot-index]");
+    if (!row || !fxSlotsListRef.current?.contains(row)) return null;
+    return Number(row.dataset.fxSlotIndex);
+  };
+
+  const clearFXDrag = () => {
+    if (fxDragScrollFrameRef.current !== null) cancelAnimationFrame(fxDragScrollFrameRef.current);
+    fxDragScrollFrameRef.current = null;
+    fxDragRef.current = null;
+    setDraggedIndex(null);
+    setDropTargetIndex(null);
+  };
+
+  useEffect(() => () => {
+    if (fxDragScrollFrameRef.current !== null) cancelAnimationFrame(fxDragScrollFrameRef.current);
+  }, []);
+
+  const startFXDragScroll = () => {
+    if (fxDragScrollFrameRef.current !== null) return;
+    let previousTime: number | null = null;
+    const scroll = (time: number) => {
+      const drag = fxDragRef.current;
+      const list = fxSlotsListRef.current;
+      if (!drag?.active || !list) {
+        fxDragScrollFrameRef.current = null;
+        return;
+      }
+      const elapsed = previousTime === null ? 16 : Math.min(32, time - previousTime);
+      previousTime = time;
+      const bounds = list.getBoundingClientRect();
+      if (drag.clientX >= bounds.left && drag.clientX <= bounds.right
+        && drag.clientY >= bounds.top && drag.clientY <= bounds.bottom) {
+        const edge = Math.min(48, bounds.height / 4);
+        const direction = drag.clientY < bounds.top + edge
+          ? -(bounds.top + edge - drag.clientY) / edge
+          : drag.clientY > bounds.bottom - edge
+            ? (drag.clientY - (bounds.bottom - edge)) / edge
+            : 0;
+        if (direction !== 0) {
+          list.scrollTop += direction * elapsed * 0.6;
+          setDropTargetIndex(fxDropTargetAt(drag.clientX, drag.clientY));
+        }
+      }
+      fxDragScrollFrameRef.current = requestAnimationFrame(scroll);
+    };
+    fxDragScrollFrameRef.current = requestAnimationFrame(scroll);
+  };
+
+  const handleFXPointerDown = (event: React.PointerEvent<HTMLButtonElement>, index: number) => {
+    if (event.button !== 0 || !event.isPrimary || reorderingRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.focus();
+    setSelectedFxIndex(index);
+    fxDragRef.current = {
+      pointerId: event.pointerId,
+      fromIndex: index,
+      startX: event.clientX,
+      startY: event.clientY,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      active: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleFXPointerMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = fxDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag.clientX = event.clientX;
+    drag.clientY = event.clientY;
+    if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    drag.active = true;
+    setDraggedIndex(drag.fromIndex);
+    setDropTargetIndex(fxDropTargetAt(event.clientX, event.clientY));
+    startFXDragScroll();
+  };
+
+  const handleFXPointerUp = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = fxDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = drag.active ? fxDropTargetAt(event.clientX, event.clientY) : null;
+    clearFXDrag();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (target !== null) void handleReorder(drag.fromIndex, target);
   };
 
   const handleToggleJSFXSliders = async (fxIndex: number) => {
@@ -1402,10 +1526,10 @@ export function FXChainPanel({
         {pitchEntry && <PitchFXEditorEntry key={pitchEntry.id} origin={pitchEntry.origin}
           onCancel={() => setPitchEntry(null)} onOpened={() => { setPitchEntry(null); onClose(); }} />}
 
-        {(openingEditor || pluginActivity) && <div className="shrink-0 px-4 py-2"><PluginActivity message={openingEditor || pluginActivity!} /></div>}
-        <div className="fx-chain-two-column-content" inert={Boolean(pluginActivity || openingEditor)}>
+        {(openingEditor || pluginActivity || reordering) && <div className="shrink-0 px-4 py-2"><PluginActivity message={openingEditor || pluginActivity || "Reordering FX…"} /></div>}
+        <div className="fx-chain-two-column-content min-h-0" inert={Boolean(pluginActivity || openingEditor || reordering)} aria-busy={reordering}>
           {/* Left Column: Loaded FX */}
-          <div className="fx-chain-loaded-column">
+          <div className="fx-chain-loaded-column min-h-0">
             <div className="fx-column-header">
               <h4>Loaded FX</h4>
               <div className="flex items-center gap-1.5">
@@ -1524,7 +1648,7 @@ export function FXChainPanel({
               </div>
             )}
 
-            <div className="fx-slots-list overflow-y-auto">
+            <div ref={fxSlotsListRef} className="fx-slots-list overflow-y-auto">
               {loading ? (
                 <div className="fx-empty-state">
                   <PluginActivity message="Loading FX chain…" />
@@ -1677,18 +1801,14 @@ export function FXChainPanel({
                     const isJSFX = fx.type === "jsfx";
                     const isBuiltIn = fx.type === "builtin";
                     return (
-                      <div key={fx.index}>
+                      <div key={fx.instanceId || fx.index}>
                         <div
-                          className={`fx-slot-item flex-wrap ${draggedIndex === index ? "dragging" : ""} ${selectedFxIndex === fx.index ? "ring-1 ring-cyan-500/70" : ""} ${isJSFX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
-                          draggable
+                          className={`fx-slot-item flex-wrap ${draggedIndex === fx.index ? "dragging" : ""} ${dropTargetIndex === fx.index && draggedIndex !== fx.index ? "drop-target" : ""} ${selectedFxIndex === fx.index ? "ring-1 ring-cyan-500/70" : ""} ${isJSFX ? "border-l-2 border-l-lime-500" : ""} ${isBuiltIn ? "border-l-2 border-l-blue-500" : ""}`}
                           tabIndex={0}
+                          data-fx-slot-index={fx.index}
                           data-selected={selectedFxIndex === fx.index ? "true" : undefined}
                           onPointerDown={() => setSelectedFxIndex(fx.index)}
                           onFocus={() => setSelectedFxIndex(fx.index)}
-                          onDragStart={() => handleDragStart(index)}
-                          onDragEnd={() => setDraggedIndex(null)}
-                          onDragOver={handleDragOver}
-                          onDrop={(e) => handleDrop(e, index)}
                           onClick={() => {
                             if (isJSFX) handleToggleJSFXSliders(fx.index);
                             else if (isBuiltIn) {
@@ -1697,12 +1817,28 @@ export function FXChainPanel({
                             } else handleOpenEditor(fx.index);
                           }}
                         >
-                          <div
-                            className="fx-drag-handle"
+                          <button
+                            type="button"
+                            className="fx-drag-handle fx-reorder-handle"
                             title="Drag to reorder"
+                            aria-label={`Reorder ${fx.name}`}
+                            aria-keyshortcuts="ArrowUp ArrowDown"
+                            onPointerDown={(event) => handleFXPointerDown(event, fx.index)}
+                            onPointerMove={handleFXPointerMove}
+                            onPointerUp={handleFXPointerUp}
+                            onPointerCancel={clearFXDrag}
+                            onLostPointerCapture={clearFXDrag}
+                            onClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => {
+                              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              const nextIndex = fx.index + (event.key === "ArrowUp" ? -1 : 1);
+                              if (nextIndex >= 0 && nextIndex < fxSlots.length) void handleReorder(fx.index, nextIndex);
+                            }}
                           >
                             <GripVertical size={14} />
-                          </div>
+                          </button>
                           <input
                             type="checkbox"
                             checked={!bypassedFx.has(fx.index)}
@@ -2282,7 +2418,7 @@ export function FXChainPanel({
           </div>
 
           {/* Right Column: Plugin Browser */}
-          <div className="fx-chain-browser-column overflow-y-auto">
+          <div className="fx-chain-browser-column min-h-0 overflow-y-auto">
             <div className="fx-column-header">
               <h4>Available Plugins</h4>
             </div>

@@ -1608,11 +1608,15 @@ Bypass all effects on a track without removing them:
 
 ### 9.8 FX Chain Reordering
 
-Drag and drop effects within track, input and master FX chains to change their
-order. Signal flows from top to bottom. Reorder and Undo retain the plugin's
-envelopes; master FX use their persistent instance identity. MIDI Learn mappings
-follow track/input reorders. Removing a mapped FX retires its mappings; removal
-Undo restores them along with the saved plugin.
+Drag an effect's grip handle onto another loaded row within a track, input or
+master FX chain to change its order. Signal flows from top to bottom, and the
+same order is applied to native audio processing. Dropping outside the chain or
+cancelling leaves the order unchanged. Hold the pointer near a list edge to
+scroll through a longer chain. Focus the grip handle and press **Up** or
+**Down** to move an effect one position with the keyboard. Reorder, Undo and Redo
+retain the plugin's envelopes; master FX use their persistent instance identity.
+MIDI Learn mappings follow track/input reorders. Removing a mapped FX retires
+its mappings; removal Undo restores them along with the saved plugin.
 
 ### 9.9 Safe Mode (Bypass FX on Load)
 
@@ -1665,17 +1669,25 @@ Closing a detached window cancels its pending credential requests, including
 when another window is waiting for a slow or unavailable keyring. A credential
 error still needs the keyring service to be restored before sign-in can succeed.
 
-**TONE3000 presentation, development checkout, October 4, 2026:** the capture/IR
+**TONE3000 presentation, development checkout, October 8, 2026:** the capture/IR
 library displays the official logo, connected account identity, creator avatars,
-artwork and NAM/IR format. **Browse TONE3000** stays available in the library
-header. Signed-out users choose **Continue** in the community introduction, then
+artwork and NAM/IR format. The compact **Browse** button followed by the T3K logo
+stays available in the library header; its accessible name is **Browse TONE3000**.
+The account avatar uses initials when no image is available: a circle such as
+**AD** identifies the signed-in account. The header and controls adapt to the
+window size, leaving more height for the scrolling tone list. Creator, license,
+instrument and character filters still apply to loaded results.
+In compact library views, open **Selected · details & actions** to reach the
+selected tone's capture controls; loading captures opens it automatically. The
+library tabs scroll horizontally when the host is narrow.
+Signed-out users choose **Continue** in the community introduction, then
 sign in and select a tone on TONE3000. The returned pack opens for capture
 selection; **Audition** and **Use** still control the rack change. **Favorites**,
 **Created**, and **Downloaded** are online account collections. **Installed** and
 **Local Favorites** are local views, and result stars save local favorites.
 Loaded tones show a T3K source mark and retained artwork when available; clicking
-the attribution reopens details. This update is uncommitted and is not a
-released-feature or partner-approval claim.
+the attribution reopens details. This update describes the development checkout
+and is not a released-feature or partner-approval claim.
 
 The mixer's **Monitor FX** picker includes built-in effects such as EQ, Gain Phase,
 Reverb and NAM Rack, together with installed effect plugins. Instruments are
@@ -1752,7 +1764,7 @@ Save the project after changing plugin knobs. Saving obtains fresh native state 
 
 Failed loads retain the plugin identity, saved state and automation. Stop transport and use the unavailable-FX retry controls after making the plugin available. Successful restoration reattaches compatible lanes and is undoable; incompatible targets keep their points without controlling another parameter. If a CLAP plugin explicitly clears a parameter's host references, the old lane is archived as unavailable and requires a new lane. Undo cannot silently reattach those cleared references. A clear-all request also removes matching MIDI Learn references.
 
-Drag a loaded FX row to another row in a track, input or master chain to reorder it. Cancelling or dropping outside the chain leaves the order unchanged. Reorder and Undo retain the plugin's envelopes and track/input MIDI Learn references.
+Drag a loaded FX row's grip handle to another row in a track, input or master chain to reorder native audio processing. Cancelling or dropping outside the chain leaves the order unchanged. Reorder, Undo and Redo retain the plugin's envelopes and track/input MIDI Learn references.
 
 Master/monitor FX Undo and Redo suspend old envelope routes and resolve saved SDK parameter identities against the restored plugin before Read resumes. A rollback resolves the current stage's identities again too. Changed or removed controls retain inactive envelopes. If plugin state or Automation Safe protection cannot be established during rollback, Save is blocked until the original project is reopened; the displayed chain cannot establish the native state after that failure.
 
