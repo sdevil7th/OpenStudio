@@ -72,6 +72,14 @@ OpenStudio production releases are distributed as platform-specific install pack
 
 **Windows:** run the installer and follow the wizard. If you are using the unsigned zero-cost release path, Windows SmartScreen may warn before first launch.
 
+Install updates in place; uninstalling first is unnecessary. Windows uninstall
+removes OpenStudio's user-scoped settings, optional AI runtime/model files and
+caches, while retaining project folders outside AppData. Interactive uninstall
+asks for confirmation. In this source checkout, an explicit unattended uninstall
+using `/VERYSILENT /SUPPRESSMSGBOXES` completes without that dialog. Suppressed
+installer validation failures return a nonzero result; use the installer log to
+diagnose missing payloads, prerequisites or failed startup checks.
+
 If startup reports that the embedded browser is unavailable, **Repair Dependencies** waits for the bundled prerequisite installers and checks browser availability again. If it still fails, open the startup log from the recovery screen and include its WebView2 error details when reporting the problem.
 
 **macOS:** OpenStudio v1 ships as an unsigned DMG. Drag `OpenStudio.app` to `Applications`. If macOS blocks launch, right-click the app, choose **Open**, and if needed allow it under **System Settings > Privacy & Security**.

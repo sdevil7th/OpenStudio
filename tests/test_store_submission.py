@@ -356,7 +356,7 @@ class StoreSubmissionTests(unittest.TestCase):
 
     def test_publishing_config_strict_schema_app_tag_and_mode(self):
         actual = store.load_publishing_config(store.ROOT / "packaging/msix/release-publishing.json")
-        self.assertEqual(actual, self.publishing_config() | {"releaseTag": "v0.1.04"})
+        self.assertEqual(actual, self.publishing_config() | {"releaseTag": "v0.1.05"})
         invalid = [self.publishing_config() | change for change in (
             {"appId": "other"}, {"releaseTag": "0.1.2"}, {"releaseTag": "v0.1.2-beta"},
             {"releaseTag": "v0.1.2.1"}, {"targetPublishMode": "SpecificDate"},
@@ -370,7 +370,8 @@ class StoreSubmissionTests(unittest.TestCase):
 
     def test_cli_publishing_policy_reports_exact_tag_immediate_and_other_tag_manual(self):
         for tag, package_version, notes_file in (
-                ("v0.1.04", "0.1.4.0", "0.1.04.md"), ("v0.1.02", "0.1.2.0", "0.1.02.md")):
+                ("v0.1.05", "0.1.5.0", "0.1.05.md"), ("v0.1.04", "0.1.4.0", "0.1.04.md"),
+                ("v0.1.02", "0.1.2.0", "0.1.02.md")):
             for mode in ("--preflight", "--submit"):
                 self.create_package(version=package_version)
                 api = FakeApi()
@@ -386,7 +387,7 @@ class StoreSubmissionTests(unittest.TestCase):
                             "--report", str(report_path), mode]):
                     self.assertEqual(store.main(), 0)
                 report = json.loads(report_path.read_text())
-                expected_mode = "Immediate" if tag == "v0.1.04" else "Manual"
+                expected_mode = "Immediate" if tag == "v0.1.05" else "Manual"
                 self.assertEqual(report["targetPublishMode"], expected_mode)
                 self.assertIn(f"Publishing mode: {expected_mode}", summary_path.read_text())
                 self.assertNotIn("SECRET", report_path.read_text() + summary_path.read_text())

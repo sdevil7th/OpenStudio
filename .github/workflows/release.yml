@@ -107,6 +107,10 @@ jobs:
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
+      - name: Test unattended installer and uninstall behavior
+        shell: pwsh
+        run: python tests/test_windows_installer.py --require-tools
+
       - name: Install Windows prerequisite installers
         shell: pwsh
         run: ./tools/setup-windows-prereqs.ps1
@@ -396,26 +400,42 @@ jobs:
           }
 
       - name: Qualify installed Windows release
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $installRoot = Join-Path $env:RUNNER_TEMP "OpenStudio-installed-qualification"
           $installer = (Resolve-Path "dist/windows/OpenStudio-Setup-x64.exe").Path
-          $installLog = Join-Path $env:RUNNER_TEMP "openstudio-install.log"
+          $evidence = Join-Path $env:RUNNER_TEMP "OpenStudio-installed-qualification-evidence"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $installLog = Join-Path $evidence "install.log"
+          Write-Host "Installing the release candidate; log: $installLog"
           $install = Start-Process -FilePath $installer -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
             ('/DIR="{0}"' -f $installRoot), ('/LOG="{0}"' -f $installLog))
           if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode). See $installLog" }
           try {
+            Write-Host "Running lifecycle qualification against the installed release"
             ./tools/run-window-lifecycle-smoke.ps1 -AppPath "$installRoot/OpenStudio.exe" `
-              -ReportPath "$env:RUNNER_TEMP/windows-installed-lifecycle.json" -TimeoutSeconds 300
+              -ReportPath "$evidence/lifecycle.json" -TimeoutSeconds 300
           } finally {
             $uninstaller = Join-Path $installRoot "unins000.exe"
             if (Test-Path -LiteralPath $uninstaller) {
+              $uninstallLog = Join-Path $evidence "uninstall.log"
+              Write-Host "Uninstalling the qualified release; log: $uninstallLog"
               $uninstall = Start-Process -FilePath $uninstaller -WindowStyle Hidden -PassThru -Wait `
-                -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+                -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f $uninstallLog)
               if ($uninstall.ExitCode -ne 0) { throw "Qualification uninstall failed: $($uninstall.ExitCode)" }
             }
           }
+
+      - name: Retain installed Windows qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installed-qualification
+          path: ${{ runner.temp }}/OpenStudio-installed-qualification-evidence/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Stage checksum-pinned FFmpeg corresponding source
         shell: pwsh

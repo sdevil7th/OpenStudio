@@ -99,11 +99,12 @@ begin
   Result := MissingItems = '';
 
   if not Result then
-    MsgBox(
+    SuppressibleMsgBox(
       'OpenStudio installed, but required shell files are missing:' + MissingItems + #13#10#13#10 +
       'Please reinstall OpenStudio or rebuild the installer before launching it.',
       mbCriticalError,
-      MB_OK
+      MB_OK,
+      IDOK
     );
 end;
 
@@ -184,12 +185,12 @@ begin
     { Version-conflict codes are successful only if the required runtime is verified. }
     if Installed then begin Result := True; exit; end;
     if Started and ((LastPrerequisiteResult = 3010) or (LastPrerequisiteResult = 1641)) then begin Result := True; exit; end;
-    Choice := MsgBox('OpenStudio could not verify ' + FriendlyName + '.' + #13#10#13#10 +
+    Choice := SuppressibleMsgBox('OpenStudio could not verify ' + FriendlyName + '.' + #13#10#13#10 +
       'Installer result: ' + IntToStr(LastPrerequisiteResult) + #13#10 +
       'Logs: ' + PrerequisiteLogDirectory + #13#10#13#10 +
       'Check the log, then choose Retry. You can also install the runtime from:' + #13#10 +
       ManualURL + #13#10#13#10 + 'Setup requests administrator permission automatically. OpenStudio itself does not need administrator access.',
-      mbError, MB_RETRYCANCEL);
+      mbError, MB_RETRYCANCEL, IDCANCEL);
     if Choice <> IDRETRY then exit;
   end;
 end;
@@ -233,7 +234,7 @@ begin
   if not Exec(SelfTestExecutable, SelfTestArguments, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     CanLaunchInstalledAppValue := False;
-    MsgBox('OpenStudio could not start its shell self-test executable.', mbCriticalError, MB_OK);
+    SuppressibleMsgBox('OpenStudio could not start its shell self-test executable.', mbCriticalError, MB_OK, IDOK);
     Result := False;
     exit;
   end;
@@ -249,20 +250,22 @@ begin
 
   if ReportText <> '' then
   begin
-    MsgBox(
+    SuppressibleMsgBox(
       'OpenStudio shell validation failed after installation:' + #13#10#13#10 + ReportText + #13#10#13#10 +
       'OpenStudio will not be launched automatically.',
       mbCriticalError,
-      MB_OK
+      MB_OK,
+      IDOK
     );
   end
   else
   begin
-    MsgBox(
+    SuppressibleMsgBox(
       'OpenStudio shell validation failed after installation and no self-test report was written.' + #13#10#13#10 +
       'OpenStudio will not be launched automatically.',
       mbCriticalError,
-      MB_OK
+      MB_OK,
+      IDOK
     );
   end;
 end;
@@ -296,14 +299,25 @@ begin
   Result := CanLaunchInstalledAppValue and (not PrerequisiteRestartRequired);
 end;
 
+function GetCustomSetupExitCode(): Integer;
+begin
+  Result := 0;
+  if not CanLaunchInstalledAppValue then
+  begin
+    Log('OpenStudio installation failed its payload, prerequisite or startup validation.');
+    Result := 10;
+  end;
+end;
+
 function InitializeUninstall(): Boolean;
 begin
-  Result := MsgBox(
+  Result := SuppressibleMsgBox(
     'Uninstalling OpenStudio will also remove its user-scoped app data for a fresh reinstall state.' + #13#10#13#10 +
     'This includes AI runtime files, downloaded models, logs, cached downloads, and OpenStudio settings under Local and Roaming AppData.' + #13#10#13#10 +
     'Project folders outside AppData will not be deleted.' + #13#10#13#10 +
     'Do you want to continue?',
     mbConfirmation,
-    MB_YESNO
+    MB_YESNO,
+    IDYES
   ) = IDYES;
 end;

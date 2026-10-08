@@ -209,6 +209,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Install Inno Setup for installer regression tests
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Test unattended installer and uninstall behavior
+        shell: pwsh
+        run: python tests/test_windows_installer.py --require-tools
+
       - name: Test Windows signing safeguards
         shell: pwsh
         run: ./tools/test-windows-signing.ps1

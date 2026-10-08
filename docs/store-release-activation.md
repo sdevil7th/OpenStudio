@@ -2,6 +2,32 @@
 
 Status recorded: October 8, 2026.
 
+## October 8 unpublished 0.1.04 attempt and 0.1.05 follow-up
+
+The owner requested immediate release and automatic Store submission. The
+`v0.1.04` tag points to merged PR #27 at
+`a7f338f292d1755886486eb7c34494ec92655da0`. Its
+[release workflow](https://github.com/sdevil7th/OpenStudio/actions/runs/37769878227)
+passed macOS/Linux packaging and qualification and Windows installation and
+installed-app lifecycle checks. Windows then waited in its unattended
+uninstaller: the script's unconditional confirmation did not respect suppressed
+message boxes. The run was cancelled to retrieve diagnostic logs. No GitHub
+application release, live Store preflight, draft, upload or commit ran.
+The tag is preserved and is not a published application version.
+
+The hotfix makes script dialogs suppressible with explicit safe defaults and
+returns a nonzero installer result for failed post-install validation. Actual
+compiled unattended installer/uninstaller regressions run before Windows builds.
+Installed-release CI qualification is bounded and retains its diagnostic logs.
+The follow-up `v0.1.05` policy requests `targetPublishMode=Immediate` for Store
+package `0.1.5.0`, retaining the owner's automatic-publication intent. All live
+API access, state, upload/commit, certification and Store-installed upgrade
+checks still require evidence from that release; none is asserted here.
+
+The readiness check below records the earlier 0.1.04 preparation. Its tag/policy
+statements are historical; the current policy file pins only the reviewed
+0.1.05 follow-up.
+
 ## October 8 readiness check for 0.1.04
 
 The GitHub repository has `OPENSTUDIO_STORE_ENABLED=true`, all three required
