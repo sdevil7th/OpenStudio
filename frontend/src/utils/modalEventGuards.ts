@@ -110,6 +110,19 @@ export function guardModalPointerEvent(
   event.stopPropagation();
 }
 
+// Stop React portal bubbling at the dialog boundary, before an owning track
+// or editor sees it. Keep default actions so native controls and HTML dragging
+// continue to work. The document guard alone runs after React's owner handlers.
+export const modalPointerBoundaryProps = {
+  onMouseDown: guardModalPointerEvent,
+  onMouseMove: guardModalPointerEvent,
+  onMouseUp: guardModalPointerEvent,
+  onPointerDown: guardModalPointerEvent,
+  onPointerMove: guardModalPointerEvent,
+  onPointerUp: guardModalPointerEvent,
+  onPointerCancel: guardModalPointerEvent,
+};
+
 function isTopWindowDragRequest(event: MouseEvent | PointerEvent): boolean {
   if (usesNativeWindowChrome || event.button !== 0 || event.clientY > WINDOW_DRAG_ZONE_HEIGHT) {
     return false;

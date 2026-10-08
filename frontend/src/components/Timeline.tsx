@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo, useTransition } from "react";
 import { Stage, Layer, Rect, Line, Text, Group, Circle } from "react-konva";
+import type Konva from "konva";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type KonvaEvent = any; // Konva events access .evt.shiftKey, .target.getStage() etc. — full typing requires 70+ null guards
 import { useShallow } from "zustand/shallow";
@@ -44,6 +45,7 @@ import {
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
 import {
   guardModalContextMenu,
+  modalPointerBoundaryProps,
   isEditorWheelOwnedTarget,
   isInsideModalLayer,
   shouldSuppressWorkspaceContextMenu,
@@ -57,6 +59,10 @@ import {
   getAutomationShortLabel,
   getAutomationDefault,
   formatAutomationValue,
+  formatAutomationParameterValue,
+  automationLaneIsDiscrete,
+  automationLineCoordinates,
+  type AutomationParameterMetadata,
 } from "../store/automationParams";
 import {
   createTrackOfType,
@@ -74,6 +80,8 @@ import { getClipInpaintRange, type AIWorkflowId } from "../data/aiWorkflows";
 import {
   classifyTimelineClipGesture,
   computeSlipOffset,
+  hasTimelineClipDragStarted,
+  TIMELINE_CLIP_DRAG_THRESHOLD_PX,
 } from "../utils/timelineClipGestures";
 import {
   resolveTimelineDropTrackIndex,
@@ -215,7 +223,7 @@ const quantizeSpp = (spp: number) =>
   Math.max(FINEST_MIPMAP_STRIDE, Math.pow(2, Math.round(Math.log2(Math.max(1, spp)))));
 
 interface MasterAutomationProps {
-  lanes: { id: string; param: string; points: { time: number; value: number }[]; visible: boolean; mode: string; armed: boolean }[];
+  lanes: { id: string; param: string; label?: string; metadata?: AutomationParameterMetadata; points: { time: number; value: number }[]; visible: boolean; mode: string; armed: boolean }[];
   showAutomation: boolean;
 }
 
@@ -423,6 +431,7 @@ type TimelineDragState = {
     isMidi: boolean;
   }>;
   snapClipGeometry?: TimelineClipSnapShape[];
+  dragActivated?: boolean;
 };
 
 function getNewTrackTypeForTimelineClip(isMidi: boolean): "audio" | "midi" {
@@ -657,6 +666,7 @@ export function Timeline({
   showRuler = true,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const timelineStageRef = useRef<Konva.Stage>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
   const [waveformPreviewCache, setWaveformPreviewCache] = useState<WaveformCache>(new Map());
@@ -698,6 +708,21 @@ export function Timeline({
     screenY: number;
   } | null>(null);
   const automationDrawRef = useRef<AutomationDrawState | null>(null);
+  const [nativeAutomationTooltip, setNativeAutomationTooltip] = useState<{ key: string; text: string } | null>(null);
+  useEffect(() => {
+    if (!hoveredAutoPoint) { setNativeAutomationTooltip(null); return; }
+    const point = hoveredAutoPoint;
+    const state = useDAWStore.getState();
+    const trackId = state.masterAutomationLanes.some(lane => lane.id === point.laneId) ? "master"
+      : state.tracks.find(track => track.automationLanes.some(lane => lane.id === point.laneId))?.id;
+    if (!trackId || !point.param.startsWith("plugin_")) return;
+    let current = true;
+    const key = `${point.laneId}:${point.value}`;
+    void nativeBridge.getAutomationValueText(trackId, point.param, point.value).then(text => {
+      if (current) setNativeAutomationTooltip(text ? { key, text } : null);
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [hoveredAutoPoint]);
   const automationPointGestureRef = useRef<{
     key: string;
     action: MouseModifierActionFor<"automation_point">;
@@ -737,14 +762,10 @@ export function Timeline({
   const setTimelineDragState = useCallback((
     next: TimelineDragState | ((previous: TimelineDragState) => TimelineDragState),
   ) => {
-    setDragStateState((previous) => {
-      const base = dragStateRef.current || previous;
-      const resolved = typeof next === "function"
-        ? (next as (previous: TimelineDragState) => TimelineDragState)(base)
-        : next;
-      dragStateRef.current = resolved;
-      return resolved;
-    });
+    // Pointer handlers need the new gesture immediately, before React renders.
+    const resolved = typeof next === "function" ? next(dragStateRef.current) : next;
+    dragStateRef.current = resolved;
+    setDragStateState(resolved);
   }, []);
   /*
     type: "move" | "resize-left" | "resize-right" | null;
@@ -1234,6 +1255,7 @@ export function Timeline({
     clipDuration: number;
     maxOffset: number;
     originalIsModified?: boolean;
+    dragActivated?: boolean;
   } | null>(null);
 
   // Split tool preview line
@@ -2703,6 +2725,11 @@ export function Timeline({
     const pps = pixelsPerSecondRef.current;
     const rawDeltaX = stageX - gesture.startX;
     const rawDeltaY = stageY - gesture.startY;
+    if (!gesture.dragActivated) {
+      if (!hasTimelineClipDragStarted(rawDeltaX, rawDeltaY)) return;
+      captureTimelineGestureUndo();
+      gesture.dragActivated = true;
+    }
     const resizeDeltaTime = rawDeltaX / pps;
     const isMidi = found.kind === "midi";
     const profiledDrag = resolveProfiledTimelineClipDrag({
@@ -2967,6 +2994,7 @@ export function Timeline({
       }));
     }
   }, [
+    captureTimelineGestureUndo,
     findCurrentTimelineClip,
     getTimelineDropTrackIndex,
     isSnapActive,
@@ -3039,6 +3067,12 @@ export function Timeline({
 
     const gesture = dragStateRef.current;
     if (!gesture.clipId || gesture.type === null) return false;
+
+    // A press/release selects only. Never snap, sync, or commit a pending drag.
+    if (!gesture.dragActivated && !gesture.isFadeDrag) {
+      resetDragState();
+      return true;
+    }
 
     if (isTimelineGestureEditLocked(gesture)) {
       cancelActiveTimelineClipGesture();
@@ -3305,7 +3339,7 @@ export function Timeline({
 
   useEffect(() => {
     const toStagePoint = (event: MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect();
+      const rect = timelineStageRef.current?.container().getBoundingClientRect();
       if (!rect) return null;
       return {
         x: event.clientX - rect.left,
@@ -3321,7 +3355,7 @@ export function Timeline({
 
       const activeDrag = dragStateRef.current;
       if (activeDrag.type !== null && activeDrag.clipId) {
-        const rect = containerRef.current?.getBoundingClientRect();
+        const rect = timelineStageRef.current?.container().getBoundingClientRect();
         const isOutsideWindow =
           rect &&
           (event.clientX < rect.left - 12 ||
@@ -3351,6 +3385,10 @@ export function Timeline({
           return;
         }
         const deltaTime = (point.x - slipEdit.startX) / pixelsPerSecondRef.current;
+        if (!slipEdit.dragActivated) {
+          if (!hasTimelineClipDragStarted(point.x - slipEdit.startX, 0)) return;
+          slipEdit.dragActivated = true;
+        }
         const nextOffset = computeSlipOffset(slipEdit.originalOffset, deltaTime, slipEdit.maxOffset);
         useDAWStore.setState((state) => ({
           tracks: state.tracks.map((track) => ({
@@ -3378,7 +3416,7 @@ export function Timeline({
       }
       if (dragStateRef.current.type !== null && dragStateRef.current.clipId) {
         const point = toStagePoint(event);
-        if (point) {
+        if (point && dragStateRef.current.dragActivated) {
           previewTimelineGestureFromPointer(point.x, point.y, event);
         }
         void finalizeTimelineClipGesture();
@@ -4141,6 +4179,10 @@ export function Timeline({
       const pointerPos = stage?.getPointerPosition();
       if (pointerPos) {
         const deltaX = pointerPos.x - slipEditRef.current.startX;
+        if (!slipEditRef.current.dragActivated) {
+          if (!hasTimelineClipDragStarted(deltaX, 0)) return;
+          slipEditRef.current.dragActivated = true;
+        }
         const deltaTime = deltaX / pixelsPerSecond;
         // Moving right moves source content right (decreases offset); moving left increases offset.
         const newOffset = computeSlipOffset(
@@ -4397,6 +4439,17 @@ export function Timeline({
 
   const shortcutHandlerRef = useRef<ShortcutSurfaceHandler>(() => "unmatched");
   shortcutHandlerRef.current = (event) => {
+    // App dispatches shortcuts during capture and consumes Escape for deselect.
+    // Cancel the pointer gesture here before that can bypass the window listener.
+    if (event.key === "Escape" && (
+      dragStateRef.current.type !== null
+      || slipEditRef.current
+      || fadeHandleGestureRef.current
+      || clipVolumeGestureRef.current
+    )) {
+      cancelActiveTimelineClipGesture();
+      return "handled";
+    }
     const state = useDAWStore.getState();
     const hasClips = state.selectedClipIds.length > 0;
 
@@ -4811,12 +4864,12 @@ export function Timeline({
 
       if (rulerDensity.mode === "bar") continue;
 
-      for (let beat = 1; beat < beatsPerBar; beat += 1) {
+      for (let beat = 0; beat < beatsPerBar; beat += 1) {
         const beatTime = barTime + beat * secondsPerBeat;
         if (beatTime > visibleEndTime) break;
         const beatX = beatTime * pixelsPerSecond - scrollX;
 
-        lines.push(
+        if (beat > 0) lines.push(
           <Line
             key={`beat-${bar}-${beat}`}
             points={[beatX, 0, beatX, stageHeight]}
@@ -4877,58 +4930,60 @@ export function Timeline({
     for (let bar = startBar; bar <= endBar; bar += 1) {
       const barTime = bar * secondsPerBar;
       const barX = barTime * pixelsPerSecond - scrollX;
-      if (barX < -60 || barX > dimensions.width + 60) continue;
-
-      const showBarLabel = bar >= 0 && bar % rulerDensity.labelEveryBars === 0;
-      marks.push(
-        <Line
-          key={`bar-line-${bar}`}
-          points={[barX, showBarLabel ? 0 : 12, barX, RULER_HEIGHT]}
-          stroke="#555"
-          strokeWidth={showBarLabel ? 1 : 0.5}
-        />,
-      );
-
-      if (showBarLabel) {
+      // A bar starting offscreen can still contain visible beats.
+      if (barX >= -60 && barX <= dimensions.width + 60) {
+        const showBarLabel = bar >= 0 && bar % rulerDensity.labelEveryBars === 0;
         marks.push(
-          <Text
-            key={`bar-label-${bar}`}
-            x={Math.round(barX) + 3}
-            y={2}
-            text={`${bar + 1}`}
-            fontSize={10}
-            fill="#888"
+          <Line
+            key={`bar-line-${bar}`}
+            points={[barX, showBarLabel ? 0 : 12, barX, RULER_HEIGHT]}
+            stroke="#555"
+            strokeWidth={showBarLabel ? 1 : 0.5}
           />,
         );
+
+        if (showBarLabel) {
+          marks.push(
+            <Text
+              key={`bar-label-${bar}`}
+              x={Math.round(barX) + 3}
+              y={2}
+              text={`${bar + 1}`}
+              fontSize={10}
+              fill="#888"
+            />,
+          );
+        }
       }
 
       if (rulerDensity.mode === "bar") continue;
 
-      for (let beat = 1; beat < beatsPerBar; beat += 1) {
+      for (let beat = 0; beat < beatsPerBar; beat += 1) {
         const beatTime = barTime + beat * secondsPerBeat;
         const beatX = beatTime * pixelsPerSecond - scrollX;
-        if (beatX < -20 || beatX > dimensions.width + 20) continue;
-
-        marks.push(
-          <Line
-            key={`beat-line-${bar}-${beat}`}
-            points={[beatX, 18, beatX, RULER_HEIGHT]}
-            stroke="#444"
-            strokeWidth={0.5}
-          />,
-        );
-
-        if (rulerDensity.mode === "beat" && beatX >= 0 && beatX <= dimensions.width) {
+        // Cull the beat independently of its subdivisions.
+        if (beat > 0 && beatX >= -20 && beatX <= dimensions.width + 20) {
           marks.push(
-            <Text
-              key={`beat-label-${bar}-${beat}`}
-              x={Math.round(beatX) + 2}
-              y={14}
-              text={`${bar + 1}.${beat + 1}`}
-              fontSize={9}
-              fill="#666"
+            <Line
+              key={`beat-line-${bar}-${beat}`}
+              points={[beatX, 18, beatX, RULER_HEIGHT]}
+              stroke="#444"
+              strokeWidth={0.5}
             />,
           );
+
+          if ((rulerDensity.mode === "beat" || rulerDensity.mode === "division") && beatX >= 0 && beatX <= dimensions.width) {
+            marks.push(
+              <Text
+                key={`beat-label-${bar}-${beat}`}
+                x={Math.round(beatX) + 2}
+                y={14}
+                text={`${bar + 1}.${beat + 1}`}
+                fontSize={9}
+                fill="#666"
+              />,
+            );
+          }
         }
 
         if (rulerDensity.mode !== "division") continue;
@@ -4977,6 +5032,7 @@ export function Timeline({
     tempo,
     timeSignature.numerator,
   ]);
+
 
   // Render track rows
   //   const renderTrackRows = () => {
@@ -5418,6 +5474,8 @@ export function Timeline({
         return;
       }
       // Don't re-select if already selected (preserves multi-selection during drag)
+      if (!gesture.isFadeDrag) captureTimelineGestureUndo();
+      gesture.dragActivated = true;
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
@@ -5651,7 +5709,6 @@ export function Timeline({
       }
 
       // Set drag state immediately - handleDragStart will preserve resize types
-      captureTimelineGestureUndo();
       setTimelineDragState({
         type: dragType,
         clipId: clip.id,
@@ -5739,6 +5796,7 @@ export function Timeline({
       <Group
         key={clip.id}
         draggable={!clipEditLocked}
+        dragDistance={TIMELINE_CLIP_DRAG_THRESHOLD_PX}
         onDragStart={handleDragStart}
         onDragMove={handleDragMoveModified}
         onDragEnd={handleDragEnd}
@@ -6693,7 +6751,6 @@ export function Timeline({
         }
       }
 
-      captureTimelineGestureUndo();
       setTimelineDragState({
         type: dragType,
         clipId: clip.id,
@@ -6766,6 +6823,8 @@ export function Timeline({
         e.target.stopDrag?.();
         return;
       }
+      captureTimelineGestureUndo();
+      gesture.dragActivated = true;
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
@@ -6797,6 +6856,7 @@ export function Timeline({
       <Group
         key={clip.id}
         draggable={!clipEditLocked}
+        dragDistance={TIMELINE_CLIP_DRAG_THRESHOLD_PX}
         onDragStart={handleMIDIClipDragStart}
         onDragMove={handleMIDIClipDragMove}
         onDragEnd={handleMIDIClipDragEnd}
@@ -6997,39 +7057,9 @@ export function Timeline({
     );
   };
 
-  // Render automation lanes for a track
-  // Catmull-Rom spline interpolation between automation points for smooth curves.
-  const interpolateAutomationCurve = (rawPts: number[], subdivisions: number = 8): number[] => {
-    const n = rawPts.length / 2;
-    if (n < 2) return rawPts;
-    if (n === 2) return rawPts;
-    const result: number[] = [];
-    for (let i = 0; i < n - 1; i++) {
-      const p0x = i > 0 ? rawPts[(i - 1) * 2] : rawPts[0];
-      const p0y = i > 0 ? rawPts[(i - 1) * 2 + 1] : rawPts[1];
-      const p1x = rawPts[i * 2];
-      const p1y = rawPts[i * 2 + 1];
-      const p2x = rawPts[(i + 1) * 2];
-      const p2y = rawPts[(i + 1) * 2 + 1];
-      const p3x = i + 2 < n ? rawPts[(i + 2) * 2] : rawPts[(n - 1) * 2];
-      const p3y = i + 2 < n ? rawPts[(i + 2) * 2 + 1] : rawPts[(n - 1) * 2 + 1];
-      for (let s = 0; s < subdivisions; s++) {
-        const t = s / subdivisions;
-        const t2 = t * t;
-        const t3 = t2 * t;
-        result.push(
-          0.5 * ((2 * p1x) + (-p0x + p2x) * t + (2 * p0x - 5 * p1x + 4 * p2x - p3x) * t2 + (-p0x + 3 * p1x - 3 * p2x + p3x) * t3),
-          0.5 * ((2 * p1y) + (-p0y + p2y) * t + (2 * p0y - 5 * p1y + 4 * p2y - p3y) * t2 + (-p0y + 3 * p1y - 3 * p2y + p3y) * t3),
-        );
-      }
-    }
-    result.push(rawPts[(n - 1) * 2], rawPts[(n - 1) * 2 + 1]);
-    return result;
-  };
-
   // Format automation value for tooltip display
-  const formatAutoValue = (param: string, value: number): string =>
-    formatAutomationValue(param, value);
+  const formatAutoValue = (param: string, value: number, metadata?: AutomationParameterMetadata): string =>
+    metadata ? formatAutomationParameterValue(metadata, value) : formatAutomationValue(param, value);
 
   // Colors and labels are now centralized in automationParams.ts
 
@@ -7056,9 +7086,10 @@ export function Timeline({
         rawPoints.push(px, py);
       }
 
-      const smoothPoints = rawPoints.length >= 4
-        ? interpolateAutomationCurve(rawPoints, 8)
-        : rawPoints;
+      // The engine interpolates continuous envelopes linearly. Drawing a
+      // decorative spline misrepresents playback and can overshoot the points.
+      const smoothPoints = automationLaneIsDiscrete(lane) ? automationLineCoordinates(lane.points,
+        time => time * pixelsPerSecond - scrollX, value => laneTop + laneH * (1 - value), true) : rawPoints;
 
       // Fill area under curve
       const fillPoints: number[] = [];
@@ -7068,7 +7099,7 @@ export function Timeline({
         fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
       }
 
-      const laneLabel = getAutomationShortLabel(lane.param);
+      const laneLabel = lane.label || getAutomationShortLabel(lane.param);
       const defaultValue = getAutomationDefault(lane.param);
       const defaultLineY = laneTop + laneH * (1 - defaultValue);
 
@@ -7271,7 +7302,7 @@ export function Timeline({
                       y={py - 27}
                       width={60}
                       height={18}
-                      text={formatAutoValue(lane.param, point.value)}
+                      text={nativeAutomationTooltip?.key === `${lane.id}:${point.value}` ? nativeAutomationTooltip.text : formatAutoValue(lane.param, point.value, lane.metadata)}
                       fontSize={10}
                       fontFamily="monospace"
                       fill="#ffffff"
@@ -7333,9 +7364,8 @@ export function Timeline({
             rawPoints.push(px, py);
           }
 
-          const smoothPoints = rawPoints.length >= 4
-            ? interpolateAutomationCurve(rawPoints, 8)
-            : rawPoints;
+          const smoothPoints = automationLaneIsDiscrete(lane) ? automationLineCoordinates(lane.points,
+            time => time * pixelsPerSecond - scrollX, value => laneTop + laneH * (1 - value), true) : rawPoints;
 
           const fillPoints: number[] = [];
           if (smoothPoints.length >= 4) {
@@ -7344,7 +7374,7 @@ export function Timeline({
             fillPoints.push(smoothPoints[smoothPoints.length - 2], laneBottom);
           }
 
-          const laneLabel = getAutomationShortLabel(lane.param);
+          const laneLabel = lane.label || getAutomationShortLabel(lane.param);
           const defaultValue = getAutomationDefault(lane.param);
           const defaultLineY = laneTop + laneH * (1 - defaultValue);
 
@@ -7502,7 +7532,7 @@ export function Timeline({
                     {isHovered && (
                       <Group listening={false}>
                         <Rect x={px - 30} y={py - 28} width={60} height={18} fill="#1a1a1a" stroke={color} strokeWidth={1} cornerRadius={3} opacity={0.95} />
-                        <Text x={px - 30} y={py - 27} width={60} height={18} text={formatAutoValue(lane.param, point.value)} fontSize={10} fontFamily="monospace" fill="#ffffff" align="center" verticalAlign="middle" />
+                        <Text x={px - 50} y={py - 27} width={100} height={18} text={nativeAutomationTooltip?.key === `${lane.id}:${point.value}` ? nativeAutomationTooltip.text : formatAutoValue(lane.param, point.value, lane.metadata)} fontSize={10} fontFamily="monospace" fill="#ffffff" align="center" verticalAlign="middle" />
                       </Group>
                     )}
                   </React.Fragment>
@@ -8213,6 +8243,7 @@ export function Timeline({
 
       {/* Main Timeline Stage */}
       <Stage
+        ref={timelineStageRef}
         width={dimensions.width}
         height={stageHeight}
         pixelRatio={window.devicePixelRatio || 1}
@@ -8614,14 +8645,11 @@ export function Timeline({
                 <Group key={track.id}>
                   {/* Existing Audio Clips — render non-selected first, selected on top
                       so that fade handles / volume line of the selected clip are always
-                      clickable even when two clips overlap. */}
+                      clickable even when two clips overlap. Keep one keyed list so
+                      selecting a clip cannot remount it and end a running drag. */}
                   {visibleClips
                     .filter((clip) => !selectedClipIds.includes(clip.id))
-                    .map((clip) =>
-                      renderClip(clip, i, trackY, track.color, track.id),
-                    )}
-                  {visibleClips
-                    .filter((clip) => selectedClipIds.includes(clip.id))
+                    .concat(visibleClips.filter((clip) => selectedClipIds.includes(clip.id)))
                     .map((clip) =>
                       renderClip(clip, i, trackY, track.color, track.id),
                     )}
@@ -9246,11 +9274,13 @@ export function Timeline({
         <div
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/45"
           data-modal-root="true"
+          {...modalPointerBoundaryProps}
           role="dialog"
           aria-modal="true"
           aria-labelledby="timeline-repeat-clip-title"
           onContextMenu={guardModalContextMenu}
           onMouseDown={(event) => {
+            event.stopPropagation();
             if (event.target === event.currentTarget) setRepeatClipDialog(null);
           }}
         >
@@ -9321,11 +9351,13 @@ export function Timeline({
         <div
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/45"
           data-modal-root="true"
+          {...modalPointerBoundaryProps}
           role="dialog"
           aria-modal="true"
           aria-labelledby="timeline-midi-source-length-title"
           onContextMenu={guardModalContextMenu}
           onMouseDown={(event) => {
+            event.stopPropagation();
             if (event.target === event.currentTarget) setMidiSourceLengthDialog(null);
           }}
         >

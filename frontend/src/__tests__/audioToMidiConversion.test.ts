@@ -134,16 +134,16 @@ describe("audio clip to MIDI conversion", () => {
     expect(nativeBridge.addTrack).toHaveBeenCalledWith(generatedTrackId, "midi");
   });
 
-  it("creates an empty matching MIDI clip when analysis finds no notes", async () => {
+  it("leaves the project and undo history unchanged when analysis finds no notes", async () => {
     const sourceTrack = createDefaultTrack("source-track", "Audio", "#4cc9f0", "audio");
     sourceTrack.clips = [sourceClip()];
     useDAWStore.setState({ tracks: [sourceTrack], canUndo: false, canRedo: false });
 
     await useDAWStore.getState().convertAudioClipToMIDI("source-track", "audio-clip");
 
-    const midiClip = useDAWStore.getState().tracks[1].midiClips[0];
-    expect(midiClip.duration).toBe(5);
-    expect(midiClip.events).toEqual([]);
+    expect(useDAWStore.getState().tracks).toEqual([sourceTrack]);
+    expect(useDAWStore.getState().canUndo).toBe(false);
+    expect(nativeBridge.addTrack).not.toHaveBeenCalled();
     expect(useDAWStore.getState().toastType).toBe("info");
   });
 

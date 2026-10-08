@@ -1,3 +1,17 @@
+import { parseFXStageState, type FXStageSlotState } from "./fxStageState";
+import { getProjectEpoch } from "../utils/projectLifetime";
+export interface PracticeTimerState { status: "idle" | "running" | "paused" | "finished" | "interrupted"; duration: number; elapsed: number; }
+export interface MetronomeSoundInfo {
+  selection?: string;
+  name?: string;
+  error: string;
+  removedLeadMs?: number;
+  peakMs?: number;
+  durationMs?: number;
+  monoChannel?: number;
+  sourceChannels?: number;
+  shortened?: boolean;
+}
 import { appDialogs } from "./appDialogs";
 import {
   DEFAULT_AI_MUSIC_MODEL_ID,
@@ -18,7 +32,7 @@ import {
 } from "../utils/namPortableState";
 
 export interface AppUpdateStatus {
-  status: "idle" | "development" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
+  status: "idle" | "development" | "manual-update" | "checking" | "busy" | "skipped" | "up-to-date" | "update-available"
     | "downloading" | "download-ready" | "installing" | "install-started" | "cancelled" | "incompatible" | "error";
   message: string;
   currentVersion?: string;
@@ -131,10 +145,74 @@ export interface PitchHistoryFrame {
 
 export type BuiltInPluginChain = "instrument" | "input" | "track" | "master" | "monitor";
 
+export interface EQDraftAuditionResult { success: boolean; error?: string; active?: boolean; reason?: number; }
+
+export interface ReverbResponseResult {
+  success: boolean; error?: string; progress?: number; stage?: number; cancelled?: boolean; complete?: boolean;
+  sampleRate?: number; tempoBpm?: number; seconds?: number; input?: number; impulseDb?: number;
+  warmupSeconds?: number; predelayMs?: number; nominalTailSeconds?: number; tailBeyondWindow?: boolean;
+  nonzero?: boolean; peak?: number[][]; rms?: number[][]; maximum?: number[]; energy?: number[]; lastRms?: number[];
+  claimLevel?: "diagnostic_only";
+}
+
 export interface BuiltInPluginAddress {
+  instanceId?: string;
   trackId?: string;
   chain: BuiltInPluginChain;
   fxIndex?: number;
+}
+
+export type EQMatchResult = {
+  success: boolean; error?: string; candidates?: BuiltInPluginAddress[];
+  sourceName?: string; startSeconds?: number;
+  spectrum?: number[]; frequencies?: number[]; sampleRate?: number; seconds?: number; windows?: number; values?: Record<string, number>;
+  accepted?: boolean; reason?: string; beforeError?: number; afterError?: number; removedLevel?: number; validPoints?: number;
+  target?: number[]; curve?: number[]; bands?: Array<{ frequency: number; gain: number; q: number; type?: number; slope?: number }>;
+};
+
+export type IRAuditionResult = {
+  success: boolean; error?: string; preparing?: boolean; playing?: boolean; progress?: number;
+  name?: string; seconds?: number; attenuationDb?: number; truncated?: boolean;
+};
+
+export interface GainPhaseAlignmentEntry {
+  expectedRoute?: string; expectedPDC?: number;
+  routePolicy?: "inputs" | "direct-master" | "fixed-master";
+  expectedSampleRate?: number;
+  address: BuiltInPluginAddress;
+  values: Record<string, number>;
+  expected?: Record<string, number>;
+  channels?: Array<{ lag: number; delay: number; invert: boolean; correlation: number; peakRatio: number; phaseResidual: number; accepted: boolean; reason: string; spectralApplied?: boolean; spectralRippleDB?: number; phaseApplied?: boolean; phaseFrequency?: number; phaseStages?: number; phaseAgreementBefore?: number; phaseAgreementAfter?: number; phaseReason?: string; sections?: Array<{ lag: number; invert: boolean; correlation: number; accepted: boolean; reason: string }> }>;
+}
+export interface GainPhaseAlignmentResult {
+  continuous?: boolean; coveredSamples?: number;
+  projectSpan?: boolean;
+  weakSignal?: boolean;
+  routePolicy?: "inputs" | "direct-master" | "fixed-master";
+  discovery?: boolean;
+  groups?: GainPhaseAlignmentResult[];
+  unmatched?: BuiltInPluginAddress[];
+  sparse?: boolean;
+  sampledSeconds?: number;
+  progress?: number;
+  stage?: number;
+  cancelled?: boolean;
+  complete?: boolean;
+  spectralPhase?: boolean;
+  fitPhase?: boolean;
+  captureSeconds?: number;
+  sectionCount?: number;
+  channelPolicy?: "independent" | "linked";
+  success: boolean;
+  error?: string;
+  accepted?: boolean;
+  candidates?: BuiltInPluginAddress[];
+  entries?: GainPhaseAlignmentEntry[];
+  before?: GainPhaseAlignmentEntry[];
+  after?: GainPhaseAlignmentEntry[];
+  sampleRate?: number;
+  samples?: number;
+  scope?: string;
 }
 
 export type NAMModelLoadOptions = {
@@ -158,7 +236,43 @@ export interface BuiltInParamDescriptor {
   enumOptions?: Array<{ value: number; label: string }>;
 }
 
+export interface IRDecayEstimate {
+  available: boolean; reason: string; rt60Seconds: number; rSquared: number;
+  startSeconds: number; endSeconds: number; fitStartSeconds: number; fitEndSeconds: number;
+  endpointDb: number; diagnosticOnly: boolean; curve: { seconds: number; db: number }[];
+  bandName?: string; lowHz?: number; highHz?: number; bands?: IRDecayEstimate[];
+  octaves?: IRDecayEstimate[]; centreHz?: number; minimumReliableRT60?: number; filterMethod?: string;
+}
+
+export interface IRPreparationStatus {
+  state: "running" | "publishing" | "complete" | "cancelled" | "failed";
+  stage: number;
+  cancellable: boolean;
+}
+
+export interface EQMIDIProgramInfo {
+  preparedConfigurations?: boolean; reservedLatency?: number; preparationRequiresStopped?: boolean;
+  enabled: boolean; channel: number; capacity: number; fingerprint: string;
+  entries: { bank: number; program: number; name: string; compatible: boolean }[];
+  lastBank: number; lastProgram: number; lastChannel: number; lastStatus: number; sequence: number; restoreRejected: boolean;
+}
+
 export interface BuiltInPluginSchema {
+  hostBypassed?: boolean;
+  midiPrograms?: EQMIDIProgramInfo;
+  drumMapping?: { inputNote: number; voiceNote: number; piece: number; closesHat: boolean; aftertouchChoke: boolean; articulation?: string; openness?: number; ignored?: boolean }[];
+  instanceId?: string;
+  impulseResponse?: { name: string; duration: number; trimSeconds: number; embedded: boolean; waveform?: number[];
+    decayEstimate?: IRDecayEstimate;
+    geometry?: { enabled: boolean; commonDelayMs: number; gainLimited: boolean; speedMetresPerSecond: number; paths: { path: string; recordedDistance: number; targetDistance: number; delayMs: number; gain: number }[] };
+    channels?: number; processedDuration?: number;
+    eqResponse?: { frequency: number; db: number }[]; eqSampleRate?: number;
+    shape?: { start: number; end: number; attack: number; size: number; reverse: boolean; normalise: boolean;
+      channelOrder: number; outputLayout?: number; octaveAnalysis?: boolean; geometryEnabled?: boolean; geometrySourceLX?: number; geometrySourceLY?: number; geometrySourceRX?: number; geometrySourceRY?: number; geometryMicLX?: number; geometryMicLY?: number; geometryMicRX?: number; geometryMicRY?: number; geometryTargetLX?: number; geometryTargetLY?: number; geometryTargetRX?: number; geometryTargetRY?: number; crossTerms?: number; brightness?: number; sourceBlendLeft?: number; sourceBlendRight?: number; directDb: number; earlyDb: number; tailDb: number; directEnd: number; earlyEnd: number;
+      lowDecay?: number; midDecay?: number; highDecay?: number; lowCrossover?: number; highCrossover?: number; eqEnabled?: boolean;
+      eq0Frequency?: number; eq0Gain?: number; eq0Q?: number; eq1Frequency?: number; eq1Gain?: number; eq1Q?: number;
+      eq2Frequency?: number; eq2Gain?: number; eq2Q?: number; eq3Frequency?: number; eq3Gain?: number; eq3Q?: number } };
+  pluginId?: string;
   schemaVersion: number;
   name: string;
   category: string;
@@ -222,18 +336,88 @@ export interface BuiltInPluginSchema {
   visualization?: {
     frequencies?: number[];
     responseDb?: number[];
+    midiCCEvent?: number[];
+    midiNoteEvent?: number[];
+    macroLive?: number[];
+    macroActive?: boolean[];
+    correlation?: number;
+    inputPeaksDb?: number[];
+    heldInputPeaksDb?: number[];
+    inputTruePeaksDb?: number[];
+    outputTruePeaksDb?: number[];
+    heldInputTruePeaksDb?: number[];
+    heldOutputTruePeaksDb?: number[];
+    heldOutputPeaksDb?: number[];
+    peakResetPending?: boolean;
+    outputPeaksDb?: number[];
+    spectrumSize?: number;
+    spectrumSource?: number;
+    spectrumWindowMs?: number;
+    latencySamples?: number;
+    latencyMs?: number;
+    phaseUpdating?: boolean;
+    spectrumBinHz?: number;
     spectrumPreDb?: number[];
     spectrumPostDb?: number[];
+    spectrumExternalDb?: number[];
     dynamicGainDb?: number[];
+    dynamicThresholdDb?: number[];
+    dynamicAttackMs?: number[];
+    dynamicReleaseMs?: number[];
     spectrumReady?: boolean;
+    sampleRate?: number;
     gainReductionDb?: number;
     inputLevelDb?: number;
+    inputAverageDb?: number[];
+    outputAverageDb?: number[];
+    drivenLevelDb?: number;
+    drivenReferenceDb?: number;
     outputLevelDb?: number;
+    outputTruePeakDb?: number;
+    momentaryLUFS?: number;
+    shortTermLUFS?: number;
+    integratedLUFS?: number;
+    loudnessRangeLU?: number;
+    integratedReady?: boolean;
+    loudnessRangeReady?: boolean;
+    loudnessRangeProvisional?: boolean;
+    meterRunning?: boolean;
+    measurementSeconds?: number;
+    maximumMomentaryLUFS?: number;
+    maximumShortTermLUFS?: number;
+    effectiveRateHz?: number;
+    instrumentPerformance?: {
+      scope: "received-keys-and-pedals";
+      notes: { channel: number; note: number; velocity: number; held: boolean }[];
+      sustain: number[];
+      sostenuto: number[];
+      soft: number[];
+    };
+    guitarPerformance?: {
+      scope: "block-end-voice-allocation";
+      available: boolean;
+      nextArticulations: { channel: number; articulation: number; source: "legacy" | "panel" | "keyswitch" }[];
+      voices: { channel: number; slot: number; note: number; stringIndex: number; articulation: number;
+        held: boolean; sustained: boolean; releasing: boolean; plucked: boolean; assigned: boolean }[];
+    };
+    effectiveDelayMsL?: number;
+    effectiveDelayMsR?: number;
+    tempoSource?: "host" | "retained-host" | "fallback";
+    effectivePredelayMs?: number;
+    predelayCapacityMs?: number;
+    predelayLimited?: boolean;
+    spatialDelayCapped?: boolean;
+    spatialDelayCapacityMs?: number;
+    tempoBpm?: number;
+    outputLeftDb?: number;
+    outputRightDb?: number;
     inputLeftLevelDb?: number;
     inputRightLevelDb?: number;
     outputLeftLevelDb?: number;
     outputRightLevelDb?: number;
     gateOpen?: boolean;
+    gateStage?: number;
+    detectorLevelDb?: number;
     detectedHz?: number;
     correctedHz?: number;
     confidence?: number;
@@ -328,6 +512,12 @@ export function projectNAMRackSchemaForUI(schema: BuiltInPluginSchema): BuiltInP
 
 export interface PluginParameterInfo {
   index: number;
+  hostParamId?: string;
+  meaningSignature?: string;
+  /** Runtime-only CLAP clear() generation. Never persisted as parameter meaning. */
+  referenceGeneration?: number;
+  stepCount?: number;
+  automationId?: string;
   name: string;
   value: number;
   text: string;
@@ -618,6 +808,7 @@ export interface NAMAssetSearchResult {
 }
 
 export interface TONE3000NAMSearchOptions {
+  collection?: "favorited" | "created" | "downloaded";
   requestOwner?: string;
   requestId?: string;
   query?: string;
@@ -660,6 +851,9 @@ export interface TONE3000AuthFlowOptions {
   clientId?: string;
   redirectUri?: string;
   prompt?: string;
+  format?: "nam" | "ir";
+  gears?: string;
+  architecture?: string;
   toneId?: string;
   loginHint?: string;
   timeoutMs?: number;
@@ -701,6 +895,13 @@ export interface TONE3000AuthStatus {
   secureTokenStorage?: string;
   error?: string;
   [key: string]: unknown;
+}
+
+export interface TONE3000User {
+  id?: number;
+  username: string;
+  avatar_url?: string | null;
+  url?: string;
 }
 
 export interface TONE3000AuthResult {
@@ -792,7 +993,7 @@ export interface ClipPitchPreviewPayload {
 }
 
 export type PitchCorrectionRenderMode = "single" | "preview_segment" | "full_clip_hq" | "note_hq";
-export type PitchRegressionJobType = "render" | "analysis" | "scrub" | "export" | "clean_export" | "audition";
+export type PitchRegressionJobType = "render" | "analysis" | "scrub" | "export" | "clean_export" | "audition" | "automation_editor_flush" | "automation_audio";
 
 export interface PitchScrubPreviewStatus {
   active: boolean;
@@ -867,6 +1068,9 @@ export interface PitchRegressionJob {
   auditionDurationSec?: number;
   auditionPlaybackOutputPath?: string;
   auditionExportOutputPath?: string;
+  automationAudioRepeatOnly?: boolean;
+  automationAudioPlaybackWarmupSeconds?: number;
+  automationAudioExportStartSeconds?: number;
   resultJsonPath: string;
   label?: string;
 }
@@ -923,6 +1127,8 @@ export interface PitchAppFinalCaptureResult {
 
 export interface PitchRegressionResult {
   success: boolean;
+  automationEditorChecks?: Array<{ name: string; pass: boolean; detail?: unknown }>;
+  automationAudioArtifacts?: Record<string, string>;
   jobType?: PitchRegressionJobType;
   outputFile?: string;
   pitchCorrectionOutputFile?: string;
@@ -1619,6 +1825,20 @@ export interface NativeGlobalShortcutEvent {
 }
 
 // Audio device configuration (matches C++ backend response shape)
+export interface AudioDeviceDraft {
+  audioDeviceType: string;
+  inputDevice: string;
+  outputDevice: string;
+  sampleRate: number;
+  bufferSize: number;
+}
+
+export interface AudioDeviceApplyResult {
+  success: boolean;
+  error?: string;
+  setup: AudioDeviceSetupResponse;
+}
+
 export interface AudioDeviceConfig {
   audioDeviceType: string;
   inputDevice: string;
@@ -1640,6 +1860,10 @@ export interface AudioDeviceConfig {
 
 export interface AudioDeviceSetupResponse {
   current: AudioDeviceConfig;
+  capabilityStatus?: "reported" | "unverified" | "unavailable";
+  capabilityMessage?: string;
+  error?: string;
+  adjustments?: string[];
   availableTypes?: string[];
   inputs?: string[];
   outputs?: string[];
@@ -1811,6 +2035,8 @@ export type NAMTunerState =
 export interface AudioDebugSnapshot {
   transportPlaying: boolean;
   transportRecording: boolean;
+  /** Optional for compatibility with older native backends. */
+  offlineRenderActive?: boolean;
   transportPosition: number;
   sampleRate: number;
   blockSize: number;
@@ -1933,7 +2159,11 @@ export interface TrackRoutingInfo {
   outputChannelCount: number;
   playbackOffsetMs: number;
   trackChannelCount: number;
+  processingChannelCount?: number;
   midiOutputDevice: string;
+  midiOutputMergeKeys?: boolean;
+  midiOutputPolicyPending?: boolean;
+  midiOutputDiagnostics?: { connected: boolean; policyPending: boolean; droppedMessages: number; recoveryCount: number; oversizedMessages: number };
   inputStartChannel: number;
   inputChannelCount: number;
   inputMonitoring: boolean;
@@ -2075,8 +2305,10 @@ declare global {
           newPosition: number,
         ) => Promise<boolean>;
         getAudioDeviceSetup?: () => Promise<AudioDeviceSetupResponse>;
+        queryAudioDeviceSetup?: (draft: AudioDeviceDraft) => Promise<AudioDeviceSetupResponse>;
+        applyAudioDeviceSetup?: (draft: AudioDeviceDraft) => Promise<AudioDeviceApplyResult>;
         openAudioDeviceControlPanel?: () => Promise<AudioDeviceControlPanelResult>;
-        setAudioDeviceSetup?: (config: any) => Promise<boolean>;
+        setAudioDeviceSetup?: (config: any) => Promise<boolean | { success: boolean; error?: string }>;
         getNAMRackOversamplingFactor?: () => Promise<2 | 4 | 8>;
         setNAMRackOversamplingFactor?: (factor: 2 | 4 | 8) => Promise<boolean>;
 
@@ -2100,13 +2332,18 @@ declare global {
           trackId: string,
           volumeDB: number,
         ) => Promise<boolean>;
+        setAutomationTrimValue?: (trackId: string, db: number, param?: string) => Promise<boolean>;
+        getAutomationTrimValue?: (trackId: string) => Promise<number>;
         setTrackPan?: (trackId: string, pan: number) => Promise<boolean>;
         setTrackMute?: (trackId: string, muted: boolean) => Promise<boolean>;
         setTrackSolo?: (trackId: string, soloed: boolean) => Promise<boolean>;
+        setTrackSoloSafe?: (trackId: string, safe: boolean) => Promise<boolean>;
 
         // Transport (Phase 2)
         setTransportPlaying?: (playing: boolean) => Promise<boolean>;
         setTransportRecording?: (recording: boolean) => Promise<boolean>;
+        setTransportStateWithToken?: (action: "position" | "playing" | "recording", value: number | boolean, token: string) => Promise<boolean | { success: boolean; parameterEdits?: unknown[] }>;
+        acknowledgeAutomationEditorFlush?: (token: string, success: boolean) => Promise<boolean>;
         setTempo?: (bpm: number) => Promise<boolean>;
         getTempo?: () => Promise<number>;
         getTransportPosition?: () => Promise<number>;
@@ -2124,6 +2361,8 @@ declare global {
         setMetronomeVolume?: (volume: number) => Promise<boolean>;
         isMetronomeEnabled?: () => Promise<boolean>;
         setMetronomePracticeEnabled?: (enabled: boolean) => Promise<boolean>;
+        controlPracticeTimer?: (action: string, duration: number) => Promise<boolean>;
+        getPracticeTimer?: () => Promise<PracticeTimerState>;
         setTimeSignature?: (
           numerator: number,
           denominator: number,
@@ -2206,10 +2445,14 @@ declare global {
         // Master (Phase 5)
         addMasterFX?: (pluginPath: string) => Promise<boolean>;
         getMasterFX?: () => Promise<any[]>;
+        getFXStageState?: (chain: string) => Promise<unknown>;
+        getAutomationValueText?: (trackId: string, param: string, value: number) => Promise<string>;
+        setFXStageState?: (chain: string, json: string) => Promise<boolean>;
         removeMasterFX?: (fxIndex: number) => Promise<boolean>;
         reorderMasterFX?: (fromIndex: number, toIndex: number) => Promise<boolean>;
         openMasterFXEditor?: (fxIndex: number) => Promise<boolean>;
         setMasterVolume?: (volume: number) => Promise<boolean>;
+        setMasterMute?: (muted: boolean) => Promise<boolean>;
         setMasterPan?: (pan: number) => Promise<boolean>;
         getMasterPan?: () => Promise<number>;
         setMasterMono?: (mono: boolean) => Promise<boolean>;
@@ -2273,6 +2516,12 @@ declare global {
         setAutomationMode?: (trackId: string, parameterId: string, mode: string) => Promise<boolean>;
         getAutomationMode?: (trackId: string, parameterId: string) => Promise<string>;
         clearAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
+        setAutomationPreview?: (trackId: string, parameterId: string, value: number, expectedMeaning: string, expectedReferenceGeneration?: number) => Promise<boolean | { success: boolean; generation: number }>;
+        clearAutomationPreviews?: () => Promise<boolean>;
+        punchAutomationPreviews?: (trackId: string, generation: number) => Promise<{time:number} | null>;
+        setAutomationWriteHold?: (trackId:string,param:string,value:number,start:number,meaning:string,generation:number) => Promise<boolean>;
+        clearAutomationWriteHold?: (trackId:string,param:string) => Promise<boolean>;
+        getAutomationCurrentValue?: (trackId: string, parameterId: string) => Promise<number | null>;
         beginTouchAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
         endTouchAutomation?: (trackId: string, parameterId: string) => Promise<boolean>;
 
@@ -2282,6 +2531,12 @@ declare global {
 
         // FX Chain Management
         getTrackInputFX?: (trackId: string) => Promise<any[]>;
+        eqMatch?: (action: string, request: string) => Promise<EQMatchResult>;
+        irAudition?: (action: string, request: string) => Promise<IRAuditionResult>;
+        irPreparation?: (action: string, id: string) => Promise<IRPreparationStatus | null>;
+        eqDraftAudition?: (action: string, request: string) => Promise<EQDraftAuditionResult>;
+        reverbResponse?: (action: string, request: string) => Promise<ReverbResponseResult>;
+        gainPhaseAlignment?: (action: string, request: string) => Promise<GainPhaseAlignmentResult>;
         getTrackFX?: (trackId: string) => Promise<any[]>;
         removeTrackInputFX?: (
           trackId: string,
@@ -2338,6 +2593,7 @@ declare global {
 
         // Built-in FX Presets
         getBuiltInFXPresets?: (pluginName: string) => Promise<any[]>;
+        eqPresetLibrary?: (action: string, request: Record<string, unknown>) => Promise<{ success: boolean; error?: string; path?: string; hasStartup?: boolean; state?: { name: string; fullState: string } }>;
         saveBuiltInFXPreset?: (
           trackId: string,
           fxIndex: number,
@@ -2408,8 +2664,10 @@ declare global {
           defaultPath?: string,
           title?: string,
           filters?: string,
+          confirmOverwrite?: boolean,
         ) => Promise<string>;
         showOpenDialog?: (title?: string, filters?: string) => Promise<string>;
+        showImportFilesDialog?: (title: string, filters: string) => Promise<string[]>;
         openFileExternal?: (path: string) => Promise<boolean>;
         saveProjectToFile?: (
           filePath: string,
@@ -2421,6 +2679,9 @@ declare global {
         projectRecovery?: (action: string, id?: string) => Promise<unknown>;
         workRecovery?: (action: string, id?: string, payload?: unknown) => Promise<unknown>;
         loadProjectFromFile?: (filePath: string) => Promise<string>;
+        beginProjectFileRead?: (filePath: string) => Promise<{ token?: string; length?: number; error?: string } | null>;
+        readProjectFileChunk?: (token: string, offset: number) => Promise<{ data: string; nextOffset: number } | null>;
+        releaseProjectFileRead?: (token: string) => Promise<boolean>;
         getRecentProjects?: () => Promise<string[]>;
         setRecentProjects?: (projects: string[]) => Promise<boolean>;
         consumePendingLaunchProjectPath?: () => Promise<string>;
@@ -2449,7 +2710,8 @@ declare global {
         getAudioDebugSnapshot?: () => Promise<AudioDebugSnapshot>;
         getRealtimeAudioTelemetry?: () => Promise<AudioDebugSnapshot>;
         setNAMTunerActive?: (trackId: string, active: boolean, subscriberId: string) => Promise<boolean>;
-        sendMidiNote?: (
+        sendBuiltInPreview?: (trackId: string, chain: string, fxIndex: number, session: string, note: number, on: boolean) => Promise<boolean>;
+      sendMidiNote?: (
           trackId: string,
           note: number,
           velocity: number,
@@ -2537,6 +2799,7 @@ declare global {
         // Phase 9: Audio Engine Enhancements
         reverseAudioFile?: (filePath: string) => Promise<string>;
         detectTransients?: (filePath: string, sensitivity: number, minGapMs: number) => Promise<number[]>;
+        getMetronomeSoundInfo?: (accent: boolean) => Promise<MetronomeSoundInfo>;
         setMetronomeClickSound?: (filePath: string) => Promise<boolean>;
         setMetronomeAccentSound?: (filePath: string) => Promise<boolean>;
         resetMetronomeSounds?: () => Promise<boolean>;
@@ -2549,6 +2812,7 @@ declare global {
         }>;
 
         // Phase 11: Send/Bus Routing
+        replaceTrackSends?: (sourceTrackId: string, sends: Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean; sourceChannel?: number }>) => Promise<boolean>;
         addTrackSend?: (sourceTrackId: string, destTrackId: string) => Promise<number>;
         removeTrackSend?: (sourceTrackId: string, sendIndex: number) => Promise<boolean>;
         setTrackSendLevel?: (sourceTrackId: string, sendIndex: number, level: number) => Promise<boolean>;
@@ -2556,7 +2820,8 @@ declare global {
         setTrackSendEnabled?: (sourceTrackId: string, sendIndex: number, enabled: boolean) => Promise<boolean>;
         setTrackSendPreFader?: (sourceTrackId: string, sendIndex: number, preFader: boolean) => Promise<boolean>;
         setTrackSendPhaseInvert?: (sourceTrackId: string, sendIndex: number, invert: boolean) => Promise<boolean>;
-        getTrackSends?: (trackId: string) => Promise<Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean }>>;
+        setTrackSendSourceChannel?: (sourceTrackId: string, sendIndex: number, sourceChannel: number) => Promise<boolean>;
+        getTrackSends?: (trackId: string) => Promise<Array<{ destTrackId: string; level: number; trimDB?: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean; sourceChannel?: number }>>;
 
         // Track Routing Features
         setTrackPhaseInvert?: (trackId: string, invert: boolean) => Promise<boolean>;
@@ -2571,6 +2836,7 @@ declare global {
         setTrackChannelCount?: (trackId: string, numChannels: number) => Promise<boolean>;
         getTrackChannelCount?: (trackId: string) => Promise<number>;
         setTrackMIDIOutput?: (trackId: string, deviceName: string) => Promise<boolean>;
+        setTrackMIDIOutputMergeKeys?: (trackId: string, merge: boolean) => Promise<boolean>;
         getTrackMIDIOutput?: (trackId: string) => Promise<string>;
         getTrackRoutingInfo?: (trackId: string) => Promise<TrackRoutingInfo | null>;
 
@@ -2649,12 +2915,14 @@ declare global {
         addTrackBuiltInFX?: (trackId: string, effectName: string, isInputFX?: boolean) => Promise<boolean>;
         addMasterBuiltInFX?: (effectName: string) => Promise<boolean>;
         getAvailableBuiltInFX?: () => Promise<Array<{ name: string; category: string; isInstrument?: boolean; instrumentMode?: number }>>;
-        getBuiltInPluginSchema?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<BuiltInPluginSchema>;
+        resolveBuiltInPluginRoute?: (trackId: string, chain: string, index: number, identity: string) => Promise<number>;
+      getBuiltInPluginSchema?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, instanceId?: string) => Promise<BuiltInPluginSchema>;
         getNAMRackDiagnostics?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<Record<string, unknown> | null>;
-        getBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number) => Promise<any>;
-        setBuiltInPluginParam?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, value: number) => Promise<boolean>;
-        builtInPluginGesture?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, starting: boolean) => Promise<boolean>;
-        setBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, stateJSON: string) => Promise<boolean>;
+        getBuiltInPluginMeters?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, instanceId?: string, analyzerSize?: number, analyzerSource?: number) => Promise<BuiltInPluginSchema["visualization"] | null>;
+        getBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, instanceId?: string) => Promise<any>;
+        setBuiltInPluginParam?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, value: number, instanceId?: string) => Promise<boolean>;
+        builtInPluginGesture?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, paramId: string, starting: boolean, instanceId?: string) => Promise<boolean>;
+        setBuiltInPluginState?: (trackId: string, chainType: BuiltInPluginChain, fxIndex: number, stateJSON: string, instanceId?: string) => Promise<boolean>;
         getNAMLibraryInfo?: () => Promise<NAMLibraryInfo>;
         inspectNAMAsset?: (filePath: string) => Promise<NAMAssetInspectionResult>;
         findNAMAssetInDirectory?: (directoryPath: string, expectedFileName: string, checksum?: string, fileSizeBytes?: number, slot?: NAMProjectAssetSlot) => Promise<NAMAssetSearchResult>;
@@ -2664,6 +2932,7 @@ declare global {
         searchTONE3000NAM?: (options: TONE3000NAMSearchOptions | string) => Promise<NAMCatalogPayload>;
         runTONE3000AuthenticatedQA?: () => Promise<TONE3000AuthenticatedQAResult>;
         getTONE3000ToneDetail?: (toneId: number, architecture?: string) => Promise<TONE3000ToneDetailResult>;
+        getTONE3000User?: () => Promise<{ success: boolean; user?: TONE3000User; error?: string }>;
         getNAMLibrary?: () => Promise<NAMLibraryPayload>;
         installNAMModel?: (model: NAMCatalogModel | string, options?: NAMInstallOptions | string) => Promise<NAMInstallResult>;
         commitNAMPreviewTone?: (record: NAMInstalledModel | string, metadata?: NAMToneSaveMetadata | string, rackState?: Record<string, unknown> | string) => Promise<NAMLibraryActionResult>;
@@ -2836,6 +3105,7 @@ declare global {
         getMixerWindowState?: () => Promise<MixerWindowState>;
         publishMixerUISnapshot?: (snapshot: any) => Promise<boolean>;
         getMixerUISnapshot?: () => Promise<any>;
+        pitchEditorSession?: (operation: string, payload: unknown) => Promise<unknown>;
         openMidiEditorWindow?: (sessionId: string, bounds?: Partial<WindowBounds>) => Promise<boolean>;
         prewarmMidiEditorWindow?: (sessionId: string, bounds?: Partial<WindowBounds>) => Promise<boolean>;
         focusMidiEditorWindow?: (sessionId: string) => Promise<boolean>;
@@ -2870,11 +3140,33 @@ export interface StretchResult {
 }
 
 class NativeBridge {
+  // The native reader owns one bounded snapshot per WebView. Keep its lifetime
+  // intact across overlapping callers, including startup and recovery jobs.
+  private projectReadQueue: Promise<unknown> = Promise.resolve();
+  private transportRequestToken = "";
+  private transportTokenPrefix = crypto.randomUUID();
+  private transportRequestSequence = 0;
+  private transportRequestsPending = 0;
   private isNative: boolean;
+  hasNativeBackend(): boolean { return this.isNative; }
+  private automationPreviewGeneration = 0;
+  private automationSnapshotRequests = 0;
+  private automationSnapshotGuard?: () => Promise<boolean>;
+  setAutomationSnapshotGuard(guard?: () => Promise<boolean>) { this.automationSnapshotGuard = guard; }
+  hasAutomationSnapshotRequest() { return this.automationSnapshotRequests > 0; }
+  private async runAutomationSnapshot<T>(operation: () => Promise<T>, canceled: T): Promise<T> {
+    ++this.automationSnapshotRequests;
+    try {
+      if (!await (this.automationSnapshotGuard ? this.automationSnapshotGuard() : this.clearAutomationPreviews())) return canceled;
+      return await operation();
+    } finally { --this.automationSnapshotRequests; }
+  }
   private eventListeners: Map<string, Set<(data: any) => void>> = new Map();
+  private automationEditorFlushers = new Set<() => Promise<boolean>>();
   private lastPluginCatalogCompletionId = "";
   private pluginCatalogChangeDispatchQueued = false;
   private devTone3000Refreshed = false;
+  private devTone3000ExpiresAtMs = Date.now() + 3600 * 1000;
   private devBuiltInParamValues: Map<string, Record<string, number>> = new Map();
   private devBuiltInPluginStates: Map<string, Record<string, any>> = new Map();
   private devNAMReadbackFailurePending = new Set<string>();
@@ -3853,6 +4145,12 @@ class NativeBridge {
       // Debugging: Alert the available keys to see what we are working with
       const backend = juce?.backend;
       if (backend) {
+        backend.addEventListener?.("automationEditorFlushRequested", (token: unknown) => {
+          if (typeof token !== "string") return;
+          void this.flushAutomationEditorWrites().then(success =>
+            backend.acknowledgeAutomationEditorFlush?.(token, success)).catch(error =>
+              console.warn("Automation editor flush acknowledgement failed", error));
+        });
         backend.addEventListener?.("pluginCatalogChanged", (data: any) => {
           this.announcePluginCatalogChanged(data?.completionId);
         });
@@ -3883,6 +4181,16 @@ class NativeBridge {
   }
 
   // Subscribe to peak-cache-ready events emitted by C++ after background peak generation.
+  registerAutomationEditorFlush(flush: () => Promise<boolean>): () => void {
+    this.automationEditorFlushers.add(flush);
+    return () => { this.automationEditorFlushers.delete(flush); };
+  }
+
+  async flushAutomationEditorWrites(): Promise<boolean> {
+    const results = await Promise.allSettled([...this.automationEditorFlushers].map(flush => Promise.resolve().then(flush)));
+    return results.every(result => result.status === "fulfilled" && result.value !== false);
+  }
+
   // Returns an unsubscribe function (or no-op in dev mode).
   onPeaksReady(callback: (filePath: string) => void): () => void {
     const backend = this.getBackend();
@@ -3980,7 +4288,7 @@ class NativeBridge {
 
   // Subscribe to transport position updates from C++ (emitted at 10Hz).
   // Returns an unsubscribe function (or no-op in dev mode).
-  onTransportUpdate(callback: (data: { position: number; isPlaying: boolean; metronomePracticeEnabled?: boolean }) => void): () => void {
+  onTransportUpdate(callback: (data: { position: number; isPlaying: boolean; metronomePracticeEnabled?: boolean; requestToken?: string }) => void): () => void {
     const backend = this.getBackend();
     if (this.isNative && backend?.addEventListener) {
       const listener = backend.addEventListener("transportUpdate", (data: any) => {
@@ -4044,6 +4352,44 @@ class NativeBridge {
     }
   }
 
+  private mockAudioSetup: AudioDeviceSetupResponse | null = null;
+
+  async queryAudioDeviceSetup(draft: AudioDeviceDraft): Promise<AudioDeviceSetupResponse> {
+    if (this.isNative) {
+      if (!window.__JUCE__?.backend.queryAudioDeviceSetup)
+        throw new Error("Audio device discovery requires the updated desktop app. Rebuild and restart OpenStudio.");
+      return window.__JUCE__.backend.queryAudioDeviceSetup(draft);
+    }
+    const asio = draft.audioDeviceType === "ASIO";
+    const inputs = asio ? ["Mock ASIO", "Mock USB ASIO"] : ["Mock In", "Mic 1"];
+    const outputs = asio ? inputs : ["Mock Out", "Speakers"];
+    const outputDevice = outputs.includes(draft.outputDevice) ? draft.outputDevice : outputs[0];
+    const inputDevice = asio ? outputDevice : inputs.includes(draft.inputDevice) ? draft.inputDevice : inputs[0];
+    const sampleRates = outputDevice === "Speakers" ? [48000] : [44100, 48000, 96000];
+    const sampleRate = sampleRates.includes(draft.sampleRate) ? draft.sampleRate : sampleRates[0];
+    const bufferSizes = outputDevice === "Speakers" ? [480, 960] : sampleRate === 96000 ? [128, 256, 512] : [64, 128, 256, 512, 1024];
+    const bufferSize = bufferSizes.includes(draft.bufferSize) ? draft.bufferSize : bufferSizes[0];
+    const current = { ...draft, inputDevice, outputDevice, sampleRate, bufferSize };
+    const labels = { inputDevice: "Input device", outputDevice: "Output device", sampleRate: "Sample rate", bufferSize: "Buffer size" };
+    const adjustments = (Object.keys(labels) as Array<keyof typeof labels>)
+      .filter((key) => draft[key] !== current[key])
+      .map((key) => `${labels[key]} adjusted to ${current[key]}.`);
+    return { current, inputs, outputs, sampleRates, bufferSizes,
+      availableTypes: ["Mock", "ASIO", "Windows Audio", "Windows Audio (Exclusive Mode)", "Windows Audio (Low Latency Mode)"],
+      capabilityStatus: "reported", adjustments };
+  }
+
+  async applyAudioDeviceSetup(draft: AudioDeviceDraft): Promise<AudioDeviceApplyResult> {
+    if (this.isNative) {
+      if (!window.__JUCE__?.backend.applyAudioDeviceSetup)
+        throw new Error("Applying audio settings requires the updated desktop app.");
+      return window.__JUCE__.backend.applyAudioDeviceSetup(draft);
+    }
+    const setup = await this.queryAudioDeviceSetup(draft);
+    this.mockAudioSetup = setup;
+    return { success: true, setup };
+  }
+
   async getAudioDeviceSetup(): Promise<AudioDeviceSetupResponse> {
     if (this.isNative && window.__JUCE__?.backend.getAudioDeviceSetup) {
       try {
@@ -4057,7 +4403,7 @@ class NativeBridge {
       }
     } else {
       // Mock Data
-      return {
+      return this.mockAudioSetup ?? {
         current: {
           audioDeviceType: "Mock",
           inputDevice: "Mock In",
@@ -4065,7 +4411,7 @@ class NativeBridge {
           sampleRate: 44100,
           bufferSize: 512,
         },
-        availableTypes: ["Mock", "ASIO", "WASAPI"],
+        availableTypes: ["Mock", "ASIO", "Windows Audio", "Windows Audio (Exclusive Mode)", "Windows Audio (Low Latency Mode)"],
         inputs: ["Mock In", "Mic 1"],
         outputs: ["Mock Out", "Speakers"],
         sampleRates: [44100, 48000],
@@ -4089,7 +4435,10 @@ class NativeBridge {
 
   async setAudioDeviceSetup(config: any): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setAudioDeviceSetup) {
-      return await window.__JUCE__.backend.setAudioDeviceSetup(config);
+      const result = await window.__JUCE__.backend.setAudioDeviceSetup(config);
+      if (typeof result === "boolean") return result;
+      if (!result.success) throw new Error(result.error || "Audio device rejected the requested configuration");
+      return true;
     } else {
       console.log("Mock: setAudioDeviceSetup", config);
       return true;
@@ -4177,6 +4526,11 @@ class NativeBridge {
     }
   }
 
+  async setTrackSoloSafe(trackId: string, safe: boolean): Promise<boolean> {
+    if (this.isNative) return await window.__JUCE__?.backend.setTrackSoloSafe?.(trackId, safe) ?? false;
+    return true;
+  }
+
   async setTrackSolo(trackId: string, soloed: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTrackSolo) {
       return await window.__JUCE__.backend.setTrackSolo(trackId, soloed);
@@ -4191,7 +4545,7 @@ class NativeBridge {
   // Transport Control (Phase 2)
   async setTransportPlaying(playing: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPlaying) {
-      return await window.__JUCE__.backend.setTransportPlaying(playing);
+      return this.changeTransport("playing", playing, () => window.__JUCE__!.backend.setTransportPlaying!(playing));
     } else {
       console.log(`[NativeBridge] Mock setTransportPlaying: ${playing}`);
       return true;
@@ -4200,7 +4554,7 @@ class NativeBridge {
 
   async setTransportRecording(recording: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportRecording) {
-      return await window.__JUCE__.backend.setTransportRecording(recording);
+      return this.changeTransport("recording", recording, () => window.__JUCE__!.backend.setTransportRecording!(recording));
     } else {
       console.log(`[NativeBridge] Mock setTransportRecording: ${recording}`);
       return true;
@@ -4257,13 +4611,47 @@ class NativeBridge {
     }
   }
 
+  async setAutomationTrimValue(trackId: string, db: number, param = "trim_volume"): Promise<boolean> {
+    if (!Number.isFinite(db)) return false;
+    return this.getBackend()?.setAutomationTrimValue?.(trackId, Math.max(-60, Math.min(12, db)), param) ?? !this.isNative;
+  }
+  async getAutomationTrimValue(trackId: string): Promise<number> {
+    return this.getBackend()?.getAutomationTrimValue?.(trackId) ?? 0;
+  }
+
   async setTransportPosition(seconds: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTransportPosition) {
-      return await window.__JUCE__.backend.setTransportPosition(seconds);
+      return this.changeTransport("position", seconds, () => window.__JUCE__!.backend.setTransportPosition!(seconds));
     } else {
       console.log(`[NativeBridge] Mock setTransportPosition: ${seconds}s`);
       return true;
     }
+  }
+
+  isTransportUpdateCurrent(data: { requestToken?: string }): boolean {
+    if (typeof data.requestToken === "string" && this.transportRequestToken) return data.requestToken === this.transportRequestToken;
+    return this.transportRequestsPending === 0;
+  }
+
+  private async changeTransport(action: "position" | "playing" | "recording", value: number | boolean, legacy: () => Promise<boolean>): Promise<boolean> {
+    const epoch = getProjectEpoch();
+    const previous = this.transportRequestToken;
+    const token = `${this.transportTokenPrefix}:${++this.transportRequestSequence}`;
+    this.transportRequestToken = token;
+    ++this.transportRequestsPending;
+    try {
+      const backend = this.getBackend();
+      const result = backend?.setTransportStateWithToken ? await backend.setTransportStateWithToken(action, value, token) : await legacy();
+      const success = typeof result === "boolean" ? result : result.success;
+      if (success && typeof result !== "boolean" && this.transportRequestToken === token && epoch === getProjectEpoch())
+        for (const event of result.parameterEdits ?? [])
+          for (const callback of this.eventListeners.get("pluginParameterEdit") ?? []) callback({ ...(event as object), transportFlush: true });
+      if (!success && this.transportRequestToken === token) this.transportRequestToken = previous;
+      return success;
+    } catch (error) {
+      if (this.transportRequestToken === token) this.transportRequestToken = previous;
+      throw error;
+    } finally { --this.transportRequestsPending; }
   }
 
   // Metronome & Time Signature (Phase 3)
@@ -4277,9 +4665,31 @@ class NativeBridge {
   }
 
   async setMetronomePracticeEnabled(enabled: boolean): Promise<boolean> {
+    if (!this.isNative) this.mockPracticeTimer = { status: "idle", duration: 0, elapsed: 0 };
     if (this.isNative) {
       return await window.__JUCE__?.backend.setMetronomePracticeEnabled?.(enabled) ?? false;
     }
+    return true;
+  }
+
+  private mockPracticeTimer: PracticeTimerState = { status: "idle", duration: 0, elapsed: 0 };
+  private mockPracticeTimerStarted = 0;
+  async getPracticeTimer(): Promise<PracticeTimerState> {
+    if (this.isNative) return await window.__JUCE__?.backend.getPracticeTimer?.() ?? { status: "idle", duration: 0, elapsed: 0 };
+    const state = this.mockPracticeTimer;
+    if (state.status !== "running") return { ...state };
+    const elapsed = state.elapsed + (performance.now() - this.mockPracticeTimerStarted) / 1000;
+    if (state.duration > 0 && elapsed >= state.duration)
+      return this.mockPracticeTimer = { ...state, status: "finished", elapsed: state.duration };
+    return { ...state, elapsed };
+  }
+  async controlPracticeTimer(action: "start" | "pause" | "resume" | "reset", duration = 0): Promise<boolean> {
+    if (this.isNative) return await window.__JUCE__?.backend.controlPracticeTimer?.(action, duration) ?? false;
+    const state = await this.getPracticeTimer();
+    this.mockPracticeTimer = action === "reset" ? { ...state, status: "idle", elapsed: 0 }
+      : action === "start" ? { status: "running", elapsed: 0, duration }
+      : { ...state, status: action === "pause" ? "paused" : "running" };
+    this.mockPracticeTimerStarted = performance.now();
     return true;
   }
 
@@ -4904,6 +5314,15 @@ class NativeBridge {
   }
 
   // Built-in FX Presets
+  async eqPresetLibrary(action: "status" | "folder" | "import" | "export" | "saveStartup" | "clearStartup", request: Record<string, unknown> = {}): Promise<{ success: boolean; error?: string; path?: string; hasStartup?: boolean; state?: { name: string; fullState: string } }> {
+    if (this.isNative && window.__JUCE__?.backend.eqPresetLibrary) return window.__JUCE__.backend.eqPresetLibrary(action, request);
+    return { success: false, error: "Native preset files are available in the desktop app" };
+  }
+
+  async builtInPresetFile(pluginName: string, action: "folder" | "import" | "export", request: Record<string, unknown> = {}) {
+    return this.eqPresetLibrary(action, { ...request, pluginName });
+  }
+
   async getBuiltInFXPresets(
     pluginName: string,
   ): Promise<{ name: string; path: string; metadataPath?: string; metadata?: any; instrumentProfile?: "guitar" | "bass" }[]> {
@@ -5139,6 +5558,21 @@ class NativeBridge {
     return [];
   }
 
+  async getFXStageState(chain: "master" | "monitor"): Promise<FXStageSlotState[] | null> {
+    return this.isNative && window.__JUCE__?.backend.getFXStageState
+      ? parseFXStageState(await window.__JUCE__.backend.getFXStageState(chain)) : null;
+  }
+
+  async getAutomationValueText(trackId: string, param: string, value: number): Promise<string> {
+    return this.isNative && window.__JUCE__?.backend.getAutomationValueText
+      ? window.__JUCE__.backend.getAutomationValueText(trackId, param, value) : "";
+  }
+
+  async setFXStageState(chain: "master" | "monitor", state: FXStageSlotState[]): Promise<boolean> {
+    return this.isNative && window.__JUCE__?.backend.setFXStageState
+      ? window.__JUCE__.backend.setFXStageState(chain, JSON.stringify(state)) : false;
+  }
+
   async removeMasterFX(fxIndex: number): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.removeMasterFX) {
       return await window.__JUCE__.backend.removeMasterFX(fxIndex);
@@ -5205,6 +5639,10 @@ class NativeBridge {
       return await window.__JUCE__.backend.bypassMonitoringFX(fxIndex, bypassed);
     }
     return false;
+  }
+
+  async setMasterMute(muted: boolean): Promise<boolean> {
+    return this.isNative && window.__JUCE__?.backend.setMasterMute ? await window.__JUCE__.backend.setMasterMute(muted) : true;
   }
 
   async setMasterVolume(volume: number): Promise<boolean> {
@@ -5499,6 +5937,41 @@ class NativeBridge {
     return "off";
   }
 
+  async setAutomationPreview(trackId: string, param: string, value: number, expectedMeaning = "", expectedReferenceGeneration = -1): Promise<boolean> {
+    if (this.isNative) {
+      if (!window.__JUCE__?.backend.setAutomationPreview) return false;
+      const result = await window.__JUCE__.backend.setAutomationPreview(trackId, param, value, expectedMeaning, expectedReferenceGeneration);
+      if (typeof result === "boolean") return result;
+      if (result.success && Number.isFinite(result.generation)) this.automationPreviewGeneration = Math.max(this.automationPreviewGeneration, result.generation);
+      return result.success;
+    }
+    return true;
+  }
+  isCurrentAutomationPreviewClear(generation: number): boolean {
+    return Number.isFinite(generation) && generation >= this.automationPreviewGeneration;
+  }
+  async clearAutomationPreviews(): Promise<boolean> {
+    if (this.isNative) return window.__JUCE__?.backend.clearAutomationPreviews ? await window.__JUCE__.backend.clearAutomationPreviews() : false;
+    return true;
+  }
+  async punchAutomationPreviews(trackId: string): Promise<number | null | undefined> {
+    if(!this.isNative)return undefined;
+    const result=await this.getBackend()?.punchAutomationPreviews?.(trackId,this.automationPreviewGeneration);
+    return result && Number.isFinite(result.time) ? result.time : null;
+  }
+  async setAutomationWriteHold(trackId:string,param:string,value:number,start:number,meaning="",generation=-1):Promise<boolean> {
+    if(!this.isNative)return true;
+    return this.getBackend()?.setAutomationWriteHold?.(trackId,param,value,start,meaning,generation) ?? false;
+  }
+  async clearAutomationWriteHold(trackId:string,param:string):Promise<boolean> {
+    if(!this.isNative)return true;
+    return this.getBackend()?.clearAutomationWriteHold?.(trackId,param) ?? false;
+  }
+  async getAutomationCurrentValue(trackId: string, param: string): Promise<number | null | undefined> {
+    if (this.isNative) return window.__JUCE__?.backend.getAutomationCurrentValue ? await window.__JUCE__.backend.getAutomationCurrentValue(trackId, param) : null;
+    return undefined;
+  }
+
   async clearAutomation(
     trackId: string,
     parameterId: string,
@@ -5674,9 +6147,9 @@ class NativeBridge {
   }
 
   // Project Save/Load (F2)
-  async showSaveDialog(defaultPath?: string, title?: string, filters?: string): Promise<string> {
+  async showSaveDialog(defaultPath?: string, title?: string, filters?: string, confirmOverwrite = false): Promise<string> {
     if (this.isNative && window.__JUCE__?.backend.showSaveDialog) {
-      return await window.__JUCE__.backend.showSaveDialog(defaultPath, title, filters);
+      return await window.__JUCE__.backend.showSaveDialog(defaultPath, title, filters, confirmOverwrite);
     }
     console.log("[NativeBridge] Mock showSaveDialog");
     return "";
@@ -5688,6 +6161,13 @@ class NativeBridge {
     }
     console.log("[NativeBridge] Mock showOpenDialog");
     return "";
+  }
+
+  async showImportFilesDialog(title: string, filters: string): Promise<string[]> {
+    if (this.isNative && window.__JUCE__?.backend.showImportFilesDialog)
+      return window.__JUCE__.backend.showImportFilesDialog(title, filters);
+    const path = await this.showOpenDialog(title, filters);
+    return path ? [path] : [];
   }
 
   async getAppVersion(): Promise<string> {
@@ -5782,6 +6262,34 @@ class NativeBridge {
   }
 
   async loadProjectFromFile(filePath: string): Promise<string> {
+    const read = this.projectReadQueue.then(() => this.readProjectFromFile(filePath));
+    this.projectReadQueue = read.catch(() => undefined);
+    return read;
+  }
+
+  private async readProjectFromFile(filePath: string): Promise<string> {
+    const backend = typeof window === "undefined" ? undefined : window.__JUCE__?.backend;
+    if (this.isNative && backend?.beginProjectFileRead && backend.readProjectFileChunk && backend.releaseProjectFileRead) {
+      const info = await backend.beginProjectFileRead(filePath);
+      if (!info?.token) throw new Error(typeof info?.error === "string" ? info.error : "The native project reader did not provide a file snapshot");
+      try {
+        if (typeof info.length !== "number" || !Number.isInteger(info.length) || info.length < 1 || info.length > 256 * 1024 * 1024) throw new Error("Invalid project read size");
+        const chunks: string[] = [];
+        let offset = 0;
+        while (offset < info.length) {
+          const chunk = await backend.readProjectFileChunk(info.token, offset);
+          if (!chunk || typeof chunk.data !== "string" || !chunk.data.length || !Number.isInteger(chunk.nextOffset)
+            || chunk.nextOffset <= offset || chunk.nextOffset > info.length || chunk.nextOffset - offset > 8192) throw new Error("Incomplete project read");
+          chunks.push(chunk.data);
+          // Native offsets count JUCE characters; JS strings may count emoji
+          // as two UTF-16 code units. Advance using the native cursor.
+          offset = chunk.nextOffset;
+        }
+        return chunks.join("");
+      } finally {
+        await backend.releaseProjectFileRead(info.token).catch(() => {});
+      }
+    }
     if (this.isNative && window.__JUCE__?.backend.loadProjectFromFile) {
       return await window.__JUCE__.backend.loadProjectFromFile(filePath);
     }
@@ -5909,6 +6417,7 @@ class NativeBridge {
     includeMetronome?: boolean;
     includedClipIds?: string[];
   }): Promise<boolean> {
+    return this.runAutomationSnapshot(async () => {
     if (this.isNative && window.__JUCE__?.backend.renderProject) {
       const success = await window.__JUCE__.backend.renderProject(
         options.source,
@@ -5939,6 +6448,7 @@ class NativeBridge {
     return new Promise((resolve) => {
       setTimeout(() => resolve(true), 2000);
     });
+    }, false);
   }
 
   async capturePitchAuditionPlayback(options: {
@@ -6005,6 +6515,7 @@ class NativeBridge {
     includeMetronome?: boolean;
     includedClipIds?: string[];
   }): Promise<boolean> {
+    return this.runAutomationSnapshot(async () => {
     if (this.isNative && window.__JUCE__?.backend.renderProjectWithDither) {
       const success = await window.__JUCE__.backend.renderProjectWithDither(
         options.source,
@@ -6031,9 +6542,16 @@ class NativeBridge {
     }
     // Fallback to non-dither render
     return this.renderProject(options);
+    }, false);
   }
 
   // MIDI
+  async sendBuiltInPreview(address: BuiltInPluginAddress, session: string, note: number, on: boolean): Promise<boolean> {
+    if (note >= 0) address = await this.resolveBuiltInAddress(address);
+    if (this.isNative) return await window.__JUCE__?.backend.sendBuiltInPreview?.(address.trackId ?? "", address.chain, address.fxIndex ?? -1, session, note, on) ?? false;
+    return true;
+  }
+
   async sendMidiNote(
     trackId: string,
     note: number,
@@ -6420,6 +6938,12 @@ class NativeBridge {
     return [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
   }
 
+  async getMetronomeSoundInfo(accent: boolean): Promise<MetronomeSoundInfo> {
+    if (this.isNative && window.__JUCE__?.backend.getMetronomeSoundInfo)
+      return await window.__JUCE__.backend.getMetronomeSoundInfo(accent);
+    return { error: "" };
+  }
+
   async setMetronomeClickSound(filePath: string): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setMetronomeClickSound) {
       return await window.__JUCE__.backend.setMetronomeClickSound(filePath);
@@ -6459,6 +6983,15 @@ class NativeBridge {
   }
 
   // Phase 11: Send/Bus Routing
+  async replaceTrackSends(sourceTrackId: string, sends: Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean; sourceChannel?: number }>): Promise<boolean> {
+    if (this.isNative) {
+      // Never emulate this with scalar setters: the intermediate routing would
+      // be audible. A frontend/backend version mismatch must fail closed.
+      return window.__JUCE__?.backend.replaceTrackSends?.(sourceTrackId, sends) ?? false;
+    }
+    return true;
+  }
+
   async addTrackSend(sourceTrackId: string, destTrackId: string): Promise<number> {
     if (this.isNative && window.__JUCE__?.backend.addTrackSend) {
       return await window.__JUCE__.backend.addTrackSend(sourceTrackId, destTrackId);
@@ -6503,7 +7036,7 @@ class NativeBridge {
     return true;
   }
 
-  async getTrackSends(trackId: string): Promise<Array<{ destTrackId: string; level: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean }>> {
+  async getTrackSends(trackId: string): Promise<Array<{ destTrackId: string; level: number; trimDB?: number; pan: number; enabled: boolean; preFader: boolean; phaseInvert: boolean; sourceChannel?: number }>> {
     if (this.isNative && window.__JUCE__?.backend.getTrackSends) {
       return await window.__JUCE__.backend.getTrackSends(trackId);
     }
@@ -6513,6 +7046,16 @@ class NativeBridge {
   async setTrackSendPhaseInvert(sourceTrackId: string, sendIndex: number, invert: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setTrackSendPhaseInvert) {
       return await window.__JUCE__.backend.setTrackSendPhaseInvert(sourceTrackId, sendIndex, invert);
+    }
+    return true;
+  }
+
+  async setTrackSendSourceChannel(sourceTrackId: string, sendIndex: number, sourceChannel: number): Promise<boolean> {
+    if (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 62 || sourceChannel % 2 !== 0) return false;
+    if (this.isNative) {
+      return window.__JUCE__?.backend.setTrackSendSourceChannel
+        ? await window.__JUCE__.backend.setTrackSendSourceChannel(sourceTrackId, sendIndex, sourceChannel)
+        : sourceChannel === 0;
     }
     return true;
   }
@@ -6594,6 +7137,11 @@ class NativeBridge {
       return await window.__JUCE__.backend.getTrackChannelCount(trackId);
     }
     return 2;
+  }
+
+  async setTrackMIDIOutputMergeKeys(trackId: string, merge: boolean): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.setTrackMIDIOutputMergeKeys) return await window.__JUCE__.backend.setTrackMIDIOutputMergeKeys(trackId, merge);
+    return !this.isNative;
   }
 
   async setTrackMIDIOutput(trackId: string, deviceName: string): Promise<boolean> {
@@ -6931,6 +7479,9 @@ class NativeBridge {
       { name: "OpenStudio Drums", category: "Built-in Instrument", isInstrument: true, instrumentMode: 2 },
       { name: "OpenStudio Clean Guitar", category: "Built-in Instrument", isInstrument: true, instrumentMode: 3 },
       { name: "OpenStudio EQ", category: "Built-in" },
+      { name: "OpenStudio Preamp", category: "Built-in" },
+      { name: "OpenStudio Graphic EQ", category: "Built-in" },
+      { name: "OpenStudio Gain Phase", category: "Built-in" },
       { name: "OpenStudio Compressor", category: "Built-in" },
       { name: "OpenStudio Gate", category: "Built-in" },
       { name: "OpenStudio Limiter", category: "Built-in" },
@@ -6943,11 +7494,57 @@ class NativeBridge {
     ];
   }
 
+  async irAudition(action: "play" | "stop" | "status", session: string, options: { address?: BuiltInPluginAddress; sound?: number; input?: number } = {}): Promise<IRAuditionResult> {
+    if (this.isNative && window.__JUCE__?.backend.irAudition)
+      return await window.__JUCE__.backend.irAudition(action, JSON.stringify({ ...options, session }));
+    return { success: false, error: "IR audition requires the native audio engine" };
+  }
+
+  async eqMatch(action: "list" | "capture" | "file" | "fit" | "sketch", request: Record<string, unknown> = {}): Promise<EQMatchResult> {
+    if (this.isNative && window.__JUCE__?.backend.eqMatch)
+      return await window.__JUCE__.backend.eqMatch(action, JSON.stringify(request));
+    return { success: false, error: "Spectrum learning requires the native audio engine" };
+  }
+
+  async eqDraftAudition(action: "start" | "update" | "status" | "stop", session: string,
+    options: { address?: BuiltInPluginAddress; bands?: EQMatchResult["bands"]; expectedState?: string; immediate?: boolean } = {}): Promise<EQDraftAuditionResult> {
+    if (this.isNative && window.__JUCE__?.backend.eqDraftAudition)
+      return await window.__JUCE__.backend.eqDraftAudition(action, JSON.stringify({ ...options, session }));
+    return { success: false, error: "Proposal audition requires the native audio engine" };
+  }
+
+  async reverbResponse(action: "render" | "status" | "cancel" | "release", jobId: string,
+    options: { address?: BuiltInPluginAddress; seconds?: number; input?: number } = {}): Promise<ReverbResponseResult> {
+    if (this.isNative && window.__JUCE__?.backend.reverbResponse)
+      return await window.__JUCE__.backend.reverbResponse(action, JSON.stringify({ ...options, jobId }));
+    return { success: false, error: "Response rendering requires the native audio engine" };
+  }
+
+  async gainPhaseAlignmentJob(action: "status" | "cancel" | "release", jobId: string): Promise<GainPhaseAlignmentResult> {
+    if (this.isNative && window.__JUCE__?.backend.gainPhaseAlignment)
+      return await window.__JUCE__.backend.gainPhaseAlignment(action, JSON.stringify({ jobId }));
+    return { success: false, error: "Alignment requires the native audio engine" };
+  }
+
+  async gainPhaseAlignment(action: "list" | "capture" | "apply", entries: Array<Partial<GainPhaseAlignmentEntry>> = [], channelPolicy: "independent" | "linked" = "independent", fitPhase = false, captureSeconds = .5, spectralPhase = false, jobId = "", discoverGroups = false, options: { projectSpan?: boolean; projectEndSeconds?: number; weakSignal?: boolean; routePolicy?: "inputs" | "direct-master" | "fixed-master" } = {}): Promise<GainPhaseAlignmentResult> {
+    if (this.isNative && window.__JUCE__?.backend.gainPhaseAlignment)
+      return await window.__JUCE__.backend.gainPhaseAlignment(action, JSON.stringify({ entries, channelPolicy, fitPhase, captureSeconds, spectralPhase, jobId, discoverGroups, ...options }));
+    return { success: false, error: "Live alignment requires the native audio engine" };
+  }
+
+  async resolveBuiltInAddress(address: BuiltInPluginAddress): Promise<BuiltInPluginAddress> {
+    if (!this.isNative || !address.instanceId || !window.__JUCE__?.backend.resolveBuiltInPluginRoute) return address;
+    const index = await window.__JUCE__.backend.resolveBuiltInPluginRoute(address.trackId ?? "", address.chain, address.fxIndex ?? -1, address.instanceId);
+    if (index < 0) throw new Error("This plugin instance was removed. Reopen its editor from the FX chain.");
+    return { ...address, fxIndex: index };
+  }
+
   async getBuiltInPluginSchema(address: BuiltInPluginAddress): Promise<BuiltInPluginSchema> {
+    address = await this.resolveBuiltInAddress(address);
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     if (this.isNative && window.__JUCE__?.backend.getBuiltInPluginSchema) {
-      const schema = await window.__JUCE__.backend.getBuiltInPluginSchema(trackId, address.chain, fxIndex);
+      const schema = await window.__JUCE__.backend.getBuiltInPluginSchema(trackId, address.chain, fxIndex, address.instanceId);
       return projectNAMRackSchemaForUI(schema);
     }
     if (this.shouldUseDevNAMMock()) {
@@ -7301,6 +7898,15 @@ class NativeBridge {
     };
   }
 
+  async getBuiltInPluginMeters(address: BuiltInPluginAddress, analyzerSize = 0, analyzerSource = 0): Promise<BuiltInPluginSchema["visualization"] | null> {
+    address = await this.resolveBuiltInAddress(address);
+    if (this.isNative && window.__JUCE__?.backend.getBuiltInPluginMeters) {
+      const result = await window.__JUCE__.backend.getBuiltInPluginMeters(address.trackId || "", address.chain, address.fxIndex ?? -1, address.instanceId, analyzerSize, analyzerSource);
+      return result && typeof result === "object" ? result : null;
+    }
+    return null;
+  }
+
   async getNAMRackDiagnostics(
     address: BuiltInPluginAddress,
   ): Promise<Record<string, unknown> | null> {
@@ -7353,10 +7959,11 @@ class NativeBridge {
   }
 
   async getBuiltInPluginState(address: BuiltInPluginAddress): Promise<any> {
+    address = await this.resolveBuiltInAddress(address);
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     if (this.isNative && window.__JUCE__?.backend.getBuiltInPluginState) {
-      return await window.__JUCE__.backend.getBuiltInPluginState(trackId, address.chain, fxIndex);
+      return await window.__JUCE__.backend.getBuiltInPluginState(trackId, address.chain, fxIndex, address.instanceId);
     }
     if (this.shouldUseDevNAMMock()) {
       const addressKey = this.devBuiltInAddressKey(address);
@@ -7400,16 +8007,19 @@ class NativeBridge {
     return { schemaVersion: 1, values: {} };
   }
 
-  async builtInPluginGesture(address: BuiltInPluginAddress, paramId: string, starting: boolean): Promise<void> {
+  async builtInPluginGesture(address: BuiltInPluginAddress, paramId: string, starting: boolean): Promise<boolean> {
+    address = await this.resolveBuiltInAddress(address);
     if (this.isNative && window.__JUCE__?.backend.builtInPluginGesture)
-      await window.__JUCE__.backend.builtInPluginGesture(address.trackId || "", address.chain, address.fxIndex ?? -1, paramId, starting);
+      return await window.__JUCE__.backend.builtInPluginGesture(address.trackId || "", address.chain, address.fxIndex ?? -1, paramId, starting, address.instanceId);
+    return true;
   }
 
   async setBuiltInPluginParam(address: BuiltInPluginAddress, paramId: string, value: number): Promise<boolean> {
+    address = await this.resolveBuiltInAddress(address);
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     if (this.isNative && window.__JUCE__?.backend.setBuiltInPluginParam) {
-      return await window.__JUCE__.backend.setBuiltInPluginParam(trackId, address.chain, fxIndex, paramId, value);
+      return await window.__JUCE__.backend.setBuiltInPluginParam(trackId, address.chain, fxIndex, paramId, value, address.instanceId);
     }
     if (this.shouldUseDevNAMMock() && paramId === "inputMode") {
       console.warn("[NativeBridge] Mock rejected retired NAM Rack inputMode write");
@@ -7449,12 +8059,20 @@ class NativeBridge {
     return await this.setBuiltInPluginParam(address, "auditionSource", enabled ? 1 : 0);
   }
 
+  async irPreparation(action: "begin" | "status" | "cancel" | "release", id: string): Promise<IRPreparationStatus | null> {
+    if (this.isNative && window.__JUCE__?.backend.irPreparation) {
+      return await window.__JUCE__.backend.irPreparation(action, id);
+    }
+    return null;
+  }
+
   async setBuiltInPluginState(address: BuiltInPluginAddress, state: any): Promise<boolean> {
+    address = await this.resolveBuiltInAddress(address);
     const trackId = address.trackId || "";
     const fxIndex = address.fxIndex ?? -1;
     const stateJSON = typeof state === "string" ? state : JSON.stringify(state);
     if (this.isNative && window.__JUCE__?.backend.setBuiltInPluginState) {
-      return await window.__JUCE__.backend.setBuiltInPluginState(trackId, address.chain, fxIndex, stateJSON);
+      return await window.__JUCE__.backend.setBuiltInPluginState(trackId, address.chain, fxIndex, stateJSON, address.instanceId);
     }
     console.log("[NativeBridge] Mock setBuiltInPluginState:", address, state);
     let parsedState: unknown = state;
@@ -7741,6 +8359,14 @@ class NativeBridge {
     return { success: false, error: "Live TONE3000 detail is only available in the native app." };
   }
 
+  async getTONE3000User(): Promise<{ success: boolean; user?: TONE3000User; error?: string }> {
+    if (this.isNative && window.__JUCE__?.backend.getTONE3000User) {
+      return await window.__JUCE__.backend.getTONE3000User();
+    }
+    if (this.shouldUseDevNAMMock()) return { success: true, user: { id: 1, username: "openstudio_player", avatar_url: null } };
+    return { success: false, error: "TONE3000 account information is unavailable." };
+  }
+
   async getNAMLibrary(): Promise<NAMLibraryPayload> {
     if (this.isNative && window.__JUCE__?.backend.getNAMLibrary) {
       return await window.__JUCE__.backend.getNAMLibrary();
@@ -7971,11 +8597,12 @@ class NativeBridge {
     }
     if (this.shouldUseDevNAMMock()) {
       this.devTone3000Refreshed = true;
+      this.devTone3000ExpiresAtMs = Date.now() + 3600 * 1000;
       return {
         success: true,
         authenticated: true,
         expired: false,
-        expiresAtMs: Date.now() + 3600 * 1000,
+        expiresAtMs: this.devTone3000ExpiresAtMs,
         hasRefreshToken: true,
         clientId: clientId || "t3k_pub_openstudio_visual_qa",
       };
@@ -8014,7 +8641,7 @@ class NativeBridge {
         success: true,
         authenticated: true,
         expired: false,
-        expiresAtMs: Date.now() + 3600 * 1000,
+        expiresAtMs: this.devTone3000ExpiresAtMs,
         hasRefreshToken: true,
         clientId: "t3k_pub_openstudio_visual_qa",
         configuredClientId: true,
@@ -8271,6 +8898,13 @@ class NativeBridge {
     return null;
   }
 
+  async pitchEditorSession<T = unknown>(operation: string, payload: unknown = {}): Promise<T | false> {
+    if (this.isNative && window.__JUCE__?.backend.pitchEditorSession) {
+      return await window.__JUCE__.backend.pitchEditorSession(operation, payload) as T;
+    }
+    return false;
+  }
+
   async openMidiEditorWindow(sessionId: string, bounds?: Partial<WindowBounds>): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.openMidiEditorWindow) {
       return await window.__JUCE__.backend.openMidiEditorWindow(sessionId, bounds);
@@ -8352,9 +8986,12 @@ class NativeBridge {
 
   // Event subscription
   subscribe(eventId: string, callback: (data: any) => void): () => void {
+    if (!this.eventListeners.has(eventId)) this.eventListeners.set(eventId, new Set());
+    this.eventListeners.get(eventId)!.add(callback);
     if (this.isNative && window.__JUCE__?.backend.addEventListener) {
       const token = window.__JUCE__.backend.addEventListener(eventId, callback);
       return () => {
+        this.eventListeners.get(eventId)?.delete(callback);
         if (window.__JUCE__?.backend.removeEventListener) {
           window.__JUCE__.backend.removeEventListener(token);
         }
@@ -8486,7 +9123,14 @@ class NativeBridge {
 
   async setMIDILearnMappings(mappings: MIDILearnMappingInfo[]): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setMIDILearnMappings) {
-      return await window.__JUCE__.backend.setMIDILearnMappings(mappings);
+      if (!await window.__JUCE__.backend.setMIDILearnMappings(mappings)) return false;
+      // Native validates routes and may reject individual controls. A successful
+      // publication must not silently discard assignments from a saved project.
+      const actual = await this.getMIDILearnMappings();
+      return actual.length === mappings.length && mappings.every(expected => actual.some(item =>
+        item.ccNumber === expected.ccNumber && item.trackId === expected.trackId && item.chainType === expected.chainType
+        && item.pluginIndex === expected.pluginIndex && (expected.builtIn && expected.paramId
+          ? item.builtIn && item.paramId === expected.paramId : item.paramIndex === expected.paramIndex)));
     }
     console.log("[NativeBridge] Mock setMIDILearnMappings:", mappings);
     return true;

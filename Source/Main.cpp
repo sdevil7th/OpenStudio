@@ -1,3 +1,6 @@
+#include "RegressionMessagePump.h"
+#include "AudioDeviceProbe.h"
+#include "RuntimeLocation.h"
 #include <JuceHeader.h>
 #include "ApplicationLaunchState.h"
 #include "AudioEngine.h"
@@ -5,6 +8,7 @@
 #include "RuntimeSafetyRegression.h"
 #include "RecordingRecoveryRegression.h"
 #include "MetronomeRegression.h"
+#include "FreePluginRegression.h"
 #include "AppUpdater.h"
 #include "UpdateInstaller.h"
 #include "StoreUpdaterRegression.h"
@@ -12,9 +16,12 @@
 #include "WindowsPackage.h"
 #include "CLAPPluginFormat.h"
 #include "MainComponent.h"
+#include "NativeWindowTheme.h"
 #include "MixerWindowManager.h"
+#include "ASIOCapabilities.h"
 #include "NAMModelSafety.h"
 #include "PluginManager.h"
+#include "PluginQualification.h"
 #include "IsolatedPlugin.h"
 
 #include "NAM/container.h"
@@ -106,7 +113,8 @@ juce::StringArray readPluginScanSearchPathsFile(const juce::File& pathsFile)
 int runHeadlessPluginScanProbe(const juce::String& formatName,
                                const juce::String& pluginIdentifier,
                                const juce::StringArray& searchPaths,
-                               const juce::File& reportFile)
+                               const juce::File& reportFile,
+                               bool qualify = false, bool checkEditor = false)
 {
     juce::AudioPluginFormatManager formats;
     juce::addDefaultFormatsToManager(formats);
@@ -168,6 +176,15 @@ int runHeadlessPluginScanProbe(const juce::String& formatName,
             result->setAttribute("pluginCount", descriptions.size());
             if (descriptions.isEmpty())
                 result->setAttribute("error", "The module loaded no compatible plug-in types.");
+            if (qualify)
+                for (const auto* description : descriptions)
+                    if (description != nullptr)
+                    {
+                        auto qualification = PluginQualification::run(formats, *description, checkEditor);
+                        if (!qualification->getBoolAttribute("success"))
+                            result->setAttribute("status", "qualification-failed");
+                        result->addChildElement(qualification.release());
+                    }
         }
     }
 
@@ -1115,6 +1132,7 @@ public:
             storeQueryWindow->setUsingNativeTitleBar(true);
             storeQueryWindow->centreWithSize(420, 120);
             storeQueryWindow->setVisible(true);
+            applyNativeWindowTheme(*storeQueryWindow);
             appUpdater.checkForUpdates(true, [this, storeQueryPath](const juce::var& status) {
                 auto* report = new juce::DynamicObject();
                 const auto resultStatus = status["status"].toString();
@@ -1228,12 +1246,23 @@ public:
             else
             {
                 OwnedChildProcess descendant;
-                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+                const auto executable = OpenStudioRuntime::executableFile();
                 if (!descendant.start({ executable.getFullPathName(), "--owned-worker-fixture", ownedWorkerFixture, "--owned-worker-leaf" }))
                 { setApplicationReturnValue(3); quit(); return; }
                 fixtureDirectory.getChildFile("descendant.pid").replaceWithText(juce::String(descendant.getProcessId()));
                 juce::Thread::sleep(30000);
             }
+            quit(); return;
+        }
+        const auto audioProbeName = getCommandLineOptionValue(commandLine, "--audio-device-probe");
+        if (audioProbeName.isNotEmpty())
+        {
+            const auto output = getCommandLineOptionValue(commandLine, "--output-dir");
+            const auto seconds = getCommandLineOptionValue(commandLine, "--audio-probe-seconds");
+            const auto buffer = getCommandLineOptionValue(commandLine, "--audio-probe-buffer");
+            setApplicationReturnValue(output.isNotEmpty()
+                ? AudioDeviceProbe::run(audioProbeName, juce::File(output),
+                    seconds.isEmpty() ? 10 : seconds.getIntValue(), buffer.isEmpty() ? 512 : buffer.getIntValue()) : 2);
             quit(); return;
         }
         const auto runtimeTestPath = getCommandLineOptionValue(commandLine, "--runtime-safety-self-test");
@@ -1283,6 +1312,20 @@ public:
         }
 
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
+        if (commandLineHasFlag(commandLine, "--free-plugin-regression-headless"))
+        {
+            ScopedHeadlessRegressionMessages headlessMessages(true);
+            const auto reportPath = getCommandLineOptionValue(commandLine, "--report");
+            const auto fixturePath = getCommandLineOptionValue(commandLine, "--fixtures");
+            const auto result = runFreePluginRegression(
+                fixturePath.isEmpty() ? juce::File() : juce::File(fixturePath),
+                commandLineHasFlag(commandLine, "--capture-fixtures"), getCommandLineOptionValue(commandLine, "--case"));
+            const bool written = reportPath.isNotEmpty()
+                && writeHeadlessResult(juce::File(reportPath), result);
+            setApplicationReturnValue(written && static_cast<bool>(result["overallPass"]) ? 0 : 1);
+            quit();
+            return;
+        }
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
         const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
         const auto renderExportRegressionHeadlessMode = commandLineHasFlag(commandLine, "--render-export-regression-headless");
@@ -1300,17 +1343,43 @@ public:
         const auto pluginScanSearchPathsFile = getCommandLineOptionValue(commandLine, "--plugin-search-paths-file");
         const auto pluginScanRegressionHeadlessMode = commandLineHasFlag(commandLine, "--plugin-scan-regression-headless");
         const auto windowLifecycleHarnessMode = commandLineHasFlag(commandLine, "--window-lifecycle-harness");
+        ScopedHeadlessRegressionMessages headlessMessages(
+            automatedRegressionHeadlessMode || renderExportRegressionHeadlessMode
+            || pitchRegressionHeadlessJobPath.isNotEmpty()
+            || cleanGuitarRegressionReportPath.isNotEmpty()
+            || namRackRegressionReportPath.isNotEmpty()
+            || namRackDIRegressionInputPath.isNotEmpty());
         startupMode = commandLineHasFlag(commandLine, "--ui-safe-mode")
             ? MainComponent::StartupMode::safe
             : MainComponent::StartupMode::normal;
 
-        auto logFile = pluginScanProbePath.isNotEmpty() && startupSelfTestReportPath.isNotEmpty()
-            ? juce::File(startupSelfTestReportPath.trim().unquoted()).withFileExtension("log")
+        const auto startupLogReportFile = juce::File(startupSelfTestReportPath.trim().unquoted());
+        auto logFile = startupSelfTestReportPath.isNotEmpty()
+            ? startupLogReportFile.withFileExtension(pluginScanProbePath.isNotEmpty() ? "log" : "startup.log")
             : getWritableStartupLogFile();
-        juce::Logger::setCurrentLogger(new juce::FileLogger(logFile, "OpenStudio Startup Log"));
+        startupLogger = std::make_unique<juce::FileLogger>(logFile, "OpenStudio Startup Log");
+        juce::Logger::setCurrentLogger(startupLogger.get());
         juce::Logger::writeToLog("Application Initialising...");
         juce::Logger::writeToLog("Startup log path: " + logFile.getFullPathName());
         juce::Logger::writeToLog("Startup mode: " + juce::String(startupMode == MainComponent::StartupMode::safe ? "safe" : "normal"));
+        if (commandLineHasFlag(commandLine, "--asio-capability-probe"))
+        {
+            // Deliberately before AudioEngine construction: no streaming device,
+            // user settings mutation, microphone recording, or application UI.
+            auto* root = new juce::DynamicObject();
+            auto* draft = new juce::DynamicObject();
+            const auto driver = getCommandLineOptionValue(commandLine, "--driver");
+            const bool reported = ASIOCapabilities::query(driver, *root, *draft);
+            root->setProperty("driver", driver);
+            root->setProperty("channels", juce::var(draft));
+            root->setProperty("success", reported);
+            root->setProperty("classification", "diagnostic_only: inactive ASIO capabilities, no recording or playback");
+            const bool wrote = startupSelfTestReportPath.isNotEmpty()
+                && writeHeadlessResult(juce::File(startupSelfTestReportPath), juce::var(root));
+            setApplicationReturnValue(reported && wrote ? 0 : 2);
+            quit();
+            return;
+        }
         if (pitchRegressionJobPath.isNotEmpty())
         {
             juce::Logger::writeToLog("Pitch regression job path: " + pitchRegressionJobPath);
@@ -1391,7 +1460,9 @@ public:
                 pluginScanSearchPathsFile.isNotEmpty()
                     ? readPluginScanSearchPathsFile(juce::File(pluginScanSearchPathsFile.trim().unquoted()))
                     : juce::StringArray(),
-                reportFile);
+                reportFile,
+                commandLineHasFlag(commandLine, "--plugin-qualify"),
+                commandLineHasFlag(commandLine, "--plugin-editor-check"));
             setApplicationReturnValue(exitCode);
             quit();
             return;
@@ -1590,9 +1661,11 @@ public:
                 ? juce::File(startupSelfTestReportPath.trim().unquoted())
                 : getWritableStartupLogFile().getSiblingFile("OpenStudio_WindowLifecycleHarness.json");
 
-            juce::Timer::callAfterDelay(1000, [this, reportFile]()
+            const int editorReviewHoldMs = juce::jlimit(0, 60000,
+                getCommandLineOptionValue(commandLine, "--plugin-editor-review-hold-ms").getIntValue());
+            juce::Timer::callAfterDelay(1000, [this, reportFile, editorReviewHoldMs]()
             {
-                runWindowLifecycleHarness(reportFile);
+                runWindowLifecycleHarness(reportFile, editorReviewHoldMs);
             });
         }
     }
@@ -1607,16 +1680,19 @@ public:
         if (audioEngine != nullptr)
             audioEngine->onFXSlotsRemoved = {};
         pluginEditorWindowManagers.clear();
+        pitchEditorWindowManager = nullptr;
         midiEditorWindowManagers.clear();
         mixerWindowManager = nullptr;
         mainWindow = nullptr;
         audioEngine.reset();
 
         juce::Logger::setCurrentLogger(nullptr);
+        startupLogger.reset();
     }
 
     void systemRequestedQuit() override
     {
+        if (pitchEditorWindowManager != nullptr) pitchEditorWindowManager->close();
         if (mixerWindowManager != nullptr)
             mixerWindowManager->close();
         for (auto& entry : pluginEditorWindowManagers)
@@ -1637,8 +1713,7 @@ public:
         OpenStudioLaunchState::setPendingProjectPath(commandLine);
     }
 
-    class MainWindow    : public juce::DocumentWindow,
-                          private juce::Timer
+    class MainWindow    : public juce::DocumentWindow
     {
     public:
         MainWindow (juce::String name,
@@ -1649,18 +1724,9 @@ public:
                     const juce::String& pitchRegressionJobPath = {})
             : DocumentWindow (name,
                               juce::Colours::black,
-#if JUCE_MAC
                               juce::DocumentWindow::allButtons)
-#else
-                              0)
-#endif
         {
-#if JUCE_MAC
             setUsingNativeTitleBar (true);
-#else
-            setUsingNativeTitleBar (false);
-            setTitleBarHeight (0);
-#endif
             setContentOwned (new MainComponent(audioEngine,
                                                appUpdater,
                                                startupMode,
@@ -1679,23 +1745,8 @@ public:
 
             setVisible (true);
 
-           #if JUCE_WINDOWS
-            if (auto* peer = getPeer())
-            {
-                auto hwnd = static_cast<HWND> (peer->getNativeHandle());
+            applyNativeWindowTheme(*this);
 
-                auto style = ::GetWindowLongPtr (hwnd, GWL_STYLE);
-                style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
-                ::SetWindowLongPtr (hwnd, GWL_STYLE, style);
-                ::SetWindowPos (hwnd, nullptr, 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-
-                BOOL useDarkMode = TRUE;
-                ::DwmSetWindowAttribute (hwnd, 20, &useDarkMode, sizeof (useDarkMode));
-            }
-           #endif
-
-            startTimer (600);
         }
 
         void closeButtonPressed() override
@@ -1720,19 +1771,7 @@ public:
             return dynamic_cast<MainComponent*>(getContentComponent());
         }
 
-        juce::BorderSize<int> getBorderThickness() const override { return { 0, 0, 0, 0 }; }
-        juce::BorderSize<int> getContentComponentBorder() const override { return { 0, 0, 0, 0 }; }
-
     private:
-        void timerCallback() override
-        {
-            stopTimer();
-
-            auto b = getBounds();
-            setBounds (b.withWidth (b.getWidth() + 1));
-            setBounds (b);
-        }
-
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
     };
 
@@ -1764,6 +1803,9 @@ private:
         {
             return getMixerUISnapshot();
         };
+        callbacks.pitchEditorSession = [this](const juce::String& operation, const juce::var& payload,
+                                              MainComponent::WindowRole sender, const juce::String& identity)
+        { return handlePitchEditorSession(operation, payload, sender, identity); };
         callbacks.openMidiEditorWindow = [this](const juce::String& sessionId, const juce::var& bounds)
         {
             return openMidiEditorWindow(sessionId, bounds);
@@ -1884,6 +1926,187 @@ private:
         return "OpenStudio Plugin";
     }
 
+    struct PluginEditorWindowGeometry
+    {
+        juce::Rectangle<int> preferred { 180, 90, 1320, 860 };
+        int minimumWidth = 980;
+        int minimumHeight = 620;
+    };
+
+    PluginEditorWindowGeometry getPluginEditorWindowGeometry(const juce::String& sessionId) const
+    {
+        const auto session = juce::JSON::parse(sessionId);
+        auto pluginId = session.getProperty("pluginId", {}).toString().trim().toLowerCase();
+        // New sessions carry the native ID. Exact known names keep old sessions
+        // usable without classifying NAM or an unrelated custom title as compact.
+        if (pluginId.isEmpty())
+        {
+            const auto fallbackName = session.getProperty("fallbackName", {}).toString().trim();
+            const auto name = fallbackName.isNotEmpty() ? fallbackName : getPluginEditorTitleFromSession(sessionId);
+            const std::pair<const char*, const char*> legacyNames[] {
+                { "OpenStudio EQ", "eq" }, { "OpenStudio Graphic EQ", "geq" },
+                { "OpenStudio Compressor", "compressor" }, { "OpenStudio Gate", "gate" },
+                { "OpenStudio Limiter", "limiter" }, { "OpenStudio Preamp", "preamp" },
+                { "OpenStudio Saturator", "saturator" }, { "OpenStudio Gain Phase", "utility" },
+                { "OpenStudio Reverb", "reverb" }, { "OpenStudio Delay", "delay" },
+                { "OpenStudio Chorus", "chorus" }, { "OpenStudio Basic Synth", "synth" },
+                { "OpenStudio Piano", "piano" }, { "OpenStudio Clean Guitar", "guitar" },
+                { "OpenStudio Drums", "drums" }
+            };
+            for (const auto& entry : legacyNames)
+                if (name == entry.first) { pluginId = entry.second; break; }
+        }
+        const juce::StringArray compactIds { "eq", "geq", "compressor", "gate", "limiter", "preamp",
+            "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums" };
+        PluginEditorWindowGeometry result;
+        if (compactIds.contains(pluginId))
+        {
+            result.minimumWidth = 640;
+            result.minimumHeight = 480;
+            result.preferred.setSize(pluginId == "chorus" ? 940 : 1040,
+                                     pluginId == "chorus" ? 520 : pluginId == "delay" ? 620 : 680);
+        }
+        return result;
+    }
+
+    // All calls run on the message thread. Checkpoints outlive a retired WebView.
+    juce::var handlePitchEditorSession(const juce::String& operation, const juce::var& payload,
+                                      MainComponent::WindowRole sender, const juce::String& identity)
+    {
+        const bool fromMain = sender == MainComponent::WindowRole::main;
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        const auto recoveryFile = pitchRecoveryFileOverride.getFullPathName().isNotEmpty() ? pitchRecoveryFileOverride
+            : getWritableStartupLogFile().getSiblingFile("OpenStudio_PitchRecovery.json");
+        if (fromMain && operation == "ownerHeartbeat") {
+            pitchOwnerHeartbeat = now;
+            return true;
+        }
+        if (fromMain && operation == "tick") {
+            if (pitchOwnerHeartbeat > 0 && now - pitchOwnerPing > 2000.0) {
+                pitchOwnerPing = now;
+                MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchOwnerPing", {});
+            }
+            if (pitchOwnerHeartbeat > 0 && now - pitchOwnerHeartbeat > 15000.0) {
+                pitchOwnerHeartbeat = 0;
+                const auto clipId = pitchEditorCheckpoint.getProperty("pitch", {}).getProperty("clipId", {}).toString();
+                if (clipId.isNotEmpty()) {
+                    audioEngine->getPlaybackEngine().clearAllPitchPreviewRoutes(clipId);
+                    audioEngine->stopPitchScrubPreview(clipId);
+                    if (pitchEditorCheckpoint.getProperty("committedNotes", {}).isArray()) {
+                        const auto checkpointText = juce::JSON::toString(pitchEditorCheckpoint);
+                        pitchRecoveryCheckpoint = juce::JSON::parse(checkpointText);
+                        recoveryFile.replaceWithText(checkpointText);
+                    }
+                }
+                if (pitchEditorWindowManager) pitchEditorWindowManager->close();
+                juce::Logger::writeToLog("Pitch session owner heartbeat expired; transient preview stopped, accepted checkpoint retained.");
+            }
+            return true;
+        }
+        if (fromMain && operation == "discardRecovery") {
+            pitchRecoveryCheckpoint = juce::var(); recoveryFile.deleteFile(); return true;
+        }
+        const bool fromCurrentView = sender == MainComponent::WindowRole::pitchEditor
+            && identity == pitchEditorViewId && identity.isNotEmpty();
+        if (!fromMain && !fromCurrentView) return false;
+        if (operation == "publish" && fromMain && payload.isObject())
+        {
+            const auto incomingSourceRevision = payload.getProperty("sourceRevision", {}).toString();
+            const bool sourceChanged = incomingSourceRevision != pitchEditorCheckpoint.getProperty("sourceRevision", {}).toString();
+            // Merge versioned field deltas so get always returns a full checkpoint.
+            if (!pitchEditorCheckpoint.isObject()) pitchEditorCheckpoint = juce::var(new juce::DynamicObject());
+            auto* checkpoint = pitchEditorCheckpoint.getDynamicObject();
+            for (const auto& property : payload.getDynamicObject()->getProperties())
+            {
+                if (property.name == juce::Identifier("pitch") && property.value.isObject())
+                {
+                    if (!checkpoint->getProperty("pitch").isObject())
+                        checkpoint->setProperty("pitch", juce::var(new juce::DynamicObject()));
+                    auto* pitch = checkpoint->getProperty("pitch").getDynamicObject();
+                    for (const auto& field : property.value.getDynamicObject()->getProperties())
+                        pitch->setProperty(field.name, field.value);
+                }
+                else checkpoint->setProperty(property.name, property.value);
+            }
+            if (sourceChanged) {
+                const auto source = checkpoint->getProperty("pitch").getProperty("originalClipFilePath", {}).toString();
+                const juce::File sourceFile(source.isNotEmpty() ? source : juce::File::getSpecialLocation(juce::File::tempDirectory).getFullPathName());
+                checkpoint->setProperty("sourceFingerprint", source.isNotEmpty() && sourceFile.existsAsFile()
+                    ? juce::String(sourceFile.getSize()) + ":" + juce::String(sourceFile.getLastModificationTime().toMilliseconds()) : juce::String());
+            }
+            MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorSnapshot", payload);
+            return true;
+        }
+        if (operation == "get")
+        {
+            auto* reply = new juce::DynamicObject();
+            if (fromMain && !pitchRecoveryCheckpoint.isObject() && recoveryFile.existsAsFile() && recoveryFile.getSize() < 33554432)
+                pitchRecoveryCheckpoint = juce::JSON::parse(recoveryFile);
+            bool recoverySourceMatches = false;
+            const auto source = pitchRecoveryCheckpoint.getProperty("pitch", {}).getProperty("originalClipFilePath", {}).toString();
+            if (source.isNotEmpty()) {
+                const juce::File sourceFile(source);
+                const auto fingerprint = juce::String(sourceFile.getSize()) + ":" + juce::String(sourceFile.getLastModificationTime().toMilliseconds());
+                recoverySourceMatches = sourceFile.existsAsFile() && fingerprint == pitchRecoveryCheckpoint.getProperty("sourceFingerprint", {}).toString();
+            }
+            reply->setProperty("recovery", fromMain && recoverySourceMatches ? pitchRecoveryCheckpoint : juce::var());
+            reply->setProperty("snapshot", pitchEditorCheckpoint);
+            reply->setProperty("viewId", pitchEditorViewId);
+            return juce::var(reply);
+        }
+        if (operation == "open" && fromMain)
+        {
+            pitchEditorCloseReason = "close";
+            if (pitchEditorWindowManager == nullptr)
+            {
+                pitchEditorWindowManager = std::make_unique<MixerWindowManager>(
+                    [this]() {
+                        pitchEditorViewId = juce::Uuid().toString();
+                        pitchEditorInteractive = false;
+                        return std::make_unique<MainComponent>(*audioEngine, appUpdater, startupMode,
+                            MainComponent::WindowRole::pitchEditor, createWindowCallbacks(), juce::String(), pitchEditorViewId);
+                    },
+                    [this](const juce::Rectangle<int>&) {
+                        auto* closed = new juce::DynamicObject();
+                        closed->setProperty("viewId", pitchEditorViewId);
+                        closed->setProperty("reason", pitchEditorCloseReason);
+                        pitchEditorViewId.clear();
+                        pitchEditorInteractive = false;
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchEditorClosed", juce::var(closed));
+                    }, "Pitch Editor", juce::Rectangle<int>(160, 100, 1280, 800), 800, 480);
+            }
+            return pitchEditorWindowManager->open({});
+        }
+        if (operation == "close") {
+            pitchEditorCloseReason = payload.isString() && payload.toString() == "dock" ? "dock" : "close";
+            return pitchEditorWindowManager != nullptr && pitchEditorWindowManager->close();
+        }
+        if (operation == "status")
+        {
+            auto* state = new juce::DynamicObject();
+            state->setProperty("interactive", pitchEditorInteractive);
+            state->setProperty("viewId", pitchEditorViewId);
+            state->setProperty("state", pitchEditorWindowManager ? pitchEditorWindowManager->getStateDescription() : juce::String("idle"));
+            state->setProperty("frontendStartupState", pitchEditorWindowManager ? pitchEditorWindowManager->getFrontendStartupStateDescription() : juce::String("not-created"));
+            return juce::var(state);
+        }
+        if ((operation == "command" || operation == "ready" || operation == "heartbeat") && fromCurrentView && payload.isObject())
+        {
+            if (juce::JSON::toString(payload, true).length() > 262144) return false;
+            auto message = payload.getDynamicObject()->clone();
+            message->setProperty("viewId", identity); // Never trust a JS-supplied identity.
+            message->setProperty("operation", operation);
+            MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchEditorCommand", juce::var(message.release()));
+            return true;
+        }
+        if (operation == "acceptReady" && fromMain)
+        {
+            pitchEditorInteractive = payload.toString() == pitchEditorViewId && pitchEditorViewId.isNotEmpty();
+            return pitchEditorInteractive;
+        }
+        return false;
+    }
+
     MixerWindowManager* getOrCreateMidiEditorWindowManager(const juce::String& sessionId)
     {
         const auto safeSessionId = normaliseMidiEditorSessionId(sessionId);
@@ -2002,6 +2225,8 @@ private:
         if (existing != pluginEditorWindowManagers.end())
             return existing->second.get();
 
+        const auto editorTitle = getPluginEditorTitleFromSession(safeSessionId);
+        const auto geometry = getPluginEditorWindowGeometry(safeSessionId);
         auto manager = std::make_unique<MixerWindowManager>(
             [this, safeSessionId]()
             {
@@ -2017,10 +2242,10 @@ private:
             {
                 handlePluginEditorWindowClosed(safeSessionId, bounds);
             },
-            getPluginEditorTitleFromSession(safeSessionId),
-            juce::Rectangle<int>(180, 90, 1320, 860),
-            980,
-            620);
+            editorTitle,
+            geometry.preferred,
+            geometry.minimumWidth,
+            geometry.minimumHeight);
 
         auto* result = manager.get();
         pluginEditorWindowManagers[safeSessionId] = std::move(manager);
@@ -2106,8 +2331,10 @@ private:
         MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "builtInPluginEditorWindowClosed", juce::var(payload));
     }
 
-    void runWindowLifecycleHarness(const juce::File& reportFile)
+    void runWindowLifecycleHarness(const juce::File& reportFile, int editorReviewHoldMs = 0)
     {
+        pitchRecoveryFileOverride = reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-recovery.json");
+        pitchRecoveryCheckpoint = juce::var();
         struct HarnessStep
         {
             juce::String id;
@@ -2121,11 +2348,12 @@ private:
         const auto midiBounds = juce::Rectangle<int>(140, 100, 1180, 720);
         const auto pluginBounds = juce::Rectangle<int>(180, 90, 1040, 680);
         const juce::String midiSessionId = "window-lifecycle-midi";
-        const juce::String pluginSessionId = R"({"title":"Window Lifecycle Harness","fallbackName":"OpenStudio Built-in","address":{"trackId":"window-lifecycle","chain":"track","fxIndex":0}})";
+        const juce::String pluginSessionId = R"({"title":"Window Lifecycle Harness","fallbackName":"OpenStudio EQ","pluginId":"eq","address":{"trackId":"window-lifecycle","chain":"track","fxIndex":0}})";
         constexpr int frontendReadyMaxAttempts = 120;
         constexpr int frontendReadyRetryDelayMs = 250;
 
         auto checks = std::make_shared<juce::Array<juce::var>>();
+        auto inputEvidence = std::make_shared<juce::Array<juce::var>>();
         auto steps = std::make_shared<std::vector<HarnessStep>>();
 
         steps->push_back({ "main_frontend_ready", 0, [this]()
@@ -2134,6 +2362,84 @@ private:
             return component != nullptr && component->hasFrontendStartupSucceeded();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
 
+        const auto originalBounds = mainWindow->getBounds();
+        const auto geometryBounds = originalBounds.withSizeKeepingCentre(1000, 700).translated(17, 13);
+        steps->push_back({ "main_native_chrome", 0, [this]() {
+            if (!mainWindow || !mainWindow->isUsingNativeTitleBar()) return false;
+           #if JUCE_WINDOWS
+            const auto hwnd = static_cast<HWND>(mainWindow->getPeer()->getNativeHandle());
+            const auto style = ::GetWindowLongPtr(hwnd, GWL_STYLE);
+            const auto required = WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+            return (style & required) == required;
+           #else
+            return true;
+           #endif
+        }});
+       #if JUCE_WINDOWS
+        steps->push_back({ "main_dark_native_caption", 0, [this]() {
+            BOOL dark = FALSE;
+            return mainWindow && mainWindow->getPeer()
+                && SUCCEEDED(::DwmGetWindowAttribute(static_cast<HWND>(mainWindow->getPeer()->getNativeHandle()), 20, &dark, sizeof(dark))) && dark;
+        }});
+       #endif
+        steps->push_back({ "main_move_resize", 900, [this, geometryBounds]() {
+            mainWindow->setBounds(geometryBounds);
+            return mainWindow->getBounds() == geometryBounds;
+        }});
+        steps->push_back({ "main_bounds_stable", 0, [this, geometryBounds]() {
+            return mainWindow->getBounds() == geometryBounds;
+        }});
+       #if JUCE_WINDOWS
+        steps->push_back({ "main_os_maximize", 300, [this]() {
+            auto hwnd = static_cast<HWND>(mainWindow->getPeer()->getNativeHandle());
+            ::ShowWindow(hwnd, SW_MAXIMIZE);
+            return ::IsZoomed(hwnd) != 0;
+        }});
+        steps->push_back({ "main_os_restore", 300, [this]() {
+            auto hwnd = static_cast<HWND>(mainWindow->getPeer()->getNativeHandle());
+            ::ShowWindow(hwnd, SW_RESTORE);
+            return ::IsZoomed(hwnd) == 0 && ::IsIconic(hwnd) == 0;
+        }});
+        steps->push_back({ "main_os_minimize", 300, [this]() {
+            auto hwnd = static_cast<HWND>(mainWindow->getPeer()->getNativeHandle());
+            ::ShowWindow(hwnd, SW_MINIMIZE);
+            return ::IsIconic(hwnd) != 0;
+        }});
+        steps->push_back({ "main_os_unminimize", 300, [this]() {
+            auto hwnd = static_cast<HWND>(mainWindow->getPeer()->getNativeHandle());
+            ::ShowWindow(hwnd, SW_RESTORE);
+            return ::IsIconic(hwnd) == 0;
+        }});
+       #endif
+        steps->push_back({ "main_restore_geometry", 300, [this, originalBounds]() {
+            mainWindow->setBounds(originalBounds);
+            return mainWindow->getBounds() == originalBounds;
+        }});
+        const auto probeDriver = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_AUDIO_PROBE_DRIVER", "");
+        if (probeDriver.isNotEmpty())
+            steps->push_back({ "audio_capability_query_preserves_active_setup", 0, [this, probeDriver, reportFile]() {
+                const auto before = audioEngine->getAudioDeviceSetup();
+                const auto stopsBefore = audioEngine->getAudioDebugSnapshot().getProperty("audioDeviceStopCount", {});
+                auto* request = new juce::DynamicObject();
+                request->setProperty("audioDeviceType", "ASIO");
+                request->setProperty("inputDevice", probeDriver);
+                request->setProperty("outputDevice", probeDriver);
+                request->setProperty("sampleRate", 0);
+                request->setProperty("bufferSize", 0);
+                const auto capabilities = audioEngine->queryAudioDeviceSetup(juce::var(request));
+                auto* evidence = new juce::DynamicObject();
+                evidence->setProperty("before", before);
+                evidence->setProperty("reported", capabilities);
+                auto* wasapiRequest = new juce::DynamicObject();
+                wasapiRequest->setProperty("audioDeviceType", "Windows Audio");
+                evidence->setProperty("wasapiReported", audioEngine->queryAudioDeviceSetup(juce::var(wasapiRequest)));
+                evidence->setProperty("after", audioEngine->getAudioDeviceSetup());
+                evidence->setProperty("classification", "diagnostic_only: driver capability query, not a recording test");
+                const bool wrote = writeHeadlessResult(reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-audio.json"), juce::var(evidence));
+                return wrote && juce::JSON::toString(before.getProperty("current", {}))
+                    == juce::JSON::toString(audioEngine->getAudioDeviceSetup().getProperty("current", {}))
+                    && stopsBefore == audioEngine->getAudioDebugSnapshot().getProperty("audioDeviceStopCount", {});
+            }});
         steps->push_back({ "mixer_prewarm", 700, [this, mixerBounds]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->prewarm(mixerBounds);
@@ -2146,6 +2452,126 @@ private:
         {
             return mixerWindowManager != nullptr && mixerWindowManager->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+       #if JUCE_WINDOWS
+        // Optional real desktop input: never infer this evidence from setBounds.
+        const bool testDesktopInput = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_INPUT", "0") == "1";
+        auto injectMouse = [](int x, int y, DWORD buttons) {
+            INPUT input {};
+            input.type = INPUT_MOUSE;
+            const int left = ::GetSystemMetrics(SM_XVIRTUALSCREEN);
+            const int top = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
+            input.mi.dx = static_cast<LONG>((static_cast<double>(x - left) * 65535.0) / juce::jmax(1, ::GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1));
+            input.mi.dy = static_cast<LONG>((static_cast<double>(y - top) * 65535.0) / juce::jmax(1, ::GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1));
+            input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE | buttons;
+            return ::SendInput(1, &input, sizeof(INPUT)) == 1;
+        };
+        auto addInputChecks = [steps, inputEvidence, testDesktopInput, injectMouse](const juce::String& role, std::function<juce::DocumentWindow*()> getWindow) {
+            if (!testDesktopInput) return;
+            struct InputGeometry { RECT before {}; POINT saved {}; int x = 0; int y = 0; HWND hwnd = nullptr; };
+            auto inputState = std::make_shared<InputGeometry>();
+            steps->push_back({ role + "_input_prepare", 400, [getWindow, inputState]() {
+                auto* window = getWindow();
+                if (!window || !window->getPeer()) return false;
+                inputState->hwnd = static_cast<HWND>(window->getPeer()->getNativeHandle());
+                ::GetCursorPos(&inputState->saved);
+                ::ShowWindow(inputState->hwnd, SW_RESTORE);
+                ::SetForegroundWindow(inputState->hwnd);
+                return ::GetWindowRect(inputState->hwnd, &inputState->before) != 0;
+            } });
+            steps->push_back({ role + "_input_title_down", 200, [inputState, injectMouse]() {
+                const auto& r = inputState->before;
+                inputState->x = r.left + (r.right - r.left) / 3;
+                inputState->y = r.top + ::GetSystemMetricsForDpi(SM_CYFRAME, ::GetDpiForWindow(inputState->hwnd))
+                    + ::GetSystemMetricsForDpi(SM_CYCAPTION, ::GetDpiForWindow(inputState->hwnd)) / 2;
+                const auto hit = ::SendMessage(inputState->hwnd, WM_NCHITTEST, 0, MAKELPARAM(inputState->x, inputState->y));
+                return hit == HTCAPTION && injectMouse(inputState->x, inputState->y, MOUSEEVENTF_LEFTDOWN);
+            } });
+            steps->push_back({ role + "_input_title_threshold", 200, [inputState, injectMouse]() {
+                return injectMouse(inputState->x + 6, inputState->y + 4, 0);
+            } });
+            steps->push_back({ role + "_input_title_move", 200, [inputState, injectMouse]() {
+                return injectMouse(inputState->x + 60, inputState->y + 40, 0);
+            } });
+            steps->push_back({ role + "_input_title_up", 300, [inputState, injectMouse]() {
+                return injectMouse(inputState->x + 60, inputState->y + 40, MOUSEEVENTF_LEFTUP);
+            } });
+            steps->push_back({ role + "_input_drag_verified", 0, [inputState, inputEvidence, role]() {
+                RECT actual {}; ::GetWindowRect(inputState->hwnd, &actual);
+                juce::Logger::writeToLog("[windowInput] drag delta=" + juce::String(actual.left - inputState->before.left)
+                    + "," + juce::String(actual.top - inputState->before.top)
+                    + " foreground=" + juce::String(::GetForegroundWindow() == inputState->hwnd ? "yes" : "no"));
+                auto* evidence = new juce::DynamicObject();
+                evidence->setProperty("role", role);
+                evidence->setProperty("input", "SendInput");
+                evidence->setProperty("dpi", static_cast<int>(::GetDpiForWindow(inputState->hwnd)));
+                evidence->setProperty("fromX", static_cast<int>(inputState->before.left));
+                evidence->setProperty("fromY", static_cast<int>(inputState->before.top));
+                evidence->setProperty("toX", static_cast<int>(actual.left));
+                evidence->setProperty("toY", static_cast<int>(actual.top));
+                evidence->setProperty("expectedDeltaX", 54);
+                evidence->setProperty("expectedDeltaY", 36);
+                inputEvidence->add(juce::var(evidence));
+                // DefWindowProc starts SC_MOVE after the initial 6x4 threshold
+                // movement. Only the following 54x36 motion moves the window.
+                return std::abs(actual.left - inputState->before.left - 54) <= 3
+                    && std::abs(actual.top - inputState->before.top - 36) <= 3;
+            } });
+            steps->push_back({ role + "_input_resize_down", 200, [inputState, injectMouse]() {
+                ::GetWindowRect(inputState->hwnd, &inputState->before);
+                inputState->x = inputState->before.right - 2; inputState->y = inputState->before.bottom - 2;
+                const auto hit = ::SendMessage(inputState->hwnd, WM_NCHITTEST, 0, MAKELPARAM(inputState->x, inputState->y));
+                return hit == HTBOTTOMRIGHT && injectMouse(inputState->x, inputState->y, MOUSEEVENTF_LEFTDOWN);
+            } });
+            steps->push_back({ role + "_input_resize_move", 200, [inputState, injectMouse]() {
+                return injectMouse(inputState->x + 40, inputState->y + 30, 0);
+            } });
+            steps->push_back({ role + "_input_resize_up", 300, [inputState, injectMouse]() {
+                return injectMouse(inputState->x + 40, inputState->y + 30, MOUSEEVENTF_LEFTUP);
+            } });
+            steps->push_back({ role + "_input_resize_verified", 0, [inputState]() {
+                RECT actual {}; ::GetWindowRect(inputState->hwnd, &actual);
+                ::SetCursorPos(inputState->saved.x, inputState->saved.y);
+                return std::abs((actual.right - actual.left) - (inputState->before.right - inputState->before.left) - 40) <= 3
+                    && std::abs((actual.bottom - actual.top) - (inputState->before.bottom - inputState->before.top) - 30) <= 3;
+            } });
+        };
+        addInputChecks("main", [this]() { return mainWindow.get(); });
+       #endif
+        auto addGeometryChecks = [steps](const juce::String& role, std::function<juce::DocumentWindow*()> getWindow)
+        {
+            auto expected = std::make_shared<juce::Rectangle<int>>();
+            steps->push_back({ role + "_native_move_resize", 900, [getWindow, expected]() {
+                auto* window = getWindow();
+                if (!window || !window->isUsingNativeTitleBar()) return false;
+                *expected = window->getBounds().translated(11, 9).withWidth(window->getWidth() + 20);
+                window->setBounds(*expected);
+                return window->getBounds() == *expected;
+            }});
+            steps->push_back({ role + "_bounds_stable", 0, [getWindow, expected]() {
+                return getWindow() && getWindow()->getBounds() == *expected;
+            }});
+           #if JUCE_WINDOWS
+            steps->push_back({ role + "_dark_native_caption", 0, [getWindow]() {
+                auto* window = getWindow();
+                BOOL dark = FALSE;
+                return window && window->getPeer()
+                    && SUCCEEDED(::DwmGetWindowAttribute(static_cast<HWND>(window->getPeer()->getNativeHandle()), 20, &dark, sizeof(dark))) && dark;
+            }});
+            steps->push_back({ role + "_os_maximize_restore", 300, [getWindow]() {
+                auto* window = getWindow();
+                if (!window || !window->getPeer()) return false;
+                auto hwnd = static_cast<HWND>(window->getPeer()->getNativeHandle());
+                ::ShowWindow(hwnd, SW_MAXIMIZE);
+                const bool maximized = ::IsZoomed(hwnd) != 0;
+                ::ShowWindow(hwnd, SW_RESTORE);
+                return maximized && !::IsZoomed(hwnd) && !::IsIconic(hwnd);
+            }});
+           #endif
+        };
+        addGeometryChecks("mixer", [this]() { return mixerWindowManager->getNativeWindow(); });
+       #if JUCE_WINDOWS
+        addInputChecks("mixer", [this]() { return mixerWindowManager->getNativeWindow(); });
+       #endif
         steps->push_back({ "mixer_focus", 300, [this]()
         {
             return mixerWindowManager != nullptr && mixerWindowManager->focus();
@@ -2167,6 +2593,124 @@ private:
             return mixerWindowManager != nullptr && mixerWindowManager->close();
         }});
 
+        if (startupMode == MainComponent::StartupMode::normal)
+        {
+            const auto pitchFixture = reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-pitch.wav").getNonexistentSibling();
+            steps->push_back({ "pitch_fixture_setup", 500, [this, pitchFixture]() {
+                juce::AudioBuffer<float> samples(1, 144000);
+                for (int sample = 0; sample < samples.getNumSamples(); ++sample)
+                    samples.setSample(0, sample, 0.15f * std::sin(juce::MathConstants<float>::twoPi * 220.0f * static_cast<float>(sample) / 48000.0f));
+                juce::WavAudioFormat wav;
+                std::unique_ptr<juce::OutputStream> output = pitchFixture.createOutputStream();
+                if (!output) return false;
+                auto writer = wav.createWriterFor(output, juce::AudioFormatWriterOptions()
+                    .withSampleRate(48000.0).withNumChannels(1).withBitsPerSample(16));
+                if (!writer || !writer->writeFromAudioSampleBuffer(samples, 0, samples.getNumSamples())) return false;
+                writer.reset();
+                audioEngine->addTrack("window-lifecycle-pitch");
+                audioEngine->addPlaybackClip("window-lifecycle-pitch", pitchFixture.getFullPathName(), 0, 3, 0, 0, 0, 0, "window-lifecycle-pitch-clip");
+                auto* payload = new juce::DynamicObject();
+                payload->setProperty("filePath", pitchFixture.getFullPathName());
+                MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "pitchEditorHarness", juce::var(payload));
+                return true;
+            } });
+            steps->push_back({ "pitch_analysis_hydrated", 0, [this]() {
+                const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
+                return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
+                    && pitch.getProperty("contour", {}).isObject() && !static_cast<bool>(pitch.getProperty("isAnalyzing", true));
+            }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+            const int pitchCycles = juce::jlimit(2, 50, juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_CYCLES", "2").getIntValue());
+            for (int cycle = 0; cycle < pitchCycles; ++cycle)
+            {
+                const auto prefix = "pitch_cycle_" + juce::String(cycle + 1);
+                steps->push_back({ prefix + "_open", 700, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("open", {}, MainComponent::WindowRole::main, {}));
+                } });
+                steps->push_back({ prefix + "_interactive_ready", 0, [this]() {
+                    return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady() && pitchEditorInteractive;
+                }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                if (cycle == 0) {
+                    steps->push_back({ "pitch_edit_with_main_minimized", 500, [this]() {
+                        mainWindow->setMinimised(true);
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "relative+4");
+                        return true;
+                    } });
+                    steps->push_back({ "pitch_native_relative_shift_committed", 0, [this]() {
+                        const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
+                        if (!notes.isArray() || notes.size() == 0) return false;
+                        for (const auto& note : *notes.getArray())
+                            if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
+                                - static_cast<double>(note.getProperty("detectedPitch", 0)) - 4.0) > 1.0e-6) return false;
+                        return true;
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    steps->push_back({ "pitch_native_correction_file_published", 0, [this, pitchFixture]() {
+                        const auto tracks = pitchEditorCheckpoint.getProperty("daw", {}).getProperty("tracks", {});
+                        if (!tracks.isArray() || tracks.size() == 0) return false;
+                        const auto clips = tracks[0].getProperty("clips", {});
+                        if (!clips.isArray() || clips.size() == 0) return false;
+                        const auto path = clips[0].getProperty("filePath", {}).toString();
+                        return path.isNotEmpty() && path != pitchFixture.getFullPathName() && juce::File(path).existsAsFile();
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    steps->push_back({ "pitch_native_undo", 500, []() {
+                        MainComponent::broadcastEventToRole(MainComponent::WindowRole::pitchEditor, "pitchEditorHarnessEdit", "undo");
+                        return true;
+                    } });
+                    steps->push_back({ "pitch_native_undo_preserved", 0, [this]() {
+                        const auto notes = pitchEditorCheckpoint.getProperty("committedNotes", {});
+                        if (!notes.isArray() || notes.size() == 0) return false;
+                        for (const auto& note : *notes.getArray())
+                            if (std::abs(static_cast<double>(note.getProperty("correctedPitch", 0))
+                                - static_cast<double>(note.getProperty("detectedPitch", 0))) > 1.0e-6) return false;
+                        mainWindow->setMinimised(false);
+                        return true;
+                    }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                    addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                   #if JUCE_WINDOWS
+                    addInputChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                   #endif
+                }
+                steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("close", {}, MainComponent::WindowRole::main, {}));
+                } });
+            }
+            steps->push_back({ "pitch_checkpoint_preserved", 0, [this]() {
+                const auto pitch = pitchEditorCheckpoint.getProperty("pitch", {});
+                return pitch.getProperty("clipId", {}).toString() == "window-lifecycle-pitch-clip"
+                    && pitch.getProperty("contour", {}).isObject() && !pitchEditorInteractive;
+            } });
+
+            steps->push_back({ "pitch_owner_loss_retains_checkpoint", 0, [this]() {
+                pitchOwnerHeartbeat = juce::Time::getMillisecondCounterHiRes() - 16000.0;
+                handlePitchEditorSession("tick", {}, MainComponent::WindowRole::main, {});
+                const bool retained = pitchRecoveryCheckpoint.getProperty("committedNotes", {}).isArray()
+                    && pitchRecoveryFileOverride.existsAsFile();
+                handlePitchEditorSession("discardRecovery", {}, MainComponent::WindowRole::main, {});
+                return retained;
+            } });
+
+        }
+        else
+        {
+            // Safe Mode mounts recovery UI in each browser role. It cannot
+            // acknowledge normal pitch analysis/editing session messages.
+            const int pitchCycles = juce::jlimit(2, 50, juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_WINDOW_CYCLES", "2").getIntValue());
+            for (int cycle = 0; cycle < pitchCycles; ++cycle)
+            {
+                const auto prefix = "pitch_safe_cycle_" + juce::String(cycle + 1);
+                steps->push_back({ prefix + "_open", 700, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("open", {}, MainComponent::WindowRole::main, {}));
+                } });
+                steps->push_back({ prefix + "_frontend_ready", 0, [this]() {
+                    return pitchEditorWindowManager && pitchEditorWindowManager->isFrontendReady();
+                }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+                if (cycle == 0)
+                    addGeometryChecks("pitch", [this]() { return pitchEditorWindowManager->getNativeWindow(); });
+                steps->push_back({ prefix + "_close", cycle == 0 ? 50 : 2200, [this]() {
+                    return static_cast<bool>(handlePitchEditorSession("close", {}, MainComponent::WindowRole::main, {}));
+                } });
+            }
+        }
+
         steps->push_back({ "midi_prewarm", 700, [this, midiSessionId, midiBounds]()
         {
             return prewarmMidiEditorWindow(midiSessionId, rectangleToVar(midiBounds));
@@ -2182,6 +2726,10 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        addGeometryChecks("midi", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
+       #if JUCE_WINDOWS
+        addInputChecks("midi", [this, midiSessionId]() { return midiEditorWindowManagers.at(midiSessionId)->getNativeWindow(); });
+       #endif
         steps->push_back({ "midi_close", 50, [this, midiSessionId]()
         {
             return closeMidiEditorWindow(midiSessionId, "close");
@@ -2202,6 +2750,27 @@ private:
             return closeMidiEditorWindow(midiSessionId, "close");
         }});
 
+        steps->push_back({ "plugin_editor_geometry_contract", 0, [this]()
+        {
+            for (const auto& id : juce::StringArray { "eq", "geq", "compressor", "gate", "limiter", "preamp",
+                     "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums" })
+            {
+                auto* session = new juce::DynamicObject();
+                session->setProperty("pluginId", id);
+                session->setProperty("title", "Custom editor title");
+                const auto geometry = getPluginEditorWindowGeometry(juce::JSON::toString(juce::var(session)));
+                if (geometry.minimumWidth != 640 || geometry.minimumHeight != 480
+                    || geometry.preferred.getWidth() != (id == "chorus" ? 940 : 1040)
+                    || geometry.preferred.getHeight() != (id == "chorus" ? 520 : id == "delay" ? 620 : 680))
+                    return false;
+            }
+            const auto legacy = getPluginEditorWindowGeometry(R"({"title":"OpenStudio Chorus"})");
+            const auto nam = getPluginEditorWindowGeometry(R"({"pluginId":"nam","title":"OpenStudio NAM Rack"})");
+            const auto external = getPluginEditorWindowGeometry(R"({"pluginId":"external","title":"OpenStudio EQ"})");
+            return legacy.minimumWidth == 640 && legacy.preferred.getWidth() == 940
+                && nam.minimumWidth == 980 && nam.minimumHeight == 620 && nam.preferred.getWidth() == 1320
+                && external.minimumWidth == 980 && external.preferred.getHeight() == 860;
+        }});
         steps->push_back({ "plugin_open", 700, [this, pluginSessionId, pluginBounds]()
         {
             audioEngine->addTrack("window-lifecycle");
@@ -2215,6 +2784,34 @@ private:
                 && existing->second != nullptr
                 && existing->second->isFrontendReady();
         }, frontendReadyMaxAttempts, frontendReadyRetryDelayMs });
+        steps->push_back({ "plugin_compact_native_resize", 900, [this, pluginSessionId, pluginBounds]()
+        {
+            auto* window = pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow();
+            auto* constrainer = window != nullptr ? window->getConstrainer() : nullptr;
+            if (constrainer == nullptr || constrainer->getMinimumWidth() != 640 || constrainer->getMinimumHeight() != 480)
+                return false;
+            constrainer->setBoundsForComponent(window, pluginBounds.withSize(640, 480), false, false, true, true);
+            return window->getWidth() == 640 && window->getHeight() == 480;
+        }});
+        steps->push_back({ "plugin_compact_bounds_stable", 0, [this, pluginSessionId]()
+        {
+            auto* window = pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow();
+            return window != nullptr && window->getWidth() == 640 && window->getHeight() == 480
+                && pluginEditorWindowManagers.at(pluginSessionId)->isFrontendReady();
+        }});
+        steps->push_back({ "plugin_restore_preferred_geometry", 300, [this, pluginSessionId, pluginBounds]()
+        {
+            auto* window = pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow();
+            if (window == nullptr) return false;
+            window->setBounds(pluginBounds);
+            return window->getBounds() == pluginBounds;
+        }});
+        if (editorReviewHoldMs > 0)
+            steps->push_back({ "plugin_editor_review_hold", editorReviewHoldMs, []() { return true; } });
+        addGeometryChecks("plugin", [this, pluginSessionId]() { return pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow(); });
+       #if JUCE_WINDOWS
+        addInputChecks("plugin", [this, pluginSessionId]() { return pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow(); });
+       #endif
         steps->push_back({ "plugin_close", 50, [this, pluginSessionId]()
         {
             return closePluginEditorWindow(pluginSessionId, "close");
@@ -2314,18 +2911,38 @@ private:
             return pluginEditorWindowManagers.at(pluginSessionId)->getStateDescription() == "idle";
         }});
 
+        steps->push_back({ "no_orphan_secondary_browser_components", 0, []() {
+            const auto counts = MainComponent::getBrowserInstanceCounts();
+            return static_cast<int>(counts.getProperty("main", 0)) == 1
+                && static_cast<int>(counts.getProperty("secondary", -1)) == 0
+                && static_cast<int>(counts.getProperty("retiring", -1)) == 0;
+        }, 20, 250 });
+
         auto stepIndex = std::make_shared<size_t>(0);
         auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
-        *runner = [this, reportFile, checks, steps, stepIndex, stepAttempt, runner, midiSessionId]() mutable
+        const std::weak_ptr<std::function<void()>> weakRunner = runner;
+        *runner = [this, reportFile, checks, inputEvidence, steps, stepIndex, stepAttempt, weakRunner, midiSessionId]() mutable
         {
+            // Timers own the next invocation. The function must not own itself,
+            // otherwise all check results survive application shutdown.
+            const auto runner = weakRunner.lock();
+            if (runner == nullptr)
+                return;
             if (*stepIndex >= steps->size())
             {
                 const bool success = ! hasFailedHarnessCheck(*checks);
                 auto* root = new juce::DynamicObject();
                 root->setProperty("harnessMode", "window_lifecycle");
+                root->setProperty("startupMode", startupMode == MainComponent::StartupMode::safe ? "safe" : "normal");
+                root->setProperty("pitchEditing", startupMode == MainComponent::StartupMode::safe ? "not_asserted: recovery UI only" : "objective normal-mode editing checks");
                 root->setProperty("success", success);
                 root->setProperty("checks", juce::var(*checks));
+                root->setProperty("nativeBrowserComponents", MainComponent::getBrowserInstanceCounts());
+                root->setProperty("inputMeasurements", juce::var(*inputEvidence));
+                root->setProperty("platform", juce::SystemStats::getOperatingSystemName());
+                root->setProperty("multiMonitorDpi", "not_asserted");
+                root->setProperty("pitchState", handlePitchEditorSession("status", {}, MainComponent::WindowRole::main, {}));
                 root->setProperty("mixerState", getMixerWindowState());
                 root->setProperty("midiState", getMidiEditorWindowState(midiSessionId));
                 root->setProperty("generatedAtMs", static_cast<double>(juce::Time::currentTimeMillis()));
@@ -2393,12 +3010,22 @@ private:
         (*runner)();
     }
 
+    std::unique_ptr<juce::FileLogger> startupLogger;
     std::unique_ptr<AudioEngine> audioEngine;
     AppUpdater appUpdater;
     std::unique_ptr<juce::DocumentWindow> storeQueryWindow;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<MixerWindowManager> mixerWindowManager;
+    std::unique_ptr<MixerWindowManager> pitchEditorWindowManager;
+    juce::var pitchEditorCheckpoint;
+    juce::var pitchRecoveryCheckpoint;
+    juce::File pitchRecoveryFileOverride;
+    double pitchOwnerHeartbeat = 0;
+    double pitchOwnerPing = 0;
+    juce::String pitchEditorViewId;
+    juce::String pitchEditorCloseReason = "close";
+    bool pitchEditorInteractive = false;
     std::map<juce::String, std::unique_ptr<MixerWindowManager>> midiEditorWindowManagers;
     std::map<juce::String, std::unique_ptr<MixerWindowManager>> pluginEditorWindowManagers;
     mutable juce::CriticalSection mixerSnapshotLock;

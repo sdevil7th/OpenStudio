@@ -24,6 +24,7 @@ public:
     // Scan for available external plugins. The returned object contains a
     // per-format discovery report suitable for presenting in the UI.
     juce::var scanForPlugins(bool forceRescan = false);
+    static juce::var runDiscoveryIdentityRegression();
 
     // Persistent folders supplied by the user are searched by every supported
     // external plugin format, in addition to that format's standard locations.

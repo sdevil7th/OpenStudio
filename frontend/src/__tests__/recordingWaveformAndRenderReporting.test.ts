@@ -39,9 +39,10 @@ describe("live recording waveform regression guards", () => {
 
 describe("render result reporting regression guards", () => {
   it("does not impose the generic 15-second bridge timeout on offline renders", () => {
-    expect(mainComponentSource).toContain(
-      "const NO_TIMEOUT_FUNCTIONS = ['scanForPlugins', 'renderProject', 'renderProjectWithDither']",
-    );
+    const declaration = mainComponentSource.match(/const NO_TIMEOUT_FUNCTIONS = \[([^\]]+)\]/)?.[1] ?? "";
+    for (const name of ["scanForPlugins", "renderProject", "renderProjectWithDither"]) {
+      expect(declaration).toContain(`'${name}'`);
+    }
   });
 
   it("checks native boolean results and distinguishes later-stage failures", () => {

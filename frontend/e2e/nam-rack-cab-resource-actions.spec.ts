@@ -70,14 +70,18 @@ test("installed IR cards use one verified, single-flight load path and the facep
     const testWindow = window as typeof window & {
       __namCabMutationCalls?: number;
       __namCabMutationPatches?: unknown[];
+      __releaseNamCabMutation?: () => void;
     };
     testWindow.__namCabMutationCalls = 0;
     testWindow.__namCabMutationPatches = [];
+    // Keep the native write pending until its locked UI has been inspected.
+    // Browser click completion may outlast a short wall-clock delay.
+    const pendingWrite = new Promise<void>((resolve) => { testWindow.__releaseNamCabMutation = resolve; });
     nativeBridge.setBuiltInPluginState = async (address, patch) => {
       if (patch.modelState?.cabIRPath) {
         testWindow.__namCabMutationCalls = (testWindow.__namCabMutationCalls ?? 0) + 1;
         testWindow.__namCabMutationPatches?.push(patch);
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        await pendingWrite;
       }
       return original(address, patch);
     };
@@ -89,6 +93,9 @@ test("installed IR cards use one verified, single-flight load path and the facep
   await expect.poll(() => page.evaluate(() => (
     (window as typeof window & { __namCabMutationCalls?: number }).__namCabMutationCalls
   ))).toBe(1);
+  await page.evaluate(() => (
+    window as typeof window & { __releaseNamCabMutation?: () => void }
+  ).__releaseNamCabMutation?.());
   await expect.poll(() => readCabPath(page)).toBe(selectedPath);
   await expect.poll(() => page.evaluate(() => (
     (window as typeof window & { __namCabMutationPatches?: Array<{

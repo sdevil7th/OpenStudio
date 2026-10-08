@@ -4,9 +4,10 @@ const PROFILE_SETTINGS_KEY = "openstudio.inputProfiles.v1";
 const CUSTOM_KEYBOARD_PROFILES_KEY = "openstudio.keyboardProfiles.v2";
 const MOUSE_MODIFIER_OVERRIDES_KEY = "openstudio.mouseModifierOverrides.v1";
 const IS_MAC_HOST = process.platform === "darwin";
+const IS_LINUX_HOST = process.platform === "linux";
 const PRIMARY_KEY = IS_MAC_HOST ? "Meta" : "Control";
 const PRIMARY_LABEL = IS_MAC_HOST ? "Cmd" : "Ctrl";
-const HOST_OVERRIDE_TARGET = IS_MAC_HOST ? "macos" : "windows";
+const HOST_OVERRIDE_TARGET = IS_MAC_HOST ? "macos" : IS_LINUX_HOST ? "linux" : "windows";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
@@ -46,11 +47,11 @@ test("chooser exposes the additional platform-qualified DAW profiles", async ({ 
   const keyboard = page.getByLabel("Keyboard profile");
   const mouse = page.getByLabel("Mouse & scroll profile");
   for (const [value, label] of [
-    ["cakewalk_sonar", IS_MAC_HOST ? "Cakewalk / Sonar (cross-platform emulation)" : "Cakewalk / Sonar"],
+    ["cakewalk_sonar", IS_MAC_HOST || IS_LINUX_HOST ? "Cakewalk / Sonar (cross-platform emulation)" : "Cakewalk / Sonar"],
     ["garageband", IS_MAC_HOST ? "GarageBand" : "GarageBand (cross-platform emulation)"],
-    ["digital_performer", "Digital Performer"],
-    ["adobe_audition", "Adobe Audition"],
-    ["mixcraft", IS_MAC_HOST ? "Mixcraft (cross-platform emulation)" : "Mixcraft"],
+    ["digital_performer", IS_LINUX_HOST ? "Digital Performer (cross-platform emulation)" : "Digital Performer"],
+    ["adobe_audition", IS_LINUX_HOST ? "Adobe Audition (cross-platform emulation)" : "Adobe Audition"],
+    ["mixcraft", IS_MAC_HOST || IS_LINUX_HOST ? "Mixcraft (cross-platform emulation)" : "Mixcraft"],
     ["waveform", "Waveform"],
     ["renoise", "Renoise"],
   ] as const) {

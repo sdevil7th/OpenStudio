@@ -65,6 +65,7 @@ import {
 } from "../utils/timelineGeometry";
 import {
   guardModalContextMenu,
+  modalPointerBoundaryProps,
   isEditorWheelOwnedTarget,
   shouldSuppressWorkspaceContextMenu,
 } from "../utils/modalEventGuards";
@@ -6282,6 +6283,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         <div
           className="piano-roll-modal-backdrop"
           data-modal-root="true"
+          {...modalPointerBoundaryProps}
           onContextMenu={guardModalContextMenu}
         >
           <div
@@ -6359,6 +6361,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         <div
           className="piano-roll-modal-backdrop"
           data-modal-root="true"
+          {...modalPointerBoundaryProps}
           onContextMenu={guardModalContextMenu}
         >
           <div

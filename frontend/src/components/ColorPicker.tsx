@@ -4,6 +4,7 @@ import { useShallow } from "zustand/shallow";
 import { Button } from "./ui";
 import { useTransientOverlayShortcutScope } from "../utils/modalShortcutScope";
 import { activateShortcutContext } from "../utils/shortcutContext";
+import { modalPointerBoundaryProps } from "../utils/modalEventGuards";
 
 interface ColorPickerProps {
   currentColor: string;
@@ -95,6 +96,7 @@ export function ColorPicker({
   return (
     <div
       ref={popupRef}
+      {...modalPointerBoundaryProps}
       className="bg-neutral-800 border border-neutral-600 rounded-lg shadow-xl p-2"
       style={style}
       onClick={(e) => e.stopPropagation()}

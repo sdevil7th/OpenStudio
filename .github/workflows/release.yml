@@ -26,6 +26,14 @@ jobs:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       NOTES_FILE: ${{ github.event.inputs.release_notes_file }}
     steps:
+      - name: Require exact release tag when Store is enabled
+        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF" != "refs/tags/v${VERSION#v}" ]; then
+            echo "Store-enabled releases require an existing v-prefixed tag matching the requested version. Select that tag when dispatching." >&2
+            exit 1
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Validate exact-version release notes before building
         id: notes
@@ -387,13 +395,35 @@ jobs:
             }
           }
 
+      - name: Qualify installed Windows release
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "OpenStudio-installed-qualification"
+          $installer = (Resolve-Path "dist/windows/OpenStudio-Setup-x64.exe").Path
+          $installLog = Join-Path $env:RUNNER_TEMP "openstudio-install.log"
+          $install = Start-Process -FilePath $installer -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            ('/DIR="{0}"' -f $installRoot), ('/LOG="{0}"' -f $installLog))
+          if ($install.ExitCode -ne 0) { throw "Installer exited with $($install.ExitCode). See $installLog" }
+          try {
+            ./tools/run-window-lifecycle-smoke.ps1 -AppPath "$installRoot/OpenStudio.exe" `
+              -ReportPath "$env:RUNNER_TEMP/windows-installed-lifecycle.json" -TimeoutSeconds 300
+          } finally {
+            $uninstaller = Join-Path $installRoot "unins000.exe"
+            if (Test-Path -LiteralPath $uninstaller) {
+              $uninstall = Start-Process -FilePath $uninstaller -WindowStyle Hidden -PassThru -Wait `
+                -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+              if ($uninstall.ExitCode -ne 0) { throw "Qualification uninstall failed: $($uninstall.ExitCode)" }
+            }
+          }
+
       - name: Stage checksum-pinned FFmpeg corresponding source
         shell: pwsh
         run: ./tools/setup-ffmpeg.ps1 -CorrespondingSourceDestination "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
 
       - name: Build validated Microsoft Store package
         # Always retain a tag-built MSIX for the first manual Store submission.
-        # OPENSTUDIO_STORE_ENABLED gates only the credentialed submit-store job.
+        # OPENSTUDIO_STORE_ENABLED gates the credentialed Store jobs.
         shell: pwsh
         env:
           RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
@@ -676,7 +706,11 @@ jobs:
 
   build-linux:
     needs: validate-release-notes
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
@@ -693,15 +727,9 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config \
-            libasound2-dev libjack-jackd2-dev \
-            libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libgl1-mesa-dev libfreetype6-dev libfontconfig1-dev \
-            libcurl4-openssl-dev libsecret-tools \
-            libx11-dev libxext-dev libxrandr-dev libxi-dev \
-            libxinerama-dev libxcursor-dev libxcomposite-dev
+          bash tools/setup-linux-prereqs.sh
+          sudo apt-get install -y xvfb xauth openbox
+
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -788,6 +816,14 @@ jobs:
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform linux -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
 
+      - name: Package and qualify native Ubuntu baseline installer
+        run: |
+          python3 tools/package-linux-native.py --format deb --version "$VERSION" --build-dir "$BUILD_DIR" --notes-file "$RELEASE_NOTES_FILE"
+          sudo apt-get install -y ./dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
+          python3 tools/validate-linux-abi.py --root /usr/lib/openstudio --require-os ubuntu:22.04 --max-glibc 2.35 --report output/linux-native-abi.json
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native --desktop --render --features --nam-fixtures "$BUILD_DIR/_deps/neural_amp_modeler_core-src/example_models"
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native-safe --desktop --safe-mode
+
       - name: Package AppImage
         run: |
           chmod +x ./tools/package-linux-release.sh
@@ -814,10 +850,40 @@ jobs:
             -ExpectedVersion "$VERSION" \
             -EnforceLeanBundle
 
+      - name: Launch packaged Linux AppImage
+        shell: bash
+        run: |
+          python3 tools/smoke-linux-appimage.py \
+            "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Exercise the finished AppImage launcher
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop --render
+
+      - name: Attest Linux installer build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            dist/linux/*.AppImage
+            dist/linux/*.deb
+
+      - name: Retain Linux qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-qualification
+          path: |
+            output/linux-*
+            dist/linux/*-abi.json
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-release
-          path: dist/linux/OpenStudio-*-linux-x86_64.AppImage
+          path: |
+            dist/linux/OpenStudio-*-x86_64.AppImage
+            dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
           if-no-files-found: error
 
   preflight-store:
@@ -850,6 +916,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-prepublish.json --preflight
       - name: Retain sanitized readiness evidence
         if: always()
@@ -870,8 +937,7 @@ jobs:
           && needs.build-linux.result == 'success'
           && (needs.preflight-store.result == 'success'
               || (needs.preflight-store.result == 'skipped'
-                  && (vars.OPENSTUDIO_STORE_ENABLED != 'true'
-                      || !startsWith(github.ref, 'refs/tags/v')))) }}
+                  && vars.OPENSTUDIO_STORE_ENABLED != 'true')) }}
     runs-on: ubuntu-latest
     needs:
       - validate-release-notes
@@ -886,8 +952,6 @@ jobs:
       RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}
       AI_RUNTIME_VERSION: ${{ vars.OPENSTUDIO_AI_RUNTIME_VERSION != '' && vars.OPENSTUDIO_AI_RUNTIME_VERSION || github.event.inputs.version || github.ref_name }}
       AI_RUNTIME_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_RELEASE_TAG }}
-      WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
-      WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -1054,6 +1118,10 @@ jobs:
         run: |
           $sourcePath = "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
           $checksumsPath = "dist/release-publish-assets/OpenStudio-checksums.txt"
+          Get-ChildItem -Path "dist/linux/*.deb" | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Add-Content -LiteralPath $checksumsPath -Encoding utf8
+          }
           $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
           "$sourceHash  OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip" |
             Add-Content -LiteralPath $checksumsPath -Encoding utf8
@@ -1069,7 +1137,8 @@ jobs:
             dist/windows/OpenStudio-Setup-x64.exe
             dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip
             dist/macos/OpenStudio-macOS.dmg
-            dist/linux/OpenStudio-*-linux-x86_64.AppImage
+            dist/linux/OpenStudio-*-x86_64.AppImage
+            dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
             dist/release-publish-assets/OpenStudio-checksums.txt
             dist/release-publish-assets/OpenStudio-release-latest.json
             dist/release-publish-assets/OpenStudio-release-stable-latest.json
@@ -1079,6 +1148,16 @@ jobs:
             dist/release-publish-assets/OpenStudio-appcast-macos-stable.xml
             dist/release-publish-assets/OpenStudio-appcast-linux-stable.xml
 
+  publish-website:
+    name: Trigger website release publication
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      WEBSITE_REPO: ${{ vars.OPENSTUDIO_WEBSITE_REPO != '' && vars.OPENSTUDIO_WEBSITE_REPO || 'sdevil7th/OpenStudioWebsite' }}
+      WEBSITE_DISPATCH_EVENT_TYPE: ${{ vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE != '' && vars.OPENSTUDIO_WEBSITE_DISPATCH_EVENT_TYPE || 'openstudio_release_published' }}
+    steps:
       - name: Verify website dispatch configuration
         shell: bash
         env:
@@ -1139,6 +1218,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-preflight.json --preflight
 
       - name: Submit the exact release package and notes
@@ -1150,6 +1230,7 @@ jobs:
           python3 tools/submit_store_release.py --version "$VERSION"
           --package-dir dist/store --notes-file "$RELEASE_NOTES_FILE"
           --initial-submission-config packaging/msix/initial-submission.json
+          --publishing-config packaging/msix/release-publishing.json
           --report output/store-submission.json --submit
 
       - name: Retain sanitized submission status

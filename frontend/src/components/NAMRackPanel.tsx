@@ -1,4 +1,6 @@
 import "./NAMRackPanel.css";
+import { TONE3000Logo } from "./TONE3000Branding";
+import { tone3000OriginFromRecord } from "../utils/tone3000Attribution";
 import {
   normalizeNAMRackCapturePath,
   rankNAMRackAmpCaptures,
@@ -2554,13 +2556,21 @@ export function NAMRackPanel({
   const identityForRackSlot = (targetSlot: NAMToneSlot, localPath: string) => resolveNAMToneIdentity({
     activePreview: activeNAMPreview?.slot === targetSlot ? activeNAMPreview : null,
     savedTone: savedNAMToneSlot === targetSlot ? savedNAMTone : null,
-    installedRecord: activeNAMPreview?.slot === targetSlot ? activeNAMPreview.record : null,
+    installedRecord: activeNAMPreview?.slot === targetSlot ? activeNAMPreview.record : designInstalledCaptures.find((record) => normalizeNAMRackCapturePath(record.localPath) === normalizeNAMRackCapturePath(localPath)),
     localPath,
     titleFallback: namDisplayNameFromPath(localPath),
   });
   const pedalIdentity = identityForRackSlot("pedal", modelState?.pedalModelPath || "");
   const ampIdentity = identityForRackSlot("amp", modelState?.ampModelPath || "");
   const cabIdentity = identityForRackSlot("cab", modelState?.cabIRPath || "");
+  const originForRackSlot = (targetSlot: NAMToneSlot, localPath: string) => {
+    if (!localPath) return undefined;
+    const record = activeNAMPreview?.slot === targetSlot ? activeNAMPreview.record : designInstalledCaptures.find((entry) => normalizeNAMRackCapturePath(entry.localPath) === normalizeNAMRackCapturePath(localPath));
+    return tone3000OriginFromRecord(record);
+  };
+  const ampOrigin = originForRackSlot("amp", modelState?.ampModelPath || "");
+  const pedalOrigin = originForRackSlot("pedal", modelState?.pedalModelPath || "");
+  const cabOrigin = originForRackSlot("cab", modelState?.cabIRPath || "");
   const pedalName = firstNAMDisplayName(pedalIdentity.title, pedalPathName);
   const ampName = firstNAMDisplayName(ampIdentity.title, ampPathName);
   const cabName = firstNAMDisplayName(cabIdentity.title, cabPathName);
@@ -5298,7 +5308,7 @@ export function NAMRackPanel({
     setRackRailTab("gear");
   };
 
-  const openSourceFlow = (flow: NAMLibraryFlowMode, sourceFilter?: OpenStudioFXModuleId, categoryFilter?: string) => {
+  const openSourceFlow = (flow: NAMLibraryFlowMode, sourceFilter?: OpenStudioFXModuleId, categoryFilter?: string, toneId?: number) => {
     const moduleId = flow === "fx" && sourceFilter ? sourceFilter : rackModuleForNAMLibraryFlow(flow);
     const categoryGearFilter = categoryFilter
       ? getNAMSourceFlowConfig(flow).filterControls.find((control) => control.category === categoryFilter)?.gearFilter
@@ -5309,6 +5319,7 @@ export function NAMRackPanel({
     setExplorerIntent({
       token: Date.now(),
       ...explorerIntentForNAMLibraryFlow(flow, sourceFilter),
+      ...(toneId ? { toneId } : {}),
       ...(categoryFilter ? { categoryFilter } : {}),
       ...(categoryGearFilter !== undefined ? { gearFilter: categoryGearFilter } : {}),
     });
@@ -6224,6 +6235,8 @@ export function NAMRackPanel({
   const signalChainCaptureCore: NAMSignalChainRouteModule[] = [
     {
       id: "pedal-capture",
+      toneOrigin: pedalOrigin,
+      onToneDetails: () => openSourceFlow("pedal", undefined, undefined, pedalOrigin?.toneId),
       label: "Pedal Capture",
       caption: pedalName || "No capture loaded",
       status: !hasPedalModel
@@ -6239,6 +6252,8 @@ export function NAMRackPanel({
     },
     {
       id: "amp-nam",
+      toneOrigin: ampOrigin,
+      onToneDetails: () => openSourceFlow("amp", undefined, undefined, ampOrigin?.toneId),
       label: "Amp Capture",
       caption: ampName || "No capture loaded",
       status: !hasAmpModel
@@ -6258,6 +6273,8 @@ export function NAMRackPanel({
     },
     {
       id: "cab-ir",
+      toneOrigin: cabOrigin,
+      onToneDetails: () => openSourceFlow("ir", undefined, undefined, cabOrigin?.toneId),
       label: "Cab / IR",
       caption: hardwareCabLabel,
       status: embeddedCabCapture
@@ -7098,7 +7115,7 @@ export function NAMRackPanel({
             onClick={() => openRackToneRail()}
             title="Open the TONE3000 Capture Library"
           >
-            <Library size={15} />
+            <TONE3000Logo />
             Capture Library
           </button>
 
@@ -7635,6 +7652,9 @@ export function NAMRackPanel({
                 parameters={params}
                 compressorGainReductionDb={compressorGainReductionDb}
                 rig={{
+                  ampOrigin,
+                  pedalOrigin,
+                  cabOrigin,
                   presetName: displayPresetName,
                   presetEyebrow: displayPresetEyebrow,
                   presetDirty: isPresetDirty,
@@ -7700,6 +7720,7 @@ export function NAMRackPanel({
                 onBrowseLocalCabIR={cabPresentation.canLoadLocalIR ? () => void loadCabIR() : undefined}
                 onClearCabIR={cabPresentation.canClearExternalIR ? () => void clearCabIR() : undefined}
                 cabResourceBusy={cabBusy}
+                onOpenToneDetails={(section) => openSourceFlow(section === "cab" ? "ir" : section === "pre" ? "pedal" : "amp", undefined, undefined, (section === "cab" ? cabOrigin : section === "pre" ? pedalOrigin : ampOrigin)?.toneId)}
                 onOpenLibrary={(section) => {
                   setAdvancedFocus(null);
                   openDesignPortLibrary(section);

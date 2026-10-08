@@ -32,6 +32,8 @@ $arguments = @(
     ('"{0}"' -f $ReportPath)
 )
 
+$previousPackagedUI = $env:OPENSTUDIO_FORCE_PACKAGED_UI
+$env:OPENSTUDIO_FORCE_PACKAGED_UI = '1'
 Write-Host "Running native window lifecycle smoke test: $resolvedAppPath"
 $startOptions = @{ FilePath = $resolvedAppPath; ArgumentList = $arguments; PassThru = $true }
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -81,12 +83,36 @@ try {
     }
 
     $requiredChecks = @(
+        "no_orphan_secondary_browser_components",
         "main_frontend_ready",
+        "main_native_chrome",
+        "main_move_resize",
+        "main_bounds_stable",
+        "main_restore_geometry",
         "mixer_frontend_ready",
+        "mixer_native_move_resize",
+        "mixer_bounds_stable",
         "mixer_reopened_frontend_ready",
+        "pitch_analysis_hydrated",
+        "pitch_cycle_1_interactive_ready",
+        "pitch_cycle_2_interactive_ready",
+        "pitch_native_move_resize",
+        "pitch_checkpoint_preserved",
+        "pitch_native_relative_shift_committed",
+        "pitch_native_correction_file_published",
+        "pitch_native_undo_preserved",
+        "pitch_owner_loss_retains_checkpoint",
         "midi_frontend_ready",
+        "midi_native_move_resize",
+        "midi_bounds_stable",
         "midi_reopened_frontend_ready",
         "plugin_frontend_ready",
+        "plugin_editor_geometry_contract",
+        "plugin_compact_native_resize",
+        "plugin_compact_bounds_stable",
+        "plugin_restore_preferred_geometry",
+        "plugin_native_move_resize",
+        "plugin_bounds_stable",
         "plugin_reopened_frontend_ready",
         "plugin_track_failed_removal_keeps_editor",
         "plugin_input_failed_removal_keeps_editor",
@@ -109,5 +135,6 @@ try {
     Write-Host "Window lifecycle smoke test passed. Report: $ReportPath"
 }
 finally {
+    $env:OPENSTUDIO_FORCE_PACKAGED_UI = $previousPackagedUI
     $process.Dispose()
 }

@@ -1,6 +1,12 @@
+#include "PluginAutomationDelivery.h"
+#include "PreparedMIDINoteLifetimes.h"
+#include "MIDIParameterChase.h"
+#include "MIDIOutputNotePolicy.h"
 #include "AppPaths.h"
 #include "TrackProcessor.h"
 #include "IsolatedPlugin.h"
+#include "CLAPPluginFormat.h"
+#include "PluginParameterIdentity.h"
 #include "BuiltInParameterSupport.h"
 #include "BuiltInEffects2.h"
 #include "CrashDiagnostics.h"
@@ -108,6 +114,7 @@ public:
         stopThread(-1); // Never forcibly terminate a MIDI driver/allocator call.
 
         const juce::ScopedLock sl(outputLock);
+        releaseOutputNotes();
         output.reset();
         outputDeviceName.clear();
     }
@@ -155,6 +162,7 @@ public:
         notify();
 
         const juce::ScopedLock sl(outputLock);
+        releaseOutputNotes();
         output.reset();
         outputDeviceName.clear();
     }
@@ -169,6 +177,28 @@ public:
         const juce::ScopedLock sl(outputLock);
         return outputDeviceName;
     }
+
+    void setMergeKeys(bool merge) noexcept
+    {
+        // Control thread only; preserve used-channel cleanup history when idle.
+        requestedMergeKeys.store(merge,std::memory_order_release);
+        const juce::ScopedLock sl(outputLock);
+        notePolicy.updateIdlePolicy(merge);
+        activeMergeKeys.store(notePolicy.isMerging(),std::memory_order_release);
+    }
+    bool getMergeKeys() const noexcept { return requestedMergeKeys.load(std::memory_order_acquire); }
+    bool mergePending() const noexcept {return getMergeKeys()!=activeMergeKeys.load(std::memory_order_acquire);}
+
+    juce::var diagnostics() const
+    {
+        auto* value = new juce::DynamicObject();
+        value->setProperty("droppedMessages", static_cast<juce::int64>(droppedMessageCount.load()));
+        value->setProperty("recoveryCount", static_cast<juce::int64>(recoveryCount.load()));
+        value->setProperty("oversizedMessages", static_cast<juce::int64>(oversizedMessageCount.load()));
+        value->setProperty("connected", isConnected()); value->setProperty("policyPending", isConnected() && mergePending());
+        return value;
+    }
+    static juce::var regression();
 
     void enqueueBuffer(const juce::MidiBuffer& buffer,
                        double sampleRate,
@@ -235,6 +265,7 @@ private:
         {
             const auto controller = bytes[1];
             return controller == 64u
+                || controller == 66u
                 || controller == 120u
                 || controller == 121u
                 || controller == 123u;
@@ -310,6 +341,26 @@ private:
         return true;
     }
 
+    void releaseOutputNotes()
+    {
+        notePolicy.releaseUsedChannels([this](const auto& bytes) {
+            if (output != nullptr) output->sendMessageNow(juce::MidiMessage(bytes.data(), static_cast<int>(bytes.size())));
+        }, requestedMergeKeys.load(std::memory_order_acquire));
+        activeMergeKeys.store(notePolicy.isMerging(), std::memory_order_release);
+    }
+    template<class Send> bool recoverDroppedMessages(bool& hasPacket, Send&& send)
+    {
+        const auto dropped = droppedMessageCount.load(std::memory_order_acquire);
+        if (dropped == acknowledgedDrops) return false;
+        // Consumer discards the compromised backlog. Producer never blocks or
+        // sends driver messages; the worker releases only channels this track used.
+        readPosition.store(writePosition.load(std::memory_order_acquire), std::memory_order_release);
+        hasPacket = false;
+        notePolicy.releaseUsedChannels(std::forward<Send>(send), requestedMergeKeys.load(std::memory_order_acquire));
+        activeMergeKeys.store(notePolicy.isMerging(), std::memory_order_release);
+        acknowledgedDrops = dropped; recoveryCount.fetch_add(1, std::memory_order_relaxed); return true;
+    }
+
     void run() override
     {
         Packet packet;
@@ -317,6 +368,13 @@ private:
 
         while (!threadShouldExit())
         {
+            if (droppedMessageCount.load(std::memory_order_acquire) != acknowledgedDrops)
+            {
+                const juce::ScopedLock sl(outputLock);
+                recoverDroppedMessages(hasPacket, [this](const auto& bytes) {
+                    if (output != nullptr && connected.load(std::memory_order_acquire)) output->sendMessageNow(juce::MidiMessage(bytes.data(), static_cast<int>(bytes.size())));
+                });
+            }
             if (!hasPacket)
                 hasPacket = dequeue(packet);
 
@@ -360,10 +418,11 @@ private:
                         == generation.load(
                             std::memory_order_acquire))
                 {
-                    output->sendMessageNow(
-                        juce::MidiMessage(
-                            packet.bytes.data(),
-                            static_cast<int>(packet.size)));
+                    const bool merge=requestedMergeKeys.load(std::memory_order_acquire);
+                    if(policyGeneration!=packet.generation){notePolicy.reset(merge);policyGeneration=packet.generation;}
+                    const bool send=notePolicy.accept(packet.bytes.data(),static_cast<int>(packet.size),merge);
+                    activeMergeKeys.store(notePolicy.isMerging(),std::memory_order_release);
+                    if(send)output->sendMessageNow(juce::MidiMessage(packet.bytes.data(),static_cast<int>(packet.size)));
                 }
             }
 
@@ -371,6 +430,9 @@ private:
         }
     }
 
+    MIDIOutputNotePolicy notePolicy;
+    std::uint32_t policyGeneration=0, acknowledgedDrops=0;
+    std::atomic<std::uint32_t> recoveryCount{0};
     std::array<Packet, kQueueCapacity> queue {};
     std::atomic<std::uint32_t> writePosition { 0 };
     std::atomic<std::uint32_t> readPosition { 0 };
@@ -378,10 +440,34 @@ private:
     std::atomic<std::uint32_t> droppedMessageCount { 0 };
     std::atomic<std::uint32_t> oversizedMessageCount { 0 };
     std::atomic<bool> connected { false };
+    std::atomic<bool> requestedMergeKeys{false},activeMergeKeys{false};
     mutable juce::CriticalSection outputLock;
     std::unique_ptr<juce::MidiOutput> output;
     juce::String outputDeviceName;
 };
+
+juce::var TrackMIDIOutputDispatcher::regression()
+{
+    auto dispatcher = std::make_unique<TrackMIDIOutputDispatcher>(); dispatcher->connected.store(true); dispatcher->setMergeKeys(true);
+    const std::array<std::uint8_t,3> note{0x92,60,100}, off{0x82,60,0}, other{0x97,61,100};
+    dispatcher->notePolicy.accept(note.data(),3,true);dispatcher->notePolicy.accept(note.data(),3,true);dispatcher->notePolicy.accept(other.data(),3,true);
+    bool bounded=!dispatcher->mergePending(); for(std::uint32_t i=0;i<kQueueCapacity;++i)bounded=dispatcher->enqueueMessage(note.data(),3,static_cast<double>(i))&&bounded;
+    bounded=!dispatcher->enqueueMessage(off.data(),3,999)&&dispatcher->droppedMessageCount.load()==1&&bounded;
+    std::vector<std::array<std::uint8_t,3>> sent; bool hasPacket=true;
+    const bool recovered=dispatcher->recoverDroppedMessages(hasPacket,[&](const auto& bytes){sent.push_back(bytes);});
+    bool channels=sent.size()==8;for(size_t i=0;i<sent.size();++i)channels=channels&&sent[i][0]==(i<4?0xb2:0xb7)&&sent[i][1]==std::array<int,4>{64,66,120,123}[i%4]&&sent[i][2]==0;
+    Packet packet;const bool discarded=!hasPacket&&!dispatcher->dequeue(packet)&&dispatcher->notePolicy.isIdle();
+    bool resumed=dispatcher->enqueueMessage(note.data(),3,1000)&&dispatcher->dequeue(packet)&&dispatcher->notePolicy.accept(packet.bytes.data(),packet.size,true)
+        &&dispatcher->notePolicy.accept(off.data(),3,true)&&dispatcher->notePolicy.isIdle();
+    const auto count=sent.size();resumed=!dispatcher->recoverDroppedMessages(hasPacket,[&](const auto& bytes){sent.push_back(bytes);})&&sent.size()==count&&dispatcher->recoveryCount.load()==1&&resumed;
+    // Exercise wrap-around and repeated recovery without an OS MIDI device.
+    for(int cycle=0;cycle<4;++cycle){for(std::uint32_t i=0;i<kQueueCapacity;++i)bounded=dispatcher->enqueueMessage(note.data(),3,0)&&bounded;bounded=!dispatcher->enqueueMessage(off.data(),3,0)&&bounded;dispatcher->recoverDroppedMessages(hasPacket,[](const auto&){});}
+    juce::MidiBuffer stopMessages;stopMessages.addEvent(juce::MidiMessage::controllerEvent(3,66,0),0);stopMessages.addEvent(juce::MidiMessage::noteOn(3,60,.8f),1);
+    dispatcher->enqueueBuffer(stopMessages,48000,true);const bool resetFilter=dispatcher->dequeue(packet)&&packet.bytes[0]==0xb2&&packet.bytes[1]==66&&packet.bytes[2]==0&&!dispatcher->dequeue(packet);
+    dispatcher->connected.store(false);auto* result=new juce::DynamicObject();result->setProperty("stoppedRouteReleasesSostenuto",resetFilter);result->setProperty("plugin","Hardware MIDI bounded queue recovery");result->setProperty("boundedProducerAndWrap",bounded);result->setProperty("affectedChannelPedalsAndPanic",channels);result->setProperty("compromisedBacklogDiscarded",recovered&&discarded);result->setProperty("newNotesResumeAndRecoveryIsOnce",resumed);result->setProperty("diagnostics",dispatcher->diagnostics());result->setProperty("externalDeviceBehavior","not_asserted");result->setProperty("pass",bounded&&channels&&recovered&&discarded&&resumed&&resetFilter);return result;
+}
+juce::var TrackProcessor::runMIDIOutputQueueRegression(){return TrackMIDIOutputDispatcher::regression();}
+juce::var TrackProcessor::getMIDIOutputDiagnostics() const {return midiOutputDispatcher?midiOutputDispatcher->diagnostics():juce::var();}
 
 static bool isBuiltInInstrumentProcessor(const juce::AudioProcessor* processor)
 {
@@ -560,49 +646,6 @@ static void computePanLawGains(PanLaw panLaw, float pan, float volumeGain,
     }
 }
 
-static void normalizeMonoLikeBufferToDualMono(juce::AudioBuffer<float>& buffer,
-                                              int bufferChannels,
-                                              int numSamples)
-{
-    if (bufferChannels < 2 || numSamples <= 0)
-        return;
-
-    const auto* left = buffer.getReadPointer(0);
-    const auto* right = buffer.getReadPointer(1);
-
-    float peakLeft = 0.0f;
-    float peakRight = 0.0f;
-    float maxDifference = 0.0f;
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        const float absLeft = std::abs(left[sample]);
-        const float absRight = std::abs(right[sample]);
-        peakLeft = juce::jmax(peakLeft, absLeft);
-        peakRight = juce::jmax(peakRight, absRight);
-        maxDifference = juce::jmax(maxDifference, std::abs(left[sample] - right[sample]));
-    }
-
-    constexpr float silenceThreshold = 1.0e-5f;
-    const float identicalTolerance = juce::jmax(1.0e-4f, juce::jmax(peakLeft, peakRight) * 1.0e-3f);
-
-    const bool leftSilent = peakLeft <= silenceThreshold;
-    const bool rightSilent = peakRight <= silenceThreshold;
-    const bool nearlyIdentical = maxDifference <= identicalTolerance;
-
-    if (nearlyIdentical)
-        return;
-
-    if (!leftSilent && rightSilent)
-    {
-        buffer.copyFrom(1, 0, buffer, 0, 0, numSamples);
-        return;
-    }
-
-    if (leftSilent && !rightSilent)
-        buffer.copyFrom(0, 0, buffer, 1, 0, numSamples);
-}
-
 static float backendWidthToPercent(float backendWidth)
 {
     return juce::jlimit(0.0f, 200.0f, (juce::jlimit(-1.0f, 1.0f, backendWidth) + 1.0f) * 100.0f);
@@ -717,6 +760,7 @@ TrackProcessor::TrackProcessor()
     preFXWidthAutomation.setDefaultValue(0.0f);
     trimVolumeAutomation.setDefaultValue(0.0f);
     muteAutomation.setDefaultValue(0.0f);
+    muteAutomation.setInterpolation(AutomationInterpolation::Discrete);
     midiVelocityScaleAutomation.setDefaultValue(1.0f);
     midiPitchBendAutomation.setDefaultValue(0.0f);
     midiChannelPressureAutomation.setDefaultValue(0.0f);
@@ -856,6 +900,8 @@ TrackProcessor::clonePluginAutomationRoute(
     clone->fxIndex = source.fxIndex;
     clone->targetProcessor = source.targetProcessor;
     clone->paramIndex = source.paramIndex;
+    clone->parameterMeaning = source.parameterMeaning;
+    clone->referenceGeneration = source.referenceGeneration;
     clone->editorState = source.editorState;
     clone->builtInParamId = source.builtInParamId;
     clone->builtInMinimum = source.builtInMinimum;
@@ -1045,6 +1091,23 @@ std::shared_ptr<TrackProcessor::PluginAutomationRoute> TrackProcessor::getOrCrea
             openStudioBuiltInValueToNormalized(
                 descriptor, descriptor.currentValue));
     }
+    else if (processor != nullptr && route->paramIndex >= 0
+             && route->paramIndex < processor->getParameters().size())
+    {
+        const auto* parameter = processor->getParameters()[route->paramIndex];
+        if (parameter == nullptr || !parameter->isAutomatable()
+            || (static_cast<int>(parameter->getCategory()) >> 16) == 2)
+            return nullptr;
+        route->builtInDiscrete = parameter != nullptr && parameter->isDiscrete();
+        route->parameterMeaning = pluginParameterMeaning(processor, route->paramIndex);
+        getOpenStudioCLAPParameterReferenceGeneration(processor, route->paramIndex, route->referenceGeneration);
+    }
+    else
+        return nullptr;
+    // Switches and enum choices hold their value until the next point. Rounding
+    // a linear ramp would switch early and visit unintended intermediate modes.
+    if (route->builtInDiscrete)
+        route->automation->setInterpolation(AutomationInterpolation::Discrete);
 
     const juce::ScopedLock sl(pluginAutomationRouteLock);
     if (auto existing = findPluginAutomationRoute(parameterId))
@@ -1147,6 +1210,40 @@ std::optional<TrackProcessor::AutomationTarget> TrackProcessor::resolveAutomatio
                                                                                         bool createIfNeeded)
 {
     AutomationTarget target;
+    if (parameterId.startsWith("builtin_instrument_0_") && isUsingFallbackInstrument())
+    {
+        const auto id = juce::URL::removeEscapeChars(parameterId.substring(21));
+        for (size_t index = 0; index < fallbackAutomationControls.size(); ++index)
+            if (id == fallbackAutomationControls[index].id)
+            {
+                target.kind = AutomationTarget::Kind::FallbackParameter;
+                target.list = &fallbackAutomation[index];
+                target.fallbackIndex = static_cast<int>(index);
+                if (fallbackAutomationControls[index].discrete)
+                    target.list->setInterpolation(AutomationInterpolation::Discrete);
+                return target;
+            }
+        return std::nullopt;
+    }
+    if (parameterId.startsWith("send_"))
+    {
+        const auto suffixIndex = parameterId.lastIndexOfChar('_');
+        const auto destination = juce::URL::removeEscapeChars(parameterId.substring(5, suffixIndex));
+        const auto suffix = parameterId.substring(suffixIndex + 1);
+        const auto found = sendAutomationStates.find(destination);
+        const bool exists = std::any_of(sends.begin(), sends.end(), [&](const auto& send)
+        { return send.destTrackId == destination; });
+        if (!exists || found == sendAutomationStates.end())
+            return std::nullopt;
+        auto* state = found->second.get();
+        if (suffix == "level") { target.kind = AutomationTarget::Kind::SendLevel; target.list = &state->level; }
+        else if (suffix == "pan") { target.kind = AutomationTarget::Kind::SendPan; target.list = &state->pan; }
+        else if (suffix == "mute") { target.kind = AutomationTarget::Kind::SendMute; target.list = &state->mute; }
+        else if (suffix == "trim") { target.kind = AutomationTarget::Kind::SendTrim; target.list = &state->trim; }
+        else return std::nullopt;
+        target.sendAutomation = state;
+        return target;
+    }
     if (parameterId == "volume")
     {
         target.kind = AutomationTarget::Kind::Volume;
@@ -1249,10 +1346,22 @@ float TrackProcessor::getAutomationDefaultValue(const AutomationTarget& target) 
         case AutomationTarget::Kind::PreFXVolume:
         case AutomationTarget::Kind::PreFXPan:
         case AutomationTarget::Kind::PreFXWidth:
-        case AutomationTarget::Kind::TrimVolume:
             return 0.0f;
+        case AutomationTarget::Kind::TrimVolume:
+            return getTrimVolume();
         case AutomationTarget::Kind::Mute:
             return getMute() ? 1.0f : 0.0f;
+        case AutomationTarget::Kind::SendLevel:
+        case AutomationTarget::Kind::SendPan:
+        case AutomationTarget::Kind::SendMute:
+        case AutomationTarget::Kind::SendTrim:
+            return target.list->getDefaultValue();
+        case AutomationTarget::Kind::FallbackParameter:
+        {
+            const auto& control = fallbackAutomationControls[static_cast<size_t>(target.fallbackIndex)];
+            return juce::jlimit(0.0f, 1.0f, (getFallbackInstrumentParam(control.id) - control.minimum)
+                / (control.maximum - control.minimum));
+        }
         case AutomationTarget::Kind::MIDIVelocityScale:
             return 1.0f;
         case AutomationTarget::Kind::MIDIPitchBend:
@@ -1269,7 +1378,8 @@ float TrackProcessor::getAutomationDefaultValue(const AutomationTarget& target) 
             }
             else
             {
-                if (target.fxIndex >= 0 && target.fxIndex < getNumTrackFX())
+                if (target.fxIndex < 0) processor = getInstrument();
+                else if (target.fxIndex < getNumTrackFX())
                     processor = getTrackFXProcessor(target.fxIndex);
             }
 
@@ -1303,6 +1413,10 @@ float TrackProcessor::getAutomationDefaultValue(const AutomationTarget& target) 
 
 bool TrackProcessor::hasPluginAutomation() const
 {
+    if (isUsingFallbackInstrument())
+        for (const auto& lane : fallbackAutomation)
+            if (lane.hasPlaybackData() && lane.shouldPlaybackForRead())
+                return true;
     if (!hasPublishedPluginAutomationRoutes.load(std::memory_order_acquire))
         return false;
 
@@ -1315,7 +1429,7 @@ bool TrackProcessor::hasPluginAutomation() const
         return false;
 
     for (const auto& route : *snapshot)
-        if (route && route->automation && route->automation->getNumPoints() > 0
+        if (route && route->automation && route->automation->hasPlaybackData()
             && route->automation->shouldPlaybackForRead())
             return true;
 
@@ -1324,11 +1438,11 @@ bool TrackProcessor::hasPluginAutomation() const
 
 bool TrackProcessor::hasMIDIAutomation() const
 {
-    if (midiVelocityScaleAutomation.shouldPlaybackForRead() && midiVelocityScaleAutomation.getNumPoints() > 0)
+    if (midiVelocityScaleAutomation.shouldPlaybackForRead() && midiVelocityScaleAutomation.hasPlaybackData())
         return true;
-    if (midiPitchBendAutomation.shouldPlaybackForRead() && midiPitchBendAutomation.getNumPoints() > 0)
+    if (midiPitchBendAutomation.shouldPlaybackForRead() && midiPitchBendAutomation.hasPlaybackData())
         return true;
-    if (midiChannelPressureAutomation.shouldPlaybackForRead() && midiChannelPressureAutomation.getNumPoints() > 0)
+    if (midiChannelPressureAutomation.shouldPlaybackForRead() && midiChannelPressureAutomation.hasPlaybackData())
         return true;
 
     if (!hasPublishedMIDICCAutomationRoutes.load(std::memory_order_acquire))
@@ -1343,7 +1457,7 @@ bool TrackProcessor::hasMIDIAutomation() const
         return false;
 
     for (const auto& route : *snapshot)
-        if (route && route->automation && route->automation->getNumPoints() > 0
+        if (route && route->automation && route->automation->hasPlaybackData()
             && route->automation->shouldPlaybackForRead())
             return true;
 
@@ -1370,6 +1484,11 @@ void TrackProcessor::resetAutomationTouchState()
     midiVelocityScaleAutomation.resetTouchAndLatch();
     midiPitchBendAutomation.resetTouchAndLatch();
     midiChannelPressureAutomation.resetTouchAndLatch();
+    for (auto& list : fallbackAutomation)
+        list.resetTouchAndLatch();
+    for (const auto& entry : sendAutomationStates)
+        for (auto* list : { &entry.second->level, &entry.second->pan, &entry.second->mute, &entry.second->trim })
+            list->resetTouchAndLatch();
 
     if (hasPublishedPluginAutomationRoutes.load(std::memory_order_acquire))
     {
@@ -1425,7 +1544,7 @@ void TrackProcessor::reclaimRetiredRealtimeAuxOwners()
 
 void TrackProcessor::reclaimRetiredScheduledMIDISnapshots()
 {
-    std::vector<std::shared_ptr<const std::vector<ScheduledMIDIClip>>>
+    std::vector<std::shared_ptr<const ScheduledMIDISnapshot>>
         reclaim;
     {
         const juce::ScopedLock retirementGuard(
@@ -1440,7 +1559,7 @@ void TrackProcessor::reclaimRetiredScheduledMIDISnapshots()
 }
 
 void TrackProcessor::publishScheduledMIDIClips(
-    std::shared_ptr<const std::vector<ScheduledMIDIClip>> snapshot)
+    std::shared_ptr<const ScheduledMIDISnapshot> snapshot)
 {
     const juce::ScopedLock publicationGuard(
         scheduledMIDIPublicationLock);
@@ -1479,6 +1598,8 @@ void TrackProcessor::publishRealtimeStateSnapshots()
     // Serialise control-side publishers. The callback never acquires this lock.
     const juce::ScopedLock publicationGuard(
         realtimeGraphPublicationLock);
+    for (auto& send : sends)
+        prepareSendAutomation(send);
     // Reclaim only owners retired by an earlier publication. The owner replaced
     // below must survive at least one publication boundary so a reader that
     // starts concurrently can still observe it safely.
@@ -1495,6 +1616,18 @@ void TrackProcessor::publishRealtimeStateSnapshots()
     next->inputFXPrecisionOverrides = inputFXForceFloatOverrides;
     next->trackFXPrecisionOverrides = trackFXForceFloatOverrides;
     next->instrument = instrumentPlugin;
+    int outputChannels = 2;
+    const auto includeOutputs = [&] (const auto& processors)
+    {
+        for (const auto& processor : processors)
+            if (processor != nullptr)
+                outputChannels = juce::jmax(outputChannels, processor->getTotalNumOutputChannels());
+    };
+    includeOutputs(next->inputFX);
+    includeOutputs(next->trackFX);
+    if (next->instrument != nullptr)
+        outputChannels = juce::jmax(outputChannels, next->instrument->getTotalNumOutputChannels());
+    processingChannelCount.store(juce::jlimit(2, maxProcessingChannels, outputChannels), std::memory_order_release);
     // Preserve quarantine by instance identity, including reorder/publication.
     const auto safetyFor = [&] (const ProcessorPtr& processor)
     {
@@ -1533,6 +1666,7 @@ void TrackProcessor::publishRealtimeStateSnapshots()
 
         const int reportedLatency =
             juce::jmax(0, processor->getLatencySamples());
+        const int dryChannels = juce::jlimit(hostBypassDryChannels, maxProcessingChannels, processor->getMainBusNumOutputChannels());
         const int requiredCapacity =
             juce::jmax(
                 kHostBypassLatencyHeadroomSamples,
@@ -1541,7 +1675,7 @@ void TrackProcessor::publishRealtimeStateSnapshots()
         if (reusable != nullptr
             && reusable->processor == processor.get()
             && reusable->ring.getNumChannels()
-                    >= hostBypassDryChannels
+                    >= dryChannels
             && reusable->ring.getNumSamples()
                     >= requiredCapacity)
         {
@@ -1558,7 +1692,7 @@ void TrackProcessor::publishRealtimeStateSnapshots()
             reportedLatency,
             std::memory_order_relaxed);
         storage->ring.setSize(
-            hostBypassDryChannels,
+            dryChannels,
             requiredCapacity,
             false,
             true,
@@ -1716,7 +1850,7 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
                                                        bool isInputFX,
                                                        int fxIndex,
                                                        double blockTimeSeconds,
-                                                       const PluginAutomationRouteSnapshot* routes)
+                                                       const PluginAutomationRouteSnapshot* routes, int numSamples)
 {
     if (proc == nullptr
         || routes == nullptr
@@ -1749,24 +1883,40 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
             continue;
         }
 
+        if (route->editorState) route->editorState->hostAutomating.store(false, std::memory_order_release);
+        uint64_t generation = 0;
+        if (getOpenStudioCLAPParameterReferenceGeneration(proc, route->paramIndex, generation)
+            && generation != route->referenceGeneration)
+        { route->automation->setMode(AutomationMode::Off); route->automation->clearPreview(); continue; }
         const auto mode = route->automation->getMode();
+        if (route->automation->hasWrittenValue() && route->editorState && route->editorState->touching.load()
+            && pluginAutomationClock && route->editorState->captureEpoch.load() == pluginAutomationClock->epoch.load())
+            route->automation->setWrittenValue(route->editorState->value.load());
         const bool editorWriting = !forceAutomationReadDuringProcessing.load(std::memory_order_relaxed)
             && route->editorState && route->editorState->touching.load()
             && (mode == AutomationMode::Touch || mode == AutomationMode::Latch);
-        if (!shouldApplyAutomation(*route->automation) || route->automation->getNumPoints() == 0 || editorWriting)
+        if (!shouldApplyAutomation(*route->automation) || !route->automation->hasPlaybackData() || (editorWriting && !route->automation->hasPreview()))
         {
             // Off/Touch/Write preserve the actual knob. Never apply a stale
             // lane default, and force the next Read block to reclaim the knob.
             route->lastAppliedValue.store(std::numeric_limits<float>::quiet_NaN());
             continue;
         }
+        if (route->builtInParamId.isEmpty() && juce::isPositiveAndBelow(route->paramIndex, params.size())
+            && params[route->paramIndex]->isAutomatable()
+            && deliverPluginAutomationPoints(params[route->paramIndex], *route->automation, blockTimeSeconds, getSampleRate(), numSamples, route->editorState))
+        { route->lastAppliedValue.store(params[route->paramIndex]->getValue()); continue; }
         const float automatedValue = route->automation->eval(blockTimeSeconds);
         if (! std::isfinite(automatedValue))
             continue;
 
         const float clampedValue = juce::jlimit(0.0f, 1.0f, automatedValue);
         const float lastValue = route->lastAppliedValue.load(std::memory_order_relaxed);
+        const bool hostValueChanged = route->builtInParamId.isEmpty()
+            && juce::isPositiveAndBelow(route->paramIndex, params.size())
+            && std::abs(params[route->paramIndex]->getValue() - clampedValue) > 1.0e-6f;
         if (std::isfinite(lastValue) && std::abs(lastValue - clampedValue) <= 1.0e-6f
+            && !hostValueChanged
             && !(route->editorState && route->editorState->touching.load()))
             continue;
 
@@ -1789,7 +1939,7 @@ void TrackProcessor::applyPluginAutomationForProcessor(juce::AudioProcessor* pro
             if (route->paramIndex < 0 || route->paramIndex >= params.size())
                 continue;
             auto* param = params[route->paramIndex];
-            if (param == nullptr)
+            if (param == nullptr || !param->isAutomatable())
                 continue;
             param->setValue(clampedValue);
         }
@@ -1897,7 +2047,7 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
                 const auto module =
                     getNAMTailAutomationModule(route->builtInParamId);
                 const bool hasRelevantPoints =
-                    route->automation->getNumPoints() > 0;
+                    route->automation->hasPlaybackData();
                 if (hasRelevantPoints)
                 {
                     mask |= module;
@@ -1906,18 +2056,37 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
         }
         return mask;
     };
-    const auto addProcessorTail = [&serialTailSeconds, &getTailAutomationMask]
+    const auto instrumentTailForRoute = [&automationSnapshot] (const juce::AudioProcessor* processor, bool isInputFX, int fxIndex)
+    {
+        const auto* synth = dynamic_cast<const OpenStudioBasicSynthInstrument*>(processor);
+        const auto* piano = dynamic_cast<const OpenStudioPianoInstrument*>(processor);
+        const auto* guitar = dynamic_cast<const OpenStudioCleanGuitarInstrument*>(processor);
+        double tail = processor->getTailLengthSeconds();
+        if ((!synth && !piano && !guitar) || !automationSnapshot) return tail;
+        for (const auto& route : *automationSnapshot)
+        {
+            if (!route || route->fxIndex != fxIndex || route->isInputFX != isInputFX
+                || route->targetProcessor != processor || !route->automation
+                || !route->automation->shouldPlaybackForRead() || !route->automation->hasPlaybackData()) continue;
+            const auto& id = route->builtInParamId;
+            // Generic parameter routes do not carry a stable built-in ID;
+            // conservatively reserve the maximum for those instrument routes.
+            const bool relevant = id.isEmpty() || id == "releaseMs"
+                || (synth && id.startsWith("matrix"))
+                || ((piano || guitar) && (id == "coupledBody" || id == "bodyDecay"));
+            if (relevant) return synth ? synth->getMaximumTailLengthSeconds()
+                : piano ? piano->getMaximumTailLengthSeconds() : guitar->getMaximumTailLengthSeconds();
+        }
+        return tail;
+    };
+    const auto addProcessorTail = [&serialTailSeconds, &getTailAutomationMask, &instrumentTailForRoute]
         (const juce::AudioProcessor* processor, bool isInputFX, int fxIndex)
     {
-        if (processor == nullptr)
-            return;
-
-        double processorTail = processor->getTailLengthSeconds();
+        if (processor == nullptr) return;
+        double processorTail = instrumentTailForRoute(processor, isInputFX, fxIndex);
         if (const auto* rack = dynamic_cast<const OpenStudioNAMRack*>(processor))
-            processorTail = rack->getAutomatedTailLengthSeconds(
-                getTailAutomationMask(isInputFX, fxIndex));
-        if (std::isfinite(processorTail) && processorTail > 0.0)
-            serialTailSeconds += processorTail;
+            processorTail = rack->getAutomatedTailLengthSeconds(getTailAutomationMask(isInputFX, fxIndex));
+        if (std::isfinite(processorTail) && processorTail > 0.0) serialTailSeconds += processorTail;
     };
 
     for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
@@ -1929,7 +2098,7 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
     // Instruments do not use track/input FX automation route identities.
     if (instrumentPlugin)
     {
-        const double instrumentTail = instrumentPlugin->getTailLengthSeconds();
+        const double instrumentTail = instrumentTailForRoute(instrumentPlugin.get(), false, -1);
         if (std::isfinite(instrumentTail) && instrumentTail > 0.0)
             serialTailSeconds += instrumentTail;
     }
@@ -1983,19 +2152,28 @@ void TrackProcessor::recomputePanGains()
 
 void TrackProcessor::setVolume(float newVolume)
 {
+    if (volumeAutomation.hasWrittenValue()) volumeAutomation.setWrittenValue(juce::jlimit(-60.0f, 12.0f, newVolume));
     trackVolumeDB.store(juce::jlimit(-60.0f, 12.0f, newVolume), std::memory_order_relaxed);
     recomputePanGains();
 }
 
 void TrackProcessor::setPan(float newPan)
 {
+    if (panAutomation.hasWrittenValue()) panAutomation.setWrittenValue(juce::jlimit(-1.0f, 1.0f, newPan));
     trackPan.store(juce::jlimit(-1.0f, 1.0f, newPan), std::memory_order_relaxed);
     recomputePanGains();
 }
 
 void TrackProcessor::setMute(bool shouldMute)
 {
+    if (muteAutomation.hasWrittenValue()) muteAutomation.setWrittenValue(shouldMute ? 1.0f : 0.0f);
     isMuted.store(shouldMute);
+}
+
+void TrackProcessor::setStereoWidth(float widthPercent)
+{
+    stereoWidth.store(juce::jlimit(0.0f,200.0f,widthPercent));
+    if(widthAutomation.hasWrittenValue())widthAutomation.setWrittenValue(widthPercentToBackend(getStereoWidth()));
 }
 
 void TrackProcessor::setSolo(bool shouldSolo)
@@ -2072,6 +2250,10 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     if (!std::isfinite(sampleRate) || sampleRate <= 0.0
         || samplesPerBlock <= 0 || samplesPerBlock > 65536)
         return;
+    // Tracks are also prepared directly before a running graph adds its node.
+    // Keep AudioProcessor's metadata in sync: the fallback sampler and automation
+    // read getSampleRate(), which otherwise remains zero until graph preparation.
+    setRateAndBufferSizeDetails(sampleRate, samplesPerBlock);
     realtimeFXTailSampleRateHz.store(
         juce::roundToInt(juce::jlimit(8000.0, 384000.0,
                                      sampleRate > 0.0 ? sampleRate : 44100.0)),
@@ -2172,7 +2354,7 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     channelStripEQ.prepareToPlay(sampleRate, samplesPerBlock);
 
     // Pre-allocate pre-fader buffer for send routing (2-channel stereo)
-    preFaderBuffer.setSize(2, samplesPerBlock);
+    preFaderBuffer.setSize(maxProcessingChannels, samplesPerBlock);
     automationGainBuffer.setSize(8, samplesPerBlock);
     realtimeFallbackBuffer.setSize(2, samplesPerBlock);
     publishRealtimeStateSnapshots();
@@ -2354,12 +2536,12 @@ void TrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 
 bool TrackProcessor::tryProcessBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    // The PDC path is mono/stereo; all scratch storage is prepared off-thread.
+    // Main-pair PDC and multichannel processor storage are prepared off-thread.
     // Reject before any DSP, pointer access or send tap can observe a malformed
     // block. Re-preparation belongs to the device/control path, never here.
     if (preparedRealtimeBlockCapacity <= 0
         || buffer.getNumSamples() > preparedRealtimeBlockCapacity
-        || buffer.getNumChannels() < 1 || buffer.getNumChannels() > 2)
+        || buffer.getNumChannels() < 1 || buffer.getNumChannels() > getProcessingChannelCount())
     {
         buffer.clear();
         preFaderBuffer.clear();
@@ -2417,6 +2599,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         graphSnapshot != nullptr ? &graphSnapshot->inputFX : nullptr;
     const auto* const trackFXSnapshot =
         graphSnapshot != nullptr ? &graphSnapshot->trackFX : nullptr;
+    if (graphSnapshot)
+    {
+        for (size_t index = 0; index < graphSnapshot->inputFX.size(); ++index)
+            flushOpenStudioCLAPParameterEvents(graphSnapshot->inputFX[index].get(), graphSnapshot->inputSafety[index].get());
+        for (size_t index = 0; index < graphSnapshot->trackFX.size(); ++index)
+            flushOpenStudioCLAPParameterEvents(graphSnapshot->trackFX[index].get(), graphSnapshot->trackSafety[index].get());
+        flushOpenStudioCLAPParameterEvents(graphSnapshot->instrument.get(), graphSnapshot->instrumentSafety.get());
+    }
     const auto resolveSafety = [&] (bool input, int index) -> ProcessorSafety*
     {
         if (!graphSnapshot) return nullptr;
@@ -2464,6 +2654,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             : nullptr;
     const bool instrumentForceFloat = instrumentForceFloatOverride.load(std::memory_order_acquire);
     const double blockTimeSeconds = this->blockStartTimeSeconds;
+    const ScopedPluginAutomationProcessing parameterCaptureContext(blockTimeSeconds, getSampleRate());
     const auto hasEnabledProcessor = [] (
         const ProcessorSnapshot* processors,
         const BypassSnapshot* bypassState) noexcept
@@ -2609,10 +2800,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
     };
     bool hasTrackBuiltInInstrument = false;
-    // Audio tracks cannot host OpenStudio's built-in instrument fallback.
-    // Avoid calling getName() on every FX here: JUCE returns String by value,
-    // which can allocate on the realtime thread even for a literal name.
-    if (currentTrackType == TrackType::Instrument && trackFXSnapshot)
+    // Detect built-in generators without allocating a plugin name on the callback.
+    // Their intentional stereo output must survive the mono-source fallback below.
+    if (trackFXSnapshot)
     {
         for (const auto& plugin : *trackFXSnapshot)
         {
@@ -2635,13 +2825,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     for (auto i = totalNumInputChannels; i < juce::jmin(totalNumOutputChannels, bufferChannels); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    const bool muteAutomationCanUnmute = shouldApplyAutomation(muteAutomation) && muteAutomation.getNumPoints() > 0;
+    const bool muteAutomationCanUnmute = shouldApplyAutomation(muteAutomation) && muteAutomation.hasPlaybackData();
     // Static mute may only short-circuit if no mute automation can unmute this block.
     if (isMuted.load()
         && !ignoreStaticMuteDuringProcessing.load(std::memory_order_relaxed)
         && !muteAutomationCanUnmute)
     {
         buffer.clear();
+        preFaderBuffer.clear();
         currentRMS = 0.0f;
         finishRealtimeFXTailDrain(0.0f);
         return;
@@ -2703,7 +2894,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
 
         for (int channel = 0;
-             channel < bufferChannels;
+             channel < juce::jmin(2, bufferChannels);
              ++channel)
         {
             const float input =
@@ -2974,13 +3165,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     std::memory_order_acquire));
         }
 
-        applyPluginAutomationForProcessor(
-            proc,
-            isInputFXChain,
-            fxIndex,
-            blockTimeSeconds,
-            pluginAutomationRoutesForBlock);
-
         // Compute isARAProcessor first so we can gate expensive QPC calls on it.
         // For non-ARA plugins (Amplitube, OpenStudio FX, etc.) all timing overhead is skipped.
         auto* safety = resolveSafety(isInputFXChain, fxIndex);
@@ -2999,6 +3183,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         safety->refreshRemoteFailure();
         if (safety->failure.load(std::memory_order_acquire) != ProcessorSafety::Failure::none)
             return false;
+        applyPluginAutomationForProcessor(
+            proc,
+            isInputFXChain,
+            fxIndex,
+            blockTimeSeconds,
+            pluginAutomationRoutesForBlock, buffer.getNumSamples());
+
+
         const bool isARAProcessor =
             activeARAControllerForBlock != nullptr
             && trackFXSnapshot
@@ -3090,7 +3282,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             int outCh = proc->getTotalNumOutputChannels();
             if (outCh > 0 && outCh < bufferChannels)
             {
-                for (int ch = outCh; ch < bufferChannels; ++ch)
+                for (int ch = outCh; ch < juce::jmin(2, bufferChannels); ++ch)
                     buffer.copyFrom (ch, 0, buffer, 0, 0, numSamps);
             }
             logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
@@ -3127,7 +3319,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
                     auto* mono = pluginBuffer.getReadPointer(0);
-                    for (int ch = 0; ch < bufferChannels; ++ch)
+                    for (int ch = 0; ch < juce::jmin(2, bufferChannels); ++ch)
                     {
                         auto* dest = buffer.getWritePointer(ch);
                         for (int sample = 0; sample < numSamps; ++sample)
@@ -3136,7 +3328,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 }
                 else
                 {
-                    for (int ch = 0; ch < bufferChannels; ++ch)
+                    for (int ch = 0; ch < juce::jmin(bufferChannels, proc->getTotalNumOutputChannels()); ++ch)
                     {
                         auto* dest = buffer.getWritePointer(ch);
                         auto* src = pluginBuffer.getReadPointer(ch < expandedCh ? ch : 0);
@@ -3177,12 +3369,12 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
-                    for (int ch = 0; ch < bufferChannels; ++ch)
+                    for (int ch = 0; ch < juce::jmin(2, bufferChannels); ++ch)
                         buffer.copyFrom(ch, 0, pluginBuffer, 0, 0, numSamps);
                 }
                 else
                 {
-                    for (int ch = 0; ch < bufferChannels; ++ch)
+                    for (int ch = 0; ch < juce::jmin(bufferChannels, proc->getTotalNumOutputChannels()); ++ch)
                         buffer.copyFrom(ch, 0, pluginBuffer, ch < expandedCh ? ch : 0, 0, numSamps);
                 }
                 logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
@@ -3224,8 +3416,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
              bool writeDryOutput,
              bool advanceHistory)
     {
-        const int channels = buffer.getNumChannels();
+        // Auxiliary pairs bypass a stereo processor. Only its main input path
+        // needs latency-aligned dry storage; preserve the remaining pairs.
+        const int channels = juce::jmin(buffer.getNumChannels(),
+            juce::jmax(2, processor.getMainBusNumOutputChannels()));
         const int samples = buffer.getNumSamples();
+        if (writeDryOutput)
+            for (int channel = channels; channel < buffer.getNumChannels(); ++channel)
+                fxBypassDryBuffer.copyFrom(channel, 0, buffer, channel, 0, samples);
         if (storage == nullptr
             || storage->processor != &processor
             || storage->ring.getNumChannels() < channels
@@ -3570,9 +3768,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     const float staticPreFXVolDb = 0.0f;
     const float staticPreFXPan = 0.0f;
     const float staticPreFXWidth = 100.0f;
-    const bool preFXVolAutoActive = shouldApplyAutomation(preFXVolumeAutomation) && preFXVolumeAutomation.getNumPoints() > 0;
-    const bool preFXPanAutoActive = shouldApplyAutomation(preFXPanAutomation) && preFXPanAutomation.getNumPoints() > 0;
-    const bool preFXWidthAutoActive = shouldApplyAutomation(preFXWidthAutomation) && preFXWidthAutomation.getNumPoints() > 0;
+    const bool preFXVolAutoActive = shouldApplyAutomation(preFXVolumeAutomation) && preFXVolumeAutomation.hasPlaybackData();
+    const bool preFXPanAutoActive = shouldApplyAutomation(preFXPanAutomation) && preFXPanAutomation.hasPlaybackData();
+    const bool preFXWidthAutoActive = shouldApplyAutomation(preFXWidthAutomation) && preFXWidthAutomation.hasPlaybackData();
 
     if (preFXVolAutoActive || preFXPanAutoActive)
     {
@@ -3633,7 +3831,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     // Channel strip EQ (processed before plugin FX chains). It stays in the
     // callback so its internal dry/wet ramp can make power changes click-free;
     // the steady disabled path returns immediately.
-    channelStripEQ.processBlock(buffer, midiMessages);
+    juce::AudioBuffer<float> stripBuffer(buffer.getArrayOfWritePointers(), juce::jmin(2, bufferChannels), numSamps);
+    channelStripEQ.processBlock(stripBuffer, midiMessages);
 
     // Process through input FX chain
     if (inputFXSnapshot)
@@ -3689,19 +3888,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                              && trackFXPrecisionOverrideSnapshot->count(fxIdx) > 0
                              && trackFXPrecisionOverrideSnapshot->at(fxIdx);
 
-        // Check if this plugin has a sidechain source configured AND
-        // the plugin actually supports sidechain input (more than 1 input bus)
-        SidechainSourceSnapshot::const_iterator scIt;
-        bool hasSidechain = false;
-        if (sidechainSnapshot != nullptr)
+        // Auxiliary buses always receive explicit data or silence. Bind by both
+        // processor identity and source so a newer FX snapshot cannot consume an
+        // old slot's key after reorder/removal/source changes.
+        const juce::AudioBuffer<float>* sidechainInputBuffer = nullptr;
+        if (sidechainSnapshot != nullptr && sidechainInputs != nullptr)
         {
-            scIt = sidechainSnapshot->find(fxIdx);
-            hasSidechain = scIt != sidechainSnapshot->end();
+            const auto source = sidechainSnapshot->find(fxIdx);
+            if (source != sidechainSnapshot->end())
+                for (const auto& route : *sidechainInputs)
+                    if (route.processor.get() == proc && route.sourceTrackId == source->second)
+                    {
+                        sidechainInputBuffer = route.buffer;
+                        break;
+                    }
         }
-        hasSidechain = hasSidechain
-                            && sidechainInputBuffer != nullptr
-                            && proc->getBusCount(true) > 1
-                            && proc->getBus(true, 1)->isEnabled();
+        const bool hasSidechain = proc->getBusCount(true) > 1
+            && proc->getBus(true, 1)->isEnabled();
 
         if (hasSidechain)
         {
@@ -3802,13 +4005,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 continue;
             }
 
-            applyPluginAutomationForProcessor(
-                proc,
-                false,
-                fxIdx,
-                blockTimeSeconds,
-                pluginAutomationRoutesForBlock);
-
             // Sidechain path: expand buffer to include sidechain channels after
             // the main stereo channels.  The plugin's second input bus receives
             // the sidechain audio.
@@ -3819,6 +4015,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             // to be safe.
             // Input-bus offsets depend on INPUT layout, not output width.
             const int mainCh = proc->getMainBusNumInputChannels();
+            const int mainOutputCh = proc->getMainBusNumOutputChannels();
             const int declaredChannels = juce::jmax(proc->getTotalNumInputChannels(),
                                                     proc->getTotalNumOutputChannels());
 
@@ -3826,7 +4023,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             int scBusCh = 0;
             if (auto* scBus = proc->getBus(true, 1))
                 scBusCh = scBus->getNumberOfChannels();
-            if (mainCh < 0 || mainCh > kMaxFXChannels || scBusCh <= 0
+            if (mainCh < 0 || mainCh > kMaxFXChannels || mainOutputCh <= 0
+                || mainOutputCh > kMaxFXChannels || scBusCh <= 0
                 || scBusCh > kMaxFXChannels - mainCh
                 || declaredChannels > kMaxFXChannels
                 || declaredChannels < mainCh + scBusCh)
@@ -3836,11 +4034,33 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 finishFXSlot(continuity, bypassed, false, dryInputCaptured);
                 continue;
             }
+            auto* automationSafety = resolveSafety(false, fxIdx);
+            if (!automationSafety || automationSafety->failure.load(std::memory_order_acquire) != ProcessorSafety::Failure::none)
+            { finishFXSlot(continuity, bypassed, false, dryInputCaptured); continue; }
+            applyPluginAutomationForProcessor(
+                proc,
+                false,
+                fxIdx,
+                blockTimeSeconds,
+                pluginAutomationRoutesForBlock, buffer.getNumSamples());
+
             // Additional enabled auxiliary buses still require real storage,
             // even when this host routes only the first sidechain bus.
             const int totalCh = juce::jmax(bufferChannels, declaredChannels);
             const int sidechainSamples = juce::jmin(
-                numSamps2, sidechainInputBuffer->getNumSamples());
+                numSamps2, sidechainInputBuffer != nullptr ? sidechainInputBuffer->getNumSamples() : 0);
+            const int sourceKeyChannels = sidechainInputBuffer != nullptr
+                ? sidechainInputBuffer->getNumChannels() : 0;
+            const auto keySample = [&] (int channel, int sample) noexcept
+            {
+                if (sourceKeyChannels == 0)
+                    return 0.0f;
+                if (scBusCh == 1 && sourceKeyChannels > 1)
+                    return (sidechainInputBuffer->getSample(0, sample)
+                            + sidechainInputBuffer->getSample(1, sample)) * 0.5f;
+                return sidechainInputBuffer->getSample(
+                    juce::jmin(channel, sourceKeyChannels - 1), sample);
+            };
             const bool useDoublePrecision =
                 processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
                 && !forceFloat
@@ -3857,14 +4077,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 {
                     auto* dest = fxProcessBufferDouble.getWritePointer(ch);
                     juce::FloatVectorOperations::clear(dest, numSamps2);
-                    if (expandedCh == 1 && bufferChannels > 1)
+                    if (ch == 0 && mainCh == 1 && bufferChannels > 1)
                     {
                         auto* left = buffer.getReadPointer(0);
                         auto* right = buffer.getReadPointer(1);
                         for (int sample = 0; sample < numSamps2; ++sample)
                             dest[sample] = static_cast<double>((left[sample] + right[sample]) * 0.5f);
                     }
-                    else if (ch < bufferChannels)
+                    else if (ch < mainCh && ch < bufferChannels)
                     {
                         auto* src = buffer.getReadPointer(ch);
                         for (int sample = 0; sample < numSamps2; ++sample)
@@ -3872,16 +4092,11 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     }
                 }
 
-                int scInputCh = sidechainInputBuffer->getNumChannels();
                 for (int ch = 0; ch < scBusCh && (mainCh + ch) < expandedCh; ++ch)
                 {
-                    if (ch < scInputCh)
-                    {
-                        auto* dest = fxProcessBufferDouble.getWritePointer(mainCh + ch);
-                        auto* src = sidechainInputBuffer->getReadPointer(ch);
-                        for (int sample = 0; sample < sidechainSamples; ++sample)
-                            dest[sample] = static_cast<double>(src[sample]);
-                    }
+                    auto* dest = fxProcessBufferDouble.getWritePointer(mainCh + ch);
+                    for (int sample = 0; sample < sidechainSamples; ++sample)
+                        dest[sample] = static_cast<double>(keySample(ch, sample));
                 }
 
                 double* channelPtrs[kMaxFXChannels];
@@ -3891,10 +4106,10 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 juce::AudioBuffer<double> pluginBuffer(channelPtrs, expandedCh, numSamps2);
                 processedSafely = safety != nullptr && safety->process(*proc, pluginBuffer, midiMessages);
 
-                for (int ch = 0; ch < bufferChannels; ++ch)
+                for (int ch = 0; ch < juce::jmin(bufferChannels, juce::jmax(2, mainOutputCh)); ++ch)
                 {
                     auto* dest = buffer.getWritePointer(ch);
-                    auto* src = pluginBuffer.getReadPointer(ch);
+                    auto* src = pluginBuffer.getReadPointer(juce::jmin(ch, mainOutputCh - 1));
                     for (int sample = 0; sample < numSamps2; ++sample)
                         dest[sample] = static_cast<float>(src[sample]);
                 }
@@ -3904,21 +4119,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 // Copy main audio into pre-allocated buffer
                 for (int ch = 0; ch < expandedCh; ++ch)
                 {
-                    if (ch < bufferChannels)
+                    juce::FloatVectorOperations::clear(fxProcessBuffer.getWritePointer(ch), numSamps2);
+                    if (ch == 0 && mainCh == 1 && bufferChannels > 1)
+                    {
+                        fxProcessBuffer.copyFrom(ch, 0, buffer, 0, 0, numSamps2);
+                        fxProcessBuffer.addFrom(ch, 0, buffer, 1, 0, numSamps2);
+                        fxProcessBuffer.applyGain(ch, 0, numSamps2, .5f);
+                    }
+                    else if (ch < mainCh && ch < bufferChannels)
                         fxProcessBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamps2);
-                    else
-                        juce::FloatVectorOperations::clear(fxProcessBuffer.getWritePointer(ch), numSamps2);
                 }
 
                 // Copy sidechain audio into channels after the main channels
-                int scInputCh = sidechainInputBuffer->getNumChannels();
                 for (int ch = 0; ch < scBusCh && (mainCh + ch) < expandedCh; ++ch)
                 {
-                    if (ch < scInputCh)
-                    {
-                        fxProcessBuffer.copyFrom(mainCh + ch, 0,
-                                                 *sidechainInputBuffer, ch, 0, sidechainSamples);
-                    }
+                    auto* dest = fxProcessBuffer.getWritePointer(mainCh + ch);
+                    for (int sample = 0; sample < sidechainSamples; ++sample)
+                        dest[sample] = keySample(ch, sample);
                 }
 
                 float* channelPtrs[kMaxFXChannels];
@@ -3929,8 +4146,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 processedSafely = safety != nullptr && safety->process(*proc, pluginBuffer, midiMessages);
 
                 // Copy processed main channels back
-                for (int ch = 0; ch < bufferChannels; ++ch)
-                    buffer.copyFrom(ch, 0, pluginBuffer, ch, 0, numSamps2);
+                for (int ch = 0; ch < juce::jmin(bufferChannels, juce::jmax(2, mainOutputCh)); ++ch)
+                    buffer.copyFrom(ch, 0, pluginBuffer, juce::jmin(ch, mainOutputCh - 1), 0, numSamps2);
             }
 
             if (!processedSafely && canWriteDry)
@@ -4023,7 +4240,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     }
 
     // ===== POST-FX WIDTH =====
-    const bool widthAutoActive = shouldApplyAutomation(widthAutomation) && widthAutomation.getNumPoints() > 0;
+    const bool widthAutoActive = shouldApplyAutomation(widthAutomation) && widthAutomation.hasPlaybackData();
     if (bufferChannels >= 2)
     {
         if (widthAutoActive)
@@ -4049,24 +4266,23 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // Mirror effectively mono post-FX output before send taps so pre/post-fader sends,
-    // receives, and the track output all hear the same centered mono image.
-    normalizeMonoLikeBufferToDualMono(buffer, bufferChannels, buffer.getNumSamples());
+    // Preserve stereo channel identity at the send taps. A silent channel is valid
+    // stereo content; mono expansion belongs to the declared source/plugin layout.
 
     // ===== CAPTURE PRE-FADER BUFFER (for pre-fader sends) =====
     if (sendSnapshot && !sendSnapshot->empty())
     {
         int pfSamples = buffer.getNumSamples();
         preFaderBuffer.clear();
-        for (int ch = 0; ch < juce::jmin(2, bufferChannels); ++ch)
+        for (int ch = 0; ch < bufferChannels; ++ch)
             preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
     }
 
     // ===== AUTOMATION-AWARE FADER/TAIL APPLICATION =====
-    bool volAutoActive = shouldApplyAutomation(volumeAutomation) && volumeAutomation.getNumPoints() > 0;
-    bool panAutoActive = shouldApplyAutomation(panAutomation) && panAutomation.getNumPoints() > 0;
-    bool trimAutoActive = shouldApplyAutomation(trimVolumeAutomation) && trimVolumeAutomation.getNumPoints() > 0;
-    bool muteAutoActive = shouldApplyAutomation(muteAutomation) && muteAutomation.getNumPoints() > 0;
+    bool volAutoActive = shouldApplyAutomation(volumeAutomation) && volumeAutomation.hasPlaybackData();
+    bool panAutoActive = shouldApplyAutomation(panAutomation) && panAutomation.hasPlaybackData();
+    bool trimAutoActive = shouldApplyAutomation(trimVolumeAutomation) && trimVolumeAutomation.hasPlaybackData();
+    bool muteAutoActive = shouldApplyAutomation(muteAutomation) && muteAutomation.hasPlaybackData();
 
     if (volAutoActive || panAutoActive)
     {
@@ -4102,6 +4318,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 buffer.setSample(0, i, buffer.getSample(0, i) * lGain);
             if (bufferChannels >= 2)
                 buffer.setSample(1, i, buffer.getSample(1, i) * rGain);
+            for (int ch = 2; ch < bufferChannels; ++ch)
+                buffer.setSample(ch, i, buffer.getSample(ch, i) * (ch % 2 == 0 ? lGain : rGain));
         }
     }
     else
@@ -4113,6 +4331,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             buffer.applyGain(0, 0, numSamps, leftGain);
         if (bufferChannels >= 2)
             buffer.applyGain(1, 0, numSamps, rightGain);
+        for (int ch = 2; ch < bufferChannels; ++ch)
+            buffer.applyGain(ch, 0, numSamps, ch % 2 == 0 ? leftGain : rightGain);
     }
 
     if (trimAutoActive)
@@ -4121,14 +4341,13 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         trimVolumeAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, trimValues);
         for (int i = 0; i < numSamps; ++i)
         {
-            const float trimDb = juce::jlimit(-60.0f, 12.0f, trimValues[i]);
-            const float trimGain = juce::Decibels::decibelsToGain(trimDb);
-            if (bufferChannels >= 1)
-                buffer.setSample(0, i, buffer.getSample(0, i) * trimGain);
-            if (bufferChannels >= 2)
-                buffer.setSample(1, i, buffer.getSample(1, i) * trimGain);
+            const float trimGain = juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, trimValues[i]));
+            for (int channel = 0; channel < bufferChannels; ++channel)
+                buffer.setSample(channel, i, buffer.getSample(channel, i) * trimGain);
         }
     }
+    else if (const auto trimGain = trackTrimGain.load(std::memory_order_relaxed); trimGain != 1.0f)
+        buffer.applyGain(trimGain);
 
     if (muteAutoActive)
     {
@@ -4205,17 +4424,50 @@ void TrackProcessor::setInputChannels(int startChannel, int numChannels)
 // This gives us full control over the plugin lifecycle and avoids any graph
 // interference (bus layout changes, re-preparation, etc.).
 
-void TrackProcessor::drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events)
+void TrackProcessor::drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events, bool finishing)
 {
     const auto drain = [&] (const auto& plugins, bool input) {
         for (size_t index = 0; index < plugins.size(); ++index)
             if (auto it = pluginParameterCaptures.find(plugins[index].get()); it != pluginParameterCaptures.end())
-                it->second->drain(trackId, input, static_cast<int>(index), events);
+                if (it->second->drain(trackId, input, static_cast<int>(index), events, {}, finishing)) refreshPluginAutomationMetadata(plugins[index].get());
     };
     drain(inputFXPlugins, true);
     drain(trackFXPlugins, false);
     if (auto it = pluginParameterCaptures.find(instrumentPlugin.get()); it != pluginParameterCaptures.end())
-        it->second->drain(trackId, false, -1, events);
+        if (it->second->drain(trackId, false, -1, events, {}, finishing)) refreshPluginAutomationMetadata(instrumentPlugin.get());
+}
+
+void TrackProcessor::refreshPluginAutomationMetadata(juce::AudioProcessor* processor)
+{
+    const juce::ScopedLock guard(pluginAutomationRouteLock);
+    const auto snapshot = std::atomic_load(&pluginAutomationSnapshot);
+    if (!snapshot) return;
+    auto next = std::make_shared<PluginAutomationRouteSnapshot>();
+    next->reserve(snapshot->size());
+    for (const auto& route : *snapshot)
+    {
+        if (!route || route->targetProcessor != processor || route->builtInParamId.isNotEmpty()) { next->push_back(route); continue; }
+        auto updated = clonePluginAutomationRoute(*route);
+        if (const auto capture = pluginParameterCaptures.find(processor); capture != pluginParameterCaptures.end())
+            updated->editorState = capture->second->stateFor(updated->paramIndex);
+        const auto& parameters = processor->getParameters();
+        if (juce::isPositiveAndBelow(updated->paramIndex, parameters.size()))
+        {
+            const auto* parameter = parameters[updated->paramIndex];
+            updated->builtInDiscrete = parameter->isDiscrete();
+            updated->automation->setInterpolation(parameter->isDiscrete() ? AutomationInterpolation::Discrete : AutomationInterpolation::Linear);
+            const auto meaning = pluginParameterMeaning(processor, updated->paramIndex);
+            uint64_t generation = 0;
+            getOpenStudioCLAPParameterReferenceGeneration(processor, updated->paramIndex, generation);
+            if (meaning.isEmpty() || meaning != updated->parameterMeaning || generation != updated->referenceGeneration) updated->automation->setMode(AutomationMode::Off);
+            updated->referenceGeneration = generation;
+            updated->parameterMeaning = meaning;
+        }
+        else updated->automation->setMode(AutomationMode::Off);
+        updated->lastAppliedValue.store(std::numeric_limits<float>::quiet_NaN());
+        next->push_back(std::move(updated));
+    }
+    publishPluginAutomationRoutes(std::static_pointer_cast<const PluginAutomationRouteSnapshot>(next));
 }
 
 void TrackProcessor::discardPluginParameterEdits(juce::AudioProcessor* processor)
@@ -4239,10 +4491,15 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // duplicated mono signal, producing a "polyphonic" doubled sound).
     if (plugin->getTotalNumInputChannels() == 0 && plugin->getTotalNumOutputChannels() == 0)
     {
-        juce::AudioProcessor::BusesLayout stereoLayout;
-        stereoLayout.inputBuses.add(juce::AudioChannelSet::stereo());
-        stereoLayout.outputBuses.add(juce::AudioChannelSet::stereo());
-        plugin->setBusesLayout(stereoLayout);
+        // A MIDI-only processor can genuinely have no audio buses. Enabling
+        // existing buses must not invent buses or change their count.
+        auto stereoLayout = plugin->getBusesLayout();
+        if (!stereoLayout.inputBuses.isEmpty())
+            stereoLayout.inputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.outputBuses.isEmpty())
+            stereoLayout.outputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.inputBuses.isEmpty() || !stereoLayout.outputBuses.isEmpty())
+            plugin->setBusesLayout(stereoLayout);
     }
 
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
@@ -4263,7 +4520,7 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
                              " outCh=" + juce::String(plugin->getTotalNumOutputChannels()));
 
     inputFXPlugins.push_back(std::shared_ptr<juce::AudioProcessor>(std::move(plugin)));
-    pluginParameterCaptures[inputFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(inputFXPlugins.back());
+    pluginParameterCaptures[inputFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(inputFXPlugins.back(), pluginAutomationClock);
     publishRealtimeStateSnapshots();
     return true;
 }
@@ -4279,10 +4536,15 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // (same rationale as addInputFX — preserve the plugin's default layout).
     if (plugin->getTotalNumInputChannels() == 0 && plugin->getTotalNumOutputChannels() == 0)
     {
-        juce::AudioProcessor::BusesLayout stereoLayout;
-        stereoLayout.inputBuses.add(juce::AudioChannelSet::stereo());
-        stereoLayout.outputBuses.add(juce::AudioChannelSet::stereo());
-        plugin->setBusesLayout(stereoLayout);
+        // A MIDI-only processor can genuinely have no audio buses. Enabling
+        // existing buses must not invent buses or change their count.
+        auto stereoLayout = plugin->getBusesLayout();
+        if (!stereoLayout.inputBuses.isEmpty())
+            stereoLayout.inputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.outputBuses.isEmpty())
+            stereoLayout.outputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (!stereoLayout.inputBuses.isEmpty() || !stereoLayout.outputBuses.isEmpty())
+            plugin->setBusesLayout(stereoLayout);
     }
 
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
@@ -4303,7 +4565,7 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
                              " outCh=" + juce::String(plugin->getTotalNumOutputChannels()));
 
     trackFXPlugins.push_back(std::shared_ptr<juce::AudioProcessor>(std::move(plugin)));
-    pluginParameterCaptures[trackFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(trackFXPlugins.back());
+    pluginParameterCaptures[trackFXPlugins.back().get()] = std::make_unique<PluginParameterCapture>(trackFXPlugins.back(), pluginAutomationClock);
     publishRealtimeStateSnapshots();
     return true;
 }
@@ -4382,6 +4644,11 @@ void TrackProcessor::removeTrackFX(int index)
         }
         trackFXForceFloatOverrides = std::move(updatedOverrides);
         trackFXBypassedState = std::move(updatedBypass);
+        std::map<int, juce::String> updatedSidechains;
+        for (const auto& [fxIndex, source] : sidechainSources)
+            if (fxIndex != index)
+                updatedSidechains[fxIndex > index ? fxIndex - 1 : fxIndex] = source;
+        sidechainSources = std::move(updatedSidechains);
         remapPluginAutomationRoutesForRemoval(false, index);
         publishRealtimeStateSnapshots();
         juce::Logger::writeToLog("TrackProcessor: Removed Track FX at index " + juce::String(index));
@@ -4649,6 +4916,16 @@ bool TrackProcessor::reorderTrackFX(int fromIndex, int toIndex)
     }
     trackFXForceFloatOverrides = std::move(updatedOverrides);
     trackFXBypassedState = std::move(updatedBypass);
+    std::map<int, juce::String> updatedSidechains;
+    for (const auto& [fxIndex, source] : sidechainSources)
+    {
+        int next = fxIndex;
+        if (fxIndex == fromIndex) next = toIndex;
+        else if (fromIndex < toIndex && fxIndex > fromIndex && fxIndex <= toIndex) --next;
+        else if (fromIndex > toIndex && fxIndex >= toIndex && fxIndex < fromIndex) ++next;
+        updatedSidechains[next] = source;
+    }
+    sidechainSources = std::move(updatedSidechains);
     remapPluginAutomationRoutesForReorder(false, fromIndex, toIndex);
     if (araFXIndex == fromIndex)
         araFXIndex = toIndex;
@@ -4675,7 +4952,10 @@ bool TrackProcessor::reorderTrackFX(int fromIndex, int toIndex)
 
 void TrackProcessor::setSidechainSource(int pluginIndex, const juce::String& sourceTrackId)
 {
-    sidechainSources[pluginIndex] = sourceTrackId;
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
+    if (pluginIndex < 0 || pluginIndex >= static_cast<int>(trackFXPlugins.size())) return;
+    if (sourceTrackId.isEmpty()) sidechainSources.erase(pluginIndex);
+    else sidechainSources[pluginIndex] = sourceTrackId;
     publishRealtimeStateSnapshots();
     juce::Logger::writeToLog("TrackProcessor: Set sidechain source for FX[" +
                              juce::String(pluginIndex) + "] = " + sourceTrackId);
@@ -4683,6 +4963,7 @@ void TrackProcessor::setSidechainSource(int pluginIndex, const juce::String& sou
 
 void TrackProcessor::clearSidechainSource(int pluginIndex)
 {
+    const juce::ScopedLock processorCallbackGuard(getCallbackLock());
     sidechainSources.erase(pluginIndex);
     publishRealtimeStateSnapshots();
     juce::Logger::writeToLog("TrackProcessor: Cleared sidechain source for FX[" +
@@ -4702,9 +4983,21 @@ juce::String TrackProcessor::getSidechainSource(int pluginIndex) const
     return {};
 }
 
-void TrackProcessor::setSidechainBuffer(const juce::AudioBuffer<float>* buffer)
+void TrackProcessor::setSidechainBuffers(const SidechainRoutes* buffers) noexcept
 {
-    sidechainInputBuffer = buffer;
+    sidechainInputs = buffers;
+}
+
+TrackProcessor::SidechainRoutes TrackProcessor::getSidechainRouteSnapshot() const
+{
+    const auto graph = std::atomic_load_explicit(&realtimeGraphSnapshot, std::memory_order_acquire);
+    SidechainRoutes routes;
+    if (graph == nullptr) return routes;
+    routes.reserve(graph->sidechainSources.size());
+    for (const auto& [index, source] : graph->sidechainSources)
+        if (index >= 0 && index < static_cast<int>(graph->trackFX.size()) && source.isNotEmpty())
+            routes.push_back({graph->trackFX[static_cast<size_t>(index)], source, nullptr});
+    return routes;
 }
 
 bool TrackProcessor::hasAnySidechainSources() const
@@ -4716,6 +5009,26 @@ bool TrackProcessor::hasAnySidechainSources() const
 
 //==============================================================================
 // Send Management (Phase 4 / Phase 11)
+
+bool TrackProcessor::replaceSends(const SendSnapshot& replacement)
+{
+    juce::StringArray destinations;
+    for (const auto& send : replacement)
+    {
+        if (send.destTrackId.isEmpty() || destinations.contains(send.destTrackId)
+            || !std::isfinite(send.level) || send.level < 0.0f || send.level > 1.0f
+            || !std::isfinite(send.pan) || send.pan < -1.0f || send.pan > 1.0f
+            || !std::isfinite(send.trimDB) || send.trimDB < -60.0f || send.trimDB > 12.0f
+            || send.sourceChannel < 0 || send.sourceChannel > 62 || send.sourceChannel % 2 != 0)
+            return false;
+        destinations.add(send.destTrackId);
+    }
+    // The control thread publishes the complete configuration once. A callback
+    // can observe the previous or replacement routes, never default new sends.
+    sends = replacement;
+    publishRealtimeStateSnapshots();
+    return true;
+}
 
 int TrackProcessor::addSend(const juce::String& destTrackId)
 {
@@ -4729,6 +5042,19 @@ int TrackProcessor::addSend(const juce::String& destTrackId)
     publishRealtimeStateSnapshots();
     juce::Logger::writeToLog("TrackProcessor: Added send to " + destTrackId + " (index " + juce::String(sends.size() - 1) + ")");
     return static_cast<int>(sends.size()) - 1;
+}
+
+bool TrackProcessor::setSendTrim(const juce::String& destination, float db)
+{
+    if (!std::isfinite(db)) return false;
+    for (auto& send : sends) if (send.destTrackId == destination && send.automation) {
+        send.trimDB = juce::jlimit(-60.0f, 12.0f, db);
+        send.automation->trimDB.store(send.trimDB);
+        if (send.automation->trim.hasWrittenValue()) send.automation->trim.setWrittenValue(send.trimDB);
+        send.automation->trim.setDefaultValue(send.trimDB);
+        return true;
+    }
+    return false;
 }
 
 void TrackProcessor::removeSend(int sendIndex)
@@ -4746,6 +5072,7 @@ void TrackProcessor::setSendLevel(int sendIndex, float level)
     if (sendIndex >= 0 && sendIndex < (int)sends.size())
     {
         sends[sendIndex].level = juce::jlimit(0.0f, 1.0f, level);
+        if (const auto& state=sends[sendIndex].automation; state && state->level.hasWrittenValue()) state->level.setWrittenValue(sends[sendIndex].level);
         publishRealtimeStateSnapshots();
     }
 }
@@ -4755,6 +5082,7 @@ void TrackProcessor::setSendPan(int sendIndex, float pan)
     if (sendIndex >= 0 && sendIndex < (int)sends.size())
     {
         sends[sendIndex].pan = juce::jlimit(-1.0f, 1.0f, pan);
+        if (const auto& state=sends[sendIndex].automation; state && state->pan.hasWrittenValue()) state->pan.setWrittenValue((sends[sendIndex].pan+1.0f)*0.5f);
         publishRealtimeStateSnapshots();
     }
 }
@@ -4764,6 +5092,7 @@ void TrackProcessor::setSendEnabled(int sendIndex, bool enabled)
     if (sendIndex >= 0 && sendIndex < (int)sends.size())
     {
         sends[sendIndex].enabled = enabled;
+        if (const auto& state=sends[sendIndex].automation; state && state->mute.hasWrittenValue()) state->mute.setWrittenValue(enabled ? 0.0f : 1.0f);
         publishRealtimeStateSnapshots();
     }
 }
@@ -4775,6 +5104,41 @@ void TrackProcessor::setSendPreFader(int sendIndex, bool preFader)
         sends[sendIndex].preFader = preFader;
         publishRealtimeStateSnapshots();
     }
+}
+
+bool TrackProcessor::setSendSourceChannel(int sendIndex, int sourceChannel)
+{
+    if (sendIndex < 0 || sendIndex >= static_cast<int>(sends.size())
+        || sourceChannel < 0 || sourceChannel > maxProcessingChannels - 2 || sourceChannel % 2 != 0)
+        return false;
+    sends[static_cast<size_t>(sendIndex)].sourceChannel = sourceChannel;
+    publishRealtimeStateSnapshots();
+    return true;
+}
+
+int TrackProcessor::getSendSourceChannel(int sendIndex) const
+{
+    const auto graph = std::atomic_load_explicit(&realtimeGraphSnapshot, std::memory_order_acquire);
+    return graph != nullptr && sendIndex >= 0 && sendIndex < static_cast<int>(graph->sends.size())
+        ? graph->sends[static_cast<size_t>(sendIndex)].sourceChannel : 0;
+}
+
+void TrackProcessor::mixSendPair(const juce::AudioBuffer<float>& source,
+                                juce::AudioBuffer<float>& destination,
+                                int sourceChannel, int samples, float leftGain,
+                                float rightGain, float monoGain) noexcept
+{
+    samples = juce::jmin(samples, source.getNumSamples(), destination.getNumSamples());
+    if (samples <= 0 || sourceChannel < 0 || sourceChannel >= source.getNumChannels()
+        || destination.getNumChannels() < 1)
+        return;
+    if (sourceChannel + 1 < source.getNumChannels() && destination.getNumChannels() >= 2)
+    {
+        destination.addFrom(0, 0, source, sourceChannel, 0, samples, leftGain);
+        destination.addFrom(1, 0, source, sourceChannel + 1, 0, samples, rightGain);
+    }
+    else if (sourceChannel == 0)
+        destination.addFrom(0, 0, source, 0, 0, samples, monoGain);
 }
 
 juce::String TrackProcessor::getSendDestination(int sendIndex) const
@@ -4799,6 +5163,19 @@ float TrackProcessor::getSendLevel(int sendIndex) const
         && sendIndex < static_cast<int>(graph->sends.size()))
     {
         return graph->sends[static_cast<size_t>(sendIndex)].level;
+    }
+    return 0.0f;
+}
+
+float TrackProcessor::getSendTrim(int sendIndex) const
+{
+    const auto graph = std::atomic_load_explicit(
+        &realtimeGraphSnapshot, std::memory_order_acquire);
+    if (graph != nullptr && sendIndex >= 0
+        && sendIndex < static_cast<int>(graph->sends.size()))
+    {
+        const auto& send = graph->sends[static_cast<size_t>(sendIndex)];
+        return send.automation ? send.automation->trimDB.load(std::memory_order_relaxed) : send.trimDB;
     }
     return 0.0f;
 }
@@ -4855,11 +5232,7 @@ void TrackProcessor::fillSendBuffer(int sendIndex, const juce::AudioBuffer<float
         return;
     }
     const auto& send = graph->sends[static_cast<size_t>(sendIndex)];
-    if (!send.enabled || send.level <= 0.0f) return;
-
     const auto& srcBuf = send.preFader ? preFaderBuf : postFaderBuf;
-    const int srcChannels = srcBuf.getNumChannels();
-    const int destChannels = destBuffer.getNumChannels();
 
     // Apply send level, pan, and optional phase invert, mix into dest
     const float level = send.level;
@@ -4869,19 +5242,12 @@ void TrackProcessor::fillSendBuffer(int sendIndex, const juce::AudioBuffer<float
     float leftGain = std::cos(panAngle) * level * phaseMultiplier;
     float rightGain = std::sin(panAngle) * level * phaseMultiplier;
 
-    if (destChannels >= 2 && srcChannels >= 2)
-    {
-        for (int s = 0; s < numSamples; ++s)
-        {
-            destBuffer.getWritePointer(0)[s] += srcBuf.getReadPointer(0)[s] * leftGain;
-            destBuffer.getWritePointer(1)[s] += srcBuf.getReadPointer(1)[s] * rightGain;
-        }
-    }
-    else if (destChannels >= 1 && srcChannels >= 1)
-    {
-        for (int s = 0; s < numSamples; ++s)
-            destBuffer.getWritePointer(0)[s] += srcBuf.getReadPointer(0)[s] * level;
-    }
+    RealtimeSendInfo info;
+    info.level = send.level; info.pan = send.pan; info.enabled = send.enabled;
+    info.phaseInvert = send.phaseInvert; info.sourceChannel = send.sourceChannel;
+    info.leftGain = leftGain; info.rightGain = rightGain; info.automation = send.automation;
+    mixAutomatedSend(info, srcBuf, destBuffer, numSamples, blockStartTimeSeconds,
+        getSampleRate() > 0 ? getSampleRate() : 44100.0);
 }
 
 //==============================================================================
@@ -4905,7 +5271,7 @@ void TrackProcessor::setInstrument(std::unique_ptr<juce::AudioPluginInstance> pl
         pluginParameterCaptures.erase(instrumentPlugin.get());
         remapPluginAutomationRoutesForRemoval(false, -1);
         instrumentPlugin = std::shared_ptr<juce::AudioPluginInstance>(std::move(plugin));
-        pluginParameterCaptures[instrumentPlugin.get()] = std::make_unique<PluginParameterCapture>(instrumentPlugin);
+        pluginParameterCaptures[instrumentPlugin.get()] = std::make_unique<PluginParameterCapture>(instrumentPlugin, pluginAutomationClock);
         publishRealtimeStateSnapshots();
         juce::Logger::writeToLog("TrackProcessor: Instrument plugin loaded");
     }
@@ -5387,6 +5753,19 @@ void TrackProcessor::renderFallbackInstrument(juce::AudioBuffer<float>& buffer,
     if (numSamples <= 0 || sampleRate <= 0.0 || buffer.getNumChannels() <= 0)
         return;
 
+    for (size_t index = 0; index < fallbackAutomationControls.size(); ++index)
+    {
+        const auto& lane = fallbackAutomation[index];
+        if (lane.hasPlaybackData() && shouldApplyAutomation(lane))
+        {
+            const auto& control = fallbackAutomationControls[index];
+            auto value = control.minimum + juce::jlimit(0.0f, 1.0f, lane.eval(blockStartTimeSeconds))
+                * (control.maximum - control.minimum);
+            if (control.discrete) value = std::round(value);
+            setFallbackInstrumentParam(control.id, value);
+        }
+    }
+
     if (fallbackInstrumentResetRequested.exchange(false, std::memory_order_acq_rel))
         clearFallbackInstrumentState();
 
@@ -5655,9 +6034,46 @@ bool TrackProcessor::enqueueMidiMessage(const juce::MidiMessage& message, int sa
     return true;
 }
 
+TrackProcessor::ScheduledMIDISnapshot::ScheduledMIDISnapshot(std::vector<ScheduledMIDIClip> source)
+    : clips(std::move(source))
+{
+    size_t total=0;
+    for(auto& clip:clips)
+    {
+        // Projection normally supplies sorted data; direct/imported callers get
+        // the same stable ordering contract before the audio thread sees it.
+        clip.events.erase(std::remove_if(clip.events.begin(),clip.events.end(),[](const auto& event){return !std::isfinite(event.timestampSeconds);}),clip.events.end());
+        if (std::isfinite(clip.duration) && clip.duration > 0)
+            for (auto& event : clip.events)
+                if (event.message.isNoteOff() && event.timestampSeconds > clip.duration)
+                    event.timestampSeconds = clip.duration;
+        std::stable_sort(clip.events.begin(),clip.events.end(),[](const auto& a,const auto& b){return a.timestampSeconds<b.timestampSeconds;});
+        total+=clip.events.size();
+    }
+    chronological.reserve(total);
+    for(size_t clipIndex=0;clipIndex<clips.size();++clipIndex)
+    {
+        const auto& clip=clips[clipIndex];
+        if(!std::isfinite(clip.startTime)||!std::isfinite(clip.duration)||clip.duration<=0)continue;
+        for(size_t eventIndex=0;eventIndex<clip.events.size();++eventIndex)
+        {
+            const auto& event = clip.events[eventIndex];
+            const double relative = event.timestampSeconds;
+            const double time = clip.startTime + relative;
+            // A note-off at the right edge closes a contained note; all other
+            // events use the half-open clip interval, consistently for play/seek.
+            const bool inside = relative >= 0 && (relative < clip.duration
+                || (relative == clip.duration && event.message.isNoteOff()));
+            if (inside && std::isfinite(time)) chronological.push_back({time,clipIndex,eventIndex});
+        }
+    }
+    std::stable_sort(chronological.begin(),chronological.end(),[](const auto& a,const auto& b){return a.time<b.time;});
+    prepareMIDINoteLifetimes(chronological, [&](const auto& entry) -> const juce::MidiMessage& { return clips[entry.clip].events[entry.event].message; });
+}
+
 void TrackProcessor::setScheduledMIDIClips(std::vector<ScheduledMIDIClip> clips)
 {
-    auto sharedClips = std::make_shared<const std::vector<ScheduledMIDIClip>>(std::move(clips));
+    auto sharedClips = std::make_shared<const ScheduledMIDISnapshot>(std::move(clips));
     publishScheduledMIDIClips(
         std::move(sharedClips));
     requestMIDIChase();
@@ -5674,7 +6090,8 @@ void TrackProcessor::markActiveMIDINoteState(const juce::MidiMessage& message)
     if (message.isNoteOn())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        activeMIDINotes[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = true;
+        auto& count = activeMIDINotes[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)];
+        if (count < std::numeric_limits<juce::uint32>::max()) ++count;
         midiNoteCurrentlyActive[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)].store(true, std::memory_order_relaxed);
         midiNoteLastOnMs[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)].store(nowMs, std::memory_order_relaxed);
         midiNoteLastVelocity[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)]
@@ -5683,8 +6100,9 @@ void TrackProcessor::markActiveMIDINoteState(const juce::MidiMessage& message)
     else if (message.isNoteOff())
     {
         const int note = juce::jlimit(0, 127, message.getNoteNumber());
-        activeMIDINotes[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)] = false;
-        midiNoteCurrentlyActive[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)].store(false, std::memory_order_relaxed);
+        auto& count = activeMIDINotes[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)];
+        if (count > 0) --count;
+        midiNoteCurrentlyActive[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)].store(count > 0, std::memory_order_relaxed);
         midiNoteLastOffMs[static_cast<size_t>(channelIndex)][static_cast<size_t>(note)].store(nowMs, std::memory_order_relaxed);
     }
     else if (message.isAllNotesOff() || message.isAllSoundOff())
@@ -5734,7 +6152,7 @@ std::vector<TrackProcessor::MIDINoteActivity> TrackProcessor::getRecentMIDINoteA
 }
 
 void TrackProcessor::appendScheduledMIDIToBuffer(juce::MidiBuffer& destination,
-                                                 const std::vector<ScheduledMIDIClip>* const clips,
+                                                 const ScheduledMIDISnapshot* const clips,
                                                  double blockTimeSeconds,
                                                  int numSamples, double sampleRate) const
 {
@@ -5743,112 +6161,118 @@ void TrackProcessor::appendScheduledMIDIToBuffer(juce::MidiBuffer& destination,
 
     const double blockEndTimeSeconds = blockTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
 
-    for (const auto& clip : *clips)
+    const auto first=std::lower_bound(clips->chronological.begin(),clips->chronological.end(),blockTimeSeconds,[](const auto& event,double time){return event.time<time;});
+    for(auto current=first;current!=clips->chronological.end()&&current->time<blockEndTimeSeconds;++current)
     {
-        if (clip.events.empty())
-            continue;
-
-        const double clipEndTime = clip.startTime + clip.duration;
-        if (clipEndTime <= blockTimeSeconds || clip.startTime >= blockEndTimeSeconds)
-            continue;
-
-        for (const auto& event : clip.events)
-        {
-            const double absoluteEventTime = clip.startTime + event.timestampSeconds;
-            if (absoluteEventTime < blockTimeSeconds || absoluteEventTime >= blockEndTimeSeconds)
-                continue;
-
-            int sampleOffset = static_cast<int>(std::floor((absoluteEventTime - blockTimeSeconds) * sampleRate));
-            sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1), sampleOffset);
-            destination.addEvent(event.message, sampleOffset);
-        }
+        const auto& clip=clips->clips[current->clip];
+        // The immutable schedule already clips event lifetimes. In particular,
+        // a Note Off at the clip end must play even at a block boundary.
+        const auto& event=clip.events[current->event];
+        int sampleOffset=static_cast<int>(std::floor((current->time-blockTimeSeconds)*sampleRate));
+        sampleOffset=juce::jlimit(0,juce::jmax(0,numSamples-1),sampleOffset);
+        destination.addEvent(event.message,sampleOffset);
     }
 }
 
 void TrackProcessor::appendScheduledMIDIChaseToBuffer(juce::MidiBuffer& destination,
-                                                      const std::vector<ScheduledMIDIClip>* const clips,
+                                                      const ScheduledMIDISnapshot* const clips,
                                                       double blockTimeSeconds,
                                                       double sampleRate) const
 {
     if (clips == nullptr || clips->empty() || sampleRate <= 0.0)
         return;
 
-    std::array<std::array<const ScheduledMIDIEvent*, 128>, 16> activeNoteStarts {};
+    MIDIParameterChase parameterChase;
+    std::array<std::array<bool,128>,16> soundingKeys {};
+    std::array<const ScheduledMIDISnapshot::Entry*,16> sostenutoCapture {};
     std::array<std::array<const ScheduledMIDIEvent*, 128>, 16> ccChase {};
+    std::array<std::array<const ScheduledMIDIEvent*, 128>, 16> polyPressureChase {};
     std::array<const ScheduledMIDIEvent*, 16> pitchBendChase {};
     std::array<const ScheduledMIDIEvent*, 16> pressureChase {};
     std::array<const ScheduledMIDIEvent*, 16> programChase {};
+    std::array<std::array<const ScheduledMIDIEvent*, 2>, 16> programBankChase {};
+    std::array<bool,16> sostenutoDown {};
 
-    auto sameNote = [] (const juce::MidiMessage& a, const juce::MidiMessage& b)
+    for(const auto& ordered:clips->chronological)
     {
-        return a.getChannel() == b.getChannel() && a.getNoteNumber() == b.getNoteNumber();
-    };
-
-    for (const auto& clip : *clips)
-    {
-        if (clip.events.empty())
-            continue;
-
-        const double clipEndTime = clip.startTime + clip.duration;
-        if (clip.startTime > blockTimeSeconds || clipEndTime <= blockTimeSeconds)
-            continue;
-
-        for (size_t eventIndex = 0; eventIndex < clip.events.size(); ++eventIndex)
+        if(ordered.time>=blockTimeSeconds)break;
+        const auto& clip=clips->clips[ordered.clip];
+        if (clip.startTime > blockTimeSeconds) continue;
+        const size_t eventIndex=ordered.event;
+        const auto& event=clip.events[eventIndex];
+        const auto& message=event.message;
+        // Channel state persists beyond the clip that emitted it. Notes and
+        // per-note pressure retain the existing containing-clip lifetime: an
+        // ended clip must never resurrect a voice, including a pedal-held one.
+        const bool clipContainsSeek = clip.startTime + clip.duration > blockTimeSeconds;
+        if (!clipContainsSeek && (message.isNoteOnOrOff() || message.isAftertouch())) continue;
+        const double absoluteEventTime=ordered.time;
+        const int channelIndex = juce::jlimit(0, 15, message.getChannel() - 1);
+        if (message.isNoteOn())
+            polyPressureChase[static_cast<size_t>(channelIndex)][static_cast<size_t>(message.getNoteNumber())]=nullptr;
+        else if (message.isController())
         {
-            const auto& event = clip.events[eventIndex];
-            const auto& message = event.message;
-            const double absoluteEventTime = clip.startTime + event.timestampSeconds;
-            if (absoluteEventTime >= blockTimeSeconds)
-                break;
-
-            const int channelIndex = juce::jlimit(0, 15, message.getChannel() - 1);
-            if (message.isNoteOn())
+            parameterChase.add(message, absoluteEventTime);
+            const int number = message.getControllerNumber();
+            if (MIDIParameterChase::isParameterController(number)) continue;
+            if (number == 121)
             {
-                bool noteEndsAfterBlock = false;
-                for (size_t endIndex = eventIndex + 1; endIndex < clip.events.size(); ++endIndex)
-                {
-                    const auto& endEvent = clip.events[endIndex];
-                    const auto& endMessage = endEvent.message;
-                    if (!endMessage.isNoteOff() || !sameNote(message, endMessage))
-                        continue;
-
-                    const double absoluteEndTime = clip.startTime + endEvent.timestampSeconds;
-                    noteEndsAfterBlock = absoluteEndTime > blockTimeSeconds;
-                    break;
-                }
-
-                if (noteEndsAfterBlock)
-                    activeNoteStarts[static_cast<size_t>(channelIndex)]
-                                    [static_cast<size_t>(message.getNoteNumber())] = &event;
+                // RP-015 preserves banks/programs, volume/pan, sound/effect
+                // controls and parameter values. The reset itself supplies
+                // defaults; stale pre-reset expression must not be replayed.
+                for (size_t controller = 0; controller < 128; ++controller)
+                    if (!(controller == 0 || controller == 32 || controller == 7 || controller == 39
+                        || controller == 10 || controller == 42 || (controller >= 70 && controller <= 79)
+                        || (controller >= 91 && controller <= 95) || controller >= 120))
+                        ccChase[static_cast<size_t>(channelIndex)][controller] = nullptr;
+                pitchBendChase[static_cast<size_t>(channelIndex)] = nullptr;
+                pressureChase[static_cast<size_t>(channelIndex)] = nullptr;
+                polyPressureChase[static_cast<size_t>(channelIndex)].fill(nullptr);
+                sostenutoDown[static_cast<size_t>(channelIndex)]=false; sostenutoCapture[static_cast<size_t>(channelIndex)]=nullptr;
             }
-            else if (message.isNoteOff())
+            else if (number == 120)
+                polyPressureChase[static_cast<size_t>(channelIndex)].fill(nullptr);
+            else if(number==66)
             {
-                activeNoteStarts[static_cast<size_t>(channelIndex)]
-                                [static_cast<size_t>(message.getNoteNumber())] = nullptr;
+                const auto channel=static_cast<size_t>(channelIndex);const bool down=message.getControllerValue()>=64;
+                if(down&&!sostenutoDown[channel])sostenutoCapture[channel]=&ordered;
+                sostenutoDown[channel]=down;
             }
-            else if (message.isController())
-            {
-                ccChase[static_cast<size_t>(channelIndex)]
-                       [static_cast<size_t>(juce::jlimit(0, 127, message.getControllerNumber()))] = &event;
-            }
-            else if (message.isPitchWheel())
-            {
-                pitchBendChase[static_cast<size_t>(channelIndex)] = &event;
-            }
-            else if (message.isChannelPressure() || message.isAftertouch())
-            {
-                pressureChase[static_cast<size_t>(channelIndex)] = &event;
-            }
-            else if (message.isProgramChange())
-            {
-                programChase[static_cast<size_t>(channelIndex)] = &event;
-            }
+            ccChase[static_cast<size_t>(channelIndex)]
+                   [static_cast<size_t>(juce::jlimit(0, 127, number))] = &event;
+        }
+        else if (message.isPitchWheel())
+        {
+            pitchBendChase[static_cast<size_t>(channelIndex)] = &event;
+        }
+        else if (message.isChannelPressure())
+        {
+            pressureChase[static_cast<size_t>(channelIndex)] = &event;
+        }
+        else if (message.isAftertouch())
+        {
+            polyPressureChase[static_cast<size_t>(channelIndex)][static_cast<size_t>(message.getNoteNumber())] = &event;
+        }
+        else if (message.isProgramChange())
+        {
+            programChase[static_cast<size_t>(channelIndex)] = &event;
+            programBankChase[static_cast<size_t>(channelIndex)] = {
+                ccChase[static_cast<size_t>(channelIndex)][0], ccChase[static_cast<size_t>(channelIndex)][32] };
         }
     }
 
-    for (const auto* event : programChase)
-        if (event != nullptr)
+    for (size_t channel = 0; channel < 16; ++channel)
+    {
+        if (const auto* reset = ccChase[channel][121]) destination.addEvent(reset->message, 0);
+        if(sostenutoDown[channel])destination.addEvent(juce::MidiMessage::controllerEvent(static_cast<int>(channel)+1,66,0),0);
+        if (const auto* event = programChase[channel])
+        {
+            for (const auto* bank : programBankChase[channel]) if (bank != nullptr) destination.addEvent(bank->message, 0);
             destination.addEvent(event->message, 0);
+        }
+    }
+
+    parameterChase.append(destination);
 
     for (const auto* event : pitchBendChase)
         if (event != nullptr)
@@ -5860,13 +6284,67 @@ void TrackProcessor::appendScheduledMIDIChaseToBuffer(juce::MidiBuffer& destinat
 
     for (const auto& channelCCs : ccChase)
         for (const auto* event : channelCCs)
-            if (event != nullptr)
+            if (event != nullptr && event->message.getControllerNumber() != 121
+                && !(event->message.getControllerNumber()==66&&event->message.getControllerValue()>=64))
                 destination.addEvent(event->message, 0);
 
-    for (const auto& channelNotes : activeNoteStarts)
-        for (const auto* event : channelNotes)
-            if (event != nullptr)
-                destination.addEvent(event->message, 0);
+    const auto eligible = [&](const ScheduledMIDISnapshot::Entry& entry)
+    {
+        const auto& clip=clips->clips[entry.clip];const auto& message=clip.events[entry.event].message;
+        return message.isNoteOn()&&entry.time<blockTimeSeconds&&clip.startTime+clip.duration>blockTimeSeconds
+            &&std::isfinite(entry.noteOffTime)&&entry.soundingEndTime>=blockTimeSeconds;
+    };
+    const auto captured = [&](const ScheduledMIDISnapshot::Entry& entry,size_t channel)
+    {
+        const auto* capture=sostenutoCapture[channel];
+        return sostenutoDown[channel]&&capture!=nullptr&& &entry<capture
+            &&entry.noteOffEvent>=static_cast<size_t>(capture-clips->chronological.data());
+    };
+    const auto release = [&](const ScheduledMIDISnapshot::Entry& entry)
+    {
+        if(entry.noteOffTime>=blockTimeSeconds)return;
+        const auto& original=clips->clips[entry.clip].events[entry.event].message;
+        if(entry.noteOffEvent<clips->chronological.size())
+        {
+            const auto& off=clips->chronological[entry.noteOffEvent];const auto& message=clips->clips[off.clip].events[off.event].message;
+            if(message.isNoteOff()){destination.addEvent(message,0);return;}
+        }
+        destination.addEvent(juce::MidiMessage::noteOff(original.getChannel(),original.getNoteNumber()),0);
+    };
+    // Restore released sustain-only duplicates before the sostenuto capture.
+    // Then capture its held set and release its already-released keys before
+    // introducing later duplicates, preserving FIFO Note Off ownership.
+    for(int phase=0;phase<3;++phase)
+    {
+        for(const auto& entry:clips->chronological)
+        {
+            if(entry.time>=blockTimeSeconds)break;
+            if(!eligible(entry))continue;
+            const auto& message=clips->clips[entry.clip].events[entry.event].message;const auto channel=static_cast<size_t>(message.getChannel()-1);
+            const bool heldBySostenuto=captured(entry,channel);
+            const bool beforeCapture=sostenutoDown[channel]&&sostenutoCapture[channel]!=nullptr&& &entry<sostenutoCapture[channel];
+            const int group=heldBySostenuto?1:beforeCapture?0:2;
+            if(group!=phase)continue;
+            destination.addEvent(message,0);soundingKeys[channel][static_cast<size_t>(message.getNoteNumber())]=true;
+            if(phase!=1)release(entry);
+        }
+        if(phase==1)
+        {
+            for(size_t channel=0;channel<16;++channel)
+                if(sostenutoDown[channel]&&ccChase[channel][66]!=nullptr)destination.addEvent(ccChase[channel][66]->message,0);
+            for(const auto& entry:clips->chronological)
+            {
+                if(entry.time>=blockTimeSeconds)break;
+                if(eligible(entry)&&captured(entry,static_cast<size_t>(clips->clips[entry.clip].events[entry.event].message.getChannel()-1)))release(entry);
+            }
+        }
+    }
+    // Poly pressure belongs to a sounding key, unlike channel pressure. Emit
+    // it after chased Note On so instruments can bind it to the restored voice.
+    for (size_t channel = 0; channel < 16; ++channel)
+        for (size_t note = 0; note < 128; ++note)
+            if (soundingKeys[channel][note] && polyPressureChase[channel][note] != nullptr)
+                destination.addEvent(polyPressureChase[channel][note]->message, 0);
 }
 
 void TrackProcessor::appendQueuedMIDIToBuffer(juce::MidiBuffer& destination, int numSamples)
@@ -5893,11 +6371,11 @@ void TrackProcessor::applyMIDIAutomationToBuffer(juce::MidiBuffer& destination, 
         return;
 
     const bool velocityActive = shouldApplyAutomation(midiVelocityScaleAutomation)
-                             && midiVelocityScaleAutomation.getNumPoints() > 0;
+                             && midiVelocityScaleAutomation.hasPlaybackData();
     const bool pitchBendActive = shouldApplyAutomation(midiPitchBendAutomation)
-                              && midiPitchBendAutomation.getNumPoints() > 0;
+                              && midiPitchBendAutomation.hasPlaybackData();
     const bool channelPressureActive = shouldApplyAutomation(midiChannelPressureAutomation)
-                                    && midiChannelPressureAutomation.getNumPoints() > 0;
+                                    && midiChannelPressureAutomation.hasPlaybackData();
     const bool hasCCRoutedAutomation =
         ccRoutes != nullptr
         && ! ccRoutes->empty();
@@ -5963,7 +6441,7 @@ void TrackProcessor::applyMIDIAutomationToBuffer(juce::MidiBuffer& destination, 
         {
             if (!route || !route->automation || route->controller < 0 || route->controller > 127)
                 continue;
-            if (!shouldApplyAutomation(*route->automation) || route->automation->getNumPoints() <= 0)
+            if (!shouldApplyAutomation(*route->automation) || !route->automation->hasPlaybackData())
                 continue;
 
             const int controller = route->controller;
@@ -5997,7 +6475,7 @@ bool TrackProcessor::hasScheduledMIDIClips() const
 std::vector<TrackProcessor::ScheduledMIDIClip> TrackProcessor::getScheduledMIDIClipSnapshot() const
 {
     auto clips = std::atomic_load_explicit(&scheduledMIDIClips, std::memory_order_acquire);
-    return clips ? *clips : std::vector<ScheduledMIDIClip>();
+    return clips ? clips->clips : std::vector<ScheduledMIDIClip>();
 }
 
 int TrackProcessor::getScheduledMIDIClipCount() const
@@ -6022,30 +6500,16 @@ bool TrackProcessor::hasScheduledMIDIInBlock(
     double blockTimeSeconds,
     int numSamples,
     double sampleRate,
-    const std::vector<ScheduledMIDIClip>* const clips) const
+    const ScheduledMIDISnapshot* const clips) const
 {
     if (clips == nullptr || clips->empty() || sampleRate <= 0.0)
         return false;
 
     const double blockEndTimeSeconds = blockTimeSeconds + (static_cast<double>(numSamples) / sampleRate);
-    for (const auto& clip : *clips)
-    {
-        if (clip.events.empty())
-            continue;
-
-        const double clipEndTime = clip.startTime + clip.duration;
-        if (clipEndTime <= blockTimeSeconds || clip.startTime >= blockEndTimeSeconds)
-            continue;
-
-        for (const auto& event : clip.events)
-        {
-            const double absoluteEventTime = clip.startTime + event.timestampSeconds;
-            if (absoluteEventTime >= blockTimeSeconds && absoluteEventTime < blockEndTimeSeconds)
-                return true;
-        }
-    }
-
-    return false;
+    const auto first=std::lower_bound(clips->chronological.begin(),clips->chronological.end(),blockTimeSeconds,[](const auto& event,double time){return event.time<time;});
+    // The prepared timeline already enforces clip bounds and includes closing
+    // Note Off at the right edge. That edge must keep this block scheduled.
+    return first != clips->chronological.end() && first->time < blockEndTimeSeconds;
 }
 
 void TrackProcessor::buildMidiBuffer(juce::MidiBuffer& destination, double blockTimeSeconds,
@@ -6291,6 +6755,8 @@ std::vector<TrackProcessor::RealtimeSendInfo> TrackProcessor::getRealtimeSendSna
         info.enabled = send.enabled;
         info.preFader = send.preFader;
         info.phaseInvert = send.phaseInvert;
+        info.sourceChannel = send.sourceChannel;
+        info.automation = send.automation;
         snapshot.push_back(std::move(info));
     }
     return snapshot;
@@ -6466,6 +6932,8 @@ void TrackProcessor::resetPDCDelayState()
 
 void TrackProcessor::resetOfflineRenderState()
 {
+    // Every fresh offline pass must reconstruct notes/controllers at its start.
+    queueAllNotesOff(true);
     resetPDCDelayState();
     channelStripEQ.reset();
     dcFilterStateL = 0.0f;
@@ -6599,6 +7067,10 @@ void TrackProcessor::setOutputChannels(int startChannel, int numChannels)
 
 //==============================================================================
 // Per-track MIDI Output
+
+void TrackProcessor::setMIDIOutputMergeKeys(bool merge) {if(midiOutputDispatcher)midiOutputDispatcher->setMergeKeys(merge);}
+bool TrackProcessor::getMIDIOutputMergeKeys() const noexcept {return midiOutputDispatcher&&midiOutputDispatcher->getMergeKeys();}
+bool TrackProcessor::isMIDIOutputPolicyPending() const noexcept {return midiOutputDispatcher&&midiOutputDispatcher->isConnected()&&midiOutputDispatcher->mergePending();}
 
 void TrackProcessor::setMIDIOutputDevice(const juce::String& deviceName)
 {
@@ -6847,3 +7319,5 @@ void TrackProcessor::updateARAAttemptStatus(int fxIndex, bool completed, bool wa
     const juce::ScopedLock sl(araStatusLock);
     araLastAttemptError = errorMessage;
 }
+
+#include "TrackProcessorSendAutomation.inc"

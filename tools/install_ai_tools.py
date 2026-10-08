@@ -14,6 +14,7 @@ an external Python interpreter.
 from __future__ import annotations
 
 import argparse
+import atexit
 from collections import deque
 import ctypes
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -46,6 +48,7 @@ from ai_runtime_probe import (
     get_windows_triton_package_spec,
     get_music_generation_required_paths,
     get_music_runtime_profiles,
+    is_nonempty_model_file,
     probe_runtime_capabilities,
     resolve_music_gen_checkpoint_root,
 )
@@ -96,6 +99,21 @@ SESSION_ID = ""
 RUNTIME_CANDIDATE = ""
 FALLBACK_ATTEMPTED = False
 START_TIME_MONOTONIC = time.monotonic()
+PENDING_RUNTIME_CANDIDATE: Path | None = None
+
+
+def cleanup_pending_runtime_candidate() -> None:
+    global PENDING_RUNTIME_CANDIDATE
+    candidate = PENDING_RUNTIME_CANDIDATE
+    PENDING_RUNTIME_CANDIDATE = None
+    if candidate is not None and candidate.exists():
+        try:
+            shutil.rmtree(candidate, onerror=_handle_remove_readonly)
+        except OSError as exc:
+            write_log(f"Could not remove unused runtime candidate {candidate}: {exc}")
+
+
+atexit.register(cleanup_pending_runtime_candidate)
 
 
 class InstallerStepError(Exception):
@@ -232,38 +250,48 @@ def _probe_nvidia_gpu() -> dict[str, Any] | None:
     }
 
 
+def _rocm_gpu_pool_memory_mb(output: str) -> int:
+    gpu = global_pool = False
+    pool_kb = largest_kb = 0
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith("Agent "):
+            gpu = global_pool = False
+            pool_kb = 0
+        if line.startswith("Device Type:"):
+            gpu = line.split(":", 1)[1].strip() == "GPU"
+        if line.startswith("Segment:"):
+            global_pool = "GLOBAL;" in line
+            pool_kb = 0
+        if line.startswith("Size:") and line.endswith(" KB"):
+            match = re.match(r"Size:\s*(\d+)", line)
+            pool_kb = int(match[1]) if match else 0
+        if line.startswith("Allocatable:") and line.endswith("TRUE") and gpu and global_pool:
+            largest_kb = max(largest_kb, pool_kb)
+    return largest_kb // 1024
+
+
 def _probe_rocm_gpu() -> dict[str, Any] | None:
     if platform.system() != "Linux":
         return None
-
-    try:
-        result = subprocess.run(
-            ["rocm-smi", "--showmeminfo", "vram"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-
-    if result.returncode != 0:
-        return None
-
     best_memory_mb = 0
-    for raw_value in re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(?:MiB|MB|GiB|GB|B)?", result.stdout or ""):
+    for command in (["rocminfo"], ["rocm-smi", "--showmeminfo", "vram"]):
         try:
-            numeric = float(raw_value)
-        except ValueError:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=5)
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
             continue
-        # rocm-smi commonly prints bytes; large values are converted to MiB.
-        memory_mb = int(numeric / (1024 * 1024)) if numeric > 1024 * 1024 else int(numeric)
-        best_memory_mb = max(best_memory_mb, memory_mb)
-
+        if result.returncode != 0:
+            continue
+        if command[0] == "rocminfo":
+            best_memory_mb = _rocm_gpu_pool_memory_mb(result.stdout or "")
+        else:
+            for value in re.findall(r"VRAM Total Memory \(B\):\s*(\d+)", result.stdout or ""):
+                best_memory_mb = max(best_memory_mb, int(value) // (1024 * 1024))
+        if best_memory_mb > 0:
+            break
     if best_memory_mb <= 0:
         return None
-
     return {
         "gpuBackend": "rocm",
         "gpuName": "AMD ROCm GPU",
@@ -286,7 +314,7 @@ def probe_hardware_requirements() -> dict[str, Any]:
         "gpuMemoryMb": int(gpu.get("gpuMemoryMb", 0) or 0),
         "gpuMemoryGb": round(int(gpu.get("gpuMemoryMb", 0) or 0) / 1024, 2),
         "gpuMemoryDetected": bool(gpu.get("gpuMemoryDetected", False)),
-        "audioGenerationGpuSupported": gpu.get("gpuBackend") == "cuda",
+        "audioGenerationGpuSupported": gpu.get("gpuBackend") in {"cuda", "rocm"},
         "requirements": {
             FEATURE_STEM_SEPARATION: {
                 "minSystemRamMb": MIN_STEM_SYSTEM_RAM_MB,
@@ -294,7 +322,7 @@ def probe_hardware_requirements() -> dict[str, Any]:
             FEATURE_AUDIO_GENERATION: {
                 "minSystemRamMb": MIN_AUDIO_SYSTEM_RAM_MB,
                 "minGpuMemoryMb": MIN_AUDIO_GPU_MEMORY_MB,
-                "supportedGpuBackends": ["cuda"],
+                "supportedGpuBackends": ["cuda", "rocm"],
             },
         },
     }
@@ -1672,6 +1700,12 @@ def download_file_with_retries(
                             build_runtime_mode=build_runtime_mode,
                         )
 
+            if downloaded == 0 or (total_size > 0 and downloaded != total_size):
+                raise ModelDownloadError(
+                    f"OpenStudio received an empty or incomplete download for {target_path.name}. Retry AI tools setup.",
+                    error_code="model_transfer_interrupted",
+                )
+
             temp_path.replace(target_path)
             final_size = target_path.stat().st_size
             completed_total = completed_bytes + final_size
@@ -1697,6 +1731,9 @@ def download_file_with_retries(
                 build_runtime_mode=build_runtime_mode,
             )
             return final_size
+        except ModelDownloadError:
+            temp_path.unlink(missing_ok=True)
+            raise
         except HTTPError as exc:
             append_activity_line(recent_lines, f"{target_path.name} was not available at {url} ({exc.code})")
             log_event(
@@ -2490,6 +2527,18 @@ def load_backend_install_plan(install_plan_path: Path) -> dict[str, Any]:
     return install_plan
 
 
+def select_rocm_architecture_plan(install_plan: dict[str, Any], backend: str) -> dict[str, Any]:
+    if backend != "rocm" or platform.system() != "Linux":
+        return install_plan
+    try:
+        result = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return install_plan
+    if result.returncode != 0 or not re.search(r"Name:\s+gfx1151\b", result.stdout or ""):
+        return install_plan
+    return load_backend_install_plan(Path(__file__).with_name("ai-runtime-install-plan-linux-rocm-gfx1151.json"))
+
+
 def apply_backend_install_plan(
     runtime_python: Path,
     runtime_root: Path,
@@ -2502,6 +2551,7 @@ def apply_backend_install_plan(
     python_detected: bool,
     build_runtime_mode: str,
 ) -> None:
+    install_plan = select_rocm_architecture_plan(install_plan, backend_requested)
     plan_id = str(install_plan.get("id", "")).strip()
     package_source = str(install_plan.get("packageSource", "")).strip()
     steps = install_plan.get("steps", [])
@@ -2568,6 +2618,9 @@ def apply_backend_install_plan(
                 index_url = str(step.get("indexUrl", "")).strip()
                 if index_url:
                     command += ["--index-url", index_url]
+                find_links = str(step.get("findLinks", "")).strip()
+                if find_links:
+                    command += ["--find-links", find_links]
                 extra_index_urls = step.get("extraIndexUrls", [])
                 if isinstance(extra_index_urls, list):
                     for extra_index_url in extra_index_urls:
@@ -3011,6 +3064,65 @@ def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested:
         return None
 
     return None
+
+
+def prepare_windows_fallback_runtime(runtime_root: Path, runtime_python: Path) -> tuple[Path, Path]:
+    """Build a relocatable candidate without replacing DLLs in the active runtime."""
+    global PENDING_RUNTIME_CANDIDATE
+
+    candidate = runtime_root.with_name(f"stem-runtime-directml-{uuid.uuid4().hex}")
+    try:
+        relative_python = runtime_python.relative_to(runtime_root)
+        shutil.copytree(runtime_root, candidate)
+        candidate_python = candidate / relative_python
+        if not candidate_python.is_file():
+            raise OSError(f"Copied runtime is missing {relative_python}")
+    except (OSError, ValueError) as exc:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+        raise InstallerStepError(
+            f"Could not prepare a separate DirectML runtime: {exc}",
+            error_code="backend_fallback_prepare_failed",
+            progress=0.74,
+        ) from exc
+
+    PENDING_RUNTIME_CANDIDATE = candidate
+    log_event(
+        "installer", "installing_backend", "backend_fallback_candidate_prepared",
+        sourceRuntime=str(runtime_root), candidateRuntime=str(candidate),
+    )
+    return candidate, candidate_python
+
+
+def activate_windows_runtime(base_runtime_root: Path, selected_runtime_root: Path) -> None:
+    """Publish a verified runtime selection with an atomic, allowlisted marker."""
+    global PENDING_RUNTIME_CANDIDATE
+
+    if platform.system() != "Windows":
+        return
+    name = selected_runtime_root.name
+    if name != "stem-runtime" and not re.fullmatch(r"stem-runtime-directml-[0-9a-f]{32}", name):
+        return
+    if selected_runtime_root.parent != base_runtime_root.parent:
+        raise InstallerStepError(
+            "The verified runtime is outside the OpenStudio runtime directory.",
+            error_code="runtime_activation_failed", progress=0.99,
+        )
+
+    marker = base_runtime_root.parent / "stem-runtime-active.txt"
+    temporary_marker = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary_marker.write_text(name + "\n", encoding="utf-8")
+        os.replace(temporary_marker, marker)
+    except OSError as exc:
+        temporary_marker.unlink(missing_ok=True)
+        raise InstallerStepError(
+            f"Could not activate the verified AI runtime: {exc}",
+            error_code="runtime_activation_failed", progress=0.99,
+        ) from exc
+    if PENDING_RUNTIME_CANDIDATE == selected_runtime_root:
+        PENDING_RUNTIME_CANDIDATE = None
+    log_event("installer", "ready", "runtime_activated", runtimeRoot=str(selected_runtime_root))
 
 
 def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_features: list[str]) -> Path:
@@ -3529,7 +3641,13 @@ def download_model(
                 else "the model configuration"
             )
 
-            if target_path.exists() and target_path.is_file():
+            if target_path.exists() and not target_path.is_file():
+                raise ModelDownloadError(
+                    f"OpenStudio needs a model file at {target_path}, but a folder or another non-file item is there. Move that item and retry AI tools setup.",
+                    error_code="model_path_invalid",
+                )
+
+            if is_nonempty_model_file(target_path):
                 existing_size = target_path.stat().st_size
                 completed_bytes += existing_size
                 append_activity_line(recent_lines, f"Using cached {target_path.name}")
@@ -3579,13 +3697,13 @@ def download_model(
         )
 
     model_path = models_dir / model_name
-    if not model_path.exists():
+    if not is_nonempty_model_file(model_path):
         log_event(
             "installer",
             "downloading_model",
             "model_download_failed",
             errorCode="model_download_failed",
-            reason="model file missing after download",
+            reason="model file missing, empty or not a regular file after download",
             modelPath=str(model_path),
         )
         fail(
@@ -3617,6 +3735,17 @@ def download_music_gen_model(
     build_runtime_mode: str,
 ) -> None:
     checkpoint_root = resolve_music_gen_checkpoint_root(str(music_gen_checkpoint_root))
+    # Setup and inference must agree on cached snapshots. In particular, reuse
+    # complete models in the standard Hugging Face cache instead of downloading
+    # another copy into the managed cache.
+    layout = get_music_generation_required_paths(str(checkpoint_root), music_gen_model)
+    if layout["layoutValid"]:
+        emit("downloading_model", 0.99, message="Reusing the complete local ACE-Step model cache.",
+             stepLabel="ACE-Step model already installed", musicGenerationLayoutValid=True,
+             musicGenerationMainModelPath=layout["mainModelPath"])
+        log_event("installer", "downloading_model", "music_generation_cached_snapshot_reused",
+                  modelPath=layout["mainModelPath"])
+        return
     runtime_profiles = get_music_runtime_profiles(str(checkpoint_root))
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     log_event(
@@ -4020,6 +4149,7 @@ def main() -> None:
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).expanduser().resolve()
+    base_runtime_root = runtime_root
     models_dir = Path(args.models_dir).expanduser().resolve()
     music_gen_checkpoint_root = resolve_music_gen_checkpoint_root(args.music_gen_checkpoint_root)
     bootstrap_python = Path(args.bootstrap_with).expanduser().resolve() if args.bootstrap_with else None
@@ -4210,9 +4340,15 @@ def main() -> None:
                 )
 
                 try:
+                    fallback_runtime_root = runtime_root
+                    fallback_runtime_python = runtime_python
+                    if platform.system() == "Windows" and install_source == "downloadedRuntime":
+                        fallback_runtime_root, fallback_runtime_python = prepare_windows_fallback_runtime(
+                            runtime_root, runtime_python
+                        )
                     apply_backend_install_plan(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         fallback_backend_install_plan,
                         backend_requested=fallback_backend_requested,
                         selected_features=install_features,
@@ -4222,8 +4358,8 @@ def main() -> None:
                         build_runtime_mode=build_runtime_mode,
                     )
                     verify_runtime(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         require_audio_separator=True,
                         require_music_generation=False,
                         install_source=install_source,
@@ -4233,8 +4369,8 @@ def main() -> None:
                         raise_on_error=True,
                     )
                     probe_runtime(
-                        runtime_python,
-                        runtime_root,
+                        fallback_runtime_python,
+                        fallback_runtime_root,
                         models_dir,
                         args.model,
                         acceleration_mode="auto",
@@ -4247,6 +4383,8 @@ def main() -> None:
                         build_runtime_mode=build_runtime_mode,
                         raise_on_error=True,
                     )
+                    runtime_root = fallback_runtime_root
+                    runtime_python = fallback_runtime_python
                     log_event(
                         "installer",
                         "installing_backend",
@@ -4443,6 +4581,30 @@ def main() -> None:
             else "AI feature setup finished, but one or more selected features are not ready."
         )
     )
+
+    if PENDING_RUNTIME_CANDIDATE is not None and not stem_separation_ready:
+        fail(
+            "The DirectML runtime did not pass the final stem-separation check; the previous runtime remains active.",
+            progress=0.99,
+            error_code="backend_fallback_probe_failed",
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
+
+    try:
+        activate_windows_runtime(base_runtime_root, runtime_root)
+    except InstallerStepError as activation_error:
+        fail(
+            activation_error.message,
+            progress=activation_error.progress,
+            error_code=activation_error.error_code,
+            installSource=install_source,
+            requiresExternalPython=requires_external_python,
+            pythonDetected=python_detected,
+            buildRuntimeMode=build_runtime_mode,
+        )
 
     emit(
         "ready",

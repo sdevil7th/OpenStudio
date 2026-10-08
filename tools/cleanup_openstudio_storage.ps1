@@ -54,9 +54,15 @@ function Test-PathUnderRoot {
     if ($null -eq $resolvedPath -or $null -eq $resolvedRoot) {
         return $false
     }
-    $prefix = $resolvedRoot.TrimEnd("\") + "\"
-    return $resolvedPath.Equals($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $resolvedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $prefix = $resolvedRoot.TrimEnd($separator) + $separator
+    $comparison = if ($separator -eq '\') {
+        [System.StringComparison]::OrdinalIgnoreCase
+    } else {
+        [System.StringComparison]::Ordinal
+    }
+    return $resolvedPath.Equals($resolvedRoot, $comparison) -or
+        $resolvedPath.StartsWith($prefix, $comparison)
 }
 
 function New-CleanupCandidate {

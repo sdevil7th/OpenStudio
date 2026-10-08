@@ -306,7 +306,7 @@ $windows = Get-AssetMetadata -AssetPath $WindowsAssetPath -AssetUrl $WindowsAsse
 $macos = Get-AssetMetadata -AssetPath $MacAssetPath -AssetUrl $MacAssetUrl -AdditionalProperties $macAdditional
 # Release Linux binaries are built on Ubuntu 24.04. Do not offer them to older
 # glibc hosts merely because both run x86_64; update this contract with the runner.
-$linux = Get-AssetMetadata -AssetPath $LinuxAssetPath -AssetUrl $LinuxAssetUrl -AdditionalProperties @{ architectures = @("x86_64"); minimumGlibcVersion = "2.39" }
+$linux = Get-AssetMetadata -AssetPath $LinuxAssetPath -AssetUrl $LinuxAssetUrl -AdditionalProperties @{ architectures = @("x86_64"); minimumGlibcVersion = "2.35" }
 $windowsAiRuntime = Get-AssetMetadata -AssetPath $WindowsAiRuntimeAssetPath -AssetUrl $WindowsAiRuntimeAssetUrl
 $windowsBaseAiRuntime = Get-AssetMetadata -AssetPath $WindowsBaseAiRuntimeAssetPath -AssetUrl $WindowsBaseAiRuntimeAssetUrl
 $windowsDirectmlAiRuntime = Get-AssetMetadata -AssetPath $WindowsDirectmlAiRuntimeAssetPath -AssetUrl $WindowsDirectmlAiRuntimeAssetUrl

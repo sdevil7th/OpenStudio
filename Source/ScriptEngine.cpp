@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "AppPaths.h"
 #include "ScriptEngine.h"
 #include "AudioEngine.h"
@@ -1400,7 +1401,7 @@ juce::File ScriptEngine::getUserScriptsDirectory()
 
 juce::File ScriptEngine::getStockScriptsDirectory()
 {
-    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    auto exeDir = OpenStudioRuntime::executableFile()
         .getParentDirectory();
 
    #if JUCE_MAC

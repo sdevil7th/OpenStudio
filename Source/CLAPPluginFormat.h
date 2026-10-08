@@ -3,6 +3,15 @@
 #include <JuceHeader.h>
 #include <clap/clap.h>
 
+// Processing-thread hook, including bypassed slots. Uses a callback try-lock;
+// CLAP editor events still need a legal audio-thread flush while active.
+struct ProcessorSafety;
+void flushOpenStudioCLAPParameterEvents(juce::AudioProcessor* processor, ProcessorSafety* safety = nullptr);
+juce::var runOpenStudioCLAPAutomationRegression();
+bool getOpenStudioCLAPParameterRange(juce::AudioProcessor* processor, int index, double& minimum, double& maximum);
+bool getOpenStudioCLAPParameterReferenceGeneration(juce::AudioProcessor* processor, int index, uint64_t& generation);
+juce::Array<juce::var> takeOpenStudioCLAPParameterClears(juce::AudioProcessor* processor);
+
 // CLAP plugin hosting for JUCE — implements juce::AudioPluginFormat
 // so CLAP plugins appear alongside VST3/LV2 in the plugin browser.
 

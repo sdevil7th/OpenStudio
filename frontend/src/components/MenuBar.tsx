@@ -1,3 +1,5 @@
+import { AudioDeviceStatus } from "./AudioDeviceStatus";
+import { importMediaWithDialog } from "../services/mediaImport";
 import { appDialogs } from "../services/appDialogs";
 import { useAppUpdateStore } from "../store/appUpdateStore";
 import { useState, useEffect, useCallback } from "react";
@@ -136,6 +138,10 @@ export function MenuBar() {
 
   // File menu
   const fileMenuItems: MenuItemProps[] = [
+    { label: "Import", submenu: [
+      { label: "Audio...", shortcut: shortcut("file.importAudio", "Ctrl+I"), onClick: () => { void importMediaWithDialog("audio"); } },
+      { label: "MIDI...", shortcut: shortcut("file.importMIDI", "Ctrl+Alt+I"), onClick: () => { void importMediaWithDialog("midi"); } },
+    ] },
     {
       label: "New Project",
       shortcut: shortcut("file.new", "Ctrl+N"),
@@ -534,35 +540,7 @@ export function MenuBar() {
     {
       label: "Media file...",
       shortcut: shortcut("insert.mediaFile", "Insert"),
-      onClick: async () => {
-        const { selectedTrackIds, tracks, transport, importMedia } =
-          useDAWStore.getState();
-
-        // Show file open dialog
-        const filePath = await nativeBridge.showOpenDialog(
-          "Import Audio/Video File",
-        );
-        if (!filePath) return; // User cancelled
-
-        // Find the target track (first selected, or first audio track)
-        let targetTrackId = selectedTrackIds[0];
-        if (!targetTrackId) {
-          const firstAudioTrack = tracks.find((t) => t.type === "audio");
-          if (!firstAudioTrack) {
-            void appDialogs.alert("No audio track available. Please create an audio track first.");
-            return;
-          }
-          targetTrackId = firstAudioTrack.id;
-        }
-
-        // Import at current playhead position
-        try {
-          await importMedia(filePath, targetTrackId, transport.currentTime);
-          console.log(`Media imported successfully: ${filePath}`);
-        } catch (error) {
-          void appDialogs.alert(`Failed to import media: ${error}`);
-        }
-      },
+      onClick: () => { void importMediaWithDialog("media"); },
       dividerAfter: true,
     },
     {
@@ -905,8 +883,6 @@ export function MenuBar() {
   return (
     <div
       className="h-8 bg-daw-darker border-b border-daw-border flex items-center text-sm shrink-0 relative z-[9999] select-none"
-      onMouseDown={usesNativeWindowChrome ? undefined : handleDragStart}
-      onDoubleClick={usesNativeWindowChrome ? undefined : handleDoubleClick}
     >
       {/* App icon + Menus (no-drag so clicks work normally) */}
       <div
@@ -926,11 +902,17 @@ export function MenuBar() {
         <MenuDropdown label="Help" items={helpMenuItems} />
       </div>
 
-      {/* Draggable spacer — fills remaining width, acts as title bar drag area */}
+      <div className="flex-1 min-w-0 h-full"
+        data-testid={usesNativeWindowChrome ? undefined : "window-drag-region"}
+        onMouseDown={usesNativeWindowChrome ? undefined : handleDragStart}
+        onDoubleClick={usesNativeWindowChrome ? undefined : handleDoubleClick}
+      />
+      <div className="flex shrink-0 items-center px-3" data-no-drag>
+        <AudioDeviceStatus onOpen={openSettings} />
+      </div>
+
       {!usesNativeWindowChrome && (
         <>
-          <div className="flex-1 min-w-0" />
-
           {/* Window controls */}
           <div
             className="flex items-center shrink-0 h-full"

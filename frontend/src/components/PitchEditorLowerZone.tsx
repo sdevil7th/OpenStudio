@@ -1,3 +1,5 @@
+import { detachPitchEditor, initializePitchViewport, usePitchWindowState } from "../utils/pitchEditorSession";
+import { windowRole } from "../utils/windowEnvironment";
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
@@ -27,6 +29,12 @@ import {
   type PitchEditorRenderState,
 } from "./PitchEditorCanvas";
 
+function createStaticCanvas(width: number, height: number): HTMLCanvasElement | OffscreenCanvas {
+  if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(width, height);
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  return canvas;
+}
 const MIN_PPS = 1;
 const MAX_PPS = 1000;
 const ZOOM_SENSITIVITY = 0.0015;
@@ -188,7 +196,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
   const rafRef = useRef<number>(0);
   // Offscreen canvas caches the static content (grid, notes, contour) so the
   // playback RAF loop only needs to blit + draw playhead, not redraw everything.
-  const staticCanvasRef = useRef<OffscreenCanvas | null>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement | OffscreenCanvas | null>(null);
   // Track the scrollX that the static cache was rendered at, so we can invalidate
   // when auto-scroll during playback changes the viewport.
   const staticCacheScrollXRef = useRef<number>(-1);
@@ -196,21 +204,17 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
 
   // DAW store
   const {
-    pixelsPerSecond, scrollX: dawScrollX, lowerZoneHeight, tcpWidth,
+    lowerZoneHeight, tcpWidth,
     pitchEditorTrackId, pitchEditorClipId,
-    setLowerZoneHeight, closePitchEditor, setScroll, setZoom,
+    setLowerZoneHeight, closePitchEditor,
   } = useDAWStore(
     useShallow((s) => ({
-      pixelsPerSecond: s.pixelsPerSecond,
-      scrollX: s.scrollX,
       lowerZoneHeight: s.lowerZoneHeight,
       tcpWidth: s.tcpWidth,
       pitchEditorTrackId: s.pitchEditorTrackId,
       pitchEditorClipId: s.pitchEditorClipId,
       setLowerZoneHeight: s.setLowerZoneHeight,
       closePitchEditor: s.closePitchEditor,
-      setScroll: s.setScroll,
-      setZoom: s.setZoom,
     }))
   );
 
@@ -234,10 +238,31 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
   const clipInfoRef = useRef(clipInfo);
   useEffect(() => { clipInfoRef.current = clipInfo; }, [clipInfo]);
 
-  const currentTime = useDAWStore((s) => s.transport.currentTime);
-  const isPlaying = useDAWStore((s) => s.transport.isPlaying);
-  const bpm = useDAWStore((s) => s.transport.tempo);
-  const timeSignature = useDAWStore((s) => s.timeSignature);
+  const { currentTime, isPlaying, bpm, timeSignature } = useDAWStore(useShallow(s => ({
+    currentTime: s.transport.currentTime, isPlaying: s.transport.isPlaying, bpm: s.transport.tempo, timeSignature: s.timeSignature,
+  })));
+  const { pixelsPerSecond, pitchScrollX, setZoom } = usePitchEditorStore(useShallow(s => ({
+    pixelsPerSecond: s.zoomX, pitchScrollX: s.scrollX, setZoom: s.setZoomX,
+  })));
+  const dawScrollX = pitchScrollX * pixelsPerSecond;
+  const setScroll = useCallback((pixels: number, _y?: number) => {
+    const state = usePitchEditorStore.getState();
+    state.setScrollX(pixels / state.zoomX);
+  }, []);
+  const windowState = usePitchWindowState();
+  const [pixelRatio, setPixelRatio] = useState(window.devicePixelRatio || 1);
+  useEffect(() => {
+    let media: MediaQueryList;
+    const update = () => {
+      media?.removeEventListener("change", update);
+      setPixelRatio(window.devicePixelRatio || 1);
+      media = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      media.addEventListener("change", update);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => { media.removeEventListener("change", update); window.removeEventListener("resize", update); };
+  }, []);
 
   const {
     contour, notes, isAnalyzing, analysisPhase, selectedNoteIds, tool, snapMode, progressPercent, progressLabel,
@@ -303,7 +328,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
   const analyzedRangesRef = useRef<Array<[number, number]>>([]);
   const openViewportKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    analyzedRangesRef.current = [];
+    analyzedRangesRef.current = [...usePitchEditorStore.getState().analyzedRanges];
     openViewportKeyRef.current = null;
   }, [pitchEditorClipId]);
 
@@ -314,7 +339,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
     if (!pitchEditorTrackId || !pitchEditorClipId || !clipInfo || canvasSize.width <= 0) return;
 
     const openKey = `${pitchEditorTrackId}:${pitchEditorClipId}`;
-    if (openViewportKeyRef.current === openKey) return;
+    if (openViewportKeyRef.current === openKey || usePitchEditorStore.getState().viewportInitialized || windowRole === "pitchEditor") return;
 
     const targetPixelsPerSecond = Math.max(MIN_PPS, Math.min(MAX_PPS, canvasSize.width / 5));
     const { leftEdgeProjectTime } = getOpeningViewportWindow(clipInfo, currentTime);
@@ -323,6 +348,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
     setZoom(targetPixelsPerSecond);
     setScroll(Math.max(0, leftEdgeProjectTime * targetPixelsPerSecond), daw.scrollY);
     openViewportKeyRef.current = openKey;
+    initializePitchViewport();
   }, [pitchEditorTrackId, pitchEditorClipId, clipInfo, canvasSize.width, currentTime, setScroll, setZoom]);
 
   // Auto-analyze on mount
@@ -509,13 +535,13 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
     renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, viewport, renderState);
 
     // Cache to offscreen canvas for playback RAF overlay
-    const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
+    const offscreen = createStaticCanvas(canvas.width, canvas.height);
     const offCtx = offscreen.getContext("2d");
     if (offCtx) {
       offCtx.drawImage(canvas, 0, 0);
     }
     staticCanvasRef.current = offscreen;
-  }, [canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, renderCoverage]);
+  }, [pixelRatio, canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, renderCoverage]);
 
   // Playhead RAF — during playback, blit cached static canvas + draw playhead only.
   // This avoids a full renderPitchEditor() (grid, notes, contour) at 60fps.
@@ -533,9 +559,9 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
         const st = usePitchEditorStore.getState();
         const daw = useDAWStore.getState();
         const vp: PitchEditorViewport = {
-          scrollX: daw.scrollX / daw.pixelsPerSecond,
+          scrollX: st.scrollX,
           scrollY: st.scrollY,
-          pixelsPerSecond: daw.pixelsPerSecond,
+          pixelsPerSecond: st.zoomX,
           pixelsPerSemitone: st.zoomY,
           clipStartTime: clipStart,
           clipDuration: clipDur,
@@ -544,11 +570,11 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
         const safeCanvasHeight = Math.max(1, Math.round(canvasSize.height));
         renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, vp, buildRenderState(st, daw));
         // Update cache
-        const offscreen = new OffscreenCanvas(canvas.width, canvas.height);
+        const offscreen = createStaticCanvas(canvas.width, canvas.height);
         const offCtx = offscreen.getContext("2d");
         if (offCtx) offCtx.drawImage(canvas, 0, 0);
         staticCanvasRef.current = offscreen;
-        staticCacheScrollXRef.current = daw.scrollX;
+        staticCacheScrollXRef.current = st.scrollX * st.zoomX;
       }
     }
 
@@ -560,11 +586,11 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
 
       const daw = useDAWStore.getState();
       const st = usePitchEditorStore.getState();
-      const currentScrollX = daw.scrollX;
+      const currentScrollX = st.scrollX * st.zoomX;
       const vp: PitchEditorViewport = {
-        scrollX: currentScrollX / daw.pixelsPerSecond,
+        scrollX: st.scrollX,
         scrollY: st.scrollY,
-        pixelsPerSecond: daw.pixelsPerSecond,
+        pixelsPerSecond: st.zoomX,
         pixelsPerSemitone: st.zoomY,
         clipStartTime: clipStart,
         clipDuration: clipDur,
@@ -575,7 +601,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
         const safeCanvasWidth = Math.max(1, Math.round(canvasSize.width));
         const safeCanvasHeight = Math.max(1, Math.round(canvasSize.height));
         renderPitchEditor(ctx, safeCanvasWidth, safeCanvasHeight, vp, buildRenderState(st, daw));
-        const offscreen = new OffscreenCanvas(cvs.width, cvs.height);
+        const offscreen = createStaticCanvas(cvs.width, cvs.height);
         const offCtx = offscreen.getContext("2d");
         if (offCtx) offCtx.drawImage(cvs, 0, 0);
         staticCanvasRef.current = offscreen;
@@ -1115,12 +1141,12 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
       data-shortcut-context="pitch_editor"
     >
       {/* Resize grip */}
-      <div
+      {windowRole !== "pitchEditor" && <div
         className="h-1.5 cursor-row-resize group flex items-center justify-center shrink-0 hover:bg-daw-accent/30 transition-colors"
         onMouseDown={handleResizeStart}
       >
         <GripHorizontal size={10} className="text-neutral-700 group-hover:text-daw-accent/70" />
-      </div>
+      </div>}
 
       {/* Two-column layout */}
       <div className="flex-1 min-h-0 flex">
@@ -1133,6 +1159,8 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
           {/* Header */}
           <div className="flex items-center h-7 px-2.5 border-b border-neutral-800 shrink-0 bg-neutral-900">
             <span className="text-[10px] font-semibold text-neutral-200 tracking-wide uppercase flex-1">Pitch Editor</span>
+            {windowRole === "main" && <button type="button" className="px-1 text-[10px] text-neutral-300 hover:text-white disabled:opacity-40" disabled={windowState.opening}
+              title="Detach pitch editor" aria-label="Detach pitch editor" onClick={() => { void detachPitchEditor(); }}>Detach</button>}
             <button
               onClick={closePitchEditor}
               className="p-0.5 rounded text-neutral-600 hover:text-neutral-300 hover:bg-neutral-700 transition-colors"
@@ -1279,7 +1307,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
             <div className="px-2 py-1.5 border-b border-neutral-800/60 shrink-0">
               <div className="text-[9px] text-neutral-600 uppercase tracking-wider mb-1">Pitch Engine</div>
               <div className="text-[10px] text-neutral-400 leading-snug">
-                Formant editing is temporarily disabled while the pitch-only engine is being rebuilt around the research renderer.
+                Formant editing is unavailable in this pitch-only editor.
               </div>
               <div className="mt-1 text-[10px] text-neutral-500 leading-snug">
                 Pitch editing is monophonic only. Stereo vocal clips are still supported and analyzed from a mono sum while correction keeps the clip's multichannel audio.

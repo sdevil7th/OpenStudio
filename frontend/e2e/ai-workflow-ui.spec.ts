@@ -210,3 +210,27 @@ for (const workflow of ["variation", "inpaint-selection", "continue-clip"] as co
     expect(await page.evaluate(() => (window as any).__aiSourceReview.imports)).toBe(0);
   });
 }
+
+for (const [modelId, title, button] of [
+  ["ace-step-v15-xl-turbo", "ACE-Step 1.5 XL Turbo", "Set Up ACE-Step"],
+  ["stable-audio-3-medium", "Stable Audio 3 Medium", "Set Up Stable Audio 3"],
+  ["minimax-music-3", "MiniMax Music 3", "Set Up MiniMax"],
+]) {
+  test(`setup from ${modelId} keeps the requested model`, async ({ page }) => {
+    await page.evaluate(async () => {
+      const storeUrl = "/src/store/useDAWStore.ts";
+      const { useDAWStore } = await import(/* @vite-ignore */ storeUrl);
+      const current = useDAWStore.getState();
+      useDAWStore.setState({ aiToolsStatus: { ...current.aiToolsStatus,
+        installInProgress: false, musicGenerationReady: false,
+        musicModels: {}, features: { ...current.aiToolsStatus.features,
+          audioGeneration: { ready: false, compatible: true } },
+      }, refreshAiToolsStatus: async () => useDAWStore.getState().aiToolsStatus });
+    });
+    await page.locator('[data-qa="ai-track-header"]').getByRole("button", { name: "Open AI generation parameters" }).click();
+    await page.getByLabel("Model", { exact: true }).selectOption(modelId);
+    await page.getByRole("button", { name: button, exact: true }).first().click();
+    await expect(page.getByRole("dialog").filter({ has: page.getByText("AI Tools Setup", { exact: true }) })
+      .getByRole("heading", { name: title, exact: true })).toBeVisible();
+  });
+}

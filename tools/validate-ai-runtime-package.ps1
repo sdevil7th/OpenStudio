@@ -204,6 +204,14 @@ try {
         Assert-True ($pythonResolved.StartsWith($runtimeRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) "AI runtime executable '$pythonResolved' was not launched from inside '$runtimeRootResolved'."
     }
 
+    # All current runtime families support optional music generation, whose
+    # interpreter contract is 3.11/3.12. Base/stem import success alone previously
+    # admitted Python 3.10 archives that could never run that feature.
+    $pythonVersionResult = & $pythonExe -c "import sys; assert (3, 11) <= sys.version_info[:2] < (3, 13), 'OpenStudio AI requires Python 3.11 or 3.12; got ' + sys.version; print(sys.version)" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "AI runtime Python compatibility check failed: $pythonVersionResult"
+    }
+
     $probeJson = & $pythonExe $probeScriptPath --acceleration-mode auto 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "AI runtime capability probe failed for '$pythonExe'. Output: $probeJson"

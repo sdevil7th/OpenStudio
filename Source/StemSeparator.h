@@ -160,6 +160,7 @@ public:
                                    const juce::String& errorMsg = {});
 
 private:
+    friend class RuntimeSafetyRegression;
     /** Get the OpenStudio app-data root directory. */
     juce::File getUserDataRoot() const;
 
@@ -367,8 +368,8 @@ private:
     /** Serialize AI tools status to juce::var for the native bridge. */
     juce::var aiToolsStatusToVar (const AiToolsStatus& status) const;
 
-    std::unique_ptr<juce::ChildProcess> childProcess;
-    std::shared_ptr<juce::ChildProcess> installProcess;
+    std::unique_ptr<OwnedChildProcess> childProcess;
+    std::shared_ptr<OwnedChildProcess> installProcess;
     std::shared_ptr<OwnedChildProcess> diffusersInstallProcess;
     juce::String outputBuffer;  // Accumulated stdout from child
     juce::String installOutputBuffer;
@@ -381,6 +382,7 @@ private:
     juce::String installBackendRequested;
     juce::String installSessionId;
     juce::String installLastObservedPhase;
+    std::atomic<double> installStartedTimeMs { 0.0 };
     double installLaunchTimeMs = 0.0;
     double installFirstOutputTimeMs = 0.0;
     double installLastOutputTimeMs = 0.0;

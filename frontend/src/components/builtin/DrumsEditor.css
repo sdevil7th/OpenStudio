@@ -1,0 +1,150 @@
+.instrument-drums {
+  --instrument-accent: #b9a886;
+}
+.drums-topbar>label {
+  min-width: 140px;
+  flex: 1;
+  max-width: 230px;
+}
+.drums-kit-layout {
+  grid-template-columns: minmax(0,1.6fr) minmax(220px,1fr);
+}
+.drums-character {
+  grid-column: 1/-1;
+}
+.drums-pad-grid {
+  grid-template-columns: repeat(4,minmax(0,1fr));
+}
+.drums-pad {
+  position: relative;
+  min-height: 94px;
+  border: 1px solid #4c5050;
+  border-top: 3px solid #85908e;
+  border-radius: 6px;
+  background: linear-gradient(#333d42,#242e34);
+  box-shadow: 0 3px 2px #0005;
+  overflow: hidden;
+}
+.drums-pad[data-piece="0"] {
+  border-top-color: #cc997c;
+}
+.drums-pad[data-piece="1"] {
+  border-top-color: #c1a57e;
+}
+.drums-pad[data-piece="2"],.drums-pad[data-piece="3"] {
+  border-top-color: #92aebe;
+}
+.drums-pad[data-piece="4"],.drums-pad[data-piece="5"] {
+  border-top-color: #9fa893;
+}
+.drums-pad[data-piece="6"],.drums-pad[data-piece="7"] {
+  border-top-color: #a89bb3;
+}
+.drums-pad[aria-pressed=true] {
+  background: linear-gradient(#43483f,#313930);
+  border-color: var(--instrument-accent);
+}
+.drums-pad[data-audition=true] {
+  box-shadow: inset 0 0 20px #d7b99330;
+}
+.drums-pad[data-ignored=true] {
+  border-style: dashed;
+  background: #1c262c;
+  color: var(--instrument-muted);
+}
+.drums-pad-index {
+  width: 100%;
+  font: 10px ui-monospace,monospace;
+  color: #a9b3b8;
+  margin-bottom: auto;
+}
+.drums-pad-index i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  background: #4f5f65;
+  border-radius: 50%;
+}
+.drums-pad[data-input-held=true] .drums-pad-index i {
+  background: #daefaf;
+  box-shadow: 0 0 5px #daefaf88;
+}
+.drums-pad strong {
+  font-size: 12px;
+  line-height: 1.25;
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+.drums-pad-note {
+  font: 10px ui-monospace,monospace;
+  color: #a6b3bc;
+}
+.drums-pad small {
+  font-size: 10px;
+  color: #9fabb3;
+  margin-top: 4px;
+}
+.drums-master-strip {
+  border-top: 1px solid var(--instrument-line);
+  background: #182127;
+}
+.drums-master-strip>.instrument-slider {
+  max-width: 240px;
+  flex: 1;
+}
+.drums-master-strip>span {
+  font-size: 11px;
+  color: var(--instrument-muted);
+}
+.drums-mapping-layout {
+  grid-template-columns: 1.7fr 1fr;
+}
+.drums-mapping-table {
+  max-height: 360px;
+  overflow: auto;
+}
+.drums-mapping-table>[role=row] {
+  display: grid;
+  grid-template-columns: 35px 35px 1.3fr 1fr;
+  gap: 8px;
+  padding: 7px 2px;
+  border-bottom: 1px solid #34414a;
+  font-size: 11px;
+}
+.drums-mapping-table>[role=row]>span:nth-child(-n+2) {
+  font-variant-numeric: tabular-nums;
+  color: var(--instrument-accent);
+}
+.drums-piece-mixer {
+  grid-template-columns: repeat(4,minmax(0,1fr));
+}
+.drums-piece-mixer>section {
+  padding: 12px;
+  border: 1px solid var(--instrument-line);
+  border-radius: 5px;
+}
+.drums-piece-mixer h4 {
+  font-size: 12px;
+  margin-bottom: 16px;
+  color: var(--instrument-accent);
+}
+.drums-piece-mixer .instrument-controls {
+  margin-bottom: 16px;
+}
+@container(max-width:790px) {
+  .drums-kit-layout,.drums-mapping-layout {
+    grid-template-columns: 1fr;
+  }
+  .drums-pad {
+    min-height: 84px;
+  }
+  .drums-pad-grid {
+    gap: 7px;
+  }
+  .drums-piece-mixer {
+    grid-template-columns: repeat(2,minmax(0,1fr));
+  }
+  .drums-master-strip>.instrument-slider {
+    min-width: 130px;
+  }
+}

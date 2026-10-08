@@ -32,7 +32,7 @@ param(
     [string]$StandaloneReleaseTag = "20260325",
 
     [Parameter(Mandatory = $false)]
-    [string]$StandalonePythonVersion = "3.11.9",
+    [string]$StandalonePythonVersion = "3.11.15",
 
     [Parameter(Mandatory = $false)]
     [ValidateSet("install_only", "install_only_stripped")]
@@ -701,7 +701,14 @@ try {
         Remove-Item -LiteralPath $resolvedRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    Move-Item -LiteralPath $extractedRuntimeRoot -Destination $resolvedRuntimeRoot
+    if ($Platform -eq "linux") {
+        # Native mv preserves relative/dangling terminfo symlinks across volumes.
+        # PowerShell's recursive cross-volume Move-Item follows those links.
+        & /bin/mv -- $extractedRuntimeRoot $resolvedRuntimeRoot
+        if ($LASTEXITCODE -ne 0) { throw "Could not move the standalone Python tree." }
+    } else {
+        Move-Item -LiteralPath $extractedRuntimeRoot -Destination $resolvedRuntimeRoot
+    }
 
     Assert-PortableRuntimeLayout -RuntimePath $resolvedRuntimeRoot
 

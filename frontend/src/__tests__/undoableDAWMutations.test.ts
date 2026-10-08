@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBridge } from "../services/NativeBridge";
+import { advanceProjectEpoch } from "../utils/projectLifetime";
 import { commandManager } from "../store/commands";
 import {
   createDefaultTrack,
@@ -85,6 +86,43 @@ afterEach(() => {
 });
 
 describe("undo-aware track control mutations", () => {
+  it("discards an overlap-policy reply after reopening the same track ID in another project", async () => {
+    useDAWStore.setState({ tracks: [track("reused")], globalLocked: false, isModified: false });
+    let finish!: (accepted: boolean) => void;
+    vi.spyOn(nativeBridge, "setTrackMIDIOutputMergeKeys").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = useDAWStore.getState().setTrackMIDIOutputMergeKeys("reused", true);
+    advanceProjectEpoch();
+    useDAWStore.setState({ tracks: [track("reused")], isModified: false });
+    finish(true);
+    await pending;
+    expect(currentTrack("reused").midiOutputMergeKeys).toBe(false);
+    expect(useDAWStore.getState().isModified).toBe(false);
+    expect(commandManager.canUndo()).toBe(false);
+  });
+  it("changes hardware MIDI overlap policy with exact undo and native failure protection", async () => {
+    useDAWStore.setState({ tracks: [track("midi")], globalLocked: false, isModified: false });
+    const setPolicy = vi.spyOn(nativeBridge, "setTrackMIDIOutputMergeKeys").mockResolvedValue(true);
+    expect(currentTrack("midi").midiOutputMergeKeys).toBe(false);
+    await useDAWStore.getState().setTrackMIDIOutputMergeKeys("midi", true);
+    expect(currentTrack("midi").midiOutputMergeKeys).toBe(true);
+    expect(useDAWStore.getState().isModified).toBe(true);
+    commandManager.undo();
+    expect(currentTrack("midi").midiOutputMergeKeys).toBe(false);
+    expect(setPolicy).toHaveBeenLastCalledWith("midi", false);
+    commandManager.redo();
+    expect(currentTrack("midi").midiOutputMergeKeys).toBe(true);
+    expect(setPolicy).toHaveBeenLastCalledWith("midi", true);
+    commandManager.clear();
+    setPolicy.mockResolvedValue(false);
+    await useDAWStore.getState().setTrackMIDIOutputMergeKeys("midi", false);
+    expect(currentTrack("midi").midiOutputMergeKeys).toBe(true);
+    expect(commandManager.canUndo()).toBe(false);
+    setPolicy.mockClear();
+    useDAWStore.setState({ globalLocked: true });
+    await useDAWStore.getState().setTrackMIDIOutputMergeKeys("midi", false);
+    expect(setPolicy).not.toHaveBeenCalled();
+  });
+
   it("coalesces AI parameter packets into one exact UPDATE_TRACK undo/redo edit", () => {
     useDAWStore.setState({
       tracks: [track("ai", {
@@ -768,6 +806,7 @@ describe("undo-aware master and fade-shape mutations", () => {
   });
 
   it("undoes and redoes master mute and mono", () => {
+    const muteSpy = vi.spyOn(nativeBridge, "setMasterMute").mockResolvedValue(true);
     const volumeSpy = vi.spyOn(nativeBridge, "setMasterVolume").mockResolvedValue(true);
     const monoSpy = vi.spyOn(nativeBridge, "setMasterMono").mockResolvedValue(true);
 
@@ -777,7 +816,9 @@ describe("undo-aware master and fade-shape mutations", () => {
     expect(useDAWStore.getState().isMasterMuted).toBe(false);
     useDAWStore.getState().redo();
     expect(useDAWStore.getState().isMasterMuted).toBe(true);
-    expect(volumeSpy).toHaveBeenCalledWith(0.8);
+    expect(muteSpy.mock.calls.map(call => call[0])).toEqual([true, false, true]);
+    expect(volumeSpy).not.toHaveBeenCalled();
+    expect(useDAWStore.getState().masterVolume).toBe(0.8);
 
     commandManager.clear();
     useDAWStore.getState().toggleMasterMono();
@@ -831,6 +872,22 @@ describe("undo-aware per-slot FX bypass", () => {
       ["a", 0, false],
       ["a", 0, true],
     ]);
+  });
+
+  it("undoes and redoes a sidechain change and rejects invalid routes", async () => {
+    useDAWStore.setState({ tracks: [track("a"), track("b")] });
+    vi.spyOn(nativeBridge, "getTrackFX").mockResolvedValue([{ index: 0, name: "Gate" }] as any);
+    vi.spyOn(nativeBridge, "getSidechainSource").mockResolvedValue("");
+    const assign = vi.spyOn(nativeBridge, "setSidechainSource").mockResolvedValue(true);
+    const clear = vi.spyOn(nativeBridge, "clearSidechainSource").mockResolvedValue(true);
+    expect(await useDAWStore.getState().setSidechainSourceWithUndo("a", 0, "b")).toBe(true);
+    useDAWStore.getState().undo(); await Promise.resolve();
+    useDAWStore.getState().redo(); await Promise.resolve();
+    expect(assign.mock.calls).toEqual([["a", 0, "b"], ["a", 0, "b"]]);
+    expect(clear).toHaveBeenCalledExactlyOnceWith("a", 0);
+    expect(await useDAWStore.getState().setSidechainSourceWithUndo("a", 0, "a")).toBe(false);
+    expect(await useDAWStore.getState().setSidechainSourceWithUndo("a", 2, "b")).toBe(false);
+    expect(await useDAWStore.getState().setSidechainSourceWithUndo("a", 0, "missing")).toBe(false);
   });
 
   it("sets input FX bypass and restores the native slot on undo/redo", async () => {

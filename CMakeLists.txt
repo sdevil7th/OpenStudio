@@ -122,6 +122,65 @@ FetchContent_Declare(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
 )
 FetchContent_MakeAvailable(juce)
+
+# FetchContent's PATCH_COMMAND runs when the dependency is populated. Existing
+# checkouts also need updated recipes applied before compiling host code.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEVST3StatePatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEAutomationPatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELV2IdentifierPatch.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELinuxBrowserPatch.cmake")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DJUCE_SOURCE_DIR=${juce_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
+    RESULT_VARIABLE OPENSTUDIO_JUCE_PATCH_RESULT
+    OUTPUT_VARIABLE OPENSTUDIO_JUCE_PATCH_OUTPUT
+    ERROR_VARIABLE OPENSTUDIO_JUCE_PATCH_ERROR)
+if(NOT OPENSTUDIO_JUCE_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "Pinned JUCE patch verification failed: ${OPENSTUDIO_JUCE_PATCH_ERROR}")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Run on every configure too: an existing populated dependency may predate
+    # this patch, and FetchContent's PATCH_COMMAND alone would not revisit it.
+    set(JUCE_SOURCE_DIR "${juce_SOURCE_DIR}")
+    include(cmake/ApplyJUCELinuxBrowserPatch.cmake)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # JUCE's bundled libjpeg uses intentional C switch fallthrough. Restrict the
+    # vendor diagnostic exception to its amalgamation, preserving app warnings.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_graphics/juce_graphics_libjpg_1.c"
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-implicit-fallthrough")
+    # Vendor aggregates contain intentional VST FOURCCs and a Release-only
+    # warnOnFailure expression. GCC 11 also warns across Lilv/HarfBuzz enum and
+    # iterator paths; keep these exceptions out of first-party translation units.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.cpp"
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-multichar;-Wno-unused-value")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+        set_property(SOURCE
+            "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.cpp"
+            "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless_lv2_libs.cpp"
+            "${juce_SOURCE_DIR}/modules/juce_graphics/juce_graphics_Harfbuzz.cpp"
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-maybe-uninitialized")
+    endif()
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        # GCC 15's inlined atomic diagnostic treats JUCE's factory-owned IIR
+        # coefficient references as null. Limit it to the vendor DSP module.
+        set_property(SOURCE "${juce_SOURCE_DIR}/modules/juce_dsp/juce_dsp.cpp"
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-stringop-overflow")
+    endif()
+endif()
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+    # The pinned VST3 wrapper intentionally discards warnOnFailure's Release
+    # expression. Apple builds compile JUCE's Objective-C++ aggregates.
+    set_property(SOURCE
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors_headless/juce_audio_processors_headless.mm"
+        "${juce_SOURCE_DIR}/modules/juce_audio_processors/juce_audio_processors.mm"
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-value")
+endif()
 if(MSVC)
     # JUCE's VST3 wrapper has two benign C4458 warnings in vendor code.
     set_source_files_properties(
@@ -178,6 +237,52 @@ endif()
 if(MSVC AND TARGET ysfx-private)
     # Third-party YSFX currently emits C4297 from its public noexcept C API.
     target_compile_options(ysfx-private PRIVATE /W0)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET ysfx-private)
+    # WDL uses the intentional 'YUVx' FOURCC in its bitmap extension protocol.
+    # Keep this exception on that vendor translation unit only.
+    set_property(SOURCE
+        "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/lice/lice_textnew.cpp"
+        TARGET_DIRECTORY ysfx-private
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-multichar")
+    # EEL_F intentionally carries alignment attributes; this static assertion
+    # compares its underlying scalar type with the public YSFX real type.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/sources/ysfx.cpp"
+        TARGET_DIRECTORY ysfx-private
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-ignored-attributes")
+endif()
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$" AND TARGET lice)
+    # Pinned WDL/SWELL supports legacy AppKit APIs, and stb's writer uses
+    # sprintf internally. Limit deprecation exceptions to their vendor sources;
+    # OpenStudio and the rest of YSFX retain normal compiler diagnostics.
+    foreach(_openstudio_swell_source IN ITEMS
+            swell-appstub.mm swell-dlg.mm swell-gdi.mm swell-kb.mm
+            swell-menu.mm swell-misc.mm swell-miscdlg.mm swell-modstub.mm
+            swell-wnd.mm swell-ini.cpp)
+        set_property(SOURCE
+            "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/${_openstudio_swell_source}"
+            TARGET_DIRECTORY lice
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-deprecated-declarations")
+    endforeach()
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/sources/lice_stb/lice_stb_write.cpp"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-deprecated-declarations")
+    # WDL records the native drag mask for compatibility without consuming it.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-dlg.mm"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-but-set-variable")
+    # WDL's key mapper uses Clang's supported variable-length array extension.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-kb.mm"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-vla-extension")
+endif()
+
+if(APPLE AND CMAKE_C_COMPILER_ID STREQUAL "AppleClang" AND TARGET eel2)
+    # The pinned WDL generated parser tracks syntax errors without reading the
+    # counter. Keep this exception on its including C translation unit only.
+    set_property(SOURCE "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/eel2/nseel-yylex.c"
+        TARGET_DIRECTORY eel2
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-but-set-variable")
 endif()
 
 # Fetch Lua 5.4 — scripting engine (MIT license)
@@ -282,6 +387,9 @@ file(GLOB LUA_CORE_SOURCES "${lua_SOURCE_DIR}/src/*.c")
 list(FILTER LUA_CORE_SOURCES EXCLUDE REGEX "lua\\.c$|luac\\.c$")
 add_library(lua_static STATIC ${LUA_CORE_SOURCES})
 target_include_directories(lua_static PUBLIC "${lua_SOURCE_DIR}/src")
+if(UNIX AND NOT APPLE)
+    target_compile_definitions(lua_static PRIVATE LUA_USE_LINUX)
+endif()
 if(MSVC)
     target_compile_definitions(lua_static PRIVATE _CRT_SECURE_NO_WARNINGS)
     # Suppress Lua C code warnings (third-party code)
@@ -331,6 +439,9 @@ juce_add_gui_app(OpenStudio
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-1024x1024.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-16x16.png"
     NEEDS_WEB_BROWSER TRUE
+    # JUCE disables HTTPS on Linux unless this is explicitly requested, even
+    # when libcurl is linked separately. AI downloads and updates require it.
+    NEEDS_CURL TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "OpenStudio needs access to your audio input to record from microphones and audio interfaces."
 )
@@ -382,6 +493,7 @@ target_sources(OpenStudio PRIVATE
     Source/RecordingRecoveryRegression.cpp
     Source/AudioEngine.cpp
     Source/MetronomeRegression.cpp
+    Source/FreePluginRegression.cpp
     Source/NAMDelayRegression.h
     Source/NAMDelayRegression.cpp
     Source/NAMDelayRegressionLifecycle.cpp
@@ -521,9 +633,10 @@ target_include_directories(OpenStudio PRIVATE
     "${ysfx_SOURCE_DIR}/sources"
     # CLAP SDK headers
     "${clap_SOURCE_DIR}/include"
-    # Signalsmith Stretch — header-only pitch shifting (MIT)
-    "${CMAKE_SOURCE_DIR}/thirdparty/signalsmith"
 )
+
+# Keep diagnostics for vendored header-only DSP separate from first-party code.
+target_include_directories(OpenStudio SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/thirdparty")
 
 # ONNX Runtime include (optional)
 if(HAS_ONNXRUNTIME)
@@ -644,6 +757,9 @@ target_compile_definitions(OpenStudio PRIVATE
     JUCE_PLUGINHOST_VST=0
     # Required for JSFX gfx_showmenu() synchronous popup menus
     JUCE_MODAL_LOOPS_PERMITTED=1
+    # Route Debug assertions through Logger so native regression observers and
+    # narrowly scoped injected-I/O diagnostics see the actual JUCE failures.
+    $<$<CONFIG:Debug>:JUCE_LOG_ASSERTIONS=1>
     OPENSTUDIO_UPDATE_MANIFEST_URL="${OPENSTUDIO_UPDATE_MANIFEST_URL_VALUE}"
     OPENSTUDIO_UPDATE_APPCAST_URL="${OPENSTUDIO_UPDATE_APPCAST_URL_VALUE}"
     OPENSTUDIO_RELEASES_PAGE_URL="${OPENSTUDIO_RELEASES_PAGE_URL_VALUE}"
@@ -685,6 +801,7 @@ elseif(UNIX)
         JUCE_PLUGINHOST_AU=0
         JUCE_ALSA=1
         JUCE_JACK=1
+        JUCE_USE_MP3AUDIOFORMAT=1
     )
 endif()
 
@@ -739,14 +856,12 @@ endif()
 if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
     find_package(CURL REQUIRED)
-    pkg_check_modules(ALSA alsa)
-    pkg_check_modules(JACK jack)
-    # webkit2gtk-4.1 is standard on Ubuntu 24.04+; fall back to 4.0 for older distros
-    pkg_check_modules(WEBKIT webkit2gtk-4.1)
-    if(NOT WEBKIT_FOUND)
-        pkg_check_modules(WEBKIT webkit2gtk-4.0)
-    endif()
-    pkg_check_modules(GTK gtk+-3.0)
+    pkg_check_modules(ALSA REQUIRED alsa)
+    pkg_check_modules(JACK REQUIRED jack)
+    # Native Linux packages declare this same maintained runtime stack. Do not
+    # silently configure an application whose embedded interface cannot load.
+    pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.1>=2.40)
+    pkg_check_modules(GTK REQUIRED gtk+-3.0)
     if(ALSA_FOUND)
         target_link_libraries(OpenStudio PRIVATE ${ALSA_LIBRARIES})
         target_include_directories(OpenStudio PRIVATE ${ALSA_INCLUDE_DIRS})
@@ -1298,7 +1413,7 @@ endif()
 
 # Copy Linux AI backend install plans to output directory
 if(UNIX AND NOT APPLE)
-    foreach(LINUX_PLAN_FILE "ai-runtime-install-plan-linux-cuda.json" "ai-runtime-install-plan-linux-rocm.json")
+    foreach(LINUX_PLAN_FILE "ai-runtime-install-plan-linux-cuda.json" "ai-runtime-install-plan-linux-rocm.json" "ai-runtime-install-plan-linux-rocm-gfx1151.json")
         set(LINUX_PLAN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tools/${LINUX_PLAN_FILE}")
         if(EXISTS "${LINUX_PLAN_SRC}")
             openstudio_copy_runtime_file(

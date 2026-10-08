@@ -167,6 +167,9 @@ get-pip.py
 # Audio test samples
 /audio_test_samples/
 /resources/test_fixtures/
+# Local projects and browser captures can contain machine-specific media paths.
+/test projects/
+/frontend/output/
 
 # Logs
 *.log
@@ -182,3 +185,6 @@ Desktop.ini
 # Local cabinet presentation captures
 /tmp_cab_showcase/
 /tmp_cab_showcase_v2/
+
+# Download cache for local AI runtime assembly
+/.cache/

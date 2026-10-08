@@ -323,6 +323,7 @@ export default function AiToolsSetupModal() {
   const {
     showAiToolsSetup,
     aiToolsSetupRequestedFeature,
+    aiToolsSetupRequestedModelId,
     closeAiToolsSetup,
     installAiTools,
     refreshAiToolsStatus,
@@ -333,6 +334,7 @@ export default function AiToolsSetupModal() {
     useShallow((s) => ({
       showAiToolsSetup: s.showAiToolsSetup,
       aiToolsSetupRequestedFeature: s.aiToolsSetupRequestedFeature,
+      aiToolsSetupRequestedModelId: s.aiToolsSetupRequestedModelId,
       closeAiToolsSetup: s.closeAiToolsSetup,
       installAiTools: s.installAiTools,
       refreshAiToolsStatus: s.refreshAiToolsStatus,
@@ -403,13 +405,13 @@ export default function AiToolsSetupModal() {
     if (activeItemId) {
       setSelectedItemId(activeItemId);
     } else if (aiToolsSetupRequestedFeature === "audioGeneration") {
-      setSelectedItemId(ACE_STEP_MODEL_ID);
+      setSelectedItemId(aiToolsSetupRequestedModelId ?? ACE_STEP_MODEL_ID);
     } else if (aiToolsSetupRequestedFeature === "stemSeparation") {
       setSelectedItemId("stemSeparation");
     }
     // Choose an initial item only when opening the dialog or changing its request.
     // Status polling and clicks must not reset the user's model selection.
-  }, [showAiToolsSetup, aiToolsSetupRequestedFeature]);
+  }, [showAiToolsSetup, aiToolsSetupRequestedFeature, aiToolsSetupRequestedModelId]);
 
   if (!showAiToolsSetup) return null;
 
@@ -766,7 +768,7 @@ export default function AiToolsSetupModal() {
           <main className="min-w-0 space-y-4 p-5">
             <div className="flex flex-col gap-3 border-b border-neutral-800 pb-4 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <p className="text-xl font-semibold text-daw-text">{selectedItem.label}</p>
+                <h3 className="text-xl font-semibold text-daw-text">{selectedItem.label}</h3>
                 <p className="mt-1 max-w-2xl text-sm leading-6 text-daw-text-secondary">{selectedItem.description}</p>
               </div>
               <span className="inline-flex w-fit items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-daw-text">

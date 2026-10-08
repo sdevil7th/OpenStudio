@@ -1,18 +1,14 @@
-import { useState, useEffect } from "react";
-import { createPortal } from "react-dom";
-import { ExternalLink, X } from "lucide-react";
+import { useState, useEffect, useSyncExternalStore, useRef } from "react";
+import { ExternalLink } from "lucide-react";
 import {
   nativeBridge,
   type AudioDebugSnapshot,
+  type AudioDeviceDraft,
 } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { Button, NativeSelect } from "./ui";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
-import {
-  resolveAudioBufferSizeOptions,
-  resolveAudioBufferSizeRequest,
-} from "../utils/audioBufferOptions";
+import { Button, NativeSelect, Modal } from "./ui";
+import { AudioSettingsSession, audioDeviceDraft, isWasapiType, wasapiModes } from "../utils/audioSettingsSession";
 import { resolveAudioPerformanceAdvisory } from "../utils/audioPerformanceAdvisory";
 
 interface SettingsModalProps {
@@ -21,180 +17,105 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const [config, setConfig] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [switching, setSwitching] = useState(false); // Track when switching audio types
+  const [session] = useState(() => new AudioSettingsSession((draft) => nativeBridge.queryAudioDeviceSetup(draft)));
+  const { setup: config, applied, loading, resolving: switching, error } = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const [applying, setApplying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [openingDriverPanel, setOpeningDriverPanel] = useState(false);
-  const [driverPanelMessage, setDriverPanelMessage] = useState<{
-    tone: "success" | "error";
-    text: string;
-  } | null>(null);
-  const [audioDiagnostics, setAudioDiagnostics] =
-    useState<AudioDebugSnapshot | null>(null);
-  const [oversamplingFactor, setOversamplingFactor] =
-    useState<2 | 4 | 8>(4);
+  const [driverPanelMessage, setDriverPanelMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [audioDiagnostics, setAudioDiagnostics] = useState<AudioDebugSnapshot | null>(null);
+  const [oversamplingFactor, setOversamplingFactor] = useState<2 | 4 | 8>(4);
+  const appliedOversampling = useRef<2 | 4 | 8>(4);
+  const openGeneration = useRef(0);
   const { refreshAudioDeviceSetup, stop } = useDAWStore(useShallow((s) => ({
     refreshAudioDeviceSetup: s.refreshAudioDeviceSetup,
     stop: s.stop,
   })));
-
-  // Combined loading state for disabling dropdowns
-  const isLoading = loading || switching || applying;
-  const bufferSizeOptions = resolveAudioBufferSizeOptions(
-    config?.bufferSizes,
-    config?.current?.bufferSize,
-  );
-  const selectedBufferSize = resolveAudioBufferSizeRequest(
-    config?.current?.bufferSize,
-    config?.bufferSizes,
-  );
-  const performanceAdvisory =
-    resolveAudioPerformanceAdvisory(audioDiagnostics);
+  const isLoading = loading || switching || applying || openingDriverPanel;
+  const controlsLocked = loading || applying || openingDriverPanel;
+  const bufferSizeOptions = config?.bufferSizes?.length ? config.bufferSizes : [0];
+  const selectedBufferSize = config?.current.bufferSize ?? 0;
+  const performanceAdvisory = resolveAudioPerformanceAdvisory(audioDiagnostics);
   const { deadlineStatus } = performanceAdvisory;
-
-  // Fetch initial config
-  useEffect(() => {
-    if (isOpen) {
-      refreshConfig();
-    }
-  }, [isOpen]);
+  const devicePending = config && applied && JSON.stringify(audioDeviceDraft(config.current)) !== JSON.stringify(audioDeviceDraft(applied.current));
+  const canApply = !!config && config.current.sampleRate > 0 && config.current.bufferSize > 0 && !isLoading && !error;
+  const availableModes = wasapiModes.filter((mode) => config?.availableTypes?.includes(mode.value));
+  const systemOptions = [...new Set((config?.availableTypes ?? []).map((type) => isWasapiType(type) ? "WASAPI" : type))];
 
   const refreshConfig = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      console.log("[SettingsModal] Fetching audio config...");
-      const data = await nativeBridge.getAudioDeviceSetup();
-      console.log("[SettingsModal] Audio Config received:", data);
-
-      if (!data || !data.current) {
-        throw new Error("Invalid config data received from backend");
+    const generation = ++openGeneration.current;
+    await session.load(async () => {
+      const [setup, factor, diagnostics] = await Promise.all([
+        nativeBridge.getAudioDeviceSetup(),
+        nativeBridge.getNAMRackOversamplingFactor(),
+        nativeBridge.getAudioDebugSnapshot().catch(() => null),
+      ]);
+      if (generation === openGeneration.current) {
+        appliedOversampling.current = factor;
+        setOversamplingFactor(factor);
+        setAudioDiagnostics(diagnostics);
       }
-
-      setConfig(data);
-      setOversamplingFactor(
-        await nativeBridge
-          .getNAMRackOversamplingFactor()
-          .catch((): 2 | 4 | 8 => 4),
-      );
-      const diagnostics = await nativeBridge.getAudioDebugSnapshot()
-        .catch((diagnosticError) => {
-          console.warn(
-            "[SettingsModal] Audio diagnostics are unavailable:",
-            diagnosticError,
-          );
-          return null;
-        });
-      setAudioDiagnostics(diagnostics);
-    } catch (e) {
-      console.error("[SettingsModal] Failed to get audio config:", e);
-      setError(e instanceof Error ? e.message : "Unknown error");
-    } finally {
-      setLoading(false);
-    }
+      return setup;
+    });
   };
 
-  const buildBackendAudioDeviceConfig = (current: any) => ({
-    type: current.type || current.audioDeviceType || "",
-    inputDevice: current.inputDevice || "",
-    outputDevice: current.outputDevice || "",
-    sampleRate: Number(current.sampleRate) || 44100,
-    bufferSize: resolveAudioBufferSizeRequest(
-      current.bufferSize,
-      config?.bufferSizes,
-    ),
-  });
+  const close = () => {
+    if (applying || openingDriverPanel) return;
+    ++openGeneration.current;
+    session.invalidate();
+    onClose();
+  };
 
-  const handleApply = async () => {
-    if (!config || !config.current) return;
+  useEffect(() => {
+    if (isOpen) {
+      setDriverPanelMessage(null);
+      void refreshConfig();
+    }
+    return () => {
+      ++openGeneration.current;
+      session.invalidate();
+    };
+  }, [isOpen, session]);
 
+  const handleApply = async (closeAfter = false) => {
+    if (!canApply || !config) return;
+    if (useDAWStore.getState().transport.isRecording) {
+      session.setError("Stop recording before changing audio devices.");
+      return;
+    }
     setApplying(true);
-    setError(null);
+    session.invalidate();
+    session.setError(null);
     try {
-      const backendConfig = buildBackendAudioDeviceConfig(config.current);
-      console.log("[SettingsModal] Applying config:", backendConfig);
       await stop();
-      await nativeBridge.panicMIDI().catch(() => false);
-      const oversamplingApplied =
-        await nativeBridge.setNAMRackOversamplingFactor(oversamplingFactor);
-      if (!oversamplingApplied) {
-        throw new Error("NAM Rack rejected the requested oversampling factor");
-      }
-      const applied = await nativeBridge.setAudioDeviceSetup(backendConfig);
-      if (!applied) {
-        throw new Error("Audio device rejected the requested configuration");
-      }
-
-      // Update the store so TrackHeader immediately gets new input list
+      await nativeBridge.panicMIDI();
+      const result = await nativeBridge.applyAudioDeviceSetup(audioDeviceDraft(config.current));
       await refreshAudioDeviceSetup();
-      await nativeBridge.panicMIDI().catch(() => false);
-
-      onClose();
-    } catch (e) {
-      console.error("[SettingsModal] Failed to set audio config:", e);
-      setError(e instanceof Error ? e.message : "Unknown error");
+      if (!result.success) {
+        // Keep the pending choices for correction; publish the actual recovery state.
+        session.acceptApplied(result.setup, true);
+        throw new Error(result.error || "Audio device rejected the requested configuration.");
+      }
+      session.acceptApplied(result.setup);
+      if (oversamplingFactor !== appliedOversampling.current) {
+        const accepted = await nativeBridge.setNAMRackOversamplingFactor(oversamplingFactor);
+        if (!accepted) {
+          setOversamplingFactor(appliedOversampling.current);
+          throw new Error("Audio device settings were applied, but NAM oversampling was rejected.");
+        }
+        appliedOversampling.current = oversamplingFactor;
+      }
+      setAudioDiagnostics(await nativeBridge.getAudioDebugSnapshot().catch(() => null));
+      if (closeAfter) onClose();
+    } catch (cause) {
+      session.setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setApplying(false);
     }
   };
 
-  const updateConfig = (key: string, value: any) => {
-    if (!config) return;
-
-    const newConfig = {
-      ...config,
-      current: {
-        ...config.current,
-        [key]: value,
-      },
-    };
-
-    setConfig(newConfig);
-
-    // If changing audio system type, we need to switch backend and refresh device lists
-    if (key === "audioDeviceType") {
-      console.log("[SettingsModal] Audio type changed to:", value);
-      // Apply the type change immediately to get correct device lists
-      handleApplyTypeChange(value);
-    }
-  };
-
-  const handleApplyTypeChange = async (newType: string) => {
-    setSwitching(true);
-    try {
-      console.log("[SettingsModal] Switching to audio type:", newType);
-      await stop();
-      await nativeBridge.panicMIDI().catch(() => false);
-      // Tell backend to switch audio device type
-      const switchBufferSize = resolveAudioBufferSizeRequest(
-        config?.current?.bufferSize,
-        config?.bufferSizes,
-      );
-      const applied = await nativeBridge.setAudioDeviceSetup({
-        type: newType,
-        inputDevice: "", // Will use default
-        outputDevice: "", // Will use default
-        sampleRate: 44100,
-        bufferSize: switchBufferSize,
-      });
-      if (!applied) {
-        throw new Error("Audio device rejected the selected audio system");
-      }
-
-      // Wait a bit for backend to switch
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Refresh to get devices for new type
-      await refreshConfig();
-      await nativeBridge.panicMIDI().catch(() => false);
-    } catch (e) {
-      console.error("[SettingsModal] Failed to switch audio type:", e);
-      setError(e instanceof Error ? e.message : "Failed to switch audio system");
-    } finally {
-      setSwitching(false);
-    }
+  const updateConfig = <K extends keyof AudioDeviceDraft>(key: K, value: AudioDeviceDraft[K]) => {
+    setDriverPanelMessage(null);
+    void session.select({ [key]: value });
   };
 
   const handleOpenAudioDeviceControlPanel = async () => {
@@ -209,7 +130,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         );
       }
 
-      await refreshConfig();
+      const setup = await nativeBridge.getAudioDeviceSetup();
+      session.acceptApplied(setup, !!devicePending);
+      if (devicePending) await session.select({});
+      await refreshAudioDeviceSetup();
       const deviceLabel = result.deviceName?.trim() || "ASIO driver";
       setDriverPanelMessage({
         tone: "success",
@@ -231,35 +155,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   if (!isOpen) return null;
 
-  return createPortal(
-    <div
-      className="fixed inset-0 w-screen h-screen bg-black/70 flex justify-center items-center z-[10000] backdrop-blur-[2px]"
-      data-modal-root="true"
-      onClick={onClose}
-      onContextMenu={guardModalContextMenu}
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={close}
+      title="Audio Settings"
+      size="md"
+      fullHeight
+      closeOnEscape={!applying && !openingDriverPanel}
+      closeOnOverlayClick={!applying && !openingDriverPanel}
     >
-      <div
-        className="bg-neutral-900 border border-neutral-700 w-[500px] max-w-[90vw] max-h-[85vh] flex flex-col rounded-lg shadow-2xl text-neutral-200"
-        onClick={(e) => e.stopPropagation()}
-        onContextMenu={guardModalContextMenu}
-      >
-        <div className="flex justify-between items-center p-4 bg-neutral-800 rounded-t-lg border-b border-neutral-700">
-          <h2 className="m-0 text-lg font-medium">Audio Settings</h2>
-          <Button
-            variant="ghost"
-            size="icon-md"
-            onClick={onClose}
-          >
-            <X size={18} />
-          </Button>
-        </div>
-
         <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-5">
           {isLoading && (
             <div className="flex items-center gap-2 p-3 bg-blue-500/15 border border-blue-500 rounded text-blue-400 text-sm animate-pulse">
               <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
               {switching
-                ? "Switching audio system..."
+                ? "Updating device options..."
                 : applying
                   ? "Applying audio settings..."
                   : "Loading audio devices..."}
@@ -272,7 +183,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <Button
                 variant="danger"
                 size="xs"
-                onClick={refreshConfig}
+                onClick={() => config ? void session.select({}) : void refreshConfig()}
                 className="ml-2"
               >
                 Retry
@@ -286,7 +197,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <Button
                 variant="primary"
                 size="xs"
-                onClick={refreshConfig}
+                onClick={() => config ? void session.select({}) : void refreshConfig()}
                 className="ml-2"
               >
                 Load
@@ -294,17 +205,25 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
           )}
 
+          {config?.capabilityMessage && <p role="status" className="text-xs text-neutral-400">{config.capabilityMessage}</p>}
+          {!!config?.adjustments?.length && <p role="status" className="text-xs text-amber-200">{config.adjustments.join(" ")}</p>}
+          {devicePending && <p className="text-xs text-neutral-400">Changes are pending. Audio continues using the applied settings until you choose Apply or OK.</p>}
           {config && config.current && (
             <>
               {/* Audio System (Driver Type) */}
               <NativeSelect
                 label="Audio System"
-                options={config.availableTypes || []}
-                value={config.current.audioDeviceType}
-                onChange={(val) => updateConfig("audioDeviceType", val)}
-                loading={isLoading}
+                options={systemOptions}
+                value={isWasapiType(config.current.audioDeviceType) ? "WASAPI" : config.current.audioDeviceType}
+                onChange={(val) => updateConfig("audioDeviceType", val === "WASAPI" ? availableModes[0].value : String(val))}
+                loading={controlsLocked}
                 fullWidth
               />
+              {isWasapiType(config.current.audioDeviceType) && (
+                <NativeSelect label="Mode" options={availableModes} value={config.current.audioDeviceType}
+                  onChange={(value) => updateConfig("audioDeviceType", String(value))}
+                  loading={controlsLocked} fullWidth />
+              )}
 
               {/* ASIO Driver Selection (only show when ASIO is selected) */}
               {config.current.audioDeviceType === "ASIO" && (
@@ -314,25 +233,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     options={config.outputs || []}
                     value={config.current.outputDevice || (config.outputs && config.outputs[0]) || ""}
                     onChange={(val) => {
-                      console.log("[SettingsModal] ASIO driver selected:", val);
-                      // For ASIO, input and output use the same driver
-                      const newConfig = {
-                        ...config,
-                        current: {
-                          ...config.current,
-                          inputDevice: val,
-                          outputDevice: val,
-                        },
-                      };
-                      setConfig(newConfig);
                       setDriverPanelMessage(null);
+                      void session.select({ inputDevice: String(val), outputDevice: String(val) });
                     }}
-                    loading={isLoading}
+                    loading={controlsLocked}
                     fullWidth
                   />
                   <div className="mt-2 flex items-center justify-between gap-3">
                     <span className="text-xs leading-snug text-neutral-500">
-                      Opens the active driver&apos;s native hardware settings.
+                      {devicePending ? "Apply the pending device settings before opening the driver panel." : "Opens the active driver's native hardware settings."}
                     </span>
                     <Button
                       variant="default"
@@ -340,7 +249,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       icon={<ExternalLink size={14} />}
                       onClick={handleOpenAudioDeviceControlPanel}
                       loading={openingDriverPanel}
-                      disabled={isLoading || openingDriverPanel}
+                      disabled={isLoading || !!devicePending}
                       className="shrink-0"
                     >
                       Open ASIO Control Panel
@@ -372,8 +281,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   label="Input Device"
                   options={config.inputs || []}
                   value={config.current.inputDevice}
-                  onChange={(val) => updateConfig("inputDevice", val)}
-                  loading={isLoading}
+                  onChange={(val) => updateConfig("inputDevice", String(val))}
+                  loading={controlsLocked}
                   fullWidth
                 />
               )}
@@ -384,8 +293,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   label="Output Device"
                   options={config.outputs || []}
                   value={config.current.outputDevice}
-                  onChange={(val) => updateConfig("outputDevice", val)}
-                  loading={isLoading}
+                  onChange={(val) => updateConfig("outputDevice", String(val))}
+                  loading={controlsLocked}
                   fullWidth
                 />
               )}
@@ -393,13 +302,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               {/* Sample Rate */}
               <NativeSelect
                 label="Sample Rate"
-                options={config.sampleRates?.length > 0 ? config.sampleRates : [44100]}
-                value={config.current.sampleRate || (config.sampleRates && config.sampleRates[0]) || 44100}
+                options={config.sampleRates?.length ? config.sampleRates : [0]}
+                value={config.current.sampleRate}
                 onChange={(val) => {
                   console.log("[SettingsModal] Sample rate selected:", val);
                   updateConfig("sampleRate", Number(val));
                 }}
-                formatLabel={(val) => `${val} Hz`}
+                formatLabel={(val) => Number(val) === 0 ? "Automatic" : `${val} Hz`}
                 loading={isLoading}
                 fullWidth
               />
@@ -416,7 +325,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     }
                   }}
                   formatLabel={(val) => `${val}x`}
-                  loading={isLoading}
+                  loading={controlsLocked}
                   fullWidth
                 />
                 <div className="mt-2 text-xs leading-relaxed text-neutral-500">
@@ -442,13 +351,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     console.log("[SettingsModal] Buffer size selected:", val);
                     updateConfig("bufferSize", Number(val));
                   }}
-                  formatLabel={(val) => `${val} samples`}
+                  formatLabel={(val) => Number(val) === 0 ? "Automatic" : `${val} samples`}
                   loading={isLoading}
                   fullWidth
                 />
                 <div className="mt-2 text-xs leading-relaxed text-neutral-500">
-                  Every size reported by the active driver is available. Smaller
-                  buffers reduce latency but leave less time for audio processing. If 8 samples is absent, the selected device, I/O pair, sample rate, and driver did not report it; Windows and Core Audio can offer different sizes.
+                  Options follow the selected device pair. Smaller buffers leave less time for audio processing. The driver confirms the actual size when applied.
                 </div>
                 {performanceAdvisory.shouldWarn && (
                   <div className="mt-2 rounded border border-amber-500/45 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200">
@@ -497,21 +405,22 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           <Button
             variant="default"
             size="md"
-            onClick={onClose}
+            onClick={close}
           >
             Cancel
           </Button>
           <Button
             variant="primary"
             size="md"
-            onClick={handleApply}
-            disabled={!config || isLoading}
+            onClick={() => void handleApply()}
+            disabled={!canApply}
           >
             Apply
           </Button>
+          <Button variant="primary" size="md" onClick={() => void handleApply(true)} disabled={!canApply}>
+            OK
+          </Button>
         </div>
-      </div>
-    </div>,
-    document.body
+    </Modal>
   );
 }

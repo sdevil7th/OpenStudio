@@ -1,4 +1,5 @@
 #include "AppUpdater.h"
+#include "RuntimeLocation.h"
 #include "WindowsPackage.h"
 #include "UpdateManifest.h"
 #include "UpdateInstaller.h"
@@ -42,6 +43,11 @@ AppUpdater::AppUpdater(const juce::File& directory, bool restoreOnStartup) : sta
     {
         storeUpdater = std::make_unique<StoreUpdater>([this](const juce::var& status) { publishStatus(status); });
         return;
+    }
+    if (OpenStudioRuntime::nativePackageFormat().isNotEmpty())
+    {
+        rejectUnsupportedInstallerUpdate({});
+        return; // Never restore or download a staged AppImage for a native package.
     }
     const auto stateFile = stateDirectory.getChildFile("updater-state.json");
     if (stateFile.existsAsFile())
@@ -101,8 +107,19 @@ void AppUpdater::authorisePreparedInstallForQuit()
     installQuitAuthorised = installTransaction != juce::File();
 }
 
-bool AppUpdater::rejectDevelopmentUpdate(const Completion& completion)
+bool AppUpdater::rejectUnsupportedInstallerUpdate(const Completion& completion)
 {
+    const auto packageFormat = OpenStudioRuntime::nativePackageFormat();
+    if (packageFormat.isNotEmpty())
+    {
+        auto result = makeStatus("manual-update",
+            "This installation uses a ." + packageFormat + " package. Download the matching installer for your distribution and open it with your software installer to update OpenStudio.");
+        result.getDynamicObject()->setProperty("updateSource", "linux-package");
+        result.getDynamicObject()->setProperty("releasePageUrl", juce::String(OPENSTUDIO_RELEASES_PAGE_URL));
+        publishStatus(result);
+        if (completion) completion(result);
+        return true;
+    }
     if (!isDevelopmentBuild) return false;
     const auto result = makeStatus("development",
         "Development build: update installers are disabled. Build this checkout to update it.");
@@ -132,7 +149,7 @@ void AppUpdater::checkForUpdates(bool manual, Completion completion)
 {
     if (!MessageThreadLifetime::accepts(jobs.token())) return;
     if (storeUpdater) { storeUpdater->check(manual, std::move(completion)); return; }
-    if (rejectDevelopmentUpdate(completion)) return;
+    if (rejectUnsupportedInstallerUpdate(completion)) return;
     if (installInProgress.load() || getStringProperty(getLastStatus(), "status") == "download-ready")
     {
         if (completion) completion(getLastStatus());
@@ -188,7 +205,7 @@ void AppUpdater::downloadUpdate(Completion completion)
 {
     if (!MessageThreadLifetime::accepts(jobs.token())) return;
     if (storeUpdater) { storeUpdater->download(std::move(completion)); return; }
-    if (rejectDevelopmentUpdate(completion)) return;
+    if (rejectUnsupportedInstallerUpdate(completion)) return;
     if (checkInProgress.load() || installInProgress.exchange(true))
     {
         if (completion) completion(getLastStatus());
@@ -234,7 +251,7 @@ void AppUpdater::installDownloadedUpdate(Completion completion)
 {
     if (!MessageThreadLifetime::accepts(jobs.token())) return;
     if (storeUpdater) { storeUpdater->install(std::move(completion)); return; }
-    if (rejectDevelopmentUpdate(completion)) return;
+    if (rejectUnsupportedInstallerUpdate(completion)) return;
     if (checkInProgress.load() || installInProgress.exchange(true))
     {
         if (completion) completion(getLastStatus());

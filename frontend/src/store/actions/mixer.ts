@@ -2,7 +2,7 @@
 import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
-import { VOLUME_DB_RANGE, VOLUME_MIN_DB } from "../automationParams";
+import { VOLUME_DB_RANGE, VOLUME_MIN_DB, quantizeAutomationLaneValue } from "../automationParams";
 import { automationLaneReadEnabled, automationWriteBehaviorToBackendMode, syncAutomationLaneToBackend } from "./storeHelpers";
 import {
   captureAutomationProjectSnapshot,
@@ -63,10 +63,10 @@ function masterWriteEnabled(state: any): boolean {
 
 function masterLaneMode(state: any, lane: any) {
   if (!masterReadEnabled(state) || !automationLaneReadEnabled(lane)) return "off";
-  if (!masterWriteEnabled(state)) return "read";
+  if (state.masterAutomationTrimWriteEnabled ? lane.param !== "trim_volume" : !masterWriteEnabled(state)) return "read";
   const behavior = state.automationWriteBehavior ?? "touch";
   if (behavior === "overwrite") return "read";
-  return automationWriteBehaviorToBackendMode(behavior);
+  return automationWriteBehaviorToBackendMode(behavior, lane.param);
 }
 
 function syncMasterAutomationModes(state: any) {
@@ -247,8 +247,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
       const next = !current;
       const applyMute = (isMasterMuted: boolean) => {
         set({ isMasterMuted, isModified: true });
-        // The backend represents master mute by receiving zero gain.
-        nativeBridge.setMasterVolume(isMasterMuted ? 0 : get().masterVolume).catch(logBridgeError("master mute"));
+        nativeBridge.setMasterMute(isMasterMuted).catch(logBridgeError("master mute"));
       };
       commandManager.execute({
         type: "TOGGLE_MASTER_MUTE",
@@ -359,7 +358,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
     toggleMasterAutomationEnabled: () => {
       get().toggleMasterAutomationRead();
     },
-    addMasterAutomationLane: (param) => {
+    addMasterAutomationLane: (param, label, metadata, options = {}) => {
       const state = get();
       if (isAutomationEditLocked(state)) return null;
       const existing = state.masterAutomationLanes.find((l) => l.param === param);
@@ -372,16 +371,18 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
           () => set((s) => {
             const nextState = {
               ...s,
-              masterAutomationReadEnabled: true,
-              masterAutomationEnabled: true,
+              masterAutomationReadEnabled: options.read === false ? s.masterAutomationReadEnabled : true,
+              masterAutomationEnabled: options.read === false ? s.masterAutomationReadEnabled : true,
             };
             return {
-              showMasterAutomation: true,
-              masterAutomationReadEnabled: true,
-              masterAutomationEnabled: true,
+              showMasterAutomation: s.showMasterAutomation || (options.visible ?? true),
+              masterAutomationReadEnabled: nextState.masterAutomationReadEnabled,
+              masterAutomationEnabled: nextState.masterAutomationEnabled,
               masterAutomationLanes: s.masterAutomationLanes.map((l) =>
                 l.param === param
-                  ? { ...l, visible: true, readEnabled: true, mode: masterLaneMode(nextState, { ...l, readEnabled: true }) }
+                  ? { ...l, label: label ?? l.label, metadata: metadata ?? l.metadata, visible: options.visible ?? true,
+                    readEnabled: options.read === false ? l.readEnabled : true,
+                    mode: masterLaneMode(nextState, { ...l, readEnabled: options.read === false ? l.readEnabled : true }) }
                   : l,
               ),
             };
@@ -403,24 +404,26 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
         () => set((s) => {
           const nextState = {
             ...s,
-            masterAutomationReadEnabled: true,
-            masterAutomationEnabled: true,
+            masterAutomationReadEnabled: options.read === false ? s.masterAutomationReadEnabled : true,
+            masterAutomationEnabled: options.read === false ? s.masterAutomationReadEnabled : true,
           };
           const baseLane = {
             id: newId,
             param,
+            ...(label ? { label } : {}),
+            ...(metadata ? { metadata } : {}),
             points: [],
-            visible: true,
+            visible: options.visible ?? true,
             mode: "read",
             armed: false,
-            readEnabled: true,
+            readEnabled: options.read ?? true,
           };
           const nextLane = { ...baseLane, mode: masterLaneMode(nextState, baseLane) };
           laneToSync = nextLane;
           return {
-            showMasterAutomation: true,
-            masterAutomationReadEnabled: true,
-            masterAutomationEnabled: true,
+            showMasterAutomation: s.showMasterAutomation || (options.visible ?? true),
+            masterAutomationReadEnabled: nextState.masterAutomationReadEnabled,
+            masterAutomationEnabled: nextState.masterAutomationEnabled,
             masterAutomationLanes: [...s.masterAutomationLanes, nextLane],
           };
         }),
@@ -449,7 +452,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
     setMasterAutomationLaneRead: (laneId, enabled) => {
       if (isAutomationEditLocked(get())) return;
       const lane = get().masterAutomationLanes.find((l) => l.id === laneId);
-      if (!lane || automationLaneReadEnabled(lane) === Boolean(enabled)) return;
+      if (!lane || (automationLaneReadEnabled(lane) === Boolean(enabled) && (!enabled || get().masterAutomationReadEnabled))) return;
       commitMasterAutomationProjectMutation(
         set,
         get,
@@ -458,19 +461,22 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
         () => set((s) => {
           const nextState = {
             ...s,
+            masterAutomationReadEnabled: enabled ? true : s.masterAutomationReadEnabled,
+            masterAutomationEnabled: enabled ? true : s.masterAutomationEnabled,
             masterAutomationLanes: s.masterAutomationLanes.map((l) => (
               l.id === laneId ? { ...l, readEnabled: Boolean(enabled) } : l
             )),
           };
           return {
+            masterAutomationReadEnabled: nextState.masterAutomationReadEnabled,
+            masterAutomationEnabled: nextState.masterAutomationEnabled,
             masterAutomationLanes: nextState.masterAutomationLanes.map((l) => (
-              l.id === laneId ? { ...l, mode: masterLaneMode(nextState, l) } : l
+              { ...l, mode: masterLaneMode(nextState, l) }
             )),
           };
         }),
         () => {
-          const updatedLane = get().masterAutomationLanes.find((l) => l.id === laneId);
-          if (updatedLane) syncAutomationLaneToBackend("master", updatedLane);
+          syncMasterAutomationModes(get());
           get().updateAutomatedValues?.();
         },
       );
@@ -623,7 +629,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
       const oldPoints = sortMasterAutomationPoints(lane.points);
       const newPoints = sortMasterAutomationPoints([
         ...oldPoints,
-        normalizedMasterAutomationPoint(time, value),
+        normalizedMasterAutomationPoint(time, quantizeAutomationLaneValue(lane, value)),
       ]);
       const oldReadState = {
         masterAutomationReadEnabled: state.masterAutomationReadEnabled,
@@ -715,7 +721,7 @@ export const mixerActions = (set: SetFn, get: GetFn) => ({
       if (!Number.isInteger(pointIndex) || pointIndex < 0 || pointIndex >= oldPoints.length) return;
       const movedPoint = {
         ...oldPoints[pointIndex],
-        ...normalizedMasterAutomationPoint(time, value, oldPoints[pointIndex].id),
+        ...normalizedMasterAutomationPoint(time, quantizeAutomationLaneValue(lane, value), oldPoints[pointIndex].id),
       };
       const newPoints = sortMasterAutomationPoints(oldPoints.map((point, index) => (
         index === pointIndex ? movedPoint : point

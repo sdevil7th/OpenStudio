@@ -9,7 +9,7 @@
  * PolyPitchDetector — Polyphonic pitch detection via Spotify's Basic-Pitch ONNX model.
  *
  * Model I/O (Basic-Pitch NMP):
- *   Input:  [1, N_frames, N_harmonics, 1] float32 — Constant-Q harmonic stacking of audio at 22050 Hz
+ *   Input:  [1, 43844, 1] float32 — raw mono audio at 22050 Hz
  *   Output 1 (contour): [1, T, 264] — pitch salience map (time x frequency bins, ~1/3 semitone)
  *   Output 2 (note):    [1, T, 88]  — note activation probabilities for 88 piano keys (A0-C8, MIDI 21-108)
  *   Output 3 (onset):   [1, T, 88]  — onset activation probabilities
@@ -40,6 +40,7 @@ public:
     struct PolyAnalysisResult
     {
         juce::String clipId;
+        juce::String error;
         double sampleRate = 22050.0;
         int hopSize       = 256;   // samples at 22050 Hz (~11.6ms)
 

@@ -34,7 +34,7 @@ function MenuList({ items, anchor, label, owner, nested = false, close, back, au
     return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
   }, [anchor, nested, autoFocus]);
   return createPortal(<div ref={ref} role="menu" aria-label={`${label} menu`} data-menu-owner={owner}
-    className="fixed left-[var(--menu-left)] top-[var(--menu-top)] z-[10000] flex max-h-[calc(100dvh-16px)] min-w-48 max-w-[calc(100vw-16px)] flex-col overflow-y-auto rounded border border-daw-border bg-daw-panel py-1 shadow-xl"
+    className="fixed left-[var(--menu-left)] top-[var(--menu-top)] z-[10000] flex max-h-[min(80dvh,calc(100dvh-16px))] overscroll-contain min-w-48 max-w-[calc(100vw-16px)] flex-col overflow-y-auto rounded border border-daw-border bg-daw-panel py-1 shadow-xl"
     style={{ "--menu-left": `${position.left}px`, "--menu-top": `${position.top}px` } as CSSProperties}
     onKeyDown={event => {
       if (event.target instanceof HTMLElement && !ref.current?.contains(event.target)) return;

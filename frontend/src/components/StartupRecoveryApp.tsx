@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { usesNativeWindowChrome } from "../utils/windowEnvironment";
+import { nextNativeRequestId } from "../utils/nativeRequestId";
 
 type StartupDiagnostics = {
   windowRole?: string;
@@ -31,11 +32,11 @@ export function StartupRecoveryApp() {
       if (!backend?.emitEvent || !backend?.addEventListener) {
         return undefined;
       }
-      const emitEvent = backend.emitEvent;
-      const addEventListener = backend.addEventListener;
-      const removeEventListener = backend.removeEventListener;
+      const emitEvent = backend.emitEvent.bind(backend);
+      const addEventListener = backend.addEventListener.bind(backend);
+      const removeEventListener = backend.removeEventListener?.bind(backend);
 
-      const resultId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+      const resultId = nextNativeRequestId(backend);
 
       return await new Promise<T | undefined>((resolve, reject) => {
         let token = "";
@@ -98,10 +99,10 @@ export function StartupRecoveryApp() {
       return undefined;
     }
 
-    const emitEvent = backend.emitEvent;
-    const addEventListener = backend.addEventListener;
-    const removeEventListener = backend.removeEventListener;
-    const resultId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+    const emitEvent = backend.emitEvent.bind(backend);
+    const addEventListener = backend.addEventListener.bind(backend);
+    const removeEventListener = backend.removeEventListener?.bind(backend);
+    const resultId = nextNativeRequestId(backend);
 
     return await new Promise<T | undefined>((resolve, reject) => {
       let token = "";

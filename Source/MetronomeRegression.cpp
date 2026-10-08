@@ -1,5 +1,6 @@
 #include "MetronomeRegression.h"
 #include "Metronome.h"
+#include "MetronomeSoundRegression.h"
 
 #include <array>
 #include <limits>
@@ -312,6 +313,50 @@ juce::var runMetronomeRegression()
               "The 50ms synthesized click has a 1ms terminal taper, not a hard non-zero cutoff.");
     }
 
+    for (const double rate : { 44100.0, 48000.0, 96000.0 })
+    {
+        Metronome timer;
+        timer.prepareToPlay(rate, 512);
+        timer.setBpm(120);
+        bool pass = timer.controlPracticeTimer("start", 1.0);
+        int processed = 0;
+        while (processed < static_cast<int>(rate)) {
+            const int count = juce::jmin(127, static_cast<int>(rate) - processed);
+            liveBlock(timer, 0, false, count);
+            processed += count;
+        }
+        auto state = timer.getPracticeTimer();
+        pass = pass && state["status"].toString() == "finished" && std::abs(static_cast<double>(state["elapsed"]) - 1.0) < 1.0e-9;
+        check("timer_exact_duration_" + juce::String(rate), pass,
+              "Native elapsed time reaches the requested second at irregular block boundaries.");
+        liveBlock(timer, 0, false, 512); // Allow the click's short de-click tail.
+        check("timer_finished_silent_" + juce::String(rate), silent(liveBlock(timer, 0, false, 512)),
+              "No new beats are generated after countdown completion.");
+        timer.controlPracticeTimer("start", 0);
+        liveBlock(timer, 0, false, 100);
+        timer.controlPracticeTimer("pause", 0);
+        liveBlock(timer, 0, false, 100);
+        const auto paused = static_cast<double>(timer.getPracticeTimer()["elapsed"]);
+        liveBlock(timer, 0, false, 100);
+        pass = timer.getPracticeTimer()["status"].toString() == "paused"
+            && static_cast<double>(timer.getPracticeTimer()["elapsed"]) == paused;
+        timer.controlPracticeTimer("resume", 0);
+        timer.setBpm(90);
+        liveBlock(timer, 0, false, 100);
+        pass = pass && std::abs(static_cast<double>(timer.getPracticeTimer()["elapsed"]) - 200.0 / rate) < 1.0e-9;
+        check("timer_pause_tempo_resume_" + juce::String(rate), pass,
+              "Pause freezes elapsed time; tempo changes do not alter elapsed seconds.");
+        liveBlock(timer, 0, true);
+        check("timer_transport_handover_" + juce::String(rate), timer.getPracticeTimer()["status"].toString() == "interrupted",
+              "Transport ends timed practice instead of allowing expiry to affect recording.");
+        timer.controlPracticeTimer("start", 60);
+        timer.setPracticePlaybackAvailable(false);
+        check("timer_device_loss_" + juce::String(rate), timer.getPracticeTimer()["status"].toString() == "interrupted"
+              && !timer.controlPracticeTimer("start", 60), "Device loss cancels the timer and rejects a new start.");
+    }
+
+    runMetronomeSoundRegression(check);
+
     // Measure only the click generator; not a guarantee for plugins/device/UI.
     for (const int block : { 8, 16, 128, 512 })
     {
@@ -342,5 +387,6 @@ juce::var runMetronomeRegression()
     root->setProperty("suites", suites);
     root->setProperty("timings", timings);
     root->setProperty("liveTwoPluginASIOSession", "not_asserted");
+    root->setProperty("cowbellTimbre", "not_asserted");
     return juce::var(root);
 }

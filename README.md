@@ -40,6 +40,18 @@
 
 ---
 
+## See OpenStudio In Motion
+
+<p align="center">
+  <a href="https://openstudio.org.in">
+    <img src="assets/readme/openstudio-session.gif" width="960" alt="Screen recording of the OpenStudio desktop app playing four audio tracks and two MIDI instruments, with live mixer meters and the piano roll"/>
+  </a>
+</p>
+
+Recorded in the Windows desktop app using original generated audio and MIDI:
+four audio tracks, two built-in instruments, live mixer meters, and the piano roll.
+Recreate the demo project with [the sample generator](tools/generate-readme-demo.py).
+
 ## OpenStudio In One Sentence
 
 OpenStudio is for people who want a real DAW surface, not just a prompt box: record or import material, edit it deeply, host plugins, tune vocals, split stems, generate or transform ideas with local AI tools, and render deliverables without leaving the session.
@@ -375,7 +387,7 @@ Local NAM captures and IR files remain usable offline.
 
 ## macOS First Launch Note
 
-The v1 macOS community package is unsigned. Verify the published SHA-256 checksum, try to open the app once, then use **System Settings > Privacy & Security > Open Anyway** and confirm **Open**. This is Apple's per-app override and preserves the diagnostic distinction between Gatekeeper and an OpenStudio startup failure.
+The v1 macOS package is unsigned. Verify the published SHA-256 checksum, try to open the app once, then use **System Settings > Privacy & Security > Open Anyway** and confirm **Open**. This is Apple's per-app override and preserves the diagnostic distinction between Gatekeeper and an OpenStudio startup failure.
 
 Only when diagnosing a verified artifact that still cannot be approved through the macOS UI, compare behavior after removing quarantine:
 

@@ -1,3 +1,4 @@
+#include "NativeWindowTheme.h"
 #include "PluginWindowManager.h"
 #include "IsolatedPlugin.h"
 #include "ARADebug.h"
@@ -258,6 +259,7 @@ PluginWindowManager::PluginWindow::PluginWindow(PluginWindowManager& ownerIn,
 {
     setUsingNativeTitleBar(true);
     setResizable(true, false);
+    applyNativeWindowTheme(*this);
 
     if (auto* editor = processor.createEditorAndMakeActive())
     {

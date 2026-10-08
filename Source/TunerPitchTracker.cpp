@@ -614,14 +614,21 @@ private:
             kPitchMedianSize, pitchHistoryCount + 1);
 
         std::array<double, kPitchMedianSize> sorted {};
-        for (int index = 0; index < pitchHistoryCount; ++index)
-            sorted[static_cast<size_t>(index)] =
-                pitchHistory[static_cast<size_t>(index)];
-        std::sort(
-            sorted.begin(),
-            sorted.begin() + pitchHistoryCount);
-        const double medianCents =
-            sorted[static_cast<size_t>(pitchHistoryCount / 2)];
+        const auto count = juce::jlimit(1, kPitchMedianSize, pitchHistoryCount);
+        // The window has at most five values. Bounded insertion avoids the
+        // general introsort implementation's speculative out-of-bounds paths.
+        for (int index = 0; index < count; ++index)
+        {
+            const double value = pitchHistory[static_cast<size_t>(index)];
+            int insertion = index;
+            while (insertion > 0 && sorted[static_cast<size_t>(insertion - 1)] > value)
+            {
+                sorted[static_cast<size_t>(insertion)] = sorted[static_cast<size_t>(insertion - 1)];
+                --insertion;
+            }
+            sorted[static_cast<size_t>(insertion)] = value;
+        }
+        const double medianCents = sorted[static_cast<size_t>(count / 2)];
 
         const double hopSeconds =
             static_cast<double>(kAnalysisHopSize)

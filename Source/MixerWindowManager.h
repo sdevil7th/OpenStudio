@@ -29,6 +29,8 @@ public:
     bool isFrontendReady() const;
     juce::String getFrontendStartupStateDescription() const;
     juce::String getStateDescription() const;
+    // Read-only native-window diagnostics, also used by the lifecycle harness.
+    juce::DocumentWindow* getNativeWindow() const;
 
 private:
     class MixerWindow;
@@ -67,7 +69,7 @@ private:
     static void releaseGlobalCreateSlot(const juce::String& title);
     bool ensureMessageThread(const char* action) const;
     bool createWindow(const juce::Rectangle<int>& targetBounds, bool visible);
-    void scheduleStartupNudge();
+    void scheduleStartupLayoutRefresh();
     void beginClose(bool notifyClosed);
     void finishClose();
     void releaseGlobalCloseSlot();
@@ -94,7 +96,7 @@ private:
     static constexpr int closeReadinessPollMs = 250;
     static constexpr int closeStartupMaxWaitMs = 8000;
     static constexpr int createSettleDelayMs = 1200;
-    static constexpr int startupNudgeDelayMs = 600;
+    static constexpr int startupLayoutDelayMs = 600;
     static int globalCloseDepth;
     static int globalCreateDepth;
     static juce::Array<MixerWindowManager*> managersWithPendingRequests;

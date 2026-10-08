@@ -38,7 +38,7 @@ interface AIWorkflowModalProps {
   onClose: () => void;
   onGenerate: () => void | Promise<void>;
   onCancel: () => void | Promise<void>;
-  onOpenAiToolsSetup: (requestedFeature?: AiFeatureId) => void;
+  onOpenAiToolsSetup: (requestedFeature?: AiFeatureId, modelId?: AiMusicModelId) => void;
   onModelChange: (modelId: AiMusicModelId) => void;
   onWorkflowChange: (workflowId: string) => void;
   onParamsChange: (params: Record<string, unknown>) => void;
@@ -420,7 +420,7 @@ export function AIWorkflowModal({
                     className="mt-3"
                     variant="secondary"
                     size="sm"
-                    onClick={() => onOpenAiToolsSetup("audioGeneration")}
+                    onClick={() => onOpenAiToolsSetup("audioGeneration", modelId)}
                   >
                     Open AI Tools Setup
                   </Button>
@@ -578,7 +578,7 @@ export function AIWorkflowModal({
         ) : (
           <>
             {!isMusicGenerationReady ? (
-              <Button variant="secondary" onClick={() => onOpenAiToolsSetup("audioGeneration")}>
+              <Button variant="secondary" onClick={() => onOpenAiToolsSetup("audioGeneration", modelId)}>
                 Set Up {model.shortLabel}
               </Button>
             ) : null}

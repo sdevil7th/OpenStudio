@@ -1,4 +1,5 @@
 #if defined(__APPLE__)
+#include "RuntimeLocation.h"
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
 #include <Security/Security.h>
@@ -59,6 +60,8 @@ extern char** environ;
 #include <wincrypt.h>
 #include <oleidl.h>
 #include <shellapi.h>
+#include <WebView2.h>
+#include <wrl.h>
 #endif
 
 #ifndef OPENSTUDIO_TONE3000_CLIENT_ID
@@ -467,7 +470,7 @@ juce::WebBrowserComponent::Options::Backend getPreferredBrowserBackend()
 
 juce::File getExecutableDirectory()
 {
-    return juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory();
+    return OpenStudioRuntime::executableFile().getParentDirectory();
 }
 
 juce::File getRuntimeAssetRoot()
@@ -484,7 +487,9 @@ juce::File getRuntimeAssetRoot()
 juce::Array<juce::File> getPackagedFrontendCandidates()
 {
     const auto exeDir = getExecutableDirectory();
+    const auto runtimeRoot = getRuntimeAssetRoot();
     return {
+        runtimeRoot.getChildFile("webui").getChildFile("index.html"),
         exeDir.getChildFile("webui").getChildFile("index.html"),
         exeDir.getParentDirectory().getChildFile("Resources").getChildFile("webui").getChildFile("index.html"),
         exeDir.getChildFile("../../../frontend/dist/index.html")
@@ -509,8 +514,52 @@ juce::File getWebView2UserDataFolder()
         .getChildFile("WebView2UserData");
 }
 
+#if JUCE_WINDOWS
+void reconcileInheritedWebView2RuntimeOverride()
+{
+    static const bool checked = []
+    {
+        if (WindowsPackage::isStoreManaged())
+            return true;
+
+        const auto inheritedFolder = juce::SystemStats::getEnvironmentVariable(
+            "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", {});
+        if (inheritedFolder.isEmpty())
+            return true;
+
+        const auto canCreateEnvironment = []
+        {
+            const auto handler = Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+                [] (HRESULT, ICoreWebView2Environment*) -> HRESULT { return S_OK; });
+            return SUCCEEDED(::CreateCoreWebView2EnvironmentWithOptions(
+                nullptr, getWebView2UserDataFolder().getFullPathName().toWideCharPointer(),
+                nullptr, handler.Get()));
+        };
+
+        if (canCreateEnvironment()
+            || ! ::SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", nullptr))
+            return true;
+
+        if (canCreateEnvironment())
+        {
+            juce::Logger::writeToLog(
+                "Ignored unusable inherited WebView2 fixed-runtime override: " + inheritedFolder);
+            return true;
+        }
+
+        ::SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+                                  inheritedFolder.toWideCharPointer());
+        return true;
+    }();
+    juce::ignoreUnused(checked);
+}
+#endif
+
 juce::WebBrowserComponent::Options getEmbeddedBrowserBaseOptions()
 {
+#if JUCE_WINDOWS
+    reconcileInheritedWebView2RuntimeOverride();
+#endif
     auto options = juce::WebBrowserComponent::Options()
                        .withBackend(getPreferredBrowserBackend())
                        .withKeepPageLoadedWhenBrowserIsHidden();
@@ -527,6 +576,11 @@ juce::WebBrowserComponent::Options getEmbeddedBrowserBaseOptions()
 #endif
 
     return options;
+}
+
+bool areEmbeddedBrowserOptionsSupported()
+{
+    return juce::WebBrowserComponent::areOptionsSupported(getEmbeddedBrowserBaseOptions());
 }
 
 juce::File getStartupLogFile()
@@ -842,6 +896,37 @@ juce::String detectWebView2RuntimeVersion()
     return bestVersion;
 }
 
+juce::String probeWebView2StartupFailure()
+{
+    const auto formatResult = [] (HRESULT result)
+    {
+        return "0x" + juce::String::toHexString(static_cast<int>(result)).paddedLeft('0', 8);
+    };
+
+    LPWSTR version = nullptr;
+    const auto versionResult = ::GetAvailableCoreWebView2BrowserVersionString(nullptr, &version);
+    const auto reportedVersion = version != nullptr ? juce::String(version) : juce::String();
+    if (version != nullptr)
+        ::CoTaskMemFree(version);
+
+    const auto userDataFolder = getWebView2UserDataFolder();
+    const auto handler = Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+        [] (HRESULT result, ICoreWebView2Environment*) -> HRESULT
+        {
+            juce::Logger::writeToLog("WebView2 environment callback HRESULT: 0x"
+                + juce::String::toHexString(static_cast<int>(result)).paddedLeft('0', 8));
+            return S_OK;
+        });
+    const auto createResult = ::CreateCoreWebView2EnvironmentWithOptions(
+        nullptr, userDataFolder.getFullPathName().toWideCharPointer(), nullptr, handler.Get());
+
+    return "WebView2 loader version HRESULT: " + formatResult(versionResult)
+        + ", loader version: " + (reportedVersion.isNotEmpty() ? reportedVersion : "unavailable")
+        + ", environment creation HRESULT: " + formatResult(createResult)
+        + ", user data parent writable: "
+        + juce::String(userDataFolder.getParentDirectory().hasWriteAccess() ? "Yes" : "No");
+}
+
 bool isVCRedistInstalled(juce::String* detectedVersion = nullptr)
 {
     if (WindowsPackage::isStoreManaged())
@@ -1008,6 +1093,8 @@ juce::String getWindowRoleQueryValue(MainComponent::WindowRole role)
 {
     if (role == MainComponent::WindowRole::mixer)
         return "mixer";
+    if (role == MainComponent::WindowRole::pitchEditor)
+        return "pitchEditor";
     if (role == MainComponent::WindowRole::midiEditor)
         return "midiEditor";
     if (role == MainComponent::WindowRole::pluginEditor)
@@ -1035,16 +1122,8 @@ juce::String getHostPlatformQueryValue()
 
 juce::String getWindowChromeQueryValue(MainComponent::WindowRole role)
 {
-    if (role == MainComponent::WindowRole::mixer
-        || role == MainComponent::WindowRole::midiEditor
-        || role == MainComponent::WindowRole::pluginEditor)
-        return "native";
-
-#if JUCE_MAC
+    juce::ignoreUnused(role);
     return "native";
-#else
-    return "custom";
-#endif
 }
 
 juce::File getOpenStudioNAMRoot()
@@ -1283,21 +1362,123 @@ bool sleepForTone3000Task(int milliseconds)
     return ! isTone3000TaskCancelled();
 }
 
+struct ScopedTone3000TaskCancellation
+{
+    explicit ScopedTone3000TaskCancellation(
+        const std::atomic<bool>* cancellation)
+        : previous(activeTone3000TaskCancellation)
+    {
+        activeTone3000TaskCancellation = cancellation;
+    }
+
+    ~ScopedTone3000TaskCancellation()
+    {
+        activeTone3000TaskCancellation = previous;
+    }
+
+    const std::atomic<bool>* previous = nullptr;
+};
+
+struct ScopedTone3000CredentialStorageLock
+{
+    explicit ScopedTone3000CredentialStorageLock(
+        std::mutex& mutex, int maximumWaitMs = 30000)
+        : firstLock(mutex, std::defer_lock)
+    {
+        acquire([this] { return firstLock.try_lock(); }, maximumWaitMs);
+    }
+
+    ScopedTone3000CredentialStorageLock(
+        std::mutex& first, std::mutex& second,
+        int maximumWaitMs = 30000)
+        : firstLock(first, std::defer_lock),
+          secondLock(second, std::defer_lock)
+    {
+        acquire([this]
+        {
+            // A failed attempt releases both locks; a waiting dual transaction
+            // must never retain one mutex while another owner finishes its I/O.
+            return std::try_lock(firstLock, secondLock) == -1;
+        }, maximumWaitMs);
+    }
+
+    template <typename TryLock>
+    void acquire(TryLock&& tryLock, int maximumWaitMs)
+    {
+        const auto deadline = juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! isTone3000TaskCancelled())
+        {
+            if (tryLock())
+            {
+                if (isTone3000TaskCancelled())
+                {
+                    if (secondLock.owns_lock()) secondLock.unlock();
+                    if (firstLock.owns_lock()) firstLock.unlock();
+                    return;
+                }
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(25))
+                return;
+        }
+    }
+
+    std::unique_lock<std::mutex> firstLock;
+    std::unique_lock<std::mutex> secondLock;
+    bool locked = false;
+};
+
 struct ScopedTone3000CredentialProcessLock
 {
-    ScopedTone3000CredentialProcessLock()
-        : locked(tone3000CredentialProcessLock.enter(30000))
+    explicit ScopedTone3000CredentialProcessLock(
+        const ScopedTone3000CredentialStorageLock& storageGuard,
+        juce::InterProcessLock& processLockIn = tone3000CredentialProcessLock,
+        int maximumWaitMs = 30000)
+        : processLock(processLockIn)
     {
+        if (! storageGuard.locked)
+            return;
+        const auto deadline = juce::Time::getMillisecondCounterHiRes()
+            + juce::jmax(1, maximumWaitMs);
+        while (! isTone3000TaskCancelled())
+        {
+            // JUCE holds its own process-local CriticalSection during enter().
+            // A long timeout here would also block another canceled worker.
+            if (processLock.enter(0))
+            {
+                if (isTone3000TaskCancelled())
+                {
+                    processLock.exit();
+                    return;
+                }
+                locked = true;
+                return;
+            }
+            if (juce::Time::getMillisecondCounterHiRes() >= deadline
+                || ! sleepForTone3000Task(25))
+                return;
+        }
     }
 
     ~ScopedTone3000CredentialProcessLock()
     {
         if (locked)
-            tone3000CredentialProcessLock.exit();
+            processLock.exit();
     }
 
+    juce::InterProcessLock& processLock;
     bool locked = false;
 };
+
+juce::String getTone3000CredentialLockError()
+{
+    return isTone3000TaskCancelled()
+        ? juce::String("The TONE3000 credential operation was canceled.")
+        : juce::String("Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+}
 
 struct ScopedTone3000CatalogRefreshLock
 {
@@ -2528,13 +2709,13 @@ juce::var makeTone3000AuthStatus()
     juce::String error;
     juce::var stored;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
             stored = loadProtectedJson(getTone3000TokenFile(), error);
         else
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
     }
     juce::DynamicObject::Ptr status = new juce::DynamicObject();
     status->setProperty("success", true);
@@ -2599,13 +2780,13 @@ juce::String getStoredTone3000AccessToken()
     juce::String error;
     juce::var stored;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
             stored = loadProtectedJson(getTone3000TokenFile(), error);
         else
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
     }
     if (auto* object = stored.getDynamicObject())
     {
@@ -3174,6 +3355,10 @@ juce::var searchTone3000NAM(juce::var optionsPayload)
     if (accessToken.isEmpty())
         return makeTone3000Error("Connect TONE3000 or refresh the stored token before live search");
 
+    const auto collection = options != nullptr ? getModelObjectString(options, "collection") : juce::String();
+    const bool accountCollection = collection.isNotEmpty();
+    if (accountCollection && collection != "favorited" && collection != "created" && collection != "downloaded")
+        return makeTone3000Error("Unsupported TONE3000 account collection");
     const auto query = options != nullptr ? getModelObjectString(options, "query") : juce::String();
     const auto sort = normaliseTone3000Sort(options != nullptr ? getModelObjectString(options, "sort") : juce::String());
     const auto gears = normaliseTone3000Gears(options != nullptr ? getModelObjectString(options, "gears") : juce::String("amp_amp-cab"));
@@ -3189,7 +3374,7 @@ juce::var searchTone3000NAM(juce::var optionsPayload)
     const int modelPageSize = juce::jlimit(1, 100, options != nullptr ? getModelObjectInt(options, "model_page_size", "modelPageSize") : 20);
     const bool includeModels = options == nullptr || !options->hasProperty("includeModels") || static_cast<bool>(options->getProperty("includeModels"));
     auto architectures = makeTone3000ArchitectureRequests(architecture);
-    if (format == "ir")
+    if (format == "ir" || accountCollection)
     {
         architectures.clear();
         architectures.add(juce::String());
@@ -3203,16 +3388,26 @@ juce::var searchTone3000NAM(juce::var optionsPayload)
 
     for (const auto& architectureRequest : architectures)
     {
-        auto url = juce::URL("https://www.tone3000.com/api/v1/tones/search")
+        auto url = juce::URL("https://www.tone3000.com/api/v1/tones/"
+                            + (accountCollection ? collection : juce::String("search")))
             .withParameter("query", query)
             .withParameter("page", juce::String(page))
-            .withParameter("page_size", juce::String(pageSize))
-            .withParameter("sort", sort)
-            .withParameter("format", format);
-        if (gears.isNotEmpty())
-            url = url.withParameter("gears", gears);
-        if (architectureRequest.isNotEmpty())
-            url = url.withParameter("architecture", architectureRequest);
+            .withParameter("page_size", juce::String(pageSize));
+        if (accountCollection)
+        {
+            // Account lists accept one gear, query and pagination, not search's
+            // format/architecture/sort filters. Remaining filters apply in the UI.
+            if (gears.isNotEmpty() && ! gears.containsChar('_'))
+                url = url.withParameter("gear", gears);
+        }
+        else
+        {
+            url = url.withParameter("sort", sort).withParameter("format", format);
+            if (gears.isNotEmpty())
+                url = url.withParameter("gears", gears);
+            if (architectureRequest.isNotEmpty())
+                url = url.withParameter("architecture", architectureRequest);
+        }
 
         auto payload = getTone3000Json(url, accessToken, "TONE3000 tone search");
         if (isTone3000ErrorPayload(payload))
@@ -3238,7 +3433,7 @@ juce::var searchTone3000NAM(juce::var optionsPayload)
 
                         tone->setProperty("source", "tone3000-live");
                         tone->setProperty("sortBucket", sort);
-                        tone->setProperty("searchArchitecture", architectureRequest);
+                        tone->setProperty("searchArchitecture", accountCollection ? architecture : architectureRequest);
                         tones.add(toneVar);
                     }
                 }
@@ -3332,6 +3527,21 @@ juce::var runTone3000AuthenticatedQA()
     return juce::var(result.get());
 }
 
+juce::var getTone3000User()
+{
+    const auto payload = getTone3000Json(
+        juce::URL("https://www.tone3000.com/api/v1/user"),
+        getStoredTone3000AccessToken(), "TONE3000 account");
+    if (isTone3000ErrorPayload(payload))
+        return payload;
+    if (payload.getDynamicObject() == nullptr
+        || getModelObjectString(payload.getDynamicObject(), "username").trim().isEmpty())
+        return makeTone3000Error("TONE3000 account response was invalid");
+    auto result = makeTone3000Success();
+    result.getDynamicObject()->setProperty("user", payload);
+    return result;
+}
+
 juce::var getTone3000ToneDetail(int toneId, const juce::String& architecture)
 {
     const auto accessToken = getStoredTone3000AccessToken();
@@ -3382,7 +3592,10 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
                                     const juce::String& redirectUri,
                                     const juce::String& prompt,
                                     const juce::String& toneId,
-                                    const juce::String& loginHint)
+                                    const juce::String& loginHint,
+                                    const juce::String& format = "nam",
+                                    const juce::String& gears = "amp_amp-cab",
+                                    const juce::String& architecture = "2")
 {
     if (clientId.trim().isEmpty())
         return makeTone3000Error("Missing TONE3000 client_id");
@@ -3401,10 +3614,13 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
         .withParameter("code_challenge", challenge)
         .withParameter("code_challenge_method", "S256")
         .withParameter("state", state)
-        .withParameter("platform", "nam")
-        .withParameter("gears", "amp_amp-cab")
-        .withParameter("architecture", "2")
-        .withParameter("menubar", "true");
+        .withParameter("format", format == "ir" ? "ir" : "nam")
+        .withParameter("menubar", "true")
+        .withParameter("preview", "true");
+    if (gears.isNotEmpty())
+        authUrl = authUrl.withParameter("gears", gears);
+    if (architecture == "1" || architecture == "2" || architecture == "custom")
+        authUrl = authUrl.withParameter("architecture", architecture);
     if (prompt.isNotEmpty())
         authUrl = authUrl.withParameter("prompt", prompt);
     if (toneId.isNotEmpty())
@@ -3430,7 +3646,7 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
 
     juce::String error;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
         if (isTone3000TaskCancelled())
         {
@@ -3443,11 +3659,11 @@ juce::var createTone3000AuthRequest(const juce::String& clientId,
             return makeTone3000Error(
                 "This TONE3000 sign-in request was superseded by a newer credential action.");
         }
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (! processGuard.locked)
         {
             return makeTone3000Error(
-                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+                getTone3000CredentialLockError());
         }
         juce::String existingError;
         const auto existingPending = loadProtectedJson(
@@ -3486,9 +3702,9 @@ bool deleteTone3000PendingAuthIfCurrent(
     const juce::String& expectedState,
     juce::uint64 expectedEpoch)
 {
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
         return false;
     juce::String error;
@@ -3525,9 +3741,9 @@ bool tone3000PendingAuthStillCurrent(
     const juce::String& expectedState,
     juce::uint64 expectedEpoch)
 {
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
         return false;
 
@@ -3558,9 +3774,9 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
     juce::String error;
     juce::var pending;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             pending = loadProtectedJson(
@@ -3568,7 +3784,7 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
         }
         else
         {
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
         }
     }
     auto* pendingObject = pending.getDynamicObject();
@@ -3598,13 +3814,13 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
     const auto requestAgeMs = juce::Time::getCurrentTime().toMilliseconds() - createdAtMs;
     if (createdAtMs <= 0 || requestAgeMs < 0 || requestAgeMs > kTone3000LoopbackTimeoutMs)
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (! processGuard.locked)
         {
             return makeTone3000Error(
-                "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+                getTone3000CredentialLockError());
         }
         juce::String currentError;
         const auto currentPending = loadProtectedJson(
@@ -3666,14 +3882,14 @@ juce::var exchangeTone3000OAuthCode(const juce::String& code,
             return tokenPayload;
     }
 
-    std::scoped_lock storageGuards(
+    const ScopedTone3000CredentialStorageLock storageGuards(
         tone3000TokenStorageMutex,
         tone3000PendingAuthStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuards);
     if (! processGuard.locked)
     {
         return makeTone3000Error(
-            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+            getTone3000CredentialLockError());
     }
     juce::String currentPendingError;
     const auto currentPending = loadProtectedJson(
@@ -3829,7 +4045,8 @@ juce::var waitForTone3000LoopbackCallback(juce::StreamingSocket& listener,
             if (static_cast<bool> (exchangeObject->getProperty("success")))
             {
                 exchangeObject->setProperty("status", "connected");
-                if (toneId.isNotEmpty())
+                exchangeObject->setProperty("selectionCanceled", canceled.equalsIgnoreCase("true"));
+                if (toneId.isNotEmpty() && ! canceled.equalsIgnoreCase("true"))
                     exchangeObject->setProperty("toneId", toneId);
                 writeTone3000CallbackPage(*client, "Connected to OpenStudio", "You can return to OpenStudio. TONE3000 is connected for this user account.", true);
                 return exchangeResult;
@@ -3860,6 +4077,9 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
     const auto prompt = getTone3000OptionString(options, "prompt");
     const auto toneId = getTone3000OptionString(options, "toneId");
     const auto loginHint = getTone3000OptionString(options, "loginHint");
+    const auto format = getTone3000OptionString(options, "format", "nam");
+    const auto gears = getTone3000OptionString(options, "gears", "amp_amp-cab");
+    const auto architecture = getTone3000OptionString(options, "architecture", "2");
     const auto timeoutMs = juce::jlimit(30000, kTone3000LoopbackTimeoutMs, getTone3000OptionInt(options, "timeoutMs", kTone3000LoopbackTimeoutMs));
 
     if (clientId.isEmpty())
@@ -3894,7 +4114,7 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
     juce::StreamingSocket listener;
     if (! listener.createListener(kTone3000LoopbackPort, kTone3000LoopbackHost))
     {
-        auto fallbackRequest = createTone3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint);
+        auto fallbackRequest = createTone3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint, format, gears, architecture);
         juce::String authUrl;
         if (auto* fallbackObject = fallbackRequest.getDynamicObject())
             authUrl = fallbackObject->getProperty("authUrl").toString();
@@ -3907,7 +4127,7 @@ juce::var startTone3000AuthFlow(juce::var optionsPayload)
                                           true);
     }
 
-    auto authRequest = createTone3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint);
+    auto authRequest = createTone3000AuthRequest(clientId, redirectUri, prompt, toneId, loginHint, format, gears, architecture);
     auto* requestObject = authRequest.getDynamicObject();
     if (requestObject == nullptr || ! static_cast<bool> (requestObject->getProperty("success")))
     {
@@ -3957,9 +4177,9 @@ juce::var cancelTone3000AuthFlow()
     bool pendingAuthDeleted = false;
     bool pendingAuthCleanupComplete = false;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             juce::String loadError;
@@ -4011,10 +4231,10 @@ juce::var clearTone3000Auth()
     bool pendingAuthClearComplete = false;
     bool tokenWasPresent = false;
     {
-        std::scoped_lock storageGuards(
+        const ScopedTone3000CredentialStorageLock storageGuards(
             tone3000TokenStorageMutex,
             tone3000PendingAuthStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuards);
         if (processGuard.locked)
         {
             juce::String tokenLoadError;
@@ -4125,9 +4345,9 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
     juce::var stored;
     juce::uint64 snapshotEpoch = 0;
     {
-        const std::lock_guard<std::mutex> storageGuard(
+        const ScopedTone3000CredentialStorageLock storageGuard(
             tone3000TokenStorageMutex);
-        const ScopedTone3000CredentialProcessLock processGuard;
+        const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
         if (processGuard.locked)
         {
             stored = loadProtectedJson(
@@ -4137,7 +4357,7 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
         }
         else
         {
-            error = "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.";
+            error = getTone3000CredentialLockError();
         }
     }
     auto* object = stored.getDynamicObject();
@@ -4176,9 +4396,9 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
                 bool currentTokenPresent = false;
                 bool snapshotStillCurrent = false;
                 {
-                    const std::lock_guard<std::mutex> storageGuard(
+                    const ScopedTone3000CredentialStorageLock storageGuard(
                         tone3000TokenStorageMutex);
-                    const ScopedTone3000CredentialProcessLock processGuard;
+                    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
                     if (processGuard.locked)
                     {
                         juce::String currentError;
@@ -4229,13 +4449,13 @@ juce::var refreshTone3000Auth(const juce::String& clientIdOverride)
             tokenObject->setProperty("refresh_token", refreshToken);
     }
 
-    const std::lock_guard<std::mutex> storageGuard(
+    const ScopedTone3000CredentialStorageLock storageGuard(
         tone3000TokenStorageMutex);
-    const ScopedTone3000CredentialProcessLock processGuard;
+    const ScopedTone3000CredentialProcessLock processGuard(storageGuard);
     if (! processGuard.locked)
     {
         return makeTone3000Error(
-            "Timed out waiting for another OpenStudio instance to finish updating TONE3000 credentials.");
+            getTone3000CredentialLockError());
     }
     juce::String currentError;
     const auto currentStored = loadProtectedJson(
@@ -4449,8 +4669,7 @@ NAMLibraryMultiProcessRegressionResult
 runNAMLibraryMultiProcessRegression()
 {
     NAMLibraryMultiProcessRegressionResult result;
-    const auto executable = juce::File::getSpecialLocation(
-        juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     const auto regressionDirectory = juce::File::getSpecialLocation(
         juce::File::tempDirectory).getChildFile(
             "OpenStudio_NAM_Library_Multiprocess_"
@@ -4578,8 +4797,7 @@ NAMLibraryMultiProcessRegressionResult
 runNAMLibraryProcessCleanupRegression()
 {
     NAMLibraryMultiProcessRegressionResult result;
-    const auto executable = juce::File::getSpecialLocation(
-        juce::File::currentExecutableFile);
+    const auto executable = OpenStudioRuntime::executableFile();
     const auto regressionDirectory = juce::File::getSpecialLocation(
         juce::File::tempDirectory).getChildFile(
             "OpenStudio_NAM_Library_Multiprocess_"
@@ -4914,6 +5132,303 @@ juce::var runNAMCatalogNativeRegressionImpl()
         "token_refresh_threads_are_process_local_single_flight",
         tokenRefreshSerializationPass,
         "Concurrent refresh workers in one process must serialize before attempting the separately configured inter-process token-rotation lock.");
+
+    // Reproduce a closing window whose status job is waiting on a live peer.
+    // The peer retains the real credential mutex until after the cancellation
+    // gate, so a passing status request cannot reach OS credential storage.
+    {
+        juce::WaitableEvent peerEntered;
+        juce::WaitableEvent releasePeer;
+        juce::WaitableEvent statusStarted;
+        std::atomic<bool> peerHolding { false };
+        std::atomic<bool> statusCancelled { false };
+        juce::var statusResult;
+        const auto originalEpoch = tone3000CredentialEpoch.load(
+            std::memory_order_acquire);
+        std::thread peer([&]
+        {
+            const ScopedTone3000CredentialStorageLock lock(
+                tone3000TokenStorageMutex, 2000);
+            peerHolding.store(lock.locked, std::memory_order_release);
+            peerEntered.signal();
+            if (lock.locked)
+                releasePeer.wait();
+            peerHolding.store(false, std::memory_order_release);
+        });
+        const bool peerReady = peerEntered.wait(2500)
+            && peerHolding.load(std::memory_order_acquire);
+        juce::ThreadPool statusPool { 1 };
+        statusPool.addJob(std::function<void()>([&]
+        {
+            const ScopedTone3000TaskCancellation cancellation(
+                &statusCancelled);
+            statusStarted.signal();
+            if (peerHolding.load(std::memory_order_acquire))
+                statusResult = makeTone3000AuthStatus();
+        }));
+        const bool statusJobStarted = statusStarted.wait(2000);
+        statusCancelled.store(true, std::memory_order_release);
+        const bool drainedWhilePeerHeld = statusPool.removeAllJobs(true, 1000)
+            && peerHolding.load(std::memory_order_acquire);
+
+        // Release the blocker even when the gate fails, then finish ownership
+        // cleanup before the result/cancellation objects leave this scope.
+        releasePeer.signal();
+        peer.join();
+        const bool statusCleanupComplete = statusPool.removeAllJobs(true, 2000);
+        const bool noCredentialPublication =
+            tone3000CredentialEpoch.load(std::memory_order_acquire)
+                == originalEpoch
+            && ! static_cast<bool>(statusResult.getProperty(
+                "authenticated", false))
+            && statusResult.getProperty("error", {}).toString()
+                == "The TONE3000 credential operation was canceled.";
+        addCheck(
+            "canceled_auth_status_pool_drains_while_live_peer_holds_credentials",
+            peerReady && statusJobStarted && drainedWhilePeerHeld
+                && statusCleanupComplete && noCredentialPublication,
+            "A canceled real auth-status job must leave its owned pool within one second while a live peer still holds the actual token mutex, without reading or changing OS credentials or the credential epoch.");
+    }
+
+    {
+        std::mutex storageMutex;
+        juce::WaitableEvent contenderStarted;
+        std::atomic<bool> contenderEntered { false };
+        auto holder = std::make_unique<ScopedTone3000CredentialStorageLock>(
+            storageMutex, 2000);
+        std::thread contender([&]
+        {
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(storageMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+        });
+        const bool started = contenderStarted.wait(2000);
+        juce::Thread::sleep(50);
+        const bool serialized = holder->locked
+            && ! contenderEntered.load(std::memory_order_acquire);
+        holder.reset();
+        contender.join();
+        addCheck(
+            "credential_single_mutex_uncanceled_waiter_remains_serialized",
+            started && serialized
+                && contenderEntered.load(std::memory_order_acquire),
+            "An uncanceled credential waiter must retain mutual exclusion and acquire the same mutex after the current owner releases it.");
+    }
+
+    {
+        std::mutex tokenMutex;
+        std::mutex pendingMutex;
+        juce::WaitableEvent contenderStarted;
+        std::atomic<bool> contenderEntered { false };
+        std::unique_lock<std::mutex> pendingHolder(pendingMutex);
+        std::thread contender([&]
+        {
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(
+                tokenMutex, pendingMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+        });
+        const bool started = contenderStarted.wait(2000);
+        // A blocked dual transaction must release its available token mutex.
+        // Retain it here while releasing the pending mutex to verify that the
+        // contender can only publish after it owns both locks together.
+        auto tokenProbe = std::make_unique<ScopedTone3000CredentialStorageLock>(
+            tokenMutex, 500);
+        const bool partialLockReleased = tokenProbe->locked
+            && ! contenderEntered.load(std::memory_order_acquire);
+        pendingHolder.unlock();
+        juce::Thread::sleep(50);
+        const bool bothRequired = ! contenderEntered.load(
+            std::memory_order_acquire);
+        tokenProbe.reset();
+        contender.join();
+        addCheck(
+            "credential_dual_mutex_wait_is_all_or_none_and_serialized",
+            started && partialLockReleased && bothRequired
+                && contenderEntered.load(std::memory_order_acquire),
+            "A dual credential transaction must retain neither partial lock while blocked, then acquire token and pending mutexes together before publication.");
+    }
+
+    {
+        std::mutex tokenMutex;
+        std::mutex pendingMutex;
+        juce::WaitableEvent contenderStarted;
+        juce::WaitableEvent contenderFinished;
+        std::atomic<bool> cancelled { false };
+        std::atomic<bool> contenderEntered { false };
+        std::unique_lock<std::mutex> pendingHolder(pendingMutex);
+        std::thread contender([&]
+        {
+            const ScopedTone3000TaskCancellation cancellation(&cancelled);
+            contenderStarted.signal();
+            const ScopedTone3000CredentialStorageLock lock(
+                tokenMutex, pendingMutex, 2000);
+            contenderEntered.store(lock.locked, std::memory_order_release);
+            contenderFinished.signal();
+        });
+        const bool started = contenderStarted.wait(2000);
+        cancelled.store(true, std::memory_order_release);
+        const bool canceledBeforePeerRelease = contenderFinished.wait(1000)
+            && pendingHolder.owns_lock()
+            && ! contenderEntered.load(std::memory_order_acquire);
+        pendingHolder.unlock();
+        contender.join();
+        addCheck(
+            "credential_dual_mutex_cancellation_does_not_wait_for_live_peer",
+            started && canceledBeforePeerRelease,
+            "Cancellation must abort a dual credential waiter while the live peer still owns its pending mutex, without acquiring or changing either credential record.");
+    }
+
+#if JUCE_LINUX
+    {
+        // A second JUCE lock object in this process cannot prove POSIX lock
+        // contention. Use a child holding the real F_SETLK lock on a unique
+        // fixture file, with no JUCE/allocator calls after fork in the child.
+        const auto lockName = "OpenStudio.CredentialRegression."
+            + juce::Uuid().toString();
+        const juce::File lockDirectory(
+            juce::File("/var/tmp").isDirectory() ? "/var/tmp" : "/tmp");
+        const auto lockFile = lockDirectory.getChildFile(lockName);
+        const auto lockPath = lockFile.getFullPathName().toUTF8();
+        const auto* childLockPath = lockPath.getAddress();
+        int readyPipe[2] { -1, -1 };
+        int releasePipe[2] { -1, -1 };
+        const bool pipesReady = ::pipe(readyPipe) == 0
+            && ::pipe(releasePipe) == 0;
+        pid_t child = pipesReady ? ::fork() : -1;
+        if (child == 0)
+        {
+            ::close(readyPipe[0]);
+            ::close(releasePipe[1]);
+            const int descriptor = ::open(childLockPath, O_CREAT | O_RDWR, 0600);
+            struct flock childLock {};
+            childLock.l_whence = SEEK_SET;
+            childLock.l_type = F_WRLCK;
+            const char ready = descriptor >= 0
+                && ::fcntl(descriptor, F_SETLK, &childLock) == 0 ? '1' : '0';
+            ssize_t readyBytesWritten = -1;
+            do
+            {
+                readyBytesWritten = ::write(readyPipe[1], &ready, 1);
+            }
+            while (readyBytesWritten < 0 && errno == EINTR);
+            if (readyBytesWritten != 1)
+                ::_exit(1);
+            char released = 0;
+            if (ready == '1')
+            {
+                while (::read(releasePipe[0], &released, 1) < 0 && errno == EINTR) {}
+            }
+            ::_exit(ready == '1' ? 0 : 1);
+        }
+
+        bool ready = false;
+        bool timedOut = false;
+        bool canceledWhileChildHeld = false;
+        bool reaped = false;
+        bool acquiredAfterPeerRelease = false;
+        std::atomic<bool> canceled { false };
+        std::atomic<bool> processAcquired { false };
+        juce::WaitableEvent contenderStarted;
+        juce::WaitableEvent contenderFinished;
+        std::thread contender;
+        if (child > 0)
+        {
+            ::close(readyPipe[1]); readyPipe[1] = -1;
+            ::close(releasePipe[0]); releasePipe[0] = -1;
+            if (::fcntl(readyPipe[0], F_SETFL, O_NONBLOCK) >= 0)
+            {
+                const auto readyDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+                char state = 0;
+                while (::read(readyPipe[0], &state, 1) != 1
+                       && juce::Time::getMillisecondCounterHiRes() < readyDeadline)
+                    juce::Thread::sleep(5);
+                ready = state == '1';
+            }
+            if (ready)
+            {
+                std::mutex storageMutex;
+                juce::InterProcessLock processLock(lockName);
+                {
+                    const ScopedTone3000CredentialStorageLock storageGuard(
+                        storageMutex, 2000);
+                    const auto waitStarted = juce::Time::getMillisecondCounterHiRes();
+                    const ScopedTone3000CredentialProcessLock processGuard(
+                        storageGuard, processLock, 100);
+                    const auto elapsed = juce::Time::getMillisecondCounterHiRes() - waitStarted;
+                    timedOut = storageGuard.locked && ! processGuard.locked
+                        && elapsed >= 100 && elapsed < 1000;
+                }
+                contender = std::thread([&]
+                {
+                    const ScopedTone3000TaskCancellation cancellation(&canceled);
+                    const ScopedTone3000CredentialStorageLock storageGuard(
+                        storageMutex, 2000);
+                    contenderStarted.signal();
+                    const ScopedTone3000CredentialProcessLock processGuard(
+                        storageGuard, processLock, 2000);
+                    processAcquired.store(processGuard.locked, std::memory_order_release);
+                    contenderFinished.signal();
+                });
+                const bool started = contenderStarted.wait(2000);
+                canceled.store(true, std::memory_order_release);
+                canceledWhileChildHeld = started && contenderFinished.wait(1000)
+                    && ! processAcquired.load(std::memory_order_acquire);
+                // EOF releases the child even on failure, before joining the
+                // contender or destroying its captured mutex/lock objects.
+                ::close(releasePipe[1]); releasePipe[1] = -1;
+                contender.join();
+            }
+            if (releasePipe[1] >= 0)
+            {
+                ::close(releasePipe[1]); releasePipe[1] = -1;
+            }
+            const auto reapDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+            while (juce::Time::getMillisecondCounterHiRes() < reapDeadline)
+            {
+                const auto waited = ::waitpid(child, nullptr, WNOHANG);
+                if (waited == child || (waited < 0 && errno == ECHILD))
+                {
+                    reaped = true;
+                    break;
+                }
+                juce::Thread::sleep(5);
+            }
+            if (! reaped)
+            {
+                ::kill(child, SIGKILL);
+                const auto killDeadline = juce::Time::getMillisecondCounterHiRes() + 2000;
+                while (juce::Time::getMillisecondCounterHiRes() < killDeadline)
+                {
+                    const auto waited = ::waitpid(child, nullptr, WNOHANG);
+                    if (waited == child || (waited < 0 && errno == ECHILD))
+                    {
+                        reaped = true;
+                        break;
+                    }
+                    juce::Thread::sleep(5);
+                }
+            }
+            if (reaped && ready)
+            {
+                std::mutex storageMutex;
+                juce::InterProcessLock processLock(lockName);
+                const ScopedTone3000CredentialStorageLock storageGuard(storageMutex, 2000);
+                const ScopedTone3000CredentialProcessLock processGuard(storageGuard, processLock, 500);
+                acquiredAfterPeerRelease = processGuard.locked;
+            }
+        }
+        for (const int descriptor : { readyPipe[0], readyPipe[1], releasePipe[0], releasePipe[1] })
+            if (descriptor >= 0) ::close(descriptor);
+        const bool fixtureRemoved = (child <= 0 || reaped)
+            && (! lockFile.existsAsFile() || lockFile.deleteFile());
+        addCheck(
+            "credential_process_contention_timeout_and_cancel_use_real_child",
+            ready && timedOut && canceledWhileChildHeld && reaped
+                && acquiredAfterPeerRelease && fixtureRemoved,
+            "A uniquely named real POSIX credential lock held by another process must honor both an uncanceled bounded wait and cancellation before peer release; the owned child and lock fixture must be cleaned up.");
+    }
+#endif
 
     const bool retryAfterPass =
         std::abs(parseTone3000RetryAfterSeconds({}) - 15.0) < 0.001
@@ -8074,7 +8589,7 @@ juce::var runNAMLibraryReliabilityRegressionImpl()
     return juce::var(result.get());
 }
 
-bool isLocalFrontendDevServerReachable()
+[[maybe_unused]] bool isLocalFrontendDevServerReachable()
 {
     if (juce::SystemStats::getEnvironmentVariable ("OPENSTUDIO_FORCE_PACKAGED_FRONTEND", {}).trim() == "1")
     {
@@ -8168,6 +8683,9 @@ juce::String determineStartupFailureCategory(const StartupDependencyStatus& depe
 
         return "webview2-backend-unusable";
     }
+#elif JUCE_LINUX
+    if (! dependencyStatus.browserBackendSupported)
+        return "linux-webkit-unavailable";
 #else
     if (! dependencyStatus.browserBackendSupported)
         return "macos-backend-unavailable";
@@ -8195,6 +8713,10 @@ juce::String buildStartupFailureSummary(const StartupDependencyStatus& dependenc
 
     if (failureCategory == "webview2-backend-unusable")
         return "WebView2 Runtime was detected, but JUCE still reports the backend as unavailable.";
+#elif JUCE_LINUX
+    if (failureCategory == "linux-webkit-unavailable")
+        return "The GTK/WebKitGTK browser runtime could not be loaded. "
+               "Repair or reinstall the OpenStudio package using your software installer to restore its runtime dependencies.";
 #else
     if (failureCategory == "macos-backend-unavailable")
         return "The system browser backend is unavailable on this macOS installation.";
@@ -8222,6 +8744,8 @@ juce::String buildStartupSelfTestText(const StartupDependencyStatus& dependencyS
 #if JUCE_WINDOWS
     lines.add("webView2UserDataPath=" + getWebView2UserDataFolder().getFullPathName());
     lines.add("webView2RuntimeVersion=" + dependencyStatus.webView2RuntimeVersion);
+    if (! dependencyStatus.browserBackendSupported)
+        lines.add("webView2FailureDetail=" + probeWebView2StartupFailure());
     lines.add("vcRedistInstalled=" + juce::String(dependencyStatus.vcRedistInstalled ? "true" : "false"));
     lines.add("vcRedistVersion=" + dependencyStatus.vcRedistVersion);
     lines.add("prerequisiteRepairAvailable=" + juce::String(dependencyStatus.repairAvailable ? "true" : "false"));
@@ -8297,6 +8821,125 @@ juce::StringArray getNAMModelMutationSlots(const juce::String& stateJson)
 
 juce::CriticalSection MainComponent::instanceListLock;
 juce::Array<MainComponent*> MainComponent::activeInstances;
+
+// Only the message thread owns this bounded editor drain. Audio has already
+// stopped; its callback never waits for a browser or allocates these messages.
+struct MainComponent::AutomationEditorFlush
+{
+    juce::Component::SafePointer<MainComponent> owner;
+    juce::Array<juce::Component::SafePointer<MainComponent>> waiting;
+    juce::Array<juce::var> edits;
+    juce::WebBrowserComponent::NativeFunctionCompletion completion;
+    juce::String token;
+    juce::uint64 sequence = 0;
+    double stoppedPosition = 0.0;
+    bool wasRolling = false, failed = false;
+};
+
+std::shared_ptr<MainComponent::AutomationEditorFlush> MainComponent::pendingAutomationEditorFlush;
+
+void MainComponent::finishAutomationEditorFlush(const std::shared_ptr<AutomationEditorFlush>& request,
+                                               bool timedOut, bool cancelled)
+{
+    if (pendingAutomationEditorFlush != request) return;
+    pendingAutomationEditorFlush.reset();
+    if (!request->owner) return;
+    auto& owner = *request->owner;
+    if (!cancelled)
+    {
+        const auto tail = owner.audioEngine.takePluginParameterEdits(true);
+        if (const auto* events = tail.getArray()) request->edits.addArray(*events);
+    }
+    if (timedOut || request->failed)
+    {
+        auto* warning = new juce::DynamicObject();
+        warning->setProperty("phase", "editor-flush-failed");
+        juce::Array<juce::var> pendingEditors;
+        for (const auto& participant : request->waiting)
+            pendingEditors.add(participant ? participant->isMainWindow() ? "main" : "detached" : "closed");
+        warning->setProperty("pendingEditors", pendingEditors);
+        warning->setProperty("timedOut", timedOut);
+        request->edits.add(juce::var(warning));
+    }
+    for (auto& edit : request->edits)
+        if (auto* object = edit.getDynamicObject()) object->setProperty("transportFlush", true);
+    auto* result = new juce::DynamicObject();
+    result->setProperty("success", !cancelled);
+    result->setProperty("parameterEdits", juce::var(request->edits));
+    // Detached transport controls still deliver capture into the main project.
+    if (!cancelled && owner.windowRole != WindowRole::main)
+        broadcastEventToRole(WindowRole::main, "pluginParameterEditBatch", juce::var(request->edits));
+    request->completion(juce::var(result));
+}
+
+void MainComponent::cancelAutomationEditorFlush()
+{
+    const auto request = pendingAutomationEditorFlush;
+    if (request && (!request->owner || &request->owner->audioEngine == &audioEngine))
+        finishAutomationEditorFlush(request, false, true);
+}
+
+void MainComponent::flushEditorsAfterTransportStop(const juce::String& token, juce::uint64 sequence,
+                                                  bool wasRolling, double stoppedPosition,
+                                                  juce::WebBrowserComponent::NativeFunctionCompletion completion)
+{
+    auto request = std::make_shared<AutomationEditorFlush>();
+    request->owner = this;
+    request->token = token;
+    request->sequence = sequence;
+    request->stoppedPosition = stoppedPosition;
+    request->wasRolling = wasRolling;
+    request->completion = std::move(completion);
+    const auto captured = audioEngine.takePluginParameterEdits(true);
+    if (const auto* events = captured.getArray()) request->edits.addArray(*events);
+    pendingAutomationEditorFlush = request;
+    if (wasRolling)
+    {
+        const juce::ScopedLock guard(instanceListLock);
+        for (auto* instance : activeInstances)
+            if (instance && &instance->audioEngine == &audioEngine && !instance->secondaryWindowClosing
+                && instance->frontendStartupState == FrontendStartupState::ready && instance->isShowing())
+                request->waiting.add(juce::Component::SafePointer<MainComponent>(instance));
+    }
+    if (request->waiting.isEmpty()) { finishAutomationEditorFlush(request); return; }
+    // Snapshot the participants before emitting: synchronous acknowledgements
+    // must not invalidate iteration or enroll a newly opened editor.
+    const auto participants = request->waiting;
+    for (const auto& participant : participants)
+        if (participant) participant->emitFrontendEvent("automationEditorFlushRequested", token);
+    juce::Timer::callAfterDelay(1500, [request] { finishAutomationEditorFlush(request, true); });
+}
+
+void MainComponent::acknowledgeAutomationEditorFlush(const juce::String& token, bool success)
+{
+    const auto request = pendingAutomationEditorFlush;
+    if (!request || request->token != token) return;
+    const auto participant = juce::Component::SafePointer<MainComponent>(this);
+    if (!request->waiting.contains(participant)) return;
+    request->failed = request->failed || !success;
+    request->waiting.removeFirstMatchingValue(participant);
+    if (request->waiting.isEmpty()) finishAutomationEditorFlush(request);
+}
+
+void MainComponent::publishBuiltInParameterEdit(juce::var event)
+{
+    const auto request = pendingAutomationEditorFlush;
+    if (request && request->owner && &request->owner->audioEngine == &audioEngine
+        && request->owner->transportRequestSequence == request->sequence && request->wasRolling
+        && request->waiting.contains(juce::Component::SafePointer<MainComponent>(this)))
+    {
+        if (auto* object = event.getDynamicObject())
+        {
+            object->setProperty("capturedTime", request->stoppedPosition);
+            object->setProperty("capturedWhileRolling", true);
+            object->setProperty("transportFlush", true);
+        }
+        if (request->edits.size() < 1024) request->edits.add(std::move(event));
+        else request->failed = true;
+        return;
+    }
+    broadcastEventToAll("pluginParameterEdit", event);
+}
 
 int MainComponent::runNAMLibraryManifestWriterRegressionChild(
     const juce::File& manifestFile,
@@ -8427,20 +9070,8 @@ void MainComponent::runTone3000NativeTask(
                 return;
             }
 
-            struct ScopedTaskCancellation
-            {
-                explicit ScopedTaskCancellation(
-                    const std::atomic<bool>* cancellationIn)
-                    : previous(activeTone3000TaskCancellation)
-                {
-                    activeTone3000TaskCancellation = cancellationIn;
-                }
-                ~ScopedTaskCancellation()
-                {
-                    activeTone3000TaskCancellation = previous;
-                }
-                const std::atomic<bool>* previous = nullptr;
-            } scopedCancellation(cancellation.get());
+            const ScopedTone3000TaskCancellation scopedCancellation(
+                cancellation.get());
 
             juce::var result;
             try
@@ -8684,8 +9315,7 @@ juce::var MainComponent::discardNAMPreviewIfUnused(juce::var recordPayload,
 
 juce::var MainComponent::buildStartupSelfTestReport()
 {
-    const auto checkOptions = getEmbeddedBrowserBaseOptions();
-    const auto supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
+    const auto supported = areEmbeddedBrowserOptionsSupported();
     const auto dependencyStatus = evaluateStartupDependencies(supported);
 
     auto* report = new juce::DynamicObject();
@@ -8704,6 +9334,8 @@ juce::var MainComponent::buildStartupSelfTestReport()
 #if JUCE_WINDOWS
     report->setProperty("webView2UserDataPath", getWebView2UserDataFolder().getFullPathName());
     report->setProperty("webView2RuntimeVersion", dependencyStatus.webView2RuntimeVersion);
+    if (! dependencyStatus.browserBackendSupported)
+        report->setProperty("webView2FailureDetail", probeWebView2StartupFailure());
     report->setProperty("vcRedistInstalled", dependencyStatus.vcRedistInstalled);
     report->setProperty("vcRedistVersion", dependencyStatus.vcRedistVersion);
     report->setProperty("prerequisiteRepairAvailable", dependencyStatus.repairAvailable);
@@ -8729,6 +9361,19 @@ bool MainComponent::writeStartupSelfTestReport(const juce::File& reportFile)
 }
 
 //==============================================================================
+juce::WebBrowserComponent::NativeFunction MainComponent::deferNativeMutation(
+    const juce::String& name, juce::WebBrowserComponent::NativeFunction callback)
+{
+    deferredNativeFunctionNames.add(juce::var(name));
+    return [this, callback = std::move(callback)] (const juce::Array<juce::var>& args,
+        juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+        messageMutations.enqueue(namModelMutationStateLock, mediaOperations.token(),
+            [callback, args, completion = std::move(completion)] () mutable {
+                callback(args, std::move(completion));
+            });
+    };
+}
+
 MainComponent::MainComponent(AudioEngine& audioEngineIn,
                              AppUpdater& appUpdaterIn,
                              StartupMode startupModeIn,
@@ -8871,7 +9516,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        window.__JUCE__.backend.getNativeFunction = function(name) {
                            return function(...args) {
                                return new Promise((resolve, reject) => {
-                                   const resultId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+                                   const backend = window.__JUCE__.backend;
+                                   const resultId = Math.max(Date.now() * 1000, (backend.__openStudioLastNativeCallId || 0) + 1);
+                                   backend.__openStudioLastNativeCallId = resultId;
 
                                    // Dialog functions are interactive — user may spend several minutes navigating.
                                    // Worker-backed startup calls may also legitimately take longer than the default bridge timeout.
@@ -8880,14 +9527,20 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                    // Offline renders are duration-dependent and continue on a native worker thread;
                                    // a browser deadline would report failure while the valid output is still being written.
                                    // Update deadlines include native preparation/download limits and verification time.
-                                    const DIALOG_FUNCTIONS = ['showRenderSaveDialog', 'showSaveDialog', 'showOpenDialog', 'showOpenFileDialog', 'showDirectoryDialog', 'openAudioDeviceControlPanel'];
+                                    const DIALOG_FUNCTIONS = ['showRenderSaveDialog', 'showSaveDialog', 'showOpenDialog', 'showImportFilesDialog', 'showOpenFileDialog', 'showDirectoryDialog', 'openAudioDeviceControlPanel'];
                                    const LONG_RUNNING_FUNCTIONS = ['startAIGeneration', 'refreshNAMCatalog', 'installDownloadedUpdate'];
-                                   const NO_TIMEOUT_FUNCTIONS = ['scanForPlugins', 'renderProject', 'renderProjectWithDither'];
+                                   // Device application may wait for microphone consent. A browser-only
+                                   // timeout must not unlock the form while the native transaction continues.
+                                   const NO_TIMEOUT_FUNCTIONS = ['scanForPlugins', 'renderProject', 'renderProjectWithDither', 'freezeTrack', 'applyAudioDeviceSetup'];
+                                   // These bindings can wait behind a duration-dependent offline transaction.
+                                   // Rejecting them on a browser deadline would leave a live native mutation
+                                   // that applies after the caller has already rolled back or reported failure.
+                                   const deferredFunctions = window.__JUCE__.initialisationData?.__openStudioDeferredMutationFunctions?.[0] || [];
                                     const timeoutMs = name === 'getAIGenerationPreflight' ? 45000
                                        : name === 'downloadUpdate' ? 900000
                                        : name === 'checkForUpdates' ? 60000
                                        : (DIALOG_FUNCTIONS.indexOf(name) >= 0 || LONG_RUNNING_FUNCTIONS.indexOf(name) >= 0) ? 300000 : 15000;
-                                   const timeout = NO_TIMEOUT_FUNCTIONS.indexOf(name) >= 0
+                                   const timeout = NO_TIMEOUT_FUNCTIONS.indexOf(name) >= 0 || deferredFunctions.indexOf(name) >= 0
                                        ? null
                                        : setTimeout(() => {
                                            window.__JUCE__.backend.removeEventListener(listener);
@@ -8949,8 +9602,32 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                  completion(audioEngine.openAudioDeviceControlPanel());
                              });
                     })
+                    .withNativeFunction ("queryAudioDeviceSetup", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto request = args.isEmpty() ? juce::var() : args[0];
+                        juce::MessageManager::callAsync([this, request, completion = std::move(completion)]() mutable {
+                            completion(audioEngine.queryAudioDeviceSetup(request));
+                        });
+                    })
+                    .withNativeFunction ("applyAudioDeviceSetup", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto request = args.isEmpty() ? juce::var() : args[0];
+                        juce::MessageManager::callAsync([this, request, completion = std::move(completion)]() mutable {
+                            audioEngine.setAudioDeviceSetup(
+                                request.getProperty("audioDeviceType", {}).toString(),
+                                request.getProperty("inputDevice", {}).toString(),
+                                request.getProperty("outputDevice", {}).toString(),
+                                request.getProperty("sampleRate", 0),
+                                request.getProperty("bufferSize", 0),
+                                [this, completion = std::move(completion)](bool success, const juce::String& error) mutable {
+                                    auto* result = new juce::DynamicObject();
+                                    result->setProperty("success", success);
+                                    result->setProperty("error", error);
+                                    result->setProperty("setup", audioEngine.getAudioDeviceSetup());
+                                    completion(juce::var(result));
+                                });
+                        });
+                    })
                     .withNativeFunction ("setAudioDeviceSetup", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
-                        // Expecting: [type, input, output, sampleRate, bufferSize]
+                        // A single audio setup request, with explicit default selection.
                         if (args.size() == 1 && args[0].isObject()) {
                            auto* obj = args[0].getDynamicObject();
                            juce::String type = obj->getProperty("type");
@@ -8958,12 +9635,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            juce::String output = obj->getProperty("outputDevice");
                            double sampleRate = obj->getProperty("sampleRate");
                            int bufferSize = obj->getProperty("bufferSize");
+                           bool useDefaultDevices = obj->getProperty("useDefaultDevices");
                            
                            // Device changes belong on the message thread. Resolve
                            // the JS promise only after JUCE has accepted (and
                            // verified) the actual setup so the UI cannot report a
                            // false success.
-                           juce::MessageManager::callAsync([this, type, input, output, sampleRate, bufferSize,
+                           juce::MessageManager::callAsync([this, type, input, output, sampleRate, bufferSize, useDefaultDevices,
                                                             completion = std::move(completion)]() mutable {
                                audioEngine.setAudioDeviceSetup(
                                    type,
@@ -8977,8 +9655,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                        if (! applied && errorMessage.isNotEmpty())
                                            juce::Logger::writeToLog(
                                                "setAudioDeviceSetup failed: " + errorMessage);
-                                       completion(applied);
-                                   });
+                                       auto result = std::make_unique<juce::DynamicObject>();
+                                       result->setProperty("success", applied);
+                                       result->setProperty("error", errorMessage);
+                                       completion(juce::var(result.release()));
+                                   }, useDefaultDevices);
                            });
                         } else {
                            completion(false);
@@ -9023,7 +9704,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        juce::ignoreUnused(args);
                        completion(buildStartupDiagnostics());
                    })
-                   .withNativeFunction ("addTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("addTrack", deferNativeMutation("addTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::String explicitId = "";
                        if (args.size() > 0 && args[0].isString()) {
                            explicitId = args[0].toString();
@@ -9036,8 +9717,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        invalidateNAMRackTopology();
                        juce::String trackId = audioEngine.addTrack(explicitId, initialType);
                        completion(trackId);
-                   })
-                   .withNativeFunction ("removeTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   }))
+                   .withNativeFunction ("removeTrack", deferNativeMutation("removeTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() > 0 && args[0].isString())
                        {
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -9046,7 +9727,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            completion(success);
                        }
                        else { completion(false); }
-                   })
+                   }))
                    .withNativeFunction ("reorderTrack", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 2) {
                            juce::String trackId = args[0].toString();
@@ -9108,6 +9789,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                            completion(false);
                        }
                    })
+                   .withNativeFunction ("setAutomationTrimValue", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion((args.size() == 2 || args.size() == 3) && audioEngine.setAutomationTrimValue(args[0].toString(), static_cast<float>(args[1]), args.size() == 3 ? args[2].toString() : "trim_volume"));
+                   })
+                   .withNativeFunction ("getAutomationTrimValue", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion(args.size() == 1 ? juce::var(audioEngine.getAutomationTrimValue(args[0].toString())) : juce::var());
+                   })
                    .withNativeFunction ("setTrackPan", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 2) {
                            juce::String trackId = args[0].toString();
@@ -9127,6 +9814,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
+                   })
+                   .withNativeFunction ("setTrackSoloSafe", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() < 2) { completion(false); return; }
+                       audioEngine.setTrackSoloSafe(args[0].toString(), static_cast<bool>(args[1]));
+                       completion(true);
                    })
                    .withNativeFunction ("setTrackSolo", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 2) {
@@ -9156,6 +9848,50 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
+                   })
+
+                   .withNativeFunction ("setTransportStateWithToken", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() != 3 || !args[2].isString() || args[2].toString().length() > 128) { completion(false); return; }
+                       const auto action = args[0].toString();
+                       if (action != "position" && action != "playing" && action != "recording") { completion(false); return; }
+                       if (action == "position" && !std::isfinite(static_cast<double>(args[1]))) { completion(false); return; }
+                       const auto token = args[2].toString();
+                       cancelAutomationEditorFlush();
+                       const auto sequence = ++transportRequestSequence;
+                       if (action == "recording")
+                       {
+                           const juce::Component::SafePointer<MainComponent> safe(this);
+                           audioEngine.setTransportRecordingAsync(static_cast<bool>(args[1]),
+                               [safe, sequence, token, completion = std::move(completion)] (bool success) mutable {
+                                   juce::MessageManager::callAsync([safe, sequence, token, success, completion = std::move(completion)] () mutable {
+                                       if (!safe) { completion(false); return; }
+                                       if (success && safe->transportRequestSequence == sequence) safe->transportRequestToken = token;
+                                       completion(success);
+                                   });
+                               });
+                           return;
+                       }
+                       const bool wasRolling = audioEngine.isTransportPlaying();
+                       const double stoppedPosition = audioEngine.getTransportPosition();
+                       if (action == "position") audioEngine.setTransportPosition(static_cast<double>(args[1]));
+                       else
+                       {
+                           audioEngine.setTransportPlaying(static_cast<bool>(args[1]));
+                           // Finalize recording before waiting for browser edits. A new
+                           // Play may supersede this Stop while that drain is pending.
+                           if (!static_cast<bool>(args[1])) audioEngine.setTransportRecording(false);
+                       }
+                       transportRequestToken = token;
+                       if (action == "playing" && !static_cast<bool>(args[1]))
+                       {
+                           flushEditorsAfterTransportStop(token, sequence, wasRolling, stoppedPosition, std::move(completion));
+                       }
+                       else completion(true);
+                   })
+                   .withNativeFunction ("acknowledgeAutomationEditorFlush", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 2 && args[0].isString())
+                           acknowledgeAutomationEditorFlush(args[0].toString(), static_cast<bool>(args[1]));
+                       completion(true);
                    })
 
                    // Punch In/Out (Phase 3.1)
@@ -9209,6 +9945,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        }
                    })
                    // Master Controls
+                   .withNativeFunction ("setMasterMute", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       if (args.size() == 1 && args[0].isBool()) { audioEngine.setMasterMute(static_cast<bool>(args[0])); completion(true); }
+                       else completion(false);
+                   })
                    .withNativeFunction ("setMasterVolume", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 1 && (args[0].isDouble() || args[0].isInt())) {
                            audioEngine.setMasterVolume(args[0]);
@@ -9245,7 +9985,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        juce::ignoreUnused(args);
                        completion(audioEngine.getMasterMono());
                    })
-                   .withNativeFunction ("addMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("addMasterFX", deferNativeMutation("addMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 1) {
                            juce::String pluginPath = args[0].toString();
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -9255,12 +9995,21 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
+                   }))
                    .withNativeFunction ("getMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        juce::ignoreUnused(args);
                        completion(audioEngine.getMasterFX());
                    })
-                   .withNativeFunction ("removeMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("getFXStageState", deferNativeMutation("getFXStageState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion(args.size() == 1 ? audioEngine.getFXStageState(args[0].toString()) : juce::var());
+                   }))
+                   .withNativeFunction ("getAutomationValueText", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion(args.size() == 3 ? audioEngine.getAutomationValueText(args[0].toString(), args[1].toString(), static_cast<float>(static_cast<double>(args[2]))) : juce::String());
+                   })
+                   .withNativeFunction ("setFXStageState", deferNativeMutation("setFXStageState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                       completion(args.size() == 2 && audioEngine.setFXStageState(args[0].toString(), args[1].toString()));
+                   }))
+                   .withNativeFunction ("removeMasterFX", deferNativeMutation("removeMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 1 && (args[0].isInt() || args[0].isDouble())) {
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
                            invalidateNAMRackTopology();
@@ -9268,8 +10017,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
-                   .withNativeFunction ("reorderMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   }))
+                   .withNativeFunction ("reorderMasterFX", deferNativeMutation("reorderMasterFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 2
                            && (args[0].isInt() || args[0].isDouble())
                            && (args[1].isInt() || args[1].isDouble())) {
@@ -9279,7 +10028,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
+                   }))
                    .withNativeFunction ("openMasterFXEditor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 1 && (args[0].isInt() || args[0].isDouble())) {
                            audioEngine.setPluginWindowOwnerComponent(this);
@@ -9406,7 +10155,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        completion(args.size() == 2 && args[0].isString() && args[1].isBool()
                            && audioEngine.setIsolatedPluginHosting(args[0].toString(), static_cast<bool>(args[1])));
                    })
-                   .withNativeFunction ("addTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("addTrackInputFX", deferNativeMutation("addTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String pluginPath = args[1].toString();
@@ -9418,8 +10167,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
-                   .withNativeFunction ("addTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   }))
+                   .withNativeFunction ("addTrackFX", deferNativeMutation("addTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String pluginPath = args[1].toString();
@@ -9431,7 +10180,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
+                   }))
                    .withNativeFunction ("openPluginEditor", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() == 3) {
                            juce::String trackId = args[0].toString();
@@ -9460,6 +10209,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(true);
                     })
                     // Built-in FX Preset System
+                    .withNativeFunction ("eqPresetLibrary", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(audioEngine.eqPresetLibrary(args.size()>0?args[0].toString():juce::String(),args.size()>1?args[1]:juce::var()));
+                    })
                     .withNativeFunction ("getBuiltInFXPresets", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         auto pluginName = args[0].toString();
                         completion(audioEngine.getBuiltInFXPresets(pluginName));
@@ -9613,12 +10365,148 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(juce::Array<juce::var>());
                         }
                     })
+                    .withNativeFunction ("resolveBuiltInPluginRoute", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 4 ? audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args[3].toString()) : -2);
+                    })
+                    .withNativeFunction ("gainPhaseAlignment", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto fail=[&](const juce::String& reason){auto* value=new juce::DynamicObject();value->setProperty("success",false);value->setProperty("error",reason);completion(value);};
+                        if(args.size()!=2){fail("Invalid alignment request");return;}
+                        const auto action=args[0].toString();const auto request=juce::JSON::parse(args[1].toString());
+                        const auto id=request["jobId"].toString();
+                        if(action=="status"||action=="cancel"||action=="release")
+                        {
+                            const auto found=alignmentJobs.find(id);if(found==alignmentJobs.end()){fail("Alignment session is no longer active");return;}
+                            const auto job=found->second;
+                            if(action=="status")job->touch();else job->cancel();
+                            const auto status=job->status();if(action=="release")alignmentJobs.erase(found);completion(status);return;
+                        }
+                        if(action=="list"){completion(audioEngine.gainPhaseAlignment(action,request));return;}
+                        std::shared_ptr<BuiltInAlignmentJob> job;
+                        if(action=="capture")
+                        {
+                            if(id.isEmpty()||id.length()>128){fail("A unique alignment session is required");return;}
+                            for(auto it=alignmentJobs.begin();it!=alignmentJobs.end();)
+                                if(it->second->complete.load())it=alignmentJobs.erase(it);else ++it;
+                            if(!alignmentJobs.empty()){fail("An alignment capture is already active in this window");return;}
+                            job=std::make_shared<BuiltInAlignmentJob>();alignmentJobs.emplace(id,job);
+                        }
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        auto work=[safeThis,action,request,job,completion]() mutable {
+                            if(safeThis==nullptr)return;
+                            const auto result=safeThis->audioEngine.gainPhaseAlignment(action,request,
+                                [safeThis,job]{return safeThis!=nullptr&&(!job||job->keepRunning());},
+                                [job](int stage,double progress){if(job){job->stage.store(stage);job->progress.store(progress);}});
+                            if(job){job->stage.store(3);job->complete.store(true);}
+                            juce::MessageManager::callAsync([safeThis,result,completion]() mutable {if(safeThis!=nullptr)completion(result);});
+                        };
+                        if(action=="capture")alignmentCapturePool.addJob(std::move(work));else builtInStateMutationPool.addJob(std::move(work));
+                    })
+                    .withNativeFunction ("eqDraftAudition", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto fail=[&](const juce::String& reason){auto* r=new juce::DynamicObject();r->setProperty("success",false);r->setProperty("error",reason);completion(r);};
+                        if(args.size()!=2){fail("Invalid EQ audition request");return;}
+                        const auto action=args[0].toString();const auto request=juce::JSON::parse(args[1].toString());const auto session=request["session"].toString();
+                        if(action=="status"||action=="stop")
+                        {
+                            const auto found=eqDraftJobs.find(session);if(found==eqDraftJobs.end()){fail("Audition session is no longer active");return;}
+                            if(action=="stop")found->second.ticket->cancel();else found->second.ticket->touch();
+                            auto command=found->second.request.clone();command.getDynamicObject()->setProperty("immediate",static_cast<bool>(request["immediate"]));
+                            const auto result=audioEngine.eqDraftAudition(action,command);
+                            if(action=="stop")eqDraftJobs.erase(found);
+                            completion(result);return;
+                        }
+                        if((action!="start"&&action!="update")||session.isEmpty()||session.length()>128){fail("A unique EQ audition session is required");return;}
+                        std::shared_ptr<BuiltInWorkerJob> job;auto workRequest=request;
+                        if(action=="update")
+                        {
+                            const auto found=eqDraftJobs.find(session);if(found==eqDraftJobs.end()){fail("Audition session is no longer active");return;}
+                            job=found->second.ticket;if(!job->complete.exchange(false)){fail("Audition update is already pending");return;}
+                            job->touch();workRequest=found->second.request.clone();workRequest.getDynamicObject()->setProperty("bands",request["bands"]);
+                        }
+                        else
+                        {
+                            if(!eqDraftJobs.empty()){fail("An EQ proposal is already being auditioned in this window");return;}
+                            job=std::make_shared<BuiltInWorkerJob>();eqDraftJobs.emplace(session,EQDraftJob{job,request});
+                        }
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        builtInStateMutationPool.addJob([safeThis,workRequest,action,job,completion]() mutable {
+                            if(safeThis==nullptr)return;
+                            const auto result=safeThis->audioEngine.eqDraftAudition(action,workRequest,[safeThis,job]{return safeThis!=nullptr&&job->keepRunning();});
+                            job->complete.store(true);
+                            juce::MessageManager::callAsync([safeThis,result,completion]() mutable {if(safeThis!=nullptr)completion(result);});
+                        });
+                    })
+                    .withNativeFunction ("reverbResponse", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto fail=[&](const juce::String& reason){auto* r=new juce::DynamicObject();r->setProperty("success",false);r->setProperty("error",reason);completion(r);};
+                        if(args.size()!=2){fail("Invalid response request");return;}
+                        const auto action=args[0].toString();const auto request=juce::JSON::parse(args[1].toString());
+                        const auto id=request["jobId"].toString();
+                        if(action=="status"||action=="cancel"||action=="release")
+                        {
+                            const auto found=reverbResponseJobs.find(id);if(found==reverbResponseJobs.end()){fail("Response session is no longer active");return;}
+                            const auto job=found->second;if(action=="status")job->touch();else job->cancel();
+                            const auto status=job->status();if(action=="release")reverbResponseJobs.erase(found);completion(status);return;
+                        }
+                        if(action!="render"||id.isEmpty()||id.length()>128){fail("A unique response session is required");return;}
+                        for(auto it=reverbResponseJobs.begin();it!=reverbResponseJobs.end();)
+                            if(it->second->complete.load())it=reverbResponseJobs.erase(it);else ++it;
+                        if(!reverbResponseJobs.empty()){fail("A response is already being rendered in this window");return;}
+                        auto job=std::make_shared<BuiltInWorkerJob>();reverbResponseJobs.emplace(id,job);
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        reverbResponsePool.addJob([safeThis,request,job,completion]() mutable {
+                            if(safeThis==nullptr)return;
+                            const auto result=safeThis->audioEngine.reverbResponse(request,
+                                [safeThis,job]{return safeThis!=nullptr&&job->keepRunning();},
+                                [job](int stage,double progress){job->stage.store(stage);job->progress.store(progress);});
+                            job->stage.store(3);job->complete.store(true);
+                            juce::MessageManager::callAsync([safeThis,result,completion]() mutable {if(safeThis!=nullptr)completion(result);});
+                        });
+                    })
+                    .withNativeFunction ("irAudition", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const auto fail=[&](const juce::String& reason){auto* result=new juce::DynamicObject();result->setProperty("success",false);result->setProperty("error",reason);completion(juce::var(result));};
+                        if(args.size()!=2){fail("Invalid audition request");return;}
+                        const auto action=args[0].toString();const auto request=juce::JSON::parse(args[1].toString());const auto session=request["session"].toString();
+                        if(session.isEmpty()||session.length()>128){fail("Invalid audition session");return;}
+                        if(action=="stop"){audioEngine.irPreview.stop(session);completion(audioEngine.irPreview.status(session));return;}
+                        if(action=="status"){completion(audioEngine.irPreview.status(session));return;}
+                        if(action!="play"){fail("Unknown audition operation");return;}
+                        auto* device=audioEngine.getDeviceManager().getCurrentAudioDevice();
+                        if(!device||!device->isPlaying()){fail("Open an audio output device before auditioning");return;}
+                        // Reserve on the message thread, before queueing work: a
+                        // close/Stop message can invalidate even a queued start.
+                        const auto ticket=audioEngine.irPreview.begin(session);
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        builtInStateMutationPool.addJob([safeThis,request,ticket,completion]() mutable {
+                            if(safeThis==nullptr)return;
+                            const auto result=safeThis->audioEngine.prepareIRAudition(request,ticket,[safeThis]{return safeThis!=nullptr;});
+                            juce::MessageManager::callAsync([safeThis,result,completion]() mutable {if(safeThis!=nullptr)completion(result);});
+                        });
+                    })
+                    .withNativeFunction ("eqMatch", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if(args.size()!=2){completion(false);return;}
+                        const auto action=args[0].toString();const auto request=juce::JSON::parse(args[1].toString());
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        builtInStateMutationPool.addJob([safeThis,action,request,completion]() mutable {
+                            if(safeThis==nullptr)return;
+                            const auto result=safeThis->audioEngine.eqMatch(action,request,[safeThis]{return safeThis!=nullptr;});
+                            juce::MessageManager::callAsync([safeThis,result,completion]() mutable {if(safeThis!=nullptr)completion(result);});
+                        });
+                    })
                     .withNativeFunction ("getBuiltInPluginSchema", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3 && args[0].isString()) {
-                            completion(audioEngine.getBuiltInPluginSchema(args[0].toString(), args[1].toString(), static_cast<int>(args[2])));
+                            const int routedIndex = audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args.size() > 3 ? args[3].toString() : juce::String());
+                            if (routedIndex == -2) { completion(false); return; }
+                            completion(audioEngine.getBuiltInPluginSchema(args[0].toString(), args[1].toString(), routedIndex));
                         } else {
                             completion(juce::var());
                         }
+                    })
+                    .withNativeFunction ("getBuiltInPluginMeters", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() >= 3 && args[0].isString()) {
+                            const int routedIndex = audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args.size() > 3 ? args[3].toString() : juce::String());
+                            if (routedIndex == -2) { completion(false); return; }
+                            completion(audioEngine.getBuiltInPluginMeters(args[0].toString(), args[1].toString(), routedIndex, args.size() > 4 ? static_cast<int>(args[4]) : 0, args.size() > 5 ? static_cast<int>(args[5]) : 0));
+                        } else
+                            completion(juce::var());
                     })
                     .withNativeFunction ("getNAMRackDiagnostics", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3 && args[0].isString()) {
@@ -9629,18 +10517,22 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("getBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3 && args[0].isString()) {
-                            completion(audioEngine.getBuiltInPluginState(args[0].toString(), args[1].toString(), static_cast<int>(args[2])));
+                            const int routedIndex = audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args.size() > 3 ? args[3].toString() : juce::String());
+                            if (routedIndex == -2) { completion(false); return; }
+                            completion(audioEngine.getBuiltInPluginState(args[0].toString(), args[1].toString(), routedIndex));
                         } else {
                             completion(juce::var());
                         }
                     })
                     .withNativeFunction ("setBuiltInPluginParam", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 5 && args[0].isString()) {
-                            const bool applied = audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), static_cast<int>(args[2]),
+                            const int routedIndex = audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args.size() > 5 ? args[5].toString() : juce::String());
+                            if (routedIndex == -2) { completion(false); return; }
+                            const bool applied = audioEngine.setBuiltInPluginParam(args[0].toString(), args[1].toString(), routedIndex,
                                                                          args[3].toString(), static_cast<float>(static_cast<double>(args[4])));
                             if (applied)
-                                broadcastEventToAll("pluginParameterEdit", audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
-                                    static_cast<int>(args[2]), args[3].toString(), "value"));
+                                publishBuiltInParameterEdit(audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
+                                    routedIndex, args[3].toString(), "value", static_cast<float>(static_cast<double>(args[4]))));
                             completion(applied);
                         } else {
                             completion(false);
@@ -9648,27 +10540,63 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("builtInPluginGesture", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() < 5) { completion(false); return; }
+                            const int routedIndex = audioEngine.resolveBuiltInPluginRoute(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args.size() > 5 ? args[5].toString() : juce::String());
+                            if (routedIndex == -2) { completion(false); return; }
                         const auto event = audioEngine.builtInParameterEdit(args[0].toString(), args[1].toString(),
-                            static_cast<int>(args[2]), args[3].toString(), static_cast<bool>(args[4]) ? "begin" : "end");
+                            routedIndex, args[3].toString(), static_cast<bool>(args[4]) ? "begin" : "end");
                         const auto parameter = event.getProperty("param", "").toString();
                         if (parameter.isNotEmpty() && static_cast<bool>(args[4]))
                             audioEngine.beginTouchAutomation(args[0].toString(), parameter);
-                        broadcastEventToAll("pluginParameterEdit", event);
+                        publishBuiltInParameterEdit(event);
                         completion(true);
+                    })
+                    .withNativeFunction ("irPreparation", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if(args.size()!=2){completion(juce::var());return;}
+                        const auto action=args[0].toString(),id=args[1].toString();
+                        if(id.isEmpty()||id.length()>80){completion(juce::var());return;}
+                        if(action=="begin")
+                        {
+                            if(irPreparationJobs.size()>=32)
+                            {
+                                for(auto it=irPreparationJobs.begin();it!=irPreparationJobs.end();)
+                                {
+                                    if(it->second->terminal())it=irPreparationJobs.erase(it);else ++it;
+                                }
+                            }
+                            if(irPreparationJobs.size()>=32||irPreparationJobs.count(id)!=0){completion(juce::var());return;}
+                            irPreparationJobs.emplace(id,std::make_shared<BuiltInIRPreparation>());
+                        }
+                        const auto found=irPreparationJobs.find(id);if(found==irPreparationJobs.end()){completion(juce::var());return;}
+                        if(action=="cancel")found->second->cancel();
+                        const auto info=found->second->info();
+                        if(action=="release"){found->second->cancel();irPreparationJobs.erase(found);}
+                        completion(info);
                     })
                     .withNativeFunction ("setBuiltInPluginState", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 4 && args[0].isString()) {
                             const auto trackId = args[0].toString();
                             const auto chainType = args[1].toString();
-                            const int fxIndex = static_cast<int>(args[2]);
+                            const int fxIndex = audioEngine.resolveBuiltInPluginRoute(trackId, chainType, static_cast<int>(args[2]), args.size() > 4 ? args[4].toString() : juce::String());
+                            if (fxIndex == -2) { completion(false); return; }
                             const auto stateJson = args[3].toString();
+                            std::shared_ptr<BuiltInIRPreparation> irPreparation;
+                            const auto parsedIRState=juce::JSON::parse(stateJson);
+                            const auto preparationId=parsedIRState.getProperty("irPreparationId",{}).toString();
+                            if(preparationId.isNotEmpty())
+                            {
+                                const auto found=irPreparationJobs.find(preparationId);
+                                const bool irEdit=parsedIRState.hasProperty("irFile")||parsedIRState.hasProperty("irShape")||parsedIRState.hasProperty("defaultIR");
+                                if(!irEdit||found==irPreparationJobs.end()||!found->second->claim()){completion(false);return;}
+                                irPreparation=found->second;
+                            }
                             const auto namMutationSlots = getNAMModelMutationSlots(stateJson);
                             std::vector<std::pair<juce::String, juce::uint64>> namMutationRequests;
                             const auto topologyGeneration = beginNAMModelMutationRequests(
                                 trackId, chainType, fxIndex, namMutationSlots, namMutationRequests);
 
                             juce::Component::SafePointer<MainComponent> safeThis(this);
-                            builtInStateMutationPool.addJob([safeThis, trackId, chainType, fxIndex, stateJson, namMutationRequests, topologyGeneration, completion]() mutable {
+                            builtInStateMutationPool.addJob([safeThis, trackId, chainType, fxIndex, stateJson, namMutationRequests, topologyGeneration, irPreparation, completion]() mutable {
+                                BuiltInIRPreparation::FinishGuard preparationFinish{irPreparation};
                                 if (safeThis == nullptr)
                                     return;
 
@@ -9713,13 +10641,31 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                             namMutationRequests, topologyGeneration)
                                         : std::shared_ptr<void>();
                                 };
+                                const auto stateRequest = juce::JSON::parse(stateJson);
+                                const auto bypassBefore = stateRequest["hostBypassed"].isBool()
+                                    ? safeThis->audioEngine.getBuiltInPluginSchema(trackId, chainType, fxIndex) : juce::var();
                                 const bool applied = safeThis->audioEngine.setBuiltInPluginState(
-                                    trackId, chainType, fxIndex, stateJson, publicationLeaseFactory);
+                                    trackId, chainType, fxIndex, stateJson, publicationLeaseFactory, irPreparation);
+                                if(irPreparation)irPreparation->finish(applied);
                                 const bool result = applied;
                                 juce::Logger::writeToLog("Built-in bridge: sequenced state mutation finished chain=" + chainType + " fx=" + juce::String(fxIndex) + " result=" + juce::String(result ? "true" : "false"));
-                                juce::MessageManager::callAsync([safeThis, completion, result]() mutable {
+                                juce::var bypassEvent;
+                                if (applied && bypassBefore["hostBypassed"].isBool()
+                                    && static_cast<bool>(bypassBefore["hostBypassed"]) != static_cast<bool>(stateRequest["hostBypassed"]))
+                                {
+                                    auto* event = new juce::DynamicObject();
+                                    event->setProperty("trackId", trackId); event->setProperty("chain", chainType); event->setProperty("fxIndex", fxIndex);
+                                    event->setProperty("instanceId", bypassBefore["instanceId"]);
+                                    event->setProperty("before", bypassBefore["hostBypassed"]); event->setProperty("after", stateRequest["hostBypassed"]);
+                                    event->setProperty("historyReplay", static_cast<bool>(stateRequest["hostBypassHistoryReplay"]));
+                                    bypassEvent = juce::var(event);
+                                }
+                                juce::MessageManager::callAsync([safeThis, completion, result, bypassEvent]() mutable {
                                     if (safeThis != nullptr)
+                                    {
+                                        if (bypassEvent.isObject()) MainComponent::broadcastEventToAll("builtInHostBypassChanged", bypassEvent);
                                         completion(result);
+                                    }
                                 });
                             });
                         } else {
@@ -9738,7 +10684,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("removeTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("removeTrackInputFX", deferNativeMutation("removeTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2 && args[1].isInt()) {
                            juce::String trackId = args[0].toString();
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -9747,8 +10693,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
-                    })
-                    .withNativeFunction ("removeTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    }))
+                    .withNativeFunction ("removeTrackFX", deferNativeMutation("removeTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2 && args[1].isInt()) {
                            juce::String trackId = args[0].toString();
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -9757,7 +10703,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
-                    })
+                    }))
                     .withNativeFunction ("bypassTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 3 && args[1].isInt() && args[2].isBool()) {
                             juce::String trackId = args[0].toString();
@@ -9776,7 +10722,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
-                    .withNativeFunction ("reorderTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("reorderTrackInputFX", deferNativeMutation("reorderTrackInputFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 3 && args[1].isInt() && args[2].isInt()) {
                             juce::String trackId = args[0].toString();
                             int fromIndex = args[1];
@@ -9788,8 +10734,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
-                    })
-                    .withNativeFunction ("reorderTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    }))
+                    .withNativeFunction ("reorderTrackFX", deferNativeMutation("reorderTrackFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 3 && args[1].isInt() && args[2].isInt()) {
                             juce::String trackId = args[0].toString();
                             int fromIndex = args[1];
@@ -9801,9 +10747,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
-                    })
+                    }))
                    // JSFX (JSFX) Management
-                   .withNativeFunction ("addTrackJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   .withNativeFunction ("addTrackJSFX", deferNativeMutation("addTrackJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 2) {
                            juce::String trackId = args[0].toString();
                            juce::String scriptPath = args[1].toString();
@@ -9815,8 +10761,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
-                   .withNativeFunction ("addMasterJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                   }))
+                   .withNativeFunction ("addMasterJSFX", deferNativeMutation("addMasterJSFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 1) {
                            juce::String scriptPath = args[0].toString();
                            const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -9826,7 +10772,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        } else {
                            completion(false);
                        }
-                   })
+                   }))
                    .withNativeFunction ("getJSFXSliders", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                        if (args.size() >= 3) {
                            juce::String trackId = args[0].toString();
@@ -9935,6 +10881,13 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                        completion(audioEngine.getTempo());
                    })
                     // Metronome & Time Signature (Phase 3)
+                    .withNativeFunction ("controlPracticeTimer", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() >= 2 && audioEngine.controlPracticeTimer(args[0].toString(), static_cast<double>(args[1])));
+                    })
+                    .withNativeFunction ("getPracticeTimer", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        completion(audioEngine.getPracticeTimer());
+                    })
                     .withNativeFunction ("setMetronomePracticeEnabled", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(args.size() == 1 && args[0].isBool()
                             && audioEngine.setMetronomePracticeEnabled(static_cast<bool>(args[0])));
@@ -10331,6 +11284,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
+                    .withNativeFunction ("sendBuiltInPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 6 && audioEngine.sendBuiltInPreview(args[0].toString(), args[1].toString(), static_cast<int>(args[2]), args[3].toString(), static_cast<int>(args[4]), static_cast<bool>(args[5])));
+                    })
                     .withNativeFunction ("sendMidiNote", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 4 && args[0].isString()) {
                             completion(audioEngine.sendMidiNote(args[0].toString(),
@@ -10395,10 +11351,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         juce::ignoreUnused(args);
                         completion(audioEngine.getPluginCompatibilityMatrix());
                     })
-                    .withNativeFunction ("runEngineBenchmarks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("runEngineBenchmarks", deferNativeMutation("runEngineBenchmarks", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(audioEngine.runEngineBenchmarks());
-                    })
+                    }))
                     .withNativeFunction ("setTrackPluginPrecisionOverride", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 4 && args[0].isString() && args[1].isInt() && args[2].isBool() && args[3].isString()) {
                             completion(audioEngine.setTrackPluginPrecisionOverride(args[0].toString(),
@@ -10686,6 +11642,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         runTone3000NativeTask(
                             [] { return runTone3000AuthenticatedQA(); },
                             std::move(completion));
+                    })
+                    .withNativeFunction ("getTONE3000User", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args);
+                        runTone3000NativeTask([] { return getTone3000User(); }, std::move(completion));
                     })
                     .withNativeFunction ("getTONE3000ToneDetail", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         const int toneId = args.size() > 0 ? static_cast<int>(args[0]) : 0;
@@ -11003,6 +11963,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         );
                         
                         auto chooserFlags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles;
+                        if(args.size()>3&&static_cast<bool>(args[3]))chooserFlags|=juce::FileBrowserComponent::warnAboutOverwriting;
 
                         const auto preferredExtension = getPreferredExtension(defaultPath, filters);
 
@@ -11025,6 +11986,18 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                 completion("");  // User cancelled
                             }
                         });
+                    })
+                    .withNativeFunction ("showImportFilesDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        fileChooser = std::make_unique<juce::FileChooser>(
+                            args.size() > 0 ? args[0].toString() : "Import Media",
+                            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                            args.size() > 1 ? args[1].toString() : "*.wav;*.aiff;*.flac;*.ogg;*.mp3;*.mid;*.midi", true);
+                        fileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                            | juce::FileBrowserComponent::canSelectMultipleItems, [completion](const juce::FileChooser& fc) {
+                                juce::Array<juce::var> paths;
+                                for (const auto& file : fc.getResults()) if (file.existsAsFile()) paths.add(file.getFullPathName());
+                                completion(paths);
+                            });
                     })
                     .withNativeFunction ("showOpenDialog", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Show native open file dialog
@@ -11131,6 +12104,58 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             else result = false;
                             juce::MessageManager::callAsync([completion, result] { (*completion)(result); });
                         });
+                    })
+                    .withNativeFunction ("beginProjectFileRead", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 1 || !args[0].isString() || !juce::File::isAbsolutePath(args[0].toString())) {
+                            auto* info = new juce::DynamicObject(); info->setProperty("error", "Project path must be absolute"); completion(juce::var(info)); return;
+                        }
+                        const auto file = juce::File(args[0].toString());
+                        juce::Component::SafePointer<MainComponent> safeThis(this);
+                        projectFilePool.addJob([safeThis, file, completion] {
+                            juce::String json, error;
+                            if (!file.existsAsFile()) error = "Project file does not exist";
+                            else if (file.getSize() > 256 * 1024 * 1024) error = "Project file exceeds the 256 MiB limit";
+                            else {
+                                juce::FileInputStream input(file);
+                                if (!input.openedOk()) error = "Project file could not be opened: " + input.getStatus().getErrorMessage();
+                                else {
+                                    json = input.readEntireStreamAsString();
+                                    if (json.isEmpty()) error = "Project file is empty or unreadable";
+                                    else if (!hasBoundedJsonEnvelope(json)) error = "Project JSON exceeds supported nesting or size, or is incomplete";
+                                }
+                            }
+                            juce::MessageManager::callAsync([safeThis, file, json = std::move(json), error, completion] {
+                                if (!safeThis || error.isNotEmpty()) {
+                                    auto* info = new juce::DynamicObject();
+                                    const auto detail = safeThis ? error : juce::String("Project reader closed before the read completed");
+                                    info->setProperty("error", detail);
+                                    juce::Logger::writeToLog("Project read failed: " + file.getFullPathName() + " (" + detail + ")");
+                                    completion(juce::var(info)); return;
+                                }
+                                safeThis->projectReadToken = juce::Uuid().toString();
+                                safeThis->projectReadJSON = json;
+                                auto* info = new juce::DynamicObject();
+                                info->setProperty("token", safeThis->projectReadToken);
+                                info->setProperty("length", json.length());
+                                completion(juce::var(info));
+                            });
+                        });
+                    })
+                    .withNativeFunction ("readProjectFileChunk", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 2 || projectReadToken.isEmpty() || args[0].toString() != projectReadToken) { completion(juce::var()); return; }
+                        if (!args[1].isInt() && !args[1].isInt64() && !args[1].isDouble()) { completion(juce::var()); return; }
+                        const double projectOffsetValue = static_cast<double>(args[1]);
+                        if (!std::isfinite(projectOffsetValue) || projectOffsetValue < 0 || projectOffsetValue >= projectReadJSON.length() || std::floor(projectOffsetValue) != projectOffsetValue) { completion(juce::var()); return; }
+                        const int offset = static_cast<int>(projectOffsetValue);
+                        const int next = juce::jmin(projectReadJSON.length(), offset + 8192);
+                        auto* chunk = new juce::DynamicObject();
+                        chunk->setProperty("data", projectReadJSON.substring(offset, next));
+                        chunk->setProperty("nextOffset", next);
+                        completion(juce::var(chunk));
+                    })
+                    .withNativeFunction ("releaseProjectFileRead", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 1 || projectReadToken.isEmpty() || args[0].toString() != projectReadToken) { completion(false); return; }
+                        projectReadToken.clear(); projectReadJSON.clear(); completion(true);
                     })
                     .withNativeFunction ("loadProjectFromFile", [] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Load project JSON from file
@@ -11394,7 +12419,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 
                         completion(true);
                     })
-                    .withNativeFunction ("cancelWaveformPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("cancelWaveformPreview", [
+#if JUCE_WINDOWS
+                        this
+#endif
+                    ] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 1 && args[0].isString())
                         {
 #if JUCE_WINDOWS
@@ -11907,6 +12936,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(false);
                         }
                     })
+                    .withNativeFunction ("getMetronomeSoundInfo", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(audioEngine.getMetronomeSoundInfo(args.size() == 1 && static_cast<bool>(args[0])));
+                    })
                     .withNativeFunction ("resetMetronomeSounds", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Phase 9C: Reset metronome to default synthesized sounds
                         juce::ignoreUnused(args);
@@ -11914,6 +12946,10 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         completion(true);
                     })
                     // ===== Phase 11: Send/Bus Routing =====
+                    .withNativeFunction ("replaceTrackSends", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 2 && args[0].isString()
+                            && audioEngine.replaceTrackSends(args[0].toString(), args[1]));
+                    })
                     .withNativeFunction ("addTrackSend", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2) {
                             int idx = audioEngine.addTrackSend(args[0].toString(), args[1].toString());
@@ -11975,6 +13011,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                             completion(true);
                         } else { completion(false); }
                     })
+                    .withNativeFunction ("setTrackSendSourceChannel", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() >= 3 && audioEngine.setTrackSendSourceChannel(args[0].toString(), (int)args[1], (int)args[2]));
+                    })
                     .withNativeFunction ("setTrackPhaseInvert", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2) {
                             audioEngine.setTrackPhaseInvert(args[0].toString(), (bool)args[1]);
@@ -12035,6 +13074,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         if (args.size() == 1) {
                             completion(audioEngine.getTrackChannelCount(args[0].toString()));
                         } else { completion(2); }
+                    })
+                    .withNativeFunction ("setTrackMIDIOutputMergeKeys", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size()==2&&audioEngine.setTrackMIDIOutputMergeKeys(args[0].toString(),static_cast<bool>(args[1])));
                     })
                     .withNativeFunction ("setTrackMIDIOutput", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2) {
@@ -12695,7 +13737,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         }
                     })
                     // ========== Phase 4.3: Built-in Effects ==========
-                    .withNativeFunction ("addTrackBuiltInFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    .withNativeFunction ("addTrackBuiltInFX", deferNativeMutation("addTrackBuiltInFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [trackId, effectName, isInputFX?]
                         if (args.size() >= 2 && args[0].isString() && args[1].isString()) {
                             bool isInputFX = args.size() >= 3 && (bool)args[2];
@@ -12706,8 +13748,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(juce::var(false));
                         }
-                    })
-                    .withNativeFunction ("addMasterBuiltInFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                    }))
+                    .withNativeFunction ("addMasterBuiltInFX", deferNativeMutation("addMasterBuiltInFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [effectName]
                         if (args.size() >= 1 && args[0].isString()) {
                             const juce::ScopedLock processMutationLock(namModelMutationStateLock);
@@ -12717,7 +13759,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(juce::var(false));
                         }
-                    })
+                    }))
                     .withNativeFunction ("getAvailableBuiltInFX", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         juce::ignoreUnused(args);
                         completion(audioEngine.getAvailableBuiltInFX());
@@ -12882,8 +13924,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("setSidechainSource", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [destTrackId, pluginIndex, sourceTrackId]
                         if (args.size() >= 3 && args[0].isString() && args[2].isString()) {
-                            audioEngine.setSidechainSource(args[0].toString(), (int)args[1], args[2].toString());
-                            completion(juce::var(true));
+                            completion(juce::var(audioEngine.setSidechainSource(args[0].toString(), (int)args[1], args[2].toString())));
                         } else {
                             completion(juce::var(false));
                         }
@@ -12891,8 +13932,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("clearSidechainSource", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         // Args: [destTrackId, pluginIndex]
                         if (args.size() >= 2 && args[0].isString()) {
-                            audioEngine.clearSidechainSource(args[0].toString(), (int)args[1]);
-                            completion(juce::var(true));
+                            completion(juce::var(audioEngine.clearSidechainSource(args[0].toString(), (int)args[1])));
                         } else {
                             completion(juce::var(false));
                         }
@@ -13029,6 +14069,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         if (isMainWindow())
                         {
                             requestFrontendAppClose();
+                        }
+                        else if (windowRole == WindowRole::pitchEditor && windowCallbacks.pitchEditorSession)
+                        {
+                            auto callback = windowCallbacks.pitchEditorSession;
+                            const auto identity = windowInstanceId;
+                            juce::MessageManager::callAsync([callback, identity]() { callback("close", {}, WindowRole::pitchEditor, identity); });
                         }
                         else if (windowRole == WindowRole::midiEditor && windowCallbacks.closeMidiEditorWindow)
                         {
@@ -13182,6 +14228,12 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         else
                             completion(juce::var());
                     })
+                    .withNativeFunction ("pitchEditorSession", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 2 || !args[0].isString() || !windowCallbacks.pitchEditorSession
+                            || (windowRole != WindowRole::main && windowRole != WindowRole::pitchEditor))
+                        { completion(juce::var(false)); return; }
+                        completion(windowCallbacks.pitchEditorSession(args[0].toString(), args[1], windowRole, windowInstanceId));
+                    })
                     .withNativeFunction ("publishMidiEditorUISnapshot", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() > 1 && args[0].isString() && windowCallbacks.publishMidiEditorUISnapshot)
                             windowCallbacks.publishMidiEditorUISnapshot(args[0].toString(), args[1]);
@@ -13283,6 +14335,28 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(juce::var("off"));
                         }
+                    })
+                    .withNativeFunction ("setAutomationPreview", deferNativeMutation("setAutomationPreview", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        const juce::ScopedLock processMutationLock(namModelMutationStateLock);
+                        auto* result = new juce::DynamicObject();
+                        result->setProperty("success", (args.size() == 4 || args.size() == 5) && (args[2].isDouble() || args[2].isInt()) && audioEngine.setAutomationPreview(args[0].toString(), args[1].toString(), static_cast<float>(static_cast<double>(args[2])), args[3].toString(), args.size() == 5 ? static_cast<juce::int64>(args[4]) : -1));
+                        result->setProperty("generation", static_cast<juce::int64>(audioEngine.getAutomationPreviewGeneration()));
+                        completion(juce::var(result));
+                    }))
+                    .withNativeFunction ("clearAutomationPreviews", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        juce::ignoreUnused(args); completion(audioEngine.clearAutomationPreviews());
+                    })
+                    .withNativeFunction ("punchAutomationPreviews", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 2 ? audioEngine.punchAutomationPreviews(args[0].toString(), static_cast<juce::uint64>(static_cast<juce::int64>(args[1]))) : juce::var());
+                    })
+                    .withNativeFunction ("setAutomationWriteHold", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 6 && audioEngine.setAutomationWriteHold(args[0].toString(),args[1].toString(),static_cast<float>(args[2]),static_cast<double>(args[3]),args[4].toString(),static_cast<juce::int64>(args[5])));
+                    })
+                    .withNativeFunction ("clearAutomationWriteHold", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 2 && audioEngine.clearAutomationWriteHold(args[0].toString(),args[1].toString()));
+                    })
+                    .withNativeFunction ("getAutomationCurrentValue", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(args.size() == 2 ? audioEngine.getAutomationCurrentValue(args[0].toString(), args[1].toString()) : juce::var());
                     })
                     .withNativeFunction ("clearAutomation", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() == 2) {
@@ -13747,6 +14821,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         {
                             audioEngine.setPitchCorrectorParam(args[0].toString(), static_cast<int>(args[1]),
                                                                args[2].toString(), static_cast<float>(static_cast<double>(args[3])));
+                            const auto legacyParam = args[2].toString();
+                            const auto parameter = legacyParam == "midiOutput" ? juce::String("midiOutputEnabled")
+                                : legacyParam == "midiChannel" ? juce::String("midiOutputChannel") : legacyParam;
+                            broadcastEventToAll("pluginParameterEdit", audioEngine.builtInParameterEdit(
+                                args[0].toString(), "track", static_cast<int>(args[1]), parameter, "value"));
                             completion(true);
                         }
                         else
@@ -13807,7 +14886,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     auto notesVar = obj->getProperty ("notes");
                                     noteCount = notesVar.isArray() ? notesVar.getArray()->size() : 0;
                                     hasResult = true;
-                                    juce::Logger::writeToLog ("PitchAnalysis: Complete — "
+                                    juce::Logger::writeToLog ("PitchAnalysis: Complete - "
                                         + juce::String(noteCount) + " notes detected, clipId=" + clipId);
                                 }
                                 else
@@ -13892,7 +14971,7 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                                     auto notesVar = obj->getProperty ("notes");
                                     noteCount = notesVar.isArray() ? notesVar.getArray()->size() : 0;
                                     hasResult = true;
-                                    juce::Logger::writeToLog ("PitchAnalysis: Complete — "
+                                    juce::Logger::writeToLog ("PitchAnalysis: Complete - "
                                         + juce::String(noteCount) + " notes detected, clipId=" + clipId);
                                 }
                                 else
@@ -15023,15 +16102,15 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     })
                     .withNativeFunction ("hasAnyActiveARA", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(juce::var(audioEngine.hasAnyActiveARA()));
-                    }))
+                    })
+                    .withInitialisationData("__openStudioDeferredMutationFunctions", juce::var(deferredNativeFunctionNames)))
 {
     const auto preferredBackend = getPreferredBrowserBackend();
     const auto startupLogFile = getStartupLogFile();
     const auto packagedFrontend = getPackagedFrontendEntryPoint();
     const auto webViewUserDataDir = getWebView2UserDataFolder();
 
-    const auto checkOptions = getEmbeddedBrowserBaseOptions();
-    const bool supported = juce::WebBrowserComponent::areOptionsSupported(checkOptions);
+    const bool supported = areEmbeddedBrowserOptionsSupported();
     const auto dependencyStatus = evaluateStartupDependencies(supported);
 
     juce::Logger::writeToLog("=== Embedded UI startup diagnostics ===");
@@ -15040,6 +16119,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
     juce::Logger::writeToLog("Embedded browser backend supported: " + juce::String(supported ? "Yes" : "No"));
     juce::Logger::writeToLog("Startup log file: " + startupLogFile.getFullPathName());
     juce::Logger::writeToLog("Executable directory: " + getExecutableDirectory().getFullPathName());
+    juce::Logger::writeToLog("Runtime asset root: " + getRuntimeAssetRoot().getFullPathName());
+#if JUCE_LINUX
+    juce::Logger::writeToLog("AppImage APPDIR: " + juce::SystemStats::getEnvironmentVariable("APPDIR", {}));
+    juce::Logger::writeToLog("AppImage APPIMAGE: " + juce::SystemStats::getEnvironmentVariable("APPIMAGE", {}));
+#endif
     juce::Logger::writeToLog("Packaged frontend found: " + juce::String(packagedFrontend.existsAsFile() ? "Yes" : "No"));
     if (packagedFrontend.existsAsFile())
         juce::Logger::writeToLog("Packaged frontend path: " + packagedFrontend.getFullPathName());
@@ -15055,6 +16139,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
 #if JUCE_WINDOWS
     const auto webView2RuntimeVersion = detectWebView2RuntimeVersion();
     juce::Logger::writeToLog("Detected WebView2 runtime version: " + (webView2RuntimeVersion.isNotEmpty() ? webView2RuntimeVersion : "not found"));
+    const auto webView2FailureDetail = ! supported ? probeWebView2StartupFailure() : juce::String();
+    if (webView2FailureDetail.isNotEmpty())
+        juce::Logger::writeToLog(webView2FailureDetail);
     juce::Logger::writeToLog("VC++ Redistributable installed: " + juce::String(dependencyStatus.vcRedistInstalled ? "Yes" : "No"));
     if (dependencyStatus.vcRedistVersion.isNotEmpty())
         juce::Logger::writeToLog("Detected VC++ Redistributable version: " + dependencyStatus.vcRedistVersion);
@@ -15129,7 +16216,11 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         else
             message << "\n\nOpenStudio selected the WebView2 backend, and WebView2 Runtime " << webView2RuntimeVersion
                     << " was detected, but JUCE reported the browser backend as unavailable on this machine.";
+        message << "\n\n" << webView2FailureDetail;
         startupRepairAction = dependencyStatus.repairAvailable ? StartupRepairAction::dependencies : StartupRepairAction::none;
+#elif JUCE_LINUX
+        message << "\n\n" << buildStartupFailureSummary(dependencyStatus);
+        startupRepairAction = StartupRepairAction::none;
 #else
         message << "\n\nOpenStudio could not access the system browser backend on this macOS installation.";
         startupRepairAction = StartupRepairAction::none;
@@ -15143,7 +16234,8 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
         bool loadedFrontend = false;
 
        #if JUCE_DEBUG
-        if (isLocalFrontendDevServerReachable())
+        if (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_FORCE_PACKAGED_UI", "0") != "1"
+            && isLocalFrontendDevServerReachable())
         {
             const auto frontendUrl = appendFrontendStartupQuery("http://127.0.0.1:5183", windowRole, startupMode, windowInstanceId);
             juce::Logger::writeToLog("Loading frontend from 127.0.0.1:5183");
@@ -15482,6 +16574,7 @@ MainComponent::~MainComponent()
 {
     for (const auto& entry : toneSearchRequests) entry.second->cancel();
 
+    messageMutations.cancel();
     mediaOperations.cancelPending();
     aiPreflightOperations.cancelPending();
     aiPreflightOperations.shutdown();
@@ -15510,6 +16603,12 @@ MainComponent::~MainComponent()
     ++fullClipRenderGeneration;
     pitchAnalysisRunning.store(false);
     pitchNoteHqPriorityActive.store(false);
+    for(const auto& job:alignmentJobs)job.second->cancel();
+    for(const auto& job:reverbResponseJobs)job.second->cancel();
+    for(const auto& job:eqDraftJobs){job.second.ticket->cancel();audioEngine.eqDraftAudition("stop",job.second.request);}
+    for(const auto& job:irPreparationJobs)job.second->cancel();
+    drain(alignmentCapturePool, "alignment capture");
+    drain(reverbResponsePool, "reverb response");
     drain(builtInStateMutationPool, "built-in state mutations");
     // A timeout is not proof that a worker stopped. These jobs still reference
     // members declared after their pools; allowing member destruction after a
@@ -15542,6 +16641,10 @@ void MainComponent::prepareForSecondaryWindowClose()
         return;
 
     secondaryWindowClosing = true;
+    for(const auto& job:alignmentJobs)job.second->cancel();
+    for(const auto& job:reverbResponseJobs)job.second->cancel();
+    for(const auto& job:eqDraftJobs){job.second.ticket->cancel();audioEngine.eqDraftAudition("stop",job.second.request);}
+    for(const auto& job:irPreparationJobs)job.second->cancel();
     tone3000NativeCompletionsEnabled.store(
         false, std::memory_order_release);
     if (tone3000TaskCancellation != nullptr)
@@ -15697,7 +16800,13 @@ void MainComponent::requestFrontendAppClose()
 {
     if (! isMainWindow())
     {
-        if (windowRole == WindowRole::midiEditor && windowCallbacks.closeMidiEditorWindow)
+        if (windowRole == WindowRole::pitchEditor && windowCallbacks.pitchEditorSession)
+        {
+            auto callback = windowCallbacks.pitchEditorSession;
+            const auto identity = windowInstanceId;
+            juce::MessageManager::callAsync([callback, identity]() { callback("close", {}, WindowRole::pitchEditor, identity); });
+        }
+        else if (windowRole == WindowRole::midiEditor && windowCallbacks.closeMidiEditorWindow)
         {
             auto closeMidiEditorWindow = windowCallbacks.closeMidiEditorWindow;
             const auto sessionId = windowInstanceId.isNotEmpty() ? windowInstanceId : juce::String("default-midi-editor");
@@ -15749,6 +16858,23 @@ void MainComponent::broadcastEventToAll(const juce::String& eventId, const juce:
     for (auto* instance : instancesCopy)
         if (instance != nullptr)
             instance->emitFrontendEvent(eventId, payload);
+}
+
+juce::var MainComponent::getBrowserInstanceCounts()
+{
+    auto* counts = new juce::DynamicObject();
+    int mainCount = 0, secondaryCount = 0, retiringCount = 0;
+    const juce::ScopedLock sl(instanceListLock);
+    for (auto* instance : activeInstances) {
+        if (!instance) continue;
+        if (instance->windowRole == WindowRole::main) ++mainCount;
+        else ++secondaryCount;
+        if (instance->secondaryWindowClosing) ++retiringCount;
+    }
+    counts->setProperty("main", mainCount);
+    counts->setProperty("secondary", secondaryCount);
+    counts->setProperty("retiring", retiringCount);
+    return juce::var(counts);
 }
 
 void MainComponent::broadcastEventToRole(WindowRole role, const juce::String& eventId, const juce::var& payload)
@@ -16036,46 +17162,97 @@ void MainComponent::repairInstalledApplication()
 void MainComponent::repairWindowsPrerequisites()
 {
 #if JUCE_WINDOWS
+    if (prerequisiteRepairInProgress)
+        return;
+
     const auto prereqDir = getWindowsPrerequisiteInstallerDirectory();
     const auto webView2Installer = prereqDir.getChildFile("MicrosoftEdgeWebView2RuntimeInstallerX64.exe");
     const auto vcRedistInstaller = prereqDir.getChildFile("vc_redist.x64.exe");
 
     auto launchedInstallers = juce::StringArray();
 
-    if (vcRedistInstaller.existsAsFile() && vcRedistInstaller.startAsProcess("/install /quiet /norestart"))
-        launchedInstallers.add("Microsoft Visual C++ Redistributable");
+    if (! isVCRedistInstalled() && vcRedistInstaller.existsAsFile())
+    {
+        vcRedistRepairProcess = std::make_unique<juce::ChildProcess>();
+        if (vcRedistRepairProcess->start({ vcRedistInstaller.getFullPathName(), "/install", "/quiet", "/norestart" }))
+            launchedInstallers.add("Microsoft Visual C++ Redistributable");
+        else
+            vcRedistRepairProcess.reset();
+    }
 
-    if (webView2Installer.existsAsFile() && webView2Installer.startAsProcess("/silent /install"))
-        launchedInstallers.add("Microsoft Edge WebView2 Runtime");
+    if (webView2Installer.existsAsFile())
+    {
+        webView2RepairProcess = std::make_unique<juce::ChildProcess>();
+        if (webView2RepairProcess->start({ webView2Installer.getFullPathName(), "/silent", "/install" }))
+            launchedInstallers.add("Microsoft Edge WebView2 Runtime");
+        else
+            webView2RepairProcess.reset();
+    }
 
     if (launchedInstallers.isEmpty())
     {
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::WarningIcon,
             "Repair Prerequisites",
-            "OpenStudio could not find any local prerequisite installers in:\n"
+            "OpenStudio could not start a local prerequisite installer in:\n"
                 + prereqDir.getFullPathName()
                 + "\n\nReinstall OpenStudio or rebuild the installer with prerequisite staging enabled."
         );
         return;
     }
 
+    prerequisiteRepairInProgress = true;
+    startupRepairButton.setEnabled(false);
+    juce::Logger::writeToLog("Prerequisite repair started: " + launchedInstallers.joinIntoString(", "));
     juce::AlertWindow::showMessageBoxAsync(
         juce::AlertWindow::InfoIcon,
         "Repair Started",
         "OpenStudio launched the following repair installers:\n - "
             + launchedInstallers.joinIntoString("\n - ")
-            + "\n\nComplete any prompts, then click Retry."
+            + "\n\nOpenStudio will check the result when they finish."
     );
 #else
     juce::ignoreUnused(startupRepairAction);
 #endif
 }
 
+void MainComponent::pollWindowsPrerequisiteRepair()
+{
+#if JUCE_WINDOWS
+    if (! prerequisiteRepairInProgress)
+        return;
+    if ((webView2RepairProcess && webView2RepairProcess->isRunning())
+        || (vcRedistRepairProcess && vcRedistRepairProcess->isRunning()))
+        return;
+
+    const auto webView2Exit = webView2RepairProcess ? webView2RepairProcess->getExitCode() : -1;
+    const auto vcRedistExit = vcRedistRepairProcess ? vcRedistRepairProcess->getExitCode() : -1;
+    webView2RepairProcess.reset();
+    vcRedistRepairProcess.reset();
+    prerequisiteRepairInProgress = false;
+    startupRepairButton.setEnabled(true);
+
+    const auto supported = areEmbeddedBrowserOptionsSupported();
+    const auto detail = supported ? juce::String() : probeWebView2StartupFailure();
+    juce::Logger::writeToLog("Prerequisite repair completed: WebView2 installer exit="
+        + juce::String(webView2Exit) + ", VC++ installer exit=" + juce::String(vcRedistExit)
+        + ", browser backend supported=" + juce::String(supported ? "Yes" : "No")
+        + (detail.isNotEmpty() ? ", " + detail : juce::String()));
+
+    juce::AlertWindow::showMessageBoxAsync(
+        supported ? juce::AlertWindow::InfoIcon : juce::AlertWindow::WarningIcon,
+        supported ? "Browser Available" : "Repair Did Not Restore Browser",
+        supported
+            ? "The WebView2 backend is available. Click Retry to start the interface."
+            : "The WebView2 backend is still unavailable.\n\n" + detail
+                + "\n\nStartup log: " + getStartupLogFile().getFullPathName());
+#endif
+}
+
 juce::var MainComponent::buildStartupDiagnostics() const
 {
     const auto dependencyStatus = evaluateStartupDependencies(
-        juce::WebBrowserComponent::areOptionsSupported(getEmbeddedBrowserBaseOptions()));
+        areEmbeddedBrowserOptionsSupported());
     auto* diagnostics = new juce::DynamicObject();
     const auto selfTestReport = buildStartupSelfTestReport();
     diagnostics->setProperty("windowRole", getWindowRoleQueryValue(windowRole));
@@ -16251,6 +17428,11 @@ void MainComponent::startDesktopWindowDrag()
 //==============================================================================
 void MainComponent::timerCallback()
 {
+    pollWindowsPrerequisiteRepair();
+    if (isMainWindow() && windowCallbacks.pitchEditorSession)
+        windowCallbacks.pitchEditorSession("tick", {}, windowRole, windowInstanceId);
+    if (isMainWindow() && audioEngine.finalizeInterruptedRecording())
+        pendingRecordingDeviceInterruption = true;
     if (isMainWindow() && frontendStartupState == FrontendStartupState::ready)
         OpenStudioCrashDiagnostics::pulseMessageThread();
     OpenStudioCrashDiagnostics::flushRealtimeFaults();
@@ -16259,10 +17441,18 @@ void MainComponent::timerCallback()
     const auto faultGeneration = ProcessorSafety::changeGeneration.load(std::memory_order_acquire);
     if (isMainWindow() && webView.isVisible() && frontendStartupState == FrontendStartupState::ready)
     {
+        if (pendingRecordingDeviceInterruption) {
+            pendingRecordingDeviceInterruption = false;
+            webView.emitEventIfBrowserIsVisible("recordingDeviceInterrupted", {});
+        }
         const auto edits = audioEngine.takePluginParameterEdits();
-        if (const auto* items = edits.getArray())
-            for (const auto& edit : *items)
-                webView.emitEventIfBrowserIsVisible("pluginParameterEdit", edit);
+        if (const auto generation = audioEngine.takeAutomationPreviewCleared(); generation != 0)
+        {
+            auto* status = new juce::DynamicObject(); status->setProperty("generation", static_cast<juce::int64>(generation));
+            webView.emitEventIfBrowserIsVisible("automationPreviewCleared", juce::var(status));
+        }
+        if (const auto* items = edits.getArray(); items && !items->isEmpty())
+            webView.emitEventIfBrowserIsVisible("pluginParameterEditBatch", edits);
         const auto failures = audioEngine.takeRecordingWriteFailures();
         if (failures.size() > 0)
         {
@@ -16360,6 +17550,7 @@ void MainComponent::timerCallback()
 
         juce::DynamicObject::Ptr transportData = new juce::DynamicObject();
         transportData->setProperty("position", position);
+        transportData->setProperty("requestToken", transportRequestToken);
         transportData->setProperty("isPlaying", audioEngine.isTransportPlaying());
         transportData->setProperty("metronomePracticeEnabled", audioEngine.isMetronomePracticeEnabled());
 

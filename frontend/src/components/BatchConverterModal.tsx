@@ -1,3 +1,4 @@
+import { AUDIO_FILE_FILTER } from "../utils/fileDialogFilters";
 import { useRef, useState } from "react";
 import { Plus, Play, X } from "lucide-react";
 import { nativeBridge } from "../services/NativeBridge";
@@ -52,7 +53,7 @@ export function BatchConverterModal({
   };
 
   const addFromBrowse = async () => {
-    const filePath = await nativeBridge.showOpenDialog("Select audio file to convert");
+    const filePath = await nativeBridge.showOpenDialog("Select audio file to convert", AUDIO_FILE_FILTER);
     if (filePath) {
       if (jobs.some((j) => j.inputPath === filePath)) return;
       setJobs((prev) => [

@@ -1,3 +1,4 @@
+import { startPitchEditorSessionController, usePitchWindowState, detachPitchEditor, dockPitchEditor, recoverPitchCheckpoint } from "./utils/pitchEditorSession";
 import { usePanelLayout } from "./utils/usePanelLayout";
 import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
@@ -5,6 +6,8 @@ import { ExternalLink, GripHorizontal, X } from "lucide-react";
 import { nativeBridge, type NativeGlobalShortcutEvent } from "./services/NativeBridge";
 import { bootstrapTONE3000Session } from "./services/tone3000Session";
 import { startPluginAutomationCapture } from "./services/pluginAutomationCapture";
+import { startAutomationPreviewLifecycle } from "./services/automationPreviewLifecycle";
+import { startBuiltInHostBypassHistory } from "./utils/builtInHostBypassHistory";
 import {
   getGlobalShortcutConflicts,
   getRegisteredAction,
@@ -342,6 +345,7 @@ function App() {
   }, [dockedPianoRollClipId, dockedPianoRollTrackId, selectedClipIds, tracks]);
 
   const isMixerDetached = detachedPanels.includes("mixer");
+  const pitchWindowState = usePitchWindowState();
   const pitchVisible = Boolean(showPitchEditor && pitchEditorTrackId && pitchEditorClipId);
   const midiVisible = Boolean(showPianoRoll && dockedMidiEditorSession && dockedPianoRollTrackId && dockedPianoRollClipId);
   const { rootRef: layoutRootRef, heights: panelHeights, available: panelAvailable } = usePanelLayout({
@@ -425,7 +429,10 @@ function App() {
 
   useEffect(() => startMixerUISync(), []);
   useEffect(() => startPluginAutomationCapture(), []);
+  useEffect(() => startAutomationPreviewLifecycle(), []);
+  useEffect(() => startBuiltInHostBypassHistory(), []);
   useEffect(() => startMidiEditorUISync(), []);
+  useEffect(() => startPitchEditorSessionController(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -997,7 +1004,7 @@ function App() {
         // Update automation display values at ~30fps (every ~33ms)
         if (now - lastAutoUpdate > 33) {
           lastAutoUpdate = now;
-          currentState.recordAutomationWriteTick(now);
+          currentState.recordAutomationWriteTick();
           currentState.updateAutomatedValues();
         }
 
@@ -1027,6 +1034,7 @@ function App() {
           && data.metronomePracticeEnabled !== state.metronomePracticeEnabled) {
         useDAWStore.setState({ metronomePracticeEnabled: data.metronomePracticeEnabled });
       }
+      if (!nativeBridge.isTransportUpdateCurrent(data)) return;
       const backendPos = data.position;
       const frontendPos = state.transport.currentTime;
       const drift = Math.abs(backendPos - frontendPos);
@@ -1671,7 +1679,13 @@ function App() {
       {pitchVisible && (
         <div data-layout-pane="pitch" className="shrink-0 h-[var(--pane-height)] min-h-0 overflow-hidden" style={panelHeightStyle(panelHeights.pitch ?? 96)}>
           <Suspense fallback={<div className="h-full bg-daw-panel flex items-center justify-center text-neutral-500 text-sm">Loading pitch editor...</div>}>
-            <PitchEditorLowerZone height={panelHeights.pitch ?? 96} />
+            {pitchWindowState.detached ? <div className="h-full flex items-center justify-center gap-3 bg-daw-panel text-sm text-neutral-300">
+              <span>Pitch editor is open in its own window.</span>
+              <button type="button" className="px-3 py-1 rounded bg-neutral-700" onClick={() => { void detachPitchEditor(); }}>Focus</button>
+              <button type="button" className="px-3 py-1 rounded bg-neutral-700" onClick={() => { void dockPitchEditor(); }}>Dock</button>
+            </div> : <PitchEditorLowerZone height={panelHeights.pitch ?? 96} />}
+            {pitchWindowState.recovery && <button type="button" className="text-xs px-3 py-1 text-amber-300" onClick={recoverPitchCheckpoint}>Recover pitch edits from interrupted session</button>}
+            {pitchWindowState.error && <div role="alert" className="text-xs text-amber-300 px-3">{pitchWindowState.error}</div>}
           </Suspense>
         </div>
       )}

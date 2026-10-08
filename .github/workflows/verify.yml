@@ -21,18 +21,29 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install audio routing test dependencies
-        run: python -m pip install numpy==2.4.2 soundfile==0.13.1 cryptography==46.0.3
+      - name: Install Python tooling test dependencies
+        run: python -m pip install numpy==2.4.2 soundfile==0.13.1 cryptography==46.0.3 PyYAML==6.0.3
 
       - name: Check first-party product names
         run: python3 tools/check-product-naming.py
+
+      - name: Check UI coverage inventory
+        run: python3 tools/check-ui-coverage-inventory.py
 
       - name: Run Python tooling unit tests
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_build_process_lifecycle
+          tests.test_juce_lv2_identifier_patch
+          tests.test_linux_qualification
+          tests.test_linux_native_packaging
+          tests.test_linux_abi
+          tests.test_ai_model_cache
+          tests.test_stem_model_downloads
           tests.test_updater_manifest
           tests.test_store_submission
+          tests.test_store_release_workflow
           tests.test_ai_runtime_dependency_pins
           tests.test_install_ai_tools_feature_gating
           tests.test_install_ai_tools_runtime_repair
@@ -62,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14]
+        os: [windows-latest, macos-15, ubuntu-24.04]
     defaults:
       run:
         working-directory: frontend
@@ -81,11 +92,65 @@ jobs:
       - name: Run frontend unit tests
         run: npm test
 
-      - name: Install Playwright Chromium
-        run: npx playwright install chromium
+      - name: Install browsers on Linux
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Install browsers on Windows and macOS
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium webkit
+
+      - name: Enable all-controls keyboard navigation for Playwright WebKit
+        if: runner.os == 'macOS'
+        run: defaults write org.webkit.Playwright AppleKeyboardUIMode -int 2
+
+      - name: Verify WebKit Tab traverses buttons on macOS
+        if: runner.os == 'macOS'
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { webkit } from '@playwright/test';
+
+          const browser = await webkit.launch();
+          try {
+            const page = await browser.newPage();
+            await page.setContent('<button id="first">First</button><button id="second">Second</button><button id="third">Third</button>');
+            await page.locator('#first').focus();
+            for (const [key, expected] of [['Tab', 'second'], ['Tab', 'third'], ['Shift+Tab', 'second'], ['Shift+Tab', 'first']]) {
+              await page.keyboard.press(key);
+              const actual = await page.evaluate(() => document.activeElement?.id);
+              assert.equal(actual, expected, `${key} must focus ${expected}; actual focus: ${actual}`);
+              console.log(`WebKit keyboard preflight: ${key} -> ${actual}`);
+            }
+          } finally {
+            await browser.close();
+          }
+          NODE
 
       - name: Run shortcut and input-profile browser tests
         run: npm run test:e2e
+
+      - name: Remove Playwright WebKit keyboard-navigation preference
+        if: always() && runner.os == 'macOS'
+        run: defaults delete org.webkit.Playwright AppleKeyboardUIMode 2>/dev/null || true
+
+      - name: Check controls in the system WebKitGTK
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libxtst6 xvfb xauth
+          npm run build
+          xvfb-run -a -s '-screen 0 1440x1000x24' /usr/bin/python3 ../tools/run-linux-control-ui.py --frontend-dir dist --output ../output/linux-control-ui
+
+      - name: Retain UI qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-ui-${{ matrix.os }}
+          path: |
+            output/playwright/test-results
+            output/linux-control-ui
+          if-no-files-found: ignore
 
   verify-windows:
     runs-on: windows-latest
@@ -219,6 +284,22 @@ jobs:
           $process = Start-Process -FilePath $exe -ArgumentList @("--updater-self-test", "`"$report`"") -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Signed updater regression failed." }
 
+      - name: Verify native FX processing order and automation (Windows Release)
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_FXStageAutomationRegression.json"
+          ./tools/run-free-plugin-headless-regression.ps1 -AppPath $exe -ReportPath $report -CaseName stage-automation
+
+      - name: Retain native FX order regression evidence (Windows)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-windows-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
       - name: Run render and export regression matrix
         shell: pwsh
         run: |
@@ -303,7 +384,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: window-lifecycle-windows-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          path: |
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
       - name: Run NAM Rack deterministic regression
@@ -396,6 +479,22 @@ jobs:
           "$APP_BUNDLE/Contents/MacOS/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
           "$APP_BUNDLE/Contents/Helpers/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
 
+      - name: Verify native FX processing order and automation (macOS Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_FXStageAutomationRegression.json"
+          "$APP_BUNDLE/Contents/MacOS/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
+
+      - name: Retain native FX order regression evidence (macOS)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
       - name: Run macOS native-window lifecycle smoke test
         shell: pwsh
         run: |
@@ -408,14 +507,16 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: window-lifecycle-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+          path: |
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
   verify-linux:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
-      VERSION: 0.1.02
+      VERSION: 0.1.04
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
@@ -429,7 +530,7 @@ jobs:
         shell: bash
         run: |
           bash ./tools/setup-linux-prereqs.sh
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb xauth openbox
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -492,6 +593,33 @@ jobs:
           xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --updater-self-test "$RUNNER_TEMP/updater-regression"
           "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudioUpdateInstaller" --self-test "$HOME/updater-installer-regression"
 
+      - name: Verify native FX processing order and automation (Linux Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_FXStageAutomationRegression.json"
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
+
+      - name: Retain native FX order regression evidence (Linux)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fx-order-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
+      - name: Test native package construction
+        run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v
+
+      - name: Build and install Ubuntu package
+        shell: bash
+        run: |
+          python3 tools/package-linux-native.py --format deb --version "$VERSION" --build-dir "$BUILD_DIR"
+          sudo apt-get install -y ./dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native --desktop --render --features --nam-fixtures "$BUILD_DIR/_deps/neural_amp_modeler_core-src/example_models"
+          xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-native-safe --desktop --safe-mode
+
       - name: Package AppImage
         shell: bash
         run: |
@@ -519,3 +647,24 @@ jobs:
             -BundlePath "$EXTRACT_ROOT/squashfs-root/usr/bin" \
             -ExpectedVersion "$VERSION" \
             -EnforceLeanBundle
+
+      - name: Launch packaged AppImage with a window manager
+        run: python3 tools/smoke-linux-appimage.py "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Exercise final AppImage launcher and native windows
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop
+
+      - name: Retain Linux qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-qualification
+          path: |
+            output/linux-native
+            output/linux-native-safe
+            output/linux-appimage
+          if-no-files-found: warn

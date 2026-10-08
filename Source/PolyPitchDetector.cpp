@@ -1,15 +1,24 @@
 #include "PolyPitchDetector.h"
+#include <stdexcept>
 
 // Basic-Pitch model constants
 static constexpr double kModelSampleRate = 22050.0;
 static constexpr int    kHopSize         = 256;    // ~11.6ms at 22050 Hz
 static constexpr int    kNoteBins        = 88;     // A0 (MIDI 21) to C8 (MIDI 108)
-static constexpr int    kContourBins     = 264;    // 88 * 3 (1/3 semitone resolution)
 static constexpr int    kMidiOffset      = 21;     // MIDI note of lowest bin (A0)
 
-// Maximum chunk size for inference (in samples at 22050 Hz).
-// Basic-Pitch processes audio in ~5-second chunks.
-static constexpr int kMaxChunkSamples = 22050 * 5;
+#if OPENSTUDIO_HAS_ONNXRUNTIME
+static constexpr int kContourBins = 264;    // 88 * 3 (1/3 semitone resolution)
+
+// Fixed waveform contract of the bundled Spotify NMP model.
+static constexpr int kWindowSamples = 43844;
+static constexpr int kWindowFrames = 172;
+static constexpr int kContextFrames = 15;
+static constexpr int kKeptFrames = kWindowFrames - 2 * kContextFrames;
+// Keep the stride on the 256-sample frame grid so successive windows cannot
+// accumulate a timestamp drift. Discard context predictions at both edges.
+static constexpr int kWindowStride = kKeptFrames * kHopSize;
+#endif
 
 PolyPitchDetector::PolyPitchDetector()
 {
@@ -103,7 +112,7 @@ std::vector<float> PolyPitchDetector::resampleTo22050 (const float* audio, int n
     }
 
     double ratio = kModelSampleRate / sourceSampleRate;
-    int outputLen = static_cast<int> (numSamples * ratio) + 1;
+    int outputLen = std::max (1, static_cast<int> (std::ceil (numSamples * ratio)));
     std::vector<float> output (static_cast<size_t> (outputLen));
 
     // Linear interpolation resampling (sufficient for analysis — not audio playback)
@@ -177,7 +186,7 @@ PolyPitchDetector::extractNotes (const std::vector<std::vector<float>>& noteAct,
                 if (gapCount > mergeGapFrames || t == numFrames)
                 {
                     // End of region — emit note if valid
-                    int regionEnd = t - gapCount;
+                    int regionEnd = t - gapCount + 1;
                     int durationFrames = regionEnd - regionStart;
 
                     // Accept note if it has an onset OR if it's long enough to be a sustained note.
@@ -208,7 +217,7 @@ PolyPitchDetector::extractNotes (const std::vector<std::vector<float>>& noteAct,
 
     // Sort by start time, then by pitch
     std::sort (notes.begin(), notes.end(), [] (const PolyNote& a, const PolyNote& b) {
-        if (std::abs (a.startTime - b.startTime) < 0.001f)
+        if (a.startTime == b.startTime)
             return a.midiPitch < b.midiPitch;
         return a.startTime < b.startTime;
     });
@@ -225,148 +234,98 @@ PolyPitchDetector::analyze (const float* monoAudio, int numSamples,
     result.sampleRate = kModelSampleRate;
     result.hopSize = kHopSize;
 
+    if (monoAudio == nullptr || numSamples <= 0 || ! std::isfinite (sourceSampleRate)
+        || sourceSampleRate <= 0.0)
+    {
+        result.error = "Basic Pitch needs non-empty audio at a valid sample rate.";
+        return result;
+    }
+    for (int i = 0; i < numSamples; ++i)
+        if (! std::isfinite (monoAudio[i]))
+        {
+            result.error = "Basic Pitch cannot analyze non-finite audio samples.";
+            return result;
+        }
 #if OPENSTUDIO_HAS_ONNXRUNTIME
     if (! modelLoaded || ortSession == nullptr)
     {
-        juce::Logger::writeToLog ("PolyPitchDetector::analyze: Model not loaded");
+        result.error = "Basic Pitch model is not loaded.";
         return result;
     }
-
-    // Step 1: Resample to 22050 Hz
-    auto resampled = resampleTo22050 (monoAudio, numSamples, sourceSampleRate);
-    int totalSamples = static_cast<int> (resampled.size());
-
-    juce::Logger::writeToLog ("PolyPitchDetector: Analyzing " + juce::String (totalSamples)
-                            + " samples (" + juce::String (totalSamples / kModelSampleRate, 1) + "s)");
-
-    // Step 2: Run inference in chunks
-    // The model accepts variable-length audio. We'll process in ~5s chunks
-    // and concatenate outputs.
-    Ort::AllocatorWithDefaultOptions allocator;
-
-    // Get input/output names
-    auto inputName = ortSession->GetInputNameAllocated (0, allocator);
-    auto numOutputs = ortSession->GetOutputCount();
-
-    std::vector<std::string> outputNameStrs;
-    std::vector<const char*> outputNamePtrs;
-    for (size_t i = 0; i < numOutputs; ++i)
-    {
-        auto name = ortSession->GetOutputNameAllocated (i, allocator);
-        outputNameStrs.push_back (name.get());
-    }
-    for (const auto& s : outputNameStrs)
-        outputNamePtrs.push_back (s.c_str());
-
-    const char* inputNames[] = { inputName.get() };
-
-    // Process all audio at once (Basic-Pitch handles variable length)
-    // Input shape: [1, N_samples, 1] — raw audio waveform
-    std::vector<int64_t> inputShape = { 1, static_cast<int64_t> (totalSamples), 1 };
-
-    auto inputTensor = Ort::Value::CreateTensor<float> (
-        memoryInfo, resampled.data(), resampled.size(),
-        inputShape.data(), inputShape.size());
-
     try
     {
-        auto outputs = ortSession->Run (
-            Ort::RunOptions { nullptr },
-            inputNames, &inputTensor, 1,
-            outputNamePtrs.data(), outputNamePtrs.size());
+        const auto resampled = resampleTo22050 (monoAudio, numSamples, sourceSampleRate);
+        const auto inputInfo = ortSession->GetInputTypeInfo (0);
+        const auto shape = inputInfo.GetTensorTypeAndShapeInfo().GetShape();
+        if (shape.size() != 3 || shape[1] != kWindowSamples || shape[2] != 1)
+            throw std::runtime_error ("Unsupported Basic Pitch input shape.");
 
-        // Parse outputs
-        // Output order depends on model version; typically:
-        //   0: contour [1, T, 264]
-        //   1: note    [1, T, 88]
-        //   2: onset   [1, T, 88]
+        Ort::AllocatorWithDefaultOptions allocator;
+        const auto inputName = ortSession->GetInputNameAllocated (0, allocator);
+        const char* inputNames[] = { inputName.get() };
+        // Names, not graph output positions, identify the three different heads.
+        // Spotify basic_pitch/inference.py specifies these ONNX export names.
+        const char* outputNames[] = { "StatefulPartitionedCall:0",
+                                     "StatefulPartitionedCall:1",
+                                     "StatefulPartitionedCall:2" };
+        const std::array<int64_t, 3> inputShape { 1, kWindowSamples, 1 };
+        std::vector<float> window (kWindowSamples, 0.0f);
+        std::vector<std::vector<float>> onsetActivation;
+        const auto frameCount = (resampled.size() + kHopSize - 1) / kHopSize;
+        const auto contextSamples = kContextFrames * kHopSize;
 
-        auto parseOutput = [&] (size_t idx, int expectedBins) -> std::vector<std::vector<float>> {
-            std::vector<std::vector<float>> matrix;
-            if (idx >= outputs.size()) return matrix;
-
-            auto& tensor = outputs[idx];
-            auto shape = tensor.GetTensorTypeAndShapeInfo().GetShape();
-            if (shape.size() < 2) return matrix;
-
-            int T = static_cast<int> (shape.size() == 3 ? shape[1] : shape[0]);
-            int bins = static_cast<int> (shape.size() == 3 ? shape[2] : shape[1]);
-            juce::ignoreUnused (expectedBins);
-
-            const float* data = tensor.GetTensorData<float>();
-            matrix.resize (static_cast<size_t> (T));
-            for (int t = 0; t < T; ++t)
+        for (size_t firstFrame = 0; firstFrame < frameCount; firstFrame += kKeptFrames)
+        {
+            std::fill (window.begin(), window.end(), 0.0f);
+            const auto start = static_cast<int64_t> (firstFrame / kKeptFrames) * kWindowStride - contextSamples;
+            for (int i = 0; i < kWindowSamples; ++i)
             {
-                matrix[static_cast<size_t> (t)].assign (
-                    data + t * bins,
-                    data + t * bins + bins);
+                const auto source = start + i;
+                if (source >= 0 && source < static_cast<int64_t> (resampled.size()))
+                    window[static_cast<size_t> (i)] = resampled[static_cast<size_t> (source)];
             }
-            return matrix;
-        };
-
-        result.pitchSalience = parseOutput (0, kContourBins);
-
-        std::vector<std::vector<float>> noteAct;
-        std::vector<std::vector<float>> onsetAct;
-
-        if (numOutputs >= 3)
-        {
-            noteAct  = parseOutput (1, kNoteBins);
-            onsetAct = parseOutput (2, kNoteBins);
-        }
-        else if (numOutputs == 2)
-        {
-            // Some model versions combine note+onset
-            noteAct = parseOutput (1, kNoteBins);
-            // Synthesize onsets from note activation derivative
-            onsetAct.resize (noteAct.size());
-            for (size_t t = 0; t < noteAct.size(); ++t)
+            auto input = Ort::Value::CreateTensor<float> (memoryInfo, window.data(), window.size(),
+                                                         inputShape.data(), inputShape.size());
+            auto outputs = ortSession->Run (Ort::RunOptions { nullptr }, inputNames, &input, 1, outputNames, 3);
+            const std::array<int, 3> bins { kContourBins, kNoteBins, kNoteBins };
+            const std::array<std::vector<std::vector<float>>*, 3> destinations {
+                &result.pitchSalience, &result.noteActivation, &onsetActivation };
+            for (size_t head = 0; head < outputs.size(); ++head)
             {
-                onsetAct[t].resize (static_cast<size_t> (kNoteBins), 0.0f);
-                if (t == 0)
+                const auto info = outputs[head].GetTensorTypeAndShapeInfo();
+                if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+                    || info.GetShape() != std::vector<int64_t> { 1, kWindowFrames, bins[head] })
+                    throw std::runtime_error ("Unsupported Basic Pitch output shape or type.");
+                const auto* data = outputs[head].GetTensorData<float>();
+                const auto count = std::min (static_cast<size_t> (kKeptFrames), frameCount - firstFrame);
+                for (size_t frame = 0; frame < count; ++frame)
                 {
-                    onsetAct[t] = noteAct[t]; // first frame = onset
-                }
-                else
-                {
-                    for (int p = 0; p < kNoteBins; ++p)
-                    {
-                        float diff = noteAct[t][static_cast<size_t> (p)]
-                                   - noteAct[t - 1][static_cast<size_t> (p)];
-                        onsetAct[t][static_cast<size_t> (p)] = std::max (0.0f, diff);
-                    }
+                    const auto* row = data + (frame + kContextFrames) * static_cast<size_t> (bins[head]);
+                    if (! std::all_of (row, row + bins[head], [] (float value) { return std::isfinite (value); }))
+                        throw std::runtime_error ("Basic Pitch returned non-finite predictions.");
+                    destinations[head]->emplace_back (row, row + bins[head]);
                 }
             }
         }
-
-        result.noteActivation = noteAct;
-
-        // Diagnostic: log max activations so we can see if model output is valid
-        float maxNote = 0.0f, maxOnset = 0.0f;
-        for (const auto& row : noteAct)
-            for (float v : row) maxNote = std::max (maxNote, v);
-        for (const auto& row : onsetAct)
-            for (float v : row) maxOnset = std::max (maxOnset, v);
-        juce::Logger::writeToLog ("PolyPitchDetector: maxNoteAct=" + juce::String (maxNote, 3)
-                                + " maxOnsetAct=" + juce::String (maxOnset, 3)
-                                + " frames=" + juce::String ((int) noteAct.size())
-                                + " noteThresh=" + juce::String (noteThreshold, 2)
-                                + " onsetThresh=" + juce::String (onsetThreshold, 2));
-
-        // Step 3: Post-process into discrete notes
-        result.notes = extractNotes (noteAct, onsetAct, kHopSize, kModelSampleRate);
-
+        result.notes = extractNotes (result.noteActivation, onsetActivation, kHopSize, kModelSampleRate);
+        const auto duration = static_cast<float> (numSamples / sourceSampleRate);
+        for (auto& note : result.notes)
+            note.endTime = std::min (note.endTime, duration);
+        result.notes.erase (std::remove_if (result.notes.begin(), result.notes.end(),
+            [] (const PolyNote& note) { return note.endTime <= note.startTime; }), result.notes.end());
         juce::Logger::writeToLog ("PolyPitchDetector: Found " + juce::String ((int) result.notes.size())
-                                + " notes in " + juce::String ((int) result.pitchSalience.size()) + " frames");
+                                 + " notes in " + juce::String ((int) result.noteActivation.size()) + " frames");
     }
-    catch (const Ort::Exception& e)
+    catch (const std::exception& e)
     {
-        juce::Logger::writeToLog ("PolyPitchDetector: Inference error: " + juce::String (e.what()));
+        result.error = "Basic Pitch analysis failed: " + juce::String::fromUTF8 (e.what());
+        result.notes.clear();
+        result.pitchSalience.clear();
+        result.noteActivation.clear();
+        juce::Logger::writeToLog (result.error);
     }
-
 #else
-    juce::ignoreUnused (monoAudio, numSamples, sourceSampleRate, clipId);
-    juce::Logger::writeToLog ("PolyPitchDetector: ONNX Runtime not available");
+    result.error = "Basic Pitch requires ONNX Runtime support in this build.";
 #endif
 
     return result;
@@ -376,6 +335,8 @@ juce::var PolyPitchDetector::resultToJSON (const PolyAnalysisResult& result)
 {
     auto obj = std::make_unique<juce::DynamicObject>();
     obj->setProperty ("clipId", result.clipId);
+    if (result.error.isNotEmpty())
+        obj->setProperty ("error", result.error);
     obj->setProperty ("sampleRate", result.sampleRate);
     obj->setProperty ("hopSize", result.hopSize);
 

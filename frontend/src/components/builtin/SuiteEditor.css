@@ -1,0 +1,24 @@
+/* The dedicated editor registry owns effect and instrument artwork. */
+.suite-editor {
+  container-type: size;
+  container-name: suite;
+  --suite-accent: #58b6ff;
+  --suite-surface: #222a33;
+  background: var(--suite-surface);
+  color: var(--color-daw-text);
+  color-scheme: dark;
+}
+.suite-editor :is(button,select,input,[tabindex]):focus-visible {
+  outline: 2px solid #8fceff;
+  outline-offset: 3px;
+}
+.suite-fallback-section {
+  background: #1b232c;
+}
+.suite-fallback-section>div>label {
+  min-width: 140px;
+  max-width: 220px;
+}
+.suite-editor [aria-label="Custom scale notes"] .suite-button {
+  min-width: 52px;
+}

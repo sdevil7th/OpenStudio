@@ -19,7 +19,7 @@ void MIDIClip::addEvent(const MIDIEvent& event)
     events.push_back(event);
     
     // Keep events sorted by timestamp
-    std::sort(events.begin(), events.end(),
+    std::stable_sort(events.begin(), events.end(),
         [](const MIDIEvent& a, const MIDIEvent& b) {
             return a.timestamp < b.timestamp;
         });
@@ -156,7 +156,7 @@ void MIDIClip::quantize(double gridSize)
     }
     
     // Re-sort after quantization
-    std::sort(events.begin(), events.end(),
+    std::stable_sort(events.begin(), events.end(),
         [](const MIDIEvent& a, const MIDIEvent& b) {
             return a.timestamp < b.timestamp;
         });

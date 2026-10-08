@@ -1,4 +1,6 @@
 import "./NAMRackDesignPort.css";
+import { TONE3000Creator, TONE3000LibraryHeader, TONE3000LoadedTone, TONE3000Logo, type TONE3000ToneOrigin } from "./TONE3000Branding";
+import type { TONE3000User } from "../services/NativeBridge";
 import "./NAMRackStage.css";
 import "./NAMRackHardware.css";
 import "./NAMRackDesignPortSourceFlow.css";
@@ -95,6 +97,7 @@ export type NAMSourceFlowDesignBoardId =
   | "14-fx-collection-flow";
 
 export type NAMSourceFlowDesignActionId =
+  | "browse-tone3000"
   | "return"
   | "query"
   | "search"
@@ -125,6 +128,9 @@ export type NAMSourceFlowDesignResult = {
   id: string;
   name: string;
   creator: string;
+  creatorAvatarUrl?: string;
+  gear?: string;
+  format?: string;
   kind: string;
   arch: string;
   category: string;
@@ -154,10 +160,10 @@ export type NAMSourceFlowDesignConfig = {
   authState: "connected" | "local" | "offline" | "warning";
   authTitle: string;
   authDetail: string;
+  signedInUser?: TONE3000User | null;
   authBusy?: boolean;
   actionBusy?: boolean;
   loading?: boolean;
-  filterScopeDetail?: string;
   statusAction?: { id: NAMSourceFlowDesignActionId; label: string };
   searchLabel: string;
   searchText: string;
@@ -199,6 +205,10 @@ export type NAMSourceFlowDesignConfig = {
   };
   detailEyebrow: string;
   selectedRowId?: string;
+  selectedCreator?: string;
+  selectedCreatorAvatarUrl?: string;
+  selectedDescription?: string;
+  selectedFormat?: string;
   selectedName: string;
   selectedMeta: string;
   selectedAvailable: boolean;
@@ -1455,6 +1465,9 @@ export function computePremiumPreStagePlacement(
 }
 
 type NAMRackDesignRigSummary = {
+  ampOrigin?: TONE3000ToneOrigin;
+  cabOrigin?: TONE3000ToneOrigin;
+  pedalOrigin?: TONE3000ToneOrigin;
   presetName: string;
   presetEyebrow: string;
   presetDirty: boolean;
@@ -3409,6 +3422,7 @@ function WidePedal({
 function TopShell({
   active,
   libraryActive = false,
+  tone3000Library = true,
   previewText = "Previewing TONE3000: Emerald Twin A2 \u2192 Amp",
   presetName = "Clean Twin-style",
   presetEyebrow = "Current preset",
@@ -3437,6 +3451,7 @@ function TopShell({
 }: {
   active: string;
   libraryActive?: boolean;
+  tone3000Library?: boolean;
   previewText?: string;
   presetName?: string;
   presetEyebrow?: string;
@@ -3621,8 +3636,7 @@ function TopShell({
             title="Open Capture Library"
             aria-label="Open Capture Library"
           >
-            <Library aria-hidden="true" />
-            {libraryActive ? "Library open" : "Browse captures"}
+            {tone3000Library ? <TONE3000Logo size="small" /> : <><Library aria-hidden="true" />{libraryActive ? "Library open" : "Browse presets"}</>}
           </button>
         </div>
         <div
@@ -6117,7 +6131,8 @@ function ToneResultRow({
       </div>
       <div className="tone-row-main">
         <strong title={item.name}>{item.name}</strong>
-        <span title={rowMeta}>{rowMeta}</span>
+        {item.source === "tone3000" ? <TONE3000Creator username={item.creator} avatarUrl={item.creatorAvatarUrl} /> : <span>{item.creator}</span>}
+        <span title={rowMeta}>{[item.gear || item.kind, item.format || item.arch, item.arch].filter((value, index, values) => value && values.indexOf(value) === index).join(" · ")}</span>
         <div className="tone-row-tags">
           {item.tags.slice(0, 2).map((tag) => (
             <i key={tag}>{tag}</i>
@@ -6151,10 +6166,10 @@ function ToneResultRow({
             aria-pressed={Boolean(item.favorite)}
             aria-label={
               item.favorite
-                ? `Remove ${item.name} from favorites`
-                : `Add ${item.name} to favorites`
+                ? `Remove ${item.name} from local favorites`
+                : `Add ${item.name} to local favorites`
             }
-            title={item.favorite ? "Remove favorite" : "Add favorite"}
+            title={item.favorite ? "Remove local favorite" : "Add local favorite"}
             onClick={(event) => {
               event.stopPropagation();
               onFavorite();
@@ -6190,11 +6205,13 @@ function SourceFlowSurface({
   config: NAMSourceFlowDesignConfig;
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
+  const [compactDetailsOpen, setCompactDetailsOpen] = useState(false);
   const emit = (
     action: NAMSourceFlowDesignActionId,
     value = "",
     rowId = "",
   ) => {
+    if (action === "select-row") setCompactDetailsOpen(true);
     onAction({
       type: "nam-source-flow-design-port",
       instanceId: "native-source-flow",
@@ -6205,6 +6222,14 @@ function SourceFlowSurface({
   };
   const feedListRef = useRef<HTMLDivElement | null>(null);
   const appendSentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (config.captures?.items.length || config.captures?.busy || config.captures?.error)
+      setCompactDetailsOpen(true);
+  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error]);
+  const actionStyle: NativeStyle = {
+    "--tone-action-count": Math.max(1, config.actions.length),
+    "--tone-action-width": `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
+  };
   const architectureFilters = config.filters.filter((filter) =>
     filter.id.startsWith("arch-"),
   );
@@ -6278,9 +6303,8 @@ function SourceFlowSurface({
           <span>
             {config.originLabel} / {sourceLibraryLabel}
           </span>
-          <b>{config.sourceLabel}</b>
         </div>
-
+        {config.mode !== "fx" && <TONE3000LibraryHeader embedded user={config.signedInUser} connected={config.authState === "connected"} busy={Boolean(config.authBusy || config.actionBusy)} onBrowse={() => emit("browse-tone3000")} />}
       </section>
       <div className="tone-source-v2-workspace">
         <main
@@ -6327,6 +6351,9 @@ function SourceFlowSurface({
           </div>
           {config.selectedAvailable ? (
             <div className="tone-selected-info">
+              {config.mode !== "fx" && config.selectedCreator && <TONE3000Creator username={config.selectedCreator} avatarUrl={config.selectedCreatorAvatarUrl} />}
+              {config.selectedFormat && <span className="text-xs text-neutral-300">{config.selectedFormat}</span>}
+              {config.selectedDescription && <details className="basis-full text-xs text-neutral-300"><summary className="cursor-pointer py-2">Creator’s description</summary><p className="whitespace-pre-wrap break-words leading-relaxed">{config.selectedDescription}</p></details>}
               <div className="tone-selected-meta">
                 {config.detailMeta.slice(0, 5).map((line) => (
                   <span key={line}>{line}</span>
@@ -6356,10 +6383,7 @@ function SourceFlowSurface({
             <div
               className="tone-action-grid"
               aria-label={`Preview and use ${sourceResourceLabel} actions`}
-              style={{
-                gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
-                maxWidth: `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
-              }}
+              style={actionStyle}
             >
               {config.actions.map((action) => (
                 <button
@@ -6397,19 +6421,17 @@ function SourceFlowSurface({
           className="tone-browser-feed tone-library-panel"
           aria-label={`${config.sourceLabel} browse feed`}
         >
-          <div className="tone-library-heading">
+          <div className="tone-library-heading" title={resultSummary}>
             <div>
               <span>{sourceLibraryLabel}</span>
               <strong title={config.feedTitle}>{config.feedTitle}</strong>
             </div>
-            <em>{resultSummary}</em>
-          </div>
-          <div className="tone-connection-state" data-auth={config.authState} title={config.authDetail}>
-            <i /><span role="status">{config.authTitle}</span>
-            {config.statusAction && <button type="button" disabled={config.authBusy} onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>}
+            <div className="tone-connection-state" data-auth={config.authState} title={config.authDetail}>
+              <i /><span role="status">{config.authTitle}</span>
+              {config.statusAction && <button type="button" disabled={config.authBusy} onClick={() => emit(config.statusAction!.id)}>{config.statusAction.label}</button>}
+            </div>
           </div>
           {config.authState !== "connected" && config.authState !== "local" && <p role="status" className="px-2 text-xs text-neutral-300">{config.authDetail}</p>}
-          {config.filterScopeDetail && <p className="px-2 text-[10px] text-neutral-400">{config.filterScopeDetail}</p>}
           <div className="tone-search-panel">
             <Search aria-hidden="true" />
             <input
@@ -6494,54 +6516,57 @@ function SourceFlowSurface({
             </select>
           </div>
           {config.selectedAvailable ? (
-            <div
+            <details
               className="tone-compact-selection"
-              aria-label={`Selected ${sourceResourceLabel} actions`}
+              open={compactDetailsOpen}
+              onToggle={(event) => setCompactDetailsOpen(event.currentTarget.open)}
             >
-              <div className="tone-compact-selection-copy">
-                <span>Selected</span>
-                <strong title={config.selectedName}>
-                  {config.selectedName}
-                </strong>
+              <summary className="tone-compact-selection-summary" aria-label={`Show selected ${sourceResourceLabel} details and actions`}>
+                <span className="tone-compact-selection-copy">
+                  <span>Selected · details & actions</span>
+                  <strong title={config.selectedName}>{config.selectedName}</strong>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </summary>
+              <div className="tone-compact-selection-body flex min-w-0 flex-col gap-3 p-2.5">
+                {config.mode !== "fx" && <div className="tone3000-compact-details flex min-w-0 flex-wrap items-center gap-3">
+                  {config.selectedArtUrl && <img className="size-14 shrink-0 rounded object-cover" src={config.selectedArtUrl} alt="" referrerPolicy="no-referrer" />}
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    {config.selectedCreator && <TONE3000Creator username={config.selectedCreator} avatarUrl={config.selectedCreatorAvatarUrl} />}
+                    <span className="text-xs text-neutral-300">{[config.selectedFormat, ...config.selectedTags].filter(Boolean).join(" · ")}</span>
+                  </div>
+                  {config.selectedDescription && <details className="basis-full text-xs text-neutral-300"><summary className="cursor-pointer py-2">Creator’s description</summary><p className="whitespace-pre-wrap break-words leading-relaxed">{config.selectedDescription}</p></details>}
+                </div>}
+                <div className="tone-action-grid tone-compact-actions" style={actionStyle}>
+                  {config.actions.map((action) => (
+                    <button
+                      key={`compact-${action.id}-${action.label}`}
+                      type="button"
+                      disabled={action.disabled}
+                      data-primary={Boolean(action.primary)}
+                      data-source-flow-action={action.id}
+                      onClick={() => emit(action.id, "", config.selectedRowId || "")}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                {config.captures ? <div className="tone-compact-capture-picker">
+                  <NAMToneCapturePicker
+                    title={config.captures.title}
+                    items={config.captures.items}
+                    selectedId={config.captures.selectedId}
+                    busy={config.captures.busy}
+                    error={config.captures.error}
+                    showUse
+                    compact
+                    onSelect={(rowId) => emit("select-capture", "", rowId)}
+                    onAudition={(rowId) => emit("preview", "", rowId)}
+                    onUse={(rowId) => emit("use-selection", "", rowId)}
+                  />
+                </div> : null}
               </div>
-              <div
-                className="tone-action-grid tone-compact-actions"
-                style={{
-                  gridTemplateColumns: `repeat(${Math.max(1, config.actions.length)}, minmax(0, 1fr))`,
-                }}
-              >
-                {config.actions.map((action) => (
-                  <button
-                    key={`compact-${action.id}-${action.label}`}
-                    type="button"
-                    disabled={action.disabled}
-                    data-primary={Boolean(action.primary)}
-                    data-source-flow-action={action.id}
-                    onClick={() =>
-                      emit(action.id, "", config.selectedRowId || "")
-                    }
-                  >
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {config.selectedAvailable && config.captures ? (
-            <div className="tone-compact-capture-picker">
-              <NAMToneCapturePicker
-                title={config.captures.title}
-                items={config.captures.items}
-                selectedId={config.captures.selectedId}
-                busy={config.captures.busy}
-                error={config.captures.error}
-                showUse
-                compact
-                onSelect={(rowId) => emit("select-capture", "", rowId)}
-                onAudition={(rowId) => emit("preview", "", rowId)}
-                onUse={(rowId) => emit("use-selection", "", rowId)}
-              />
-            </div>
+            </details>
           ) : null}
           <div
             className="tone-feed-list"
@@ -7142,8 +7167,8 @@ function PremiumRigDrawer({
         className="premium-library-cta"
         onClick={openResolvedLibrary}
       >
-        <Library aria-hidden="true" />
-        {libraryActionLabel}
+        {libraryTarget === "amp" || libraryTarget === "cab" || libraryTarget === "pre" ? <TONE3000Logo size="small" /> : <Library aria-hidden="true" />}
+        <span>{libraryActionLabel}</span>
       </button>
     </aside>
   );
@@ -7179,6 +7204,7 @@ export function NAMRackDesignPort({
   onClearCabIR,
   cabResourceBusy = false,
   onOpenLibrary,
+  onOpenToneDetails,
   onPreviousPreset,
   onNextPreset,
   previousPresetLabel,
@@ -7228,6 +7254,7 @@ export function NAMRackDesignPort({
   onClearCabIR?: () => void;
   cabResourceBusy?: boolean;
   onOpenLibrary: (sectionId: RackSectionId) => void;
+  onOpenToneDetails?: (sectionId: RackSectionId) => void;
   onPreviousPreset?: () => void;
   onNextPreset?: () => void;
   previousPresetLabel?: string;
@@ -7433,6 +7460,7 @@ export function NAMRackDesignPort({
               onEnterSection={(nextSection) =>
                 onEnterSection(nextSection, SECTION_TARGET_MODULE[nextSection])
               }
+              tone3000Library={designSection !== "eq" && designSection !== "post"}
               onOpenLibrary={() => onOpenLibrary(designSection)}
               onPreviousPreset={onPreviousPreset}
               onNextPreset={onNextPreset}
@@ -7452,9 +7480,15 @@ export function NAMRackDesignPort({
             data-tuner-open={tunerOpen}
             data-compact-drawer-open={compactDrawerOpen || undefined}
           >
+            <div className="tone3000-stage-column flex min-h-0 min-w-0 flex-col">
+            {!tunerOpen && (designSection === "amp" ? rig.ampOrigin : designSection === "cab" ? rig.cabOrigin : designSection === "pre" ? rig.pedalOrigin : undefined) && (
+              <div className="tone3000-stage-origin flex-none px-3 pt-2.5">
+                <TONE3000LoadedTone tone={(designSection === "amp" ? rig.ampOrigin : designSection === "cab" ? rig.cabOrigin : rig.pedalOrigin)!} onDetails={() => (onOpenToneDetails ?? onOpenLibrary)(designSection)} />
+              </div>
+            )}
             <div
               ref={stageRef}
-              className="premium-stage-canvas"
+              className="premium-stage-canvas min-h-0 flex-1"
               data-design-section={designSection}
               data-recovery={recovery && !tunerOpen ? recovery.slot : undefined}
               style={
@@ -7547,6 +7581,7 @@ export function NAMRackDesignPort({
                     <span>{runtime.diagnosticMessage}</span>
                   </div>
                 )}
+            </div>
             </div>
             {!tunerOpen && (designSection === "amp" || designSection === "cab") ? (
               <>
@@ -7706,6 +7741,7 @@ export function NAMRackSourceFlowDesignPort({
           <div className="nam-top-artboard">
             <TopShell
               active={config.originLabel}
+              tone3000Library={config.mode !== "fx"}
               libraryActive
               previewText={config.previewText}
               presetName={presetName}

@@ -172,7 +172,7 @@ describe("visible component command reachability", () => {
     useDAWStore.setState({
       keyboardShortcutProfileId: "openstudio",
       customShortcuts: {
-        "modal.close": { windows: [], macos: [] },
+        "modal.close": { windows: [], macos: [], linux: [] },
       },
     });
     cleanup.push(registerTransientOverlayShortcutScope(close, { eventTarget: editableTarget }));
@@ -185,7 +185,7 @@ describe("visible component command reachability", () => {
     cleanup.pop()?.();
     useDAWStore.setState({
       customShortcuts: {
-        "modal.close": { windows: ["Control+F9"], macos: ["Command+F9"] },
+        "modal.close": { windows: ["Control+F9"], macos: ["Command+F9"], linux: ["Control+F9"] },
       },
     });
     cleanup.push(registerTransientOverlayShortcutScope(close, { eventTarget: editableTarget }));

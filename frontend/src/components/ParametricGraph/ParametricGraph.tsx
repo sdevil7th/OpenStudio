@@ -104,21 +104,32 @@ export function ParametricGraph({
   nodeConfig,
   responseCurve,
   backgroundCurves,
+  backgroundRegions,
   perNodeCurves,
   onNodeAdd,
   onNodeChange,
   onNodeRemove,
   onNodeDragStart,
   onNodeDragEnd,
+  onNodeDragCancel,
   className,
+  selectedNodeId,
+  selectedNodeIds,
+  onSelectionChange,
+  onNodeSelect,
 }: ParametricGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipPathId = useId();
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const activeDrag = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const pointerFocus = useRef(false);
+  const [marquee, setMarquee] = useState<{ x: number; y: number; endX: number; endY: number } | null>(null);
+  const marqueeStart = useRef<{ x: number; y: number; ids: string[]; moved: boolean } | null>(null);
+
 
   const plotWidth = width - MARGIN.left - MARGIN.right;
-  const plotHeight = height - MARGIN.top - MARGIN.bottom;
+  const plotHeight = Math.max(1, height - MARGIN.top - MARGIN.bottom);
 
   // --- Coordinate converters bound to current axes ---
   const toPixelX = useCallback(
@@ -164,38 +175,57 @@ export function ParametricGraph({
     [onNodeAdd, getSVGPoint, fromPixelX, fromPixelY],
   );
 
-  const handleNodePointerDown = useCallback(
-    (e: React.PointerEvent<SVGCircleElement>, nodeId: string) => {
-      e.stopPropagation();
-      e.preventDefault();
-      (e.target as SVGCircleElement).setPointerCapture(e.pointerId);
-      setDragNodeId(nodeId);
-      onNodeDragStart?.(nodeId);
-    },
-    [onNodeDragStart],
-  );
-
-  const handleNodePointerMove = useCallback(
-    (e: React.PointerEvent<SVGCircleElement>) => {
-      if (!dragNodeId || !onNodeChange) return;
-      const pt = getSVGPoint(e);
-      const xVal = Math.max(xAxis.min, Math.min(xAxis.max, fromPixelX(pt.x)));
-      const yVal = Math.max(yAxis.min, Math.min(yAxis.max, fromPixelY(pt.y)));
-      onNodeChange(dragNodeId, { x: xVal, y: yVal });
-    },
-    [dragNodeId, onNodeChange, getSVGPoint, fromPixelX, fromPixelY, xAxis, yAxis],
-  );
-
-  const handleNodePointerUp = useCallback(
-    (e: React.PointerEvent<SVGCircleElement>) => {
-      if (dragNodeId) {
-        (e.target as SVGCircleElement).releasePointerCapture(e.pointerId);
-        onNodeDragEnd?.(dragNodeId);
-        setDragNodeId(null);
-      }
-    },
-    [dragNodeId, onNodeDragEnd],
-  );
+  const chooseNode = (id: string, toggle = false) => {
+    if (onSelectionChange) {
+      const current = selectedNodeIds ?? (selectedNodeId ? [selectedNodeId] : []);
+      onSelectionChange(toggle ? current.includes(id) ? current.filter(value => value !== id) : [...current, id] : current.includes(id) ? current : [id], id);
+    } else onNodeSelect?.(id);
+  };
+  const handleNodePointerDown = (e: React.PointerEvent<SVGCircleElement>, nodeId: string) => {
+    if (e.button !== 0) return;
+    e.stopPropagation(); e.preventDefault();
+    pointerFocus.current = true; if (onNodeSelect || onSelectionChange) e.currentTarget.focus(); pointerFocus.current = false;
+    const toggle = e.shiftKey || e.ctrlKey || e.metaKey;
+    chooseNode(nodeId, toggle);
+    if (toggle && onSelectionChange) return;
+    const node = nodes.find(item => item.id === nodeId), point = getSVGPoint(e);
+    activeDrag.current = { id: nodeId, offsetX: point.x - toPixelX(node?.x ?? 0), offsetY: point.y - toPixelY(node?.y ?? 0) };
+    e.currentTarget.setPointerCapture(e.pointerId); setDragNodeId(nodeId); onNodeDragStart?.(nodeId);
+  };
+  const handleNodePointerMove = (e: React.PointerEvent<SVGCircleElement>) => {
+    const drag = activeDrag.current; if (!drag || !onNodeChange) return;
+    const pt = getSVGPoint(e), node = nodes.find(item => item.id === drag.id);
+    const x = fromPixelX(pt.x - drag.offsetX), y = fromPixelY(pt.y - drag.offsetY);
+    onNodeChange(drag.id, node?.lockY ? { x } : { x, y });
+  };
+  const finishNodeDrag = (e: React.PointerEvent<SVGCircleElement>, canceled = false) => {
+    const drag = activeDrag.current; if (!drag) return;
+    activeDrag.current = null; setDragNodeId(null);
+    if (canceled && onNodeDragCancel) onNodeDragCancel(drag.id); else onNodeDragEnd?.(drag.id);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const startMarquee = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!onSelectionChange || e.button !== 0 || activeDrag.current || (e.target instanceof Element && e.target.closest('[role="button"]'))) return;
+    const pt = getSVGPoint(e); if (pt.x < 0 || pt.x > plotWidth || pt.y < 0 || pt.y > plotHeight) return;
+    e.preventDefault();e.currentTarget.focus();e.currentTarget.setPointerCapture(e.pointerId);
+    marqueeStart.current = { ...pt, ids: e.shiftKey || e.ctrlKey || e.metaKey ? selectedNodeIds ?? [] : [], moved: false };
+    setMarquee({ ...pt, endX: pt.x, endY: pt.y });
+  };
+  const moveMarquee = (e: React.PointerEvent<SVGSVGElement>) => {
+    const start = marqueeStart.current; if (!start) return;
+    const point = getSVGPoint(e), endX = Math.max(0, Math.min(plotWidth, point.x)), endY = Math.max(0, Math.min(plotHeight, point.y));
+    start.moved = start.moved || Math.hypot(endX - start.x, endY - start.y) > 3;
+    setMarquee({ x: start.x, y: start.y, endX, endY });
+    if (start.moved) {
+      const contained = nodes.filter(node => node.enabled && toPixelX(node.x) >= Math.min(start.x,endX) && toPixelX(node.x) <= Math.max(start.x,endX) && toPixelY(node.y) >= Math.min(start.y,endY) && toPixelY(node.y) <= Math.max(start.y,endY)).map(node => node.id);
+      const selection = [...new Set([...start.ids, ...contained])];onSelectionChange?.(selection, selection[selection.length - 1]);
+    }
+  };
+  const endMarquee = (e: React.PointerEvent<SVGSVGElement>) => {
+    const start = marqueeStart.current;if(!start)return;marqueeStart.current=null;setMarquee(null);
+    if(!start.moved)onSelectionChange?.(start.ids);
+    if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);
+  };
 
   const handleNodeContextMenu = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
@@ -277,7 +307,15 @@ export function ParametricGraph({
       ref={svgRef}
       width={width}
       height={height}
-      className={`parametric-graph select-none ${className ?? ""}`}
+      className={`parametric-graph select-none touch-none ${className ?? ""}`}
+      tabIndex={onSelectionChange ? 0 : undefined}
+      aria-label={onSelectionChange ? "EQ band graph" : undefined}
+      onPointerDown={startMarquee} onPointerMove={moveMarquee} onPointerUp={endMarquee} onPointerCancel={endMarquee}
+      onDoubleClick={onSelectionChange ? e => { if (!(e.target instanceof Element && e.target.closest('[role="button"]'))) { const point = getSVGPoint(e); if (point.x >= 0 && point.x <= plotWidth && point.y >= 0 && point.y <= plotHeight) onNodeAdd?.(fromPixelX(point.x), fromPixelY(point.y)); } } : undefined}
+      onKeyDown={e => {
+        if (e.key === "Escape") { if(activeDrag.current){onNodeDragCancel?.(activeDrag.current.id);activeDrag.current=null;setDragNodeId(null);}marqueeStart.current=null;setMarquee(null);e.stopPropagation(); }
+        if (onSelectionChange && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {e.preventDefault();e.stopPropagation();onSelectionChange(nodes.filter(node=>node.enabled).map(node=>node.id),selectedNodeId);}
+      }}
       style={{ background: GRAPH_COLORS.surface }}
     >
       <g transform={`translate(${MARGIN.left}, ${MARGIN.top})`}>
@@ -287,9 +325,14 @@ export function ParametricGraph({
           height={plotHeight}
           fill={GRAPH_COLORS.plot}
           rx={2}
-          onClick={handleBackgroundClick}
+          onClick={onSelectionChange ? undefined : handleBackgroundClick}
           style={{ cursor: "crosshair" }}
         />
+
+        {backgroundRegions?.map(region => <rect key={region.id} data-spectrum-overlap={region.id}
+          x={toPixelX(Math.max(xAxis.min, region.start))} y={0}
+          width={Math.max(0, toPixelX(Math.min(xAxis.max, region.end)) - toPixelX(Math.max(xAxis.min, region.start)))} height={plotHeight}
+          fill={region.color} opacity={region.opacity ?? .12} pointerEvents="none" clipPath={`url(#${clipPathId})`} />)}
 
         {/* X grid lines */}
         {xGridLines.map((v) => {
@@ -374,6 +417,7 @@ export function ParametricGraph({
         {backgroundCurvePaths.map((curve) => (
           <path
             key={curve.id}
+            data-background-curve={curve.id}
             d={curve.path}
             fill="none"
             stroke={curve.color ?? GRAPH_COLORS.label}
@@ -419,6 +463,7 @@ export function ParametricGraph({
           </clipPath>
         </defs>
 
+        {marquee && <rect data-band-marquee="true" x={Math.min(marquee.x,marquee.endX)} y={Math.min(marquee.y,marquee.endY)} width={Math.abs(marquee.endX-marquee.x)} height={Math.abs(marquee.endY-marquee.y)} fill="var(--color-daw-accent)" fillOpacity={.13} stroke="var(--color-daw-accent)" strokeDasharray="4 2" pointerEvents="none" />}
         {/* Draggable nodes */}
         {enabledNodes.map((node) => {
           const nodeIdx = nodes.findIndex((n) => n.id === node.id);
@@ -427,6 +472,7 @@ export function ParametricGraph({
           const cy = toPixelY(node.y);
           const isHovered = hoveredNodeId === node.id;
           const isDragging = dragNodeId === node.id;
+          const isSelected = selectedNodeIds ? selectedNodeIds.includes(node.id) : selectedNodeId === node.id;
 
           return (
             <g key={node.id}>
@@ -436,10 +482,28 @@ export function ParametricGraph({
                 cy={cy}
                 r={14}
                 fill="transparent"
+                role={onNodeSelect ? "button" : undefined}
+                tabIndex={onNodeSelect ? 0 : undefined}
+                aria-label={onNodeSelect ? `${node.label ?? node.id}: ${Math.round(node.x)} Hz${node.lockY ? " cutoff" : `, ${node.y.toFixed(1)} dB`}` : undefined}
+                aria-pressed={onNodeSelect ? isSelected : undefined}
+                onFocus={() => { if (!pointerFocus.current) chooseNode(node.id); }}
+                onKeyDown={e => {
+                  if ((onNodeSelect || onSelectionChange) && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.stopPropagation(); chooseNode(node.id,e.shiftKey||e.ctrlKey||e.metaKey); }
+                  if (onSelectionChange && ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)) {
+                    e.preventDefault();e.stopPropagation();chooseNode(node.id);onNodeDragStart?.(node.id);
+                    const direction = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 1;
+                    if(e.altKey&&node.z!==undefined)onNodeChange?.(node.id,{z:node.z*2**(direction*(e.shiftKey ? .01 : .1))});
+                    else if(e.key==="ArrowLeft"||e.key==="ArrowRight")onNodeChange?.(node.id,{x:xAxis.scale==="log"?node.x*2**(direction*(e.shiftKey ? .01 : .1)/12):node.x+direction*(xAxis.max-xAxis.min)/100});
+                    else if(!node.lockY)onNodeChange?.(node.id,{y:node.y+direction*(e.shiftKey ? .01 : .1)});
+                    onNodeDragEnd?.(node.id);
+                  }
+                }}
                 style={{ cursor: "grab" }}
                 onPointerDown={(e) => handleNodePointerDown(e, node.id)}
                 onPointerMove={handleNodePointerMove}
-                onPointerUp={handleNodePointerUp}
+                onPointerUp={e => finishNodeDrag(e)}
+                onPointerCancel={e => finishNodeDrag(e,true)}
+                onLostPointerCapture={e => finishNodeDrag(e,true)}
                 onContextMenu={(e) => handleNodeContextMenu(e, node.id)}
                 onWheel={(e) => handleNodeWheel(e, node)}
                 onMouseEnter={() => setHoveredNodeId(node.id)}
@@ -449,14 +513,15 @@ export function ParametricGraph({
               <circle
                 cx={cx}
                 cy={cy}
-                r={isDragging ? 7 : isHovered ? 6 : 5}
-                fill={color}
+                r={node.displayLabel ? Math.max(isDragging || isSelected ? 9 : 8, node.displayLabel.length * 3.5 + 3) : (isDragging || isSelected ? 7 : isHovered ? 6 : 5)}
+                fill={node.displayLabel ? "var(--openstudio-graph-plot, #151719)" : color}
                 fillOpacity={0.85}
-                stroke={isHovered || isDragging ? "var(--openstudio-graph-node-stroke, #ffffff)" : color}
-                strokeWidth={isHovered || isDragging ? 1.5 : 1}
+                stroke={isHovered || isDragging || isSelected ? "var(--openstudio-graph-node-stroke, #ffffff)" : color}
+                strokeWidth={node.displayLabel || isHovered || isDragging || isSelected ? 2 : 1}
                 strokeOpacity={0.8}
                 pointerEvents="none"
               />
+              {node.displayLabel && <text x={cx} y={cy} dy=".35em" textAnchor="middle" fontSize={9} fill="var(--openstudio-graph-node-stroke, #ffffff)" pointerEvents="none" aria-hidden="true">{node.displayLabel}</text>}
               {/* Q ring (z parameter visualization) */}
               {node.z !== undefined && nodeConfig.zAxis && (isHovered || isDragging) && (
                 <circle
@@ -482,7 +547,7 @@ export function ParametricGraph({
                   pointerEvents="none"
                 >
                   {formatAxisValue(node.x, xAxis.unit, xAxis.scale)}{xAxis.unit ? xAxis.unit : ""}{" "}
-                  {formatAxisValue(node.y, yAxis.unit)}
+                  {node.lockY ? "cutoff" : formatAxisValue(node.y, yAxis.unit)}
                   {node.z !== undefined && nodeConfig.zAxis
                     ? ` ${nodeConfig.zAxis.label}:${node.z.toFixed(1)}`
                     : ""}

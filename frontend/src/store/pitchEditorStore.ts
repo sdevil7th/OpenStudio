@@ -1,8 +1,16 @@
+import { commandManager } from "./commands";
+import { getProjectEpoch } from "../utils/projectLifetime";
 import { create } from "zustand";
 import { nativeBridge, PitchNoteData, PitchContourData, type PitchCorrectionCompletionData, type PitchCorrectionRenderMode, type PitchPreviewRoutingStatus } from "../services/NativeBridge";
-import { useDAWStore } from "./useDAWStore";
+import { useDAWStore, type AudioClip } from "./useDAWStore";
 import { logBridgeError } from "../utils/bridgeErrorHandler";
 import { isClipEditLocked } from "../utils/clipEditLock";
+
+export function pitchSourceRevision(clip: AudioClip): string {
+  return JSON.stringify([clip.pitchCorrectionSourceFilePath ?? clip.filePath,
+    clip.pitchCorrectionSourceOffset ?? clip.offset, clip.duration, clip.startTime,
+    clip.reversed ?? false, clip.playbackRate ?? 1, clip.pitchSemitones ?? 0, clip.activeTakeIndex ?? 0]);
+}
 
 export type PitchEditorTool = "select" | "pitch" | "drift" | "vibrato" | "transition" | "draw" | "split";
 export type PitchSnapMode = "off" | "chromatic" | "scale";
@@ -92,7 +100,7 @@ export interface ReferenceTrack {
   visible: boolean;
 }
 
-interface PitchEditorState {
+export interface PitchEditorState {
   // Data
   trackId: string | null;
   clipId: string | null;
@@ -127,6 +135,11 @@ interface PitchEditorState {
   selectedNoteIds: string[];
   tool: PitchEditorTool;
   snapMode: PitchSnapMode;
+
+  sourceRevision: string;
+  sessionEpoch: number;
+  viewportInitialized: boolean;
+  analyzedRanges: Array<[number, number]>;
 
   // Viewport
   scrollX: number; // seconds offset
@@ -320,6 +333,7 @@ let _runningPreviewSegmentJobs = 0;
 let _stagedPreviewBase: Omit<PitchCorrectionRequestMeta, "requestId" | "stage" | "renderMode" | "windowStartSec" | "windowEndSec" | "segmentIndex"> | null = null;
 
 function shouldLogPitchEditorFormant() {
+  if (typeof window === "undefined") return false;
   const win = window as Window & { __OpenStudio_DEBUG_FORMANT__?: boolean; location?: { hostname?: string } };
   const host = win.location?.hostname ?? "";
   return win.__OpenStudio_DEBUG_FORMANT__ === true || host === "localhost" || host === "127.0.0.1";
@@ -2059,8 +2073,71 @@ function scheduleAutoApply(delayMs = 300, allowLockedHistoryReplay = false) {
   }, delayMs);
 }
 
+export function restoreCommittedPitchNotes(notes: PitchNoteData[]): boolean {
+  if (!canStartPitchEditorMutation() || !Array.isArray(notes) || notes.length > 50000) return false;
+  if (!notes.every(note => typeof note.id === "string" && Number.isFinite(note.correctedPitch)
+    && Number.isFinite(note.startTime) && Number.isFinite(note.endTime))) return false;
+  cancelPitchEditorGesture();
+  usePitchEditorStore.getState().pushUndo("Recover pitch edits");
+  usePitchEditorStore.setState({ notes: normalizePitchNotes(clonePitchNotes(notes)) });
+  replaceDirtyPitchNotes(notes.map(note => note.id));
+  onNotesChanged();
+  return true;
+}
+
+/** Serializable accepted state; an unfinished drag is never a recovery checkpoint. */
+export function getCommittedPitchNotes(): PitchNoteData[] {
+  return _interactiveEditBaseline?.notes ?? usePitchEditorStore.getState().notes;
+}
+
+/** View retirement cancels only an unfinished gesture, never a committed render. */
+export function cancelPitchEditorGesture() {
+  const baseline = _interactiveEditBaseline;
+  _interactiveEditBaseline = null;
+  _interactiveEditCancelled = Boolean(baseline);
+  if (_dragPreviewThrottle) { clearTimeout(_dragPreviewThrottle); _dragPreviewThrottle = null; }
+  if (baseline) usePitchEditorStore.setState({ ...baseline, notes: clonePitchNotes(baseline.notes) });
+  usePitchEditorStore.getState().endInteractivePreview();
+}
+
+// One project command per committed gesture; the editor's snapshots are the UI
+// projection of that same history. Captured epochs prevent replay into a reload.
+function recordPitchCommit(baseline: InteractivePitchEditBaseline) {
+  const state = usePitchEditorStore.getState();
+  if (pitchNotesEqual(baseline.notes, state.notes)) return;
+  const epoch = getProjectEpoch();
+  const after = { ...state, notes: clonePitchNotes(state.notes) };
+  const before = { ...after, ...baseline, redoStack: [...after.redoStack, {
+    description: state.undoStack[state.undoStack.length - 1]?.description ?? "Edit pitch",
+    notes: clonePitchNotes(after.notes), selectedNoteIds: [...after.selectedNoteIds],
+  }] };
+  const restore = (snapshot: PitchEditorState) => {
+    if (epoch !== getProjectEpoch()) return;
+    const track = useDAWStore.getState().tracks.find(t => t.id === snapshot.trackId);
+    const clip = track?.clips.find(c => c.id === snapshot.clipId);
+    if (!clip || (clip.pitchCorrectionSourceFilePath ?? clip.filePath) !== snapshot.originalClipFilePath
+      || (snapshot.sourceRevision && pitchSourceRevision(clip) !== snapshot.sourceRevision)) return;
+    cancelPitchEditorGesture();
+    if (usePitchEditorStore.getState().clipId !== snapshot.clipId)
+      cancelPitchEditorForAuthorityLoss("history_target_changed");
+    const view = usePitchEditorStore.getState();
+    usePitchEditorStore.setState({ ...snapshot, ...(view.clipId === snapshot.clipId ? {
+      scrollX: view.scrollX, scrollY: view.scrollY, zoomX: view.zoomX, zoomY: view.zoomY,
+      viewportInitialized: view.viewportInitialized, tool: view.tool, snapMode: view.snapMode,
+      inspectorExpanded: view.inspectorExpanded,
+    } : {}) });
+    useDAWStore.setState({ pitchEditorTrackId: snapshot.trackId, pitchEditorClipId: snapshot.clipId, showPitchEditor: true });
+    replaceDirtyPitchNotes(snapshot.notes.map(n => n.id));
+    onNotesChanged({ historicalReplay: true });
+  };
+  commandManager.push({ type: "pitch.edit", description: state.undoStack[state.undoStack.length - 1]?.description ?? "Edit pitch",
+    timestamp: Date.now(), execute: () => restore(after), undo: () => restore(before) });
+  useDAWStore.setState({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo(), isModified: true });
+}
+
 /** Wrapper: send real-time preview immediately + queue high-quality WORLD correction. */
 function onNotesChanged(options: { historicalReplay?: boolean } = {}) {
+  if (!options.historicalReplay && _interactiveEditBaseline) recordPitchCommit(_interactiveEditBaseline);
   markPitchEditorDirty("notesChanged");
   _interactiveEditBaseline = null;
   _interactiveEditCancelled = false;
@@ -2074,6 +2151,10 @@ function onNotesChanged(options: { historicalReplay?: boolean } = {}) {
 }
 
 export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
+  sourceRevision: "",
+  sessionEpoch: -1,
+  viewportInitialized: false,
+  analyzedRanges: [],
   trackId: null,
   clipId: null,
   fxIndex: 0,
@@ -2115,6 +2196,10 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     ensureDAWTransportSubscription();
     ensureDAWPitchEditAuthoritySubscription();
     const previousTarget = get();
+    if (previousTarget.trackId === trackId && previousTarget.clipId === clipId && previousTarget.sessionEpoch === getProjectEpoch()) {
+      const existing = useDAWStore.getState().tracks.find(t => t.id === trackId)?.clips.find(c => c.id === clipId);
+      if (existing && pitchSourceRevision(existing) === previousTarget.sourceRevision) return;
+    }
     if (previousTarget.clipId
       && (previousTarget.clipId !== clipId || previousTarget.trackId !== trackId)) {
       cancelPitchEditorForAuthorityLoss("target_changed");
@@ -2128,6 +2213,11 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
     const resolvedDuration = clip?.duration ?? 0;
     if (!track || !clip) console.warn("[pitchEditor.open] track or clip not found: trackId=%s clipId=%s", trackId, clipId);
     set({
+      sourceRevision: clip ? pitchSourceRevision(clip) : "",
+      sessionEpoch: getProjectEpoch(),
+      viewportInitialized: false,
+      analyzedRanges: [],
+      scrollX: resolvedStart,
       trackId,
       clipId,
       fxIndex,
@@ -2239,6 +2329,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       analyzeDuration = Math.min(MAX_CHUNK, clipDuration);
     }
 
+    if (get().contour && (get().undoStack.length > 0 || get().redoStack.length > 0
+      || get().analyzedRanges.some(([start, end]) => analyzeStart >= start && analyzeStart + analyzeDuration <= end))) return;
     const analysisRevision = _editRevision;
     const analysisSeq = ++_analysisRunSeq;
     set({ isAnalyzing: true, analysisPhase: "analyzing", progressPercent: 0, progressLabel: "Analyzing pitch..." });
@@ -2262,7 +2354,8 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       unsubscribe();
       // notification contains noteCount and ready flag only (no heavy JSON)
 
-      if (notification?.cancelled || analysisSeq !== _analysisRunSeq) {
+      if (analysisSeq !== _analysisRunSeq || get().trackId !== trackId || get().clipId !== clipId) return;
+      if (notification?.cancelled) {
         set({ isAnalyzing: false, analysisPhase: "idle", progressPercent: 0, progressLabel: "" });
         if (_noteHqApplyInFlight) {
           deferPitchAnalysis(viewStartTime, viewEndTime, "native_analysis_cancelled");
@@ -2273,6 +2366,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
       if (notification?.ready && notification?.noteCount >= 0) {
         try {
           const fullResult = await nativeBridge.getLastPitchAnalysisResult();
+          if (analysisSeq !== _analysisRunSeq || get().trackId !== trackId || get().clipId !== clipId) return;
           if (fullResult?.notes) {
             if (analysisRevision !== _editRevision && get().notes.length > 0) {
               logPitchEditorFormant("ignored stale pitch analysis after edit revision changed", {
@@ -2384,6 +2478,7 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
               progressPercent: 100,
               progressLabel: "",
               contour: mergedContour,
+              analyzedRanges: [...get().analyzedRanges, [analyzeStart, analyzeStart + analyzeDuration]],
               notes: mergedNotes,
               selectedNoteIds: filterSelectedNoteIdsForNotes(existingSelectedNoteIds, mergedNotes),
             });
@@ -2712,37 +2807,16 @@ export const usePitchEditorStore = create<PitchEditorState>()((set, get) => ({
 
   undo: () => {
     if (!canReplayPitchEditorHistory() || _interactiveEditBaseline) return;
-    const { undoStack, notes, selectedNoteIds } = get();
-    if (undoStack.length === 0) return;
-    const entry = undoStack[undoStack.length - 1];
-    replaceDirtyPitchNotes(entry.notes.map((note) => note.id));
-    set({
-      undoStack: undoStack.slice(0, -1),
-      redoStack: [...get().redoStack, { description: entry.description, notes: clonePitchNotes(notes), selectedNoteIds: [...selectedNoteIds] }],
-      notes: normalizePitchNotes(entry.notes),
-      selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
-    });
-    onNotesChanged({ historicalReplay: true });
+    useDAWStore.getState().undo();
   },
-
   redo: () => {
     if (!canReplayPitchEditorHistory() || _interactiveEditBaseline) return;
-    const { redoStack, notes, selectedNoteIds } = get();
-    if (redoStack.length === 0) return;
-    const entry = redoStack[redoStack.length - 1];
-    replaceDirtyPitchNotes(entry.notes.map((note) => note.id));
-    set({
-      redoStack: redoStack.slice(0, -1),
-      undoStack: [...get().undoStack, { description: entry.description, notes: clonePitchNotes(notes), selectedNoteIds: [...selectedNoteIds] }],
-      notes: normalizePitchNotes(entry.notes),
-      selectedNoteIds: [...(entry.selectedNoteIds ?? [])],
-    });
-    onNotesChanged({ historicalReplay: true });
+    useDAWStore.getState().redo();
   },
 
   setScrollX: (x) => set({ scrollX: Math.max(0, x) }),
   setScrollY: (y) => set({ scrollY: Math.max(0, Math.min(120, y)) }),
-  setZoomX: (z) => set({ zoomX: Math.max(50, Math.min(2000, z)) }),
+  setZoomX: (z) => set({ zoomX: Math.max(1, Math.min(1000, z)) }),
   setZoomY: (z) => set({ zoomY: Math.max(4, Math.min(80, z)) }),
 
   applyCorrection: async () => {

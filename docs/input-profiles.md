@@ -57,7 +57,13 @@ profile does not define an override; explicit empty mappings prevent known
 collisions or false equivalence. Digital Performer, Waveform, and Renoise use a
 strict policy, so commands without a verified mapping remain unassigned. The
 deliberate exception is `Esc` for closing an active modal, which remains an
-application-level safety control.
+application-level safety control. **Start / Stop Click-Only Metronome** is another
+OpenStudio command explicitly bound in every built-in profile, including strict
+profiles: **Ctrl+Shift+Space** on Windows/Linux and **Cmd+Shift+Space** on macOS.
+It mirrors **Play click only / Stop click only** in Metronome Settings, even with
+the dialog closed. It does not change transport, recording, or metronome Enable;
+stopping standalone practice can leave the transport-driven click sounding when
+Enable is on. Custom overrides can reassign or disable the shortcut.
 
 Profiles remain selectable on every supported OpenStudio platform. When the
 source DAW is not native to the current operating system, the UI labels the
@@ -95,8 +101,9 @@ An open but unfocused editor must never claim another window's undo context.
 The same key may be valid in different editors. OpenStudio resolves bindings by
 action scope, including global, Timeline/ruler, track controls, Mixer, Piano
 Roll, Pitch Editor, automation, browser, plug-in, modal, and contextual
-surfaces. Text entry and active shortcut capture take precedence so typing in a
-field does not accidentally run a DAW command.
+surfaces. Ordinary typing, native text-editing shortcuts, input-method composition
+and active shortcut capture take precedence. Recognized global modifier shortcuts
+can still run while a text field is focused; focus does not disable every command.
 
 The action list is the authoritative view of the selected profile. Use
 **Print** to generate a cheat sheet for the current profile and platform; static

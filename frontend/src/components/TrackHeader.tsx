@@ -26,7 +26,7 @@ import {
   automationToBackend,
 } from "../store/automationParams";
 import { subscribeToInstrumentChanged } from "../utils/fxChain";
-import { guardModalContextMenu } from "../utils/modalEventGuards";
+import { guardModalContextMenu, modalPointerBoundaryProps } from "../utils/modalEventGuards";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
 import { activateShortcutContext } from "../utils/shortcutContext";
@@ -57,6 +57,7 @@ export const TrackHeader = React.memo(function TrackHeader({
   const {
     toggleTrackMute,
     toggleTrackSolo,
+    toggleTrackSoloSafe,
     toggleTrackArmed,
     toggleTrackFXBypass,
     toggleTrackAutomationRead,
@@ -82,6 +83,7 @@ export const TrackHeader = React.memo(function TrackHeader({
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
       toggleTrackSolo: s.toggleTrackSolo,
+      toggleTrackSoloSafe: s.toggleTrackSoloSafe,
       toggleTrackArmed: s.toggleTrackArmed,
       toggleTrackFXBypass: s.toggleTrackFXBypass,
       toggleTrackAutomationRead: s.toggleTrackAutomationRead,
@@ -344,7 +346,7 @@ export const TrackHeader = React.memo(function TrackHeader({
       >
         {/* Main track controls area — fixed at trackHeight */}
         <div
-          className="flex shrink-0 overflow-hidden"
+          className="flex shrink-0 overflow-x-hidden overflow-y-auto"
           style={{ height: trackHeight }}
         >
           {/* Link group bracket */}
@@ -385,7 +387,7 @@ export const TrackHeader = React.memo(function TrackHeader({
             )}
 
           {/* Main Content — single flex-wrap row, wraps when TCP is narrow */}
-          <div className="flex-1 flex flex-wrap items-center py-1 px-2 gap-x-2 gap-y-1 content-center">
+          <div className="min-w-0 flex-1 flex flex-wrap items-center py-1 px-2 gap-x-2 gap-y-1 content-start">
             {/* Record Arm Button */}
             <Button
               variant="danger"
@@ -547,10 +549,11 @@ export const TrackHeader = React.memo(function TrackHeader({
                 shape="square"
                 active={track.soloed}
                 onClick={handleSolo}
-                title="Solo (S)"
+                onContextMenu={event => { event.preventDefault(); event.stopPropagation(); toggleTrackSoloSafe(track.id); }}
+                title={track.soloSafe ? "Solo Safe enabled; right-click to disable" : "Solo (S); right-click for Solo Safe"}
                 aria-label={track.soloed ? "Unsolo track" : "Solo track"}
               >
-                S
+                {track.soloSafe ? "S\u0338" : "S"}
               </Button>
             </span>
             <span
@@ -1241,11 +1244,13 @@ export const TrackHeader = React.memo(function TrackHeader({
           <div
             className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/50"
             data-modal-root="true"
+            {...modalPointerBoundaryProps}
             role="dialog"
             aria-modal="true"
             aria-labelledby="sampler-root-note-title"
             onContextMenu={guardModalContextMenu}
             onMouseDown={(event) => {
+              event.stopPropagation();
               if (event.target === event.currentTarget) setSamplerDialog(null);
             }}
           >

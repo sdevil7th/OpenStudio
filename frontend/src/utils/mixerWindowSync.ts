@@ -49,7 +49,7 @@ export interface MixerUISnapshot extends InputProfileWindowSnapshot {
   masterAutomationReadEnabled: boolean;
   masterAutomationWriteEnabled: boolean;
   masterAutomationEnabled: boolean;
-  automationWriteBehavior: "touch" | "latch" | "overwrite";
+  automationWriteBehavior: "touch" | "latch" | "overwrite" | "touch-latch" | "cross-over";
   mixerSnapshots: MixerSnapshot[];
   showMixer: boolean;
   detachedPanels: string[];
@@ -75,6 +75,7 @@ interface MixerTrackControlState {
   pan: number;
   muted: boolean;
   soloed: boolean;
+  soloSafe?: boolean;
   armed: boolean;
   fxBypassed: boolean;
 }
@@ -89,7 +90,7 @@ interface MixerMasterControlState {
   masterAutomationReadEnabled: boolean;
   masterAutomationWriteEnabled: boolean;
   masterAutomationEnabled: boolean;
-  automationWriteBehavior: "touch" | "latch" | "overwrite";
+  automationWriteBehavior: "touch" | "latch" | "overwrite" | "touch-latch" | "cross-over";
 }
 
 interface MixerProjectSnapshot extends MixerMasterControlState {
@@ -132,6 +133,7 @@ function extractMixerProjectSnapshot(
       pan: track.pan,
       muted: track.muted,
       soloed: track.soloed,
+      soloSafe: !!track.soloSafe,
       armed: track.armed,
       fxBypassed: track.fxBypassed,
     }])),
@@ -179,7 +181,7 @@ function buildMixerEdit(
       setTrackPatchValue(afterPatch, trackId, { volume: nextTrack.volume, volumeDB: nextTrack.volumeDB });
       targets.push(`track:${trackId}:volume`);
     }
-    for (const key of ["pan", "muted", "soloed", "armed", "fxBypassed"] as const) {
+    for (const key of ["pan", "muted", "soloed", "soloSafe", "armed", "fxBypassed"] as const) {
       if (oldTrack[key] === nextTrack[key]) continue;
       setTrackPatchValue(beforePatch, trackId, { [key]: oldTrack[key] });
       setTrackPatchValue(afterPatch, trackId, { [key]: nextTrack[key] });
@@ -268,6 +270,7 @@ function applyMixerEditPatch(value: MixerEditPatch): void {
     if (controls.volumeDB !== undefined) void nativeBridge.setTrackVolume(trackId, controls.volumeDB);
     if (controls.pan !== undefined) void nativeBridge.setTrackPan(trackId, controls.pan);
     if (controls.muted !== undefined) void nativeBridge.setTrackMute(trackId, controls.muted);
+    if (controls.soloSafe !== undefined) void nativeBridge.setTrackSoloSafe(trackId, controls.soloSafe);
     if (controls.soloed !== undefined) void nativeBridge.setTrackSolo(trackId, controls.soloed);
     if (controls.armed !== undefined) void nativeBridge.setTrackRecordArm(trackId, controls.armed);
     if (controls.fxBypassed !== undefined) {
@@ -284,7 +287,8 @@ function applyMixerEditPatch(value: MixerEditPatch): void {
   }
   if (patch.master?.masterVolume !== undefined || patch.master?.isMasterMuted !== undefined) {
     const state = useDAWStore.getState();
-    void nativeBridge.setMasterVolume(state.isMasterMuted ? 0 : state.masterVolume);
+    void nativeBridge.setMasterVolume(state.masterVolume);
+    void nativeBridge.setMasterMute(state.isMasterMuted);
   }
   if (patch.master?.masterPan !== undefined) void nativeBridge.setMasterPan(patch.master.masterPan);
   if (patch.master?.masterMono !== undefined) void nativeBridge.setMasterMono(patch.master.masterMono);
@@ -478,6 +482,7 @@ export function parseMixerUISnapshot(value: unknown): MixerUISnapshot | null {
     for (const key of ["muted", "soloed", "armed", "fxBypassed"]) {
       if (typeof track[key] !== "boolean") return null;
     }
+    if (track.soloSafe !== undefined && typeof track.soloSafe !== "boolean") return null;
     if (!isValidAutomationLanes(track.automationLanes)) return null;
   }
   if (!isStringArray(value.selectedTrackIds)
@@ -603,6 +608,7 @@ function mergeRemoteMixerControls(current: Track, remote: MixerTrackState): Trac
     pan: remote.pan,
     muted: remote.muted,
     soloed: remote.soloed,
+    soloSafe: !!remote.soloSafe,
     armed: remote.armed,
     fxBypassed: remote.fxBypassed,
   };

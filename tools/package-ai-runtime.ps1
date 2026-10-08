@@ -122,7 +122,22 @@ function New-StagedRuntimeArchiveRoot {
     }
 }
 
-if ($Platform -eq "macos") {
+if ($Platform -eq "linux") {
+    # Compress-Archive omits dotfiles on Unix, including required runtime metadata.
+    # Native zip includes them and dereferences the standalone tree's relative
+    # Python links so the application's ZIP extractor receives regular files.
+    $zip = Get-Command zip -ErrorAction Stop
+    $parentDir = Split-Path -Parent $resolvedRuntimeRoot
+    $runtimeName = Split-Path -Leaf $resolvedRuntimeRoot
+    Push-Location $parentDir
+    try {
+        & $zip.Source -q -r $resolvedOutputPath $runtimeName
+        if ($LASTEXITCODE -ne 0) { throw "Linux runtime ZIP creation failed." }
+    } finally {
+        Pop-Location
+    }
+}
+elseif ($Platform -eq "macos") {
     $parentDir = Split-Path -Parent $resolvedRuntimeRoot
     $runtimeName = Split-Path -Leaf $resolvedRuntimeRoot
 

@@ -1,3 +1,4 @@
+import { TONE3000Introduction, TONE3000LibraryHeader } from "./TONE3000Branding";
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -149,7 +150,8 @@ import {
   sameNAMCatalogModelIdentity,
 } from "../utils/namToneCaptureSelection";
 
-type NAMTab = "latest" | "trending" | "downloads-all-time" | "installed" | "favorites";
+type NAMTab = "latest" | "trending" | "downloads-all-time" | "installed" | "favorites" | "account-favorites" | "created" | "account-downloaded";
+const accountCollectionForTab = (tab: string) => tab === "account-favorites" ? "favorited" as const : tab === "created" ? "created" as const : tab === "account-downloaded" ? "downloaded" as const : undefined;
 type NAMSlot = "amp" | "pedal";
 type NAMTargetSlot = NAMToneSlot;
 export type NAMLibraryFlowMode = "amp" | "pedal" | "ir" | "fx";
@@ -168,6 +170,7 @@ type NAMSourceFlowFilterControl = {
   externalSource?: boolean;
 };
 export type NAMExplorerIntent = {
+  toneId?: number;
   token: number;
   tab?: NAMTab;
   query?: string;
@@ -572,6 +575,11 @@ const NAM_SORT_OPTIONS: Array<{ value: NAMSortMode; label: string; local: boolea
   { value: "favorites-count", label: "Most Liked (loaded results)", local: true },
   { value: "name-az", label: "Name A-Z (loaded results)", local: true },
 ];
+const NAM_ACCOUNT_SORT_OPTIONS = NAM_SORT_OPTIONS.map((option) => ({
+  ...option,
+  label: option.value === "best-match" ? "Account order" : option.local ? option.label : `${option.label} (loaded results)`,
+  local: option.value !== "best-match",
+}));
 export const SUPPORTED_TONE3000_PEDAL_CATEGORIES = ["drive", "boost", "fuzz", "distortion", "overdrive"] as const;
 const NAM_SOURCE_FLOW_CONFIGS: Record<NAMLibraryFlowMode, NAMSourceFlowConfig> = {
   amp: {
@@ -1956,6 +1964,10 @@ function makeInstallPayload(tone: NAMCatalogTone, model: NAMCatalogModel): NAMCa
     toneTitle: title,
     creator,
     creator_name: creator,
+    creatorAvatarUrl: creatorAvatarUrl(tone),
+    imageUrl: imageUrlOf(tone, model),
+    description: tone.description || "",
+    format: tone.format || tone.platform || (sourceCategoryForToneModel(tone, model) === "cabinet-ir" ? "ir" : "nam"),
     license,
     license_name: license,
     gearType: preciseGearType,
@@ -2330,6 +2342,7 @@ function NAMDetailSkeleton() {
 }
 
 function defaultSortForTab(tab: NAMTab): NAMSortMode {
+  if (accountCollectionForTab(tab)) return "best-match";
   if (tab === "latest") return "newest";
   if (tab === "downloads-all-time") return "downloads-all-time";
   if (tab === "trending") return "trending";
@@ -2429,6 +2442,9 @@ function initialNAMTab(): NAMTab {
     value === "trending" ||
     value === "downloads-all-time" ||
     value === "installed" ||
+    value === "account-favorites" ||
+    value === "created" ||
+    value === "account-downloaded" ||
     value === "favorites"
     ? value
     : "trending";
@@ -2602,6 +2618,9 @@ export function NAMExplorer({
   const [selectedKey, setSelectedKey] = useState(() => initialDevMockAudition() ? DEV_MOCK_AUDITION_KEY : "");
   const [capturePickerError, setCapturePickerError] = useState("");
   const [catalog, setCatalog] = useState<NAMCatalogTone[]>(() => initialRestoredCatalog);
+  const [hostedTone, setHostedTone] = useState<NAMCatalogTone | null>(null);
+  const hostedToneRef = useRef<NAMCatalogTone | null>(null);
+  const [tone3000IntroductionOpen, setTone3000IntroductionOpen] = useState(false);
   const [catalogGeneratedAt, setCatalogGeneratedAt] = useState(() => initialSessionCatalogIsLive
     ? initialSessionView?.catalogGeneratedAt ?? ""
     : initialCatalogEntryRef.current
@@ -2730,6 +2749,8 @@ export function NAMExplorer({
   }, []);
 
   const invalidateLiveSearchIntent = () => {
+    hostedToneRef.current = null;
+    setHostedTone(null);
     const requestId = activeSearchIdRef.current;
     activeSearchIdRef.current = null;
     if (requestId) void nativeBridge.cancelTONE3000Search(searchOwnerRef.current, requestId);
@@ -3216,8 +3237,10 @@ export function NAMExplorer({
   }, [catalog, installed]);
 
   const rows = useMemo<NAMCatalogRow[]>(() => {
+    if (accountCollectionForTab(tab) && (!authStatus?.authenticated || authStatus.expired)) return [];
     const needle = catalogMode === "live" && tab !== "installed" && tab !== "favorites" ? "" : query.trim().toLowerCase();
-    const flattened = catalog.flatMap((catalogTone, toneIndex) => {
+    const browsingTones = hostedTone ? [hostedTone, ...catalog.filter((tone) => toneIdOf(tone) !== toneIdOf(hostedTone))] : catalog;
+    const flattened = browsingTones.flatMap((catalogTone, toneIndex) => {
       // Catalog summaries intentionally omit captures. Reuse fresh detail
       // already fetched in this session when returning to a pack, instead of
       // replacing its usable picker with an empty summary on every reopen.
@@ -3238,6 +3261,7 @@ export function NAMExplorer({
     });
 
     const filtered = flattened.filter(({ tone, model }) => {
+      if (hostedTone && toneIdOf(tone) === toneIdOf(hostedTone)) return true;
       const modelId = modelIdOf(model);
       const favoriteKey = `${toneIdOf(tone)}:${modelId}`;
       const arch = modelArchitecture(tone, model).toLowerCase();
@@ -3248,7 +3272,14 @@ export function NAMExplorer({
         tab === "latest" ? bucket.includes("latest") || bucket.includes("newest") :
         bucket.includes(tab);
       if (!matchesTab) return false;
-      if (architecture !== "all" && arch !== architecture) return false;
+      if (architecture !== "all") {
+        // Account endpoints do not accept an architecture filter. Their summary
+        // counts identify compatible packs; detail hydration filters captures.
+        const summaryCount = architecture === "a2" ? tone.a2_models_count : tone.a1_models_count;
+        if (accountCollectionForTab(tab) && !modelId && summaryCount !== undefined) {
+          if (summaryCount <= 0) return false;
+        } else if (arch !== architecture && !(accountCollectionForTab(tab) && !modelId)) return false;
+      }
       if (creatorFilter !== "all" && creatorLabel(tone) !== creatorFilter) return false;
       if (licenseFilter !== "all" && licenseLabel(tone.license) !== licenseFilter) return false;
       const instrumentLabels = rowInstrumentLabels(tone, model);
@@ -3280,7 +3311,7 @@ export function NAMExplorer({
     const sorted = sortCatalogRows(
       filtered,
       sortMode,
-      catalogMode === "live" && (Boolean(needle) || sortMode === "trending"),
+      catalogMode === "live" && (accountCollectionForTab(tab) ? sortMode === "best-match" : Boolean(needle) || sortMode === "trending"),
     );
     return filterAndPinNAMInstrumentItems(
       sorted,
@@ -3288,7 +3319,7 @@ export function NAMExplorer({
       ({ tone, model }) => rowInstrumentLabels(tone, model),
       ({ model }) => catalogModelIsActive(model),
     );
-  }, [architecture, availabilityFilter, catalog, catalogMode, characterFilter, creatorFilter, currentAmp, currentPedal, favorites, installedByModelId, installedByModelUrl, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
+  }, [architecture, authStatus?.authenticated, authStatus?.expired, availabilityFilter, catalog, hostedTone, catalogMode, characterFilter, creatorFilter, currentAmp, currentPedal, favorites, installedByModelId, installedByModelUrl, instrumentFilter, instrumentProfile, licenseFilter, query, sortMode, sourceFlow, sourceFlowCategoryFilter, tab]);
   const packRows = useMemo(() => collapseNAMCatalogRowsToTonePacks(rows), [rows]);
   const displayRows = boundNAMCatalogRowsForDisplay(packRows, variant, catalogMode, tab);
 
@@ -3493,27 +3524,60 @@ export function NAMExplorer({
     }
   };
 
-  const startAuth = async () => {
+  const startAuth = async (skipIntroduction = false) => {
+    if (!skipIntroduction && (!authStatus?.authenticated || authStatus.expired)) {
+      setTone3000IntroductionOpen(true);
+      return;
+    }
+    const sessionToken = sessionEpochRef.current.capture();
+    const isCurrent = () => mountedRef.current && sessionEpochRef.current.isCurrent(sessionToken);
     setAuthBusy(true);
     setFallbackAuthUrl("");
     setCallbackValue("");
     setStatus("Opening TONE3000 in your browser. Sign in or create an account there; OpenStudio never sees your password.");
     try {
-      const result = await startTONE3000InteractiveAuth(clientId.trim() ? { clientId: clientId.trim() } : {});
+      const result = await startTONE3000InteractiveAuth({
+        ...(clientId.trim() ? { clientId: clientId.trim() } : {}),
+        prompt: "select_tone",
+        format: sourceFlow === "ir" ? "ir" : "nam",
+        gears: sourceFlow === "ir" ? "cab" : sourceFlow === "pedal" ? "pedal" : "amp_amp-cab",
+        architecture: sourceFlow === "ir" ? "" : architecture === "a1" ? "1" : "2",
+      });
+      if (!isCurrent()) return;
       if (!result.success && result.status !== "connected") {
         if (result.authUrl) setFallbackAuthUrl(result.authUrl);
         if (result.fallbackRequired) setAuthAdvancedOpen(true);
         setStatus(result.error || (result.status === "canceled" ? "TONE3000 sign-in canceled" : "Could not connect TONE3000"));
         return;
       }
-      await refreshLibrary(true);
-      setStatus(result.toneId ? "TONE3000 connected. Selected tone metadata is ready to load." : "TONE3000 connected");
+      await refreshLibrary(true, isCurrent);
+      if (!isCurrent()) return;
+      const toneId = Number(result.toneId);
+      if (Number.isSafeInteger(toneId) && toneId > 0 && !result.selectionCanceled) {
+        const detail = await nativeBridge.getTONE3000ToneDetail(toneId, sourceFlow === "ir" ? "" : architecture);
+        if (!isCurrent()) return;
+        if (!detail.success || !detail.tone) {
+          setStatus(detail.error || "Connected, but the selected tone details could not be loaded. Browse TONE3000 to retry.");
+          return;
+        }
+        const selectedTone = { ...detail.tone, models: detail.models ?? detail.tone.models ?? [], source: "tone3000-live", searchArchitecture: architecture };
+        // Selection opens the pack; the existing Audition/Use transaction changes audio.
+        setTab("trending");
+        hostedToneRef.current = selectedTone;
+        setHostedTone(selectedTone);
+        setCatalogMode("live");
+        setSelectedKey(`${toneId}:0`);
+        setStatus("Tone selected from TONE3000. Choose a capture to audition or use in this rack.");
+      } else {
+        setStatus(result.selectionCanceled ? "Connected to TONE3000. Tone selection canceled." : "TONE3000 connected");
+      }
     } catch (error) {
       console.error("[NAMExplorer] TONE3000 auth flow failed:", error);
+      if (!isCurrent()) return;
       setAuthAdvancedOpen(true);
       setStatus("TONE3000 sign-in failed. Advanced / Developer fallback is available.");
     } finally {
-      setAuthBusy(false);
+      if (mountedRef.current) setAuthBusy(false);
     }
   };
 
@@ -5334,6 +5398,7 @@ export function NAMExplorer({
     sourceFlow: sourceFlow ?? "",
     sourceFlowCategoryFilter,
     includeModels: false,
+    accountKey: accountCollectionForTab(liveSearchTab) ? `${tone3000Session.user?.id ?? ""}:${authStatus?.clientId ?? ""}:${authStatus?.expiresAtMs ?? ""}` : undefined,
   });
   const currentLiveSearchSnapshot = buildLiveSearchSnapshot();
   const currentLiveSearchSignature = currentLiveSearchSnapshot.signature;
@@ -5375,6 +5440,7 @@ export function NAMExplorer({
             page: request.page,
             page_size: request.pageSize,
             sort: request.sort,
+            collection: accountCollectionForTab(request.tab),
             gears: request.gearFilter,
             format: request.format,
             architecture: request.architecture,
@@ -5419,7 +5485,7 @@ export function NAMExplorer({
       setCatalogRefreshedAtMs(Date.now());
       setCatalogMode("live");
       setTabState(request.tab as NAMTab);
-      if (mode !== "append") setSelectedKey("");
+      if (mode !== "append" && !hostedToneRef.current) setSelectedKey("");
       const responsePage = Math.max(1, Number(payload.page || request.page) || request.page);
       const responsePageSize = Math.max(
         1,
@@ -5641,8 +5707,8 @@ export function NAMExplorer({
             variant="ghost"
             size="icon-sm"
             onClick={() => toggleFavorite(tone, model)}
-            title={favoriteActive ? "Remove favorite" : "Favorite"}
-            aria-label={favoriteActive ? "Remove favorite" : "Favorite"}
+            title={favoriteActive ? "Remove local favorite" : "Add local favorite"}
+            aria-label={favoriteActive ? "Remove local favorite" : "Add local favorite"}
             aria-pressed={favoriteActive}
             data-active={favoriteActive}
           >
@@ -5903,6 +5969,7 @@ export function NAMExplorer({
           </small>
         </div>
         <div className="nam-result-badges">
+          <span>{String(tone.format || tone.platform || (targetSlot === "cab" ? "IR" : "NAM")).toUpperCase()}</span>
           <span>{arch}</span>
           <span>{gear}</span>
           {(availability || license) && <span>{availability || license}</span>}
@@ -6357,6 +6424,33 @@ export function NAMExplorer({
   };
   const feedbackTone = feedbackToneForStatus(status);
   const authConnected = Boolean(authStatus?.authenticated && !authStatus.expired);
+  const accountIdentity = authConnected ? `${authStatus?.clientId}:${authStatus?.expiresAtMs}` : "";
+  const accountIdentityRef = useRef(accountIdentity);
+  useEffect(() => {
+    if (accountIdentityRef.current === accountIdentity) return;
+    accountIdentityRef.current = accountIdentity;
+    hostedToneRef.current = null;
+    setHostedTone(null);
+    if (accountCollectionForTab(tab)) {
+      setCatalog([]);
+      setSelectedKey("");
+    }
+  }, [accountIdentity, tab]);
+  useEffect(() => {
+    if (!intent?.toneId || !authConnected) return;
+    const sessionToken = sessionEpochRef.current.capture();
+    let current = true;
+    void nativeBridge.getTONE3000ToneDetail(intent.toneId, sourceFlow === "ir" ? "" : architecture).then((detail) => {
+      if (!current || !sessionEpochRef.current.isCurrent(sessionToken)) return;
+      if (!detail.success || !detail.tone) { setStatus(detail.error || "Could not open this tone’s details. Browse TONE3000 to retry."); return; }
+      const tone = { ...detail.tone, models: detail.models ?? detail.tone.models ?? [], source: "tone3000-live", searchArchitecture: architecture };
+      hostedToneRef.current = tone;
+      setHostedTone(tone);
+      setCatalogMode("live");
+      setSelectedKey(`${intent.toneId}:0`);
+    }).catch(() => { if (current) setStatus("Could not open this tone’s details."); });
+    return () => { current = false; };
+  }, [intent?.token, intent?.toneId, authConnected, architecture, sourceFlow]);
   const authClientConfigured = Boolean(authStatus?.configuredClientId || clientId.trim());
   const authExpired = Boolean(authStatus?.expired);
   const authRefreshAvailable = Boolean(authStatus?.hasRefreshToken && (!authStatus.authenticated || authStatus.expired));
@@ -6531,8 +6625,8 @@ export function NAMExplorer({
         }))
   ) : [];
 
-  const sourceFlowTabs = sourceFlow === "fx" ? ["Factory"] : ["Browse", "Installed", "Favorites"];
-  const sourceFlowActiveTab = sourceFlow === "fx" ? 0 : tab === "installed" ? 1 : tab === "favorites" ? 2 : 0;
+  const sourceFlowTabs = sourceFlow === "fx" ? ["Factory"] : ["Browse", "Favorites", "Created", "Downloaded", "Installed", "Local Favorites"];
+  const sourceFlowActiveTab = sourceFlow === "fx" ? 0 : tab === "account-favorites" ? 1 : tab === "created" ? 2 : tab === "account-downloaded" ? 3 : tab === "installed" ? 4 : tab === "favorites" ? 5 : 0;
 
   const sourceFlowTargetCards = sourceFlowConfig ? (
     sourceFlow === "fx"
@@ -6622,6 +6716,9 @@ export function NAMExplorer({
       id: row.key,
       name: toneTitle(tone, model),
       creator: creatorLabel(tone),
+      creatorAvatarUrl: creatorAvatarUrl(tone),
+      gear: gearLabel(tone.gear) || sourceCategoryLabel(category),
+      format: String(tone.format || tone.platform || (targetSlot === "cab" ? "IR" : "NAM")).toUpperCase(),
       kind: captureCount > 1 ? `${captureCount} Captures` : sourceCategoryLabel(category),
       arch: sourceArchitecture,
       category,
@@ -6669,6 +6766,9 @@ export function NAMExplorer({
       id: key,
       name: installedTitle(record),
       creator: record.creator || record.sourceProvider || "Local library",
+      creatorAvatarUrl: firstString(record.creatorAvatarUrl, record.lastSeenMetadata?.creatorAvatarUrl),
+      gear: record.gearType || sourceCategoryLabel(category),
+      format: targetSlot === "cab" ? "IR" : "NAM",
       kind: sourceCategoryLabel(category),
       arch: sourceArchitecture,
       category,
@@ -6876,10 +6976,9 @@ export function NAMExplorer({
       : !authConnected ? { id: "connect", label: authUiBusy ? "Connecting..." : "Connect TONE3000" }
       : canRetryStatus ? { id: "retry", label: sourceFlowRateLimited ? "Retry search" : "Retry" } : undefined,
     authBusy: authUiBusy,
+    signedInUser: tone3000Session.user,
     actionBusy: rackActionsBusy,
     loading: liveBusy || catalogBusy || query !== committedQuery,
-    filterScopeDetail: sourceFlow !== "fx" && catalogMode === "live"
-      ? "Creator, license, instrument and character filters apply to loaded results." : undefined,
     searchLabel: sourceFlow === "fx" ? "Search OpenStudio FX" : sourceFlow === "ir" ? "Search IR sources" : sourceFlowConfig.searchPlaceholder,
     searchText: query.trim() || sourceFlowConfig.defaultQuery || sourceFlowConfig.searchPlaceholder,
     searchAction: sourceFlow === "fx" ? "Search FX" : sourceFlow === "ir" ? "Search IRs" : "Search Live",
@@ -6890,7 +6989,7 @@ export function NAMExplorer({
     sortValue: sourceFlow === "fx" ? "factory" : sortMode,
     sortOptions: sourceFlow === "fx"
       ? [{ value: "factory", label: "Factory order" }]
-      : NAM_SORT_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+      : (accountCollectionForTab(tab) ? NAM_ACCOUNT_SORT_OPTIONS : NAM_SORT_OPTIONS).map((option) => ({ value: option.value, label: option.label })),
     targets: sourceFlowTargetCards,
     localTitle: sourceFlow === "fx" ? "Source rule" : sourceFlow === "ir" ? "Local IR file" : "Local NAM file",
     localDetail: sourceFlow === "fx"
@@ -6921,6 +7020,10 @@ export function NAMExplorer({
       ? sourceFlowConfig.sourceOnlyDetailTitle || "Selected source - Space/Reverb IR"
       : sourceFlowConfig.detailTitle,
     selectedRowId: selectedSourceFlowRowId,
+    selectedCreator: selectedCatalogRow ? creatorLabel(selectedCatalogRow.tone) : selectedInstalled?.creator,
+    selectedCreatorAvatarUrl: selectedCatalogRow ? creatorAvatarUrl(selectedCatalogRow.tone) : firstString(selectedInstalled?.creatorAvatarUrl, selectedInstalled?.lastSeenMetadata?.creatorAvatarUrl),
+    selectedDescription: selectedCatalogRow ? selectedCatalogRow.tone.description || "" : firstString(selectedInstalled?.description, selectedInstalled?.lastSeenMetadata?.description),
+    selectedFormat: sourceFlow === "ir" ? "IR" : "NAM",
     selectedName: sourceFlowDetailName,
     selectedMeta: sourceFlowDetailMetaLine,
     selectedAvailable: sourceFlow === "fx" ? Boolean(selectedFXPreset) : hasSelectedRail,
@@ -7584,26 +7687,15 @@ export function NAMExplorer({
   const applySourceFlowDesignTab = (value: string) => {
     const normalized = value.toLowerCase();
     setSelectedKey("");
-    if (sourceFlow === "ir") {
-      if (normalized.includes("installed")) setTab("installed");
-      else if (normalized.includes("favorite")) setTab("favorites");
-      else {
-        setTab("trending");
-        setSortMode("trending");
-        setSourceFlowCategoryFilter("cabinet-ir");
-      }
-      return;
-    }
     if (sourceFlow === "fx") {
       setSourceFlowCategoryFilter("all");
       return;
     }
-    const nextTab: NAMTab =
-      normalized.includes("download") ? "downloads-all-time" :
-      normalized.includes("installed") ? "installed" :
-      normalized.includes("favorite") ? "favorites" :
-      normalized.includes("trending") ? "trending" :
-      "trending";
+    const nextTab: NAMTab = normalized === "favorites" ? "account-favorites"
+      : normalized === "created" ? "created"
+      : normalized === "downloaded" ? "account-downloaded"
+      : normalized === "installed" ? "installed"
+      : normalized === "local favorites" ? "favorites" : "trending";
     setTab(nextTab);
     setSortMode(defaultSortForTab(nextTab));
   };
@@ -7673,6 +7765,10 @@ export function NAMExplorer({
     if (action === "search") {
       if (sourceFlow !== "fx" && tab !== "installed" && tab !== "favorites") void submitLiveSearch(1);
       else setSelectedKey("");
+      return;
+    }
+    if (action === "browse-tone3000") {
+      if (!authUiBusy && !rackActionsBusy) void startAuth();
       return;
     }
     if (action === "connect") {
@@ -7786,6 +7882,7 @@ export function NAMExplorer({
       || Boolean(audition && !audition.saved);
     return (
       <>
+        <TONE3000Introduction open={tone3000IntroductionOpen} onClose={() => setTone3000IntroductionOpen(false)} onContinue={() => { setTone3000IntroductionOpen(false); void startAuth(true); }} />
         <NAMRackSourceFlowDesignPort
           config={sourceFlowDesignConfig}
           rackSizePercent={rackSizePercent}
@@ -8012,6 +8109,8 @@ export function NAMExplorer({
       data-library-mode={sourceFlowConfig ? "source-flow" : undefined}
       data-source-mode={sourceFlowConfig?.sourceMode}
     >
+      <TONE3000Introduction open={tone3000IntroductionOpen} onClose={() => setTone3000IntroductionOpen(false)} onContinue={() => { setTone3000IntroductionOpen(false); void startAuth(true); }} />
+      {sourceFlow !== "fx" && <TONE3000LibraryHeader user={tone3000Session.user} connected={authConnected} busy={authUiBusy || rackActionsBusy} onBrowse={() => void startAuth()} />}
       {sourceFlowConfig && (
         <div className="tone-source-flow-head">
           <button
@@ -8414,8 +8513,11 @@ export function NAMExplorer({
                 ["latest", "Latest"],
                 ["trending", "Trending"],
                 ["downloads-all-time", "Downloaded"],
+                ["account-favorites", "Favorites"],
+                ["created", "Created"],
+                ["account-downloaded", "My Downloads"],
                 ["installed", "Installed"],
-                ["favorites", "Favorites"],
+                ["favorites", "Local Favorites"],
               ] as Array<[NAMTab, string]>).map(([id, label]) => (
                 <button
                   key={id}
@@ -8518,7 +8620,7 @@ export function NAMExplorer({
                   onPointerDownCapture={() => activateShortcutContext({ kind: "modal" })}
                   onFocusCapture={() => activateShortcutContext({ kind: "modal" })}
                 >
-                  {NAM_SORT_OPTIONS.map((option) => (
+                  {(accountCollectionForTab(tab) ? NAM_ACCOUNT_SORT_OPTIONS : NAM_SORT_OPTIONS).map((option) => (
                     <button
                       key={option.value}
                       type="button"
@@ -8538,7 +8640,7 @@ export function NAMExplorer({
             <label className="nam-sort-control" title="Sort tones">
               <span>Sort by</span>
               <select value={sortMode} onChange={(event) => applySortMode(event.currentTarget.value as NAMSortMode)}>
-                {NAM_SORT_OPTIONS.map((option) => (
+                {(accountCollectionForTab(tab) ? NAM_ACCOUNT_SORT_OPTIONS : NAM_SORT_OPTIONS).map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}{option.local ? " (local)" : ""}
                   </option>

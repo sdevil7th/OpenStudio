@@ -3,7 +3,7 @@
 template <typename Check>
 static void runIntegrationFixtures(const juce::File& root, Check check)
 {
-    const auto fixture = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("UpdaterFixture");
+    const auto fixture = OpenStudioRuntime::executableFile().getSiblingFile("UpdaterFixture");
     uint8_t seed[32] {}, secret[64] {}, publicKey[32] {};
     for (int i = 0; i < 32; ++i) seed[i] = static_cast<uint8_t>(i + 41);
     crypto_ed25519_key_pair(secret, publicKey, seed);

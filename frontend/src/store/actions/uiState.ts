@@ -66,9 +66,10 @@ export const uiStateActions = (set: SetFn) => ({
     set((state: any) => ({ showPreferences: !state.showPreferences })),
   toggleScriptConsole: () =>
     set((state: any) => ({ showScriptConsole: !state.showScriptConsole })),
-  openAiToolsSetup: (requestedFeature?: "stemSeparation" | "audioGeneration") =>
-    set({ showAiToolsSetup: true, aiToolsSetupRequestedFeature: requestedFeature ?? null }),
-  closeAiToolsSetup: () => set({ showAiToolsSetup: false, aiToolsSetupRequestedFeature: null }),
+  openAiToolsSetup: (requestedFeature?: "stemSeparation" | "audioGeneration", modelId?: AiMusicModelId) =>
+    set({ showAiToolsSetup: true, aiToolsSetupRequestedFeature: requestedFeature ?? null,
+      aiToolsSetupRequestedModelId: requestedFeature === "audioGeneration" && modelId ? resolveAiMusicModelId(modelId) : null }),
+  closeAiToolsSetup: () => set({ showAiToolsSetup: false, aiToolsSetupRequestedFeature: null, aiToolsSetupRequestedModelId: null }),
   openStemSeparation: (trackId: string, clipId: string, name: string, duration: number) =>
     set({ showStemSeparation: true, stemSepTrackId: trackId, stemSepClipId: clipId, stemSepClipName: name, stemSepClipDuration: duration }),
   closeStemSeparation: () =>

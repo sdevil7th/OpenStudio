@@ -1,4 +1,57 @@
 import type { TrackType } from "./useDAWStore";
+import type { PluginParameterInfo } from "../services/NativeBridge";
+import { denormalizeParamValue, normalizeParamValue } from "../utils/builtInParamValue";
+
+export type AutomationParameterMetadata = Pick<PluginParameterInfo, "name" | "paramId" | "hostParamId" | "meaningSignature" | "referenceGeneration" | "stepCount" | "builtIn" | "min" | "max" | "discrete" | "type" | "unit" | "enumOptions"> & { initialNormalized?: number };
+export interface AutomationLaneCreationOptions { read?: boolean; visible?: boolean }
+export function automationParameterMetadata(parameter: PluginParameterInfo): AutomationParameterMetadata {
+  const { name, paramId, hostParamId, meaningSignature, referenceGeneration, stepCount, builtIn, min, max, discrete, type, unit, enumOptions } = parameter;
+  return { name, paramId, hostParamId, meaningSignature, referenceGeneration, stepCount, builtIn, min, max, discrete, type, unit, initialNormalized: parameter.value,
+    ...(enumOptions ? { enumOptions: enumOptions.map(option => ({ ...option })) } : {}) };
+}
+export function automationParameterChoices(metadata?: AutomationParameterMetadata) {
+  return metadata?.enumOptions?.map(option => ({ ...option, value: metadata.builtIn
+    ? normalizeParamValue({ id: metadata.paramId ?? "", min: metadata.min ?? 0, max: metadata.max ?? 1,
+      label: metadata.name, type: "enum", value: option.value, defaultValue: option.value }, option.value) : option.value })) ?? [];
+}
+export function formatAutomationParameterValue(metadata: AutomationParameterMetadata | undefined, value: number): string {
+  if (!metadata) return `${Math.round(value * 100)}%`;
+  const choices = automationParameterChoices(metadata);
+  if (choices.length) return choices.reduce((best, option) => Math.abs(option.value - value) < Math.abs(best.value - value) ? option : best).label;
+  if (metadata.type === "toggle") return value >= .5 ? "On" : "Off";
+  if (!metadata.builtIn) return `${Math.round(value * 100)}% (normalized)`;
+  let raw = denormalizeParamValue({ id: metadata.paramId ?? "", min: metadata.min ?? 0, max: metadata.max ?? 1 }, value);
+  if (metadata.discrete) raw = Math.round(raw);
+  const span = Math.abs((metadata.max ?? 1) - (metadata.min ?? 0));
+  return `${raw.toFixed(metadata.discrete ? 0 : span <= 2 ? 2 : span <= 50 ? 1 : 0)}${metadata.unit ? ` ${metadata.unit}` : ""}`;
+}
+export function automationLaneIsDiscrete(lane: { param: string; metadata?: AutomationParameterMetadata }) {
+  return lane.metadata?.discrete === true || lane.param === "mute" || lane.param === "midi_cc_64"
+    || parseSendAutomationParamId(lane.param)?.control === "mute";
+}
+export function quantizeAutomationLaneValue(lane: { param: string; metadata?: AutomationParameterMetadata }, value: number) {
+  const clamped = Math.max(0, Math.min(1, value));
+  if (!automationLaneIsDiscrete(lane)) return clamped;
+  const metadata = lane.metadata;
+  const choices = automationParameterChoices(metadata);
+  if (choices.length) return choices.reduce((best, option) => Math.abs(option.value - clamped) < Math.abs(best.value - clamped) ? option : best).value;
+  if (metadata?.builtIn && metadata.type !== "toggle" && metadata.min !== undefined && metadata.max !== undefined) {
+    const parameter = { id: metadata.paramId ?? "", min: metadata.min, max: metadata.max, label: metadata.name,
+      type: "integer", value: 0, defaultValue: 0 };
+    return normalizeParamValue(parameter, Math.round(denormalizeParamValue(parameter, clamped)));
+  }
+  return metadata?.type === "toggle" || lane.param === "mute" || lane.param === "midi_cc_64" || parseSendAutomationParamId(lane.param)?.control === "mute"
+    ? clamped >= .5 ? 1 : 0 : clamped;
+}
+export function automationLineCoordinates(points: readonly { time: number; value: number }[],
+  x: (time: number) => number, y: (value: number) => number, discrete: boolean): number[] {
+  const result: number[] = [];
+  points.forEach((point, index) => {
+    if (discrete && index > 0) result.push(x(point.time), y(points[index - 1].value));
+    result.push(x(point.time), y(point.value));
+  });
+  return result;
+}
 
 // ============================================
 // Centralized Automation Parameter Registry
@@ -292,6 +345,17 @@ const FALLBACK_DEF: Omit<AutomationParamDef, "id" | "label" | "shortLabel"> = {
 export function getAutomationParamDef(paramId: string): AutomationParamDef {
   const def = PARAM_MAP.get(paramId);
   if (def) return def;
+  const send = parseSendAutomationParamId(paramId);
+  if (send) {
+    if (send.control === "trim") return { ...PARAM_MAP.get("trim_volume")!, id: paramId, label: "Send Trim", shortLabel: "Send Trim" };
+    const mute = send.control === "mute";
+    return {
+      ...FALLBACK_DEF, id: paramId, label: `Send ${send.control}`, shortLabel: `Send ${send.control}`,
+      defaultNormalized: mute ? 0 : 0.5,
+      formatNormalized: mute ? value => value >= 0.5 ? "Muted" : "On"
+        : send.control === "pan" ? value => formatAutomationValue("pan", value) : formatNormalizedPercent,
+    };
+  }
   if (/^midi_cc_(\d{1,3})$/.test(paramId)) {
     const cc = Number(paramId.slice("midi_cc_".length));
     if (cc >= 0 && cc <= 127) {
@@ -347,12 +411,24 @@ export function pluginAutomationParamId(isInputFX: boolean, fxIndex: number, par
   return `plugin_${isInputFX ? "input" : "track"}_${fxIndex}_${paramIndex}`;
 }
 
+export type SendAutomationControl = "level" | "pan" | "mute" | "trim";
+export function sendAutomationParamId(destinationId: string, control: SendAutomationControl): string {
+  return `send_${encodeURIComponent(destinationId)}_${control}`;
+}
+
+export function parseSendAutomationParamId(id: string): { destinationId: string; control: SendAutomationControl } | null {
+  const match = /^send_(.+)_(level|pan|mute|trim)$/.exec(id);
+  if (!match) return null;
+  try { return { destinationId: decodeURIComponent(match[1]), control: match[2] as SendAutomationControl }; }
+  catch { return null; }
+}
+
 export function builtInAutomationParamId(isInputFX: boolean, fxIndex: number, paramId: string): string {
   return `builtin_${isInputFX ? "input" : "track"}_${fxIndex}_${encodeURIComponent(paramId)}`;
 }
 
 export function getMasterAutomationParams(): AutomationParamDef[] {
-  return AUTOMATION_PARAMS.filter((p) => p.id === "volume" || p.id === "pan");
+  return AUTOMATION_PARAMS.filter((p) => p.id === "volume" || p.id === "pan" || p.id === "trim_volume");
 }
 
 // --- Interpolation ---

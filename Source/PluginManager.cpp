@@ -1,3 +1,4 @@
+#include "RuntimeLocation.h"
 #include "PluginSettingsMigration.h"
 #include "AppPaths.h"
 #include "PluginManager.h"
@@ -159,7 +160,7 @@ juce::StringArray getSearchPathsForFormat(juce::AudioPluginFormat& format,
     addSearchPath(paths, format.getDefaultLocationsToSearch());
 
     const auto formatName = format.getName();
-    const auto executableDirectory = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    const auto executableDirectory = OpenStudioRuntime::executableFile()
                                          .getParentDirectory();
 
    #if JUCE_WINDOWS
@@ -256,12 +257,36 @@ juce::StringArray getDeduplicatedCandidates(juce::AudioPluginFormat& format,
 {
     auto discovered = format.searchPathsForPlugins(makeFileSearchPath(paths), true, false);
     juce::StringArray result;
+    juce::StringArray visitedBundles;
 
     for (const auto& candidate : discovered)
     {
         auto normalised = normaliseCandidateIdentifier(candidate);
-        if (normalised.isNotEmpty())
+        if (normalised.isEmpty())
+            continue;
+
+        if (format.getName().equalsIgnoreCase("LV2"))
+        {
+            // JUCE enumerates LV2 bundles, but descriptions and saved catalog
+            // entries use plugin URIs. Its LV2 metadata reader only parses the
+            // RDF manifest here; native modules still load in isolated probes.
+            if (indexOfCandidateIdentifier(visitedBundles, normalised) >= 0)
+                continue;
+            addUniqueCandidateIdentifier(visitedBundles, normalised);
+            juce::OwnedArray<juce::PluginDescription> descriptions;
+            format.findAllTypesForFile(descriptions, normalised);
+            for (const auto* description : descriptions)
+                if (description != nullptr)
+                {
+                    const auto uri = normaliseCandidateIdentifier(description->fileOrIdentifier);
+                    if (uri.isNotEmpty())
+                        addUniqueCandidateIdentifier(result, uri);
+                }
+        }
+        else
+        {
             addUniqueCandidateIdentifier(result, normalised);
+        }
     }
 
     return result;
@@ -470,7 +495,7 @@ public:
         ScopedPluginProbeArtifacts artifacts;
 
         juce::StringArray arguments;
-        arguments.add(juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName());
+        arguments.add(OpenStudioRuntime::executableFile().getFullPathName());
         arguments.add("--plugin-scan-probe-headless");
         arguments.add(fileOrIdentifier);
         arguments.add("--plugin-format");
@@ -581,6 +606,102 @@ private:
     std::shared_ptr<PluginProbeState> state;
     juce::File searchPathsFile;
 };
+}
+
+juce::var PluginManager::runDiscoveryIdentityRegression()
+{
+    class FixtureFormat final : public juce::AudioPluginFormat
+    {
+    public:
+        explicit FixtureFormat(juce::String name) : formatName(std::move(name)) {}
+        juce::String getName() const override { return formatName; }
+        void findAllTypesForFile(juce::OwnedArray<juce::PluginDescription>& output,
+                                 const juce::String& identifier) override
+        {
+            ++metadataReads;
+            const auto uris = identifier.endsWith("multi.lv2")
+                ? juce::StringArray { "urn:openstudio:One", "urn:openstudio:one" }
+                : juce::StringArray { "urn:openstudio:Third" };
+            for (const auto& uri : uris)
+            {
+                auto description = std::make_unique<juce::PluginDescription>();
+                description->fileOrIdentifier = uri;
+                description->pluginFormatName = formatName;
+                description->name = uri;
+                description->uniqueId = uri.hashCode();
+                output.add(std::move(description));
+            }
+        }
+        bool fileMightContainThisPluginType(const juce::String&) override { return true; }
+        juce::String getNameOfPluginFromIdentifier(const juce::String& value) override { return value; }
+        bool pluginNeedsRescanning(const juce::PluginDescription&) override { return false; }
+        bool doesPluginStillExist(const juce::PluginDescription&) override { return true; }
+        bool canScanForPlugins() const override { return true; }
+        bool isTrivialToScan() const override { return true; }
+        juce::StringArray searchPathsForPlugins(const juce::FileSearchPath&, bool, bool) override
+        {
+            return { "/fixtures/multi.lv2", "/fixtures/multi.lv2", "/fixtures/other.lv2", " " };
+        }
+        juce::FileSearchPath getDefaultLocationsToSearch() override { return {}; }
+        bool requiresUnblockedMessageThreadDuringCreation(const juce::PluginDescription&) const override { return false; }
+        int metadataReads = 0;
+        int instanceCreations = 0;
+    protected:
+        void createPluginInstance(const juce::PluginDescription&, double, int,
+                                  PluginCreationCallback callback) override
+        {
+            ++instanceCreations;
+            callback(nullptr, "Metadata discovery must not instantiate a plugin");
+        }
+    private:
+        juce::String formatName;
+    };
+
+    FixtureFormat lv2("LV2");
+    const auto uris = getDeduplicatedCandidates(lv2, {});
+    const bool stableUris = uris.size() == 3
+        && uris.contains("urn:openstudio:One")
+        && uris.contains("urn:openstudio:one")
+        && uris.contains("urn:openstudio:Third");
+    const bool boundedMetadata = lv2.metadataReads == 2 && lv2.instanceCreations == 0;
+    juce::KnownPluginList catalog;
+    for (const auto& uri : uris)
+    {
+        juce::PluginDescription description;
+        description.fileOrIdentifier = uri;
+        description.pluginFormatName = "LV2";
+        description.name = uri;
+        description.uniqueId = uri.hashCode();
+        catalog.addType(description);
+    }
+    bool catalogMatches = catalog.getNumTypes() == 3;
+    for (const auto& description : catalog.getTypes())
+        catalogMatches = catalogMatches && std::any_of(uris.begin(), uris.end(),
+            [&description](const auto& uri) { return descriptionMatchesCandidate(description, "LV2", uri); });
+    removeDescriptionsForCandidate(catalog, "LV2", "urn:openstudio:One");
+    const auto remaining = catalog.getTypes();
+    const bool caseSensitiveRemoval = remaining.size() == 2
+        && std::none_of(remaining.begin(), remaining.end(), [](const auto& description)
+            { return description.fileOrIdentifier == "urn:openstudio:One"; })
+        && std::any_of(remaining.begin(), remaining.end(), [](const auto& description)
+            { return description.fileOrIdentifier == "urn:openstudio:one"; });
+    FixtureFormat vst3("VST3");
+    const auto files = getDeduplicatedCandidates(vst3, {});
+    const bool fileFormatsUnchanged = files.size() == 2
+        && files.contains(normaliseCandidateIdentifier("/fixtures/multi.lv2"))
+        && files.contains(normaliseCandidateIdentifier("/fixtures/other.lv2"))
+        && vst3.metadataReads == 0 && vst3.instanceCreations == 0;
+    auto* result = new juce::DynamicObject();
+    result->setProperty("plugin", "Plugin discovery catalog identities");
+    result->setProperty("pass", stableUris && boundedMetadata && catalogMatches
+        && caseSensitiveRemoval && fileFormatsUnchanged);
+    result->setProperty("stableLV2Uris", stableUris);
+    result->setProperty("oneMetadataReadPerBundle", boundedMetadata);
+    result->setProperty("catalogEntriesMatchActiveCandidates", catalogMatches);
+    result->setProperty("caseSensitiveUriRemoval", caseSensitiveRemoval);
+    result->setProperty("fileFormatDiscoveryUnchanged", fileFormatsUnchanged);
+    result->setProperty("scope", "Metadata-only multi-plugin LV2 bundle discovery, stable case-sensitive URI catalog matching/removal and unchanged filesystem format isolation. Actual module processing/editor behavior is not asserted.");
+    return juce::var(result);
 }
 
 PluginManager::PluginManager()
@@ -1432,7 +1553,7 @@ juce::File PluginManager::getUserEffectsDirectory()
 
 juce::File PluginManager::getStockEffectsDirectory()
 {
-    auto exeDir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+    auto exeDir = OpenStudioRuntime::executableFile()
         .getParentDirectory();
 
    #if JUCE_MAC

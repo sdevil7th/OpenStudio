@@ -1,3 +1,4 @@
+import { importMediaWithDialog } from "../services/mediaImport";
 import { appDialogs } from "../services/appDialogs";
 /**
  * Action Registry - Centralized registry of all available actions
@@ -29,6 +30,7 @@ import {
   type NavigationDirection,
 } from "../utils/vendorNavigation";
 import {
+  CLICK_ONLY_METRONOME_SHORTCUT,
   getProfileActionBindings,
   getProfileActionScopeAdditions,
 } from "../utils/shortcutProfiles";
@@ -799,6 +801,8 @@ export function getRegisteredActions(): ActionDef[] {
 
     automationAction("automation.writeBehavior.touch", "Set Automation Write Behavior: Touch", () => s().setAutomationWriteBehavior("touch"), { canHandleShortcut: canEditAutomationSettings }),
     automationAction("automation.writeBehavior.latch", "Set Automation Write Behavior: Latch", () => s().setAutomationWriteBehavior("latch"), { canHandleShortcut: canEditAutomationSettings }),
+    automationAction("automation.writeBehavior.touchLatch", "Set Automation Write Behavior: Touch/Latch", () => s().setAutomationWriteBehavior("touch-latch"), { canHandleShortcut: canEditAutomationSettings }),
+    automationAction("automation.writeBehavior.crossOver", "Set Automation Write Behavior: Cross-Over", () => s().setAutomationWriteBehavior("cross-over"), { canHandleShortcut: canEditAutomationSettings }),
     automationAction("automation.writeBehavior.overwrite", "Set Automation Write Behavior: Overwrite", () => s().setAutomationWriteBehavior("overwrite"), { canHandleShortcut: canEditAutomationSettings }),
 
     ...(["off", "read", "write", "touch", "latch"] as const).map((mode) => automationAction(
@@ -1015,6 +1019,9 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "transport.rewind", name: "Go to Start", category: "Transport", shortcut: "Home", execute: () => s().setCurrentTime(0) },
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
     { id: "transport.metronome", name: "Toggle Metronome", category: "Transport", shortcut: "K", execute: () => { void s().toggleMetronome(); } },
+    { id: "transport.metronomePractice", name: "Start / Stop Click-Only Metronome", category: "Transport", shortcut: CLICK_ONLY_METRONOME_SHORTCUT,
+      canHandleShortcut: () => !s().isProjectLoading && !s().metronomePracticePending,
+      execute: () => { void s().toggleMetronomePractice(); } },
     activeScopedComponentAction("transport.metronomeSettings", "Open Metronome Settings", "Transport", "global"),
 
     // ===== Navigation =====
@@ -1296,30 +1303,14 @@ export function getRegisteredActions(): ActionDef[] {
       const state = s();
       if (state.timeSelection) state.addRegion(state.timeSelection.start, state.timeSelection.end);
     }},
-    { id: "insert.mediaFile", name: "Import Media File", category: "Insert", shortcut: "Insert", execute: () => {
+    { id: "insert.mediaFile", name: "Import Media File", category: "Insert", shortcut: "Insert", execute: () => { void importMediaWithDialog("media"); } },
+    { id: "file.importAudio", name: "Import Audio Files", category: "File", shortcut: "Ctrl+I", execute: () => { void importMediaWithDialog("audio"); } },
+    { id: "file.importMIDI", name: "Import MIDI Files", category: "File", shortcut: "Ctrl+Alt+I", execute: () => { void importMediaWithDialog("midi"); } },
+
+    { id: "track.toggleSelectedSoloSafe", name: "Toggle Solo Safe on Selected Tracks", category: "Track", execute: () => {
       const state = s();
-      void (async () => {
-        const filePath = await nativeBridge.showOpenDialog("Import Audio/Video File");
-        if (!filePath) return;
-
-        let targetTrackId = state.selectedTrackIds[0];
-        if (!targetTrackId) {
-          const firstAudioTrack = state.tracks.find((t) => t.type === "audio");
-          if (!firstAudioTrack) {
-            void appDialogs.alert("No audio track available. Please create an audio track first.");
-            return;
-          }
-          targetTrackId = firstAudioTrack.id;
-        }
-
-        try {
-          await state.importMedia(filePath, targetTrackId, state.transport.currentTime);
-        } catch (error) {
-          void appDialogs.alert(`Failed to import media: ${error}`);
-        }
-      })();
-    }},
-
+      commandManager.runBatch({ type: "SOLO_SAFE_SELECTION", description: "Toggle Solo Safe" }, () => state.selectedTrackIds.forEach(id => state.toggleTrackSoloSafe(id)));
+    } },
     // ===== View =====
     { id: "view.toggleMixer", name: "Toggle Mixer", category: "View", shortcut: "Ctrl+M", execute: () => s().toggleMixer() },
     { id: "view.togglePianoRoll", name: "Toggle Piano Roll", category: "View", canHandleShortcut: () => hasActiveScopedActionExecutor("view.togglePianoRoll") || s().showPianoRoll || selectedTimelineClips().some((entry) => entry.kind === "midi"), execute: () => {

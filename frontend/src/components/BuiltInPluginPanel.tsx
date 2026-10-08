@@ -1,13 +1,17 @@
+import { resolveProfiledParameterWheel } from "../utils/parameterWheel";
+import type { GainPhaseAlignmentEntry, GainPhaseAlignmentResult } from "../services/NativeBridge";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, SlidersHorizontal, X } from "lucide-react";
+import { Activity, X } from "lucide-react";
 import {
   BuiltInParamDescriptor,
   BuiltInPluginAddress,
   BuiltInPluginSchema,
   nativeBridge,
 } from "../services/NativeBridge";
-import { ParametricGraph } from "./ParametricGraph";
-import type { GraphAxis, GraphNode, GraphNodeConfig } from "./ParametricGraph";
+import { getBuiltInEditor } from "./builtin/editorRegistry";
+import { capturePluginState } from "./builtin/EQToolbar";
+import { EQEditor } from "./builtin/EQEditor";
+import { EQInstanceBrowser } from "./builtin/EQInstanceBrowser";
 import { NAMRackPanel } from "./NAMRackPanel";
 import { Button, ProfiledRangeInput } from "./ui";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
@@ -48,10 +52,7 @@ interface BuiltInPluginPanelProps {
   onClose?: () => void;
   initialSchema?: BuiltInPluginSchema;
   shortcutSessionId?: string;
-}
-
-function getParam(params: BuiltInParamDescriptor[], id: string) {
-  return params.find((param) => param.id === id);
+  chrome?: "embedded" | "detached";
 }
 
 function makeFallbackParam(
@@ -616,6 +617,9 @@ type BuiltInPluginKind =
   | "generic";
 
 export function getPluginKind(schema: BuiltInPluginSchema | null): BuiltInPluginKind {
+  if (["preamp", "geq", "utility"].includes(schema?.pluginId ?? "")) return "generic";
+  const identities: Record<string, BuiltInPluginKind> = { eq: "eq", compressor: "dynamics", gate: "dynamics", limiter: "dynamics", delay: "delay", reverb: "reverb", chorus: "modulation", saturator: "saturation", pitch: "pitch", synth: "synth", piano: "piano", drums: "drums", guitar: "guitar", nam: "nam" };
+  if (schema?.pluginId && identities[schema.pluginId]) return identities[schema.pluginId];
   const label = `${schema?.category ?? ""} ${schema?.name ?? ""}`.toLowerCase();
   if (label.includes("eq")) return "eq";
   if (label.includes("compressor") || label.includes("gate") || label.includes("limiter") || label.includes("dynamics")) return "dynamics";
@@ -783,407 +787,57 @@ export function BuiltInParamControl({
   );
 }
 
-function BuiltInVisualization({
-  schema,
-  onParamChange,
-}: {
-  schema: BuiltInPluginSchema;
-  onParamChange: (param: BuiltInParamDescriptor, value: number) => void;
-}) {
-  const params = schema.parameters;
-  const category = `${schema.category} ${schema.name}`.toLowerCase();
-  const width = 360;
-  const height = 126;
-  const [dynamicsHistory, setDynamicsHistory] = useState<number[]>(() => Array(56).fill(0));
-  const gainReductionDb = schema.visualization?.gainReductionDb;
-
-  useEffect(() => {
-    setDynamicsHistory(Array(56).fill(0));
-  }, [schema.chain, schema.fxIndex, schema.name]);
-
-  useEffect(() => {
-    if (typeof gainReductionDb !== "number" || !Number.isFinite(gainReductionDb)) return;
-    setDynamicsHistory((history) => [...history.slice(1), clamp(Math.abs(gainReductionDb), 0, 36)]);
-  }, [gainReductionDb]);
-
-  if (category.includes("eq")) {
-    const nodes: GraphNode[] = [];
-    const dynamicGains = schema.visualization?.dynamicGainDb ?? [];
-    for (let band = 0; band < 8; band += 1) {
-      const enabled = (getParam(params, `band${band}.enabled`)?.value ?? 0) >= 0.5;
-      const freq = getParam(params, `band${band}.freq`)?.value ?? 1000;
-      const gain = getParam(params, `band${band}.gain`)?.value ?? 0;
-      const dynamicValue = dynamicGains[band] ?? 0;
-      nodes.push({
-        id: `band-${band}`,
-        x: freq,
-        y: gain,
-        z: getParam(params, `band${band}.q`)?.value ?? 1,
-        enabled,
-        label: `Band ${band + 1}`,
-        color: Math.abs(dynamicValue) > 0.05 ? "#fbbf24" : undefined,
-      });
-    }
-    const frequencies = schema.visualization?.frequencies ?? [];
-    const responseCurve = schema.visualization?.responseDb?.map((value, index) => ({
-      x: frequencies[index] ?? 20,
-      y: clamp(value, -24, 24),
-    }));
-    const spectrumToGraphPoints = (values: number[] | undefined) =>
-      values?.map((value, index) => ({
-        x: frequencies[index] ?? 20,
-        y: clamp(((value + 90) / 78) * 48 - 24, -24, 24),
-      })) ?? [];
-    const backgroundCurves = schema.visualization?.spectrumReady
-      ? [
-          {
-            id: "spectrum-pre",
-            points: spectrumToGraphPoints(schema.visualization.spectrumPreDb),
-            color: "rgba(148, 163, 184, 0.72)",
-            opacity: 0.42,
-            strokeWidth: 1,
-          },
-          {
-            id: "spectrum-post",
-            points: spectrumToGraphPoints(schema.visualization.spectrumPostDb),
-            color: "rgba(34, 197, 94, 0.76)",
-            opacity: 0.58,
-            strokeWidth: 1.15,
-          },
-        ]
-      : [];
-    const xAxis: GraphAxis = {
-      label: "Frequency",
-      min: 20,
-      max: 20000,
-      scale: "log",
-      unit: "Hz",
-      gridLines: [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000],
-    };
-    const yAxis: GraphAxis = {
-      label: "Gain",
-      min: -24,
-      max: 24,
-      scale: "linear",
-      unit: "dB",
-      gridLines: [-24, -12, 0, 12, 24],
-    };
-    const nodeConfig: GraphNodeConfig = {
-      maxNodes: 8,
-      zAxis: {
-        label: "Q",
-        min: 0.1,
-        max: 30,
-        default: 1,
-        sensitivity: 0.01,
-      },
-    };
-    return (
-      <ParametricGraph
-        width={width}
-        height={height}
-        xAxis={xAxis}
-        yAxis={yAxis}
-        nodes={nodes}
-        nodeConfig={nodeConfig}
-        responseCurve={responseCurve}
-        backgroundCurves={backgroundCurves}
-        className="builtin-visual builtin-eq-visual"
-        onNodeChange={(id, changes) => {
-          const band = Number(id.replace("band-", ""));
-          if (!Number.isFinite(band)) return;
-          const enabledParam = getParam(params, `band${band}.enabled`);
-          const freqParam = getParam(params, `band${band}.freq`);
-          const gainParam = getParam(params, `band${band}.gain`);
-          const qParam = getParam(params, `band${band}.q`);
-          if (enabledParam && enabledParam.value < 0.5) onParamChange(enabledParam, 1);
-          if (freqParam && changes.x !== undefined) onParamChange(freqParam, changes.x);
-          if (gainParam && changes.y !== undefined) onParamChange(gainParam, changes.y);
-          if (qParam && changes.z !== undefined) onParamChange(qParam, changes.z);
-        }}
-      />
-    );
-  }
-
-  if (category.includes("dynamics") || category.includes("compressor") || category.includes("gate") || category.includes("limiter")) {
-    const threshold = normalize(getParam(params, "threshold") ?? { value: -18, min: -60, max: 0 } as BuiltInParamDescriptor);
-    const ratio = normalize(getParam(params, "ratio") ?? { value: 4, min: 1, max: 20 } as BuiltInParamDescriptor);
-    const knee = normalize(getParam(params, "knee") ?? { value: 0, min: 0, max: 24 } as BuiltInParamDescriptor);
-    const x = threshold * width;
-    const y = height - threshold * height;
-    const endY = clamp(y - (1 - ratio) * height * 0.38 + knee * 8, 12, height - 10);
-    const currentGr = clamp(Math.abs(gainReductionDb ?? 0), 0, 36);
-    const inputLevel = clamp(schema.visualization?.inputLevelDb ?? -90, -90, 6);
-    const outputLevel = clamp(schema.visualization?.outputLevelDb ?? -90, -90, 6);
-    const levelY = (db: number) => height - 12 - clamp((db + 90) / 96, 0, 1) * (height - 22);
-    const historyPoints = dynamicsHistory
-      .map((value, index) => {
-        const hx = 8 + (index / Math.max(1, dynamicsHistory.length - 1)) * (width - 86);
-        const hy = height - 10 - (value / 36) * (height - 26);
-        return `${hx},${hy}`;
-      })
-      .join(" ");
-    return (
-      <svg className="builtin-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} dynamics curve`}>
-        <rect width={width} height={height} rx="6" />
-        <polyline className="builtin-dynamics-curve" points={`0,${height - 12} ${x},${y} ${width - 70},${endY}`} />
-        <polyline className="builtin-dynamics-history" points={historyPoints} />
-        <rect className="builtin-dynamics-meter" x={width - 56} y={levelY(inputLevel)} width="8" height={height - 12 - levelY(inputLevel)} />
-        <rect className="builtin-dynamics-meter" x={width - 42} y={levelY(outputLevel)} width="8" height={height - 12 - levelY(outputLevel)} />
-        <rect className="builtin-dynamics-gr" x={width - 24} y={10} width="10" height={(currentGr / 36) * (height - 20)} />
-        {typeof schema.visualization?.gateOpen === "boolean" && (
-          <circle className="builtin-dynamics-status" cx={width - 19} cy={height - 13} r="4" data-active={schema.visualization.gateOpen} />
-        )}
-        <circle cx={x} cy={y} r="4.5" data-active="true" />
-      </svg>
-    );
-  }
-
-  if (category.includes("saturation")) {
-    const drive = normalize(getParam(params, "drive") ?? { value: 6, min: 0, max: 30 } as BuiltInParamDescriptor);
-    const bias = getParam(params, "asymmetry")?.value ?? 0;
-    const curve = Array.from({ length: 44 }, (_, index) => {
-      const xNorm = (index / 43) * 2 - 1;
-      const yNorm = Math.tanh(xNorm * (1.2 + drive * 5) + bias * 0.4);
-      const x = (index / 43) * width;
-      const y = height * 0.5 - yNorm * height * 0.38;
-      return `${x},${y}`;
-    }).join(" ");
-    return (
-      <svg className="builtin-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} saturation curve`}>
-        <rect width={width} height={height} rx="6" />
-        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-        <polyline points={curve} />
-      </svg>
-    );
-  }
-
-  if (category.includes("pitch")) {
-    const detected = schema.visualization?.historyDetectedMidi ?? [];
-    const corrected = schema.visualization?.historyCorrectedMidi ?? [];
-    const confidence = schema.visualization?.historyConfidence ?? [];
-    const pitchPoints = (values: number[]) =>
-      values
-        .map((value, index) => {
-          const x = (index / Math.max(1, values.length - 1)) * width;
-          const y = height - clamp((value - 36) / 48, 0, 1) * height;
-          return `${x},${y}`;
-        })
-        .join(" ");
-    const confidenceBars = confidence.filter((value) => value > 0.01).slice(-28);
-    return (
-      <svg className="builtin-visual builtin-pitch-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} pitch trace`}>
-        <rect width={width} height={height} rx="6" />
-        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-        {confidenceBars.map((value, index) => {
-          const barWidth = 4;
-          const x = width - 124 + index * barWidth;
-          return <rect key={index} className="builtin-pitch-confidence" x={x} y={height - 8 - value * 46} width="2.5" height={4 + value * 46} rx="1" />;
-        })}
-        <polyline className="builtin-pitch-detected" points={pitchPoints(detected)} />
-        <polyline className="builtin-pitch-corrected" points={pitchPoints(corrected)} />
-        <circle
-          className="builtin-pitch-note"
-          cx={width - 28}
-          cy={height - clamp(((schema.visualization?.correctedHz ?? 0) > 0 ? 0.72 : 0.22), 0, 1) * height}
-          r="5"
-          data-active={(schema.visualization?.confidence ?? 0) > 0.2}
-        />
-      </svg>
-    );
-  }
-
-  if (category.includes("delay")) {
-    const delayL = normalize(getParam(params, "delayTimeL") ?? { value: 250, min: 1, max: 2000 } as BuiltInParamDescriptor);
-    const delayR = normalize(getParam(params, "delayTimeR") ?? { value: 250, min: 1, max: 2000 } as BuiltInParamDescriptor);
-    const feedbackValue = normalize(getParam(params, "feedback") ?? { value: 0.4, min: 0, max: 0.95 } as BuiltInParamDescriptor);
-    const mixValue = normalize(getParam(params, "mix") ?? { value: 0.5, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const tapL = 38 + delayL * 230;
-    const tapR = 54 + delayR * 230;
-    const repeats = Array.from({ length: 5 }, (_, index) => ({
-      x: 54 + index * 58,
-      y: height * 0.5 + Math.sin(index * 1.2) * 24 * mixValue,
-      r: 5 + feedbackValue * 9 * Math.pow(0.72, index),
-      opacity: 0.35 + feedbackValue * Math.pow(0.72, index) * 0.55,
-    }));
-    return (
-      <svg className="builtin-visual builtin-delay-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} taps`}>
-        <rect width={width} height={height} rx="6" />
-        <line x1="28" y1={height / 2} x2={width - 28} y2={height / 2} />
-        <path className="builtin-delay-feedback" d={`M ${tapL} ${height / 2 - 24} C ${width / 2} ${12 + feedbackValue * 12}, ${tapR} ${height / 2 - 24}, ${tapR} ${height / 2}`} />
-        {repeats.map((repeat, index) => (
-          <circle key={index} className="builtin-delay-repeat" cx={repeat.x} cy={repeat.y} r={repeat.r} style={{ opacity: repeat.opacity }} />
-        ))}
-        <circle className="builtin-delay-tap" cx={tapL} cy={height / 2 - 16} r="6" data-active="true" />
-        <circle className="builtin-delay-tap" cx={tapR} cy={height / 2 + 16} r="6" data-active="true" />
-      </svg>
-    );
-  }
-
-  if (category.includes("reverb")) {
-    const decayValue = normalize(getParam(params, "decayTime") ?? { value: 2, min: 0.1, max: 20 } as BuiltInParamDescriptor);
-    const sizeValue = normalize(getParam(params, "roomSize") ?? { value: 0.5, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const dampingValue = normalize(getParam(params, "damping") ?? { value: 0.5, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const widthValue = normalize(getParam(params, "width") ?? { value: 1, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const tail = Array.from({ length: 72 }, (_, index) => {
-      const t = index / 71;
-      const envelope = Math.exp(-t * (2.2 - decayValue * 1.45));
-      const ripple = Math.sin(t * Math.PI * (8 + sizeValue * 12)) * (1 - dampingValue * 0.65);
-      const x = t * width;
-      const y = height * 0.5 - envelope * ripple * height * 0.32;
-      return `${x},${y}`;
-    }).join(" ");
-    return (
-      <svg className="builtin-visual builtin-reverb-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} tail`}>
-        <rect width={width} height={height} rx="6" />
-        <ellipse className="builtin-reverb-space" cx={width / 2} cy={height / 2} rx={60 + sizeValue * 118} ry={22 + widthValue * 28} />
-        <polyline className="builtin-reverb-tail" points={tail} />
-        <line x1="24" y1={height / 2} x2={width - 24} y2={height / 2} />
-      </svg>
-    );
-  }
-
-  if (category.includes("modulation") || category.includes("chorus") || category.includes("flanger") || category.includes("phaser")) {
-    const depthValue = normalize(getParam(params, "depth") ?? { value: 0.5, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const spreadValue = normalize(getParam(params, "spread") ?? { value: 0.5, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const feedbackValue = normalize(getParam(params, "fbAmount") ?? { value: 0, min: -1, max: 1 } as BuiltInParamDescriptor);
-    const waveA = Array.from({ length: 80 }, (_, index) => {
-      const t = index / 79;
-      const x = t * width;
-      const y = height * 0.5 + Math.sin(t * Math.PI * 4) * depthValue * height * 0.32;
-      return `${x},${y}`;
-    }).join(" ");
-    const waveB = Array.from({ length: 80 }, (_, index) => {
-      const t = index / 79;
-      const x = t * width;
-      const y = height * 0.5 + Math.sin(t * Math.PI * 4 + spreadValue * Math.PI) * depthValue * height * 0.26;
-      return `${x},${y}`;
-    }).join(" ");
-    return (
-      <svg className="builtin-visual builtin-mod-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} modulation`}>
-        <rect width={width} height={height} rx="6" />
-        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-        <polyline className="builtin-mod-wave-a" points={waveA} />
-        <polyline className="builtin-mod-wave-b" points={waveB} />
-        <circle className="builtin-mod-feedback" cx={width - 28} cy={height - 18 - feedbackValue * 72} r="7" data-active={feedbackValue > 0.52} />
-      </svg>
-    );
-  }
-
-  if (category.includes("synth")) {
-    const brightness = normalize(getParam(params, "brightness") ?? { value: 0.62, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const sub = normalize(getParam(params, "subLevel") ?? { value: 0.18, min: 0, max: 0.8 } as BuiltInParamDescriptor);
-    const noise = normalize(getParam(params, "noiseLevel") ?? { value: 0.015, min: 0, max: 0.25 } as BuiltInParamDescriptor);
-    const wave = Array.from({ length: 64 }, (_, index) => {
-      const phase = index / 63;
-      const saw = phase * 2 - 1;
-      const square = phase < 0.5 ? 1 : -1;
-      const yNorm = saw * (0.5 + brightness * 0.2) + square * brightness * 0.18 + Math.sin(phase * Math.PI * 2) * sub * 0.26;
-      const x = phase * width;
-      const y = height * 0.5 - yNorm * height * 0.34;
-      return `${x},${y}`;
-    }).join(" ");
-    return (
-      <svg className="builtin-visual builtin-instrument-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} oscillator`}>
-        <rect width={width} height={height} rx="6" />
-        <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
-        <polyline className="builtin-instrument-primary" points={wave} />
-        <rect className="builtin-instrument-accent" x="18" y={height - 18 - noise * 54} width="22" height={8 + noise * 54} rx="3" />
-        <rect className="builtin-instrument-accent" x="48" y={height - 18 - sub * 54} width="22" height={8 + sub * 54} rx="3" />
-      </svg>
-    );
-  }
-
-  if (category.includes("piano")) {
-    const toneValue = normalize(getParam(params, "tone") ?? { value: 0.58, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const bodyValue = normalize(getParam(params, "body") ?? { value: 0.72, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const resonanceValue = normalize(getParam(params, "resonance") ?? { value: 0.38, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const harmonics = [1, 2.003, 3.011, 5.031, 1.497].map((ratio, index) => {
-      const value = [bodyValue, toneValue * 0.72, toneValue * 0.52, toneValue * 0.34, resonanceValue * 0.64][index];
-      return { ratio, value };
-    });
-    return (
-      <svg className="builtin-visual builtin-instrument-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} resonance`}>
-        <rect width={width} height={height} rx="6" />
-        {Array.from({ length: 18 }, (_, index) => (
-          <rect key={index} className="builtin-piano-key" x={12 + index * 18} y="82" width="15" height="34" rx="2" data-active={index % 7 === 1 || index % 7 === 4} />
-        ))}
-        {harmonics.map((harmonic, index) => (
-          <rect
-            key={harmonic.ratio}
-            className="builtin-instrument-accent"
-            x={42 + index * 50}
-            y={70 - harmonic.value * 44}
-            width="18"
-            height={10 + harmonic.value * 44}
-            rx="4"
-          />
-        ))}
-        <polyline className="builtin-instrument-primary" points={`18,68 72,${52 - bodyValue * 18} 142,${58 - resonanceValue * 22} 236,${50 - toneValue * 18} 342,64`} />
-      </svg>
-    );
-  }
-
-  if (category.includes("drum")) {
-    const punchValue = normalize(getParam(params, "punch") ?? { value: 0.55, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const roomValue = normalize(getParam(params, "ambience") ?? { value: 0.18, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const widthValue = normalize(getParam(params, "stereoWidth") ?? { value: 0.7, min: 0, max: 1 } as BuiltInParamDescriptor);
-    const shells = [
-      { x: 176, y: 70, r: 26 + punchValue * 8 },
-      { x: 116 - widthValue * 22, y: 56, r: 18 },
-      { x: 238 + widthValue * 22, y: 56, r: 18 },
-      { x: 72 - widthValue * 28, y: 34, r: 13 + roomValue * 5 },
-      { x: 288 + widthValue * 28, y: 34, r: 13 + roomValue * 5 },
-    ];
-    return (
-      <svg className="builtin-visual builtin-instrument-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} kit`}>
-        <rect width={width} height={height} rx="6" />
-        <ellipse className="builtin-drum-room" cx={width / 2} cy="68" rx={118 + roomValue * 52} ry={34 + roomValue * 18} />
-        {shells.map((shell, index) => (
-          <circle key={index} className="builtin-drum-shell" cx={shell.x} cy={shell.y} r={shell.r} data-active={index === 0} />
-        ))}
-        <line x1={width / 2} y1="24" x2={width / 2} y2="110" />
-      </svg>
-    );
-  }
-
-  const bars = params.slice(0, 14);
-  return (
-    <svg className="builtin-visual" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${schema.name} controls`}>
-      <rect width={width} height={height} rx="6" />
-      {bars.map((param, index) => {
-        const barWidth = width / Math.max(1, bars.length);
-        const value = normalize(param);
-        const barHeight = 16 + value * (height - 34);
-        return (
-          <rect
-            key={param.id}
-            x={index * barWidth + 5}
-            y={height - barHeight - 8}
-            width={Math.max(4, barWidth - 10)}
-            height={barHeight}
-            rx="3"
-            data-active="true"
-          />
-        );
-      })}
-    </svg>
-  );
+export function BuiltInPluginPanel(props: BuiltInPluginPanelProps) {
+  const identity = `${props.address.instanceId ?? ""}:${props.address.chain}:${props.address.trackId}:${props.address.fxIndex}`;
+  return <BuiltInPluginWorkspace key={identity} {...props} />;
 }
 
-export function BuiltInPluginPanel({
-  address,
+function BuiltInPluginWorkspace(props: BuiltInPluginPanelProps) {
+  const [selected, setSelected] = useState<BuiltInPluginAddress | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+  const histories = useRef(new Map<string, BuiltInPluginParamHistory>());
+  const activeAddress = selected ?? props.address;
+  const identity = activeAddress.instanceId ?? `${activeAddress.chain}:${activeAddress.trackId}:${activeAddress.fxIndex}`;
+  const session = selected ? `builtin-instance:${identity}` : props.shortcutSessionId
+    ?? `builtin:${activeAddress.chain}:${activeAddress.trackId ?? "master"}:${activeAddress.fxIndex ?? -1}`;
+  let history = histories.current.get(identity);
+  if (!history) { history = new BuiltInPluginParamHistory(session); histories.current.set(identity, history); }
+  return <>
+    <BuiltInPluginPanelContent {...props} key={identity} address={activeAddress}
+      fallbackName={selected ? "OpenStudio EQ" : props.fallbackName} initialSchema={selected ? undefined : props.initialSchema}
+      shortcutSessionId={history.getInstanceId()} retainedHistory={history}
+      onBrowseInstances={(resolved, flush) => { void flush().then(ok => {
+        if (ok) {
+          if (resolved.instanceId) histories.current.set(resolved.instanceId, history!);
+          setBrowsing(true);
+        }
+      }); }} />
+    {browsing && <EQInstanceBrowser current={activeAddress} onClose={() => setBrowsing(false)} onSelect={address => { setSelected(address); setBrowsing(false); }} />}
+  </>;
+}
+
+function BuiltInPluginPanelContent({
+  address: requestedAddress,
   fallbackName,
   onClose,
   initialSchema,
   shortcutSessionId,
-}: BuiltInPluginPanelProps) {
+  chrome = "embedded",
+  retainedHistory,
+  onBrowseInstances,
+}: BuiltInPluginPanelProps & { retainedHistory: BuiltInPluginParamHistory; onBrowseInstances: (address: BuiltInPluginAddress, flush: () => Promise<boolean>) => void }) {
+  const address = useMemo(() => ({ ...requestedAddress }), [requestedAddress.instanceId, requestedAddress.chain, requestedAddress.trackId, requestedAddress.fxIndex]);
   const bootSchema = useMemo(
     () => (isNAMPluginName(fallbackName) ? createNAMBootSchema(address, fallbackName) : null),
     [address, fallbackName],
   );
+  const suiteMutation = useRef(false);
+  const [suiteBusy, setSuiteBusy] = useState(false);
   const [schema, setSchema] = useState<BuiltInPluginSchema | null>(initialSchema ?? bootSchema);
   const [loading, setLoading] = useState(false);
+  const [, refreshHistory] = useState(0);
+  const [historyReplayRevision, setHistoryReplayRevision] = useState(0);
+  const historyChanged = useCallback(() => refreshHistory(value => value + 1), []);
   const paramWriteReconcilerRef = useRef<ReturnType<typeof createParamWriteReconciler> | null>(null);
   if (!paramWriteReconcilerRef.current) {
     paramWriteReconcilerRef.current = createParamWriteReconciler(initialSchema);
@@ -1203,7 +857,7 @@ export function BuiltInPluginPanel({
   if (paramHistoryOwnerRef.current?.instanceId !== pluginShortcutSessionId) {
     paramHistoryOwnerRef.current = {
       instanceId: pluginShortcutSessionId,
-      history: new BuiltInPluginParamHistory(pluginShortcutSessionId),
+      history: retainedHistory,
     };
   }
   const paramHistory = paramHistoryOwnerRef.current.history;
@@ -1243,6 +897,7 @@ export function BuiltInPluginPanel({
     try {
       const nextSchema = await withTimeout(nativeBridge.getBuiltInPluginSchema(address), 2500, "Built-in plugin schema");
       if (!schemaRequestGateRef.current.isLatest(requestId)) return null;
+      if (nextSchema.instanceId) address.instanceId = nextSchema.instanceId;
 
       const acceptedSchema = isUsableSchema(nextSchema)
         ? paramWriteReconcilerRef.current!.acceptNativeSchema(nextSchema)
@@ -1321,17 +976,18 @@ export function BuiltInPluginPanel({
       chain: address.chain,
       trackId: address.trackId,
       fxIndex: address.fxIndex,
+      get instanceId() { return address.instanceId; },
     }),
     [address.chain, address.fxIndex, address.trackId],
   );
 
   const paramWriter = useMemo(
     () => createFrameCoalescedParamWriter({
-      write: (paramId, value) => nativeBridge.setBuiltInPluginParam(writeAddress, paramId, value),
+      write: (paramId, value) => nativeBridge.setBuiltInPluginParam({ ...writeAddress, instanceId: address.instanceId }, paramId, value),
       onSuccess: confirmSuccessfulParamWrite,
       onFailure: recoverFailedParamWrite,
     }),
-    [confirmSuccessfulParamWrite, recoverFailedParamWrite, writeAddress],
+    [address, confirmSuccessfulParamWrite, recoverFailedParamWrite, writeAddress],
   );
 
   const paramCommitTimerRef = useRef<number | null>(null);
@@ -1346,24 +1002,40 @@ export function BuiltInPluginPanel({
 
   const flushParamWrites = useCallback(() => paramWriter.flush(), [paramWriter]);
   const automationGestures = useRef(new Set<string>());
-  const finishAutomationGestures = useCallback(async () => {
+  const pendingGestureFinishes = useRef(new Set<Promise<boolean>>());
+  const finishAutomationGestures = useCallback(() => {
     const params = [...automationGestures.current];
     automationGestures.current.clear();
-    await flushParamWrites();
-    for (const param of params) {
-      if (!automationGestures.current.has(param))
-        await nativeBridge.builtInPluginGesture(writeAddress, param, false);
-    }
+    const operation = (async () => {
+      let success = await flushParamWrites();
+      for (const param of params) {
+        if (!automationGestures.current.has(param))
+          success = await nativeBridge.builtInPluginGesture(writeAddress, param, false) && success;
+      }
+      return success;
+    })().catch(error => { console.warn("Could not finish the plugin automation gesture", error); return false; });
+    pendingGestureFinishes.current.add(operation);
+    void operation.finally(() => pendingGestureFinishes.current.delete(operation)).catch(() => {});
+    return operation;
   }, [flushParamWrites, writeAddress]);
+
+  useEffect(() => nativeBridge.registerAutomationEditorFlush(async () => {
+    clearScheduledParamCommit();
+    const success = await finishAutomationGestures();
+    const pending = await Promise.all([...pendingGestureFinishes.current]);
+    await paramHistory.commit(flushParamWrites);
+    historyChanged();
+    return success && pending.every(Boolean);
+  }), [clearScheduledParamCommit, finishAutomationGestures, flushParamWrites, paramHistory, historyChanged]);
 
   const scheduleParamCommit = useCallback((delayMs = 220) => {
     clearScheduledParamCommit();
     paramCommitTimerRef.current = window.setTimeout(() => {
       paramCommitTimerRef.current = null;
-      void paramHistory.commit(flushParamWrites);
+      void paramHistory.commit(flushParamWrites).finally(historyChanged);
       void finishAutomationGestures();
     }, delayMs);
-  }, [clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
+  }, [clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures, historyChanged]);
 
   const beginParamEdit = useCallback((paramId: string) => {
     const currentParam = schemaRef.current?.parameters.find((entry) => entry.id === paramId);
@@ -1378,17 +1050,27 @@ export function BuiltInPluginPanel({
   const beginExclusiveParamGesture = useCallback((paramId: string) => {
     clearScheduledParamCommit();
     if (paramHistory.getActiveParamId() && !paramHistory.hasActiveParam(paramId)) {
-      void paramHistory.commit(flushParamWrites);
+      void paramHistory.commit(flushParamWrites).finally(historyChanged);
       void finishAutomationGestures();
     }
     return beginParamEdit(paramId);
-  }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures]);
+  }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures, historyChanged]);
 
   const replayParamHistory = useCallback(async (
     entry: BuiltInPluginParamHistoryEntry,
     direction: BuiltInPluginHistoryDirection,
   ) => {
     if (entry.instanceId !== pluginShortcutSessionId) return false;
+    if (entry.state) {
+      const state = JSON.parse(entry.state[direction]);
+      if (typeof state.hostBypassed === "boolean") state.hostBypassHistoryReplay = true;
+      const applied = state.alignmentGroup
+        ? (await nativeBridge.gainPhaseAlignment("apply", state.alignmentGroup)).success
+        : await nativeBridge.setBuiltInPluginState(address, state);
+      await loadSchemaRef.current(false);
+      if (applied) setHistoryReplayRevision(value => value + 1);
+      return applied;
+    }
     const currentParams = schemaRef.current?.parameters ?? [];
     const writes = entry.changes.map((change) => {
       const currentParam = currentParams.find((candidate) => candidate.id === change.paramId);
@@ -1396,7 +1078,9 @@ export function BuiltInPluginPanel({
       const requestedValue = change[direction];
       const value = currentParam.type === "toggle"
         ? (requestedValue >= 0.5 ? 1 : 0)
-        : quantizeParamValue(
+        : currentParam.type === "continuous" && getPluginKind(schemaRef.current) !== "nam"
+          ? clamp(requestedValue, currentParam.min, currentParam.max)
+          : quantizeParamValue(
             currentParam,
             clamp(requestedValue, currentParam.min, currentParam.max),
           );
@@ -1419,20 +1103,21 @@ export function BuiltInPluginPanel({
     // processor so optimistic UI values converge on the native truth; the
     // history command remains on its original stack when `applied` is false.
     await loadSchemaRef.current(false);
+    if (applied) setHistoryReplayRevision(value => value + 1);
     return applied;
-  }, [applyLocalParamValue, paramWriter, pluginShortcutSessionId]);
+  }, [address, applyLocalParamValue, paramWriter, pluginShortcutSessionId]);
 
   pluginShortcutHandlerRef.current = (event) => dispatchBuiltInPluginHistoryShortcut(event, {
-    active: builtInPluginShortcutFocusIsActive(windowRole, currentDocumentHasFocus()),
+    active: !suiteMutation.current && builtInPluginShortcutFocusIsActive(windowRole, currentDocumentHasFocus()),
     canUndo: paramHistory.canUndo(),
     canRedo: paramHistory.canRedo(),
     undo: () => {
       clearScheduledParamCommit();
-      void paramHistory.undo(flushParamWrites, replayParamHistory);
+      void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
     redo: () => {
       clearScheduledParamCommit();
-      void paramHistory.redo(flushParamWrites, replayParamHistory);
+      void paramHistory.redo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
   });
 
@@ -1453,21 +1138,16 @@ export function BuiltInPluginPanel({
     const pluginKind = `${schema?.category ?? ""} ${schema?.name ?? ""}`.toLowerCase();
     // NAM has a dedicated low-cost diagnostics endpoint. Keep periodic meter
     // refreshes separate from rebuilding and transferring the complete schema.
-    const needsLiveSchema = pluginKind.includes("eq")
-      || pluginKind.includes("pitch")
-      || pluginKind.includes("dynamics")
-      || pluginKind.includes("compressor")
-      || pluginKind.includes("gate")
-      || pluginKind.includes("limiter");
+    const needsLiveSchema = !pluginKind.includes("nam");
     if (!needsLiveSchema) return;
     let refreshInFlight = false;
     const intervalId = window.setInterval(() => {
-      if (refreshInFlight) return;
+      if (refreshInFlight || document.hidden) return;
       refreshInFlight = true;
       void loadSchema(false).finally(() => {
         refreshInFlight = false;
       });
-    }, 500);
+    }, pluginKind.includes("eq") || pluginKind.includes("pitch") ? 500 : 2000);
     return () => window.clearInterval(intervalId);
   }, [loadSchema, schema?.category, schema?.name]);
 
@@ -1506,9 +1186,27 @@ export function BuiltInPluginPanel({
   }, [pluginKind, primaryParams, schema]);
 
   const handleParamChange = (param: BuiltInParamDescriptor, rawValue: number) => {
-    const value = param.type === "toggle"
+    if (!Number.isFinite(rawValue)) return;
+    let value = param.type === "toggle"
       ? (rawValue >= 0.5 ? 1 : 0)
-      : quantizeParamValue(param, clamp(rawValue, param.min, param.max));
+      : param.type === "continuous" && getPluginKind(schemaRef.current) !== "nam"
+        ? clamp(rawValue, param.min, param.max)
+        : quantizeParamValue(param, clamp(rawValue, param.min, param.max));
+    const dependencies: Array<{ parameter: BuiltInParamDescriptor; value: number }> = [];
+    const currentParameters = schemaRef.current?.parameters ?? [];
+    if (schemaRef.current?.pluginId === "eq" && param.id.endsWith(".detectorHighCut")) {
+      const low = currentParameters.find(p => p.id === param.id.replace("HighCut", "LowCut"));
+      if (low) value = Math.max(value, low.value * 1.05);
+    }
+    if (schemaRef.current?.pluginId === "eq" && param.id.endsWith(".detectorLowCut")) {
+      const high = currentParameters.find(p => p.id === param.id.replace("LowCut", "HighCut"));
+      if (high && high.value < value * 1.05) dependencies.push({ parameter: high, value: value * 1.05 });
+    }
+    if (param.id === "mpeLowerMembers" || param.id === "mpeUpperMembers") {
+      value = Math.round(value);
+      const other = currentParameters.find(p => p.id === (param.id === "mpeLowerMembers" ? "mpeUpperMembers" : "mpeLowerMembers"));
+      if (other && value > 0 && other.value > 0 && value + other.value > 14) dependencies.push({ parameter: other, value: Math.max(0, 14 - value) });
+    }
     const previousDisplayedValue = schemaRef.current?.parameters.find(
       (entry) => entry.id === param.id,
     )?.value ?? param.value;
@@ -1521,9 +1219,22 @@ export function BuiltInPluginPanel({
     );
     applyLocalParamValue(param.id, value);
 
+    // Native coupled controls change more than the edited scalar. Keep those
+    // values in the same gesture so Undo restores the complete valid pair.
+    for (const dependent of dependencies) {
+      beginParamEdit(dependent.parameter.id);
+      paramHistory.update(dependent.parameter.id, dependent.value);
+      paramWriteReconcilerRef.current!.beginOptimisticWrite(dependent.parameter.id, dependent.value, dependent.parameter.value);
+      applyLocalParamValue(dependent.parameter.id, dependent.value);
+      paramWriter.enqueue(dependent.parameter.id, dependent.value);
+    }
+
     if (param.type === "continuous") {
       paramWriter.enqueue(param.id, value);
-      if (pointerParamRef.current !== param.id && keyboardParamRef.current !== param.id) {
+      const pointerOwnsEdit = getPluginKind(schemaRef.current) === "nam"
+        ? pointerParamRef.current === param.id
+        : pointerParamRef.current !== null;
+      if (!pointerOwnsEdit && keyboardParamRef.current !== param.id) {
         scheduleParamCommit();
       }
       return;
@@ -1532,6 +1243,98 @@ export function BuiltInPluginPanel({
     paramWriter.writeImmediately(param.id, value);
     scheduleParamCommit(0);
   };
+
+  const applySuiteValues = async (values: Record<string, number>) => {
+    if (suiteMutation.current) return false;
+    suiteMutation.current = true; setSuiteBusy(true);
+    try {
+    clearScheduledParamCommit();
+    await paramHistory.commit(flushParamWrites);
+    await finishAutomationGestures();
+    const snapshot = await loadSchema(false);
+    if (!snapshot) throw new Error("Could not read the processor before applying settings");
+    const beforeState = await capturePluginState(address);
+    for (const [id, value] of Object.entries(values)) {
+      const parameter = schemaRef.current?.parameters.find(p => p.id === id);
+      if (parameter && parameter.type !== "meter" && parameter.value !== value) handleParamChange(parameter, value);
+    }
+    clearScheduledParamCommit();
+    const applied = await flushParamWrites();
+    // Native compound controls can also change dependent parameters (type
+    // banks and Send routing). Record the actual readback as one undo step.
+    paramHistory.cancelActive();
+    await finishAutomationGestures();
+    const after = await loadSchema(false);
+    if (after) {
+      paramHistory.recordState(beforeState, await capturePluginState(address));
+    }
+    if (!applied) {
+      historyChanged();
+      throw new Error("Some settings were not applied. Undo restores the previous settings.");
+    }
+    historyChanged();
+    return applied;
+    } finally { suiteMutation.current = false; setSuiteBusy(false); }
+  };
+
+  const applyAlignmentGroup = async (entries: GainPhaseAlignmentEntry[]): Promise<GainPhaseAlignmentResult> => {
+    if (suiteMutation.current) return { success: false, error: "An editor operation is still running" };
+    suiteMutation.current = true; setSuiteBusy(true);
+    try {
+      clearScheduledParamCommit();
+      await paramHistory.commit(flushParamWrites);
+      await finishAutomationGestures();
+      if (!await flushParamWrites()) return { success: false, error: "Pending parameter writes failed" };
+      const result = await nativeBridge.gainPhaseAlignment("apply", entries);
+      if (result.success && result.before && result.after) {
+        paramHistory.recordState(JSON.stringify({ alignmentGroup: result.before }), JSON.stringify({ alignmentGroup: result.after }));
+        await loadSchema(false); historyChanged();
+      }
+      return result;
+    } finally { suiteMutation.current = false; setSuiteBusy(false); }
+  };
+
+  const applySuiteStateOperation = async (operation: () => Promise<boolean>, capture = () => capturePluginState(address)) => {
+    if (suiteMutation.current) return false;
+    suiteMutation.current = true; setSuiteBusy(true);
+    try {
+    clearScheduledParamCommit();
+    await paramHistory.commit(flushParamWrites);
+    await finishAutomationGestures();
+    if (!await flushParamWrites()) return false;
+    const before = await capture();
+    let applied = false;
+    try { applied = await operation(); }
+    finally {
+      const after = await capture();
+      paramHistory.recordState(before, after);
+      await loadSchema(false);
+      historyChanged();
+    }
+    return applied;
+    } finally { suiteMutation.current = false; setSuiteBusy(false); }
+  };
+  const applySuiteState = (state: string) => {
+    const parsed = JSON.parse(state);
+    return applySuiteStateOperation(() => nativeBridge.setBuiltInPluginState(address, parsed),
+      typeof parsed.hostBypassed === "boolean" ? async () => {
+        const current = await nativeBridge.getBuiltInPluginSchema(address);
+        if (typeof current.hostBypassed !== "boolean") throw new Error("Host bypass is unavailable");
+        return JSON.stringify({ hostBypassed: current.hostBypassed });
+      } : undefined);
+  };
+  const recallSuitePreset = (name: string) => applySuiteStateOperation(async () => {
+    const before = await nativeBridge.getBuiltInPluginSchema(address);
+    const route = await nativeBridge.resolveBuiltInAddress(address);
+    let applied = await nativeBridge.loadBuiltInFXPreset(route.trackId ?? "", route.fxIndex ?? -1, route.chain === "input", name, route.chain);
+    if (before.pluginId === "reverb" && (before.parameters.find(p => p.id === "mixLock")?.value ?? 0) >= .5) {
+      for (const id of ["sendMode", "wetLevel", "dryLevel", "insertWet", "insertDry", "mixLock"]) {
+        const parameter = before.parameters.find(p => p.id === id);
+        if (parameter) applied = await nativeBridge.setBuiltInPluginParam(address, id, parameter.value) && applied;
+      }
+    }
+    return applied;
+  });
 
   const finishPointerParamGesture = () => {
     const paramId = pointerParamRef.current;
@@ -1546,10 +1349,12 @@ export function BuiltInPluginPanel({
   const title = schema?.name || fallbackName;
   const displayTitle = pluginKind === "nam" ? "NAM Rack" : title;
 
+  const GeneralEditor = getBuiltInEditor(schema?.pluginId).component;
   return (
-    <section
+    <section inert={suiteBusy} aria-busy={suiteBusy}
       className="builtin-plugin-panel"
       data-kind={pluginKind}
+      data-chrome={chrome}
       data-shortcut-context={`plugin:${pluginShortcutSessionId}`}
       onClick={(event) => event.stopPropagation()}
       onPointerDownCapture={(event) => {
@@ -1559,7 +1364,7 @@ export function BuiltInPluginPanel({
         if (paramId) beginExclusiveParamGesture(paramId);
         else if (paramHistory.getActiveParamId()) {
           clearScheduledParamCommit();
-          void paramHistory.commit(flushParamWrites);
+          void paramHistory.commit(flushParamWrites).finally(historyChanged);
           void finishAutomationGestures();
         }
       }}
@@ -1568,7 +1373,7 @@ export function BuiltInPluginPanel({
       onLostPointerCaptureCapture={finishPointerParamGesture}
       onWheelCapture={(event) => {
         const paramId = paramIdFromEventTarget(event.target);
-        if (!paramId) return;
+        if (!paramId || resolveProfiledParameterWheel(event.nativeEvent).operation !== "adjust") return;
         beginExclusiveParamGesture(paramId);
         scheduleParamCommit();
       }}
@@ -1587,8 +1392,14 @@ export function BuiltInPluginPanel({
           scheduleParamCommit(0);
         }
       }}
-      onFocusCapture={() => activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId })}
-      onBlurCapture={(event) => {
+      onFocusCapture={(event) => {
+        activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId });
+        const paramId = paramIdFromEventTarget(event.target);
+        if (paramId) beginExclusiveParamGesture(paramId);
+      }}
+      onBlur={(event) => {
+        // Numeric fields commit in their own blur handler. Close the gesture
+        // afterwards so its normal debounce cannot merge the next field edit.
         const paramId = paramIdFromEventTarget(event.target);
         if (!paramId || !paramHistory.hasActiveParam(paramId)) return;
         pointerParamRef.current = null;
@@ -1596,7 +1407,7 @@ export function BuiltInPluginPanel({
         scheduleParamCommit(0);
       }}
     >
-      <div className="builtin-panel-header">
+      {(chrome !== "detached" || pluginKind === "nam") && <div className="builtin-panel-header">
         <div className="builtin-panel-title">
           <Activity size={14} />
           <span data-qa={pluginKind === "nam" ? "nam-window-title" : undefined}>{displayTitle}</span>
@@ -1616,7 +1427,7 @@ export function BuiltInPluginPanel({
             </Button>
           )
         )}
-      </div>
+      </div>}
 
       {loading && !schema ? (
         <div className="builtin-empty">Loading</div>
@@ -1634,52 +1445,28 @@ export function BuiltInPluginPanel({
         />
       ) : !schema || schema.parameters.length === 0 ? (
         <div className="builtin-empty">No editable parameters</div>
+      ) : pluginKind === "eq" ? (
+        <EQEditor key={pluginShortcutSessionId} schema={schema} address={address} onChange={handleParamChange}
+          onBrowseInstances={() => onBrowseInstances(address, async () => {
+            clearScheduledParamCommit();
+            if (paramHistory.getActiveParamId() && !await paramHistory.commit(flushParamWrites)) return false;
+            await finishAutomationGestures(); historyChanged();
+            return flushParamWrites();
+          })}
+          onHostBypass={value => applySuiteState(JSON.stringify({ hostBypassed: value }))} onApplyState={applySuiteState} onApplyValues={applySuiteValues} onRecallPreset={recallSuitePreset} onFlush={flushParamWrites}
+          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id); }}
+          onGestureEnd={finishPointerParamGesture}
+          canUndo={paramHistory.canUndo()} canRedo={paramHistory.canRedo()}
+          onUndo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged); }}
+          onRedo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.redo(flushParamWrites, replayParamHistory).finally(historyChanged); }} />
       ) : (
-        <>
-          {schema.parameters.length > 0 && (
-            <BuiltInVisualization
-              schema={schema}
-              onParamChange={(param, value) => {
-                void handleParamChange(param, value);
-              }}
-            />
-          )}
-          <div className="builtin-param-groups">
-            {primaryParams.length > 0 && (
-              <div className="builtin-macro-strip" aria-label={`${title} primary controls`}>
-                {primaryParams.map((param) => (
-                  <BuiltInParamControl
-                    key={param.id}
-                    param={param}
-                    compact
-                    onChange={(nextParam, value) => {
-                      void handleParamChange(nextParam, value);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-            {groupedParams.map(([group, params]) => (
-              <div className="builtin-param-group" key={group}>
-                <div className="builtin-group-title">
-                  <SlidersHorizontal size={11} />
-                  <span>{groupLabel(group)}</span>
-                </div>
-                <div className="builtin-param-grid">
-                  {params.map((param) => (
-                    <BuiltInParamControl
-                      key={param.id}
-                      param={param}
-                      onChange={(nextParam, value) => {
-                        void handleParamChange(nextParam, value);
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
+        <GeneralEditor key={pluginShortcutSessionId} historyReplayRevision={historyReplayRevision} schema={schema} address={address} onChange={handleParamChange}
+          onApplyAlignment={applyAlignmentGroup} onHostBypass={value => applySuiteState(JSON.stringify({ hostBypassed: value }))} onApplyState={applySuiteState} onApplyValues={applySuiteValues} onRecallPreset={recallSuitePreset} onFlush={flushParamWrites}
+          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id); }}
+          onGestureEnd={finishPointerParamGesture}
+          canUndo={paramHistory.canUndo()} canRedo={paramHistory.canRedo()}
+          onUndo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged); }}
+          onRedo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.redo(flushParamWrites, replayParamHistory).finally(historyChanged); }} />
       )}
     </section>
   );

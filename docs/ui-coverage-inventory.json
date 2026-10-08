@@ -1,0 +1,2781 @@
+{
+  "schemaVersion": 1,
+  "meaning": "Source inventory only. Empty coverage means untested. A component can have multiple surfaces; review tabs, states, context menus and native-only windows separately.",
+  "coverageEntryFields": [
+    "scenario",
+    "environment",
+    "status",
+    "evidence",
+    "sourceRevision"
+  ],
+  "requiredDimensions": [
+    "empty/populated/error/busy",
+    "pointer/keyboard/focus",
+    "layout/scaling",
+    "undo/save/reopen",
+    "native integration"
+  ],
+  "entries": [
+    {
+      "id": "frontend/src/components/AIClipGenerationModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIClipGenerationModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AIGenerationHardwareCheck.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIGenerationHardwareCheck.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AIGenerationProgressBar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIGenerationProgressBar.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AIModelVariantSelector.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIModelVariantSelector.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AITrackHeader.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AITrackHeader.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AIWorkflowModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIWorkflowModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AIWorkflowParamField.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIWorkflowParamField.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AddMultipleTracksModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AddMultipleTracksModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AiToolsSetupModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AiToolsSetupModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AppDialogHost.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AppDialogHost.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AppUpdatePanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AppUpdatePanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AudioDeviceStatus.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AudioDeviceStatus.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AutomationPreviewControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AutomationPreviewControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AutomationRangeTools.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AutomationRangeTools.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AutomationTrimControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AutomationTrimControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/AutomationWriteControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AutomationWriteControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/BatchConverterModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/BatchConverterModal.tsx",
+      "coverage": [
+        {
+          "scenario": "Browse File passes audio filter in Chromium/WebKit; conversion not covered by this scenario",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/BigClock.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/BigClock.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/BuiltInPluginPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/BuiltInPluginPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ChannelStrip.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ChannelStrip.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ChannelStripEQModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ChannelStripEQModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/CleanProjectModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/CleanProjectModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ClipLauncherView.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ClipLauncherView.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ClipPropertiesPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ClipPropertiesPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ColorPicker.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ColorPicker.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/CommandPalette.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/CommandPalette.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ContextMenu.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ContextMenu.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/CorrectPitchModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/CorrectPitchModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/CrossfadeEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/CrossfadeEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/CustomKeyboardProfileManager.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/CustomKeyboardProfileManager.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/DDPExportModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/DDPExportModal.tsx",
+      "coverage": [
+        {
+          "scenario": "WAV source and folder destination; cancellation avoids export; Chromium/WebKit and actual Ubuntu folder picker",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/DetachablePanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/DetachablePanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/DynamicSplitModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/DynamicSplitModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/EnvelopeManagerModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/EnvelopeManagerModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ErrorBoundary.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ErrorBoundary.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/EssentialControlsCard.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/EssentialControlsCard.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/FXChainPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/FXChainPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/GettingStartedGuide.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/GettingStartedGuide.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/HelpOverlay.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/HelpOverlay.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/HorizontalScrollbar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/HorizontalScrollbar.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/InputGestureReference.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/InputGestureReference.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/InputProfileOnboardingCard.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/InputProfileOnboardingCard.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/InputProfileSelectors.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/InputProfileSelectors.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/KeyboardShortcutsModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/KeyboardShortcutsModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MIDIDeviceSelector.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MIDIDeviceSelector.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MIDIFXControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MIDIFXControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MIDIOutputStatus.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MIDIOutputStatus.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MainToolbar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MainToolbar.tsx",
+      "coverage": [
+        {
+          "scenario": "Essential control hit targets at 150% font scale, 800 and 1280 widths",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/MasterPeakMeterCluster.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MasterPeakMeterCluster.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MasterTrackHeader.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MasterTrackHeader.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MediaExplorer.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MediaExplorer.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MenuBar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MenuBar.tsx",
+      "coverage": [
+        {
+          "scenario": "Media import menu passes media filter; native Ubuntu picker shows WAV files; import/split/undo/save/export exercised",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/MetronomeControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MetronomeControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MetronomeSettings.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MetronomeSettings.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MissingMediaResolver.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MissingMediaResolver.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/MixerPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MixerPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMCompactChain.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMCompactChain.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMExplorer.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMExplorer.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMPresetManagerModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMPresetManagerModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackChainModule.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackChainModule.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackControlTooltip.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackControlTooltip.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackDesignPort.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackDesignPort.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackDiagnostics.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackDiagnostics.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackKnob.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackKnob.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackMixer.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackMixer.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMRackPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMRackPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMToneCapturePicker.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMToneCapturePicker.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NAMToneSave.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NAMToneSave.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/NoteInspector.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/NoteInspector.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/ChorusGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/ChorusGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/CompressorGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/CompressorGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/DelayGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/DelayGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/EQGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/EQGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/GateGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/GateGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/ParametricGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/ParametricGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/ReverbGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/ReverbGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ParametricGraph/SaturationGraph.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ParametricGraph/SaturationGraph.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PeakMeter.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PeakMeter.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRoll.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRoll.tsx",
+      "coverage": [
+        {
+          "scenario": "Focused note Delete/Undo preserves tracks in browser fixture; native pointer workflow remains untested",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        },
+        {
+          "scenario": "Native pointer focus, note Select All/Delete/Undo in docked and detached editors; existing tracks retained. Not all tools, scrolling, resizing or MIDI hardware.",
+          "environment": "Ubuntu 22.04 GNOME/X11, installed revision 7, WebKitGTK 2.50.4",
+          "status": "pass",
+          "evidence": "docs/linux-native-followup-2026-10-01.md",
+          "sourceRevision": "9b8f219 + uncommitted candidate 0.1.04-7; artifact SHA256 19f9d9602bc1edadb9efa864dd1f24f4282f652431293981b6db0fe584164c98"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/PianoRollControllerLaneSection.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollControllerLaneSection.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollInfoLine.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollInfoLine.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollInspectorSummary.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollInspectorSummary.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollLaneEditorSection.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollLaneEditorSection.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollNoteInspectorSection.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollNoteInspectorSection.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollPitchBendSection.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollPitchBendSection.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollStatusStrip.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollStatusStrip.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PianoRollToolbar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PianoRollToolbar.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PitchCorrectorPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PitchCorrectorPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PitchEditorLowerZone.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PitchEditorLowerZone.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PitchFXEditorEntry.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PitchFXEditorEntry.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/Playhead.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/Playhead.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PluginActivity.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PluginActivity.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PluginBrowser.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PluginBrowser.tsx",
+      "coverage": [
+        {
+          "scenario": "Modal focus, close bindings and focused text editing (not every scan/hosting flow)",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/PracticeTimer.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PracticeTimer.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PreferencesModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PreferencesModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ProjectCompareModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ProjectCompareModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ProjectRecoveryDialog.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ProjectRecoveryDialog.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ProjectSettingsModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ProjectSettingsModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ProjectTabBar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ProjectTabBar.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/RecordingFailureBanner.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RecordingFailureBanner.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/RegionMarkerManager.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RegionMarkerManager.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/RegionRenderMatrix.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RegionRenderMatrix.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/RenderModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RenderModal.tsx",
+      "coverage": [
+        {
+          "scenario": "Native GUI WAV export 48k to 44.1k retains stereo tones/silence and 16-second duration",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/RenderQueuePanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RenderQueuePanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/RoutingMatrix.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/RoutingMatrix.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ScriptEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ScriptEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/SettingsModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/SettingsModal.tsx",
+      "coverage": [
+        {
+          "scenario": "Focus containment, default/remapped closure, blocked background insertion and audio-system switching",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        },
+        {
+          "scenario": "Installed dialog focus remains inside after a 12-Tab cycle, Escape closes and Ctrl+T does not add a background track; hardware switching separately remains open.",
+          "environment": "Ubuntu 22.04 GNOME/X11, installed revision 7, WebKitGTK 2.50.4",
+          "status": "pass",
+          "evidence": "docs/linux-native-followup-2026-10-01.md",
+          "sourceRevision": "9b8f219 + uncommitted candidate 0.1.04-7; artifact SHA256 19f9d9602bc1edadb9efa864dd1f24f4282f652431293981b6db0fe584164c98"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/SortableTrack.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/SortableTrack.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/SortableTrackHeader.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/SortableTrackHeader.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/StartupRecoveryApp.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/StartupRecoveryApp.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/StemSeparationModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/StemSeparationModal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/TONE3000Branding.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TONE3000Branding.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ThemeEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ThemeEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/TimecodeSettingsPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TimecodeSettingsPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/Timeline.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/Timeline.tsx",
+      "coverage": [
+        {
+          "scenario": "Native imported clip move/split/undo/redo saved positions and offsets; stereo playback channel isolation verified with known source",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/TimelineRuler.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TimelineRuler.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ToolbarEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ToolbarEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/TrackHeader.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TrackHeader.tsx",
+      "coverage": [
+        {
+          "scenario": "Track-name hit target at 150% font scale (not all track controls)",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/TrackNameEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TrackNameEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/TrackRoutingModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TrackRoutingModal.tsx",
+      "coverage": [
+        {
+          "scenario": "Installed save/reopen preserves width 150%, disabled master send, phase, -12 ms offset, four channels and disabled zero-level pre-fader send; dialog visually inspected.",
+          "environment": "Ubuntu 22.04 GNOME/X11, installed revision 7, WebKitGTK 2.50.4",
+          "status": "pass",
+          "evidence": "docs/linux-native-followup-2026-10-01.md",
+          "sourceRevision": "9b8f219 + uncommitted candidate 0.1.04-7; artifact SHA256 19f9d9602bc1edadb9efa864dd1f24f4282f652431293981b6db0fe584164c98"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/TransportBar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TransportBar.tsx",
+      "coverage": [
+        {
+          "scenario": "Control reachability at 150% font scale and transport keyboard ownership",
+          "environment": "Chromium and Playwright WebKit on Linux, mock native bridge",
+          "status": "pass",
+          "evidence": "frontend/e2e/ui-audit-regressions.spec.ts; output/ui-fixes/affected-final.json",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + working-tree changes recorded in output/ui-fixes/manifest.json"
+        },
+        {
+          "scenario": "Native virtual-input record and output-captured playback; physical hardware and latency not asserted",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/UndoHistoryPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/UndoHistoryPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/UnsavedChangesDialog.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/UnsavedChangesDialog.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/VideoWindow.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/VideoWindow.tsx",
+      "coverage": [
+        {
+          "scenario": "Open Video accepts actual pointer click above toolbar and passes video filter in Chromium/WebKit and installed Ubuntu 22.04; video decoding not covered",
+          "environment": "Ubuntu 22.04 installed candidates 7/8 and Linux Chromium/Playwright WebKit, as specified in report",
+          "status": "pass",
+          "evidence": "docs/synthetic-audio-verification-2026-10-01.md; output/synthetic-audio-qa/",
+          "sourceRevision": "9b8f219d52faebe0c26699a9ac2848523ad01575 + uncommitted candidate 8 changes"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/components/VirtualPianoKeyboard.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/VirtualPianoKeyboard.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/WorkRecoveryItems.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/WorkRecoveryItems.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/AnalyzerDisplayControls.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/AnalyzerDisplayControls.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ApprovedEffectEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ApprovedEffectEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/BasicSynthEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/BasicSynthEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ChorusEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ChorusEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/CleanGuitarEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/CleanGuitarEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/CompressorEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/CompressorEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/CoreEffectVisuals.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/CoreEffectVisuals.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/DelayEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/DelayEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/DrumMapEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/DrumMapEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/DrumMappingGuide.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/DrumMappingGuide.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/DrumsEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/DrumsEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQAnalyzerReferences.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQAnalyzerReferences.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQBandActions.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQBandActions.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQBandGroup.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQBandGroup.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQFrequencyView.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQFrequencyView.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQInstanceBrowser.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQInstanceBrowser.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQInstanceOverview.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQInstanceOverview.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQMIDIPrograms.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQMIDIPrograms.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQMatchPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQMatchPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQPeakPicker.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQPeakPicker.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQPresetBrowser.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQPresetBrowser.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQSketchPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQSketchPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQSpectrumGrab.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQSpectrumGrab.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EQToolbar.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EQToolbar.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/EffectDetailIndicator.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/EffectDetailIndicator.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GainPhaseAlignmentPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GainPhaseAlignmentPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GainPhaseEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GainPhaseEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GateEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GateEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GraphicEQEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GraphicEQEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GuitarArticulationGuide.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GuitarArticulationGuide.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/GuitarLivePerformance.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/GuitarLivePerformance.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/IRAudition.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/IRAudition.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/IRDecayView.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/IRDecayView.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/IRGeometryEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/IRGeometryEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ImpulseResponseEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ImpulseResponseEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/InstrumentEditorParts.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/InstrumentEditorParts.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/LimiterEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/LimiterEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/LoudnessPanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/LoudnessPanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/PianoEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/PianoEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/PreampEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/PreampEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ReverbEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ReverbEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ReverbPeakReadouts.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ReverbPeakReadouts.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/ReverbResponsePanel.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/ReverbResponsePanel.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SaturatorEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SaturatorEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SpectralPhaseGuide.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SpectralPhaseGuide.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SuiteEditor.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SuiteEditor.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SuiteParameter.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SuiteParameter.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SynthMacroLearn.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SynthMacroLearn.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/builtin/SynthMatrixGuide.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/SynthMatrixGuide.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/icons.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/icons.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/menus/EditMenu.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/menus/EditMenu.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/menus/MenuDropdown.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/menus/MenuDropdown.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Button/Button.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Button/Button.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Checkbox/Checkbox.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Checkbox/Checkbox.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Input/Input.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Input/Input.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Knob/Knob.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Knob/Knob.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Modal/Modal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Modal/Modal.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Modal/ModalContent.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Modal/ModalContent.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Modal/ModalFooter.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Modal/ModalFooter.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Modal/ModalHeader.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Modal/ModalHeader.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/NativeSelect/NativeSelect.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/NativeSelect/NativeSelect.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/ProfiledRangeInput/ProfiledRangeInput.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/ProfiledRangeInput/ProfiledRangeInput.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Select/Select.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Select/Select.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Slider/Slider.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Slider/Slider.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/Textarea/Textarea.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/Textarea/Textarea.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/components/ui/TimeSignatureInput/TimeSignatureInput.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/ui/TimeSignatureInput/TimeSignatureInput.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/App.tsx",
+      "kind": "window-shell",
+      "source": "frontend/src/App.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/MidiEditorWindowApp.tsx",
+      "kind": "window-shell",
+      "source": "frontend/src/MidiEditorWindowApp.tsx",
+      "coverage": [
+        {
+          "scenario": "Native Pop Out opens a visible populated editor; note Delete/Undo works and Dock returns to main app.",
+          "environment": "Ubuntu 22.04 GNOME/X11, installed revision 7, WebKitGTK 2.50.4",
+          "status": "pass",
+          "evidence": "docs/linux-native-followup-2026-10-01.md",
+          "sourceRevision": "9b8f219 + uncommitted candidate 0.1.04-7; artifact SHA256 19f9d9602bc1edadb9efa864dd1f24f4282f652431293981b6db0fe584164c98"
+        }
+      ]
+    },
+    {
+      "id": "frontend/src/MixerWindowApp.tsx",
+      "kind": "window-shell",
+      "source": "frontend/src/MixerWindowApp.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/PitchEditorWindowApp.tsx",
+      "kind": "window-shell",
+      "source": "frontend/src/PitchEditorWindowApp.tsx",
+      "coverage": []
+    },
+    {
+      "id": "frontend/src/PluginEditorWindowApp.tsx",
+      "kind": "window-shell",
+      "source": "frontend/src/PluginEditorWindowApp.tsx",
+      "coverage": []
+    },
+    {
+      "id": "feature:b6271dc951c7ec55",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "JUCE audio engine with React/WebView2 frontend bridge",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ee5c74f66bafc65f",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Real-time playback engine with sample-rate-aware clip mixing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:1b155df5f689be54",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Audio device setup: driver, I/O, sample rate, buffer, channels",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d09d2400aea3c55a",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Multitrack audio recording with armed tracks, monitoring, punch range",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:658e3f9744b67661",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Record modes, record-safe state, input-channel selection, and set-loop-to-time-selection workflow",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:0968ff64283f5751",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Transport: play, stop, pause, record, seek, loop, current time",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a5155c0929f1b761",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Tempo, time signature, tap tempo, tempo markers",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2d84ea7e22e4ea58",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Metronome with accenting, volume, custom/reset click sounds, and render inclusion",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:cb8b18f1cfeac802",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Click-only metronome practice with live monitoring, parked playhead, and transport handover",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b3dacb5542154834",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Background waveform peak cache and recording waveform previews",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:36a540cfcd23c49d",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "MIDI recording preview and completed MIDI clip handoff",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:798c4be8fb55087d",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Meter events isolated from the track array to avoid playback-time UI churn",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d04cc7b3c1929194",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Konva-based timeline with ruler, grid, zoom, scroll, snap",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d326d1fc9dadd71d",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Audio and MIDI clip creation, import, drag/drop, move, trim, resize",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:075d202b40966879",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Multi-clip and multi-track selection",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:13d1a474ea567e02",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Split, cut, copy, paste, duplicate, delete, nudge, fine nudge",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d9e1478f7e50a7b5",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Time selection editing: cut, copy, delete, insert silence",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:de856f4a7798b772",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Razor edit areas and razor content deletion",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2d43c3e7d57de6b9",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Slip editing, free item positioning, ripple modes",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:1f4bdb8483b97d6c",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Clip fades, clip volume, gain envelopes, mute, lock, color",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a0e74133c0995d82",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Clip reverse, normalize, time stretch, pitch shift",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6d995f237f7c1ce4",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Auto-crossfade and crossfade editor",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b8fd6cc7b66af0bd",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Takes: add, select active, explode to tracks, and implode clips",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e4959dcb6f971c43",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Dynamic/transient split workflow",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:21ff8b7f0b3b162f",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Track spacers, empty audio/MIDI items, and clip launcher",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:cda3888cb7caacdd",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Markers, named markers, regions, region manager",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:cae86ee718fa26d8",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Tempo marker support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:37348e61ac0e6d00",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Quantize selected clips",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4d8a3b7925761a9e",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Mixer panel, channel strips, master strip, detached mixer",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:3dfb4fdb53dcd2f6",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Track volume, pan, mute, solo, arm, monitor controls",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:3976cf17ac3846f6",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Master volume, pan, mute, mono, master automation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:77b5393949fb4c59",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Peak/RMS metering, master meter, clipping reset",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:7ef8242820fb1a1c",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Track sends, send pan/level/phase, pre/post routing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:0bba62230d0785f0",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Routing matrix and track routing modal",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:dfa7a72456bb3ff9",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Bus tracks, folder tracks, create bus from selected tracks",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:682a2cd61b62e5aa",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Track groups / linked group params",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:87335cd0f619aa15",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Sidechain routing into plugins",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f2cad31f7775531f",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Phase invert, stereo width, pan law, DC offset handling",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:24401444b2e4d911",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Output channel selection, track channel count, playback offset",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:8cd7cbe0e03d6f9b",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "LUFS measurement, phase correlation, spectrum data",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:bd2f9c87eb4e4c3d",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Channel strip EQ modal",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:8a7846f3bb5d3720",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Mixer snapshots with save, recall, delete, backend sync, and undoable recall",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ad4ce4a4ae0cd08d",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Track/master automation lanes with read, write, touch, latch, range replacement, and envelope management",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:53a7bb736f1f4d31",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Move-envelopes-with-items option",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:8e87dbfb13ea91de",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Plugin scanning/loading for hosted FX formats, primarily VST3 with CLAP/LV2 code paths",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:94d5638aee5341ff",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Native plugin editor window management",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6f8ce531a96bc073",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Input FX, track FX, master FX, monitoring FX chains",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:9e736cc4bab33507",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Add, remove, bypass, reorder FX chains",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ffc552a511b5ee5b",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Plugin parameters, presets, state save/load, A/B compare",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5d67f8cdaa8d841b",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Plugin MIDI learn and parameter mapping",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5478001765fe69a2",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Track, input, and master FX-chain presets",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:92ee76976630f115",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Built-in FX preset save, load, and delete",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5ce9bcdaf816d559",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Processing precision override / hybrid precision support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d91e8474985ba0d5",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Plugin capability matrix, guardrails, release benchmark hooks",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a7bf310a58c901ad",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Built-in EQ, compressor, gate, limiter, delay, reverb, chorus, saturator",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e1d24634fc55c521",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Fifteen dedicated non-NAM effect/instrument editors with profiled gestures, full-state presets/Compare and separate host bypass",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:aa726af3e0d9484a",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Prepared dynamic/spectral EQ, 32-slot configuration-changing MIDI recall, portable convolution and continuous alignment",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4cb912af99f6b935",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Independent drum output pairs and four-output convolution through complete atomic send restoration",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:70be673a622b7126",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Built-in real-time pitch corrector FX",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:9da5ae63785f0b82",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Built-in FX editors and oversampling controls",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2498e5718f2be957",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "NAM Rack A1/A2 pedal, amp, and full-rig capture hosting",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d42fd7197fa34d15",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "NAM Rack Guitar/Bass voicing, native pedalboard, cabinet IR/Cabinet Space, Graphic EQ, modulation, delay, reverb/shimmer, tuner, calibration, presets, A/B, and project recall",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5b76dccefe7ef9de",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "NAM Rack multi-capture pack selection with per-capture topology, transactional audition/rollback, Use, replace, bypass, unload, and missing-asset recovery",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:19b9466e0c054ba5",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "JSFX / JSFX-style script effects with sliders and reload",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:46575a76d16948b3",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "JSFX `@gfx` native editor support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c7721941936e91c4",
+      "kind": "feature",
+      "section": "Plugins / FX / Scripting",
+      "description": "Lua script execution, script listing/editor, console output, and app-facing API reference",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2feaeabfe7d74a9c",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI device enumeration, input open/close, output routing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:831e0679e2a2ced9",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI track type, instrument track type, MIDI channel routing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2ebced37394f9f02",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI clips with note storage and playback scheduling",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a73905da67006d24",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI recording into clips with live preview",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4983b98f7b19c189",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Piano roll editor",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2244d2d7e0dd7c5f",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Docked/detached piano-roll sessions with note, velocity, CC, pitch-bend, and range editing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c6069abbb5f866a6",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Virtual piano keyboard",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:d1a37f1721a71887",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Piano-roll step input state/actions",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f929ff4b20493412",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI panic and input-readiness checks",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ae9426403fe0c22c",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Quantize using last settings, reset quantize, and freeze quantize",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c52ba9eb73aaee4f",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI transforms: transpose/octave, velocity scale, reverse, invert, and scale snap",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:dcec2f22a6063024",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI import/export and project MIDI export",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:31fdf72e07591d47",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Load/open virtual instrument on instrument tracks",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c8c6045ca2f678ca",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Built-in basic synth, piano, clean-guitar, drum, and fallback sampler paths",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a3f1fe27e2e6fc0e",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Audio-to-MIDI creates an adjacent MIDI track with undo support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:9eb4d8ca2bb1669b",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Monophonic pitch analysis with YIN contour and note segmentation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:162c9ba4de07fabd",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Single-owner docked/detached pitch editor shared by clip and Pitch FX entry, with checkpoint recovery",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:495ae7af42ed0608",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Graphical pitch editor with blobs, contour, piano grid, zoom/scroll",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:13ae40cb64742f31",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Pitch tools: pitch, drift, vibrato, transition, draw, split",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c0de8706a3338e56",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Scale/key snapping, chromatic snap, correct-pitch macro, scale detection",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:94ac51698b7012b6",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Offline monophonic pitch correction render/apply path",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:55df83c47312fd25",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Pitch preview, scrub preview, HQ note/full-clip render states",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2c618fddc73c413d",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Real-time auto-tune style pitch corrector plugin",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6612747a6f4f7b07",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Pitch editor undo/redo and A/B style comparison state",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:283df51287e27db4",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Transient detection and silent-region detection",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f73cf00ad72944d3",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Polyphonic pitch detection and MIDI extraction via Basic Pitch / ONNX (ONNX-enabled builds; current Windows/Linux release pipeline)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2f92151e8b9c9ac1",
+      "kind": "feature",
+      "section": "Pitch / Audio Analysis",
+      "description": "Stem-aware / AI-adjacent audio analysis plumbing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:dea261fdea7f9bbd",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Offline project render through the same playback/FX engine",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a9562580513610e0",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ae013a1c499b33f2",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Render options: sample rate, bit depth/quality, mono/stereo, normalize, tail",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:42e1bedb38c6b3eb",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Dithered render path",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:1b51f73f27b9c64a",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Master and per-track stem render paths, plus region/razor range orchestration",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2bd1af078caf61ed",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Project, custom, time-selection, project-region, and selected-region bounds",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:1609e5cd0d298aec",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Include-metronome and optional secondary-format output",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a3f0a22f248c07dc",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Render queue",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:80b1f9d284c12c3a",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Add rendered output back into project",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f7b30eecaabb3a8f",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Render filename wildcards",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ee31c46a5aaa7f3c",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Render in place, consolidate track, freeze/unfreeze",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ad63872ea3c4422a",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Batch audio converter",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4b8f9de981e96f97",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "DDP export",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:7112b0434f944bb9",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "Session archive/unarchive",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:10f90e74e6a5bbd3",
+      "kind": "feature",
+      "section": "Rendering / Export / Interchange",
+      "description": "RPP import and RPP/EDL export",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:89fc69c33ffeca80",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Project new/open/save/save as/close, unsaved changes flow",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2c42d61f4a78d865",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Recent projects and startup recovery/diagnostics",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:0fd8e8b5467f44d1",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Interrupted-session recovery: unsaved project copies, complete recording samples, and saved AI requests/results",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e251d036838a1f72",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Opt-in rotating recovery snapshots, including untitled projects, without overwriting the saved project",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c9a5b9621bb45000",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Project tabs",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e09cb7705b0483cf",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Project settings, notes, author/revision metadata",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:790afa158d4bda81",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Project templates and save-from-template flow",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b7fe15dd6095cb41",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Safe-mode project open / FX bypass recovery path",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:790fa78231e2347d",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Session archive/unarchive",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:067c4324f264c1ee",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Media import and drag/drop handling",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:9f02680685b31cb5",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Missing media resolver",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e44865404d9215a8",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Media explorer browse/import",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5a0e4675db903c41",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Clean project directory tool",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e76a5c8916783bb6",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Project compare",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:681ea9bd416ab394",
+      "kind": "feature",
+      "section": "Project / Media Management",
+      "description": "Preferences, autosave/backup/display/editing settings",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:9e48cf1120cb99f5",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "AI tools runtime status, install, cancel, reset flow",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:18cb3af7bf84b75b",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "Stem separation workflow with selectable stems and progress polling",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a2f4a76389c91217",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "Stem separation result import into new tracks/clips",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ebf845f65b938a91",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "AI track type and AI track header controls",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a71e2be8f9a35797",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "ACE-Step text-to-music and lyrics-plus-style generation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:1786db04951a6b04",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "Stable Audio 3 Medium text-to-audio generation with gated Hugging Face setup, optional local import and license acknowledgement",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:413c58134d3f38ac",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "MiniMax Music 3 Lyrics + Style and Song Sections with Hugging Face setup or local import",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5dfc8a082c0c8b58",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "ACE-Step/Stable Audio source-conditioned variation, inpaint-selection, and continue-clip workflows",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2f1b18563dd8e6d8",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "AI setup totals, remaining bytes, cache reuse, persistent active-job display, and logs",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:335b96dc6fc74feb",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "AI generation stage/step/frame progress and cancellation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f5bae6dd14e2e44e",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Central action registry powering menus, shortcuts, command palette",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:102d84e0b19f124c",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Menu bar, main toolbar, custom toolbar strip/editor",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:82a95069d205b6e8",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Searchable/printable keyboard-shortcuts modal with 19 built-in DAW profile families",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c87b5523187b323e",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Independent keyboard and mouse/scroll profiles with platform-aware labels and documented gesture targeting",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6ea6adf52067643b",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Scoped multi-binding, conflict checks, intentional unassignment, and named custom keyboard-profile import/export",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:db6233fc3fff1609",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Command palette",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:e7634086ac5d84d2",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Screensets/layout state",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ef4308e3a800e698",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Theme editor and custom theme state",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c2b42fa50ca01369",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Persisted mouse modifier preferences and profile-specific wheel/drag behavior, synchronized to detached windows",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:cb90f1c99289a09c",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Custom actions/macros",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:37891ea47d239d3f",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "High-contrast theme, startup recovery surface, modal guards, and top-level error boundary",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:5c7f231a5e76af7f",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Big clock and timecode display settings",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f6b1f2bb0bc58fb4",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Help overlay and getting started guide",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:af25c9f426d12fe6",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "App update checks, background download/cancel, save-before-install UI, and reverified staged-download restoration",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:28604e934c18a113",
+      "kind": "feature",
+      "section": "Workflow / UI Customization",
+      "description": "Crash diagnostics source/module present",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:33a340e31f6d5196",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "MIDI clock output/input",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:14d293f268069fdd",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "MTC output/input and sync status/source management",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:f18e51aa5ef1d434",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "Control surface manager with MIDI learn/mappings",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:7e3ba4601b1dea4a",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "OSC connection support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:18ebd29b2f35425c",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "MCU-style control surface support",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:243dd84b308a690c",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "Video window, video metadata/frame extraction, audio extraction path",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6d3caa8530276246",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "Surround/channel layout and VBAP panner code paths",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:de266a6484e7c5f7",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "Track/master channel-format state",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:29d9b39784a1f16f",
+      "kind": "feature",
+      "section": "Sync / Control / Video / Pro Tools",
+      "description": "ARA host controller lifecycle and track ARA status plumbing",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:8b7139c05d5433eb",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Signed updates and macOS/Linux replacement",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:535e83a3e6e1bfbc",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Separate-process plugin hosting",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:624f2ac18eb88a31",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "AI hardware check and adaptive memory placement",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:52cdf0c8f9526051",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Polyphonic pitch correction / solo-note resynthesis",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:0369b83e343fce0a",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "AAF import",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:68efb3c9e1fa1888",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "LTC output",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4cf637993ce5c079",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Live capture start/stop",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:0ed4bb44b5bef01b",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Media Explorer audio preview",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:530fcda520c7a636",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Drum editor / media pool",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b43e7f4765a44beb",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Step sequencer",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ae3dea0e6fe54321",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Master FX reorder",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4ee06eeb55bb37bf",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Legacy `executeScript/loadScriptFile` bridge names",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:73d945cb0eab5c4d",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Public TONE3000 release",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:89e9f6e68a90b27f",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "NAM Rack sonic/noise acceptance",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:05e232d9ea4683fb",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Selected-item render sources",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2bec59f6e64306ac",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Render metadata",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:6872495564cd7d60",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Online render",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:88d44a91aebcf8b7",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Specialist delivery workflows",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:3566c6bebf3383e5",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "External sync and control surfaces",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:34e86b2a0544988f",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Video",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:3246e6ecbc9520c0",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Surround/immersive delivery",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b6894365c1d56c06",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "AI generation availability and quality",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:c1dd2ab7236fe5cc",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Subjective audio quality",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    }
+  ]
+}

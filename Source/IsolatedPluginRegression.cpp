@@ -69,11 +69,13 @@ int runIsolatedPluginRegression(const juce::File& directory, bool exerciseEditor
             juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
             juce::Array<juce::var> edits;
             capture.drain("isolated", false, 0, edits);
-            check("worker_editor_gestures_reach_host_automation", sent && edits.size() == 3
+            check("worker_editor_gestures_reach_host_automation", sent && edits.size() == 5
                 && edits[0].getProperty("phase", "").toString() == "begin"
                 && edits[1].getProperty("phase", "").toString() == "value"
-                && edits[2].getProperty("phase", "").toString() == "end"
-                && std::abs(static_cast<float>(edits[1].getProperty("value", 0.0)) - 0.42f) < 1.0e-6f);
+                && edits[4].getProperty("phase", "").toString() == "end"
+                && std::abs(static_cast<float>(edits[1].getProperty("value", 0.0)) - 0.1f) < 1.0e-6f
+                && std::abs(static_cast<float>(edits[2].getProperty("value", 0.0)) - 0.8f) < 1.0e-6f
+                && std::abs(static_cast<float>(edits[3].getProperty("value", 0.0)) - 0.42f) < 1.0e-6f);
             plugin->getParameters()[0]->setValue(0.65f);
             juce::MemoryBlock saved;
             plugin->getStateInformation(saved);
@@ -158,6 +160,70 @@ int runIsolatedPluginRegression(const juce::File& directory, bool exerciseEditor
             ratePass &= plugin->isHealthy() && plugin->transportLatencySamples() == 512;
         }
         check("device_rate_and_block_reprepare", ratePass);
+        {
+            plugin->prepareToPlay(48000, 128);
+            const auto clock = std::make_shared<PluginAutomationClock>(); clock->update(20, 48000, true);
+            PluginParameterCapture capture(std::shared_ptr<juce::AudioProcessor>(plugin.get(), [](auto*) {}), clock);
+            auto* parameter = plugin->getParameters()[0];
+            bool deliveryPass = parameter->supportsSampleAccurateAutomation() && plugin->setTestFailure(8);
+            std::vector<float> samples;
+            for (int block = 0; block < 8; ++block)
+            {
+                if (block == 0) deliveryPass = parameter->queueValueAtSampleOffset(.2f, 0)
+                    && parameter->queueValueAtSampleOffset(.8f, 17) && parameter->queueValueAtSampleOffset(.3f, 49) && deliveryPass;
+                juce::AudioBuffer<float> view(buffer.getArrayOfWritePointers(), 2, 64);
+                for (int channel = 0; channel < 2; ++channel) juce::FloatVectorOperations::fill(view.getWritePointer(channel), 1.0f, 64);
+                midi.clear(); const ScopedPluginAutomationProcessing processing(20 + block * 64.0 / 48000.0, 48000, 1, true);
+                plugin->processBlock(view, midi);
+                for (int sample = 0; sample < 64; ++sample) samples.push_back(view.getSample(0, sample));
+            }
+            for (int sample = 0; sample < 64; ++sample)
+                deliveryPass = deliveryPass && std::abs(samples[static_cast<size_t>(256 + sample)] - (sample < 17 ? .2f : sample < 49 ? .8f : .3f)) < 1.0e-6f;
+            juce::Array<juce::var> edits; capture.drain("isolated", false, 0, edits);
+            check("worker_sample_queues_survive_variable_parent_callbacks", deliveryPass && plugin->isHealthy());
+            check("worker_read_sample_queues_do_not_echo_as_editor_edits", edits.isEmpty());
+            plugin->prepareToPlay(48000, 128); clock->update(30, 48000, true);
+            bool capturePass = plugin->setTestFailure(8);
+            for (int block = 0; block < 4; ++block)
+            {
+                juce::AudioBuffer<float> view(buffer.getArrayOfWritePointers(), 2, 128); view.clear(); midi.clear();
+                const ScopedPluginAutomationProcessing processing(30 + block * 128.0 / 48000.0, 48000, 1, true);
+                plugin->processBlock(view, midi);
+            }
+            edits.clear(); capture.drain("isolated", false, 0, edits);
+            capturePass = capturePass && edits.size() == 3;
+            for (int point = 0; point < juce::jmin(3, edits.size()); ++point)
+                capturePass = capturePass && edits[point]["timing"].toString() == "sample"
+                    && std::abs(static_cast<double>(edits[point]["capturedTime"]) - (30 + (point == 0 ? 2.0 : point == 1 ? 17.0 : 49.0) / 48000.0)) < 1.0e-10;
+            check("worker_preserves_sdk_output_offsets_through_control_thread_delivery", capturePass);
+            bool unchangedInfoPass = plugin->setTestFailure(10);
+            for (int block = 0; block < 8; ++block) {
+                juce::AudioBuffer<float> view(buffer.getArrayOfWritePointers(), 2, 128); view.clear(); midi.clear(); plugin->processBlock(view, midi);
+                unchangedInfoPass &= plugin->isHealthy();
+            }
+            check("worker_unchanged_parameter_info_does_not_quarantine", unchangedInfoPass);
+            bool renamedPresentationPass = plugin->setTestFailure(11);
+            for (int block = 0; block < 6; ++block) {
+                juce::AudioBuffer<float> view(buffer.getArrayOfWritePointers(), 2, 128); view.clear(); midi.clear(); plugin->processBlock(view, midi);
+            }
+            const auto presentationDeadline = juce::Time::getMillisecondCounterHiRes() + 250;
+            while (plugin->isHealthy() && parameter->getName(256) != "Mode-specific Gain"
+                   && juce::Time::getMillisecondCounterHiRes() < presentationDeadline) {
+                plugin->drainParameterEdits(); juce::Thread::sleep(1);
+            }
+            renamedPresentationPass &= plugin->isHealthy() && parameter->getName(256) == "Mode-specific Gain"
+                && plugin->getHostedParameter(0)->getParameterID() == "gain" && parameter->supportsSampleAccurateAutomation();
+            check("worker_mode_rename_refreshes_without_replacing_parameter", renamedPresentationPass);
+            plugin->setTestFailure(9);
+            for (int block = 0; block < 8 && plugin->isHealthy(); ++block) {
+                juce::AudioBuffer<float> view(buffer.getArrayOfWritePointers(), 2, 128); view.clear(); midi.clear(); plugin->processBlock(view, midi);
+            }
+            // INFO validation runs on the worker message thread, outside DSP.
+            const auto metadataDeadline = juce::Time::getMillisecondCounterHiRes() + 250;
+            while (plugin->isHealthy() && juce::Time::getMillisecondCounterHiRes() < metadataDeadline) juce::Thread::sleep(1);
+            check("worker_parameter_metadata_change_fails_closed", !plugin->isHealthy() && plugin->failureDescription().contains("parameter"), plugin->failureDescription());
+            check("worker_restart_discards_stale_editor_events", plugin->restart());
+        }
         plugin->setNonRealtime(false); plugin->prepareToPlay(48000, 512);
         bool realtimePass = true;
         double maxCallbackMs = 0;
@@ -175,6 +241,7 @@ int runIsolatedPluginRegression(const juce::File& directory, bool exerciseEditor
             checkingAllocation = true;
 #endif
             const auto started = juce::Time::getMillisecondCounterHiRes();
+            realtimePass &= plugin->getParameters()[0]->queueValueAtSampleOffset(.5f, 0);
             plugin->processBlock(view, midi);
             const auto elapsed = juce::Time::getMillisecondCounterHiRes() - started;
 #if JUCE_WINDOWS && defined(_DEBUG)
@@ -289,26 +356,46 @@ int runIsolatedPluginCompatibility(const juce::File& catalog, const juce::String
     bool pass = plugin != nullptr;
     auto result = std::make_unique<juce::DynamicObject>();
     result->setProperty("plugin", name); result->setProperty("version", description.version); result->setProperty("error", error);
+    juce::Array<juce::var> compatibilityChecks;
+    const auto checkCompatibility = [&] (const juce::String& label, bool succeeded) {
+        auto* check = new juce::DynamicObject();
+        check->setProperty("name", label); check->setProperty("pass", succeeded);
+        if (!succeeded && plugin) check->setProperty("error", plugin->failureDescription());
+        compatibilityChecks.add(juce::var(check)); pass &= succeeded;
+    };
     if (plugin)
     {
+        int sampleQueueChecks = 0;
         juce::MemoryBlock state; plugin->getStateInformation(state);
         result->setProperty("stateBytes", static_cast<int>(state.getSize()));
-        pass &= plugin->isHealthy() && state.getSize() > 0;
+        checkCompatibility("initial_state", plugin->isHealthy() && state.getSize() > 0);
         for (const double rate : { 44100.0, 48000.0, 96000.0 })
         {
             plugin->setNonRealtime(true); plugin->prepareToPlay(rate, 512);
             juce::AudioBuffer<float> buffer(juce::jmax(2, plugin->getTotalNumInputChannels(), plugin->getTotalNumOutputChannels()), 512);
             juce::MidiBuffer midi; midi.ensureSize(32768);
+            bool processingPass = plugin->isHealthy();
             for (int i = 0; i < 20; ++i)
             {
                 for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
                     for (int s = 0; s < 512; ++s) buffer.setSample(ch, s, 0.05f * std::sin(static_cast<float>(i * 512 + s) * 0.05f));
                 if (!plugin->getParameters().isEmpty()) plugin->getParameters()[0]->setValue(static_cast<float>(i % 10) / 10);
                 midi.clear(); plugin->processBlock(buffer, midi);
-                pass &= plugin->isHealthy() && ProcessorSafety::isFinite(buffer);
+                processingPass &= plugin->isHealthy() && ProcessorSafety::isFinite(buffer);
             }
+            checkCompatibility("finite_audio_" + juce::String(rate), processingPass);
+            for (auto* parameter : plugin->getParameters())
+                if (parameter->isAutomatable() && (static_cast<int>(parameter->getCategory()) >> 16) != 2 && parameter->supportsSampleAccurateAutomation())
+                {
+                    const float original = parameter->getValue();
+                    const bool queued = parameter->queueValueAtSampleOffset(.2f, 0) && parameter->queueValueAtSampleOffset(.8f, 17) && parameter->queueValueAtSampleOffset(.3f, 49);
+                    midi.clear(); plugin->processBlock(buffer, midi);
+                    checkCompatibility("sample_queue_" + juce::String(rate) + "_" + parameter->getName(128),
+                        queued && plugin->isHealthy() && ProcessorSafety::isFinite(buffer));
+                    parameter->setValue(original); ++sampleQueueChecks;
+                }
             plugin->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
-            pass &= plugin->isHealthy();
+            checkCompatibility("state_restore_" + juce::String(rate), plugin->isHealthy());
         }
 #if JUCE_WINDOWS
         HMODULE modules[2048]; DWORD bytes = 0;
@@ -322,7 +409,9 @@ int runIsolatedPluginCompatibility(const juce::File& catalog, const juce::String
         }
         result->setProperty("pluginModuleLoadedInParent", loadedInParent); pass &= !loadedInParent;
 #endif
+        result->setProperty("sampleQueueChecks", sampleQueueChecks);
     }
+    result->setProperty("checks", compatibilityChecks);
     result->setProperty("passed", pass); result->setProperty("subjectiveAudio", "not_asserted");
     result->setProperty("editor", "not_asserted");
     directory.getChildFile("result.json").replaceWithText(juce::JSON::toString(juce::var(result.release())));

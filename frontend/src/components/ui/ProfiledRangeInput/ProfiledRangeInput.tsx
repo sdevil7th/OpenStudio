@@ -10,6 +10,7 @@ import {
   type WheelEvent,
 } from "react";
 import { getParameterWheelValue, resolveProfiledParameterWheel } from "../../../utils/parameterWheel";
+import { resolveProfiledNavigationWheel } from "../../../utils/navigationWheel";
 import { createWheelDeltaAccumulator, type WheelDeltaAccumulator } from "../../../utils/wheelDeltaAccumulator";
 import {
   beginEditTransaction,
@@ -40,6 +41,7 @@ export const ProfiledRangeInput = forwardRef<HTMLInputElement, ProfiledRangeInpu
       onBeginEdit,
       onCommitEdit,
       wheelSubtarget = "control",
+      wheelPolicy = "parameter",
       disabled,
       onWheel,
       onKeyDown,
@@ -95,7 +97,9 @@ export const ProfiledRangeInput = forwardRef<HTMLInputElement, ProfiledRangeInpu
       // that gesture locally.
       if (disabled) return;
 
-      const gesture = resolveProfiledParameterWheel(event.nativeEvent, wheelSubtarget);
+      const gesture = wheelPolicy === "navigation"
+        ? resolveProfiledNavigationWheel(event.nativeEvent)
+        : resolveProfiledParameterWheel(event.nativeEvent, wheelSubtarget);
       if (gesture.preventDefault) event.preventDefault();
       if (gesture.stopPropagation) event.stopPropagation();
       if (gesture.operation !== "adjust") {
@@ -131,6 +135,7 @@ export const ProfiledRangeInput = forwardRef<HTMLInputElement, ProfiledRangeInpu
       onWheel,
       step,
       wheelSubtarget,
+      wheelPolicy,
     ]);
 
     const handlePointerDown = useCallback((event: PointerEvent<HTMLInputElement>) => {

@@ -3,6 +3,8 @@
 
 #include <JuceHeader.h>
 #include "AutomationList.h"
+#include "SendAutomation.h"
+#include "FallbackInstrumentAutomation.h"
 #include "PluginParameterCapture.h"
 #include "BuiltInParameterSupport.h"
 #include "BuiltInEffects.h"
@@ -62,6 +64,25 @@ public:
         std::vector<ScheduledMIDIEvent> events;
     };
 
+    // Prepared together on the control thread and retired as one publication.
+    struct ScheduledMIDISnapshot
+    {
+        struct Entry
+        {
+            double time=0; size_t clip=0,event=0;
+            double noteOffTime=-std::numeric_limits<double>::infinity();
+            double soundingEndTime=std::numeric_limits<double>::infinity();
+            size_t noteOffEvent=std::numeric_limits<size_t>::max();
+        };
+        std::vector<ScheduledMIDIClip> clips;
+        std::vector<Entry> chronological;
+        explicit ScheduledMIDISnapshot(std::vector<ScheduledMIDIClip> source = {});
+        bool empty() const noexcept { return clips.empty(); }
+        size_t size() const noexcept { return clips.size(); }
+        auto begin() const noexcept { return clips.begin(); }
+        auto end() const noexcept { return clips.end(); }
+    };
+
     struct RealtimeSendInfo
     {
         juce::String destTrackId;
@@ -72,6 +93,12 @@ public:
         bool enabled = false;
         bool preFader = false;
         bool phaseInvert = false;
+        int sourceChannel = 0; // First channel of the routed stereo pair.
+        std::shared_ptr<SendAutomationState> automation;
+        bool hasAutomationBinding() const noexcept
+        {
+            return automation && automation->bound.load(std::memory_order_acquire);
+        }
     };
 
     struct AutomationTarget
@@ -86,6 +113,11 @@ public:
             PreFXWidth,
             TrimVolume,
             Mute,
+            SendLevel,
+            SendPan,
+            SendMute,
+            SendTrim,
+            FallbackParameter,
             PluginParameter,
             MIDIVelocityScale,
             MIDIPitchBend,
@@ -95,11 +127,13 @@ public:
 
         Kind kind = Kind::Volume;
         AutomationList* list = nullptr;
+        SendAutomationState* sendAutomation = nullptr;
         bool isInputFX = false;
         int fxIndex = -1;
         int paramIndex = -1;
         juce::String builtInParamId;
         int midiCC = -1;
+        int fallbackIndex = -1;
     };
 
     TrackProcessor();
@@ -203,19 +237,46 @@ public:
     void setSidechainSource(int pluginIndex, const juce::String& sourceTrackId);
     void clearSidechainSource(int pluginIndex);
     juce::String getSidechainSource(int pluginIndex) const;
-    void setSidechainBuffer(const juce::AudioBuffer<float>* buffer);
+    struct SidechainRoute
+    {
+        std::shared_ptr<juce::AudioProcessor> processor;
+        juce::String sourceTrackId;
+        const juce::AudioBuffer<float>* buffer = nullptr;
+    };
+    using SidechainRoutes = std::vector<SidechainRoute>;
+    SidechainRoutes getSidechainRouteSnapshot() const;
+    // Borrowed only while the owning AudioEngine routing snapshot is pinned.
+    void setSidechainBuffers(const SidechainRoutes* buffers) noexcept;
     bool hasAnySidechainSources() const;
 
     // Sends (Phase 4 / Phase 11)
+    struct SendConfig
+    {
+        juce::String destTrackId;
+        float level = 0.5f;
+        float pan = 0.0f;
+        bool enabled = true;
+        bool preFader = false;
+        bool phaseInvert = false;
+        int sourceChannel = 0;
+        float trimDB = 0.0f;
+        std::shared_ptr<SendAutomationState> automation;
+    };
+    using SendSnapshot = std::vector<SendConfig>;
+    bool replaceSends(const SendSnapshot& replacement);
     int addSend(const juce::String& destTrackId);
     void removeSend(int sendIndex);
     void setSendLevel(int sendIndex, float level);  // 0.0 to 1.0
+    bool setSendTrim(const juce::String& destination, float db);
     void setSendPan(int sendIndex, float pan);      // -1.0 (L) to 1.0 (R)
     void setSendEnabled(int sendIndex, bool enabled);
     void setSendPreFader(int sendIndex, bool preFader);
+    bool setSendSourceChannel(int sendIndex, int sourceChannel);
+    int getSendSourceChannel(int sendIndex) const;
     int getNumSends() const;
     juce::String getSendDestination(int sendIndex) const;
     float getSendLevel(int sendIndex) const;
+    float getSendTrim(int sendIndex) const;
     float getSendPan(int sendIndex) const;
     bool getSendEnabled(int sendIndex) const;
     bool getSendPreFader(int sendIndex) const;
@@ -230,9 +291,20 @@ public:
 
     /** Pre-fader buffer (captured during processBlock, before volume/pan) */
     const juce::AudioBuffer<float>& getPreFaderBuffer() const { return preFaderBuffer; }
+    static constexpr int maxProcessingChannels = 64;
+    int getProcessingChannelCount() const { return processingChannelCount.load(std::memory_order_acquire); }
+    static void mixSendPair(const juce::AudioBuffer<float>& source, juce::AudioBuffer<float>& destination,
+                            int sourceChannel, int samples, float leftGain, float rightGain,
+                            float monoGain) noexcept;
+    void mixAutomatedSend(const RealtimeSendInfo& send, const juce::AudioBuffer<float>& source,
+                          juce::AudioBuffer<float>& destination, int samples,
+                          double timeSeconds, double sampleRate) const noexcept;
+    bool hasSendAutomation() const;
     
     // Volume & Pan
     void setVolume(float newVolume);
+    void setTrimVolume(float db) noexcept { if (std::isfinite(db)) { const auto value=juce::jlimit(-60.0f,12.0f,db); trackTrimVolumeDB.store(value); trackTrimGain.store(juce::Decibels::decibelsToGain(value)); if(trimVolumeAutomation.hasWrittenValue())trimVolumeAutomation.setWrittenValue(value); } }
+    float getTrimVolume() const noexcept { return trackTrimVolumeDB.load(std::memory_order_relaxed); }
     void setPan(float newPan);  // -1.0 (L) to 1.0 (R)
     float getVolume() const { return trackVolumeDB.load(std::memory_order_relaxed); }  // Returns dB value
     float getPan() const { return trackPan.load(std::memory_order_relaxed); }
@@ -251,6 +323,8 @@ public:
     // Mute/Solo
     void setMute(bool shouldMute);
     void setSolo(bool shouldSolo);
+    void setSoloSafe(bool safe) { soloSafe.store(safe); }
+    bool getSoloSafe() const { return soloSafe.load(); }
     bool isMute() const { return isMuted.load(); }
     bool isSolo() const { return isSoloed.load(); }
     bool getMute() const { return isMuted.load(); }  // Alias for compatibility
@@ -345,6 +419,7 @@ public:
     void resetPDCDelayState();
     void resetOfflineRenderState();
     void invalidatePluginAutomationCache() noexcept;
+    void refreshPluginAutomationMetadata(juce::AudioProcessor* processor);
 
     // DC Offset Removal
     void setDCOffsetRemoval(bool enabled)
@@ -382,7 +457,7 @@ public:
     bool getPhaseInvert() const { return phaseInverted.load(); }
 
     // Stereo Width (M/S processing, 0-200%, 100% = normal)
-    void setStereoWidth(float widthPercent) { stereoWidth.store(juce::jlimit(0.0f, 200.0f, widthPercent)); }
+    void setStereoWidth(float widthPercent);
     float getStereoWidth() const { return stereoWidth.load(); }
 
     // Master Send Enable (whether this track routes to master bus)
@@ -404,6 +479,11 @@ public:
 
     // Per-track MIDI Output
     void setMIDIOutputDevice(const juce::String& deviceName);
+    static juce::var runMIDIOutputQueueRegression();
+    juce::var getMIDIOutputDiagnostics() const;
+    void setMIDIOutputMergeKeys(bool merge);
+    bool getMIDIOutputMergeKeys() const noexcept;
+    bool isMIDIOutputPolicyPending() const noexcept;
     juce::String getMIDIOutputDeviceName() const;
     bool hasMIDIOutputDevice() const noexcept;
     void sendMIDIToOutput(const juce::MidiBuffer& buffer, double sampleRate, bool resetMessagesOnly = false);
@@ -432,8 +512,9 @@ public:
     const AutomationList& getMIDIPitchBendAutomation() const { return midiPitchBendAutomation; }
     const AutomationList& getMIDIChannelPressureAutomation() const { return midiChannelPressureAutomation; }
     bool hasPluginAutomation() const;
-    void drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events);
+    void drainPluginParameterEdits(const juce::String& trackId, juce::Array<juce::var>& events, bool finishing = false);
     void discardPluginParameterEdits(juce::AudioProcessor* processor);
+    void setPluginAutomationClock(std::shared_ptr<PluginAutomationClock> clock) { pluginAutomationClock = std::move(clock); }
     bool hasMIDIAutomation() const;
     std::optional<AutomationTarget> resolveAutomationTarget(const juce::String& parameterId, bool createIfNeeded);
     float getAutomationDefaultValue(const AutomationTarget& target) const;
@@ -502,6 +583,8 @@ private:
         const juce::AudioProcessor* targetProcessor = nullptr;
         int paramIndex = -1;
         std::shared_ptr<PluginParameterCapture::State> editorState;
+        juce::String parameterMeaning;
+        uint64_t referenceGeneration = 0;
         juce::String builtInParamId;
         float builtInMinimum = 0.0f;
         float builtInMaximum = 1.0f;
@@ -541,7 +624,7 @@ private:
     void publishFallbackSamplerSample(
         std::shared_ptr<const FallbackSamplerSample> sample);
     void publishScheduledMIDIClips(
-        std::shared_ptr<const std::vector<ScheduledMIDIClip>> snapshot);
+        std::shared_ptr<const ScheduledMIDISnapshot> snapshot);
     void reclaimRetiredScheduledMIDISnapshots();
     void resetFXContinuityStates() noexcept;
     void publishPluginAutomationRoutes(
@@ -562,7 +645,7 @@ private:
         bool isInputFX,
         int fxIndex,
         double blockTimeSeconds,
-        const PluginAutomationRouteSnapshot* routes);
+        const PluginAutomationRouteSnapshot* routes, int numSamples = 0);
     std::shared_ptr<MIDICCAutomationRoute> getOrCreateMIDICCAutomationRoute(const juce::String& parameterId);
     std::shared_ptr<MIDICCAutomationRoute> findMIDICCAutomationRoute(const juce::String& parameterId) const;
     static std::optional<int> parseMIDICCAutomationParameterId(const juce::String& parameterId);
@@ -603,6 +686,7 @@ private:
     // Mute/Solo state (atomic: set from message thread, read from audio thread)
     std::atomic<bool> isMuted { false };
     std::atomic<bool> isSoloed { false };
+    std::atomic<bool> soloSafe { false };
     
     // FX Chains (Phase 3) — stored directly, no AudioProcessorGraph wrapper
     using ProcessorPtr = std::shared_ptr<juce::AudioProcessor>;
@@ -617,16 +701,6 @@ private:
     std::vector<ProcessorPtr> trackFXPlugins;  // Playback FX
     
     // Sends (Phase 4 / Phase 11)
-    struct SendConfig
-    {
-        juce::String destTrackId;
-        float level = 0.5f;
-        float pan = 0.0f;
-        bool enabled = true;
-        bool preFader = false;
-        bool phaseInvert = false;
-    };
-    using SendSnapshot = std::vector<SendConfig>;
     struct FXBypassDelayStorage
     {
         const juce::AudioProcessor* processor = nullptr;
@@ -666,6 +740,9 @@ private:
             trackFXBypassDelay;
     };
     std::vector<SendConfig> sends;
+    std::map<juce::String, std::shared_ptr<SendAutomationState>> sendAutomationStates;
+    void prepareSendAutomation(SendConfig& send);
+    std::array<AutomationList, fallbackAutomationControls.size()> fallbackAutomation;
     std::map<int, bool> inputFXForceFloatOverrides;
     std::map<int, bool> trackFXForceFloatOverrides;
     std::map<int, bool> inputFXBypassedState;
@@ -712,12 +789,11 @@ private:
     // Maps trackFX plugin index -> source track ID that provides sidechain audio.
     // Set from the message thread, read from the audio thread.
     std::map<int, juce::String> sidechainSources;
-    // Pointer to the sidechain input buffer, set by AudioEngine before processBlock.
-    // Lifetime is managed by AudioEngine (points to a buffer that lives for the
-    // duration of the audio callback). Null when no sidechain data is available.
-    const juce::AudioBuffer<float>* sidechainInputBuffer = nullptr;
+    // Callback-owned borrowed bindings, cleared by the caller after processing.
+    const SidechainRoutes* sidechainInputs = nullptr;
 
     // Mix (Phase 1)
+    std::atomic<float> trackTrimVolumeDB { 0.0f }, trackTrimGain { 1.0f };
     std::atomic<float> trackVolumeDB { 0.0f };  // -60 to +12 dB
     std::atomic<float> trackPan { 0.0f };        // -1.0 (L) to +1.0 (R)
 
@@ -739,6 +815,7 @@ private:
     // Automation
     AutomationList volumeAutomation;
     std::map<juce::AudioProcessor*, std::unique_ptr<PluginParameterCapture>> pluginParameterCaptures;
+    std::shared_ptr<PluginAutomationClock> pluginAutomationClock;
     AutomationList panAutomation;
     AutomationList widthAutomation;
     AutomationList preFXVolumeAutomation;
@@ -820,6 +897,7 @@ private:
 
     // Pre-fader buffer (captured during processBlock for pre-fader sends)
     juce::AudioBuffer<float> preFaderBuffer;
+    std::atomic<int> processingChannelCount { 2 };
 
     // Per-track MIDI Output
     // The dispatcher object itself is immutable for the TrackProcessor
@@ -852,17 +930,17 @@ private:
     // activeMIDINotes and emits the actual reset messages in-order.
     std::atomic<bool> allNotesOffRequested { false };
 
-    std::shared_ptr<const std::vector<ScheduledMIDIClip>> scheduledMIDIClips {
-        std::make_shared<const std::vector<ScheduledMIDIClip>>()
+    std::shared_ptr<const ScheduledMIDISnapshot> scheduledMIDIClips {
+        std::make_shared<const ScheduledMIDISnapshot>()
     };
-    std::atomic<const std::vector<ScheduledMIDIClip>*>
+    std::atomic<const ScheduledMIDISnapshot*>
         scheduledMIDIClipsForAudio { nullptr };
     std::atomic<bool> hasScheduledMIDIClipsForAudio { false };
     mutable std::atomic<std::uint32_t>
         scheduledMIDIAudioReaders { 0 };
     juce::CriticalSection scheduledMIDIPublicationLock;
     juce::CriticalSection scheduledMIDIRetirementLock;
-    std::vector<std::shared_ptr<const std::vector<ScheduledMIDIClip>>>
+    std::vector<std::shared_ptr<const ScheduledMIDISnapshot>>
         retiredScheduledMIDISnapshots;
     // One immutable publication replaces nine independent atomic<shared_ptr>
     // loads on every track callback. On MSVC those free-function atomics share
@@ -896,7 +974,7 @@ private:
     int realtimeFXTailQuietSamples = 0;
     int realtimeFXTailLastPublishedBudgetSamples = 0;
     bool realtimeFXPreviousBlockHadInput = false;
-    std::array<std::array<bool, 128>, 16> activeMIDINotes {};
+    std::array<std::array<juce::uint32, 128>, 16> activeMIDINotes {};
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteActive {};
     std::array<std::array<bool, 128>, 16> fallbackInstrumentNoteReleasing {};
     std::array<std::array<float, 128>, 16> fallbackInstrumentPhase {};
@@ -951,12 +1029,12 @@ private:
                                   double sampleRate);
     void appendScheduledMIDIChaseToBuffer(
         juce::MidiBuffer& destination,
-        const std::vector<ScheduledMIDIClip>* clips,
+        const ScheduledMIDISnapshot* clips,
         double blockTimeSeconds,
         double sampleRate) const;
     void appendScheduledMIDIToBuffer(
         juce::MidiBuffer& destination,
-        const std::vector<ScheduledMIDIClip>* clips,
+        const ScheduledMIDISnapshot* clips,
         double blockTimeSeconds,
         int numSamples,
         double sampleRate) const;
@@ -967,7 +1045,7 @@ private:
         double blockTimeSeconds,
         int numSamples,
         double sampleRate,
-        const std::vector<ScheduledMIDIClip>* clips) const;
+        const ScheduledMIDISnapshot* clips) const;
 
     // ARA Plugin Hosting (Phase 9)
     mutable juce::CriticalSection araStatusLock;

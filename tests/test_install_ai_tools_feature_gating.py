@@ -22,6 +22,55 @@ def hardware(system_ram_mb: int, *, gpu_backend: str = "none", gpu_memory_mb: in
 
 
 class InstallAiToolsFeatureGatingTests(unittest.TestCase):
+    def test_only_gfx1151_selects_the_new_rocm_plan(self):
+        legacy = {"id": "legacy", "steps": []}
+        for architecture, selected in (("gfx1151", True), ("gfx1100", False)):
+            with patch.object(installer.platform, "system", return_value="Linux"), patch.object(installer.subprocess, "run", return_value=Mock(returncode=0, stdout=f"Name: {architecture}")):
+                result = installer.select_rocm_architecture_plan(legacy, "rocm")
+                self.assertEqual(result.get("id") == "linux-rocm-gfx1151-7.2", selected)
+                self.assertIs(installer.select_rocm_architecture_plan(legacy, "cuda"), legacy)
+        with patch.object(installer.platform, "system", return_value="Windows"):
+            self.assertIs(installer.select_rocm_architecture_plan(legacy, "rocm"), legacy)
+
+    def test_rocm_shared_pools_exclude_cpu_and_do_not_double_count(self):
+        output = """Agent 1
+Device Type: CPU
+Segment: GLOBAL; FLAGS: FINE GRAINED
+Size: 127098492(0x0) KB
+Allocatable: TRUE
+Agent 2
+Device Type: GPU
+Segment: GLOBAL; FLAGS: COARSE GRAINED
+Size: 102400000(0x0) KB
+Allocatable: TRUE
+Segment: GLOBAL; FLAGS: EXTENDED FINE GRAINED
+Size: 102400000(0x0) KB
+Allocatable: TRUE
+Segment: GROUP
+Size: 64(0x0) KB
+Allocatable: FALSE
+"""
+        self.assertEqual(installer._rocm_gpu_pool_memory_mb(output), 100000)
+        self.assertEqual(installer._rocm_gpu_pool_memory_mb(output.replace("Device Type: GPU", "Device Type: CPU")), 0)
+        with patch.object(installer.platform, "system", return_value="Linux"), patch.object(installer.subprocess, "run", return_value=Mock(returncode=1, stdout=output)):
+            self.assertIsNone(installer._probe_rocm_gpu())
+
+    def test_rocm_probe_preserves_native_generation_eligibility_and_memory_gate(self):
+        for memory_mb, expected in ((8192, True), (2048, False)):
+            with (
+                self.subTest(memory_mb=memory_mb),
+                patch.object(installer, "_get_system_memory_mb", return_value=32768),
+                patch.object(installer, "_probe_nvidia_gpu", return_value=None),
+                patch.object(installer, "_probe_rocm_gpu", return_value={
+                    "gpuBackend": "rocm", "gpuMemoryMb": memory_mb,
+                    "gpuMemoryDetected": True,
+                }),
+            ):
+                detected = installer.probe_hardware_requirements()
+                compatibility = installer.evaluate_feature_compatibility(detected)
+                self.assertIn("rocm", detected["requirements"][installer.FEATURE_AUDIO_GENERATION]["supportedGpuBackends"])
+                self.assertEqual(compatibility[installer.FEATURE_AUDIO_GENERATION]["compatible"], expected)
+
     def test_no_gpu_8gb_ram_allows_stem_only_and_skips_audio_backend_steps(self):
         selected_features = installer.filter_compatible_features(
             [installer.FEATURE_STEM_SEPARATION],

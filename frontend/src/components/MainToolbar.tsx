@@ -333,7 +333,7 @@ export function MainToolbar({
 
   return (
     <div
-      className="relative z-[2000] h-12 overflow-visible bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-4 shrink-0"
+      className="relative z-[2000] min-h-12 flex-wrap py-1 overflow-visible bg-neutral-900 border-b border-b-neutral-950 flex items-center px-4 gap-x-4 gap-y-1 shrink-0"
       role="toolbar"
       aria-label="Main Toolbar"
     >
@@ -518,7 +518,7 @@ export function MainToolbar({
         </Button>
       </div>
 
-      <div style={{ flex: 1 }}></div>
+      <div className="flex-1" />
 
       {/* Settings */}
       <div className="flex items-center gap-1">

@@ -34,6 +34,7 @@ export function AppUpdatePanel() {
 
   const downloading = update.status.status === "downloading";
   const storeManaged = (update.status.updateSource || update.offer?.updateSource) === "microsoft-store";
+  const nativePackage = update.status.updateSource === "linux-package";
   const installing = update.status.status === "installing";
   const progress = Math.max(0, Math.min(100, Math.round((update.status.progress ?? 0) * 100)));
   const platform = update.offer?.platform || update.status.platform;
@@ -42,7 +43,8 @@ export function AppUpdatePanel() {
   const notes = update.offer?.notes?.trim();
   const actions = <div className="flex w-full flex-wrap justify-end gap-2">
     <Button disabled={installing} onClick={() => update.setOpen(false)}>{downloading ? "Keep working" : "Later"}</Button>
-    {downloading ? <Button onClick={() => { void update.cancel(); }}>Cancel download</Button>
+    {nativePackage ? <Button variant="primary" onClick={() => { void nativeBridge.openExternalURL(update.status.releasePageUrl || "https://openstudio.org.in/download"); }}>Get Linux installer</Button>
+      : downloading ? <Button onClick={() => { void update.cancel(); }}>Cancel download</Button>
       : update.downloaded ? <Button variant="primary" disabled={update.pending || playing} onClick={() => { void update.install(); }}>{update.pending ? "Preparing update…" : modified ? "Save & prepare update" : installLabel}</Button>
       : update.offer ? <Button variant="primary" disabled={update.pending} onClick={() => { void update.download(); }}>Download update</Button>
       : <Button variant="primary" disabled={update.pending} onClick={() => { void update.check(true); }}><RefreshCw size={14} aria-hidden="true" />{update.pending ? "Checking…" : "Check for updates"}</Button>}
@@ -78,10 +80,10 @@ export function AppUpdatePanel() {
               : "Save your work, then follow the Windows installer. OpenStudio will close after the installer opens."}
         </p>}
         {update.downloaded && playing && <p role="alert" className="text-amber-400">Stop playback and recording to install.</p>}
-        <label className="flex min-h-9 cursor-pointer items-center gap-2">
+        {!nativePackage && <label className="flex min-h-9 cursor-pointer items-center gap-2">
           <input type="checkbox" checked={update.automatic} onChange={(e) => update.setAutomatic(e.target.checked)} className="size-4 accent-daw-accent" />
           Check for updates automatically
-        </label>
+        </label>}
         {storeManaged && <p className="text-daw-text-muted">Updates are delivered through Microsoft Store. Windows also follows your Microsoft Store automatic-update settings.</p>}
       </div>
     </Modal>

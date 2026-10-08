@@ -126,6 +126,7 @@ export function createNAMSessionKeyedResourceCache<T>(
 ): NAMSessionKeyedResourceCache<T> {
   const entries = new Map<string, NAMSessionCacheEntry<T>>();
   const inFlight = new Map<string, Promise<T>>();
+  let generation = 0;
 
   const prune = () => {
     while (entries.size > Math.max(1, limit)) {
@@ -164,13 +165,15 @@ export function createNAMSessionKeyedResourceCache<T>(
       const pending = inFlight.get(key);
       if (pending) return pending;
 
+      const requestGeneration = generation;
       const request = loader()
         .then((value) => {
+          if (requestGeneration !== generation) throw new NAMSessionResourceInvalidatedError();
           set(key, value);
           return value;
         })
         .finally(() => {
-          inFlight.delete(key);
+          if (inFlight.get(key) === request) inFlight.delete(key);
         });
       inFlight.set(key, request);
       return request;
@@ -179,6 +182,7 @@ export function createNAMSessionKeyedResourceCache<T>(
       entries.delete(key);
     },
     clear() {
+      generation += 1;
       entries.clear();
       inFlight.clear();
     },
@@ -228,6 +232,14 @@ export type NAMExplorerSessionView = {
 // Deliberately module-memory only. Remote TONE3000 results are never written to
 // localStorage, IndexedDB, SQLite, or the filesystem by this session layer.
 const explorerViews = new Map<string, NAMExplorerSessionView>();
+
+export function invalidateTONE3000AccountSession() {
+  namLiveSearchPageSession.clear();
+  namToneDetailSession.clear();
+  for (const [key, view] of explorerViews) {
+    if (["account-favorites", "created", "account-downloaded"].includes(view.tab)) explorerViews.delete(key);
+  }
+}
 
 export function getNAMExplorerSessionView(key: string) {
   return explorerViews.get(key);

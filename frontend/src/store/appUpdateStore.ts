@@ -43,13 +43,13 @@ export const useAppUpdateStore = create<AppUpdateState>((set, get) => ({
     set({ status, error: status.status === "error" ? status.message : null });
     if (status.status === "update-available") set({ offer: status, downloaded: false });
     if (status.status === "download-ready") set({ offer: status, downloaded: true });
-    if (status.status === "up-to-date" || status.status === "development" || status.status === "install-started" || status.status === "incompatible") set({ offer: null, downloaded: false });
+    if (status.status === "up-to-date" || status.status === "development" || status.status === "manual-update" || status.status === "install-started" || status.status === "incompatible") set({ offer: null, downloaded: false });
     if (status.status === "cancelled") set({ downloaded: false });
   },
   check: async (manual) => {
     if (manual) set({ open: true });
     if (get().pending || get().downloaded) return;
-    if (!manual && (!get().automatic || get().status.status === "development" || !nativeBridge.supportsAppUpdates())) return;
+    if (!manual && (!get().automatic || get().status.status === "development" || get().status.status === "manual-update" || !nativeBridge.supportsAppUpdates())) return;
     set({ pending: true, error: null });
     try {
       const status = await nativeBridge.checkForUpdates(manual);

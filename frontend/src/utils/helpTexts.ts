@@ -10,7 +10,7 @@ import {
   getTimelineWheelHelpSentence,
 } from "./inputProfileHelp";
 import { getShortcutPlatform } from "./platform";
-import { getKeyboardShortcutProfile } from "./shortcutProfiles";
+import { CLICK_ONLY_METRONOME_SHORTCUT, getKeyboardShortcutProfile } from "./shortcutProfiles";
 
 export interface HelpEntry {
   title: string;
@@ -69,7 +69,8 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     },
     "transport.clickOnly": {
       title: "Click-only Metronome Practice",
-      description: "In Metronome Settings, Click only plays the click with live monitoring while transport is stopped, without playing clips or moving the playhead. It follows Play/Record and continues when transport stops. Switch Enable off to stop both metronome modes. Sound, accents, volume, and render-as-track settings are shared.",
+      description: "Play click only / Stop click only in Metronome Settings toggles standalone practice, also available with the dialog closed. While transport is stopped, the click plays with live monitoring without playing clips or moving the playhead. It follows Play/Record and can resume when transport stops. Stop click only leaves Enable unchanged, so the transport-driven click can still sound during playback or recording. Sound, accents, volume, and render-as-track settings are shared.",
+      shortcut: shortcut("transport.metronomePractice", CLICK_ONLY_METRONOME_SHORTCUT),
     },
     "project.recovery": {
       title: "Recover an Interrupted Session",

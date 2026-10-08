@@ -1,0 +1,109 @@
+.synth-voice-layout {
+  grid-template-columns: 1.06fr .94fr 1.05fr;
+}
+.synth-oscillator+.synth-oscillator {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--instrument-line);
+}
+.synth-oscillator>div>label {
+  flex: 1;
+}
+.synth-oscillator-letter {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #5b624e;
+  border-radius: 4px;
+  color: var(--instrument-accent);
+}
+.synth-oscillator:last-of-type {
+  margin-bottom: 15px;
+}
+.synth-filter-identity {
+  min-height: 80px;
+  color: var(--instrument-accent);
+}
+.synth-filter-identity strong {
+  font-size: 34px;
+  font-weight: 350;
+  letter-spacing: .04em;
+}
+.synth-filter-identity span {
+  color: var(--instrument-muted);
+  font-size: 12px;
+}
+.synth-macros {
+  border-color: var(--instrument-line);
+  background: #192229;
+}
+.synth-macros>.instrument-slider {
+  flex: 1;
+  min-width: 95px;
+}
+.synth-macro-title strong {
+  letter-spacing: .12em;
+  color: var(--instrument-accent);
+}
+.synth-macro-title span {
+  color: var(--instrument-muted);
+}
+.synth-modulation-layout {
+  grid-template-columns: minmax(0,2.4fr) minmax(190px,1fr);
+}
+.synth-two-columns {
+  grid-template-columns: 1fr 1fr;
+}
+.synth-route-table {
+  max-height: 405px;
+  overflow: auto;
+}
+.synth-route-row {
+  grid-template-columns: 24px minmax(85px,1fr) minmax(100px,1.25fr) minmax(85px,1fr);
+  min-height: 68px;
+  border-bottom: 1px solid var(--instrument-line);
+}
+.synth-route-number {
+  color: var(--instrument-accent);
+  min-height: 32px;
+}
+.synth-route-number[aria-pressed=true] {
+  background: #d7b9931a;
+  border-radius: 3px;
+}
+.synth-route-row>label>span {
+  font-size: 10px;
+}
+.synth-route-row .instrument-slider label {
+  font-size: 10px;
+}
+.synth-route-row .suite-value {
+  max-width: 38px;
+}
+.synth-zone {
+  border-top: 1px solid var(--instrument-line);
+}
+.synth-zone h4 {
+  color: var(--instrument-accent);
+  font-size: 12px;
+  margin-bottom: 15px;
+}
+@container(max-width:780px) {
+  .synth-voice-layout {
+    grid-template-columns: 1fr 1fr;
+  }
+  .synth-voice-layout>.instrument-section:last-child {
+    grid-column: 1/-1;
+  }
+  .synth-modulation-layout {
+    grid-template-columns: 1fr;
+  }
+  .synth-two-columns {
+    grid-template-columns: 1fr;
+  }
+  .synth-filter-identity {
+    min-height: 50px;
+  }
+  .synth-route-table {
+    max-height: none;
+  }
+}

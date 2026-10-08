@@ -186,12 +186,14 @@ void AutomationList::endTouch()
 
 void AutomationList::resetTouchAndLatch()
 {
+    clearWrittenValue();
     isTouching.store(false, std::memory_order_release);
     latchActive.store(false, std::memory_order_release);
 }
 
 bool AutomationList::shouldPlayback() const
 {
+    if (hasPreview() || hasWrittenValue()) return true;
     switch (mode.load(std::memory_order_acquire))
     {
         case AutomationMode::Read:
@@ -209,6 +211,7 @@ bool AutomationList::shouldPlayback() const
 
 bool AutomationList::shouldPlaybackForRead() const
 {
+    if (hasPreview() || hasWrittenValue()) return true;
     return mode.load(std::memory_order_acquire) != AutomationMode::Off;
 }
 
@@ -257,6 +260,8 @@ int AutomationList::findPointBefore(const PointList& points, double timeSeconds)
 
 float AutomationList::eval(double timeSeconds) const
 {
+    if (const auto value = previewValue.load(std::memory_order_acquire); std::isfinite(value)) return value;
+    if (const auto value = writtenValue.load(std::memory_order_acquire); std::isfinite(value) && timeSeconds >= writtenStart.load(std::memory_order_relaxed)) return value;
     const ScopedAutomationPointReader readerGuard(
         pointSnapshotAudioReaders);
     const auto* const snapshot =
@@ -296,6 +301,18 @@ void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int n
 {
     if (outputBuffer == nullptr || numSamples <= 0)
         return;
+
+    if (const auto value = previewValue.load(std::memory_order_acquire); std::isfinite(value))
+    {
+        juce::FloatVectorOperations::fill(outputBuffer, value, numSamples);
+        return;
+    }
+    if (const auto value = writtenValue.load(std::memory_order_acquire); std::isfinite(value)) {
+        if(startTimeSeconds >= writtenStart.load(std::memory_order_relaxed))juce::FloatVectorOperations::fill(outputBuffer, value, numSamples);
+        else if(sampleRate > 0.0)for(int sample=0;sample<numSamples;++sample)outputBuffer[sample]=eval(startTimeSeconds+sample/sampleRate);
+        else juce::FloatVectorOperations::fill(outputBuffer,eval(startTimeSeconds),numSamples);
+        return;
+    }
 
     const ScopedAutomationPointReader readerGuard(
         pointSnapshotAudioReaders);
@@ -358,4 +375,56 @@ void AutomationList::evalBlock(double startTimeSeconds, double sampleRate, int n
             outputBuffer[i] = static_cast<float>(p0.value + (p1.value - p0.value) * fraction);
         }
     }
+}
+
+int AutomationList::deliverSampleAccuratePoints(double start, double rate, int samples, bool linearQueue,
+                                               void* context, bool (*sink)(void*, int, float)) const noexcept
+{
+    if (samples <= 0 || rate <= 0 || !std::isfinite(start) || sink == nullptr) return 0;
+    if (const auto value = previewValue.load(std::memory_order_acquire); std::isfinite(value))
+    {
+        int rejected = sink(context, 0, value) ? 0 : 1;
+        if (samples > 1 && !sink(context, samples - 1, value)) ++rejected;
+        return rejected;
+    }
+    const auto heldValue=writtenValue.load(std::memory_order_acquire);
+    const bool scheduled=std::isfinite(heldValue);
+    const auto heldStart=writtenStart.load(std::memory_order_relaxed);
+    if (scheduled && start >= heldStart) {
+        int rejected = sink(context, 0, heldValue) ? 0 : 1;
+        if (samples > 1 && !sink(context, samples - 1, heldValue)) ++rejected;
+        return rejected;
+    }
+    const ScopedAutomationPointReader guard(pointSnapshotAudioReaders);
+    const auto* points = pointsSnapshotForAudio.load(std::memory_order_seq_cst);
+    const bool hasPoints=points && !points->empty();
+    if (!hasPoints && !scheduled) return 0;
+    const auto interpolationMode = interpolation.load(std::memory_order_acquire);
+    int index = hasPoints ? findPointBefore(*points, start) : -1, previousIndex = index, rejected = 0;
+    float previousValue = std::numeric_limits<float>::quiet_NaN();
+    const int size = hasPoints ? static_cast<int>(points->size()) : 0;
+    bool previousHeld=false;
+    for (int sample = 0; sample < samples; ++sample)
+    {
+        const double time = start + static_cast<double>(sample) / rate;
+        while (index < size - 1 && (*points)[static_cast<size_t>(index + 1)].timeSeconds <= time + 1.0e-12) ++index;
+        float value = !hasPoints ? defaultValue.load(std::memory_order_relaxed) : index < 0 ? points->front().value : (*points)[static_cast<size_t>(index)].value;
+        if (index >= 0 && index < size - 1 && interpolationMode != AutomationInterpolation::Discrete)
+        {
+            const auto& a = (*points)[static_cast<size_t>(index)];
+            const auto& b = (*points)[static_cast<size_t>(index + 1)];
+            double fraction = (time - a.timeSeconds) / juce::jmax(1.0e-20, b.timeSeconds - a.timeSeconds);
+            if (interpolationMode == AutomationInterpolation::Exponential) fraction *= fraction;
+            value = static_cast<float>(a.value + (b.value - a.value) * fraction);
+        }
+        const bool holding=scheduled && time + 1.0e-12 >= heldStart;
+        if(holding)value=heldValue;
+        const bool beforeJoin=scheduled && !holding && time + 1.0/rate + 1.0e-12 >= heldStart;
+        const bool beforeKnot = !holding && index < size - 1 && (*points)[static_cast<size_t>(index + 1)].timeSeconds <= time + 1.0 / rate + 1.0e-12;
+        const bool emit = sample == 0 || sample == samples - 1 || (linearQueue && (holding != previousHeld || beforeJoin || (!holding && index != previousIndex) || beforeKnot))
+            || ((!linearQueue || interpolationMode == AutomationInterpolation::Exponential) && value != previousValue);
+        if (emit && std::isfinite(value) && !sink(context, sample, value)) ++rejected;
+        previousValue = value; previousIndex = index;previousHeld=holding;
+    }
+    return rejected;
 }

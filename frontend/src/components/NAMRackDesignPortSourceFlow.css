@@ -69,7 +69,7 @@
   padding: clamp(8px, .62cqw, 16px);
   gap: clamp(5px, .45cqw, 12px);
 }
-.source-flow-workspace .tone-source-flow button {
+.source-flow-workspace .tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   min-height: clamp(24px, 1.4cqw, 38px);
   font-size: clamp(10px, .56cqw, 15px);
 }
@@ -112,7 +112,7 @@
 .tone-source-flow .tone-detail-panel { grid-column: 3; grid-row: 2; }
 .tone-source-flow .tone-audition-status { grid-column: 1/-1; grid-row: 3; }
 .tone-return-button,
-.tone-source-flow button {
+.tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   min-height: max(11px,.86cqw);
   border: 1px solid rgba(31,42,58,.22);
   border-radius: 3px;
@@ -562,7 +562,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  container-type: inline-size;
+  container: nam-source-flow / size;
   pointer-events: auto;
   background:
     radial-gradient(circle at 50% 0, rgba(224,161,73,.075), transparent 38%),
@@ -596,7 +596,7 @@
   background: linear-gradient(180deg, #181c23, #12151a);
 }
 .nam-rack-source-flow-design-port .tone-return-button,
-.nam-rack-source-flow-design-port .tone-source-flow button {
+.nam-rack-source-flow-design-port .tone-source-flow button:not(:where(.tone3000-browse-button, .tone3000-loaded-tone)) {
   border-color: rgba(255,255,255,.12);
   color: #b9bec6;
   background: #191d24;
@@ -758,7 +758,7 @@
 .nam-rack-source-flow-design-port .source-flow-workspace .tone-source-v2 {
   inset: clamp(11px, 1.5vh, 18px) clamp(12px, 1.2vw, 20px) clamp(10px, 1.4vh, 16px);
   display: grid;
-  grid-template: 58px minmax(0,1fr) / minmax(0,1fr);
+  grid-template: auto minmax(0,1fr) / minmax(0,1fr);
   gap: 0;
   padding: 0;
   overflow: hidden;
@@ -769,11 +769,13 @@
   box-shadow: 0 26px 70px rgba(0,0,0,.48), inset 0 1px rgba(255,255,255,.03);
 }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-source-header {
+  min-height: 58px;
+  flex-wrap: wrap;
   grid-column: 1;
   grid-row: 1;
   display: flex;
-  gap: 15px;
-  padding: 0 16px;
+  gap: 12px;
+  padding: 4px 16px;
   border: 0;
   border-bottom: 1px solid rgba(255,255,255,.08);
   border-radius: 0;
@@ -840,7 +842,7 @@
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0,1fr) clamp(330px, 25vw, 382px);
+  grid-template-columns: minmax(0,1fr) clamp(330px, 29cqw, 430px);
   overflow: hidden;
 }
 .nam-rack-source-flow-design-port .tone-selected-stage {
@@ -848,10 +850,11 @@
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(210px,1fr) auto auto auto;
+  grid-template-rows: minmax(130px,1fr) repeat(3, max-content);
   gap: 10px;
   padding: clamp(17px, 2vw, 28px);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
     radial-gradient(ellipse at 50% 38%, rgba(229,156,71,.14), transparent 40%),
     linear-gradient(180deg, rgba(8,10,13,.18), rgba(7,8,10,.86));
@@ -947,6 +950,7 @@
   z-index: 2;
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
@@ -962,6 +966,9 @@
   z-index: 2;
   width: 100%;
   display: grid;
+  grid-template-columns: repeat(var(--tone-action-count, 1), minmax(0, 1fr));
+  grid-auto-rows: max-content;
+  max-width: var(--tone-action-width, none);
   gap: 8px;
 }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button {
@@ -1008,8 +1015,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 17px 14px 14px;
+  gap: 7px;
+  padding: 12px;
   overflow-x: hidden;
   overflow-y: auto;
   border: 0;
@@ -1020,11 +1027,12 @@
 }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel > * { flex-shrink: 0; }
 .nam-rack-source-flow-design-port .tone-compact-selection { display: none; }
-.nam-rack-source-flow-design-port .tone-library-heading { min-width: 0; display: flex; justify-content: space-between; gap: 12px; }
+.nam-rack-source-flow-design-port .tone-library-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .nam-rack-source-flow-design-port .tone-library-heading > div { min-width: 0; display: grid; gap: 3px; }
 .nam-rack-source-flow-design-port .tone-library-heading span { color: #d99b49; font-size: 9px; font-weight: 780; letter-spacing: .13em; text-transform: uppercase; }
 .nam-rack-source-flow-design-port .tone-library-heading strong { overflow: hidden; color: #f0f1f2; font-size: 16px; font-weight: 710; text-overflow: ellipsis; white-space: nowrap; }
-.nam-rack-source-flow-design-port .tone-library-heading em { flex: none; padding-top: 3px; color: #707883; font-size: 10px; font-style: normal; }
+.nam-rack-source-flow-design-port .tone-library-heading .tone-connection-state { flex: none; gap: 6px; }
+.nam-rack-source-flow-design-port .tone-library-heading .tone-connection-state span { color: #a3a9b1; font-size: 10px; letter-spacing: 0; text-transform: none; }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-search-panel {
   min-width: 0;
   display: grid;
@@ -1058,9 +1066,10 @@
   background: transparent;
 }
 .nam-rack-source-flow-design-port .tone-search-panel button svg { width: 15px; height: 15px; }
-.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; }
+.nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button {
-  min-width: 0;
+  flex: 1 1 calc(33.333% - 4px);
+  min-width: 74px;
   min-height: 33px;
   padding: 0 5px;
   border-color: transparent;
@@ -1099,8 +1108,8 @@
   font-size: 9px;
 }
 .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list {
-  flex: 1 0 76px;
-  min-height: 76px;
+  flex: 1 1 96px;
+  min-height: 96px;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -1281,14 +1290,13 @@
 .nam-rack-source-flow-design-port .tone-feed-skeleton { height: 76px; border-radius: 5px; background: linear-gradient(100deg, #11151a 10%, #1b2027 30%, #11151a 50%); background-size: 220% 100%; animation: tone-library-shimmer 1.3s linear infinite; }
 .nam-rack-source-flow-design-port .tone-compact-capture-picker { display: none; }
 
-@media (max-width: 1120px) {
+@container nam-source-flow (max-width: 1120px) {
   .nam-rack-source-flow-design-port .tone-source-v2-workspace { grid-template-columns: minmax(0,1fr) 305px; }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel { padding-left: 11px; padding-right: 11px; }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row { grid-template-columns: 66px minmax(0,1fr) 62px; gap: 8px; }
   .nam-rack-source-flow-design-port .tone-row-art { width: 66px; height: 49px; }
   .nam-rack-source-flow-design-port .tone-selected-stats { display: none; }
   .nam-rack-source-flow-design-port .tone-row-side > em { display: none; }
-  .nam-rack-source-flow-design-port .tone-action-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-action-grid button { min-width: 0; padding-inline: 8px; }
   .nam-rack-source-flow-design-port .tone-feed-empty {
     min-height: 146px;
@@ -1303,7 +1311,7 @@
   }
   .nam-rack-source-flow-design-port .tone-library-panel:has(.tone-feed-empty)::after { display: none; }
 }
-@media (max-width: 960px) {
+@container nam-source-flow (max-width: 960px) {
   .nam-rack-source-flow-design-port .tone-source-v2-workspace { grid-template-columns: minmax(0,1fr); }
   .nam-rack-source-flow-design-port .tone-selected-stage { display: none; }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel {
@@ -1319,22 +1327,63 @@
   }
   .nam-rack-source-flow-design-port .tone-compact-selection {
     min-width: 0;
-    min-height: 44px;
-    display: grid;
-    grid-template-columns: minmax(116px,1fr) minmax(0,70vw);
-    align-items: center;
-    gap: 9px;
-    padding: 5px 7px;
+    min-height: 38px;
+    max-height: min(260px, 45cqh);
+    display: block;
+    overflow: auto;
     border: 1px solid rgba(224,161,73,.2);
     border-radius: 5px;
     background: linear-gradient(90deg, rgba(224,161,73,.075), rgba(255,255,255,.018));
   }
+  .nam-rack-source-flow-design-port .tone-compact-selection-summary {
+    min-width: 0;
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 9px;
+    padding: 6px 8px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .nam-rack-source-flow-design-port .tone-compact-selection-summary::-webkit-details-marker { display: none; }
+  .nam-rack-source-flow-design-port .tone-compact-selection-summary svg { width: 16px; height: 16px; flex: none; }
+  .nam-rack-source-flow-design-port .tone-compact-selection[open] > summary svg { transform: rotate(90deg); }
+  .nam-rack-source-flow-design-port .tone-compact-selection-summary:focus-visible { outline: 2px solid #efb766; outline-offset: -3px; }
   .nam-rack-source-flow-design-port .tone-compact-selection-copy { min-width: 0; display: grid; gap: 2px; }
   .nam-rack-source-flow-design-port .tone-compact-selection-copy span { color: #b47c37; font-size: 7px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
   .nam-rack-source-flow-design-port .tone-compact-selection-copy strong { overflow: hidden; color: #e8e9eb; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-  .nam-rack-source-flow-design-port .tone-compact-selection .tone-action-grid { width: min(620px,70vw); max-width: none; gap: 5px; }
+  .nam-rack-source-flow-design-port .tone-compact-selection .tone-action-grid { width: 100%; max-width: none; gap: 5px; }
   .nam-rack-source-flow-design-port .tone-source-v2 .tone-compact-selection .tone-action-grid button { min-width: 0; min-height: 32px; padding: 0 6px; font-size: 8px; white-space: nowrap; }
-  .nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb span { display: none; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-breadcrumb { display: none; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row { flex-wrap: nowrap; overflow-x: auto; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button { flex: 1 0 auto; }
+}
+@container nam-source-flow (max-width: 600px) {
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel { padding: 10px; gap: 6px; }
+  .nam-rack-source-flow-design-port .tone-library-heading strong { font-size: 14px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-row { grid-template-columns: 58px minmax(0,1fr) 74px; gap: 7px; }
+  .nam-rack-source-flow-design-port .tone-row-art { width: 58px; height: 49px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-filter-row { flex-wrap: wrap; }
+  .nam-rack-source-flow-design-port .tone-filter-row select { flex-basis: 90px; }
+}
+@container nam-source-flow (max-width: 480px) {
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-source-header { gap: 4px 10px; padding: 6px 10px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone3000-library-header { flex-basis: 100%; max-width: none; margin-left: 0; }
+}
+@container nam-source-flow (max-height: 500px) {
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-source-header { min-height: 50px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-library-panel { gap: 4px; padding: 8px 10px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-feed-list { flex-basis: 88px; min-height: 88px; padding-bottom: 0; -webkit-mask-image: none; mask-image: none; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-row-stats { display: none; }
+  .nam-rack-source-flow-design-port .tone-feed-row .tone3000-avatar { width: 18px; height: 18px; font-size: 8px; }
+  .nam-rack-source-flow-design-port .tone-compact-selection { min-height: 32px; }
+  .nam-rack-source-flow-design-port .tone-compact-selection-summary { min-height: 32px; padding-block: 4px; }
+  .nam-rack-source-flow-design-port .tone-source-v2 .tone-tab-row button { min-height: 30px; }
+  .nam-rack-source-flow-design-port .tone-library-pager { padding-top: 5px; }
+}
+@media (max-height: 699px) {
+  .nam-rack-source-flow-design-port .premium-source-shell { grid-template-rows: 100px 40px minmax(0,1fr) 40px; }
 }
 /* One-dimensional Flex ownership helpers. */
 .tone-source-header > :nth-child(2) {
@@ -1346,14 +1395,14 @@
   flex: 1 1 auto;
 }
 .nam-rack-source-flow-design-port .tone-selected-stage[data-has-captures="true"] {
-  grid-template-rows: minmax(180px, 1fr) auto minmax(210px, .9fr) auto auto;
+  grid-template-rows: minmax(120px, 1fr) max-content minmax(130px, .9fr) max-content max-content;
 }
 .nam-rack-source-flow-design-port .tone-selected-stage[data-has-captures="true"] > .tone-selected-visual { grid-row: 1; }
 .nam-rack-source-flow-design-port .tone-selected-stage[data-has-captures="true"] > .tone-selected-info { grid-row: 2; }
 .nam-rack-source-flow-design-port .tone-selected-stage > .nam-tone-capture-picker {
   position: relative;
   z-index: 2;
-  min-height: 150px;
+  min-height: 130px;
 }
 .nam-rack-source-flow-design-port .tone-selected-stage[data-has-captures="true"] > .nam-tone-capture-picker { grid-row: 3; }
 .nam-rack-source-flow-design-port .tone-selected-stage[data-has-captures="true"] > .tone-action-grid { grid-row: 4; }

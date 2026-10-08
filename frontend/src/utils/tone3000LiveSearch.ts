@@ -1,6 +1,7 @@
 export const TONE3000_QUERY_DEBOUNCE_MS = 400;
 
 export type TONE3000LiveSearchSnapshotInput = {
+  accountKey?: string;
   query: string;
   page: number;
   pageSize: number;
@@ -17,6 +18,7 @@ export type TONE3000LiveSearchSnapshotInput = {
 };
 
 export type TONE3000LiveSearchSnapshot = Readonly<{
+  accountKey?: string;
   query: string;
   page: number;
   pageSize: number;
@@ -37,6 +39,7 @@ export type TONE3000LiveSearchSnapshot = Readonly<{
 function stableSearchFields(input: TONE3000LiveSearchSnapshotInput) {
   const query = input.query.trim();
   return {
+    ...(input.accountKey ? { accountKey: input.accountKey } : {}),
     query,
     pageSize: Math.max(1, Math.floor(input.pageSize)),
     targetPageSize: Math.max(1, Math.floor(input.targetPageSize)),

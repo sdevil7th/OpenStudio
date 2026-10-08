@@ -74,7 +74,7 @@ Use this flow instead:
 8. Verify the published direct-download URLs:
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-Setup-x64.exe`
    - `https://github.com/<org>/<repo>/releases/latest/download/OpenStudio-macOS.dmg`
-   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-linux-x86_64.AppImage`
+   - `https://github.com/<org>/<repo>/releases/download/v<version>/OpenStudio-<version>-x86_64.AppImage`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-windows-base-x64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-macos-arm64.zip`
    - `https://github.com/<org>/<repo>/releases/download/<ai-runtime-tag>/OpenStudio-AI-Runtime-linux-cpu-x64.zip`
@@ -112,8 +112,20 @@ If a release page shows only GitHub's default source archives, treat that as a f
 - Windows setup, CMake configuration, and runtime validation fail if any pinned
   FFmpeg runtime, manifest, source-lock, license, or provenance file is absent
   or altered.
-- Linux release automation extracts the completed AppImage and reruns the
-  runtime-bundle contract against its packaged `usr/bin` payload.
+- Linux release/verification workflows now target Ubuntu 22.04 and audit the
+  complete AppDir's ELF dependencies with a glibc 2.35 ceiling. Native `.deb`
+  installation, packaged window/render/engine checks, and finished-AppImage
+  window tests accompany the existing runtime-bundle contract. These workflow
+  edits require a successful remote run before release qualification.
+- Linux build provenance is produced by the pinned GitHub attestation action.
+  Verify an actual published artifact with `gh attestation verify <artifact>
+  --repo sdevil7th/OpenStudio`. This authenticates build provenance, not a
+  malware-free promise or an Ubuntu local-file publisher badge. Production RPM
+  and repository signing and the Snap publisher account remain separate gates.
+- The new AppImage name omits `linux`; old release assets are unchanged. The
+  updater's manifest/appcast fields and Linux stable redirect keep their existing
+  AppImage meaning. Native download choices must be qualified and exposed
+  separately rather than redirecting an old AppImage client to a `.deb`.
 
 ## Dependency contract
 
@@ -252,6 +264,10 @@ That publish-asset set contains:
 
 The website repo should fetch those assets after the desktop release publishes, place them into its deploy-input area, and then deploy `openstudio.org.in`.
 
+The `publish-website` job dispatches that work after successful GitHub publication.
+It runs independently of `submit-store`, so a website credential or dispatch failure
+remains a visible workflow failure without suppressing the Store submission.
+
 ## Manual fallback
 
 Use `tools/prepare-public-release.ps1` only when GitHub Actions is unavailable or you need an emergency manual release bundle.
@@ -270,7 +286,7 @@ The default base app no longer bundles the optional stem-separation Python runti
 ## Secrets expected by GitHub Actions
 
 For the current release path, `OPENSTUDIO_WEBSITE_DISPATCH_TOKEN` must be set
-directly as a GitHub Actions secret because the publish job intentionally does
+directly as a GitHub Actions secret because the website dispatch job intentionally does
 not receive Doppler credentials. `DOPPLER_TOKEN` is an optional bootstrap for
 the allowlisted build/signing values used inside their specific build steps; it
 does not replace the website dispatch secret. Signing/notarization secrets stay
@@ -518,7 +534,8 @@ Implement it as a dependent job in the existing Release workflow, not a second
 trigger another workflow). Use the same source and Release binaries as the desktop
 release. Submit only after the GitHub release job succeeds. Preserve the Store's
 existing audience, publishing schedule, privacy URL, ratings, screenshots and
-other listing settings. Publishing a GitHub release does not skip certification.
+other listing settings, except an explicitly reviewed publication-mode override.
+Publishing a GitHub release does not skip certification.
 
 1. Validate a stable numeric version and exact-version release notes.
 2. Build the MSIX from the Windows release payload using the existing pinned
@@ -612,12 +629,17 @@ Microsoft tenant or approve the initial Store listing. It stays inactive until:
    `true` before the release tag. The job's mandatory live preflight must pass
    before submission can mutate the draft. The app identity is fixed to Store ID
    `9N3MQ442VXGW` and the reserved publisher. Restrict the `microsoft-store`
-   environment to `v*` tags; branch runs cannot access its credentials. The job
-   also rejects a manually dispatched version that differs from its tag.
+   environment to `v*` tags; branch runs cannot access its credentials. When Store
+   automation is enabled, initial validation rejects branch dispatches and tag
+   refs that differ from the requested version before any build begins. Select
+   the matching existing release tag when dispatching manually. Branch dispatch
+   remains available when Store automation is disabled; an enabled Store gate
+   cannot be skipped to publish a GitHub-only release.
 5. Push the normal stable release tag. The `submit-store` job follows `publish`.
    To require a human gate, configure required reviewers on the `microsoft-store`
    environment. With no reviewer gate, submission is automatic. The existing
-   Partner Center publish mode remains authoritative after certification.
+   Partner Center publish mode remains authoritative after certification, except
+   for an explicitly reviewed release override described below.
 
 Once automation adopts the initial draft, make further updates through the API.
 Do not edit an API-created pending submission in Partner Center: Microsoft warns
@@ -627,12 +649,29 @@ On timeout/failure, the job records the submission ID and status without tokens
 or SAS upload URLs. Rerun failed jobs to resume the same release artifact. A new
 package with a different hash requires a new version, not an overwrite.
 
+### Publication after certification
+
+The owner approved automatic publication for `v0.1.04`.
+`packaging/msix/release-publishing.json` pins that tag and Store app to API
+`targetPublishMode=Immediate`. Both live preflights and submission use the same
+config. This changes only the matching update's publication timing; pricing,
+audience, artwork and other listing settings stay as saved. Other tags preserve
+their baseline mode. Initial unpublished drafts still require their manual hold.
+Review any future override as part of that release rather than reusing this pin.
+
+`Immediate` means publication after Microsoft certification, not skipping it.
+The submission job reports accepted ingestion; monitor Partner Center for final
+certification/publication and verify the Store-installed upgrade separately.
+See Microsoft's [publication options](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/manage-submission-options#publishing-hold-options)
+and [API publish modes](https://learn.microsoft.com/en-us/windows/uwp/monetize/manage-app-submissions#app-submission-resource).
+
 ### Package-page warning
 
 `runFullTrust` is required by this packaged Win32 DAW. It runs at the user's
 normal medium-integrity level, not as administrator. Saving the package section
 is safe; the warning requires an explanation/approval during certification.
-Suggested explanation for the restricted-capability/Notes for certification field:
+Suggested explanation for the restricted-capability justification field (keep
+it within the portal's 500-character limit):
 
 > OpenStudio is a JUCE-based Win32 digital audio workstation packaged as MSIX.
 > It requires runFullTrust to run its native audio/MIDI engine, access user-selected
@@ -640,6 +679,14 @@ Suggested explanation for the restricted-capability/Notes for certification fiel
 > and crash-reporting helper processes. The application runs as the signed-in user
 > at medium integrity and does not require administrator elevation. Microsoft Store
 > installations use Store APIs for application updates.
+
+The capability justification is separate from **Notes for certification** and
+the API's `notesForCertification` field. Put release metadata and automation
+markers in certification notes, never in the capability justification. The
+submission API does not document a capability-justification field; do not guess
+one or edit an API-created draft in the portal. If Microsoft requests renewed
+capability approval, resolve that request deliberately before retrying submission.
+Microsoft documents [capability approval separately from certification notes](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/manage-submission-options#restricted-capabilities).
 
 Keep Windows Desktop selected. Other device families are not qualified. The
 AArch32 notice is unrelated to this x64 package. The separate future-device-family

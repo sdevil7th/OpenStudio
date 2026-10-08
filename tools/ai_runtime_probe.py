@@ -369,22 +369,63 @@ def find_local_ace_native_assets(
     return found, searched_roots
 
 
+def resolve_music_gen_snapshot(root: Path, model_repo: str = DEFAULT_MUSIC_GEN_MODEL_REPO) -> Path | None:
+    """Resolve one complete local snapshot for setup, preflight and inference.
+
+    Prefer the configured cache; also reuse the user's standard Hugging Face
+    cache. Never fetch a model or combine components from different snapshots.
+    """
+    candidates = [root]
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        for cache in (str(root), None):
+            index = try_to_load_from_cache(model_repo, "model_index.json", cache_dir=cache)
+            if isinstance(index, str):
+                candidates.append(Path(index).parent)
+    except (ImportError, OSError, ValueError):
+        pass
+    for candidate in candidates:
+        required = ["model_index.json", "scheduler/scheduler_config.json", "tokenizer/tokenizer.json"]
+        for component, basename in (("vae", "diffusion_pytorch_model"), ("condition_encoder", "diffusion_pytorch_model"),
+                                    ("transformer", "diffusion_pytorch_model"), ("text_encoder", "model")):
+            required.append(f"{component}/config.json")
+            weights = candidate / component / f"{basename}.safetensors"
+            if weights.is_file():
+                required.append(f"{component}/{basename}.safetensors")
+            else:
+                index_path = candidate / component / f"{basename}.safetensors.index.json"
+                try:
+                    shards = set(json.loads(index_path.read_text())["weight_map"].values())
+                    if not shards or any(not isinstance(shard, str) or Path(shard).name != shard for shard in shards):
+                        raise ValueError("Invalid weight index")
+                    required.extend(f"{component}/{shard}" for shard in shards)
+                except (OSError, ValueError, KeyError, TypeError):
+                    required.append(f"{component}/{basename}.safetensors")
+        try:
+            if all((candidate / name).is_file() and (candidate / name).stat().st_size > 0 for name in required):
+                return candidate.resolve()
+        except OSError:
+            pass
+    return None
+
+
 def get_music_generation_required_paths(
     checkpoint_root: str = "",
     model_name: str = DEFAULT_MUSIC_GEN_MODEL,
 ) -> dict[str, Any]:
     root = resolve_music_gen_checkpoint_root(checkpoint_root)
+    snapshot = resolve_music_gen_snapshot(root)
 
     return {
         "checkpointRoot": str(root),
         "modelId": model_name,
         "modelRepoId": DEFAULT_MUSIC_GEN_MODEL_REPO,
         "sharedRepoId": DEFAULT_MUSIC_GEN_SHARED_REPO,
-        "mainModelPath": "",
+        "mainModelPath": str(snapshot) if snapshot else "",
         "sharedPaths": [],
         "requiredPaths": [],
-        "missingPaths": [],
-        "layoutValid": True,
+        "missingPaths": [] if snapshot else [str(root / "model_index.json")],
+        "layoutValid": snapshot is not None,
         "requiredAssets": [],
     }
 
@@ -414,6 +455,14 @@ def get_music_runtime_profiles(checkpoint_root: str = "") -> dict[str, Any]:
         "unavailableProfiles": unavailable_profiles,
         "warmSessionCapable": True,
     }
+
+
+def is_nonempty_model_file(path: Path) -> bool:
+    """Reject missing, empty and non-file model downloads without loading weights."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def probe_runtime_capabilities(
@@ -481,7 +530,12 @@ def probe_runtime_capabilities(
     }
 
     if models_dir and model_name:
-        report["modelInstalled"] = (Path(models_dir) / model_name).exists()
+        model_path = Path(models_dir) / model_name
+        report["modelInstalled"] = is_nonempty_model_file(model_path)
+        if model_name == "BS-Roformer-SW.ckpt":
+            report["modelInstalled"] = report["modelInstalled"] and is_nonempty_model_file(
+                model_path.with_suffix(".yaml")
+            )
 
     runtime_profiles = get_music_runtime_profiles(music_checkpoint_root)
     report["musicGenerationRuntimeProfiles"] = runtime_profiles["profiles"]
@@ -552,6 +606,9 @@ def probe_runtime_capabilities(
             error_code="missing_ace_diffusers_runtime",
         )
         report["backendDecisionTrace"].append("diffusers package not installed")
+    elif not report["musicGenerationLayoutValid"]:
+        _set_music_generation_status(report, ready=False, message="ACE-Step model files are missing or incomplete. Run Audio Generation setup.",
+                                     error_code="music_generation_model_missing")
     else:
         bridge_import_ok, bridge_import_error = _can_import_music_generation_bridge()
         if bridge_import_ok:
@@ -564,7 +621,7 @@ def probe_runtime_capabilities(
             report["musicGenerationPerformanceReady"] = cuda_available
             report["musicGenerationPerformanceStatusMessage"] = (
                 f"ACE-Step uses {selected.name}. "
-                + ("CUDA runtime is available." if cuda_available else
+                + (f"{selected.family.upper()} runtime is available." if cuda_available else
                    "This device route requires model and performance qualification."))
             _set_music_generation_status(report, ready=True, message="ACE-Step Diffusers backend is ready.")
         else:

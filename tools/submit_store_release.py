@@ -141,6 +141,19 @@ def load_initial_config(path: Path) -> dict:
     return config
 
 
+def load_publishing_config(path: Path) -> dict:
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
+    if (not isinstance(config, dict) or set(config) != {"appId", "releaseTag", "targetPublishMode"}
+            or not all(isinstance(value, str) for value in config.values())
+            or config["appId"] != APP_ID or not config["releaseTag"].startswith("v")
+            or config["targetPublishMode"] not in {"Immediate", "Manual"}):
+        # SpecificDate needs a separately reviewed date; this config cannot
+        # silently reuse the published submission's old schedule.
+        raise StoreError("Invalid release publishing configuration; use an exact stable tag and Immediate or Manual mode.")
+    package_version(config["releaseTag"])
+    return config
+
+
 def json_digest(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -222,8 +235,11 @@ def prepare_initial_submission(pending: dict, config: dict, package: Path, versi
     return prepare_submission(updated, package, notes, expected)
 
 
-def prepare_submission(submission: dict, package: Path, notes: str, expected: str) -> dict:
+def prepare_submission(submission: dict, package: Path, notes: str, expected: str,
+                       *, target_publish_mode=None) -> dict:
     updated = copy.deepcopy(submission)
+    if target_publish_mode is not None:
+        updated["targetPublishMode"] = target_publish_mode
     packages = updated.get("applicationPackages", [])
     replaced = 0
     retained = []
@@ -252,6 +268,35 @@ def prepare_submission(submission: dict, package: Path, notes: str, expected: st
     if len(updated["notesForCertification"]) > 2000:
         raise StoreError("Certification notes plus automation marker exceed 2000 characters; shorten the notes first.")
     return updated
+
+
+def update_settings_digest(submission: dict) -> str:
+    # Partner Center assigns each cloned submission a new display name. All
+    # actual listing/settings changes still need to match the published baseline.
+    settings = copy.deepcopy(submission)
+    settings.pop("friendlyName", None)
+    return initial_settings_digest(settings)
+
+
+def validate_update_resume(pending: dict, published: dict, submission_id: str,
+                           package: Path, notes: str, expected: str, *, target_publish_mode=None):
+    prepared = prepare_submission(published, package, notes, expected, target_publish_mode=target_publish_mode)
+    if (pending.get("id") != submission_id
+            or pending.get("notesForCertification") != prepared.get("notesForCertification")
+            or update_settings_digest(pending) != update_settings_digest(prepared)):
+        raise StoreError("Update submission identity, release marker or published settings changed; refusing to resume.")
+    english = [value for language, value in pending.get("listings", {}).items() if language.lower() == "en-us"]
+    if len(english) != 1 or english[0].get("baseListing", {}).get("releaseNotes") != notes:
+        raise StoreError("Update submission release notes changed; refusing to commit.")
+    if pending.get("status") == "PendingCommit":
+        packages = pending.get("applicationPackages", [])
+        wanted = prepared["applicationPackages"]
+        # Preserve every existing package and require the upload ZIP's exact
+        # filename. The server may add metadata to the new pending-upload entry.
+        if len(packages) != len(wanted) or any(
+                sum(all(item.get(key) == value for key, value in target.items()) for item in packages) != 1
+                for target in wanted):
+            raise StoreError("Update submission package replacement changed; refusing to upload or commit.")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -314,9 +359,12 @@ def submission_path(submission_id: str) -> str:
 
 
 def submit(api, package: Path, version: str, sha256: str, notes: str, record,
-           *, initial_config=None, release_tag=None, preflight_only=False, max_polls=40, sleep=time.sleep):
+           *, initial_config=None, publishing_config=None, release_tag=None,
+           preflight_only=False, max_polls=40, sleep=time.sleep):
     base = f"/applications/{APP_ID}"
     expected = marker(version, sha256, notes)
+    requested_mode = (publishing_config["targetPublishMode"]
+                      if publishing_config and release_tag == publishing_config["releaseTag"] else None)
     if digest(package) != sha256:
         raise StoreError("Package changed after validation; refusing to contact the Store.")
     app = api.request("GET", base)
@@ -327,9 +375,11 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
     initial = not published_id
     record(initialSubmission=initial)
     if not published_id:
+        if requested_mode is not None:
+            raise StoreError("Release publishing overrides require a published baseline; the initial draft must keep its manual hold.")
         pending = api.request("GET", submission_path(pending_id)) if pending_id else None
         if pending is not None:
-            record(submissionId=pending_id, observedStoreStatus=safe_status(pending))
+            record(submissionId=pending_id, observedStoreStatus=safe_status(pending), targetPublishMode="Manual")
         if (not initial_config or pending_id != initial_config["submissionId"]
                 or release_tag != initial_config["releaseTag"]
                 or version != package_version(initial_config["releaseTag"])):
@@ -355,7 +405,15 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
     else:
         published = api.request("GET", submission_path(published_id))
         record(publishedSubmissionId=published_id, observedStoreStatus=safe_status(published))
+        effective_mode = requested_mode or published.get("targetPublishMode")
+        if effective_mode not in {"Immediate", "Manual", "SpecificDate"}:
+            raise StoreError("Published submission has an unknown publishing mode; review it in Partner Center.")
+        record(targetPublishMode=effective_mode)
+        if requested_mode is not None:
+            record(publishingPolicyTag=publishing_config["releaseTag"])
         if owns(published, expected):
+            if requested_mode is not None and published.get("targetPublishMode") != requested_mode:
+                raise StoreError("The published artifact has a different publishing mode from the reviewed release policy.")
             record(submissionId=published_id, status="Published", alreadySubmitted=True)
             return
         for item in published.get("applicationPackages", []):
@@ -366,17 +424,31 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
             record(submissionId=pending_id, observedStoreStatus=safe_status(pending))
             if not owns(pending, expected):
                 raise StoreError("An unrelated or unmarked submission is pending. Resolve it manually; automation will not overwrite or delete it.")
+            validate_update_resume(pending, published, pending_id, package, notes, expected,
+                                   target_publish_mode=requested_mode)
         else:
             # Validate preservation/coverage/notes before making the first mutation.
-            prepare_submission(published, package, notes, expected)
+            prepare_submission(published, package, notes, expected, target_publish_mode=requested_mode)
             if preflight_only:
                 record(status="PreflightPassed", initialSubmission=False)
                 return
             pending = api.request("POST", base + "/submissions")
             pending_id = pending["id"]
             record(submissionId=pending_id, status="Created")
-            pending = prepare_submission(pending, package, notes, expected)
+            # A newly cloned draft must still match the published baseline before
+            # changing it. Do not overwrite edits made since the create response.
+            current = api.request("GET", submission_path(pending_id))
+            if (current.get("id") != pending_id or current.get("status") != "PendingCommit"
+                    or update_settings_digest(current) != update_settings_digest(published)
+                    or current.get("applicationPackages") != published.get("applicationPackages")
+                    or current.get("notesForCertification") != published.get("notesForCertification")
+                    or current.get("listings") != published.get("listings")):
+                raise StoreError("New update draft differs from the published baseline; no draft changes were made.")
+            pending = prepare_submission(current, package, notes, expected, target_publish_mode=requested_mode)
             api.request("PUT", submission_path(pending_id), pending)
+            pending = api.request("GET", submission_path(pending_id))
+            validate_update_resume(pending, published, pending_id, package, notes, expected,
+                                   target_publish_mode=requested_mode)
     path = submission_path(pending_id)
     status = pending.get("status")
     if status in FAILED:
@@ -393,6 +465,14 @@ def submit(api, package: Path, version: str, sha256: str, notes: str, record,
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.write(package, package.name)
             api.upload(pending["fileUploadUrl"], archive)
+        if not initial:
+            # A large upload leaves time for portal edits. Check again before the
+            # irreversible commit rather than trusting the earlier draft read.
+            current = api.request("GET", path)
+            validate_update_resume(current, published, pending_id, package, notes, expected,
+                                   target_publish_mode=requested_mode)
+            if current.get("status") != "PendingCommit":
+                raise StoreError("Update submission state changed during upload; rerun to inspect it before committing.")
         api.request("POST", path + "/commit")
         record(status="CommitStarted")
     elif status not in ACCEPTED | {"CommitStarted"}:
@@ -426,6 +506,8 @@ def main():
     mode.add_argument("--submit", action="store_true")
     mode.add_argument("--preflight", action="store_true", help="Authenticate and inspect readiness without modifying the Store.")
     parser.add_argument("--initial-submission-config", type=Path)
+    parser.add_argument("--publishing-config", type=Path,
+                        help="Reviewed tag-specific publishing policy; other releases preserve the saved Store mode.")
     args = parser.parse_args()
     report = {"appId": APP_ID, "liveSubmission": args.submit, "livePreflight": args.preflight}
 
@@ -447,9 +529,10 @@ def main():
         notes = store_notes(notes, tag)
         record(version=version, sha256=sha256, releaseTag=tag, status="Validated", releaseNotes=notes)
         config = load_initial_config(args.initial_submission_config) if args.initial_submission_config else None
+        publishing = load_publishing_config(args.publishing_config) if args.publishing_config else None
         if args.submit or args.preflight:
             submit(StoreApi(), package, version, sha256, notes, record, initial_config=config,
-                   release_tag=tag, preflight_only=args.preflight)
+                   publishing_config=publishing, release_tag=tag, preflight_only=args.preflight)
         print(f"Store release: {report['status']}; report: {args.report}")
         return 0
     except (StoreError, OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as error:
@@ -465,6 +548,8 @@ def main():
                 summary.write(f"### Microsoft Store\n\nStatus: {report.get('status', 'Validation failed')}\n\n"
                               f"Submission ID: {report.get('submissionId', 'Not created')}\n\n"
                               f"Observed Store state: {report.get('observedStoreStatus', 'Not observed')}\n\n"
+                              f"Publishing mode: {report.get('targetPublishMode', 'Not observed')}\n\n"
+                              f"Publishing policy tag: {report.get('publishingPolicyTag', 'Preserve saved mode')}\n\n"
                               f"Error: {report.get('error', 'None')}\n\n"
                               "This is submission status, not proof of certification or a Store-delivered upgrade.\n")
 
