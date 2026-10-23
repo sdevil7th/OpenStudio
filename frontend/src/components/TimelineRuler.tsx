@@ -316,6 +316,12 @@ export function TimelineRuler() {
         axisLock: null,
       } : undefined,
     };
+    if (action === "seek") {
+      // Protect the pressed time before movement chooses an axis. Otherwise a
+      // queued follow frame can move the view before vertical zoom takes over.
+      ownsRulerZoomRef.current = true;
+      useDAWStore.setState({ isTimelineRulerZooming: true });
+    }
   };
 
   const handleRulerDblClick = (e: KonvaEventObject<MouseEvent>) => {
@@ -376,6 +382,7 @@ export function TimelineRuler() {
           scheduleZoom(view);
           return;
         }
+        finishRulerZoom(); // Horizontal intent no longer owns zoom suppression.
       }
       const curScrollX = scrollXRef.current;
       const curPPS = pixelsPerSecondRef.current;

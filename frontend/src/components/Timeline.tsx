@@ -4068,11 +4068,13 @@ export function Timeline({
       return;
     }
 
-    const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    flushPendingZoom();
+    const view = useDAWStore.getState();
+    const rawClickedTime = Math.max(0, (pointerPos.x + view.scrollX) / view.pixelsPerSecond);
     const quantizePreset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
     const clickedTime = getRulerClickSnapTime({
       time: rawClickedTime,
-      pixelsPerSecond: pixelsPerSecondRef.current,
+      pixelsPerSecond: view.pixelsPerSecond,
       tempo: tempoRef.current,
       timeSignature: timeSignatureRef.current,
       gridSize: gridSizeRef.current,
@@ -4086,8 +4088,8 @@ export function Timeline({
     });
 
     // Check if clicking near a range handle inside the visible marker zone.
-    const startX = projectRange.start * pixelsPerSecond - scrollX;
-    const endX = projectRange.end * pixelsPerSecond - scrollX;
+    const startX = projectRange.start * view.pixelsPerSecond - view.scrollX;
+    const endX = projectRange.end * view.pixelsPerSecond - view.scrollX;
     const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
     // Prefer end handle when both overlap (both at 0)
@@ -4129,12 +4131,16 @@ export function Timeline({
         action,
         startX: pointerPos.x,
         startY: pointerPos.y,
-        initialZoom: pixelsPerSecondRef.current,
+        initialZoom: view.pixelsPerSecond,
         anchorTime: rawClickedTime,
         axisLock: null,
         startTime: clickedTime,
         currentTime: clickedTime,
       };
+      if (action === "seek") {
+        ownsInlineRulerZoomRef.current = true;
+        useDAWStore.setState({ isTimelineRulerZooming: true });
+      }
     }
 
     // Not on a handle — plain click clears any existing time selection and seeks
@@ -4242,6 +4248,7 @@ export function Timeline({
           return;
         }
         if (!drag.axisLock) return;
+        finishInlineRulerZoom();
       }
       const curScrollX = scrollXRef.current;
       const curPPS = pixelsPerSecondRef.current;

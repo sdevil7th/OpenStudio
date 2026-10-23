@@ -21,6 +21,7 @@ interface RecordingZoomFixture {
   maxPending: number;
   timeUpdates: number;
   anchorX: number | null;
+  press: { zoom: number; scrollX: number; time: number } | null;
   publications: { zoom: number; scrollX: number }[];
   release: () => void;
   cleanup: () => void;
@@ -75,7 +76,7 @@ async function ready(page: Page) {
     let serial = Promise.resolve();
     const fixture: RecordingZoomFixture = {
       store, requests: [], hold: false, pending: 0, maxPending: 0, timeUpdates: 0,
-      anchorX: null, publications: [], release: () => releasePending?.(), cleanup: () => {},
+      anchorX: null, press: null, publications: [], release: () => releasePending?.(), cleanup: () => {},
     };
     window.__recordingZoomIntegration = fixture;
     nativeBridge.getRecordingPeaks = (trackId, samplesPerPixel, numPixels, startSample = 0) => {
@@ -112,7 +113,29 @@ async function ready(page: Page) {
       if (fixture.anchorX !== null && (state.pixelsPerSecond !== previous.pixelsPerSecond || state.scrollX !== previous.scrollX))
         fixture.publications.push({ zoom: state.pixelsPerSecond, scrollX: state.scrollX });
     });
+    // Observe the actual press-to-release interval, including queued follow work
+    // before vertical intent locks. Driver delays outside it are unrelated.
+    const observePress = (event: MouseEvent) => {
+      const canvas = event.target;
+      if (event.button !== 0 || !(canvas instanceof HTMLCanvasElement)
+        || !canvas.closest(".workspace-sticky-ruler")) return;
+      const state = store.getState();
+      fixture.press = { zoom: state.pixelsPerSecond, scrollX: state.scrollX, time: state.transport.currentTime };
+      fixture.anchorX = event.clientX - canvas.getBoundingClientRect().left;
+      fixture.publications = [];
+    };
+    const finishObservation = () => { fixture.anchorX = null; };
+    window.addEventListener("mousedown", observePress, true);
+    // Production window handlers are already registered and flush the final
+    // transform before these listeners end observation.
+    window.addEventListener("mouseup", finishObservation);
+    window.addEventListener("pointercancel", finishObservation);
+    window.addEventListener("blur", finishObservation);
     fixture.cleanup = () => {
+      window.removeEventListener("mousedown", observePress, true);
+      window.removeEventListener("mouseup", finishObservation);
+      window.removeEventListener("pointercancel", finishObservation);
+      window.removeEventListener("blur", finishObservation);
       store.setState({ recordingClips: [], recordSession: null,
         transport: { ...store.getState().transport, isPlaying: false, isRecording: false } });
       fixture.hold = false;
@@ -170,12 +193,6 @@ async function dragRuler(page: Page, dy: number, dx = 0) {
   const bounds = await page.locator(".workspace-sticky-ruler canvas").first().boundingBox();
   if (!bounds) throw new Error("Visible workspace ruler is missing");
   const x = Math.min(350, bounds.width / 2);
-  const before = await geometry(page);
-  await page.evaluate(anchorX => {
-    const fixture = window.__recordingZoomIntegration;
-    fixture.anchorX = anchorX;
-    fixture.publications = [];
-  }, x);
   await page.mouse.move(bounds.x + x, bounds.y + 18);
   await page.mouse.down();
   for (let step = 1; step <= 6; step += 1) {
@@ -184,10 +201,10 @@ async function dragRuler(page: Page, dy: number, dx = 0) {
   }
   await page.mouse.up();
   await paint(page);
-  const publications = await page.evaluate(() => {
+  const { before, publications } = await page.evaluate(() => {
     const fixture = window.__recordingZoomIntegration;
-    fixture.anchorX = null;
-    return fixture.publications;
+    if (!fixture.press) throw new Error("Ruler press was not observed");
+    return { before: fixture.press, publications: fixture.publications };
   });
   return { before, after: await geometry(page), publications, anchorX: x };
 }
@@ -326,6 +343,68 @@ for (const [surface, selector] of [
   });
 }
 
+for (const termination of ["vertical zoom", "mouseup", "pointercancel", "blur"] as const) {
+  test(`pending ruler press protects its anchor and recovers after ${termination}`, async ({ page }) => {
+    await ready(page);
+    const callsAtHold = await holdNextRequest(page);
+    const canvas = page.locator(".workspace-sticky-ruler canvas").first();
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error("Visible workspace ruler is missing");
+    const anchorX = Math.min(350, bounds.width / 2);
+    await page.mouse.move(bounds.x + anchorX, bounds.y + 18);
+    // Queue real automatic follow in the same input task, before the ruler
+    // claims the press. Its pending RAF must not overwrite the pressed anchor.
+    await canvas.evaluate(element => element.addEventListener("mousedown", () => {
+      const store = window.__recordingZoomIntegration.store;
+      store.getState().setCurrentTime(store.getState().transport.currentTime + 15);
+    }, { capture: true, once: true }));
+    await page.mouse.down();
+    const pressed = await geometry(page);
+    const press = await page.evaluate(() => window.__recordingZoomIntegration.press!);
+    expect(pressed.time * press.zoom - press.scrollX).toBeGreaterThan(pressed.width);
+    await page.evaluate(() => {
+      const fixture = window.__recordingZoomIntegration;
+      fixture.hold = false;
+      fixture.release();
+    });
+    await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.pending)).toBe(0);
+    // Wait for advancing transport, past the ordinary 200ms zoom idle period.
+    await expect.poll(() => geometry(page).then(value => value.time)).toBeGreaterThan(pressed.time + 0.45);
+    const pending = await geometry(page);
+    expect(pending.zoom).toBe(press.zoom);
+    expect(pending.scrollX).toBeCloseTo(press.scrollX, 6);
+    expect(await page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBe(callsAtHold);
+
+    if (termination === "vertical zoom") {
+      await page.mouse.move(bounds.x + anchorX, bounds.y + 108);
+      await paint(page);
+      const zoomed = await geometry(page);
+      expect(zoomed.zoom).toBeGreaterThan(press.zoom);
+      expect((zoomed.scrollX + anchorX) / zoomed.zoom)
+        .toBeCloseTo((press.scrollX + anchorX) / press.zoom, 6);
+      const publications = await page.evaluate(() => window.__recordingZoomIntegration.publications);
+      expect(publications.length).toBeGreaterThan(0);
+      for (const publication of publications)
+        expect((publication.scrollX + anchorX) / publication.zoom)
+          .toBeCloseTo((press.scrollX + anchorX) / press.zoom, 6);
+    } else if (termination !== "mouseup") {
+      await page.evaluate(event => window.dispatchEvent(new Event(event)), termination);
+    }
+    await page.mouse.up();
+    expect(await page.evaluate(() => window.__recordingZoomIntegration.store.getState().isTimelineRulerZooming)).toBe(false);
+    const released = await geometry(page);
+    // A click can seek inside the viewport; move transport past its right edge
+    // to verify that follow and polling recover after every termination path.
+    await page.evaluate(() => {
+      const store = window.__recordingZoomIntegration.store;
+      store.getState().setCurrentTime(590);
+    });
+    await expect.poll(() => geometry(page).then(value => value.scrollX)).toBeGreaterThan(released.scrollX);
+    await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBeGreaterThan(callsAtHold);
+    expect((await geometry(page)).range).toEqual(pressed.range);
+  });
+}
+
 for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
   test(`held ruler zoom pauses follow and preview polling until ${termination}`, async ({ page }) => {
     await ready(page);
@@ -333,9 +412,10 @@ for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
     const bounds = await page.locator(".workspace-sticky-ruler canvas").first().boundingBox();
     if (!bounds) throw new Error("Visible workspace ruler is missing");
     const anchorX = Math.min(350, bounds.width / 2);
-    const before = await geometry(page);
+    const rangeBefore = (await geometry(page)).range;
     await page.mouse.move(bounds.x + anchorX, bounds.y + 18);
     await page.mouse.down();
+    const before = await page.evaluate(() => window.__recordingZoomIntegration.press!);
     await page.mouse.move(bounds.x + anchorX, bounds.y + 118);
     await paint(page);
     const held = await geometry(page);
@@ -363,6 +443,6 @@ for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
     }
     await expect.poll(() => geometry(page).then(value => value.scrollX)).toBeGreaterThan(held.scrollX);
     await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBeGreaterThan(callsAtHold);
-    expect((await geometry(page)).range).toEqual(before.range);
+    expect((await geometry(page)).range).toEqual(rangeBefore);
   });
 }

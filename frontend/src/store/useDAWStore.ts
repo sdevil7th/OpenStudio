@@ -1487,7 +1487,7 @@ export interface DAWState {
   razorEdits: Array<{ trackId: string; start: number; end: number }>;
 
   // Timeline View
-  isTimelineRulerZooming: boolean; // Runtime-only ownership of a held vertical ruler gesture
+  isTimelineRulerZooming: boolean; // Runtime-only ownership of a pending or vertical ruler gesture
   pixelsPerSecond: number;
   scrollX: number;
   scrollY: number;

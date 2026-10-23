@@ -1250,8 +1250,12 @@ Recording zoom coverage is in `recordingWaveformPreview.test.ts` and
 `e2e/recording-zoom.spec.ts`. The browser fixture seeds two takes at 556 seconds,
 holds the serial preview response, and exercises the visible ruler in both
 vertical directions, horizontal range selection, scrolling, automatic-follow
-preferences and Stop. Stationary held drags must retain their anchor until
-mouseup, pointer cancellation or loss of window focus. Separate synthetic
+preferences and Stop. Stationary held drags must retain their anchor from
+the initial press, including the pending interval before axis selection, until
+mouseup, pointer cancellation or loss of window focus. Capture the baseline
+at the actual press and end observation with release; automatic follow
+outside the held gesture is permitted and must resume after termination.
+Separate synthetic
 same-task wheel checks verify zoom-then-pan ordering on the ruler and timeline.
 It checks one outstanding peak request, bounded visible
 windows, sample-aligned cached waveforms at the current zoom, atomic cursor

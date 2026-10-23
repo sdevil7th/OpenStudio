@@ -20,6 +20,9 @@ interface TimelineCopyQa {
   releaseSync: (() => void) | null;
   backendTracks: Track[];
   removedTrackIds: string[];
+  rulerPress?: { zoom: number; scrollX: number; time: number };
+  rulerSeekSeen?: boolean;
+  stopRulerSeekObservation?: () => void;
 }
 declare global { interface Window { __clipPointerQA: TimelineCopyQa } }
 
@@ -335,10 +338,125 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   assert(await page.evaluate(() => JSON.stringify(window.__clipPointerQA.backendTracks)) === JSON.stringify(beforePending.tracks),
     'pending backend content must be reconciled after cancellation, including generated-track removal');
   checks.push('cancellation during backend synchronization restores topology and content without Undo');
+
+  // The optional inline ruler has its own gesture handlers. Exercise real
+  // pointer input here as well as the extracted App ruler's recording tests.
+  for (const termination of ['vertical zoom', 'horizontal selection', 'mouseup', 'pointercancel', 'blur'] as const) {
+    await seed('audio', { snap: false });
+    await page.evaluate(() => {
+      const { store } = window.__clipPointerQA;
+      store.setState({
+        autoScrollDuringPlayback: true, projectRange: { start: 0, end: 600 }, timeSelection: null,
+        // Keep real App playback active past the original short copy fixtures.
+        tracks: store.getState().tracks.map(track => ({ ...track,
+          clips: track.clips.map(clip => ({ ...clip, duration: 600, sourceLength: 601 })) })),
+        transport: { ...store.getState().transport, isPlaying: true, currentTime: 1, loopEnabled: false },
+      });
+    });
+    await paint();
+    const ruler = page.locator('#clip-pointer-fixture .sticky canvas');
+    const bounds = await ruler.boundingBox();
+    assert(bounds && bounds.width > 400, 'inline ruler must have usable geometry');
+    const anchorX = 300;
+    await page.mouse.move(bounds.x + anchorX, bounds.y + 18);
+    // Queue automatic follow before Konva receives this same native press.
+    // A pending follow RAF must not move the view during axis arbitration.
+    await ruler.evaluate(element => element.addEventListener('mousedown', () => {
+      const qa = window.__clipPointerQA;
+      const state = qa.store.getState();
+      qa.rulerPress = { zoom: state.pixelsPerSecond, scrollX: state.scrollX, time: state.transport.currentTime };
+      state.setCurrentTime(Math.max(state.transport.currentTime + 30,
+        (state.scrollX + element.getBoundingClientRect().width + 100) / state.pixelsPerSecond));
+    }, { capture: true, once: true }));
+    await page.mouse.down();
+    const pressed = await page.evaluate(() => {
+      const qa = window.__clipPointerQA;
+      const state = qa.store.getState();
+      return { ...qa.rulerPress!, held: state.isTimelineRulerZooming, advancedTime: state.transport.currentTime };
+    });
+    assert(pressed.held, `${termination}: inline seek press must protect its view before movement`);
+    assert(pressed.advancedTime * pressed.zoom - pressed.scrollX > bounds.width,
+      `${termination}: advancing transport must really require automatic follow`);
+    // Advance transport beyond the normal 200ms idle suppression while keeping
+    // the physical button held and the pointer below the movement threshold.
+    await page.evaluate(() => new Promise<void>(resolve => {
+      const { store } = window.__clipPointerQA;
+      const started = performance.now();
+      const time = store.getState().transport.currentTime;
+      const tick = (now: number) => {
+        store.getState().setCurrentTime(time + (now - started) / 1000);
+        if (now - started >= 350) resolve();
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }));
+    const held = await page.evaluate(() => {
+      const state = window.__clipPointerQA.store.getState();
+      return { zoom: state.pixelsPerSecond, scrollX: state.scrollX, time: state.transport.currentTime };
+    });
+    assert(held.time >= pressed.advancedTime + 0.3, `${termination}: transport must continue during the pending press`);
+    assert(held.zoom === pressed.zoom && Math.abs(held.scrollX - pressed.scrollX) < 0.00001,
+      `${termination}: pending inline press must suppress both queued and subsequent automatic follow`);
+
+    if (termination === 'vertical zoom' || termination === 'horizontal selection') {
+      await page.mouse.move(bounds.x + anchorX + (termination === 'horizontal selection' ? 90 : 0),
+        bounds.y + 18 + (termination === 'vertical zoom' ? 90 : 0));
+      await paint();
+      const locked = await page.evaluate(() => {
+        const state = window.__clipPointerQA.store.getState();
+        return { zoom: state.pixelsPerSecond, scrollX: state.scrollX,
+          held: state.isTimelineRulerZooming, selection: state.timeSelection };
+      });
+      if (termination === 'vertical zoom') {
+        assert(locked.held && locked.zoom > pressed.zoom, 'inline vertical axis must retain protection and zoom');
+        assert(Math.abs((locked.scrollX + anchorX) / locked.zoom - (pressed.scrollX + anchorX) / pressed.zoom) < 0.00001,
+          'inline vertical zoom must retain the original press anchor');
+      } else {
+        assert(!locked.held && locked.zoom === pressed.zoom, 'inline horizontal axis must release zoom protection');
+        assert(locked.selection && Math.abs(locked.selection.start - (pressed.scrollX + anchorX) / pressed.zoom) < 0.00001
+          && Math.abs(locked.selection.end - (pressed.scrollX + anchorX + 90) / pressed.zoom) < 0.00001,
+          'inline horizontal movement must retain its ordinary time-selection behavior');
+      }
+    } else if (termination !== 'mouseup') {
+      await page.evaluate(event => window.dispatchEvent(new Event(event)), termination);
+    }
+    if (termination === 'mouseup') {
+      await page.evaluate(target => {
+        const qa = window.__clipPointerQA;
+        qa.rulerSeekSeen = false;
+        // seekTo can await native pause before publishing its exact position;
+        // retain that publication even if playback advances before CDP reads it.
+        qa.stopRulerSeekObservation = qa.store.subscribe(state => {
+          if (Math.abs(state.transport.currentTime - target) < 0.00001) qa.rulerSeekSeen = true;
+        });
+      }, (pressed.scrollX + anchorX) / pressed.zoom);
+    }
+    await page.mouse.up();
+    if (termination === 'mouseup') {
+      await page.waitForFunction(() => window.__clipPointerQA.rulerSeekSeen === true);
+      await page.evaluate(() => window.__clipPointerQA.stopRulerSeekObservation?.());
+    }
+    const released = await page.evaluate(() => {
+      const state = window.__clipPointerQA.store.getState();
+      return { held: state.isTimelineRulerZooming, scrollX: state.scrollX, time: state.transport.currentTime, range: state.projectRange };
+    });
+    assert(!released.held, `${termination}: inline gesture termination must release protection`);
+    assert(released.range.start === 0 && released.range.end === 600, `${termination}: inline gesture must retain the project range`);
+    await page.waitForFunction(scrollX => {
+      const { store } = window.__clipPointerQA;
+      store.getState().setCurrentTime(Math.max(60, store.getState().transport.currentTime) + 0.1);
+      return store.getState().scrollX > scrollX;
+    }, released.scrollX);
+    checks.push(`inline ruler: queued follow and pending hold preserve the press anchor; ${termination} retains its behavior and releases follow`);
+  }
+  await seed('audio', { snap: false });
   assert(pageErrors.length === 0, `browser runtime errors: ${pageErrors.join('; ')}`);
   return { status: 'pass', checks };
   } finally {
-    await page.evaluate(() => window.__clipPointerQA?.releaseSync?.());
+    await page.evaluate(() => {
+      window.__clipPointerQA?.releaseSync?.();
+      window.__clipPointerQA?.stopRulerSeekObservation?.();
+    });
     await page.mouse.up();
     await page.keyboard.up(copyModifier);
     page.off('pageerror', onPageError);
