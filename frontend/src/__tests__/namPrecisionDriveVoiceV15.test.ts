@@ -1,4 +1,3 @@
-// @ts-expect-error Vitest provides Node builtins while the app tsconfig omits Node typings.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createNAMBootSchema } from "../components/BuiltInPluginPanel";

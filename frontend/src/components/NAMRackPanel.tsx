@@ -7,6 +7,7 @@ import {
   rankNAMRackCabIRs,
 } from "../utils/namRackAmpCaptureLibrary";
 import { captureTypeForInstalled } from "../utils/namCaptureType";
+import { NAM_FUZZ_DEFAULT_VALUES, resolveNAMOctaverFuzzActivity } from "../utils/namOctaverFuzz";
 import "./NAMRackBrowser.css";
 import "./NAMRackPresets.css";
 import "./NAMRackPedalboard.css";
@@ -127,6 +128,7 @@ import {
   namInstalledCaptureInstrumentLabels,
   namInstrumentProfileTagIsCompatible,
   namStoredPresetMatchesInstrumentProfile,
+  namStoredPresetProfileMismatch,
   namPreEqBandLabelsForProfile,
   normalizeNAMInstrumentProfile,
   shouldClearNAMFactoryPresetIdentityOnProfileChange,
@@ -136,6 +138,10 @@ import {
   resolveNAMEconomyQualityWarning,
   resolveNAMGainStagingWarning,
   resolveNAMModelIdentityWarning,
+  observeNAMOutputProtection,
+  resolveNAMOutputProtectionCounter,
+  namOutputProtectionMessage,
+  type NAMOutputProtectionObservation,
 } from "../utils/namRackPresentationFeedback";
 import {
   isNAMNonPortableStateKey,
@@ -193,7 +199,7 @@ import {
 } from "../utils/namDetachedRuntime";
 import { windowRole } from "../utils/windowEnvironment";
 import { summarizeNAMCalibrationStatuses, type NAMCalibrationSummaryStatus } from "../utils/namCalibrationSummary";
-import { resolveAudioDeadlineStatus } from "../utils/audioDeadlineStatus";
+import { AUDIO_TRACK_EXECUTION_WARNING, resolveAudioPerformanceAdvisory } from "../utils/audioPerformanceAdvisory";
 import {
   clampNAMMeterDb,
   namMeterFraction,
@@ -485,6 +491,7 @@ const NAM_RACK_GLOBAL_DEFAULT_VALUES: Record<string, number> = {
   octaverDownMix: 0.32,
   octaverUpMix: 0.18,
   octaverDirectMix: 1,
+  ...NAM_FUZZ_DEFAULT_VALUES,
   preEqEnabled: 0,
   preEqHPFHz: 0,
   preEq120Db: 0,
@@ -1399,7 +1406,7 @@ async function savePresetMetadataSidecar(presetName: string, metadata: UserRackP
       updatedAt,
     },
   };
-  return nativeBridge.saveProjectToFile(metadataPath, JSON.stringify(payload, null, 2));
+  return nativeBridge.saveJsonDocumentToFile(metadataPath, JSON.stringify(payload, null, 2));
 }
 
 function normalizePresetBundle(raw: unknown): { presetName: string; metadata: UserRackPresetMetadata; state: unknown } | undefined {
@@ -1642,6 +1649,7 @@ function moduleParamIds(moduleId: RackModuleId) {
       "compressorEnabled", "compressorComp", "compressorAttackMs", "compressorReleaseMs",
       "compressorToneDb", "compressorIntensity", "compressorSidechainHPF", "compressorMix", "compressorVolumeDb",
       "octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix",
+      "fuzzEnabled", "fuzzDrive", "fuzzTone", "fuzzLevelDb", "fuzzVoice", "fuzzCleanMix",
       ...NAM_RACK_PRE_EQ_CONTROL_PARAM_IDS,
       "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack",
       "precisionDriveGate", "precisionDriveDrive", "precisionDriveEnabled",
@@ -2121,6 +2129,10 @@ export function NAMRackPanel({
   );
   const presetListRefreshErrorRef = useRef(false);
   const [presetMetadata, setPresetMetadata] = useState<Record<string, UserRackPresetMetadata>>(() => loadPresetMetadata());
+  const presetMetadataRef = useRef(presetMetadata);
+  presetMetadataRef.current = presetMetadata;
+  const presetMetadataWriteRef = useRef<Promise<void>>(Promise.resolve());
+  const [presetMetadataError, setPresetMetadataError] = useState("");
   const [presetSearch, setPresetSearch] = useState("");
   const [presetFolderFilter, setPresetFolderFilter] = useState("all");
   const [presetNameDraft, setPresetNameDraft] = useState("");
@@ -2428,6 +2440,8 @@ export function NAMRackPanel({
   const octaverEnabledParam = paramById(params, "octaverEnabled");
   const octaverDownParam = paramById(params, "octaverDownMix");
   const octaverUpParam = paramById(params, "octaverUpMix");
+  const fuzzEnabledParam = paramById(params, "fuzzEnabled");
+  const fuzzVoiceParam = paramById(params, "fuzzVoice");
   const preEqEnabledParam = paramById(params, "preEqEnabled");
   const preEqHPFParam = paramById(params, "preEqHPFHz");
   const preEqLPFParam = paramById(params, "preEqLPFHz");
@@ -2461,7 +2475,11 @@ export function NAMRackPanel({
   const gateActive = gateThreshold ? gateThreshold.value > gateThreshold.min + 0.5 : true;
   const compressorPowerActive = (compressorEnabledParam?.value ?? 0) >= 0.5;
   const compressorActive = compressorPowerActive && (compressorMixParam?.value ?? 0) > 0.0001;
-  const octaverActive = (octaverEnabledParam?.value ?? 0) >= 0.5 && (((octaverDownParam?.value ?? 0) > 0.0001) || ((octaverUpParam?.value ?? 0) > 0.0001));
+  const octaverFuzzActivity = resolveNAMOctaverFuzzActivity(octaverEnabledParam?.value, fuzzEnabledParam?.value, fuzzVoiceParam?.value);
+  const octaverActive = octaverFuzzActivity.octaveActive;
+  const fuzzActive = octaverFuzzActivity.fuzzActive;
+  const octaverFuzzActive = octaverFuzzActivity.active;
+  const octaverFuzzLabel = fuzzEnabledParam ? "Octaver Fuzz" : octaverPresentation.label;
   const preEqActive = (preEqEnabledParam?.value ?? 0) >= 0.5;
   const preEqShaped = (preEqHPFParam?.value ?? 0) >= 35
     || (preEqLPFParam?.value ?? 24000) < 22000
@@ -2747,15 +2765,6 @@ export function NAMRackPanel({
   const modelProcessFailCount = Number(rackDiagnostics?.modelProcessFailCount ?? 0);
   const resizeAvoidedCount = Number(rackDiagnostics?.audioThreadResizeAvoidedCount ?? 0);
   const oversizeBypassCount = Number(rackDiagnostics?.oversizeBypassCount ?? 0);
-  const pedalNAMOutputSafetyGuardHits = Number(
-    rackDiagnostics?.pedalNAMOutputSafetyGuardHitCount ?? 0,
-  );
-  const ampNAMOutputSafetyGuardHits = Number(
-    rackDiagnostics?.ampNAMOutputSafetyGuardHitCount ?? 0,
-  );
-  const rackOutputSafetyGuardHits = Number(
-    rackDiagnostics?.rackOutputSafetyGuardHitCount ?? 0,
-  );
   const rackOutputEmergencyMuteActive = Boolean(
     rackDiagnostics?.rackOutputEmergencyMuteActive,
   );
@@ -2802,22 +2811,28 @@ export function NAMRackPanel({
   const reverbIntegrityDetail = reverbIntegrityStages.length > 0
     ? ` at ${reverbIntegrityStages.join(", ")}`
     : "";
-  const legacyNAMOutputSafetyGuardHits = pedalNAMOutputSafetyGuardHits
-    + ampNAMOutputSafetyGuardHits;
-  const unsafePeakGuardHits = rackOutputSafetyGuardHits > 0
-    ? rackOutputSafetyGuardHits
-    : legacyNAMOutputSafetyGuardHits;
-  const unsafePeakGuardActive = unsafePeakGuardHits > 0;
-  const unsafePeakGuardStages = rackOutputSafetyGuardHits > 0
-    ? [`final NAM Rack output (${rackOutputSafetyGuardHits})`]
-    : [
-        pedalNAMOutputSafetyGuardHits > 0
-          ? `Pedal NAM core output (${pedalNAMOutputSafetyGuardHits})`
-          : null,
-        ampNAMOutputSafetyGuardHits > 0
-          ? `Amp NAM core output (${ampNAMOutputSafetyGuardHits})`
-          : null,
-      ].filter((stage): stage is string => Boolean(stage));
+  const protectionCounter = resolveNAMOutputProtectionCounter(rackDiagnostics);
+  const protectionObservationRef = useRef<NAMOutputProtectionObservation | null>(null);
+  const [, refreshProtectionPresentation] = useState(0);
+  const protectionNow = Date.now();
+  const protectionObservation = observeNAMOutputProtection(
+    protectionObservationRef.current,
+    JSON.stringify([address.instanceId ?? schema.instanceId, address.trackId, address.chain, address.fxIndex]),
+    protectionCounter.frames,
+    processedBlockCount ?? 0,
+    protectionNow,
+    protectionCounter.boundary,
+  );
+  protectionObservationRef.current = protectionObservation;
+  const outputProtectionRecent = protectionObservation.recentUntilMs > protectionNow;
+  const outputProtectionMessage = namOutputProtectionMessage(protectionObservation, protectionNow);
+  useEffect(() => {
+    if (!protectionObservation.recentUntilMs) return;
+    const remaining = protectionObservation.recentUntilMs - Date.now();
+    if (remaining <= 0) return;
+    const timeout = setTimeout(() => refreshProtectionPresentation(value => value + 1), remaining + 1);
+    return () => clearTimeout(timeout);
+  }, [protectionObservation.recentUntilMs]);
   const realtimeDSPBlocked = Boolean(rackDiagnostics?.realtimeDSPBlocked);
   const audioDebugBlockSize = Number(audioDebugSnapshot?.blockSize ?? runtimeAudioDeviceSetup?.bufferSize ?? 0);
   const audioDebugSampleRate = Number(audioDebugSnapshot?.sampleRate ?? runtimeAudioDeviceSetup?.sampleRate ?? 0);
@@ -2839,7 +2854,10 @@ export function NAMRackPanel({
     : 0;
   const audioCallbackMs = Number(audioDebugSnapshot?.lastAudioCallbackProcessMs ?? 0);
   const audioCallbackMaxMs = Number(audioDebugSnapshot?.maxAudioCallbackProcessMs ?? 0);
-  const audioDeadlineStatus = resolveAudioDeadlineStatus(audioDebugSnapshot);
+  const audioPerformanceAdvisory = resolveAudioPerformanceAdvisory(audioDebugSnapshot);
+  const audioDeadlineStatus = audioPerformanceAdvisory.deadlineStatus;
+  const trackExecutionStatus = audioPerformanceAdvisory.trackExecutionStatus;
+  const trackExecutionWarning = trackExecutionStatus.shouldWarn;
   const audioDeadlineMisses = audioDeadlineStatus.deviceSessionMissCount;
   const audioDeadlineWarning = audioDeadlineStatus.shouldWarn;
   const audioDebugRecord = audioDebugSnapshot as Record<string, unknown> | null;
@@ -2913,6 +2931,7 @@ export function NAMRackPanel({
   const dspBudgetAlert = Boolean(
     namRealtimeBlocked
     || audioDeadlineWarning
+    || trackExecutionWarning
     || (dspBudgetPct ?? 0) >= 80,
   );
   const selectedInputLabel = formatNAMRuntimeInputLabel({
@@ -2935,8 +2954,9 @@ export function NAMRackPanel({
   const liveInputDetected = rawInputDb > -60 && !auditionSourceRendered;
   const inputDiagnosticTone =
     modelProcessFailCount > 0 || resizeAvoidedCount > 0 || oversizeBypassCount > 0 || realtimeDSPBlocked || rackOutputEmergencyMuteActive ? "error" :
-    rackOutputEmergencyMuteTripCount > 0 || reverbIntegrityHits > 0 || unsafePeakGuardActive || audioDeadlineWarning || (dspBudgetPct ?? 0) >= 80 ? "warning" :
+    rackOutputEmergencyMuteTripCount > 0 || reverbIntegrityHits > 0 || outputProtectionRecent || audioDeadlineWarning || trackExecutionWarning || (dspBudgetPct ?? 0) >= 80 ? "warning" :
     monoInputOneWarning || cabMissingWarning ? "warning" :
+    outputProtectionMessage ? "info" :
     liveInputDetected ? "success" :
     auditionSourceRendered ? "info" :
     "idle";
@@ -2947,11 +2967,11 @@ export function NAMRackPanel({
       meterPct: nativeCpuUsagePct,
     },
     dsp: {
-      label: namRealtimeBlocked ? "Blocked" : dspBudgetLabel,
+      label: namRealtimeBlocked ? "Blocked" : trackExecutionWarning ? "Overload" : dspBudgetLabel,
       alert: dspBudgetAlert,
       meterPct: namRealtimeBlocked ? undefined : dspBudgetMeterPct,
       title: audioBlockBudgetMs > 0
-        ? `Callback ${audioCallbackMs.toFixed(2)} ms / ${audioBlockBudgetMs.toFixed(2)} ms block budget; device-session max ${audioCallbackMaxMs.toFixed(2)} ms (${dspMaxBudgetLabel}); over-budget callbacks ${audioDeadlineMisses}`
+        ? `Callback ${audioCallbackMs.toFixed(2)} ms / ${audioBlockBudgetMs.toFixed(2)} ms block budget; device-session max ${audioCallbackMaxMs.toFixed(2)} ms (${dspMaxBudgetLabel}); over-budget callbacks ${audioDeadlineMisses}${trackExecutionStatus.hasRecordedFailures ? `; lifetime track deadline misses ${trackExecutionStatus.deadlineMisses}; rejected jobs ${trackExecutionStatus.rejectedTrackJobs}; cancelled jobs ${trackExecutionStatus.cancelledJobs}; rejected batches ${trackExecutionStatus.rejectedBatches}; quarantined blocks ${trackExecutionStatus.quarantinedBlocks}` : ""}`
         : "DSP callback budget is waiting for native audio debug data",
     },
     sampleRateLabel: audioDebugSampleRate > 0
@@ -3314,12 +3334,13 @@ export function NAMRackPanel({
     const needle = presetSearch.trim().toLowerCase();
     const rows = userPresets.filter((entry) => {
       const metadata = presetMetadata[entry.name] ?? {};
-      if (!namStoredPresetMatchesInstrumentProfile(entry, instrumentProfile)) return false;
+      const reviewingProfile = presetFolderFilter === "profile-review";
+      if (reviewingProfile ? !namStoredPresetProfileMismatch(entry) : !namStoredPresetMatchesInstrumentProfile(entry, instrumentProfile)) return false;
       const tags = metadata.tags ?? [];
       const folder = sanitizePresetFolder(metadata.folder ?? "");
       const notes = metadata.notes ?? "";
       const matchesFolder =
-        presetFolderFilter === "all" ||
+        presetFolderFilter === "all" || reviewingProfile ||
         (presetFolderFilter === "favorites" && metadata.favorite) ||
         (presetFolderFilter === "recent" && metadata.lastUsed) ||
         (presetFolderFilter === NAM_UNFILED_PRESET_COLLECTION_ID && !folder) ||
@@ -3338,6 +3359,7 @@ export function NAMRackPanel({
       return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
     });
   }, [instrumentProfile, presetFolderFilter, presetMetadata, presetSearch, userPresets]);
+  const profileMismatchCount = userPresets.filter((entry) => namStoredPresetProfileMismatch(entry)).length;
   const presetFolders = useMemo(() => {
     const folders = new Set(DEFAULT_PRESET_FOLDERS);
     for (const metadata of Object.values(presetMetadata)) {
@@ -3662,26 +3684,49 @@ export function NAMRackPanel({
     if (presetManagerOpen) void refreshUserPresets();
   }, [presetManagerOpen, refreshUserPresets]);
 
+  const queuePresetMetadataWrite = (operation: () => Promise<void>): Promise<boolean> => {
+    const task = presetMetadataWriteRef.current.then(operation);
+    const handled = task.then(() => {
+      setPresetMetadataError("");
+      return true;
+    }, (error: unknown) => {
+      console.warn("[NAMRackPanel] Could not save preset metadata", error);
+      setPresetMetadataError("Preset details could not be saved. Check that the preset folder is writable, then retry the edit.");
+      return false;
+    });
+    presetMetadataWriteRef.current = handled.then(() => undefined);
+    return handled;
+  };
+
+  const publishPresetMetadata = (next: Record<string, UserRackPresetMetadata>) => {
+    // This cache is published only after the corresponding sidecar was saved.
+    try { savePresetMetadata(next); }
+    catch (error) { console.warn("[NAMRackPanel] Preset details saved to disk, but the local cache is unavailable", error); }
+    presetMetadataRef.current = next;
+    setPresetMetadata(next);
+  };
+
   const updatePresetMetadata = (
     presetName: string,
     patch: UserRackPresetMetadata | ((current: UserRackPresetMetadata) => UserRackPresetMetadata),
     metadataPathOverride = "",
   ) => {
     const name = sanitizePresetName(presetName);
-    if (!name) return;
-    const targetMetadataPath = metadataPathOverride || presetMetadataPath(userPresets.find((entry) => entry.name === name));
-    setPresetMetadata((current) => {
+    if (!name) return Promise.resolve(false);
+    return queuePresetMetadataWrite(async () => {
+      let targetMetadataPath = metadataPathOverride || presetMetadataPath(userPresets.find((entry) => entry.name === name));
+      if (!targetMetadataPath) {
+        const refreshed = await refreshUserPresetsAfterMutation();
+        targetMetadataPath = presetMetadataPath(refreshed.find((entry) => entry.name === name));
+      }
+      const current = presetMetadataRef.current;
       const currentEntry = current[name] ?? {};
       const nextEntry = typeof patch === "function" ? patch(currentEntry) : { ...currentEntry, ...patch };
       const persistedEntry = compactPresetMetadata({ ...nextEntry, updatedAt: Date.now() });
-      const next = { ...current, [name]: persistedEntry };
-      savePresetMetadata(next);
-      if (targetMetadataPath) {
-        void savePresetMetadataSidecar(name, persistedEntry, targetMetadataPath).catch((error) => {
-          console.warn("[NAMRackPanel] Could not save preset metadata sidecar", error);
-        });
+      if (!await savePresetMetadataSidecar(name, persistedEntry, targetMetadataPath)) {
+        throw new Error(`Metadata write rejected for ${name}`);
       }
-      return next;
+      publishPresetMetadata({ ...presetMetadataRef.current, [name]: persistedEntry });
     });
   };
 
@@ -3694,25 +3739,22 @@ export function NAMRackPanel({
   ) => {
     const from = sanitizePresetName(fromName);
     const to = sanitizePresetName(toName);
-    if (!from || !to) return;
-    setPresetMetadata((current) => {
+    if (!from || !to) return Promise.resolve(false);
+    return queuePresetMetadataWrite(async () => {
+      const current = presetMetadataRef.current;
       const next = { ...current };
       if (current[from]) {
         next[to] = compactPresetMetadata({ ...current[from], updatedAt: Date.now() });
-        if (!keepOriginal) delete next[from];
-        if (toMetadataPath) {
-          void savePresetMetadataSidecar(to, next[to], toMetadataPath).catch((error) => {
-            console.warn("[NAMRackPanel] Could not move preset metadata sidecar", error);
-          });
+        if (!await savePresetMetadataSidecar(to, next[to], toMetadataPath)) {
+          throw new Error(`Metadata write rejected for ${to}`);
         }
         if (!keepOriginal && fromMetadataPath) {
-          void nativeBridge.deleteFiles([fromMetadataPath]).catch((error) => {
-            console.warn("[NAMRackPanel] Could not delete old preset metadata sidecar", error);
-          });
+          const removed = await nativeBridge.deleteFiles([fromMetadataPath]);
+          if (removed.errors.length > 0) throw new Error(removed.errors.join("; "));
         }
+        if (!keepOriginal) delete next[from];
       }
-      savePresetMetadata(next);
-      return next;
+      publishPresetMetadata(next);
     });
   };
 
@@ -4469,7 +4511,7 @@ export function NAMRackPanel({
         return;
       }
 
-      updatePresetMetadata(metadata.toneName.trim(), {
+      await updatePresetMetadata(metadata.toneName.trim(), {
         tags: metadata.tags,
         notes: metadata.notes,
         favorite: metadata.favorite,
@@ -4616,7 +4658,7 @@ export function NAMRackPanel({
         return false;
       }
       publishActivePresetIdentity({ kind: "user", name: presetName });
-      updatePresetMetadata(presetName, {
+      await updatePresetMetadata(presetName, {
         lastUsed: Date.now(),
         instrumentProfile: namInstrumentProfileMetadataFromRackState(loadedState),
       });
@@ -4726,6 +4768,7 @@ export function NAMRackPanel({
     setPresetStatus(`Deleting ${presetName}`);
     let identityClearFailed = false;
     try {
+      await presetMetadataWriteRef.current;
       const ok = await nativeBridge.deleteBuiltInFXPreset(NAM_RACK_PLUGIN_NAME, presetName);
       if (!ok) {
         setPresetStatus("Preset could not be deleted");
@@ -4759,6 +4802,46 @@ export function NAMRackPanel({
     }
   };
 
+  const copyUserPresetWithLabelledProfile = async (name: string) => {
+    if (presetManagerBusy || presetBusy) return;
+    const source = userPresets.find((entry) => entry.name === name);
+    const mismatch = source && namStoredPresetProfileMismatch(source);
+    if (!source || !mismatch) return;
+    const label = mismatch.labelled === "bass" ? "Bass" : "Guitar";
+    const storedLabel = mismatch.stored === "bass" ? "Bass" : "Guitar";
+    const nextName = sanitizePresetName(await requestPresetPrompt({
+      kind: "input",
+      title: `Create ${label} copy`,
+      message: `${source.name} is labelled ${label}, but its saved sound uses the ${storedLabel} profile. Create a separate copy using ${label}? This changes the copy's profile and EQ band frequencies, keeps all other saved settings, and does not load it or change the original.`,
+      value: `${source.name} ${label} Copy`,
+      confirmLabel: "Create copy",
+    }) ?? "");
+    if (!nextName) return;
+    if (userPresets.some((entry) => entry.name.localeCompare(nextName, undefined, { sensitivity: "base" }) === 0)) {
+      setPresetStatus(`A preset named ${nextName} already exists. Choose a unique name.`);
+      return;
+    }
+    setPresetManagerBusy(true);
+    try {
+      const copied = await nativeBridge.copyNAMRackPresetWithInstrumentProfile(source.name, nextName, mismatch.labelled === "bass" ? 1 : 0);
+      if (!copied) {
+        setPresetStatus("The profile copy could not be created. The target name may already exist, or the saved preset could not be read. Refresh the library and try a unique name.");
+        return;
+      }
+      await refreshUserPresetsAfterMutation();
+      if (presetListRefreshErrorRef.current) {
+        setPresetStatus(`Created ${nextName}, but the preset library could not be refreshed. Choose Refresh to find the copy. The original and current rack are unchanged.`);
+        return;
+      }
+      setPresetStatus(`Created ${nextName} with the ${label} profile. The original and current rack are unchanged. Select the ${label} instrument to find and audition the copy.`);
+    } catch (error) {
+      console.warn("[NAMRackPanel] Could not create profile copy", error);
+      setPresetStatus("The profile copy could not be created. Refresh the library and try again.");
+    } finally {
+      setPresetManagerBusy(false);
+    }
+  };
+
   const duplicateUserPreset = async (name: string) => {
     const presetName = sanitizePresetName(name);
     if (!presetName) return;
@@ -4779,6 +4862,7 @@ export function NAMRackPanel({
     setPresetManagerBusy(true);
     setPresetStatus(`Duplicating ${presetName}`);
     try {
+      await presetMetadataWriteRef.current;
       const result = await mutateStoredNAMPreset(
         nativeBridge,
         NAM_RACK_PLUGIN_NAME,
@@ -4792,8 +4876,9 @@ export function NAMRackPanel({
       }
       const refreshed = await refreshUserPresetsAfterMutation();
       const targetEntry = refreshed.find((entry) => entry.name === nextName);
-      movePresetMetadata(presetName, nextName, true, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry));
-      updatePresetMetadata(nextName, { lastUsed: Date.now() }, presetMetadataPath(targetEntry));
+      if (await movePresetMetadata(presetName, nextName, true, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry))) {
+        await updatePresetMetadata(nextName, { lastUsed: Date.now() }, presetMetadataPath(targetEntry));
+      }
       setPresetStatus(`Duplicated ${nextName}`);
     } catch (error) {
       console.warn("[NAMRackPanel] Could not duplicate user preset", error);
@@ -4823,6 +4908,7 @@ export function NAMRackPanel({
     setPresetManagerBusy(true);
     setPresetStatus(`Renaming ${presetName}`);
     try {
+      await presetMetadataWriteRef.current;
       const result = await mutateStoredNAMPreset(
         nativeBridge,
         NAM_RACK_PLUGIN_NAME,
@@ -4837,12 +4923,13 @@ export function NAMRackPanel({
       const refreshed = await refreshUserPresetsAfterMutation();
       const targetEntry = refreshed.find((entry) => entry.name === nextName);
       if (!result.success) {
-        movePresetMetadata(presetName, nextName, true, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry));
+        await movePresetMetadata(presetName, nextName, true, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry));
         setPresetStatus(`Saved ${nextName}, but ${presetName} could not be deleted. Both presets remain.`);
         return;
       }
-      movePresetMetadata(presetName, nextName, false, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry));
-      updatePresetMetadata(nextName, { lastUsed: Date.now() }, presetMetadataPath(targetEntry));
+      if (await movePresetMetadata(presetName, nextName, false, presetMetadataPath(targetEntry), presetMetadataPath(sourceEntry))) {
+        await updatePresetMetadata(nextName, { lastUsed: Date.now() }, presetMetadataPath(targetEntry));
+      }
       if (activeUserPresetName === presetName) {
         const identityUpdated = await updatePresetDirtyMarker(isPresetDirty, {
           name: nextName,
@@ -4865,7 +4952,7 @@ export function NAMRackPanel({
   };
 
   const togglePresetFavorite = (name: string) => {
-    updatePresetMetadata(name, (current) => ({ ...current, favorite: !current.favorite }));
+    void updatePresetMetadata(name, (current) => ({ ...current, favorite: !current.favorite }));
   };
 
   const editPresetFolder = async (name: string) => {
@@ -4886,7 +4973,7 @@ export function NAMRackPanel({
       return;
     }
     const folder = sanitizePresetFolder(result);
-    updatePresetMetadata(presetName, { folder });
+    await updatePresetMetadata(presetName, { folder });
   };
 
   const editPresetTags = async (name: string) => {
@@ -4903,7 +4990,7 @@ export function NAMRackPanel({
     });
     if (result === null) return;
     const tags = parsePresetTags(result);
-    updatePresetMetadata(presetName, { tags });
+    await updatePresetMetadata(presetName, { tags });
   };
 
   const editPresetNotes = async (name: string) => {
@@ -4921,7 +5008,7 @@ export function NAMRackPanel({
     });
     if (result === null) return;
     const notes = sanitizePresetNotes(result);
-    updatePresetMetadata(presetName, { notes });
+    await updatePresetMetadata(presetName, { notes });
   };
 
   const writePresetBundle = async (presetName: string, state: unknown, metadata: UserRackPresetMetadata) => {
@@ -4950,7 +5037,7 @@ export function NAMRackPanel({
       state: sanitizeNAMRackPortableDspState(state),
     };
 
-    const success = await nativeBridge.saveProjectToFile(targetPath, JSON.stringify(payload, omitNAMNonPortableState, 2));
+    const success = await nativeBridge.saveJsonDocumentToFile(targetPath, JSON.stringify(payload, omitNAMNonPortableState, 2));
     return { success, canceled: false, exportedAt };
   };
 
@@ -5022,7 +5109,7 @@ export function NAMRackPanel({
         setPresetStatus("Preset could not be exported");
         return;
       }
-      updatePresetMetadata(presetName, { exportedAt: result.exportedAt });
+      await updatePresetMetadata(presetName, { exportedAt: result.exportedAt });
       setPresetStatus(`Exported ${presetName}`);
     } catch (error) {
       console.warn("[NAMRackPanel] Could not export user preset", error);
@@ -5190,7 +5277,7 @@ export function NAMRackPanel({
         await rollbackImport("The imported Preset identity could not be verified.", true);
         return;
       }
-      updatePresetMetadata(nextName, {
+      await updatePresetMetadata(nextName, {
         ...fallbackPresetMetadata(nextName, bundle.metadata),
         instrumentProfile: namInstrumentProfileMetadataFromRackState(importedState),
         importedAt: Date.now(),
@@ -5524,9 +5611,9 @@ export function NAMRackPanel({
       },
       {
         id: "octaver",
-        label: "Oct",
-        caption: octaverActive ? `${Math.round((octaverDownParam?.value ?? 0) * 100)} / ${Math.round((octaverUpParam?.value ?? 0) * 100)}` : "Bypassed",
-        active: octaverActive,
+        label: "Octaver Fuzz",
+        caption: octaverFuzzActivity.label,
+        active: octaverFuzzActive,
         params: stageParams(NAM_RACK_ADVANCED_ONLY_CONTROL_IDS.octaver),
         available: hasAmpModel,
         unavailableReason: ampRequiredReason,
@@ -5750,9 +5837,8 @@ export function NAMRackPanel({
     monoInputOneWarning,
     modulatorModeParam,
     modulatorPedalModeParam,
-    octaverActive,
-    octaverDownParam,
-    octaverUpParam,
+    octaverFuzzActive,
+    octaverFuzzActivity.label,
     outputMeterDb,
     params,
     pedalActive,
@@ -6134,6 +6220,20 @@ export function NAMRackPanel({
     }
     onParamChange(octaverEnabledParam, octaverActive ? 0 : 1);
   };
+  const toggleOctaverFuzz = () => {
+    if (octaverFuzzActive) {
+      setPowerMemory((current) => ({
+        ...current,
+        "octaver-fuzz": { octaverEnabled: octaverActive ? 1 : 0, fuzzEnabled: fuzzActive ? 1 : 0 },
+      }));
+      if (octaverActive && octaverEnabledParam) onParamChange(octaverEnabledParam, 0);
+      if (fuzzActive && fuzzEnabledParam) onParamChange(fuzzEnabledParam, 0);
+    } else {
+      const remembered = powerMemory["octaver-fuzz"];
+      if (remembered?.fuzzEnabled && fuzzEnabledParam) onParamChange(fuzzEnabledParam, 1);
+      if (remembered ? remembered.octaverEnabled : true) toggleOctaver();
+    }
+  };
   const togglePreEq = () => toggleEffectPower(preEqEnabledParam, preEqActive);
   const togglePrecisionDrive = () => toggleEffectPower(precisionDriveEnabledParam, precisionDriveActive);
   const toggleChaos = () => toggleEffectPower(chaosEnabledParam, chaosActive);
@@ -6189,14 +6289,15 @@ export function NAMRackPanel({
     },
     {
       id: "octaver",
-      label: octaverPresentation.label,
+      label: octaverFuzzLabel,
       caption: `${octaverPresentation.captionPrefix} · Down ${Math.round((octaverDownParam?.value ?? 0) * 100)}% · Up ${Math.round((octaverUpParam?.value ?? 0) * 100)}%`,
-      enabled: octaverActive,
+      status: octaverFuzzActivity.label,
+      enabled: octaverFuzzActive,
       disabled: !hasAmpModel,
       icon: <CircleDot size={15} />,
-      onToggle: octaverEnabledParam ? toggleOctaver : undefined,
+      onToggle: octaverEnabledParam || fuzzEnabledParam ? toggleOctaverFuzz : undefined,
       onEdit: editAdvancedFromCompactChain("octaver"),
-      editLabel: `Edit ${octaverPresentation.label} in Device Controls`,
+      editLabel: `Edit ${octaverFuzzLabel} in Device Controls`,
     },
     {
       id: "pre-eq",
@@ -6525,8 +6626,8 @@ export function NAMRackPanel({
             ? `NAM Rack safety mute tripped ${rackOutputEmergencyMuteTripCount} time${rackOutputEmergencyMuteTripCount === 1 ? "" : "s"} and recovered. Lower Input, Drive Volume, Amp Output, or Cab Level before continuing.`
         : reverbIntegrityHits > 0
           ? `The Reverb recorded ${reverbIntegrityHits} internal DSP containment event${reverbIntegrityHits === 1 ? "" : "s"}${reverbIntegrityDetail}. This identifies the Reverb processing boundary; it does not identify a device, cable, or input fault.`
-          : unsafePeakGuardActive
-            ? `The rack contained ${unsafePeakGuardHits} sample frame${unsafePeakGuardHits === 1 ? "" : "s"} exceeding its safety threshold at ${unsafePeakGuardStages.join(" and ")}. This identifies the processing boundary, not the original source of the transient.${audioDeadlineMisses > 0 ? ` This device session also recorded ${audioDeadlineMisses} callback overrun${audioDeadlineMisses === 1 ? "" : "s"}.` : ""}`
+            : trackExecutionWarning
+              ? `${AUDIO_TRACK_EXECUTION_WARNING} Try a larger buffer or disable unused effects.${dualNAMRateAdvice}`
             : audioDeadlineWarning
             ? audioDeadlineStatus.recording
               ? `Audio processing exceeded the ${audioBlockBudgetMs.toFixed(2)} ms buffer while recording${audioDeadlineStatus.lastMissProcessMs > 0 ? ` (last ${audioDeadlineStatus.lastMissProcessMs.toFixed(2)} ms)` : ""}. Raise the buffer before retrying.${dualNAMRateAdvice}`
@@ -6535,6 +6636,8 @@ export function NAMRackPanel({
               ? `The latest audio callback used ${dspBudgetLabel} of the available ${audioBlockBudgetMs.toFixed(2)} ms block budget. If clicks occur, disable unused stages or try the next larger driver-supported buffer.${dualNAMRateAdvice}`
             : resizeAvoidedCount > 0 || oversizeBypassCount > 0
               ? "The audio block exceeded the prepared NAM buffer, so preview was bypassed to avoid artifacts."
+              : outputProtectionRecent && outputProtectionMessage
+                ? outputProtectionMessage
               : monoInputOneWarning
                 ? rackWindowCapabilities.canOpenTrackRouting
                   ? "Track is feeding mono Input 1 into the amp. If your guitar is plugged into Input 2, the amp will amplify Input 1 noise."
@@ -6545,6 +6648,8 @@ export function NAMRackPanel({
                     ? "Precision Drive, Distortion, and Pedal NAM are all active before the Amp NAM. This is allowed, but their Levels stack; lower one stage if the amp input sounds compressed or wrapped."
                   : dualNAMRateMismatch
                     ? `Pedal NAM and Amp NAM are active through sample-rate conversion.${dualNAMRateAdvice}`
+                  : outputProtectionMessage
+                    ? outputProtectionMessage
                   : liveInputDetected
                     ? "Live instrument input is reaching the rack."
                     : auditionSourceRendered
@@ -6576,7 +6681,7 @@ export function NAMRackPanel({
     || (inputDiagnosticHasPriority ? diagnosticsMessage : rackPresentationFeedbackMessage || diagnosticsMessage);
   const diagnosticActionCandidates: Array<NAMRackDiagnosticsAction | null> = [
     rackWindowCapabilities.canOpenAppAudio
-      && (audioDeadlineWarning || (dspBudgetPct ?? 0) >= 80) ? {
+      && (audioDeadlineWarning || trackExecutionWarning || (dspBudgetPct ?? 0) >= 80) ? {
       id: "buffer",
       label: "Buffer",
       title: "Open audio settings and raise the buffer size",
@@ -7185,9 +7290,9 @@ export function NAMRackPanel({
         </section>
       )}
 
-      {presetStatus && !presetManagerOpen && (
+      {(presetMetadataError || presetStatus) && !presetManagerOpen && (
         <p className="nam-preset-toast" role="status" aria-live="polite" data-qa="nam-preset-status">
-          {presetStatus}
+          {presetMetadataError || presetStatus}
         </p>
       )}
 
@@ -7196,13 +7301,14 @@ export function NAMRackPanel({
         currentPresetName={displayPresetName}
         dirty={isPresetDirty}
         busy={presetBusy || presetManagerBusy}
-        status={presetStatus}
+        status={presetMetadataError || presetStatus}
         search={presetSearch}
         activeCollection={presetFolderFilter}
         collections={[
           { id: "all", label: "All presets", count: presetFilterCounts.all + profileFactoryPresets.length },
           { id: "favorites", label: "Favorites", count: presetFilterCounts.favorites },
           { id: "recent", label: "Recent", count: presetFilterCounts.recent },
+          ...(profileMismatchCount ? [{ id: "profile-review", label: "Profile review", count: profileMismatchCount }] : []),
           {
             id: NAM_UNFILED_PRESET_COLLECTION_ID,
             label: "Unfiled",
@@ -7232,6 +7338,7 @@ export function NAMRackPanel({
           notes: presetMetadata[entry.name]?.notes,
           favorite: Boolean(presetMetadata[entry.name]?.favorite),
           lastUsed: presetMetadata[entry.name]?.lastUsed,
+          profileMismatch: namStoredPresetProfileMismatch(entry) ?? undefined,
           active: entry.name.localeCompare(activeUserPresetName, undefined, { sensitivity: "base" }) === 0,
         }))}
         emptyMessage={userPresetEmptyState?.message}
@@ -7261,6 +7368,7 @@ export function NAMRackPanel({
         onEditNotes={editPresetNotes}
         onExportUser={exportUserPreset}
         onDuplicateUser={duplicateUserPreset}
+        onCopyLabelledProfile={copyUserPresetWithLabelledProfile}
         onRenameUser={renameUserPreset}
         onDeleteUser={deleteUserPreset}
       />
@@ -7291,6 +7399,7 @@ export function NAMRackPanel({
             {presetPrompt.kind === "input" && (presetPrompt.multiline ? (
               <textarea
                 autoFocus
+                aria-label={presetPrompt.title}
                 rows={4}
                 value={presetPrompt.value}
                 placeholder={presetPrompt.placeholder}
@@ -7302,6 +7411,7 @@ export function NAMRackPanel({
             ) : (
               <input
                 autoFocus
+                aria-label={presetPrompt.title}
                 value={presetPrompt.value}
                 placeholder={presetPrompt.placeholder}
                 onChange={(event) => {

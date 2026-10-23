@@ -1,5 +1,6 @@
 import { editorButton, editorSelect, editorTab } from "./PluginEditorControls";
 import { useEffect, useRef, useState } from "react";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { nativeBridge, type BuiltInParamDescriptor } from "../../services/NativeBridge";
 import { EQToolbar, type EQToolbarProps } from "./EQToolbar";
 import { SuiteParameter, type ParameterChange } from "./SuiteParameter";
@@ -74,6 +75,11 @@ export function GraphicEQEditor(props: Props) {
   const [page, setPage] = useState(0), [range, setRange] = useState(12), [selected, setSelected] = useState<string[]>([]);
   const [analyzer, setAnalyzer] = useState("both"), [offset, setOffset] = useState(0), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const gesture = useRef<{ id: string; values: Record<string, number> } | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  usePluginFeatureReveal(editor, props.schema.pluginId ?? "graphicEq", ({ parameterId: id }) => {
+    const band = /^third(\d+)$/.exec(id ?? "");
+    if (band) setPage(Number(band[1]) < 10 ? 0 : Number(band[1]) < 21 ? 1 : 2);
+  });
   const p = (id: string) => schema.parameters.find(p => p.id === id);
   const value = (id: string) => p(id)?.value ?? 0;
   const third = value("graphicMode") >= .5;
@@ -87,11 +93,11 @@ export function GraphicEQEditor(props: Props) {
     finally { setBusy(false); }
   };
   const parameter = (id: string) => { const descriptor = p(id); return descriptor && <SuiteParameter layout={id === "graphicTarget" ? "horizontal" : "vertical"} parameter={descriptor} onChange={onChange} onGestureStart={props.onGestureStart} onGestureEnd={props.onGestureEnd} />; };
-  return <div className="approved-effect-editor graphic-eq-editor flex min-h-0 min-w-0 flex-1 flex-col text-daw-text" data-mode={third ? 31 : 10} data-page={page}>
+  return <div ref={editor} className="approved-effect-editor graphic-eq-editor flex min-h-0 min-w-0 flex-1 flex-col text-daw-text" data-suite-kind="graphicEq" data-mode={third ? 31 : 10} data-page={page}>
     <EQToolbar {...props} />
     {error && <div role="alert" className="px-4 text-xs text-daw-record">{error}</div>}
     <div className="graphic-eq-heading flex flex-wrap items-end justify-between gap-3 p-[15px_22px_10px]">
-      <div className="graphic-eq-modes flex gap-[2px] p-[2px]" role="group" aria-label="Bands">{["10 octave", "31 third-octave"].map((name, index) => <button type="button" className={editorButton} key={name} aria-pressed={third === (index === 1)} onClick={() => { const mode = p("graphicMode"); if (mode) onChange(mode, index); setPage(0); setSelected([]); }}>{name}</button>)}</div>
+      <div className="graphic-eq-modes flex gap-[2px] p-[2px]" data-param="graphicMode" role="group" aria-label="Bands">{["10 octave", "31 third-octave"].map((name, index) => <button type="button" className={editorButton} key={name} aria-pressed={third === (index === 1)} onClick={() => { const mode = p("graphicMode"); if (mode) onChange(mode, index); setPage(0); setSelected([]); }}>{name}</button>)}</div>
       {parameter("graphicTarget")}
       <label className="flex flex-row items-center gap-2 text-xs">Range<select className={editorSelect} aria-label="Gain display range" value={displayRange} onChange={e => setRange(Number(e.target.value))}><option value="6">+/-6 dB</option><option value="12">+/-12 dB</option></select></label>
       <label className="flex flex-row items-center gap-2 text-xs">Analyzer<select className={editorSelect} aria-label="Analyzer" value={analyzer} onChange={e => setAnalyzer(e.target.value)}><option value="off">Off</option><option value="pre">Input</option><option value="post">Output</option><option value="both">Pre + post</option></select></label>
@@ -114,6 +120,7 @@ export function GraphicEQEditor(props: Props) {
       <label className="flex items-center gap-2">Offset<input className="graphic-eq-offset" aria-label="Group offset" type="number" min="-24" max="24" step=".1" value={offset} onChange={e => setOffset(Number(e.target.value))} />dB</label>
       <button className={editorButton} disabled={!activeSelection.length || !Number.isFinite(offset)} onClick={() => void apply(Object.fromEntries(bands.filter(p => activeSelection.includes(p.id)).map(p => [p.id, clamp(p.value + offset, -displayRange, displayRange)])))}>Apply offset</button>
       <button className={editorButton} onClick={() => void apply(Object.fromEntries(bands.map(p => [p.id, 0])))}>Flat bank</button>
+      <button className={editorButton} disabled={!activeSelection.length} onClick={() => void apply(Object.fromEntries(bands.filter(p => activeSelection.includes(p.id)).map(p => [p.id, p.defaultValue])))}>Reset selected</button>
     </div>
     <div className="graphic-eq-footer flex shrink-0 flex-wrap items-center justify-evenly gap-3 border-t border-daw-border-light p-[12px_4px]">
       <div className="flex items-center gap-3">{parameter("graphicHPEnabled")}{value("graphicHPEnabled") >= .5 && parameter("graphicHP")}</div>

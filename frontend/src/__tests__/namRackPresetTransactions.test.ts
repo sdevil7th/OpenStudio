@@ -1,4 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
 import { readFileSync as readRawFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -912,7 +911,6 @@ describe("NAM Rack preset transactions", () => {
     expect(panelSource).toContain("const reapplyActivePreset = async");
     expect(panelSource).toContain("onClick={() => void reapplyActivePreset()}");
     expect(panelSource).toContain('User: {activeUserPresetName}');
-    expect(panelSource).toContain("presetStatus && !presetManagerOpen");
     expect(panelSource).toContain('data-qa="nam-preset-previous"');
     expect(panelSource).toContain('data-qa="nam-preset-next"');
     const managerSource = readFileSync(

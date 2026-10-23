@@ -31,7 +31,9 @@ namespace _impl {
 	}
 }
 
-template<typename Sample=float, class RandomEngine=void>
+// OpenStudio: optional fine FFT steps for the standalone Spread pitch bank.
+// The default retains the upstream FFT plan and all other consumers' behavior.
+template<typename Sample=float, class RandomEngine=void, bool splitFft=false>
 struct SignalsmithStretch {
 	static constexpr size_t version[3] = {1, 3, 2};
 
@@ -58,6 +60,35 @@ struct SignalsmithStretch {
 		blockProcess = {};
 		freqEstimateWeighted = freqEstimateWeight = 0;
 	}
+	// OpenStudio: bounded reset of an inactive prepared voice. No process()
+	// calls are allowed until resetStep() returns true. The caller controls the
+	// work budget; no allocation, FFT or whole-buffer copy occurs in a step.
+	void beginReset() {
+		resetStage = 0;
+		resetCursor = 0;
+		prevInputOffset = -1;
+		silenceCounter = 0;
+		didSeek = false;
+		blockProcess = {};
+		freqEstimateWeighted = freqEstimateWeight = 0;
+	}
+	bool resetStep(size_t budget = 64) {
+		bool done = false;
+		if (resetStage == 0) done = stft.resetStep(resetCursor, budget);
+		else if (resetStage == 1) done = stashedInput.copyStep(stft.input, resetCursor, budget);
+		else if (resetStage == 2) done = stashedOutput.copyStep(stft.output, resetCursor, budget);
+		else if (resetStage == 3) {
+			const size_t stop = std::min(_channelBands.size(), resetCursor + budget);
+			for (; resetCursor < stop; ++resetCursor) _channelBands[resetCursor] = Band();
+			done = resetCursor == _channelBands.size();
+		} else return true;
+		if (done) { ++resetStage; resetCursor = 0; }
+		return resetStage == 4;
+	}
+	size_t resetStepCount(size_t budget = 64) const {
+		return stft.resetStepCount(budget) + stashedInput.copyStepCount(budget)
+			+ stashedOutput.copyStepCount(budget) + (_channelBands.size() + budget - 1)/budget;
+	}
 
 	// Configures using a default preset
 	void presetDefault(int nChannels, Sample sampleRate, bool splitComputation=false) {
@@ -74,6 +105,7 @@ struct SignalsmithStretch {
 		stft.configure(channels, channels, blockSamples, intervalSamples + 1);
 		stft.setInterval(intervalSamples, stft.kaiser);
 		stft.reset(Sample(0.1));
+		stft.prepareIncrementalReset();
 		stashedInput = stft.input;
 		stashedOutput = stft.output;
 
@@ -206,8 +238,42 @@ struct SignalsmithStretch {
 		return inputLatency() + playbackRate*outputLatency();
 	}
 
+	// OpenStudio: classify a complete adapter group before servicing its
+	// smaller work slices. Silence wake-up and transpose capture retain the
+	// original group's boundaries; changing only work scheduling must not
+	// change the signal following silence.
+	template<class Inputs>
+	bool beginProcessGroup(Inputs &&inputs, int inputSamples) {
+		Sample totalEnergy = 0;
+		for (int c = 0; c < channels; ++c) {
+			auto &&inputChannel = inputs[c];
+			for (int i = 0; i < inputSamples; ++i) {
+				Sample s = inputChannel[i];
+				totalEnergy += s*s;
+			}
+		}
+		if (totalEnergy < noiseFloor) {
+			if (silenceCounter >= 2*stft.blockSamples()) {
+				if (silenceFirst) {
+					silenceFirst = false;
+					blockProcess = {};
+					for (auto &b : _channelBands) {
+						b.input = b.prevInput = b.output = 0;
+						b.inputEnergy = 0;
+					}
+				}
+				return true;
+			}
+			silenceCounter += inputSamples;
+		} else {
+			silenceCounter = 0;
+			silenceFirst = true;
+		}
+		return false;
+	}
+
 	template<class Inputs, class Outputs>
-	void process(Inputs &&inputs, int inputSamples, Outputs &&outputs, int outputSamples) {
+	void process(Inputs &&inputs, int inputSamples, Outputs &&outputs, int outputSamples, int groupSilence = -1) {
 #ifdef SIGNALSMITH_STRETCH_PROFILE_PROCESS_START
 		SIGNALSMITH_STRETCH_PROFILE_PROCESS_START(inputSamples, outputSamples);
 #endif
@@ -228,27 +294,7 @@ struct SignalsmithStretch {
 			prevCopiedInput = toIndex;
 		};
 
-		Sample totalEnergy = 0;
-		for (int c = 0; c < channels; ++c) {
-			auto &&inputChannel = inputs[c];
-			for (int i = 0; i < inputSamples; ++i) {
-				Sample s = inputChannel[i];
-				totalEnergy += s*s;
-			}
-		}
-
-		if (totalEnergy < noiseFloor) {
-			if (silenceCounter >= 2*stft.blockSamples()) {
-				if (silenceFirst) { // first block of silence processing
-					silenceFirst = false;
-					//stft.reset();
-					blockProcess = {};
-					for (auto &b : _channelBands) {
-						b.input = b.prevInput = b.output = 0;
-						b.inputEnergy = 0;
-					}
-				}
-			
+		if (groupSilence >= 0 ? groupSilence != 0 : beginProcessGroup(inputs, inputSamples)) {
 				if (inputSamples > 0) {
 					// copy from the input, wrapping around if needed
 					for (int outputIndex = 0; outputIndex < outputSamples; ++outputIndex) {
@@ -269,12 +315,6 @@ struct SignalsmithStretch {
 				// Store input in history buffer
 				copyInput(inputSamples);
 				return;
-			} else {
-				silenceCounter += inputSamples;
-			}
-		} else {
-			silenceCounter = 0;
-			silenceFirst = true;
 		}
 		
 		for (int outputIndex = 0; outputIndex < outputSamples; ++outputIndex) {
@@ -492,6 +532,8 @@ struct SignalsmithStretch {
 
 private:
 	bool _splitComputation = false;
+	size_t resetCursor = 0;
+	int resetStage = 4;
 	struct {
 		size_t samplesSinceLast = std::numeric_limits<size_t>::max();
 		size_t steps = 0;
@@ -516,7 +558,7 @@ private:
 	bool formantCompensation = false; // compensate for pitch/freq change
 	Sample formantMultiplier = 1, invFormantMultiplier = 1;
 
-	using STFT = signalsmith::linear::DynamicSTFT<Sample, false, true>;
+	using STFT = signalsmith::linear::DynamicSTFT<Sample, splitFft, true>;
 	STFT stft;
 	typename STFT::Input stashedInput;
 	typename STFT::Output stashedOutput;

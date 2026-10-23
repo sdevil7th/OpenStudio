@@ -11,7 +11,7 @@ struct BuiltInEQPreparedPrograms;
 
 struct BuiltInEQMIDIProgramBank
 {
-    static constexpr size_t valueCount=24*26+6, configurationCount=7;
+    static constexpr size_t valueCount=24*26+6, configurationCount=8;
     struct Entry
     {
         int bank=0,program=0;

@@ -28,7 +28,21 @@ public:
         for (auto& channel : input) channel.fill(0);
         for (auto& channel : output) channel.fill(0);
         position = 0;
+        resetting = false;
     }
+    void beginReset()
+    {
+        stretch.beginReset();resetting=true;
+        for(auto& channel:input)channel.fill(0);
+        for(auto& channel:output)channel.fill(0);
+        position=0;
+    }
+    bool resetStep()
+    {
+        if(resetting)resetting=!stretch.resetStep(resetBudget);
+        return !resetting;
+    }
+    int resetSamples()const noexcept{return static_cast<int>(stretch.resetStepCount(resetBudget));}
     std::array<float, 2> process(float left, float right, float ratio)
     {
         const auto slot = static_cast<size_t>(position);
@@ -46,7 +60,9 @@ public:
     }
 private:
     static constexpr int chunkSize = 64;
+    static constexpr size_t resetBudget = 32;
     signalsmith::stretch::SignalsmithStretch<float> stretch { 0 };
     std::array<std::array<float, chunkSize>, 2> input {}, output {};
     int position = 0;
+    bool resetting = false;
 };

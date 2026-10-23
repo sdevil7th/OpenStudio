@@ -5,6 +5,10 @@
 // shutdown. The independent helper never terminates an application process.
 namespace UpdateInstaller
 {
+// POSIX staging directories are created with mode 0700. Existing directories
+// and ancestors must already satisfy the updater's ownership/trust policy;
+// their permissions are never changed. Windows retains normal inherited ACLs.
+bool ensurePrivateDirectory(const juce::File& directory);
 juce::File installedApplication();
 bool prepare(const juce::File& package, const juce::var& envelope,
              const juce::File& stateRoot, juce::File& transaction, juce::String& error,

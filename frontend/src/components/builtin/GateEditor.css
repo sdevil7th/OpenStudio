@@ -21,8 +21,8 @@
 }
 .gate-meter-row {
   min-height: 155px;
-  flex-basis: 180px;
-  flex-grow: 1;
+  flex-basis: clamp(160px, 19cqi, 360px);
+  flex-grow: 0;
 }
 .gate-timing {
   gap: 24px;

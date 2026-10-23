@@ -1,6 +1,4 @@
-// @ts-expect-error Vitest runs in Node; the WebView app omits Node builtin typings.
 import { readFileSync } from "node:fs";
-// @ts-expect-error Vitest runs in Node; the WebView app omits Node builtin typings.
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { nextNativeRequestId } from "../utils/nativeRequestId";

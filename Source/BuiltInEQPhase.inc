@@ -179,7 +179,20 @@ double OpenStudioEQ::getTailLengthSeconds() const
     const int quality = juce::roundToInt(phaseQuality.load());
     const int staticTail = usesPreparedEQ() ? BuiltInLinearPhaseEQ::tapCount(quality) + BuiltInLinearPhaseEQ::quantum : 0;
     const int spectralTail = frequencyProcessingRequested() ? BuiltInSpectralEQ::latency(quality) * 2 : 0;
-    return static_cast<double>(staticTail + spectralTail) / juce::jmax(1.0, publishedSampleRate.load());
+    const double fs = juce::jmax(1.0, publishedSampleRate.load());
+    double iirTail = 0;
+    if (!usesPreparedEQ())
+        for (int band = 0; band < bandCount; ++band)
+        {
+            std::array<OpenStudioIIRCoefficientSet, maxStagesPerBand> targets;
+            const int stages = buildBandTargets(band, bands[band].enabled.load() >= .5f, targets);
+            double bandTail = 0;
+            for (int stage = 0; stage < stages; ++stage)
+                bandTail += BuiltInFilterTail::biquad(targets[static_cast<size_t>(stage)], fs);
+            iirTail += juce::jmax(bandTail, retainedBandTails[static_cast<size_t>(band)].load());
+        }
+    return BuiltInFilterTail::retain(retainedFilterTail, iirTail
+        + static_cast<double>(staticTail + spectralTail) / fs + (iirTail > 0 ? .02 : 0));
 }
 
 void OpenStudioEQ::processLinearPhase(juce::AudioBuffer<float>& buffer, bool spectrumRequested, const juce::AudioBuffer<float>& fullBuffer)
@@ -208,8 +221,8 @@ void OpenStudioEQ::processLinearPhase(juce::AudioBuffer<float>& buffer, bool spe
             wetL = mid + side; wetR = mid - side;
         }
         else { wetL *= level; wetR *= level; }
-        wetL = std::isfinite(wetL) ? juce::jlimit(-2.5f, 2.5f, wetL) : 0;
-        wetR = std::isfinite(wetR) ? juce::jlimit(-2.5f, 2.5f, wetR) : 0;
+        wetL = std::isfinite(wetL) ? (signalPath.load() >= .5f ? wetL : juce::jlimit(-2.5f, 2.5f, wetL)) : 0;
+        wetR = std::isfinite(wetR) ? (signalPath.load() >= .5f ? wetR : juce::jlimit(-2.5f, 2.5f, wetR)) : 0;
         const float mix = smoothedPowerMix.getNextValue();
         buffer.setSample(0, i, wetL * mix + sample[2] * (1 - mix));
         if (channels > 1) buffer.setSample(1, i, wetR * mix + sample[3] * (1 - mix));

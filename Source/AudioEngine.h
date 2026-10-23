@@ -1,5 +1,6 @@
 #include "BuiltInIRPreparation.h"
 #pragma once
+#include "RealtimeTrackExecutor.h"
 
 #include <JuceHeader.h>
 #include "TrackProcessor.h"
@@ -42,7 +43,8 @@ class AudioEngine  : public juce::AudioIODeviceCallback,
     struct ActiveFXStage;
 
 public:
-    AudioEngine();
+    enum class DeviceStartup { openHardware, offline };
+    explicit AudioEngine(DeviceStartup startup = DeviceStartup::openHardware);
     ~AudioEngine() override;
     void reportStageProcessorFaults(); // Control thread; only called after fault/reset generation changes.
 
@@ -73,6 +75,14 @@ public:
                                  bool hybrid64PostChainActive);
 
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
+    // Control-thread diagnostics; -1 uses physical cores, zero forces serial.
+    bool setRealtimeTrackWorkerCount(int workers);
+    bool setRealtimeTrackWorkerSpinMicroseconds(int microseconds);
+    bool setProbeTrackRecoveryGraceMicroseconds(int microseconds);
+    bool setProbeNAMRackOversamplingFactor(const juce::String& trackId, int factor);
+    juce::var getRealtimeTrackExecutionDiagnostics() const;
+    bool setProbeRecordingDirectory(const juce::File& directory);
+    static juce::var runParallelTrackRegression();
 
     // Messaging
     juce::String addTrack(const juce::String& explicitId = juce::String(),
@@ -186,6 +196,7 @@ public:
     // Get clips that were completed in the last recording session
     std::vector<AudioRecorder::CompletedRecording> getLastCompletedClips();
     juce::var takeRecordingWriteFailures() { return audioRecorder.takeWriteFailures(); }
+    void maintainRecordingPreviews() { audioRecorder.maintainRecordingPreviews(); }
 
     // Get MIDI clips that were completed in the last recording session
     std::vector<MIDIRecorder::CompletedMIDIRecording> getLastCompletedMIDIClips();
@@ -251,6 +262,11 @@ public:
     bool copyBuiltInFXPreset(const juce::String& pluginName,
                              const juce::String& sourcePresetName,
                              const juce::String& targetPresetName);
+    // Library-only copy: never recalls a preset or rewrites its source.
+    bool copyNAMRackPresetWithInstrumentProfile(const juce::String& sourcePresetName,
+                                                const juce::String& targetPresetName,
+                                                int instrumentProfile);
+    juce::var runNAMRackPresetProfileCopyRegression();
     bool deleteBuiltInFXPreset(const juce::String& pluginName, const juce::String& presetName);
 
     // Plugin Editor Windows (Phase 3) - ID-based
@@ -302,7 +318,7 @@ public:
     bool setMonitoringFXPrecisionOverride(int fxIndex, const juce::String& mode);
     juce::var runReleaseGuardrails();
     juce::var runAutomatedRegressionSuite();
-    juce::var runRenderExportRegression(const juce::File& outputDirectory);
+    juce::var runRenderExportRegression(const juce::File& outputDirectory, bool requireOffline = false);
     juce::var runCleanGuitarPitchBendRegression();
     juce::var runNAMRackRegression();
     juce::var runNAMRackDIRegression(const juce::File& inputFile,
@@ -728,6 +744,19 @@ private:
         std::shared_ptr<juce::AudioBuffer<float>> destinationBuffer;
     };
 
+    struct RealtimeTrackWork
+    {
+        juce::AudioBuffer<float> buffer;
+        juce::MidiBuffer midi;
+        int capacity = 0;
+        int jobIndex = -1;
+        TrackProcessor* processor = nullptr;
+        uint64 graphGeneration = 0, automationEpoch = 0;
+        double position = 0.0, rate = 44100.0;
+        bool playing = false, excludedBySolo = false;
+        bool shouldReadHardwareInput = false, hasActiveARA = false;
+        bool prepared = false, processed = false;
+    };
     struct RealtimeTrackEntry
     {
         juce::String id;
@@ -741,6 +770,7 @@ private:
             sidechainSourceBuffers;
         std::vector<RealtimeResolvedSend> sends;
         bool hasIncomingSends = false;
+        std::shared_ptr<RealtimeTrackWork> work;
     };
 
     struct DesiredFXStageSlot
@@ -872,7 +902,13 @@ private:
         std::vector<RealtimeTrackEntry> tracks;
         std::vector<int> processingOrder; // Sized during control-thread publication, never in the callback.
         int processingOrderCount = 0;
+        std::unique_ptr<RealtimeTrackExecutor::Job[]> jobs;
     };
+    static void runParallelTrackJob(void* context) noexcept;
+    void drainRealtimeTrackExecution(); // Caller has stopped callback dispatch.
+    void recordQuarantinedTrackInput(const RealtimeTrackEntry& entry,
+                                     const float* const* inputs, int inputCount,
+                                     int samples, juce::int64 blockPosition);
     struct PublishedBuiltInProcessorOwner
     {
         std::shared_ptr<juce::AudioProcessor> processor;
@@ -1016,6 +1052,14 @@ private:
     std::atomic<const ActiveFXStage*>
         realtimeMonitoringFXSnapshotForAudio { nullptr };
     std::atomic<std::uint32_t> realtimeSnapshotAudioReaders { 0 };
+    RealtimeTrackExecutor realtimeTrackExecutor;
+    int requestedRealtimeWorkers = -1;
+    std::atomic<int> probeTrackRecoveryGraceMicroseconds { 0 };
+    const RealtimeTrackSnapshot* pendingParallelSnapshot = nullptr;
+    std::atomic<uint64> parallelTrackBlocks { 0 }, parallelTrackRejectedJobs { 0 };
+    std::atomic<uint64> parallelQuarantinedBlocks { 0 };
+    std::atomic<uint64> parallelLastFailureCallback { 0 };
+    juce::File probeRecordingDirectory;
     juce::CriticalSection realtimeSnapshotRetirementLock;
     std::vector<std::shared_ptr<const void>>
         retiredRealtimeSnapshotOwners;
@@ -1052,6 +1096,9 @@ private:
     std::atomic<double> lastAudioCallbackProcessMs { 0.0 };
     std::atomic<double> maxAudioCallbackProcessMs { 0.0 };
     std::atomic<uint64> audioCallbackCounter { 0 };
+    const DeviceStartup deviceStartupMode;
+    std::atomic<unsigned int> hardwareCallbackRegistrationCount { 0 };
+    void registerHardwareAudioCallback();
     std::atomic<uint64> audioCallbackDeadlineMissCount { 0 };
     std::atomic<uint64> lifetimeAudioCallbackDeadlineMissCount { 0 };
     std::atomic<uint64> lastAudioCallbackDeadlineMissCounter { 0 };
@@ -1293,7 +1340,6 @@ private:
     juce::AudioBuffer<float> reusableStageFXDryBuffer;
     juce::AudioBuffer<double> reusableStageFXDryBufferDouble;
     juce::AudioBuffer<float> reusablePitchScrubBuffer;
-    juce::MidiBuffer reusableRealtimeMidiBuffer;
     juce::MidiBuffer reusableMasterMidiBuffer, reusableMonitoringMidiBuffer;
     float stageFXBypassRampStep = 1.0f / 882.0f;
     int stageFXContinuityRampSamples = 353;

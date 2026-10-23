@@ -23,6 +23,7 @@ import { transportActions } from "./actions/transport";
 import { metronomePracticeActions } from "./actions/metronomePractice";
 import { clipActions } from "./actions/clips";
 import { clipEditingActions } from "./actions/clipEditing";
+import type { TimelineClipCopyOptions, TimelineClipCopyPlacement } from "./actions/timelineClipCopy";
 import { mixerActions } from "./actions/mixer";
 import { timelineActions } from "./actions/timeline";
 import { trackActions } from "./actions/tracks";
@@ -1486,6 +1487,7 @@ export interface DAWState {
   razorEdits: Array<{ trackId: string; start: number; end: number }>;
 
   // Timeline View
+  isTimelineRulerZooming: boolean; // Runtime-only ownership of a held vertical ruler gesture
   pixelsPerSecond: number;
   scrollX: number;
   scrollY: number;
@@ -1928,7 +1930,7 @@ export interface DAWActions {
     options?: AddTrackOptions,
   ) => void;
   duplicateTrack: (trackId: string) => Promise<void>;
-  duplicateSelectedTracks: () => Promise<string[]>;
+  duplicateSelectedTracks: (options?: { trackIds?: readonly string[]; beforeTrackId?: string }) => Promise<string[]>;
   removeTrack: (id: string) => Promise<void>;
   updateTrack: (id: string, updates: Partial<Track>) => void;
   setTracksColorWithUndo: (trackIds: string[], color: string) => void;
@@ -2105,6 +2107,7 @@ export interface DAWActions {
   togglePlayPause: () => Promise<void>;
   setCurrentTime: (time: number) => void;
   seekTo: (time: number) => Promise<void>;
+  goToStart: () => Promise<void>;
   setTempo: (tempo: number) => Promise<void>;
   toggleLoop: () => void;
   setLoopRegion: (start: number, end: number) => void;
@@ -2277,6 +2280,10 @@ export interface DAWActions {
     targetTrackId: string,
     targetStartTime: number,
   ) => string | null;
+  duplicateClipsToPositions: (
+    placements: readonly TimelineClipCopyPlacement[],
+    options?: TimelineClipCopyOptions,
+  ) => string[];
   repeatClip: (clipId: string, repeatCount?: number) => void;
 
   // Clip Gain Envelope
@@ -3120,6 +3127,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     recordingClips: [],
     recordSession: null,
     recordingMIDIPreviews: {},
+    isTimelineRulerZooming: false,
     playStartPosition: 0,
     timeSelection: null,
     metronomeEnabled: false,
@@ -3238,6 +3246,7 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "recordingClips",
   "recordSession",
   "playStartPosition",
+  "isTimelineRulerZooming",
 
   // Selection state — ephemeral, not part of the "document"
   "selectedTrackId",
@@ -3440,6 +3449,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     clippingStates: {},
     automatedParamValues: {},
     pixelsPerSecond: 50,
+    isTimelineRulerZooming: false,
     scrollX: 0,
     scrollY: 0,
     trackHeight: 100,

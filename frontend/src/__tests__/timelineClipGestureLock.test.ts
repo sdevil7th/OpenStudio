@@ -96,7 +96,9 @@ describe("timeline pointer gesture lock authority", () => {
     expect(timelineSource).toContain("cancelClipVolumeEdit(volumeGesture.clipId)");
     expect(timelineSource).toContain("restoreTimelineGestureUndo();");
     expect(timelineSource).toContain("runTimelineClipGestureMutation(");
-    expect(timelineSource.match(/draggable=\{!clipEditLocked\}/g)).toHaveLength(6);
+    // Preview groups add a second restriction; all six real clip drag controls
+    // still retain the current clip-edit lock gate.
+    expect(timelineSource.match(/draggable=\{(?:!isCopyPreview && )?!clipEditLocked\}/g)).toHaveLength(6);
     expect(timelineSource).not.toContain("draggable={!clip.locked}");
   });
 });

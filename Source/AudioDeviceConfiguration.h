@@ -5,6 +5,72 @@
 
 namespace AudioDeviceConfiguration
 {
+inline juce::String resolveDeviceName(const juce::var& request,
+                                     const juce::Identifier& key,
+                                     const juce::StringArray& available,
+                                     int defaultIndex,
+                                     bool useDefaultDevices)
+{
+    const auto requested = request.getProperty(key, {}).toString();
+    if (!useDefaultDevices && request.hasProperty(key) && requested.isEmpty())
+        return {};
+    if (available.contains(requested))
+        return requested;
+    return available.isEmpty() ? juce::String()
+        : available[juce::jlimit(0, available.size() - 1, defaultIndex)];
+}
+
+struct CoupledDeviceNames
+{
+    juce::String input;
+    juce::String output;
+};
+
+// A scalar settings edit must retain an explicitly disabled side. Missing names
+// and a new audio-system selection still use the driver's coupled defaults.
+inline CoupledDeviceNames resolveCoupledDeviceNames(const juce::var& request,
+                                                    const juce::String& resolvedInput,
+                                                    const juce::String& resolvedOutput,
+                                                    bool useDefaultDevices)
+{
+    const auto requestedInput = request.getProperty("inputDevice", {}).toString();
+    const auto requestedOutput = request.getProperty("outputDevice", {}).toString();
+    if (!useDefaultDevices && request.hasProperty("inputDevice") && requestedInput.isEmpty()
+        && requestedOutput.isNotEmpty() && requestedOutput == resolvedOutput)
+        return { {}, resolvedOutput };
+    if (!useDefaultDevices && request.hasProperty("outputDevice") && requestedOutput.isEmpty()
+        && requestedInput.isNotEmpty() && requestedInput == resolvedInput)
+        return { resolvedInput, {} };
+
+    const auto selected = resolvedOutput.isNotEmpty() ? resolvedOutput : resolvedInput;
+    return { selected, selected };
+}
+
+// ASIO exposes one coupled device even when only its input or output is active.
+// Treat an inactive side as absent, rather than probing the streaming driver a
+// second time just because its saved input/output names differ from the draft.
+inline bool isSameStreamingDevice(const juce::String& requestedType,
+                                  const juce::String& requestedInput,
+                                  const juce::String& requestedOutput,
+                                  const juce::String& activeType,
+                                  const juce::String& activeInput,
+                                  const juce::String& activeOutput,
+                                  bool separateInputsAndOutputs)
+{
+    if (requestedType != activeType)
+        return false;
+    if (separateInputsAndOutputs)
+        return requestedInput == activeInput && requestedOutput == activeOutput;
+
+    const auto selected = requestedOutput.isNotEmpty() ? requestedOutput : requestedInput;
+    return selected.isNotEmpty()
+        && (requestedInput.isEmpty() || requestedInput == selected)
+        && (requestedOutput.isEmpty() || requestedOutput == selected)
+        && (activeInput.isNotEmpty() || activeOutput.isNotEmpty())
+        && (activeInput.isEmpty() || activeInput == selected)
+        && (activeOutput.isEmpty() || activeOutput == selected);
+}
+
 // Message-thread transaction. Explicit empty names mean disabled; only a type
 // switch requesting defaults may substitute the driver's default devices.
 template <typename ConfigureChannels>
@@ -13,8 +79,13 @@ juce::String apply(juce::AudioDeviceManager& manager,
                    juce::AudioDeviceManager::AudioDeviceSetup setup,
                    bool useDefaultDevices,
                    bool inputAllowed,
-                   ConfigureChannels configureChannels)
+                   ConfigureChannels configureChannels,
+                   bool verifySampleRate = true,
+                   bool verifyBufferSize = true,
+                   juce::AudioDeviceManager::AudioDeviceSetup* acceptedSetup = nullptr)
 {
+    if (acceptedSetup != nullptr)
+        *acceptedSetup = {};
     if (!std::isfinite(setup.sampleRate) || setup.sampleRate <= 0.0)
         return "The requested audio sample rate must be positive and finite.";
     if (setup.bufferSize <= 0)
@@ -75,6 +146,25 @@ juce::String apply(juce::AudioDeviceManager& manager,
     auto error = manager.initialise(setup.inputChannels.countNumberOfSetBits(),
                                     setup.outputChannels.countNumberOfSetBits(),
                                     &requested, false);
+    if (auto* device = manager.getCurrentAudioDevice())
+    {
+        auto accepted = manager.getAudioDeviceSetup();
+        accepted.sampleRate = device->getCurrentSampleRate();
+        accepted.bufferSize = device->getCurrentBufferSizeSamples();
+        if (acceptedSetup != nullptr)
+            *acceptedSetup = accepted;
+        if (error.isEmpty()
+            && ((verifySampleRate && (!std::isfinite(accepted.sampleRate)
+                                     || std::abs(accepted.sampleRate - setup.sampleRate) > 1.0))
+                || (verifyBufferSize && accepted.bufferSize != setup.bufferSize)))
+        {
+            error = "The audio driver did not accept the requested settings. Requested "
+                + juce::String(setup.sampleRate, 0) + " Hz / " + juce::String(setup.bufferSize)
+                + " samples; opened " + juce::String(accepted.sampleRate, 0) + " Hz / "
+                + juce::String(accepted.bufferSize)
+                + " samples. Choose supported settings or change them in the driver's control panel.";
+        }
+    }
     if (error.isEmpty()
         && (setup.inputDeviceName.isNotEmpty() || setup.outputDeviceName.isNotEmpty())
         && manager.getCurrentAudioDevice() == nullptr)
@@ -82,9 +172,23 @@ juce::String apply(juce::AudioDeviceManager& manager,
     if (error.isNotEmpty())
     {
         manager.closeAudioDevice();
-        const auto restoreError = manager.initialise(oldSetup.inputChannels.countNumberOfSetBits(),
-                                                     oldSetup.outputChannels.countNumberOfSetBits(),
-                                                     previous.get(), false);
+        auto restoreError = manager.initialise(oldSetup.inputChannels.countNumberOfSetBits(),
+                                               oldSetup.outputChannels.countNumberOfSetBits(),
+                                               previous.get(), false);
+        if (restoreError.isEmpty()
+            && (oldSetup.inputDeviceName.isNotEmpty() || oldSetup.outputDeviceName.isNotEmpty()))
+        {
+            auto* restored = manager.getCurrentAudioDevice();
+            if (restored == nullptr)
+                restoreError = "The previous device did not reopen.";
+            else if (!std::isfinite(restored->getCurrentSampleRate())
+                     || std::abs(restored->getCurrentSampleRate() - oldSetup.sampleRate) > 1.0
+                     || restored->getCurrentBufferSizeSamples() != oldSetup.bufferSize)
+                restoreError = "The driver reopened at " + juce::String(restored->getCurrentSampleRate(), 0)
+                    + " Hz / " + juce::String(restored->getCurrentBufferSizeSamples())
+                    + " samples instead of the previous " + juce::String(oldSetup.sampleRate, 0)
+                    + " Hz / " + juce::String(oldSetup.bufferSize) + " samples.";
+        }
         if (restoreError.isNotEmpty())
             error += " Previous audio settings could not be restored: " + restoreError;
     }

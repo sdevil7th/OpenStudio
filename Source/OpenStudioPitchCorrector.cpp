@@ -12,26 +12,30 @@ OpenStudioPitchCorrector::OpenStudioPitchCorrector()
 
 void OpenStudioPitchCorrector::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    samplesPerBlock = juce::jmax(1, samplesPerBlock);
     cachedSampleRate = sampleRate;
+    activeSignalPath = signalPath.load() >= .5f;
 
+    mapper.setCorrectedNoteMask(signalPath.load() >= .5f);
+    detector.setRateNormalized(signalPath.load() >= .5f);
     detector.prepare(sampleRate, samplesPerBlock);
     mapper.prepare(sampleRate);
 
     // Streaming latency includes both analysis and synthesis, plus the
     // library's split-computation scheduling delay.
-    stretcher.presetCheaper (2, static_cast<float> (sampleRate));
+    withPitchEngine([&](auto& engine) { engine.presetCheaper(2, static_cast<float>(sampleRate)); });
 
     // Apply detection params
     detector.setMinFrequency(minFreqParam.load());
     detector.setMaxFrequency(maxFreqParam.load());
     detector.setSensitivity(sensitivity.load());
 
-    setLatencySamples (stretcher.inputLatency() + stretcher.outputLatency());
+    setLatencySamples(withPitchEngine([](const auto& engine) { return engine.inputLatency() + engine.outputLatency(); }));
     dryDelay.setSize(2, getLatencySamples() + 1);
     wetMix.reset(sampleRate, 0.010);
 
     // Pre-allocate per-block scratch buffers so processBlock never heap-allocates.
-    // samplesPerBlock is the maximum; actual numSamples will always be <= this.
+    // Oversized direct/offline calls are divided into this prepared capacity.
     dryBuffer.setSize (2, samplesPerBlock, false, true, false);
     detectionBuffer.setSize(1, samplesPerBlock, false, true, false);
     stretchOutputBuf.setSize (2, samplesPerBlock, false, true, false);
@@ -51,7 +55,8 @@ void OpenStudioPitchCorrector::reset()
     const float source = detectionSource.load();
     activeDetectionSource = std::isfinite(source) ? juce::jlimit(0, 2, juce::roundToInt(source)) : 0;
     mapper.reset();
-    stretcher.reset();
+    withPitchEngine([](auto& engine) { engine.reset(); });
+    formantSettingsValid = false;
     dryDelay.clear();
     dryDelayPosition = 0;
     dryBuffer.clear();
@@ -74,6 +79,38 @@ void OpenStudioPitchCorrector::reset()
 
 void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    const juce::ScopedNoDenormals noDenormals;
+    const int capacity = dryBuffer.getNumSamples();
+    const int channels = juce::jmin(2, buffer.getNumChannels());
+    if (capacity <= 0 || dryDelay.getNumSamples() <= 0)
+    {
+        buffer.clear();
+        return;
+    }
+    // Mono/stereo are the only supported layouts. A defensive direct call
+    // must not index the two-channel staging buffers through extra channels.
+    for (int ch = channels; ch < buffer.getNumChannels(); ++ch)
+        buffer.clear(ch, 0, buffer.getNumSamples());
+    if (channels == 0) return;
+    if (buffer.getNumSamples() <= capacity && buffer.getNumChannels() <= 2)
+    {
+        processPreparedBlock(buffer, midi, 0);
+        return;
+    }
+    for (int offset = 0; offset < buffer.getNumSamples(); offset += capacity)
+    {
+        const int count = juce::jmin(capacity, buffer.getNumSamples() - offset);
+        float* pointers[2] { buffer.getWritePointer(0, offset),
+            channels > 1 ? buffer.getWritePointer(1, offset) : nullptr };
+        // JUCE's external-data constructor uses inline channel-pointer storage
+        // for this two-channel view; it neither owns nor allocates audio data.
+        juce::AudioBuffer<float> part(pointers, channels, count);
+        processPreparedBlock(part, midi, offset);
+    }
+}
+
+void OpenStudioPitchCorrector::processPreparedBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, int midiOffset)
+{
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
     if (numSamples == 0 || numChannels == 0) return;
@@ -87,12 +124,14 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
         activeDetectionSource = source;
     }
 
-    const int requestedMidiChannel = juce::jlimit(1, 16, static_cast<int>(midiOutputChannel.load()));
+    const float channelValue = midiOutputChannel.load(std::memory_order_relaxed);
+    const int requestedMidiChannel = std::isfinite(channelValue)
+        ? static_cast<int>(juce::jlimit(1.0f, 16.0f, channelValue)) : 1;
     const bool generateMidi = !bypassed && midiOutputEnabled.load() > 0.5f;
     if (currentMidiNote >= 0 && (midiResetPending || !generateMidi || requestedMidiChannel != currentMidiChannel))
     {
-        midi.addEvent(juce::MidiMessage::noteOff(currentMidiChannel, currentMidiNote), 0);
-        midi.addEvent(juce::MidiMessage::pitchWheel(currentMidiChannel, 8192), 0);
+        midi.addEvent(juce::MidiMessage::noteOff(currentMidiChannel, currentMidiNote), midiOffset);
+        midi.addEvent(juce::MidiMessage::pitchWheel(currentMidiChannel, 8192), midiOffset);
         currentMidiNote = -1;
         midiNoteHoldTime = 0.0f;
     }
@@ -106,15 +145,22 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
 
     // Keep the dry delay warm even at 100% wet and during bypass.
     wetMix.setTargetValue(bypassed ? 0.0f : juce::jlimit(0.0f, 1.0f, mix.load()));
-    for (int i = 0; i < numSamples; ++i)
+    const int delayLength = dryDelay.getNumSamples();
+    int nextPosition = dryDelayPosition;
+    for (int ch = 0; ch < numChannels; ++ch)
     {
-        for (int ch = 0; ch < numChannels; ++ch)
+        float* delayed = dryDelay.getWritePointer(ch);
+        float* dry = dryBuffer.getWritePointer(ch);
+        const float* input = buffer.getReadPointer(ch);
+        nextPosition = dryDelayPosition;
+        for (int i = 0; i < numSamples; ++i)
         {
-            dryDelay.setSample(ch, dryDelayPosition, buffer.getSample(ch, i));
-            dryBuffer.setSample(ch, i, dryDelay.getSample(ch, (dryDelayPosition + 1) % dryDelay.getNumSamples()));
+            delayed[nextPosition] = input[i];
+            if (++nextPosition == delayLength) nextPosition = 0;
+            dry[i] = delayed[nextPosition];
         }
-        dryDelayPosition = (dryDelayPosition + 1) % dryDelay.getNumSamples();
     }
+    dryDelayPosition = nextPosition;
 
     // Detection source is independent of the linked stereo correction path.
     const float* monoInput = buffer.getReadPointer(source == 1 && numChannels > 1 ? 1 : 0);
@@ -148,10 +194,20 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
 
     // Apply pitch shift via Signalsmith Stretch (real-time, native stereo).
     // Use pre-allocated inPtrs/outPtrs/stretchOutputBuf to avoid heap allocation.
-    stretcher.setTransposeFactor (ratio);
-    // Signalsmith frequencies are cycles per sample, not Hz.
-    stretcher.setFormantBase (detectedHz > 0.0f ? detectedHz / static_cast<float>(cachedSampleRate) : 0.0f);
-    stretcher.setFormantSemitones (mapper.getFormantShift(), mapper.getFormantCorrection());
+    withPitchEngine([&](auto& engine) {
+        engine.setTransposeFactor(ratio);
+        // Signalsmith frequencies are cycles per sample, not Hz.
+        engine.setFormantBase(detectedHz > 0 ? detectedHz / static_cast<float>(cachedSampleRate) : 0);
+        const float shift = mapper.getFormantShift();
+        const bool correction = mapper.getFormantCorrection();
+        if (!formantSettingsValid || shift != appliedFormantShift || correction != appliedFormantCorrection)
+        {
+            engine.setFormantSemitones(shift, correction);
+            appliedFormantShift = shift;
+            appliedFormantCorrection = correction;
+            formantSettingsValid = true;
+        }
+    });
 
     for (int ch = 0; ch < numChannels; ++ch)
     {
@@ -168,11 +224,7 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
         outPtrs[1] = stretchOutputBuf.getWritePointer(1);
     }
 
-    stretcher.process (inPtrs, numSamples, outPtrs, numSamples);
-
-    for (int ch = 0; ch < numChannels; ++ch)
-        std::memcpy (buffer.getWritePointer (ch), stretchOutputBuf.getReadPointer (ch),
-                     static_cast<size_t> (numSamples) * sizeof (float));
+    withPitchEngine([&](auto& engine) { engine.process(inPtrs, numSamples, outPtrs, numSamples); });
 
     // Apply dry/wet mix
     for (int i = 0; i < numSamples; ++i)
@@ -180,9 +232,10 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
         const float mixVal = wetMix.getNextValue();
         for (int ch = 0; ch < numChannels; ++ch)
         {
-            float* wet = buffer.getWritePointer(ch);
+            float* output = buffer.getWritePointer(ch);
+            const float* wet = stretchOutputBuf.getReadPointer(ch);
             const float* dry = dryBuffer.getReadPointer(ch);
-            wet[i] = dry[i] * (1.0f - mixVal) + wet[i] * mixVal;
+            output[i] = dry[i] * (1.0f - mixVal) + wet[i] * mixVal;
         }
     }
 
@@ -206,7 +259,7 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
     // MIDI output generation
     if (generateMidi)
     {
-        int midiCh = juce::jlimit(1, 16, static_cast<int>(midiOutputChannel.load(std::memory_order_relaxed))) - 1;
+        const int midiCh = currentMidiChannel - 1;
 
         if (correctedHz > 0.0f && conf > 0.3f)
         {
@@ -219,8 +272,8 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
                 // Note changed — send note-off for old, note-on for new
                 if (midiNoteHoldTime >= midiMinHoldTime)
                 {
-                    midi.addEvent(juce::MidiMessage::noteOff(midiCh + 1, currentMidiNote), 0);
-                    midi.addEvent(juce::MidiMessage::noteOn(midiCh + 1, targetNote, static_cast<juce::uint8>(velocity)), 0);
+                    midi.addEvent(juce::MidiMessage::noteOff(midiCh + 1, currentMidiNote), midiOffset);
+                    midi.addEvent(juce::MidiMessage::noteOn(midiCh + 1, targetNote, static_cast<juce::uint8>(velocity)), midiOffset);
                     currentMidiNote = targetNote;
                     currentMidiVelocity = velocity;
                     midiNoteHoldTime = 0.0f;
@@ -230,7 +283,7 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
             else if (currentMidiNote < 0)
             {
                 // No note sounding — start new note
-                midi.addEvent(juce::MidiMessage::noteOn(midiCh + 1, targetNote, static_cast<juce::uint8>(velocity)), 0);
+                midi.addEvent(juce::MidiMessage::noteOn(midiCh + 1, targetNote, static_cast<juce::uint8>(velocity)), midiOffset);
                 currentMidiNote = targetNote;
                 currentMidiVelocity = velocity;
                 midiNoteHoldTime = 0.0f;
@@ -242,12 +295,12 @@ void OpenStudioPitchCorrector::processBlock(juce::AudioBuffer<float>& buffer, ju
             float bendSemitones = corMidi - static_cast<float>(currentMidiNote);
             int bendValue = 8192 + static_cast<int>(bendSemitones / 2.0f * 8191.0f);
             bendValue = juce::jlimit(0, 16383, bendValue);
-            midi.addEvent(juce::MidiMessage::pitchWheel(midiCh + 1, bendValue), 0);
+            midi.addEvent(juce::MidiMessage::pitchWheel(midiCh + 1, bendValue), midiOffset);
         }
         else if (currentMidiNote >= 0)
         {
             // No pitch detected — send note-off
-            midi.addEvent(juce::MidiMessage::noteOff(midiCh + 1, currentMidiNote), 0);
+            midi.addEvent(juce::MidiMessage::noteOff(midiCh + 1, currentMidiNote), midiOffset);
             currentMidiNote = -1;
             midiNoteHoldTime = 0.0f;
         }
@@ -319,6 +372,7 @@ void OpenStudioPitchCorrector::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::ValueTree state("OpenStudioPitchCorrector");
 
+    state.setProperty("signalPath", signalPath.load(), nullptr);
     state.setProperty("key", mapper.getKey(), nullptr);
     state.setProperty("scale", static_cast<int>(mapper.getScale()), nullptr);
     state.setProperty("retuneSpeed", mapper.getRetuneSpeed(), nullptr);
@@ -348,8 +402,11 @@ void OpenStudioPitchCorrector::getStateInformation(juce::MemoryBlock& destData)
 void OpenStudioPitchCorrector::setStateInformation(const void* data, int sizeInBytes)
 {
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
-    if (!state.isValid()) return;
+    if (!state.isValid() || state.getType().toString() != "OpenStudioPitchCorrector") return;
+    signalPath.store(static_cast<float>(state.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
 
+    const bool changedSignalPath = activeSignalPath != (signalPath.load() >= .5f);
+    mapper.setCorrectedNoteMask(signalPath.load() >= .5f);
     mapper.setKey(state.getProperty("key", 0));
     mapper.setScale(static_cast<PitchMapper::Scale>(static_cast<int>(state.getProperty("scale", 0))));
     mapper.setRetuneSpeed(state.getProperty("retuneSpeed", 50.0f));
@@ -371,6 +428,7 @@ void OpenStudioPitchCorrector::setStateInformation(const void* data, int sizeInB
 
     for (int i = 0; i < 12; ++i)
         mapper.setNoteEnabled(i, state.getProperty("noteEnable_" + juce::String(i), true));
+    if (changedSignalPath && dryBuffer.getNumSamples() > 0) prepareToPlay(cachedSampleRate, dryBuffer.getNumSamples());
 }
 
 juce::String OpenStudioPitchCorrector::midiToNoteName(float midiNote)

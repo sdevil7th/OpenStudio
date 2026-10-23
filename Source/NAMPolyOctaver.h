@@ -62,6 +62,23 @@ public:
         float lastBlockUpPeak = 0.0f;
     };
 
+    struct LifecycleTestResult
+    {
+        bool passed = false;
+        bool retirementPartitionPassed = false;
+        bool unaffectedVoicePassed = false;
+        bool retiredProfileRecallPassed = false;
+        bool fuzzPairPartitionPassed = false;
+        int retirementComparisons = 0;
+        int profileComparisons = 0;
+        int fuzzPairComparisons = 0;
+        float maximumRetirementDifference = 0.0f;
+        float maximumMetadataDifference = 0.0f;
+        float maximumUnaffectedVoiceDifference = 0.0f;
+        float maximumRetiredProfileDifference = 0.0f;
+        float maximumFuzzPairDifference = 0.0f;
+    };
+
     struct SelfTestResult
     {
         bool passed = false;
@@ -77,6 +94,9 @@ public:
         bool liveProfileSwitchPassed = false;
         bool liveProfileSwitchPartitionPassed = false;
         bool stopbandRejectionPassed = false;
+        bool excitationMetadataPassed = false;
+        bool excitationCoefficientBudgetPassed = false;
+        bool excitationFastPathsPassed = false;
         float maximumResetDifference = 0.0f;
         float maximumPartitionDifference = 0.0f;
         float maximumSilentChannelLeak = 0.0f;
@@ -86,7 +106,13 @@ public:
         float maximumProfileSwitchDelta = 0.0f;
         float maximumProfileSwitchPartitionDifference = 0.0f;
         float stopbandRejectionDb = 0.0f;
+        float maximumExcitationCoefficientError = 0.0f;
+        float maximumExcitationFloatCoefficientDifference = 0.0f;
+        float maximumExcitationBudgetExcessEpsilons = 0.0f;
+        float maximumExcitationMetadataPartitionDifference = 0.0f;
+        float maximumExcitationAudioDifference = 0.0f;
         std::uint64_t nonFiniteRecoveries = 0;
+        LifecycleTestResult lifecycle;
     };
 
     NAMPolyOctaver() noexcept;
@@ -109,8 +135,13 @@ public:
     /** Selects 0=Guitar (60 Hz first ERB band) or 1=Bass (25.3 Hz). */
     void setInstrumentProfile(int profile) noexcept;
 
-    /** In-place production mixer: Direct + Octave Down + Octave Up. */
-    void processBlock(juce::AudioBuffer<float>& buffer) noexcept;
+    /** In-place production mixer: Direct + Octave Down + Octave Up.
+        Optional excitationGains receives one control-only nonlinear-drive gain
+        per frame from the exact smoothed levels used by that frame. It must
+        hold buffer.getNumSamples() floats. The audio mix is never normalized;
+        direct-only, silent-control and unprepared paths write unity gains. */
+    void processBlock(juce::AudioBuffer<float>& buffer,
+                      float* excitationGains = nullptr) noexcept;
 
     /**
      * Allocation-free raw-voice hook for deterministic headless tests.
@@ -135,6 +166,8 @@ public:
      * callback. Subjective octave tone/voicing is deliberately not asserted.
      */
     [[nodiscard]] static SelfTestResult runDeterministicSelfTest(
+        double sampleRate = 48000.0);
+    [[nodiscard]] static LifecycleTestResult runLifecycleSelfTest(
         double sampleRate = 48000.0);
 
     [[nodiscard]] bool isPrepared() const noexcept
@@ -256,6 +289,7 @@ private:
 
     void designFilterBank(double sampleRate) noexcept;
     void resetDspState() noexcept;
+    void retireWetPath() noexcept;
     void synchroniseLevelTargets() noexcept;
     void synchroniseProfileTargets() noexcept;
     VoiceFrame processVoiceSample(int channel,

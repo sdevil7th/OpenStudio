@@ -41,10 +41,12 @@ void PitchMapper::reset()
     hasStableNote = hasSustainedCorrection = false;
     stableNote = pendingNote = sustainedCorrectionMidi = 0;
     stableNoteSeconds = pendingNoteSeconds = unvoicedSeconds = 0;
+    cachedLegacySpeed = cachedLegacyDelta = cachedSustainedSpeed = -1;
+    cachedSustainedDelta = -1;
 }
 
-void PitchMapper::setKey(int note) { rootNote.store(note % 12, std::memory_order_relaxed); }
-void PitchMapper::setScale(Scale scale) { currentScale.store(static_cast<int>(scale), std::memory_order_relaxed); }
+void PitchMapper::setKey(int note) { rootNote.store((note % 12 + 12) % 12, std::memory_order_relaxed); }
+void PitchMapper::setScale(Scale scale) { currentScale.store(juce::jlimit(0, 15, static_cast<int>(scale)), std::memory_order_relaxed); }
 void PitchMapper::setRetuneSpeed(float ms) { retuneSpeedMs.store(juce::jlimit(0.0f, 400.0f, ms), std::memory_order_relaxed); }
 void PitchMapper::setHumanize(float pct) { humanizePercent.store(juce::jlimit(0.0f, 100.0f, pct), std::memory_order_relaxed); }
 void PitchMapper::setHumanizeMode(HumanizeMode mode)
@@ -58,7 +60,7 @@ void PitchMapper::setFormantShift(float st) { formantShiftSemitones.store(juce::
 
 void PitchMapper::setNoteEnabled(int note, bool enabled)
 {
-    noteEnables[note % 12].store(enabled, std::memory_order_relaxed);
+    noteEnables[static_cast<size_t>((note % 12 + 12) % 12)].store(enabled, std::memory_order_relaxed);
 }
 
 float PitchMapper::hzToMidi(float hz)
@@ -89,9 +91,13 @@ float PitchMapper::snapToScale(float midiNote) const
         int candidate = nearest + offset;
         int degree = ((candidate - root) % 12 + 12) % 12;
 
-        // Check both scale membership AND per-note enable
-        if (scaleNotes[static_cast<size_t>(degree)]
-            && noteEnables[static_cast<size_t>(degree)].load(std::memory_order_relaxed))
+        const bool allowed = correctedNoteMask.load(std::memory_order_relaxed)
+            ? (scale == Scale::Custom
+                ? noteEnables[static_cast<size_t>((candidate % 12 + 12) % 12)].load(std::memory_order_relaxed)
+                : scaleNotes[static_cast<size_t>(degree)])
+            : (scaleNotes[static_cast<size_t>(degree)]
+                && noteEnables[static_cast<size_t>(degree)].load(std::memory_order_relaxed));
+        if (allowed)
         {
             float dist = std::abs(midiNote - static_cast<float>(candidate));
             if (dist < bestDistance)
@@ -167,10 +173,14 @@ float PitchMapper::mapPitch(float detectedHz, float conf, float deltaTime)
     {
         // Exponential smoothing toward target
         // Time constant: ~63% of the way there in speedMs milliseconds
-        float tau = speedMs / 1000.0f; // convert to seconds
-        float alpha = 1.0f - std::exp(-deltaTime / tau);
-        alpha = juce::jlimit(0.0f, 1.0f, alpha);
-        currentOutputMidi += (targetMidi - currentOutputMidi) * alpha;
+        if (speedMs != cachedLegacySpeed || deltaTime != cachedLegacyDelta)
+        {
+            const float tau = speedMs / 1000.0f; // convert to seconds
+            cachedLegacyAlpha = juce::jlimit(0.0f, 1.0f, 1.0f - std::exp(-deltaTime / tau));
+            cachedLegacySpeed = speedMs;
+            cachedLegacyDelta = deltaTime;
+        }
+        currentOutputMidi += (targetMidi - currentOutputMidi) * cachedLegacyAlpha;
     }
 
     // 6. Scale confidence: reduce correction on uncertain frames
@@ -248,8 +258,13 @@ float PitchMapper::mapSustainedPitch(float detectedHz, float conf, float deltaTi
     }
     else
     {
-        const float alpha = static_cast<float>(1.0 - std::exp(-dt / (static_cast<double>(speed) * .001)));
-        sustainedCorrectionMidi += (desiredCorrection - sustainedCorrectionMidi) * alpha;
+        if (speed != cachedSustainedSpeed || dt != cachedSustainedDelta)
+        {
+            cachedSustainedAlpha = static_cast<float>(1.0 - std::exp(-dt / (static_cast<double>(speed) * .001)));
+            cachedSustainedSpeed = speed;
+            cachedSustainedDelta = dt;
+        }
+        sustainedCorrectionMidi += (desiredCorrection - sustainedCorrectionMidi) * cachedSustainedAlpha;
     }
     const float confidenceGain = juce::jlimit(0.0f, 1.0f, conf * 2);
     // Humanize only changes corrective motion. It must not undo the requested

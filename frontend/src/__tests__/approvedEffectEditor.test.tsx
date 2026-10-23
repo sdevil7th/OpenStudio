@@ -36,10 +36,20 @@ describe("approved effect conditional controls", () => {
       ...Array.from({ length: 12 }, (_, i) => parameter(`noteEnable_${i}`, 1, "notes", "toggle"))];
     const html = renderToStaticMarkup(<SuiteEditor {...props("pitch", parameters)} />);
     for (const p of parameters) expect(html).toContain(`data-param="${p.id}"`);
-    expect(html).toContain("existing pitch editor");
+    expect(html).toContain("existing graphical editor");
+    expect(html).toContain("Choose Edit Pitch on an audio clip");
     expect(html).not.toContain("<canvas"); expect(html).not.toContain("<svg class=\"suite-envelope");
     const automatic = renderToStaticMarkup(<SuiteEditor {...props("pitch", parameters.map(p => p.id === "scale" ? { ...p, value: 0 } : p))} />);
-    expect(automatic).not.toContain('data-param="noteEnable_');
+    // Old state keeps its named-scale restrictions active. Corrected state
+    // exposes the saved mask but only enables it in Custom mode.
+    expect(automatic).toContain('data-param="noteEnable_');
+    const corrected = renderToStaticMarkup(<SuiteEditor {...props("pitch", [
+      ...parameters.map(p => p.id === "scale" ? { ...p, value: 0 } : p),
+      parameter("signalPath", 1, "configuration", "enum"),
+    ])} />);
+    expect(corrected).toContain('data-param="noteEnable_');
+    expect(corrected).toContain('disabled="" data-param="noteEnable_0"');
+    expect(corrected).toContain("Choose Custom in Scale");
   });
   it("shows compressor headroom only for an active original colour model", () => {
     const parameters = [parameter("model", 1, "model", "enum"), { ...parameter("audioCharacter", 1, "character", "enum"), automatable: false }, parameter("headroom")];

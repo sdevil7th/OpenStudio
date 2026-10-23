@@ -24,15 +24,20 @@
 #include "PeakCache.h"
 #include "JSFXProcessor.h"
 #include "AppUpdater.h"
+#include "ARAHostController.h"
 #include <atomic>
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace
@@ -132,6 +137,9 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     if (!directory.createDirectory() || directory.getChildFile("result.json").exists()) return 2;
     juce::Array<juce::var> checks;
     bool passed = true;
+#if !JUCE_WINDOWS
+    juce::String posixPublicationFailureStatus = "not_asserted: root can bypass directory write permissions";
+#endif
     const auto check = [&] (const char* name, bool success)
     {
         auto result = std::make_unique<juce::DynamicObject>();
@@ -142,6 +150,38 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     };
     juce::MidiBuffer midi;
     AudioDeviceConfigurationRegression::run(check);
+#if OpenStudio_HAS_ARA
+    {
+        ARAHostController::OpenStudioContentAccessController content;
+        const auto tempo = content.createMusicalContextContentReader(nullptr, ARA::kARAContentTypeTempoEntries, nullptr);
+        const auto bars = content.createMusicalContextContentReader(nullptr, ARA::kARAContentTypeBarSignatures, nullptr);
+        check("ara_content_handles_preserve_full_pointer_width",
+              reinterpret_cast<std::uintptr_t>(tempo) == static_cast<std::uintptr_t>(ARA::kARAContentTypeTempoEntries)
+              && reinterpret_cast<std::uintptr_t>(bars) == static_cast<std::uintptr_t>(ARA::kARAContentTypeBarSignatures)
+              && content.getContentReaderEventCount(tempo) == 2 && content.getContentReaderEventCount(bars) == 2);
+        for (int index = 0; index < 2; ++index)
+        {
+            const auto* event = static_cast<const ARA::ARAContentTempoEntry*>(content.getContentReaderDataForEvent(tempo, index));
+            check(index == 0 ? "ara_tempo_reader_first_event" : "ara_tempo_reader_second_event",
+                  event != nullptr && event->timePosition == index * 0.5 && event->quarterPosition == index);
+            const auto* signature = static_cast<const ARA::ARAContentBarSignature*>(content.getContentReaderDataForEvent(bars, index));
+            check(index == 0 ? "ara_bar_reader_first_event" : "ara_bar_reader_second_event",
+                  signature != nullptr && signature->position == index * 4.0
+                  && signature->numerator == 4 && signature->denominator == 4);
+        }
+        check("ara_content_reader_rejects_unsupported_content",
+              content.createMusicalContextContentReader(nullptr, ARA::kARAContentTypeNotes, nullptr) == nullptr
+              && content.getContentReaderEventCount(nullptr) == 0
+              && content.getContentReaderDataForEvent(nullptr, 0) == nullptr);
+        check("ara_content_reader_rejects_invalid_event_indices",
+              content.getContentReaderDataForEvent(tempo, -1) == nullptr
+              && content.getContentReaderDataForEvent(tempo, 2) == nullptr
+              && content.getContentReaderDataForEvent(bars, -1) == nullptr
+              && content.getContentReaderDataForEvent(bars, 2) == nullptr);
+        content.destroyContentReader(tempo);
+        content.destroyContentReader(bars);
+    }
+#endif
 #if JUCE_LINUX
     check("linux_https_transport_enabled_for_managed_ai_downloads", JUCE_USE_CURL != 0);
     check("failed_gpu_probe_output_is_not_hardware_evidence",
@@ -900,6 +940,77 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
 #endif
     }
     {
+        const auto target = directory.getChildFile("preset.ospreset");
+        const auto first = juce::String::fromUTF8("{\"type\":\"NAM Rack\",\"name\":\"Clair \xc3\xa9t\xc3\xa9 \xf0\x9f\x8e\xb8\","
+            "\"values\":{\"gain\":0.25},\"path\":\"C:\\\\models\\\\clean.nam\"}");
+        const juce::String second = R"json([{"name":"Pitch","scale":7,"scaleMask":2741,"signalPath":1}])json";
+        check("json_document_object_roundtrip", ProjectFileStore::saveJsonDocument(target, first).wasOk()
+            && target.loadFileAsString() == first
+            && juce::JSON::parse(target.loadFileAsString())["values"]["gain"] == juce::var(0.25));
+        check("json_document_array_roundtrip", ProjectFileStore::saveJsonDocument(target, second).wasOk()
+            && target.loadFileAsString() == second && juce::JSON::parse(target.loadFileAsString()).isArray());
+        bool malformedRejected = true;
+        for (const auto* invalid : { "{truncated", "{} trailing", "{} {}", "{\"a\":1,}",
+                                    "[1,]", "{\"name\":'single quotes'}", "{\"a\":NaN}",
+                                    "null", "42", "\"text\"", "" })
+            malformedRejected = ProjectFileStore::saveJsonDocument(target, invalid).failed()
+                && target.loadFileAsString() == second && malformedRejected;
+        check("json_document_malformed_preserves_previous_bytes", malformedRejected);
+        const auto deep = juce::String::repeatedString("[", 65) + "0" + juce::String::repeatedString("]", 65);
+        check("json_document_nesting_limit_preserves_previous_bytes", ProjectFileStore::saveJsonDocument(target, deep).failed()
+            && target.loadFileAsString() == second);
+        {
+            // Valid JSON beyond the production UTF-8 limit. Bulk construction
+            // avoids hundreds of millions of tiny repeatedString calls in Debug.
+            std::vector<char> bytes(ProjectFileStore::maximumJsonDocumentBytes + 1u, ' ');
+            bytes[0] = '['; bytes[1] = ']';
+            const juce::String oversized(juce::CharPointer_UTF8(bytes.data()),
+                juce::CharPointer_UTF8(bytes.data() + bytes.size()));
+            check("json_document_size_limit_preserves_previous_bytes", ProjectFileStore::saveJsonDocument(target, oversized).failed()
+                && target.loadFileAsString() == second);
+        }
+        const auto invalidDirectory = directory.getChildFile("json-document-directory");
+        invalidDirectory.createDirectory();
+        check("json_document_invalid_destination_preserves_existing_file", ProjectFileStore::saveJsonDocument(invalidDirectory, first).failed()
+            && ProjectFileStore::saveJsonDocument(directory.getChildFile("missing-parent/preset.json"), first).failed()
+            && invalidDirectory.isDirectory() && target.loadFileAsString() == second);
+        check("json_document_has_no_project_recovery_side_effects", directory.findChildFiles(juce::File::findFiles,
+            false, "preset.ospreset.recovery-*.osproj").isEmpty());
+        check("project_schema_remains_strict_for_presets", ProjectFileStore::save(target, first, false, 3).failed()
+            && target.loadFileAsString() == second);
+#if JUCE_WINDOWS
+        const bool readOnly = target.setReadOnly(true);
+        const bool rejected = readOnly && ProjectFileStore::saveJsonDocument(target, first).failed();
+        const bool retained = target.loadFileAsString() == second;
+        const bool writableAgain = target.setReadOnly(false);
+        check("json_document_failed_publication_preserves_previous_bytes", rejected && retained && writableAgain);
+#else
+        if (::geteuid() != 0)
+        {
+            const auto publicationDirectory = directory.getChildFile("json-publication-denied");
+            const auto previousFile = publicationDirectory.getChildFile("previous.json");
+            const auto temporaryFile = publicationDirectory.getChildFile("pending.tmp");
+            struct stat originalMode {};
+            const bool prepared = publicationDirectory.createDirectory().wasOk()
+                && previousFile.replaceWithText(first) && temporaryFile.replaceWithText(second)
+                && ::stat(publicationDirectory.getFullPathName().toRawUTF8(), &originalMode) == 0;
+            const auto path = publicationDirectory.getFullPathName();
+            const juce::ScopeGuard restorePermissions {[&] {
+                if (prepared) (void) ::chmod(path.toRawUTF8(), originalMode.st_mode & 07777);
+            }};
+            const bool denied = prepared && ::chmod(path.toRawUTF8(), 0500) == 0;
+            // Both files remain writable. Only rename/unlink is denied; JUCE's
+            // old copy fallback would overwrite previousFile in this scenario.
+            const bool rejected = denied && !ProjectFileStore::detail::renameTemporaryFile(temporaryFile, previousFile);
+            const bool retained = previousFile.loadFileAsString() == first && temporaryFile.loadFileAsString() == second;
+            const bool restored = prepared && ::chmod(path.toRawUTF8(), originalMode.st_mode & 07777) == 0;
+            const bool atomicFailure = rejected && retained && restored;
+            check("json_document_posix_rename_failure_preserves_both_files", atomicFailure);
+            posixPublicationFailureStatus = atomicFailure ? "pass" : "fail";
+        }
+#endif
+    }
+    {
         MessageThreadLifetime::Token retired;
         {
             MessageThreadLifetime owner;
@@ -1259,6 +1370,9 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
     report->setProperty("checks", checks);
     report->setProperty("subjectiveAudio", "not_asserted");
     report->setProperty("hardwareDrivers", "not_asserted");
+#if !JUCE_WINDOWS
+    report->setProperty("posixAtomicPublicationPermissionFailure", posixPublicationFailureStatus);
+#endif
 #if defined(__SANITIZE_ADDRESS__)
     report->setProperty("addressSanitizer", true);
 #else

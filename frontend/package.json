@@ -11,6 +11,7 @@
     "dev": "vite",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:types": "tsc -p e2e/tsconfig.json",
     "notices:generate": "node scripts/generate-third-party-notices.mjs",
     "notices:check": "node scripts/generate-third-party-notices.mjs --check",
     "build": "npm run notices:check && tsc && vite build",
@@ -32,13 +33,14 @@
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.4",
     "sharp": "^0.35.3",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.2.2",
-    "vite": "^8.1.5",
-    "vitest": "^4.1.2"
+    "vite": "8.1.6",
+    "vitest": "4.1.12"
   }
 }

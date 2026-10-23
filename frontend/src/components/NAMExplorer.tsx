@@ -6933,7 +6933,9 @@ export function NAMExplorer({
   const sourceFlowRackSlots = schema.uiState?.namRackSlots && typeof schema.uiState.namRackSlots === "object"
     ? schema.uiState.namRackSlots as Record<string, unknown>
     : {};
-  const sourceFlowOctaverLabel = schema.parameters.find(
+  const sourceFlowOctaverLabel = schema.parameters.some((parameter) => parameter.id === "fuzzEnabled")
+    ? "Octaver Fuzz"
+    : schema.parameters.find(
     (parameter) => parameter.id === "octaverEnabled",
   )?.label ?? "Octaver";
   const sourceFlowRoute = sourceFlow

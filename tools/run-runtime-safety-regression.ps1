@@ -1,5 +1,6 @@
 param(
     [ValidateSet('Debug', 'Release', 'ASan')] [string]$Configuration = 'Debug',
+    [string]$AppPath = '',
     [switch]$SkipBuild,
     [switch]$SkipCrashTests
 )
@@ -9,7 +10,7 @@ if (-not $SkipBuild) {
     & cmake --build (Join-Path $repoRoot 'build') --config $Configuration
     if ($LASTEXITCODE -ne 0) { throw 'Native build failed.' }
 }
-$app = Join-Path $repoRoot "build/OpenStudio_artefacts/$Configuration/OpenStudio.exe"
+$app = if ($AppPath) { (Resolve-Path -LiteralPath $AppPath).Path } else { Join-Path $repoRoot "build/OpenStudio_artefacts/$Configuration/OpenStudio.exe" }
 if (-not (Test-Path -LiteralPath $app)) { throw "Missing app: $app" }
 $run = Join-Path $repoRoot ('output/review/runtime-' + $Configuration + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
 New-Item -ItemType Directory -Path $run | Out-Null
@@ -48,7 +49,11 @@ function Invoke-Fixture([string]$Name, [string]$Arguments, [bool]$ExpectedCrash 
 }
 $native = Invoke-Fixture 'contracts' '--runtime-safety-self-test "{directory}"'
 $report = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $native 'result.json') | ConvertFrom-Json
-if (-not $report.passed) { throw 'Native contract checks failed.' }
+if ($report.passed -ne $true -or $null -eq $report.checks -or @($report.checks).Count -eq 0) { throw 'Native contract checks failed or are empty.' }
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -and
+    $report.posixAtomicPublicationPermissionFailure -ne 'pass') {
+    throw 'POSIX atomic publication failure must be tested under an unprivileged user.'
+}
 if ($Configuration -eq 'ASan' -and -not $report.addressSanitizer) { throw 'ASan build was not instrumented.' }
 Write-Host "Native checks: $($report.checks.Count) passed; ASan=$($report.addressSanitizer)"
 if (-not $SkipCrashTests) {

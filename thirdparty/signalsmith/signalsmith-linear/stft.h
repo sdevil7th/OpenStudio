@@ -90,6 +90,38 @@ struct DynamicSTFT {
 		moveOutput(_defaultInterval); // ready for first block immediately
 	}
 
+	// OpenStudio: prepare a cold normalization image off the audio callback.
+	// Existing reset() and all transform plans remain unchanged. This optional
+	// API lets an inactive, prepared voice clear bounded spans before reuse.
+	void prepareIncrementalReset() {
+		resetWindowProducts = output.windowProducts;
+		resetOutputPosition = output.pos;
+		resetSamplesSinceSynthesis = _samplesSinceSynthesis;
+	}
+	bool resetStep(size_t &cursor, size_t budget) {
+		if (cursor == 0) {
+			input.pos = _blockSamples;
+			output.pos = resetOutputPosition;
+			_samplesSinceSynthesis = resetSamplesSinceSynthesis;
+		}
+		const size_t inputEnd = input.buffer.size();
+		const size_t outputEnd = inputEnd + output.buffer.size();
+		const size_t spectrumEnd = outputEnd + spectrumBuffer.size();
+		const size_t end = spectrumEnd + output.windowProducts.size();
+		const size_t stop = std::min(end, cursor + budget);
+		for (; cursor < stop; ++cursor) {
+			if (cursor < inputEnd) input.buffer[cursor] = 0;
+			else if (cursor < outputEnd) output.buffer[cursor - inputEnd] = 0;
+			else if (cursor < spectrumEnd) spectrumBuffer[cursor - outputEnd] = 0;
+			else output.windowProducts[cursor - spectrumEnd] = resetWindowProducts[cursor - spectrumEnd];
+		}
+		return cursor == end;
+	}
+	size_t resetStepCount(size_t budget) const {
+		const size_t count = input.buffer.size() + output.buffer.size() + spectrumBuffer.size() + output.windowProducts.size();
+		return (count + budget - 1)/budget;
+	}
+
 	void writeInput(size_t channel, size_t offset, size_t length, const Sample *inputArray) {
 		Sample *buffer = input.buffer.data() + channel*_inputLengthSamples;
 
@@ -464,6 +496,13 @@ struct DynamicSTFT {
 			buffer.assign(other.buffer.begin(), other.buffer.end());
 			return *this;
 		}
+		bool copyStep(const Input &other, size_t &cursor, size_t budget) {
+			pos = other.pos;
+			const size_t stop = std::min(buffer.size(), cursor + budget);
+			for (; cursor < stop; ++cursor) buffer[cursor] = other.buffer[cursor];
+			return cursor == buffer.size();
+		}
+		size_t copyStepCount(size_t budget) const { return (buffer.size() + budget - 1)/budget; }
 	private:
 		friend struct DynamicSTFT;
 		size_t pos = 0;
@@ -485,6 +524,17 @@ struct DynamicSTFT {
 			windowProducts.assign(other.windowProducts.begin(), other.windowProducts.end());
 			return *this;
 		}
+		bool copyStep(const Output &other, size_t &cursor, size_t budget) {
+			pos = other.pos;
+			const size_t end = buffer.size() + windowProducts.size();
+			const size_t stop = std::min(end, cursor + budget);
+			for (; cursor < stop; ++cursor) {
+				if (cursor < buffer.size()) buffer[cursor] = other.buffer[cursor];
+				else windowProducts[cursor - buffer.size()] = other.windowProducts[cursor - buffer.size()];
+			}
+			return cursor == end;
+		}
+		size_t copyStepCount(size_t budget) const { return (buffer.size() + windowProducts.size() + budget - 1)/budget; }
 	private:
 		friend struct DynamicSTFT;
 		size_t pos = 0;
@@ -504,6 +554,8 @@ private:
 
 	std::vector<Complex> spectrumBuffer;
 	std::vector<Sample> timeBuffer;
+	std::vector<Sample> resetWindowProducts;
+	size_t resetOutputPosition = 0, resetSamplesSinceSynthesis = 0;
 
 	size_t _samplesSinceSynthesis = 0, _samplesSinceAnalysis = 0;
 	

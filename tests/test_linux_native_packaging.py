@@ -97,6 +97,27 @@ class NativePackageTests(unittest.TestCase):
         self.assertNotEqual(process.returncode, 0)
         self.assertFalse((self.root / 'output').exists())
 
+    def test_windows_snapshot_desktop_entry_is_staged_with_unix_line_endings(self):
+        source_root = self.root / 'source'
+        for relative in ('tools/OpenStudio.desktop', 'assets/icon-256x256.png',
+                         'packaging/linux/openstudio-mime.xml',
+                         'packaging/linux/in.org.openstudio.OpenStudio.metainfo.xml', 'LICENSE'):
+            target = source_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
+        desktop = source_root / 'tools/OpenStudio.desktop'
+        expected = desktop.read_text(encoding='utf-8').encode('utf-8')
+        desktop.write_bytes(expected.replace(b'\n', b'\r\n'))
+        stage = self.root / 'package'
+        with mock.patch.object(packaging, 'ROOT', source_root):
+            packaging.stage_bundle(self.bundle, stage, 'deb')
+        staged = stage / 'usr/share/applications/OpenStudio.desktop'
+        self.assertEqual(staged.read_bytes(), expected)
+        self.assertEqual((stage / 'usr/share/icons/hicolor/256x256/apps/OpenStudio.png').read_bytes(),
+                         (source_root / 'assets/icon-256x256.png').read_bytes())
+        if shutil.which('desktop-file-validate'):
+            subprocess.run(['desktop-file-validate', staged], check=True)
+
     def test_failed_archive_preserves_previous_installer(self):
         stage = self.root / 'package'
         packaging.stage_bundle(self.bundle, stage, 'deb')

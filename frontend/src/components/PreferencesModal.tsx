@@ -395,7 +395,7 @@ const MODIFIER_CONTEXTS: { key: MouseModifierContext; label: string }[] = [
   { key: "track_header", label: "Track Header" },
   { key: "automation_point", label: "Automation Point" },
   { key: "fade_handle", label: "Fade Handle" },
-  { key: "ruler_click", label: "Ruler Click" },
+  { key: "ruler_click", label: "Ruler Click / Drag" },
 ];
 
 const MODIFIER_COMBOS = [
@@ -460,6 +460,9 @@ function MouseModifierTab() {
       <div className="text-[9px] text-daw-text-muted mb-2">
         Configure exact modifier combinations. Custom cells override the selected profile; multi-key combinations fall back by profile precedence when left unmapped.
       </div>
+      <p className="mb-3 text-[10px] text-daw-text-muted">
+        The ruler Seek action seeks on click. Horizontal drag selects time; vertical drag zooms time, up to zoom out and down to zoom in. Range handles adjust the existing project range.
+      </p>
 
       <div className="mb-3 max-w-sm">
         <NativeSelect
@@ -528,7 +531,7 @@ function MouseModifierTab() {
                             title={unavailable?.reason}
                             className="bg-neutral-900 text-white"
                           >
-                            {action.split("_").join(" ")}
+                            {key === "ruler_click" && action === "seek" ? "seek / drag selection or zoom" : action.split("_").join(" ")}
                             {unavailable ? " (unavailable)" : ""}
                           </option>
                         );

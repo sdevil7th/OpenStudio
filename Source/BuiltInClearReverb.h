@@ -1,6 +1,9 @@
 #pragma once
+#include "BuiltInReverbDamping.h"
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
+#include "BuiltInSettledReverbTap.h"
 #include <array>
 #include <vector>
 
@@ -13,7 +16,18 @@ public:
     {
         float decay=2,size=.5f,damping=.5f,diffusion=.5f,preDelay=0,lowCut=20,highCut=20000,width=1,early=.5f;
         float inputDiffusion=.65f,onset=40,depth=.25f,speed=.3f,bassRatio=1,bassFrequency=500;
-        bool hold=false,holdInput=false;
+        bool hold=false,holdInput=false,refined=false,correctedControls=false;
+        bool operator==(const Settings& other) const noexcept
+        {
+            return decay==other.decay && size==other.size && damping==other.damping
+                && diffusion==other.diffusion && preDelay==other.preDelay
+                && lowCut==other.lowCut && highCut==other.highCut && width==other.width
+                && early==other.early && inputDiffusion==other.inputDiffusion
+                && onset==other.onset && depth==other.depth && speed==other.speed
+                && bassRatio==other.bassRatio && bassFrequency==other.bassFrequency
+                && hold==other.hold && holdInput==other.holdInput
+                && refined==other.refined && correctedControls==other.correctedControls;
+        }
     };
 private:
     struct Delay
@@ -43,19 +57,20 @@ private:
         double phase=0,oscillatorSine=0,oscillatorCosine=1,rotationSine=0,rotationCosine=1;
         juce::uint32 seed=1;
         juce::SmoothedValue<float> samples,loss,bassLoss;
+        BuiltInSettledReverbTap settledTap;
         std::array<juce::SmoothedValue<float>,4> tapLoss;
         float random() noexcept {seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return static_cast<float>(seed&0xffffffu)/8388607.5f-1;}
         void reset(size_t index) noexcept
-        {delay.reset();low=damped=0;phase=0;seed=81731u+static_cast<juce::uint32>(index)*173891u;from=random();to=random();oscillatorSine=std::sin(static_cast<double>(index)*1.713);oscillatorCosine=std::cos(static_cast<double>(index)*1.713);}
+        {delay.reset();settledTap.reset();low=damped=0;phase=0;seed=81731u+static_cast<juce::uint32>(index)*173891u;from=random();to=random();oscillatorSine=std::sin(static_cast<double>(index)*1.713);oscillatorCosine=std::cos(static_cast<double>(index)*1.713);}
     };
     struct Engine
     {
         std::array<Line,16> lines;std::array<Delay,2> pre,earlyHistory;
         std::array<std::array<Delay,4>,2> inputDiffusers;
         std::array<float,2> lowState{},highState{};
-        juce::SmoothedValue<float> scatter,inputCoefficient,onset,depth,preSamples,damping,bassPole,lowPole,highPole,width,earlyLevel,hold,excitation,size;
+        juce::SmoothedValue<float> scatter,inputCoefficient,onset,depth,preSamples,damping,dampingPole,bassPole,lowPole,highPole,width,earlyLevel,hold,excitation,size;
         Settings settings;double rate=48000;int mode=0,count=16,inputStages=4;
-        float normalise=.25f;bool initialized=false;juce::int64 drain=0;juce::uint64 frames=0;
+        float normalise=.25f;bool initialized=false,previousActive=false;juce::int64 drain=0;juce::uint64 frames=0,coefficientUpdates=0;
         void prepare(double sampleRate,int topology)
         {
             rate=sampleRate;mode=topology;count=mode==1?8:16;inputStages=mode==0?4:2;normalise=1/std::sqrt(static_cast<float>(count));
@@ -63,11 +78,11 @@ private:
             constexpr std::array<float,8> roomTimes{.0071f,.0113f,.0179f,.0233f,.0097f,.0139f,.0199f,.0317f};
             constexpr std::array<float,16> randomTimes{.0293f,.0377f,.0431f,.0539f,.0611f,.0719f,.0797f,.0899f,.0311f,.0409f,.0479f,.0571f,.0677f,.0739f,.0833f,.0971f};
             for(int i=0;i<count;++i)
-            {auto& line=lines[static_cast<size_t>(i)];line.base=mode==0?plateTimes[static_cast<size_t>(i)]:mode==1?roomTimes[static_cast<size_t>(i)]:randomTimes[static_cast<size_t>(i)];line.delay.prepare(static_cast<int>(rate*(line.base*1.5f+.003f)));for(auto* value:{&line.samples,&line.loss,&line.bassLoss})value->reset(rate,.1);for(auto& value:line.tapLoss)value.reset(rate,.1);}
+            {auto& line=lines[static_cast<size_t>(i)];line.base=mode==0?plateTimes[static_cast<size_t>(i)]:mode==1?roomTimes[static_cast<size_t>(i)]:randomTimes[static_cast<size_t>(i)];line.delay.prepare(static_cast<int>(rate*(line.base*1.5f+.003f)));line.settledTap.prepare(rate);for(auto* value:{&line.samples,&line.loss,&line.bassLoss})value->reset(rate,.1);for(auto& value:line.tapLoss)value.reset(rate,.1);}
             for(auto& line:pre)line.prepare(static_cast<int>(rate*.501));
             for(auto& line:earlyHistory)line.prepare(static_cast<int>(rate*.111));
             for(auto& channel:inputDiffusers)for(auto& line:channel)line.prepare(static_cast<int>(rate*.121));
-            for(auto* value:{&scatter,&inputCoefficient,&onset,&depth,&preSamples,&damping,&bassPole,&lowPole,&highPole,&width,&earlyLevel,&hold,&excitation,&size})value->reset(rate,.05);
+            for(auto* value:{&scatter,&inputCoefficient,&onset,&depth,&preSamples,&damping,&dampingPole,&bassPole,&lowPole,&highPole,&width,&earlyLevel,&hold,&excitation,&size})value->reset(rate,.05);
             reset();frames=0;
         }
         void reset() noexcept
@@ -75,7 +90,13 @@ private:
         double tail() const noexcept {return juce::jmin(120.0,settings.decay*juce::jmax(1.0f,settings.bassRatio)*2.0+2.0+settings.onset*.003+settings.preDelay*.001);}
         void configure(const Settings& next,bool active) noexcept
         {
+            // Targets continue smoothing in process(). Reapplying identical
+            // sanitized settings cannot change them, but used to recompute
+            // every line's decay powers and oscillator rotation each block.
+            // An active/retiring transition still releases Hold immediately.
+            if(initialized && previousActive==active && (!active || settings==next))return;
             if(active)settings=next;
+            previousActive=active;++coefficientUpdates;
             const auto set=[this](auto& value,float target){if(initialized)value.setTargetValue(target);else value.setCurrentAndTargetValue(target);};
             const float sampleRate=static_cast<float>(rate),scale=.5f+settings.size;
             for(int i=0;i<count;++i)
@@ -89,7 +110,7 @@ private:
             const auto pole=[sampleRate](float frequency){return std::exp(-juce::MathConstants<float>::twoPi*juce::jmin(frequency,sampleRate*.45f)/sampleRate);};
             set(scatter,settings.diffusion*.70710678118f);set(inputCoefficient,settings.inputDiffusion*.72f);set(onset,settings.onset*.001f*sampleRate);
             set(depth,settings.depth*sampleRate*.0012f);set(preSamples,settings.preDelay*.001f*sampleRate);set(size,scale);
-            set(damping,settings.damping);set(bassPole,pole(settings.bassFrequency));set(lowPole,pole(settings.lowCut));set(highPole,pole(settings.highCut));
+            set(damping,settings.damping);set(dampingPole,settings.correctedControls?BuiltInReverbDamping::pole(.5f,rate):.5f);set(bassPole,pole(settings.bassFrequency));set(lowPole,pole(settings.lowCut));set(highPole,pole(settings.highCut));
             set(width,settings.width);set(earlyLevel,settings.early);const bool held=active&&settings.hold;
             set(hold,held?1.0f:0.0f);set(excitation,held&&!settings.holdInput?0.0f:1.0f);initialized=true;
         }
@@ -99,6 +120,7 @@ private:
             ++frames;const float held=hold.getNextValue(),inject=excitation.getNextValue(),predelay=preSamples.getNextValue();
             const float inputDiffusion=inputCoefficient.getNextValue(),spread=onset.getNextValue(),scale=size.getNextValue();
             const float motion=depth.getNextValue()*(1-held),damp=damping.getNextValue()*(1-held),bass=bassPole.getNextValue();
+            const float tonePole=dampingPole.getNextValue();
             const float sine=scatter.getNextValue(),cosine=std::sqrt(juce::jmax(0.0f,1-sine*sine));
             std::array<float,2> input{active?left*inject:0,active?right*inject:0},early{};
             constexpr std::array<float,4> spreads{.127f,.193f,.283f,.397f};
@@ -131,10 +153,12 @@ private:
                     line.oscillatorCosine=line.oscillatorCosine*line.rotationCosine-line.oscillatorSine*line.rotationSine;line.oscillatorSine=nextSine;
                     if((frames&1023u)==0){const double norm=std::hypot(line.oscillatorSine,line.oscillatorCosine);line.oscillatorSine/=norm;line.oscillatorCosine/=norm;}
                 }
+                if(line.settledTap.needsProcessing(settings.refined))
+                    delayed=line.settledTap.process(delayed,length,settings.refined,settings.refined&&motion==0&&!line.samples.isSmoothing(),[&line](float tap) noexcept {return line.delay.read(tap);});
                 const float highLoss=line.loss.getNextValue(),lowLoss=line.bassLoss.getNextValue();
                 line.low=delayed+bass*(line.low-delayed);
                 float value=delayed*(highLoss+(1-highLoss)*held)+(line.low*(lowLoss-highLoss))*(1-held);
-                line.damped=value+.5f*(line.damped-value);value+=damp*(line.damped-value);feedback[static_cast<size_t>(i)]=value;
+                line.damped=value+tonePole*(line.damped-value);value+=damp*(line.damped-value);feedback[static_cast<size_t>(i)]=value;
                 float observed=delayed;
                 if(mode==0)
                 {
@@ -169,8 +193,27 @@ public:
         settings.inputDiffusion=safe(settings.inputDiffusion,0,1,.65f);settings.onset=safe(settings.onset,0,300,40);settings.depth=safe(settings.depth,0,1,.25f);settings.speed=safe(settings.speed,.05f,2,.3f);settings.bassRatio=safe(settings.bassRatio,.25f,4,1);settings.bassFrequency=safe(settings.bassFrequency,100,10000,500);
         for(size_t i=0;i<engines.size();++i){const bool active=selected==static_cast<int>(i);weights[i].setTargetValue(active?1.0f:0.0f);if(active||engines[i].drain>0)engines[i].configure(settings,active);spillWeights.configure(i,active,spillover,engines[i].drain>0);}
     }
-    std::array<float,3> process(float left,float right) noexcept
-    {if(!prepared)return {};std::array<float,3> result{};for(size_t i=0;i<engines.size();++i){const auto wet=engines[i].process(left,right,weights[i].getTargetValue()>0);const float weight=weights[i].getNextValue(),wetWeight=spillWeights.next(i);result[0]+=wet[0]*wetWeight;result[1]+=wet[1]*wetWeight;result[2]+=weight;}return result;}
+    std::array<float,3> process(float left,float right,float returnBlend=0) noexcept
+    {
+        if(!prepared)return {};
+        std::array<float,3> result{};
+        for(size_t i=0;i<engines.size();++i)
+        {
+            const bool active=weights[i].getTargetValue()>0;
+            const float weight=weights[i].getNextValue(),wetWeight=spillWeights.next(i);
+            if(!active&&wetWeight<=0&&engines[i].drain>0)engines[i].reset();
+            const auto wet=engines[i].process(left,right,active);
+            const float returnWeight=BuiltInReverbReturnLevels::weighted(wetWeight,24+static_cast<int>(i),returnBlend);
+            result[0]+=wet[0]*returnWeight;result[1]+=wet[1]*returnWeight;result[2]+=weight;
+        }
+        return result;
+    }
     double retiringTailSeconds() const noexcept {double tail=0;for(size_t i=0;i<engines.size();++i)if(spillWeights.audibleRetiring(i))tail=juce::jmax(tail,static_cast<double>(engines[i].drain)/engines[i].rate);return tail;}
     juce::uint64 processingFrames(size_t index) const noexcept{return engines[index].frames;}
+    juce::uint64 coefficientUpdateCount(size_t index) const noexcept{return engines[index].coefficientUpdates;}
+    bool isDormant() const noexcept
+    {
+        for(const auto& engine:engines)if(engine.drain>0)return false;
+        return true;
+    }
 };

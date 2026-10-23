@@ -1636,11 +1636,11 @@ async function qualityChecks(cdp, scenarioName) {
         && rect.height >= window.innerHeight - 16);
       const designReferenceBoxes = {
         pre: {
-          compressor: { x: 85, y: 42, w: 156, h: 232 },
-          octaver: { x: 251, y: 42, w: 120, h: 232 },
-          'eq-boost': { x: 381, y: 42, w: 156, h: 232 },
-          'precision-drive': { x: 547, y: 42, w: 120, h: 232 },
-          distortion: { x: 677, y: 42, w: 156, h: 232 },
+          compressor: { x: 67, y: 42, w: 156, h: 232 },
+          octaver: { x: 233, y: 42, w: 156, h: 232 },
+          'eq-boost': { x: 399, y: 42, w: 156, h: 232 },
+          'precision-drive': { x: 565, y: 42, w: 120, h: 232 },
+          distortion: { x: 695, y: 42, w: 156, h: 232 },
         },
         amp: {
           'amp-head': { x: 24, y: -2, w: 720, h: 345 },

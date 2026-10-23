@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": [
+    "support/*.ts",
+    "editor-gesture-regressions.spec.ts",
+    "timeline-controls.spec.ts",
+    "recording-zoom.spec.ts",
+    "release-review-ui.spec.ts",
+    "audio-settings-switching.spec.ts",
+    "nam-fuzz-workflow.spec.ts",
+    "free-suite-design03.spec.ts",
+    "free-suite-effects.spec.ts",
+    "free-suite-precision.spec.ts"
+  ]
+}

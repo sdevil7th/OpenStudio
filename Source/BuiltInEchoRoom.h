@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
 
 // Original multi-head echo and finite image-source room. No sampled room/tape model.
@@ -127,10 +128,10 @@ public:
             else if(engines[i].initialized&&engines[i].settings.hold){auto outgoing=engines[i].settings;outgoing.hold=false;engines[i].configure(outgoing);}
 
         }}
-    std::array<float,5> process(float left,float right)
+    std::array<float,5> process(float left,float right,float returnBlend=0)
     {
         std::array<float,5> result{};if(!prepared)return result;const auto safe=[](float x){return std::isfinite(x)?juce::jlimit(-16.0f,16.0f,x):0;};
-        for(size_t i=0;i<2;++i){const float weight=weights[i].getNextValue(),wetWeight=retirement.next(i);if(wetWeight==0&&weight==0&&weights[i].getTargetValue()==0){if(running[i])engines[i].reset();running[i]=false;continue;}running[i]=true;const auto output=engines[i].process({safe(left),safe(right)},weights[i].getTargetValue()>0);result[0]+=wetWeight*output[0];result[1]+=wetWeight*output[1];result[2]+=weight;result[3]+=weight*output[2];result[4]+=weight*output[3];}return result;
+        for(size_t i=0;i<2;++i){const float weight=weights[i].getNextValue(),wetWeight=retirement.next(i);if(wetWeight==0&&weight==0&&weights[i].getTargetValue()==0){if(running[i])engines[i].reset();running[i]=false;continue;}running[i]=true;const auto output=engines[i].process({safe(left),safe(right)},weights[i].getTargetValue()>0);const float returnWeight=BuiltInReverbReturnLevels::weighted(wetWeight,15+static_cast<int>(i),returnBlend);result[0]+=returnWeight*output[0];result[1]+=returnWeight*output[1];result[2]+=weight;result[3]+=weight*output[2];result[4]+=weight*output[3];}return result;
     }
     double retiringTailSeconds()const noexcept{return retirement.retiringTailSeconds();}
     std::array<juce::uint64,2> processedFrames()const{return {engines[0].frames,engines[1].frames};}

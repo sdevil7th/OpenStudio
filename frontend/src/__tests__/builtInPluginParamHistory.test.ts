@@ -13,6 +13,60 @@ function deferred<T>() {
 }
 
 describe("built-in plugin parameter history", () => {
+  it("undoes Spread scheduling and a continuous broadband-body edit independently of balance", async () => {
+    const history = new BuiltInPluginParamHistory("reverb-spread-body-window");
+    const values: Record<string, number> = { shimmerScheduling: 0, ambBody: 0, wetLevel: .33, dryLevel: .7, outputTrimDb: -3 };
+    history.begin("shimmerScheduling", "Pitch scheduling", 0);
+    values.shimmerScheduling = 1; history.update("shimmerScheduling", 1);
+    await history.commit(async () => true);
+    history.begin("ambBody", "Broadband body", 0);
+    for (const value of [.1, .25, .4, .5]) { values.ambBody = value; history.update("ambBody", value); }
+    await history.commit(async () => true);
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => {
+      for (const change of entry.changes) values[change.paramId] = change[direction];
+      return true;
+    };
+    expect(history.getUndoEntries()).toHaveLength(2);
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(values).toEqual({ shimmerScheduling: 1, ambBody: 0, wetLevel: .33, dryLevel: .7, outputTrimDb: -3 });
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(values.shimmerScheduling).toBe(0);
+    await history.redo(async () => true, replay); await history.redo(async () => true, replay);
+    expect(values).toEqual({ shimmerScheduling: 1, ambBody: .5, wetLevel: .33, dryLevel: .7, outputTrimDb: -3 });
+  });
+  it("undoes shared Return level without changing Processing or the independent wet/dry balance", async () => {
+    const history = new BuiltInPluginParamHistory("reverb-return-window");
+    const values: Record<string, number> = { reverbReturnMode: 1, reverbCharacterMode: 0, outputTrimDb: -6, wetLevel: .33, dryLevel: .7 };
+    history.begin("reverbReturnMode", "Return level", values.reverbReturnMode);
+    values.reverbReturnMode = 0; history.update("reverbReturnMode", 0);
+    await history.commit(async () => true);
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => {
+      for (const change of entry.changes) values[change.paramId] = change[direction];
+      return true;
+    };
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(values).toEqual({ reverbReturnMode: 1, reverbCharacterMode: 0, outputTrimDb: -6, wetLevel: .33, dryLevel: .7 });
+    await expect(history.redo(async () => true, replay)).resolves.toBe("applied");
+    expect(values).toEqual({ reverbReturnMode: 0, reverbCharacterMode: 0, outputTrimDb: -6, wetLevel: .33, dryLevel: .7 });
+    expect(history.getUndoEntries()).toHaveLength(1);
+  });
+  it("replays the shared Reverb Processing choice as one edit without changing Output", async () => {
+    const history = new BuiltInPluginParamHistory("reverb-refined-window");
+    const values: Record<string, number> = { reverbCharacterMode: 0, outputTrimDb: -6 };
+    history.begin("reverbCharacterMode", "Processing", values.reverbCharacterMode);
+    values.reverbCharacterMode = 1;
+    history.update("reverbCharacterMode", 1);
+    await history.commit(async () => true);
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => {
+      for (const change of entry.changes) values[change.paramId] = change[direction];
+      return true;
+    };
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(values).toEqual({ reverbCharacterMode: 0, outputTrimDb: -6 });
+    await expect(history.redo(async () => true, replay)).resolves.toBe("applied");
+    expect(values).toEqual({ reverbCharacterMode: 1, outputTrimDb: -6 });
+    expect(history.getUndoEntries()).toHaveLength(1);
+  });
   it("records a knob drag as one undo step and replays redo", async () => {
     const history = new BuiltInPluginParamHistory("nam-window-a");
     const flush = vi.fn(async () => true);
@@ -163,6 +217,21 @@ describe("built-in plugin parameter history", () => {
 
 
 describe("opaque plugin history", () => {
+  it("restores all type memories and portable assets together after collection recall", async () => {
+    const history = new BuiltInPluginParamHistory("reverb-collection-window");
+    const before = JSON.stringify({ fullState: "original-native-state-with-user-IR-and-41-banks", presetName: "User room" });
+    const after = JSON.stringify({ fullState: "voiced-native-state-with-generated-IR-and-41-authored-banks", presetName: "Factory - Voiced collection" });
+    let current = after;
+    history.recordState(before, after);
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => {
+      current = entry.state![direction]; return true;
+    };
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(current).toBe(before);
+    await expect(history.redo(async () => true, replay)).resolves.toBe("applied");
+    expect(current).toBe(after);
+    expect(history.getUndoEntries()).toHaveLength(1);
+  });
   it("keeps assets and hidden engine state together through undo/redo", async () => {
     const history = new BuiltInPluginParamHistory("reverb-one");
     const before = JSON.stringify({ fullState: "embedded-IR-a", engine: 1 });
@@ -182,5 +251,21 @@ describe("opaque plugin history", () => {
     await expect(first.undo(async () => true, async () => false)).resolves.toBe("failed");
     expect(first.canUndo()).toBe(true);
     expect(second.canUndo()).toBe(false);
+  });
+});
+
+
+describe("signal-path snapshot history", () => {
+  it("restores the mode and hidden state together on Undo and Redo", async () => {
+    const history = new BuiltInPluginParamHistory("signal-mode");
+    const before = JSON.stringify({ fullState: "legacy-payload", values: { signalPath: 0, noteEnable_0: 1 } });
+    const after = JSON.stringify({ fullState: "corrected-payload", values: { signalPath: 1, noteEnable_0: 1 } });
+    history.recordState(before, after);
+    let state = after;
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => { state = entry.state![direction]; return true; };
+    await expect(history.undo(async () => true, replay)).resolves.toBe("applied");
+    expect(state).toBe(before);
+    await expect(history.redo(async () => true, replay)).resolves.toBe("applied");
+    expect(state).toBe(after);
   });
 });

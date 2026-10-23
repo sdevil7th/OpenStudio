@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
 #include "BuiltInVintageConverter.h"
 #include <array>
@@ -308,6 +309,8 @@ private:
             for(size_t i=0;i<3;++i)
             {
                 const bool running=enabled&&active&&static_cast<int>(i)==selected;
+                const float weight=spill.next(i);weights[i].getNextValue();
+                if(!running&&weight<=0&&banks[i].drain>0)banks[i].reset();
                 std::array<float,2> wet{};
                 if(running||banks[i].drain>0)
                 {
@@ -316,8 +319,11 @@ private:
                     if(i==0)wet=banks[i].process(left,right,running);
                     else wet=converters[i-1].processThrough({left,right},[&](const auto& sampled) noexcept {return banks[i].process(sampled[0],sampled[1],running);});
                 }
-                else processing[i]=false;
-                const float weight=spill.next(i);weights[i].getNextValue();
+                else if(processing[i])
+                {
+                    if(i>0)converters[i-1].reset();
+                    processing[i]=false;
+                }
                 for(size_t ch=0;ch<2;++ch)output[ch]+=wet[ch]*weight;
                 drain=juce::jmax(drain,static_cast<juce::int64>(std::ceil(static_cast<double>(banks[i].drain)*rate/banks[i].rate)));
                 frames+=banks[i].frames;
@@ -368,21 +374,36 @@ public:
     juce::uint64 processingFrames(size_t slot) const noexcept { return engines[slot] ? engines[slot]->frames : 0; }
     juce::uint64 processingFrames(size_t slot,size_t bank) const noexcept { return engines[slot] ? engines[slot]->banks[bank].frames : 0; }
     double processingRate(size_t slot,size_t bank) const noexcept { return engines[slot] ? engines[slot]->banks[bank].rate : 0; }
+    int runningTankCount(size_t slot) const noexcept
+    {
+        int count = 0;
+        if (engines[slot]) for (const auto& bank : engines[slot]->banks) if (bank.drain > 0) ++count;
+        return count;
+    }
+    bool isDormant() const noexcept
+    {
+        for (const auto& engine : engines) if (engine && engine->drain > 0) return false;
+        return true;
+    }
     double retiringTailSeconds() const noexcept
     {
         double seconds=0;
         for(size_t i=0;i<engines.size();++i)if(engines[i] && spillWeights.audibleRetiring(i))seconds=juce::jmax(seconds,static_cast<double>(engines[i]->drain)/engines[i]->rate);
         return seconds;
     }
-    std::array<float, 3> process(float left, float right)
+    std::array<float, 3> process(float left, float right, float returnBlend = 0)
     {
         if (!prepared) return {};
         const auto safe = [](float value) { return std::isfinite(value) ? juce::jlimit(-16.0f, 16.0f, value) : 0.0f; };
         std::array<float, 3> output {};
         for (size_t i = 0; i < engines.size(); ++i)
         {
-            const auto wet = engines[i]->process(safe(left), safe(right), weights[i].getTargetValue() > 0);
-            const float weight = weights[i].getNextValue(),wetWeight=spillWeights.next(i); output[0] += wet[0] * wetWeight; output[1] += wet[1] * wetWeight; output[2] += weight;
+            const bool active = weights[i].getTargetValue() > 0;
+            const float weight = weights[i].getNextValue(),wetWeight=spillWeights.next(i);
+            if (!active && wetWeight <= 0 && engines[i]->drain > 0) engines[i]->reset();
+            const auto wet = engines[i]->process(safe(left), safe(right), active);
+            const float returnWeight = BuiltInReverbReturnLevels::weighted(wetWeight, 10 + static_cast<int>(i), returnBlend);
+            output[0] += wet[0] * returnWeight; output[1] += wet[1] * returnWeight; output[2] += weight;
         }
         return output;
     }

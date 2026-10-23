@@ -303,7 +303,8 @@ namespace
         return juce::jlimit(1.0f, static_cast<float>(sampleRate * 0.475), frequency);
     }
 
-    void prepareRealtimeFilterLut(std::vector<OpenStudioIIRCoefficientSet>& lut,
+    template <typename Sample>
+    void prepareRealtimeFilterLut(std::vector<std::array<Sample, 5>>& lut,
                                   double sampleRate,
                                   float nominalMinimum,
                                   float nominalMaximum,
@@ -319,10 +320,10 @@ namespace
         {
             const double proportion = static_cast<double>(index)
                 / static_cast<double>(lut.size() - 1);
-            const float frequency = static_cast<float>(std::exp(logMinimum + proportion * logRange));
+            const Sample frequency = static_cast<Sample>(std::exp(logMinimum + proportion * logRange));
             const auto coefficients = highPass
-                ? juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, frequency)
-                : juce::dsp::IIR::Coefficients<float>::makeLowPass(sampleRate, frequency);
+                ? juce::dsp::IIR::Coefficients<Sample>::makeHighPass(sampleRate, frequency)
+                : juce::dsp::IIR::Coefficients<Sample>::makeLowPass(sampleRate, frequency);
             const auto& source = coefficients->coefficients;
             jassert(source.size() == static_cast<int>(lut[index].size()));
             for (size_t coefficient = 0; coefficient < lut[index].size(); ++coefficient)
@@ -330,8 +331,9 @@ namespace
         }
     }
 
-    const OpenStudioIIRCoefficientSet& lookupRealtimeFilterLut(
-        const std::vector<OpenStudioIIRCoefficientSet>& lut,
+    template <typename Sample>
+    const std::array<Sample, 5>& lookupRealtimeFilterLut(
+        const std::vector<std::array<Sample, 5>>& lut,
         double sampleRate,
         float frequency,
         float nominalMinimum,
@@ -353,8 +355,9 @@ namespace
         return lut[index];
     }
 
-    void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& filter,
-                                         const OpenStudioIIRCoefficientSet& coefficients) noexcept
+    template <typename Sample>
+    void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<Sample>& filter,
+                                         const std::array<Sample, 5>& coefficients) noexcept
     {
         jassert(filter.coefficients != nullptr);
         if (filter.coefficients == nullptr)
@@ -369,19 +372,21 @@ namespace
             destination.set(static_cast<int>(coefficient), coefficients[coefficient]);
     }
 
-    void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<float>& left,
-                                         juce::dsp::IIR::Filter<float>& right,
-                                         const OpenStudioIIRCoefficientSet& coefficients) noexcept
+    template <typename Sample>
+    void writeRealtimeFilterCoefficients(juce::dsp::IIR::Filter<Sample>& left,
+                                         juce::dsp::IIR::Filter<Sample>& right,
+                                         const std::array<Sample, 5>& coefficients) noexcept
     {
         writeRealtimeFilterCoefficients(left, coefficients);
         if (right.coefficients != left.coefficients)
             writeRealtimeFilterCoefficients(right, coefficients);
     }
 
+    template <typename Sample>
     bool smoothRealtimeFilterCoefficients(
-        juce::dsp::IIR::Filter<float>& left,
-        juce::dsp::IIR::Filter<float>& right,
-        const OpenStudioIIRCoefficientSet& target,
+        juce::dsp::IIR::Filter<Sample>& left,
+        juce::dsp::IIR::Filter<Sample>& right,
+        const std::array<Sample, 5>& target,
         float smoothingCoefficient) noexcept
     {
         if (left.coefficients == nullptr
@@ -404,15 +409,22 @@ namespace
             rightCoefficients.getRawDataPointer();
         const bool sharedCoefficients =
             leftRaw == rightRaw;
+        // Keep existing float smoothing unchanged. Double high-pass filters
+        // need much finer convergence: their DC denominator may be ~1e-7 at
+        // an embedded 384kHz rate, smaller than the old float stop threshold.
+        constexpr Sample snapTolerance = sizeof(Sample) == sizeof(float)
+            ? static_cast<Sample>(1.0e-7f) : static_cast<Sample>(1.0e-14);
+        constexpr Sample stopTolerance = sizeof(Sample) == sizeof(float)
+            ? static_cast<Sample>(1.0e-6f) : static_cast<Sample>(1.0e-12);
         bool smoothing = false;
         for (size_t index = 0;
              index < target.size();
              ++index)
         {
-            const float difference =
+            const Sample difference =
                 target[index] - leftRaw[index];
-            const float next =
-                std::abs(difference) <= 1.0e-7f
+            const Sample next =
+                std::abs(difference) <= snapTolerance
                     ? target[index]
                     : leftRaw[index]
                         + difference
@@ -423,7 +435,7 @@ namespace
             smoothing =
                 smoothing
                 || std::abs(target[index] - next)
-                    > 1.0e-6f;
+                    > stopTolerance;
         }
         return smoothing;
     }
@@ -965,6 +977,12 @@ namespace
             { "octaverDownMix", 0.32 },
             { "octaverUpMix", 0.18 },
             { "octaverDirectMix", 1.0 },
+            { "fuzzEnabled", 0.0 },
+            { "fuzzDrive", 0.5 },
+            { "fuzzTone", 0.5 },
+            { "fuzzLevelDb", 0.0 },
+            { "fuzzVoice", 0.0 },
+            { "fuzzCleanMix", 0.0 },
             { "preEqEnabled", 0.0 },
             { "preEq120Db", 0.0 },
             { "preEq250Db", 0.0 },
@@ -2509,6 +2527,16 @@ void OpenStudioDelay::prepareToPlay(double sampleRate, int samplesPerBlock)
         alternateFeedbackHPF_L,
         alternateFeedbackHPF_R,
         pendingFeedbackHPFCoefficients);
+    // Allocate the final IIR order here, including inactive morph banks.
+    // JUCE otherwise lazily resizes state on the first processSample().
+    feedbackLPF_L.reset();
+    feedbackLPF_R.reset();
+    feedbackHPF_L.reset();
+    feedbackHPF_R.reset();
+    alternateFeedbackLPF_L.reset();
+    alternateFeedbackLPF_R.reset();
+    alternateFeedbackHPF_L.reset();
+    alternateFeedbackHPF_R.reset();
     feedbackFiltersUseAlternate = false;
     feedbackFilterMorphActive = false;
     feedbackFilterChangePending = false;
@@ -4635,6 +4663,8 @@ OpenStudioReverb::OpenStudioReverb(bool standalone)
                          .withOutput("IR cross paths", juce::AudioChannelSet::stereo(), standalone)),
       standaloneBanking(standalone)
 {
+    reverbReturnMode.store(standaloneBanking ? 1.0f : 0.0f);
+    reverbControlMode.store(standaloneBanking ? 1.0f : 0.0f);
     if(standaloneBanking)retroSpace=std::make_unique<BuiltInRetroReverb>();
     for(size_t i=0;i<modalControls.size();++i)modalControls[i].store(BuiltInModalPlate::defaults[i]);
     for(size_t i=0;i<modalMaterialControls.size();++i)modalMaterialControls[i].store(BuiltInModalPlate::materialDefaults[i]);
@@ -4861,6 +4891,8 @@ bool OpenStudioReverb::setModalMaterialControl(size_t index,float value)
 
 void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    resetCompatibilitySleepProof();
+    compatibilityProcessingCalls = 0;
     workflowSampleRate.store(static_cast<float>(sampleRate));
     retiringReverbTailSeconds.store(0);
     peakHold.reset();
@@ -4870,6 +4902,17 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
     if (standaloneBanking)
     {
         additionalSpaces.prepare(sampleRate, static_cast<int>(algorithm.load()));
+        standaloneWetRamp.reset(sampleRate, .02); standaloneDryRamp.reset(sampleRate, .02);
+        standaloneWetRamp.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,wetLevel.load()));
+        standaloneDryRamp.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,dryLevel.load()));
+        smoothedReturnCalibration.reset(sampleRate, 0.02);
+        const float returnMode = reverbReturnMode.load(std::memory_order_relaxed);
+        smoothedReturnCalibration.setCurrentAndTargetValue(std::isfinite(returnMode) && returnMode >= .5f ? 1.0 : 0.0);
+        returnCalibrationBlock.resize(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
+        smoothedStandaloneOutputGain.reset(sampleRate, 0.02);
+        const float trimDb = outputTrimDb.load(std::memory_order_relaxed);
+        smoothedStandaloneOutputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
+            std::isfinite(trimDb) ? juce::jlimit(-60.0f, 12.0f, trimDb) : 0.0f));
         plateColour.prepare(sampleRate);
         springSpace.prepare(sampleRate);
         echoRoom.prepare(sampleRate,isEchoRoom()?static_cast<int>(echoRoomSlot()):-1);
@@ -5084,6 +5127,16 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
             1000.0f,
             20000.0f));
 
+    // JUCE allocates IIR state when the coefficient order changes. The initial
+    // reset above used the constructor's first-order identity coefficients;
+    // size the final second-order histories here, before any audio callback or
+    // compatibility wake can call processSample()/reset(). All histories stay
+    // zero, preserving the prepared DSP response exactly.
+    for (auto* filter : {&wetLowCutL, &wetLowCutR, &wetHighCutL, &wetHighCutR,
+                        &v3WetLowCutAlternateL, &v3WetLowCutAlternateR,
+                        &v3WetHighCutAlternateL, &v3WetHighCutAlternateR})
+        filter->reset();
+
     const int scratchChannels = juce::jmax(2, getTotalNumOutputChannels());
     const int scratchSamples = juce::jmax(samplesPerBlock, 16384);
     dryBuffer.setSize(scratchChannels, scratchSamples, false, false, true);
@@ -5184,6 +5237,7 @@ void OpenStudioReverb::prepareToPlay(double sampleRate, int samplesPerBlock)
     v2DiffusionPool.assign(
         static_cast<size_t>(v2DiffusionSamples),
         0.0f);
+    v2ValidDiffusionHistorySamples.fill(0);
     v2LowBandState.fill(0.0f);
     v2BelowHighBandState.fill(0.0f);
     v2LowBandGain.fill(0.85f);
@@ -5794,6 +5848,12 @@ void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             if (const auto bpm = position->getBpm(); bpm && std::isfinite(*bpm)) workflowTempo.store(juce::jlimit(10.0f,300.0f,static_cast<float>(*bpm)));
     workflow.configure(!isSpatialSpace() && predelaySync.load() >= .5f, effectivePredelay(), wetDuckDepth.load(), wetDuckThreshold.load(), wetDuckRelease.load());
     convolutionCrossWorkflow.configure(!isSpatialSpace() && predelaySync.load() >= .5f, effectivePredelay(), wetDuckDepth.load(), wetDuckThreshold.load(), wetDuckRelease.load());
+    const bool correctedControls = reverbControlMode.load() >= .5f;
+    standaloneWetRamp.setTargetValue(juce::jlimit(0.0f,1.0f,wetLevel.load()));
+    standaloneDryRamp.setTargetValue(juce::jlimit(0.0f,1.0f,dryLevel.load()));
+    const auto configuredRouting = compatibilityRouting();
+    const float returnMode = reverbReturnMode.load(std::memory_order_relaxed);
+    smoothedReturnCalibration.setTargetValue(std::isfinite(returnMode) && returnMode >= .5f ? 1.0 : 0.0);
     const bool convolutionSelected=algorithm.load()==7, spillover=tailSpillover.load()>=.5f;
     convolutionWeight.setTargetValue(convolutionSelected ? 1.0f : 0.0f);
     if(convolutionSelected||!spillover)convolutionOuterSettings={enginePredelay(),lowCut.load(),highCut.load(),width.load(),irModDepth.load(),irModRate.load(),irExtensionControls[0].load(),irExtensionControls[1].load(),irExtensionControls[2].load(),irExtensionControls[3].load(),irExtensionControls[4].load(),irExtensionControls[5].load()};
@@ -5805,43 +5865,45 @@ void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
     modalPlate.configure(algorithm.load()==2&&plateEngine.load()>=1.5f,{decayTime.load(),damping.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
     plateSpace.configure(algorithm.load() == 2 && plateEngine.load() >= .5f && plateEngine.load() < 1.5f ? juce::jlimit(0, 2, juce::roundToInt(plateCharacter.load())) : -1,
         { decayTime.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
-          width.load(), plateModulation.load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(plateToneControls[0].load()), plateToneControls[1].load(), plateToneControls[2].load()>=.5f }, tailSpillover.load() >= .5f );
+          width.load(), plateModulation.load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(plateToneControls[0].load()), plateToneControls[1].load(), plateToneControls[2].load()>=.5f, reverbCharacterMode.load()>=.5f, correctedControls }, tailSpillover.load() >= .5f );
     plateColour.configure({pc[0].load(),pc[1].load(),pc[2].load(),pc[3].load(),pc[4].load(),pc[5].load(),pc[6].load(),pc[7].load(),pc[8].load(),pc[9].load()},(algorithm.load()==2&&plateEngine.load()>=.5f)||(tailSpillover.load()>=.5f&&(plateSpace.retiringTailSeconds()>0||modalPlate.retiringTailSeconds()>0)));
     studioSpace.configure(isStudioSpace() && studioEngines[studioSlot()].load() >= .5f ? studioTopology() : -1,
         { decayTime.load(), roomSize.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
-          earlyLevel.load(), width.load(), studioModulation[studioSlot()].load(), studioBassRatio[studioSlot()].load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(studioToneControls[studioSlot()][0].load()), studioToneControls[studioSlot()][1].load(), studioToneControls[studioSlot()][2].load()>=.5f }, tailSpillover.load() >= .5f );
+          earlyLevel.load(), width.load(), studioModulation[studioSlot()].load(), studioBassRatio[studioSlot()].load(), freezeMode.load() >= .5f, holdAcceptsInput(), juce::roundToInt(studioToneControls[studioSlot()][0].load()), studioToneControls[studioSlot()][1].load(), studioToneControls[studioSlot()][2].load()>=.5f, correctedControls }, tailSpillover.load() >= .5f );
     vintageSpace.configure(isVintageSpace() ? static_cast<int>(vintageSlot()) : -1,
         { decayTime.load(), roomSize.load(), damping.load(), diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(),
           width.load(), vintageColour[vintageSlot()].load(), vintageModulation[vintageSlot()].load(), vintageRate[vintageSlot()].load(), vintageBassRatio[vintageSlot()].load(), vintageBassFrequency[vintageSlot()].load(), vintageConversion[vintageSlot()].load(), vintageBuildUp[vintageSlot()].load(), vintageInputDiffusion[vintageSlot()].load(), vintageTankRate[vintageSlot()].load() }, tailSpillover.load() >= .5f );
     const auto& retro=retroControls[retroSlot()];
     retroSpace->configure(isRetroSpace()?static_cast<int>(retroSlot()):-1,
         {roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),earlyLevel.load(),
-         retro[0].load(),retro[1].load(),retro[2].load(),retro[3].load(),retro[4].load(),retro[5].load(),retro[6].load(),retro[7].load(),retro[8].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+         retro[0].load(),retro[1].load(),retro[2].load(),retro[3].load(),retro[4].load(),retro[5].load(),retro[6].load(),retro[7].load(),retro[8].load(),freezeMode.load()>=.5f,holdAcceptsInput(),reverbCharacterMode.load()>=.5f},spillover);
     const auto& clear=clearControls[clearSlot()];
     clearSpace.configure(isClearSpace()?static_cast<int>(clearSlot()):-1,
         {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),earlyLevel.load(),
-            clear[0].load(),clear[1].load(),clear[2].load(),clear[3].load(),clear[4].load(),clear[5].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+            clear[0].load(),clear[1].load(),clear[2].load(),clear[3].load(),clear[4].load(),clear[5].load(),freezeMode.load()>=.5f,holdAcceptsInput(),reverbCharacterMode.load()>=.5f,correctedControls},spillover);
     const auto& drift = driftingControls[driftingSlot()];
     driftingSpace.configure(isDriftingSpace() ? static_cast<int>(driftingSlot()) : -1,
         {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),
-            drift[0].load(),drift[1].load(),drift[2].load(),drift[3].load(),drift[4].load(),drift[5].load(),drift[6].load(),freezeMode.load()>=.5f,holdAcceptsInput()},spillover);
+            drift[0].load(),drift[1].load(),drift[2].load(),drift[3].load(),drift[4].load(),drift[5].load(),drift[6].load(),freezeMode.load()>=.5f,holdAcceptsInput(),reverbCharacterMode.load()>=.5f},spillover);
     const auto& amb=ambientControls[ambientSlot()];
-    ambientSpace.configure(isAmbientSpace()?static_cast<int>(ambientSlot()):-1,{ambientSlot()==2?amb[8].load():decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),amb[0].load(),amb[1].load(),amb[2].load(),amb[3].load(),amb[4].load(),amb[5].load(),amb[6].load(),amb[7].load(),amb[9].load(),amb[10].load()}, tailSpillover.load()>=.5f);
+    ambientSpace.configure(isAmbientSpace()?static_cast<int>(ambientSlot()):-1,{ambientSlot()==2?amb[8].load():decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),amb[0].load(),amb[1].load(),amb[2].load(),amb[3].load(),amb[4].load(),amb[5].load(),amb[6].load(),amb[7].load(),amb[9].load(),amb[10].load(),reverbCharacterMode.load()>=.5f,ambBody.load()}, tailSpillover.load()>=.5f);
     const auto& er=echoRoomControls[echoRoomSlot()];
     echoRoom.configure(isEchoRoom()?static_cast<int>(echoRoomSlot()):-1,{roomSize.load(),damping.load(),diffusion.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),er[0].load(),er[1].load(),er[2].load(),er[3].load(),er[4].load(),er[5].load(),er[6].load(),er[7].load(),(echoRoomSlot()==0?magneticHold.load():positionedHold.load())>=.5f,holdAcceptsInput()}, tailSpillover.load()>=.5f);
     const auto& spatial=spatialControls[spatialSlot()];
     spatialSpace.configure(isSpatialSpace()?static_cast<int>(spatialSlot()):-1,
-        {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),effectivePredelay(),spatial[1].load(),lowCut.load(),highCut.load(),width.load(),spatial[4].load(),spatial[5].load(),spatial[6].load(),spatial[7].load(),freezeMode.load()>=.5f,holdAcceptsInput(),spatialLowShelf[spatialSlot()].load()}, tailSpillover.load()>=.5f);
+        {decayTime.load(),roomSize.load(),damping.load(),diffusion.load(),effectivePredelay(),spatial[1].load(),lowCut.load(),highCut.load(),width.load(),spatial[4].load(),spatial[5].load(),spatial[6].load(),spatial[7].load(),freezeMode.load()>=.5f,holdAcceptsInput(),spatialLowShelf[spatialSlot()].load(),correctedControls}, tailSpillover.load()>=.5f);
     const auto& sp=springControls;
     const bool dispersiveSpring=algorithm.load()==4&&sp[0].load()>=.5f;
     springSpace.configure(dispersiveSpring,{decayTime.load(),damping.load(),enginePredelay(),lowCut.load(),highCut.load(),width.load(),sp[1].load()+1,sp[2].load(),sp[3].load(),sp[4].load(),sp[5].load(),sp[6].load(),springHold.load()>=.5f,holdAcceptsInput()}, tailSpillover.load()>=.5f);
     additionalSpaces.configure(dispersiveSpring?-1:static_cast<int>(algorithm.load()), { decayTime.load(), roomSize.load(), damping.load(),
         diffusion.load(), enginePredelay(), lowCut.load(), highCut.load(), shimmerAmount.load(), width.load(),
         shimmerPitchA.load(), shimmerPitchB.load(), shimmerVoiceMix.load(), nonlinearShape.load(), shimmerVoiceEngine.load(),
-        creativeControls[0].load(), creativeControls[1].load(), creativeControls[2].load(), creativeControls[3].load(), creativeControls[4].load(), shimmerHold.load() >= .5f, holdAcceptsInput(), nonlinearModulation.load(), nonlinearRate.load(), nonlinearHold.load()>=.5f },tailSpillover.load()>=.5f);
+        creativeControls[0].load(), creativeControls[1].load(), creativeControls[2].load(), creativeControls[3].load(), creativeControls[4].load(), shimmerHold.load() >= .5f, holdAcceptsInput(), nonlinearModulation.load(), nonlinearRate.load(), nonlinearHold.load()>=.5f, shimmerScheduling.load()>=.5f, correctedControls },tailSpillover.load()>=.5f);
     for (int start = 0; start < buffer.getNumSamples(); start += additionalDry.getNumSamples())
     {
         const int count = juce::jmin(additionalDry.getNumSamples(), buffer.getNumSamples() - start);
+        for (int sample = 0; sample < count; ++sample)
+            returnCalibrationBlock[static_cast<size_t>(sample)] = static_cast<float>(smoothedReturnCalibration.getNextValue());
         float* pointers[2] {};
         for (int ch = 0; ch < channels; ++ch)
         {
@@ -5853,13 +5915,46 @@ void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         dryRamp.setTargetValue(juce::jlimit(0.0f,1.0f,dryLevel.load()));
         const float legacyDryStart = dryRamp.getCurrentValue();
         auto endRamp = dryRamp; const float legacyDryEnd = endRamp.skip(count);
-        processSelectedEngine(segment, midi);
+        const auto routing = compatibilityRouting();
+        if (!compatibilityRoutingKnown || !(routing == provenCompatibilityRouting)
+            || !(routing == configuredRouting))
+        {
+            provenCompatibilityRouting = routing;
+            compatibilityRoutingKnown = true;
+            compatibilityCoveredSamples = 0;
+        }
+        // Every dedicated selection ramp is at most 50 ms. We additionally
+        // require a full 50 ms of observed, exactly-zero compatibility weight
+        // under the same routing identity before omitting a future segment.
+        // Thus transitions and compatibility selections always run the DSP.
+        const int coverageProofSamples = juce::jmax(1,
+            static_cast<int>(std::ceil(cachedSampleRate * 0.05)));
+        const bool skipCompatibility = compatibilitySleepEnabled
+            && routing == configuredRouting && canMaskCompatibility(routing)
+            && compatibilityCoveredSamples >= coverageProofSamples;
+        if (skipCompatibility)
+        {
+            compatibilitySleeping = true;
+            advanceCompatibilitySmoothers(count);
+        }
+        else
+        {
+            if (compatibilitySleeping)
+            {
+                // Only the inaudible compatibility history is discarded.
+                // Dedicated tanks, convolution and workflow remain live.
+                invalidateCompatibilityHistory();
+                compatibilitySleeping = false;
+            }
+            processSelectedEngine(segment, midi);
+        }
+        bool compatibilityFullyCovered = true;
         for (int ch = 0; ch < 2; ++ch) convolutionWet.copyFrom(ch, 0, additionalDry, juce::jmin(ch, channels - 1), 0, count);
         float* convPointers[] = { convolutionWet.getWritePointer(0), convolutionWet.getWritePointer(1), convolutionWet.getWritePointer(2), convolutionWet.getWritePointer(3) };
         juce::AudioBuffer<float> convSegment(convPointers, 4, count);
         juce::AudioBuffer<float> crossSegment(convPointers + 2, 2, count);
         const bool convolutionWasAwake=!convolutionSpace.isDormant();
-        convolutionSpace.process(convSegment,convolutionOuterSettings[0],convolutionOuterSettings[1],convolutionOuterSettings[2],convolutionOuterSettings[3],convolutionSelected);
+        convolutionSpace.process(convSegment,convolutionOuterSettings[0],convolutionOuterSettings[1],convolutionOuterSettings[2],convolutionOuterSettings[3],convolutionSelected,true,returnCalibrationBlock.data());
         const bool extensionWasAwake=convolutionExtension.isDraining();
         if(convolutionSelected||convolutionWasAwake||extensionWasAwake)convolutionExtension.process(convSegment);
         if(convolutionSelected||convolutionWasAwake||extensionWasAwake||convolutionMotion.isDraining()){convolutionMotion.configure(convolutionOuterSettings[4],convolutionOuterSettings[5]);convolutionMotion.process(convSegment);}
@@ -5867,32 +5962,37 @@ void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         if(convolutionSelected||convolutionWasAwake||crossExtensionWasAwake)convolutionCrossExtension.process(crossSegment);
         if(convolutionSelected||convolutionWasAwake||crossExtensionWasAwake||convolutionCrossMotion.isDraining())
         {convolutionCrossMotion.configure(convolutionOuterSettings[4],convolutionOuterSettings[5]);convolutionCrossMotion.process(crossSegment);}
-        const float wet = juce::jlimit(0.0f, 1.0f, wetLevel.load());
-        const float dry = juce::jlimit(0.0f, 1.0f, dryLevel.load());
+        const float legacyWet = juce::jlimit(0.0f, 1.0f, wetLevel.load());
+        const float legacyDryGain = juce::jlimit(0.0f, 1.0f, dryLevel.load());
         for (int i = 0; i < count; ++i)
         {
+            const float rampedWet = standaloneWetRamp.getNextValue(), rampedDry = standaloneDryRamp.getNextValue();
+            const float wet = correctedControls ? rampedWet : legacyWet;
+            const float dry = correctedControls ? rampedDry : legacyDryGain;
             const float left = additionalDry.getSample(0, i), right = additionalDry.getSample(channels - 1, i);
-            auto extra = additionalSpaces.process(left, right);
-            const auto spring=springSpace.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=spring[channel];
-            const auto echoes=echoRoom.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=echoes[channel];
-            const auto ambient=ambientSpace.process(left,right);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=ambient[channel];
+            const float returnBlend = returnCalibrationBlock[static_cast<size_t>(i)];
+            auto extra = additionalSpaces.process(left, right, returnBlend);
+            const float springReturn=BuiltInReverbReturnLevels::gain(4,returnBlend);auto spring=springSpace.process(left,right,springReturn);if(springReturn!=1)for(size_t channel=0;channel<2;++channel)spring[channel]*=springReturn;for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=spring[channel];
+            const auto echoes=echoRoom.process(left,right,returnBlend);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=echoes[channel];
+            const auto ambient=ambientSpace.process(left,right,returnBlend);for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=ambient[channel];
             const auto plateDry=plateColour.input({left,right});const auto plateInput=plateColour.pre(plateDry);
-            auto plate = plateSpace.process(plateInput[0],plateInput[1]);const auto modal=modalPlate.process(plateInput[0],plateInput[1]);for(size_t channel=0;channel<plate.size();++channel)plate[channel]+=modal[channel];const auto plateWet=plateColour.post({plate[0],plate[1]});plate[0]=plateWet[0];plate[1]=plateWet[1];
+            auto plate = plateSpace.process(plateInput[0],plateInput[1]);const auto modal=modalPlate.process(plateInput[0],plateInput[1]);for(size_t channel=0;channel<plate.size();++channel)plate[channel]+=modal[channel];const auto plateWet=plateColour.post({plate[0],plate[1]});plate[0]=plateWet[0];plate[1]=plateWet[1];const float plateReturn=BuiltInReverbReturnLevels::gain(2,returnBlend);if(plateReturn!=1){plate[0]*=plateReturn;plate[1]*=plateReturn;}
             for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += plate[channel];
-            const auto studio = studioSpace.process(left, right);
+            const auto studio = studioSpace.process(left, right, returnBlend);
             for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += studio[channel];
-            const auto spatialOutput=spatialSpace.process(left,right);
+            const auto spatialOutput=spatialSpace.process(left,right,returnBlend);
             for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=spatialOutput[channel];
-            const auto retroOutput=retroSpace->process(left,right);
+            const auto retroOutput=retroSpace->process(left,right,returnBlend);
             for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=retroOutput[channel];
-            const auto clearOutput=clearSpace.process(left,right);
+            const auto clearOutput=clearSpace.process(left,right,returnBlend);
             for(size_t channel=0;channel<extra.size();++channel)extra[channel]+=clearOutput[channel];
-            const auto drifting = driftingSpace.process(left, right);
+            const auto drifting = driftingSpace.process(left, right, returnBlend);
             for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += drifting[channel];
-            const auto vintage = vintageSpace.process(left, right);
+            const auto vintage = vintageSpace.process(left, right, returnBlend);
             for (size_t channel = 0; channel < extra.size(); ++channel) extra[channel] += vintage[channel];
             const float convWeight = convolutionWeight.getNextValue(), convWetWeight=convolutionRetirement.next(0);
             const float oldWeight = juce::jlimit(0.0f, 1.0f, 1.0f - extra[2] - convWeight);
+            compatibilityFullyCovered = compatibilityFullyCovered && oldWeight == 0.0f;
             const float legacyDry = engineVersion.load() >= 1.5f && engineVersion.load() < 2.5f
                 ? dryRamp.getNextValue() : legacyDryStart + (legacyDryEnd-legacyDryStart)*static_cast<float>(i+1)/static_cast<float>(count);
             std::array<float,2> drySignal {}, mixed {};
@@ -5918,14 +6018,139 @@ void OpenStudioReverb::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
             if (workflowActive) for (int ch=0;ch<channels;++ch)
                 segment.setSample(ch,i,drySignal[static_cast<size_t>(ch)]+processedWet[static_cast<size_t>(ch)]);
         }
+        compatibilityCoveredSamples = compatibilityFullyCovered
+            && routing == configuredRouting && canMaskCompatibility(routing)
+                ? juce::jmin(coverageProofSamples, compatibilityCoveredSamples + count) : 0;
     }
     retiringReverbTailSeconds.store(std::max({studioSpace.retiringTailSeconds(),plateSpace.retiringTailSeconds(),modalPlate.retiringTailSeconds(),vintageSpace.retiringTailSeconds(),driftingSpace.retiringTailSeconds(),clearSpace.retiringTailSeconds(),retroSpace->retiringTailSeconds(),spatialSpace.retiringTailSeconds(),ambientSpace.retiringTailSeconds(),echoRoom.retiringTailSeconds(),springSpace.retiringTailSeconds(),convolutionRetirement.retiringTailSeconds(),additionalSpaces.retiringTailSeconds()}),std::memory_order_relaxed);
     workflowReduction.store(workflow.gainReductionDb());
+    // Final gain follows every dry/wet, ducking and auxiliary IR path. Unity is
+    // an exact bypass; one sample ramp is shared by all outputs and host blocks.
+    const float trimDb = outputTrimDb.load(std::memory_order_relaxed);
+    smoothedStandaloneOutputGain.setTargetValue(juce::Decibels::decibelsToGain(
+        std::isfinite(trimDb) ? juce::jlimit(-60.0f, 12.0f, trimDb) : 0.0f));
+    if (smoothedStandaloneOutputGain.isSmoothing())
+    {
+        for (int sample = 0; sample < meterSamples; ++sample)
+        {
+            const float gain = smoothedStandaloneOutputGain.getNextValue();
+            for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+                buffer.setSample(channel, sample, buffer.getSample(channel, sample) * gain);
+        }
+    }
+    else if (const float gain = smoothedStandaloneOutputGain.getCurrentValue(); gain != 1.0f)
+        buffer.applyGain(gain);
     sanitizeBuiltInBuffer(buffer, 4.0f);
+}
+
+OpenStudioReverb::CompatibilityRouting OpenStudioReverb::compatibilityRouting() const noexcept
+{
+    return {{algorithm.load(), engineVersion.load(), plateEngine.load(), plateCharacter.load(),
+             roomCharacter.load(), studioEngines[0].load(), studioEngines[1].load(),
+             studioEngines[2].load(), studioEngines[3].load(), studioEngines[4].load(),
+             springControls[0].load(), shimmerVoiceEngine.load(), rackVoice.load(),
+             rackPadMode.load(), tailSpillover.load(), reverbCharacterMode.load(),
+             static_cast<float>(getMainBusNumOutputChannels())},
+            convolutionSpace.publicationRevision()};
+}
+
+bool OpenStudioReverb::canMaskCompatibility(const CompatibilityRouting& routing) const noexcept
+{
+    if (!standaloneBanking) return false;
+    for (const float value : routing.values) if (!std::isfinite(value)) return false;
+    const float selected = routing.values[0];
+    if (selected < 0 || selected >= standaloneTypeCount || selected != std::floor(selected)) return false;
+    const int type = static_cast<int>(selected);
+    if (type == 0 || type == 1 || type == 3)
+        return routing.values[static_cast<size_t>(type == 3 ? 7 : 5 + type)] >= .5f;
+    if (type == 2) return routing.values[2] >= .5f;
+    return true;
+}
+
+void OpenStudioReverb::resetCompatibilitySleepProof() noexcept
+{
+    compatibilityCoveredSamples = 0;
+    compatibilityRoutingKnown = false;
+    compatibilitySleeping = false;
+}
+
+void OpenStudioReverb::advanceCompatibilitySmoothers(int samples) noexcept
+{
+    const auto unitTarget = [] (auto& smoother, const std::atomic<float>& parameter) {
+        smoother.setTargetValue(juce::jlimit(0.0f, 1.0f, parameter.load(std::memory_order_relaxed)));
+    };
+    unitTarget(smoothedWetLevel, wetLevel);
+    unitTarget(smoothedDryLevel, dryLevel);
+    unitTarget(smoothedEarlyLevel, earlyLevel);
+    unitTarget(smoothedInputSend, inputSend);
+    unitTarget(smoothedShimmerAmount, shimmerAmount);
+    const bool processShimmer = smoothedShimmerAmount.getTargetValue() > .0001f
+        || smoothedShimmerAmount.getCurrentValue() > .0001f || smoothedShimmerAmount.isSmoothing();
+    const float selectedEngine = engineVersion.load(std::memory_order_relaxed);
+    const bool v2 = selectedEngine >= 1.5f && selectedEngine < 2.5f;
+    const bool v3 = selectedEngine >= 2.5f;
+    smoothedInputSend.skip(samples);
+    if (!v2)
+    {
+        smoothedWetLevel.skip(samples);
+        smoothedDryLevel.skip(samples);
+        smoothedEarlyLevel.skip(samples);
+    }
+    if (v2 || v3)
+    {
+        smoothedV2Width.setTargetValue(juce::jlimit(0.0f, 1.25f, width.load()));
+        unitTarget(smoothedV2Ducking, ducking);
+        unitTarget(smoothedV2Movement, movement);
+        unitTarget(smoothedV2EarlyLate, earlyLate);
+        unitTarget(smoothedV2Diffusion, diffusion);
+    }
+    if (v2) unitTarget(smoothedV2ShimmerRegen, shimmerRegen);
+    if (v3)
+    {
+        smoothedV5AlternativeVoiceBlend.setTargetValue(selectedEngine >= kReverbV5SelectionFloor
+            && sanitizeReverbV5VoiceIndex(rackVoice.load()) != OpenStudioNAMRack::studioReverbVoice ? 1.0f : 0.0f);
+        unitTarget(smoothedV3PadMode, rackPadMode);
+        const float tone = juce::jlimit(0.0f, 1.0f, (1.0f - damping.load()) / .82f);
+        smoothedV3LoopDampingCoefficient.setTargetValue(1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi * (3200.0f + tone * 7800.0f)
+            / static_cast<float>(juce::jmax(1.0, cachedSampleRate))));
+        smoothedV3PreDelayMorph.skip(samples);
+        smoothedV4TankSizeMorph.skip(samples);
+        smoothedV3WetFilterMorph.skip(samples);
+    }
+    // V2 consumes gains sample by sample. Repeating that progression preserves
+    // its floating-point ramp endpoints for later audible compatibility wakes;
+    // SmoothedValue::skip() can round differently from repeated getNextValue().
+    for (int sample = 0; sample < samples; ++sample)
+    {
+        if (processShimmer) smoothedShimmerAmount.getNextValue();
+        if (v2)
+        {
+            smoothedWetLevel.getNextValue();
+            smoothedDryLevel.getNextValue();
+            smoothedEarlyLevel.getNextValue();
+            smoothedV2ShimmerRegen.getNextValue();
+        }
+        if (v2 || v3)
+        {
+            smoothedV2Width.getNextValue();
+            smoothedV2Ducking.getNextValue();
+            smoothedV2Movement.getNextValue();
+            smoothedV2EarlyLate.getNextValue();
+            smoothedV2Diffusion.getNextValue();
+        }
+        if (v3)
+        {
+            smoothedV5AlternativeVoiceBlend.getNextValue();
+            smoothedV3PadMode.getNextValue();
+            smoothedV3LoopDampingCoefficient.getNextValue();
+        }
+    }
 }
 
 void OpenStudioReverb::processSelectedEngine(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    ++compatibilityProcessingCalls;
     const float selectedEngine =
         engineVersion.load(std::memory_order_relaxed);
     if (selectedEngine < 1.5f)
@@ -7136,7 +7361,9 @@ void OpenStudioReverb::processV2Block(juce::AudioBuffer<float>& buffer,
                     v2DiffusionOffsets[lineIndex]
                     + writeIndex);
             const float delayed =
-                v2DiffusionPool[poolIndex];
+                !v2DiffusionHistoryGuardsEnabled
+                    || v2ValidDiffusionHistorySamples[lineIndex] >= capacity
+                        ? v2DiffusionPool[poolIndex] : 0.0f;
             const float output =
                 delayed
                 - coefficient * input;
@@ -7148,6 +7375,8 @@ void OpenStudioReverb::processV2Block(juce::AudioBuffer<float>& buffer,
                 writeIndex + 1 < capacity
                     ? writeIndex + 1
                     : 0;
+            v2ValidDiffusionHistorySamples[lineIndex] = juce::jmin(
+                capacity, v2ValidDiffusionHistorySamples[lineIndex] + 1);
             return output;
         };
 
@@ -10689,14 +10918,8 @@ void OpenStudioReverb::processV3Block(juce::AudioBuffer<float>& buffer,
     clearNonFiniteSamples(buffer);
 }
 
-void OpenStudioReverb::resetTailState() noexcept
+void OpenStudioReverb::invalidateCompatibilityHistory() noexcept
 {
-    retiringReverbTailSeconds.store(0);
-    peakHold.reset();
-    reconstructedPeakMeter.reset();
-    for(auto& peak:inputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
-    for(auto& peak:outputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
-    if (standaloneBanking) { additionalSpaces.reset(); convolutionSpace.reset(); convolutionMotion.reset(); convolutionExtension.reset(); convolutionCrossMotion.reset(); convolutionCrossExtension.reset(); convolutionCrossWorkflow.reset(); convolutionRetirement.reset({convolutionWeight}); plateSpace.reset(); modalPlate.reset(); plateColour.reset(); studioSpace.reset(); vintageSpace.reset(); driftingSpace.reset(); clearSpace.reset(); retroSpace->reset(); spatialSpace.reset(); echoRoom.reset(); ambientSpace.reset(); springSpace.reset(); workflow.reset(); workflowReduction.store(0); }
     validEarlyHistorySamples = 0;
     validPreDelayHistorySamples = 0;
     validLateHistorySamples = 0;
@@ -10713,18 +10936,9 @@ void OpenStudioReverb::resetTailState() noexcept
     // line's write index plus the valid-history count makes old tank samples
     // unreadable until each addressed location has been overwritten, avoiding
     // a large full-pool memory sweep in one callback.
-    // V3 invalidates its delay histories by index/count only. Preserve the V2
-    // sweep solely for old states because that diffuser has no history guard.
-    if (engineVersion.load(std::memory_order_relaxed)
-        < 2.5f)
-    {
-        std::fill(
-            v2DiffusionPool.begin(),
-            v2DiffusionPool.end(),
-            0.0f);
-    }
     v2LateWriteIndices.fill(0);
     v2DiffusionWriteIndices.fill(0);
+    v2ValidDiffusionHistorySamples.fill(0);
     v2LowBandState.fill(0.0f);
     v2BelowHighBandState.fill(0.0f);
     for (size_t line = 0;
@@ -10781,6 +10995,22 @@ void OpenStudioReverb::resetTailState() noexcept
     v3WetFilterChangePending = false;
     smoothedV3WetFilterMorph
         .setCurrentAndTargetValue(0.0f);
+    v3CachedLowCutHz = -1.0f;
+    v3CachedHighCutHz = -1.0f;
+}
+
+void OpenStudioReverb::resetTailState() noexcept
+{
+    standaloneWetRamp.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,wetLevel.load()));
+    standaloneDryRamp.setCurrentAndTargetValue(juce::jlimit(0.0f,1.0f,dryLevel.load()));
+    retiringReverbTailSeconds.store(0);
+    peakHold.reset();
+    reconstructedPeakMeter.reset();
+    for(auto& peak:inputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    for(auto& peak:outputPeaksDb)peak.store(-100.0f,std::memory_order_relaxed);
+    if (standaloneBanking) { additionalSpaces.reset(); convolutionSpace.reset(); convolutionMotion.reset(); convolutionExtension.reset(); convolutionCrossMotion.reset(); convolutionCrossExtension.reset(); convolutionCrossWorkflow.reset(); convolutionRetirement.reset({convolutionWeight}); plateSpace.reset(); modalPlate.reset(); plateColour.reset(); studioSpace.reset(); vintageSpace.reset(); driftingSpace.reset(); clearSpace.reset(); retroSpace->reset(); spatialSpace.reset(); echoRoom.reset(); ambientSpace.reset(); springSpace.reset(); workflow.reset(); workflowReduction.store(0); }
+    resetCompatibilitySleepProof();
+    invalidateCompatibilityHistory();
     smoothedWetLevel.setCurrentAndTargetValue(0.0f);
     smoothedEarlyLevel.setCurrentAndTargetValue(0.0f);
     smoothedInputSend.setCurrentAndTargetValue(
@@ -10906,6 +11136,7 @@ void OpenStudioReverb::resetTailState() noexcept
 
 void OpenStudioReverb::releaseResources()
 {
+    resetCompatibilitySleepProof();
     preDelayLineL.reset();
     preDelayLineR.reset();
     wetLowCutL.reset();
@@ -10966,6 +11197,7 @@ void OpenStudioReverb::releaseResources()
     v3PadCachedDecaySeconds = -1.0f;
     v2LateWriteIndices.fill(0);
     v2DiffusionWriteIndices.fill(0);
+    v2ValidDiffusionHistorySamples.fill(0);
     v2LowBandState.fill(0.0f);
     v2BelowHighBandState.fill(0.0f);
     v2ShimmerPreLowPassState.fill(0.0f);
@@ -11423,6 +11655,12 @@ void OpenStudioReverb::getStateInformation(juce::MemoryBlock& destData)
         state.setProperty("nonlinearHold", nonlinearHold.load(), nullptr);
         state.setProperty("positionedHold", positionedHold.load(), nullptr);
         state.setProperty("reconstructedPeaks", reconstructedPeaks.load(), nullptr);
+        state.setProperty("outputTrimDb", outputTrimDb.load(), nullptr);
+        state.setProperty("reverbCharacterMode", reverbCharacterMode.load(), nullptr);
+        state.setProperty("reverbReturnMode", reverbReturnMode.load(), nullptr);
+        state.setProperty("shimmerScheduling", shimmerScheduling.load(), nullptr);
+        state.setProperty("ambBody", ambBody.load(), nullptr);
+        state.setProperty("reverbControlMode", reverbControlMode.load(), nullptr);
         state.setProperty("shimmerVoiceEngine", shimmerVoiceEngine.load(), nullptr);
         state.setProperty("shimmerHold",shimmerHold.load(),nullptr);
         state.setProperty("tailSpillover",tailSpillover.load(),nullptr);
@@ -11506,6 +11744,18 @@ void OpenStudioReverb::restoreStateTree(const juce::ValueTree& tree, bool restor
         mixLock.store(static_cast<float>(tree.getProperty("mixLock", 0.0f)));
         insertWet.store(static_cast<float>(tree.getProperty("insertWet", 0.33f)));
         insertDry.store(static_cast<float>(tree.getProperty("insertDry", 0.7f)));
+        const float storedOutputTrim = static_cast<float>(tree.getProperty("outputTrimDb", 0.0f));
+        outputTrimDb.store(std::isfinite(storedOutputTrim) ? juce::jlimit(-60.0f, 12.0f, storedOutputTrim) : 0.0f);
+        const float storedCharacterMode = static_cast<float>(tree.getProperty("reverbCharacterMode", 0.0f));
+        reverbCharacterMode.store(std::isfinite(storedCharacterMode) && storedCharacterMode >= .5f ? 1.0f : 0.0f);
+        const float storedReturnMode = static_cast<float>(tree.getProperty("reverbReturnMode", 0.0f));
+        reverbReturnMode.store(std::isfinite(storedReturnMode) && storedReturnMode >= .5f ? 1.0f : 0.0f);
+        const float storedScheduling = static_cast<float>(tree.getProperty("shimmerScheduling", 0.0f));
+        shimmerScheduling.store(std::isfinite(storedScheduling) && storedScheduling >= .5f ? 1.0f : 0.0f);
+        const float storedControls = static_cast<float>(tree.getProperty("reverbControlMode", 0.0f));
+        reverbControlMode.store(std::isfinite(storedControls) && storedControls >= .5f ? 1.0f : 0.0f);
+        const float storedBody = static_cast<float>(tree.getProperty("ambBody", 0.0f));
+        ambBody.store(std::isfinite(storedBody) ? juce::jlimit(0.0f, 1.0f, storedBody) : 0.0f);
         for (int bank = 0; bank < standaloneTypeCount; ++bank)
             for (int control = 0; control < bankControlCount; ++control)
             {
@@ -11751,6 +12001,8 @@ OpenStudioChorus::OpenStudioChorus()
     for (int v = 0; v < maxVoices; ++v)
     {
         lfoPhase[v] = static_cast<float>(v) * juce::MathConstants<float>::twoPi / static_cast<float>(maxVoices);
+        ensemblePhaseL[static_cast<size_t>(v)] = lfoPhase[v] * .37f;
+        ensemblePhaseR[static_cast<size_t>(v)] = lfoPhase[v] * .41f;
         sampleHoldTarget[static_cast<size_t>(v)] = nextSampleAndHoldValue();
         sampleHoldValue[static_cast<size_t>(v)] =
             sampleHoldTarget[static_cast<size_t>(v)];
@@ -11759,6 +12011,7 @@ OpenStudioChorus::OpenStudioChorus()
 
 void OpenStudioChorus::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    retainedFeedback.store(0);
     cachedSampleRate = sampleRate;
     juce::ignoreUnused(samplesPerBlock, getModulationSineLut());
 
@@ -11951,6 +12204,16 @@ void OpenStudioChorus::prepareToPlay(double sampleRate, int samplesPerBlock)
         alternateWetHighCutL,
         alternateWetHighCutR,
         pendingHighCutCoefficients);
+    // Allocate the final IIR order here, including inactive morph banks.
+    // JUCE otherwise lazily resizes state on the first processSample().
+    wetLowCutL.reset();
+    wetLowCutR.reset();
+    wetHighCutL.reset();
+    wetHighCutR.reset();
+    alternateWetLowCutL.reset();
+    alternateWetLowCutR.reset();
+    alternateWetHighCutL.reset();
+    alternateWetHighCutR.reset();
     smoothedWetFilterMorph.reset(sampleRate, 0.015);
     smoothedWetFilterMorph.setCurrentAndTargetValue(0.0f);
     wetFiltersUseAlternate = false;
@@ -11968,6 +12231,8 @@ void OpenStudioChorus::prepareToPlay(double sampleRate, int samplesPerBlock)
         lfoPhase[voice] = static_cast<float>(voice)
             * juce::MathConstants<float>::twoPi
             / static_cast<float>(maxVoices);
+        ensemblePhaseL[static_cast<size_t>(voice)] = lfoPhase[voice] * .37f;
+        ensemblePhaseR[static_cast<size_t>(voice)] = lfoPhase[voice] * .41f;
         sampleHoldTarget[static_cast<size_t>(voice)] =
             nextSampleAndHoldValue();
         sampleHoldValue[static_cast<size_t>(voice)] =
@@ -11989,6 +12254,8 @@ float OpenStudioChorus::nextSampleAndHoldValue() noexcept
 void OpenStudioChorus::advanceLFO(int voice, float phaseIncrement) noexcept
 {
     const int voiceIndex = juce::jlimit(0, maxVoices - 1, voice);
+    ensemblePhaseL[static_cast<size_t>(voiceIndex)] = wrapModulationPhase(ensemblePhaseL[static_cast<size_t>(voiceIndex)] + phaseIncrement * .37f);
+    ensemblePhaseR[static_cast<size_t>(voiceIndex)] = wrapModulationPhase(ensemblePhaseR[static_cast<size_t>(voiceIndex)] + phaseIncrement * .41f);
     auto& phase = lfoPhase[voiceIndex];
     phase += phaseIncrement;
     if (phase >= juce::MathConstants<float>::twoPi)
@@ -12100,6 +12367,7 @@ float OpenStudioChorus::resolveLFORate() noexcept
 
 void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    retainedFeedback.store(juce::jmax(retainedFeedback.load(), std::abs(fbAmount.load())), std::memory_order_relaxed);
     juce::ignoreUnused(midi);
     juce::ScopedNoDenormals noDenormals;
 
@@ -12703,7 +12971,7 @@ void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
                         currentRandomness);
                 const float ensembleOffset = characterIndex == 1
                     ? lookupModulationSine(
-                          lfoPhase[v] * 0.37f
+                          (signalPath.load(std::memory_order_relaxed) >= .5f ? ensemblePhaseL[static_cast<size_t>(v)] : lfoPhase[v] * 0.37f)
                           + static_cast<float>(v) * 1.61f)
                         * 0.18f
                     : 0.0f;
@@ -12767,7 +13035,7 @@ void OpenStudioChorus::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
                     const float decorrelatedEnsembleOffsetR =
                         characterIndex == 1
                             ? lookupModulationSine(
-                                  lfoPhase[v] * 0.41f
+                                  (signalPath.load(std::memory_order_relaxed) >= .5f ? ensemblePhaseR[static_cast<size_t>(v)] : lfoPhase[v] * 0.41f)
                                   + static_cast<float>(v) * 1.37f
                                   + phaseOffset)
                                 * 0.18f
@@ -13116,6 +13384,8 @@ void OpenStudioChorus::releaseResources()
     {
         lfoPhase[voice] = static_cast<float>(voice) * juce::MathConstants<float>::twoPi
             / static_cast<float>(maxVoices);
+        ensemblePhaseL[static_cast<size_t>(voice)] = lfoPhase[voice] * .37f;
+        ensemblePhaseR[static_cast<size_t>(voice)] = lfoPhase[voice] * .41f;
         sampleHoldTarget[static_cast<size_t>(voice)] =
             nextSampleAndHoldValue();
         sampleHoldValue[static_cast<size_t>(voice)] =
@@ -13125,23 +13395,18 @@ void OpenStudioChorus::releaseResources()
 
 double OpenStudioChorus::getTailLengthSeconds() const
 {
-    if (mix.load(std::memory_order_relaxed) <= 0.0001f)
-        return 0.0;
-
-    const auto currentMode = static_cast<Mode>(juce::jlimit(
-        0,
-        2,
-        static_cast<int>(
-            std::round(mode.load(std::memory_order_relaxed)))));
-    // Ensemble chorus reaches just under 24 ms of delayed history. Phaser has
-    // no delay line, but its all-pass/feedback state benefits from a
-    // conservative short render tail in standalone use.
-    return currentMode == Mode::Phaser ? 0.25 : 0.03;
+    // Include worst-case 26ms Ensemble taps, feedback circulation and the
+    // 20Hz wet-filter states. Phaser's 12 stages fit this conservative bound.
+    // Keep a small bound at Mix=0: a live fade may still drain stored history.
+    const double feedback = juce::jlimit(0.0, .95, juce::jmax(std::abs(static_cast<double>(fbAmount.load())), static_cast<double>(retainedFeedback.load())));
+    const double cycles = feedback > .0001 ? std::ceil(std::log(1e-8) / std::log(feedback)) : 1;
+    return .5 + .032 * (1 + cycles);
 }
 
 void OpenStudioChorus::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioChorus", {
+        { "signalPath", signalPath.load() },
         { "mode",      mode.load() },
         { "rate",      rate.load() },
         { "depth",     depth.load() },
@@ -13162,9 +13427,11 @@ void OpenStudioChorus::getStateInformation(juce::MemoryBlock& destData)
 
 void OpenStudioChorus::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioChorus");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
 
     mode      = static_cast<float>((double)tree.getProperty("mode", 0.0));
     rate      = static_cast<float>((double)tree.getProperty("rate", 1.0));
@@ -13191,6 +13458,9 @@ void OpenStudioChorus::setStateInformation(const void* data, int sizeInBytes)
     mixLaw = static_cast<float>(
         static_cast<double>(
             tree.getProperty("mixLaw", 0.0)));
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 bool OpenStudioChorus::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -13214,6 +13484,7 @@ OpenStudioSaturator::OpenStudioSaturator(bool shouldUseLowLatencyOversampling)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       useLowLatencyOversampling(shouldUseLowLatencyOversampling)
 {
+    signalPath.store(shouldUseLowLatencyOversampling ? 0.0f : 1.0f);
 }
 
 void OpenStudioSaturator::setOversamplingEnabled(bool enabled)
@@ -13313,7 +13584,7 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     toneFilterR.coefficients = coeffs;
     prepareRealtimeFilterLut(toneCoefficientLut, sampleRate, 200.0f, 20000.0f, false);
     lastLowCutFreq = juce::jlimit(20.0f, 1000.0f, lowCutFreq.load());
-    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, safeFilterFrequency(sampleRate, lastLowCutFreq));
+    auto lowCutCoeffs = juce::dsp::IIR::Coefficients<double>::makeHighPass(sampleRate, static_cast<double>(safeFilterFrequency(sampleRate, lastLowCutFreq)));
     lowCutFilterL.coefficients = lowCutCoeffs;
     lowCutFilterR.coefficients = lowCutCoeffs;
     prepareRealtimeFilterLut(lowCutCoefficientLut, sampleRate, 20.0f, 1000.0f, true);
@@ -13342,6 +13613,12 @@ void OpenStudioSaturator::prepareToPlay(double sampleRate, int samplesPerBlock)
     toneCoefficientsSmoothing = false;
     lowCutCoefficientsSmoothing = false;
 
+    // Allocate the final IIR order here, including inactive morph banks.
+    // JUCE otherwise lazily resizes state on the first processSample().
+    toneFilterL.reset();
+    toneFilterR.reset();
+    lowCutFilterL.reset();
+    lowCutFilterR.reset();
     const auto oversamplingFilterType = useLowLatencyOversampling
         ? juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR
         : juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
@@ -13573,7 +13850,8 @@ float OpenStudioSaturator::processSample(
         case SatType::Foldback:
         {
             // Foldback: controlled creative distortion, level bounded for safety.
-            const auto shape = [] (float value)
+            const bool corrected = signalPath.load(std::memory_order_relaxed) >= .5f;
+            const auto shape = [corrected] (float value)
             {
                 float shaped = value;
                 constexpr float threshold = 0.78f;
@@ -13586,7 +13864,7 @@ float OpenStudioSaturator::processSample(
                     - std::trunc(phase / period)
                         * period;
                 shaped = std::abs(
-                        wrapped
+                        (corrected ? std::abs(wrapped) : wrapped)
                         - threshold * 2.0f)
                     - threshold;
                 return juce::jlimit(-1.0f, 1.0f, shaped);
@@ -13780,6 +14058,21 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     {
         smoothedTopologyGain.setTargetValue(1.0f);
         topologyTransitionStage = 2;
+    }
+    // End the old engine exactly at the native-sample fade boundary. Recursive
+    // slices are non-owning, bounded to the two fade endpoints, and allocate no
+    // audio storage. Oversamplers retain their history across slices.
+    const int remainingFade = smoothedTopologyGain.getNumSamplesToReachTarget();
+    if (signalPath.load(std::memory_order_relaxed) >= .5f && remainingFade > 0 && remainingFade < numSamples)
+    {
+        std::array<float*, 2> pointers {};
+        for (int ch = 0; ch < numChannels; ++ch) pointers[static_cast<size_t>(ch)] = buffer.getWritePointer(ch);
+        juce::AudioBuffer<float> first(pointers.data(), numChannels, remainingFade);
+        processBlock(first, midi);
+        for (int ch = 0; ch < numChannels; ++ch) pointers[static_cast<size_t>(ch)] += remainingFade;
+        juce::AudioBuffer<float> rest(pointers.data(), numChannels, numSamples - remainingFade);
+        processBlock(rest, midi);
+        return;
     }
     const auto type =
         static_cast<SatType>(activeSaturationType);
@@ -13980,8 +14273,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             float drivenLeft = dryLeft;
             if (lowCutBeforeSaturation)
                 drivenLeft =
-                    lowCutFilterL.processSample(
-                        drivenLeft);
+                    static_cast<float>(lowCutFilterL.processSample(drivenLeft));
             drivenLeft *= driveLinear;
             float processedLeft = shapeSample(
                 drivenLeft,
@@ -13994,8 +14286,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             if (! lowCutBeforeSaturation)
             {
                 processedLeft =
-                    lowCutFilterL.processSample(
-                        processedLeft);
+                    static_cast<float>(lowCutFilterL.processSample(processedLeft));
             }
             processedLeft *= outGainLinear;
             processedLeft =
@@ -14025,8 +14316,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 if (lowCutBeforeSaturation)
                 {
                     drivenRight =
-                        lowCutFilterR.processSample(
-                            drivenRight);
+                        static_cast<float>(lowCutFilterR.processSample(drivenRight));
                 }
                 drivenRight *= driveLinear;
                 float processedRight = shapeSample(
@@ -14040,8 +14330,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 if (! lowCutBeforeSaturation)
                 {
                     processedRight =
-                        lowCutFilterR.processSample(
-                            processedRight);
+                        static_cast<float>(lowCutFilterR.processSample(processedRight));
                 }
                 processedRight *= outGainLinear;
                 processedRight =
@@ -14104,10 +14393,10 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             {
                 advanceLowCutCoefficients();
                 wetLeft[sample] =
-                    lowCutFilterL.processSample(wetLeft[sample]);
+                    static_cast<float>(lowCutFilterL.processSample(wetLeft[sample]));
                 if (wetRight != nullptr)
                     wetRight[sample] =
-                        lowCutFilterR.processSample(wetRight[sample]);
+                        static_cast<float>(lowCutFilterR.processSample(wetRight[sample]));
             }
         }
 
@@ -14156,7 +14445,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 smoothedTopologyGain.getNextValue();
             float processedLeft = processTone(wetLeft[sample],0);
             if (! lowCutBeforeSaturation)
-                processedLeft = lowCutFilterL.processSample(processedLeft);
+                processedLeft = static_cast<float>(lowCutFilterL.processSample(processedLeft));
             processedLeft *= outGainLinear;
             processedLeft = std::isfinite(processedLeft)
                 ? juce::jlimit(-2.5f, 2.5f, processedLeft)
@@ -14175,7 +14464,7 @@ void OpenStudioSaturator::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                     processTone(wetRight[sample],1);
                 if (! lowCutBeforeSaturation)
                     processedRight =
-                        lowCutFilterR.processSample(processedRight);
+                        static_cast<float>(lowCutFilterR.processSample(processedRight));
                 processedRight *= outGainLinear;
                 processedRight = std::isfinite(processedRight)
                     ? juce::jlimit(-2.5f, 2.5f, processedRight)
@@ -14392,6 +14681,7 @@ void OpenStudioSaturator::publishColourMeters(const juce::AudioBuffer<float>& bu
 void OpenStudioSaturator::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioSaturator", {
+        { "signalPath", signalPath.load() },
         { "colourEngine",colourEngine.load() }, { "inputTrim",inputTrim.load() }, { "boostDrive",boostDrive.load() }, { "driveCompensation",driveCompensation.load() },
         { "colourTone",colourTone.load() }, { "cornerBump",cornerBump.load() }, { "colourDynamics",colourDynamics.load() }, { "steepCut",steepCut.load() },
         { "satType",        satType.load() },
@@ -14409,9 +14699,11 @@ void OpenStudioSaturator::getStateInformation(juce::MemoryBlock& destData)
 
 void OpenStudioSaturator::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioSaturator");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
 
     const auto readColour=[&](const char* id,float fallback,float minimum,float maximum){const float value=static_cast<float>(tree.getProperty(id,fallback));return std::isfinite(value)?juce::jlimit(minimum,maximum,value):fallback;};
     colourEngine.store(readColour("colourEngine",0,0,5));inputTrim.store(readColour("inputTrim",0,-24,24));boostDrive.store(readColour("boostDrive",0,0,1));driveCompensation.store(readColour("driveCompensation",1,0,1));
@@ -14436,6 +14728,9 @@ void OpenStudioSaturator::setStateInformation(const void* data, int sizeInBytes)
             "oversamplingEnabled",
             restoredOversamplingMode >= 0.5f ? 1.0 : 0.0)) >= 0.5;
     setOversamplingEnabled(restoredOversamplingEnabled);
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 // ============================================================================
@@ -14870,21 +15165,6 @@ void OpenStudioNAMRack::NAMResamplerState::reset() noexcept
     nextSourceRemainder = 0;
 }
 
-float OpenStudioNAMRack::NAMResamplerState::sampleAt(std::int64_t absoluteIndex) const noexcept
-{
-    if (absoluteIndex < 0 || absoluteIndex >= totalInputSamples)
-        return 0.0f;
-
-    const auto age = totalInputSamples - 1 - absoluteIndex;
-    if (age < 0 || age >= namResamplerHistorySize)
-        return 0.0f;
-
-    int index = writeIndex - 1 - static_cast<int>(age);
-    while (index < 0)
-        index += namResamplerHistorySize;
-    return history[static_cast<size_t>(index)];
-}
-
 float OpenStudioNAMRack::NAMResamplerState::interpolate(double sourcePosition,
                                                   const NAMResamplerKernel& kernel) const noexcept
 {
@@ -14896,13 +15176,39 @@ float OpenStudioNAMRack::NAMResamplerState::interpolate(double sourcePosition,
                                   namResamplerKernelPhases - 1,
                                   static_cast<int>(fraction * static_cast<double>(namResamplerKernelPhases)));
     const auto phaseOffset = static_cast<size_t>(phase * namResamplerKernelTaps);
+    const auto firstAbsoluteIndex = baseIndex - (half - 1);
+    const auto oldestAbsoluteIndex = juce::jmax<std::int64_t>(
+        0, totalInputSamples - namResamplerHistorySize);
+    const int firstValidTap = static_cast<int>(juce::jlimit<std::int64_t>(
+        0, namResamplerKernelTaps, oldestAbsoluteIndex - firstAbsoluteIndex));
+    const int endValidTap = static_cast<int>(juce::jlimit<std::int64_t>(
+        firstValidTap, namResamplerKernelTaps, totalInputSamples - firstAbsoluteIndex));
     double result = 0.0;
-    for (int tap = 0; tap < namResamplerKernelTaps; ++tap)
+    int tap = 0;
+    // Retain the old sequential double accumulation, including zero-padded
+    // startup/future taps. Only the repeated per-tap history lookup changes.
+    for (; tap < firstValidTap; ++tap)
+        result += 0.0 * static_cast<double>(kernel.coefficients[phaseOffset + static_cast<size_t>(tap)]);
+    if (tap < endValidTap)
     {
-        const int sampleOffset = tap - (half - 1);
-        result += static_cast<double>(sampleAt(baseIndex + sampleOffset))
-            * static_cast<double>(kernel.coefficients[phaseOffset + static_cast<size_t>(tap)]);
+        int historyIndex = writeIndex - static_cast<int>(
+            totalInputSamples - (firstAbsoluteIndex + tap));
+        if (historyIndex < 0)
+            historyIndex += namResamplerHistorySize;
+        // Forty-eight taps fit in the 128-sample ring, so at most two
+        // contiguous spans are needed; no bounds/age/wrap work per tap.
+        const int firstSpanEnd = juce::jmin(
+            endValidTap, tap + namResamplerHistorySize - historyIndex);
+        for (; tap < firstSpanEnd; ++tap, ++historyIndex)
+            result += static_cast<double>(history[static_cast<size_t>(historyIndex)])
+                * static_cast<double>(kernel.coefficients[phaseOffset + static_cast<size_t>(tap)]);
+        historyIndex = 0;
+        for (; tap < endValidTap; ++tap, ++historyIndex)
+            result += static_cast<double>(history[static_cast<size_t>(historyIndex)])
+                * static_cast<double>(kernel.coefficients[phaseOffset + static_cast<size_t>(tap)]);
     }
+    for (; tap < namResamplerKernelTaps; ++tap)
+        result += 0.0 * static_cast<double>(kernel.coefficients[phaseOffset + static_cast<size_t>(tap)]);
     return static_cast<float>(result);
 }
 
@@ -15777,30 +16083,30 @@ static float applyNAMChaosC2FirmShoulder(float input) noexcept
     // transition has matching value, first derivative, and second derivative
     // at both boundaries, avoiding the abrupt higher-order corner of the
     // retired cubic hard-knee cell.
-    constexpr float knee = 0.48f;
-    constexpr float limit = 1.0f;
-    const float magnitude = std::abs(input);
+    constexpr double knee = 0.48;
+    constexpr double limit = 1.0;
+    const double magnitude = std::abs(static_cast<double>(input));
     if (magnitude <= knee)
         return input;
     if (magnitude >= limit)
-        return std::copysign(limit, input);
+        return std::copysign(1.0f, input);
 
-    const float t = (magnitude - knee) / (limit - knee);
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    const float transition =
-        t + 4.0f * t3 - 7.0f * t3 * t + 3.0f * t3 * t2;
+    const double t = (magnitude - knee) / (limit - knee);
+    const double t2 = t * t;
+    const double t3 = t2 * t;
+    const double transition =
+        t + 4.0 * t3 - 7.0 * t3 * t + 3.0 * t3 * t2;
     return std::copysign(
-        knee + (limit - knee) * transition,
+        static_cast<float>(knee + (limit - knee) * transition),
         input);
 }
 
-static float getNAMStableLogCosh(float input) noexcept
+static double getNAMStableLogCosh(double input) noexcept
 {
-    const float magnitude = std::abs(input);
+    const double magnitude = std::abs(input);
     return magnitude
-        + std::log1p(std::exp(-2.0f * magnitude))
-        - std::log(2.0f);
+        + std::log1p(std::exp(-2.0 * magnitude))
+        - std::log(2.0);
 }
 
 static float applyNAMFirstOrderTanhADAA(
@@ -15810,65 +16116,71 @@ static float applyNAMFirstOrderTanhADAA(
     float& previousInput,
     bool& statePrimed) noexcept
 {
-    const float direct = std::tanh(input + bias) - outputOffset;
+    const auto direct = [input, bias, outputOffset] () noexcept
+    { return std::tanh(input + bias) - outputOffset; };
     if (! statePrimed)
     {
         previousInput = input;
         statePrimed = true;
-        return direct;
+        return direct();
     }
 
-    const float delta = input - previousInput;
-    const float tolerance = 1.0e-4f * std::max(
-        { 1.0f, std::abs(input), std::abs(previousInput) });
-    float output = direct;
-    if (std::abs(delta) > tolerance)
+    const double current = input, previous = previousInput;
+    previousInput = input;
+    const double delta = current - previous;
+    if (delta == 0.0)
+        return direct(); // Preserve the exact constant-input/zero convention.
+
+    double average = 0.0;
+    if (std::abs(delta) <= 0.125)
     {
-        const auto antiderivative = [bias, outputOffset] (float value) noexcept
-        {
-            return getNAMStableLogCosh(value + bias)
-                - outputOffset * value;
-        };
-        output = (antiderivative(input) - antiderivative(previousInput))
-            / delta;
+        // The symmetric interval average through fourth order avoids subtracting
+        // nearly equal primitives. The omitted term is below 6.2e-10 throughout
+        // this interval, before rounding to float. The old float quotient could
+        // magnify an input ULP into ~1e-3 of artificial output at small deltas.
+        const double t = std::tanh(0.5 * (current + previous) + bias);
+        const double square = t * t, deltaSquared = delta * delta;
+        average = t + deltaSquared * t * (square - 1.0) / 12.0
+            + deltaSquared * deltaSquared * t * (1.0 - square) * (2.0 - 3.0 * square) / 240.0;
     }
     else
     {
-        output = std::tanh(
-            0.5f * (input + previousInput) + bias) - outputOffset;
+        average = (getNAMStableLogCosh(current + bias)
+            - getNAMStableLogCosh(previous + bias)) / delta;
     }
-
-    previousInput = input;
-    return std::isfinite(output) ? output : direct;
+    // Keep the existing float offset convention. Exact constant zero is
+    // guaranteed by the direct branch above, independently of tanhf rounding.
+    const float output = static_cast<float>(average) - outputOffset;
+    return std::isfinite(output) ? output : direct();
 }
 
-static float getNAMChaosC2FirmShoulderAntiderivative(
-    float input) noexcept
+static double getNAMChaosC2FirmShoulderAntiderivative(
+    double input) noexcept
 {
-    constexpr float knee = 0.48f;
-    constexpr float limit = 1.0f;
-    constexpr float width = limit - knee;
-    const float magnitude = std::abs(input);
+    constexpr double knee = 0.48;
+    constexpr double limit = 1.0;
+    constexpr double width = limit - knee;
+    const double magnitude = std::abs(input);
     if (magnitude <= knee)
-        return 0.5f * magnitude * magnitude;
+        return 0.5 * magnitude * magnitude;
 
-    constexpr float transitionIntegralAtLimit = 0.6f;
-    const float integralAtLimit = 0.5f * knee * knee
+    constexpr double transitionIntegralAtLimit = 0.6;
+    const double integralAtLimit = 0.5 * knee * knee
         + width * knee
         + width * width * transitionIntegralAtLimit;
     if (magnitude >= limit)
         return integralAtLimit + (magnitude - limit) * limit;
 
-    const float t = (magnitude - knee) / width;
-    const float t2 = t * t;
-    const float t4 = t2 * t2;
-    const float t5 = t4 * t;
-    const float t6 = t5 * t;
-    const float transitionIntegral = 0.5f * t2
+    const double t = (magnitude - knee) / width;
+    const double t2 = t * t;
+    const double t4 = t2 * t2;
+    const double t5 = t4 * t;
+    const double t6 = t5 * t;
+    const double transitionIntegral = 0.5 * t2
         + t4
-        - 1.4f * t5
-        + 0.5f * t6;
-    return 0.5f * knee * knee
+        - 1.4 * t5
+        + 0.5 * t6;
+    return 0.5 * knee * knee
         + width * knee * t
         + width * width * transitionIntegral;
 }
@@ -15878,32 +16190,276 @@ static float applyNAMChaosC2FirmShoulderADAA(
     float& previousInput,
     bool& statePrimed) noexcept
 {
-    const float direct = applyNAMChaosC2FirmShoulder(input);
+    const auto direct = [input] () noexcept { return applyNAMChaosC2FirmShoulder(input); };
     if (! statePrimed)
     {
         previousInput = input;
         statePrimed = true;
-        return direct;
+        return direct();
     }
 
-    const float delta = input - previousInput;
-    const float tolerance = 1.0e-4f * std::max(
-        { 1.0f, std::abs(input), std::abs(previousInput) });
-    float output = direct;
-    if (std::abs(delta) > tolerance)
+    const double current = input, previous = previousInput;
+    previousInput = input;
+    const double delta = current - previous;
+    if (delta == 0.0) return direct();
+    if (std::abs(current) <= 0.48 && std::abs(previous) <= 0.48)
+        return static_cast<float>(0.5 * (current + previous));
+    if (current >= 1.0 && previous >= 1.0) return 1.0f;
+    if (current <= -1.0 && previous <= -1.0) return -1.0f;
+
+    double average = 0.0;
+    if (std::abs(delta) > 1.0e-4)
     {
-        output = (getNAMChaosC2FirmShoulderAntiderivative(input)
-                  - getNAMChaosC2FirmShoulderAntiderivative(previousInput))
+        average = (getNAMChaosC2FirmShoulderAntiderivative(current)
+                  - getNAMChaosC2FirmShoulderAntiderivative(previous))
             / delta;
     }
     else
     {
-        output = applyNAMChaosC2FirmShoulder(
-            0.5f * (input + previousInput));
+        // The C2 shoulder's maximum second derivative is below 7.58, so the
+        // midpoint average error here is below 3.2e-9 before float rounding.
+        average = applyNAMChaosC2FirmShoulder(static_cast<float>(0.5 * (current + previous)));
     }
+    const float output = static_cast<float>(average);
+    return std::isfinite(output) ? output : direct();
+}
 
-    previousInput = input;
-    return std::isfinite(output) ? output : direct;
+juce::var OpenStudioNAMRack::runDistortionADAARegression()
+{
+    // Independent numerical integration of each transfer curve. This oracle
+    // shares neither production antiderivatives nor the near-delta expansion.
+    const auto curve = [] (double value, double bias, bool firm) noexcept
+    {
+        if (! firm) return std::tanh(value + bias);
+        const double magnitude = std::abs(value);
+        if (magnitude <= 0.48) return value;
+        if (magnitude >= 1.0) return std::copysign(1.0, value);
+        const double t = (magnitude - 0.48) / 0.52;
+        return std::copysign(0.48 + 0.52 * (t + 4.0 * std::pow(t, 3)
+            - 7.0 * std::pow(t, 4) + 3.0 * std::pow(t, 5)), value);
+    };
+    const auto integralAverage = [&curve] (float current, float previous, float bias, bool firm)
+    {
+        const double low = juce::jmin(static_cast<double>(current), static_cast<double>(previous));
+        const double high = juce::jmax(static_cast<double>(current), static_cast<double>(previous));
+        if (low == high) return curve(low, bias, firm);
+        std::vector<double> cuts { low, high };
+        if (firm)
+            for (const double knee : { -1.0, -0.48, 0.48, 1.0 })
+                if (knee > low && knee < high) cuts.push_back(knee);
+        std::sort(cuts.begin(), cuts.end());
+        constexpr std::array<double, 4> nodes {
+            0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
+        constexpr std::array<double, 4> weights {
+            0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763 };
+        double integral = 0.0;
+        for (size_t section = 1; section < cuts.size(); ++section)
+        {
+            const double start = cuts[section - 1], length = cuts[section] - start;
+            const int pieces = juce::jmax(1, static_cast<int>(std::ceil(length / 0.25)));
+            const double halfWidth = length / (2.0 * pieces);
+            for (int piece = 0; piece < pieces; ++piece)
+            {
+                const double center = start + (2.0 * piece + 1.0) * halfWidth;
+                for (size_t index = 0; index < nodes.size(); ++index)
+                    integral += halfWidth * weights[index] * (curve(center - halfWidth * nodes[index], bias, firm)
+                        + curve(center + halfWidth * nodes[index], bias, firm));
+            }
+        }
+        return integral / (high - low);
+    };
+    const auto process = [] (float input, float bias, bool firm, float& previous, bool& primed) noexcept
+    {
+        return firm ? applyNAMChaosC2FirmShoulderADAA(input, previous, primed)
+            : applyNAMFirstOrderTanhADAA(input, bias, std::tanh(bias), previous, primed);
+    };
+    bool passed = true, exactZero = true, exactConstant = true, exactPriming = true;
+    bool stateUpdated = true, finiteExtremes = true, dynamicBiasStatePassed = true;
+    int cases = 0;
+    double maximumError = 0.0, maximumSymmetryError = 0.0, maximumUlpExcess = 0.0;
+    juce::var worstCase;
+    const auto verify = [&] (float input, float previous, float bias, bool firm)
+    {
+        float state = previous; bool primed = true;
+        const float output = process(input, bias, firm, state, primed);
+        const float offset = firm ? 0.0f : std::tanh(bias);
+        const double expected = integralAverage(input, previous, bias, firm) - offset;
+        const double error = std::abs(static_cast<double>(output) - expected);
+        const double lower = juce::jmin(curve(input, bias, firm), curve(previous, bias, firm)) - offset;
+        const double upper = juce::jmax(curve(input, bias, firm), curve(previous, bias, firm)) - offset;
+        stateUpdated = stateUpdated && state == input && primed;
+        float reversedState = input; bool reversedPrimed = true;
+        const float reversed = process(previous, bias, firm, reversedState, reversedPrimed);
+        const double symmetryError = std::abs(static_cast<double>(output) - reversed);
+        maximumSymmetryError = juce::jmax(maximumSymmetryError, symmetryError);
+        const float adjacent = std::nextafter(input, std::numeric_limits<float>::infinity());
+        float adjacentState = previous; bool adjacentPrimed = true;
+        const float adjacentOutput = process(adjacent, bias, firm, adjacentState, adjacentPrimed);
+        const double ulpExcess = std::abs(static_cast<double>(adjacentOutput) - output)
+            - (firm ? 0.8 : 0.5) * std::abs(static_cast<double>(adjacent) - input);
+        maximumUlpExcess = juce::jmax(maximumUlpExcess, ulpExcess);
+        passed = std::isfinite(output) && std::isfinite(adjacentOutput) && error <= 2.0e-7
+            && output >= lower - 2.0e-7 && output <= upper + 2.0e-7
+            && symmetryError <= 2.0e-7 && ulpExcess <= 4.0e-7 && passed;
+        if (error > maximumError)
+        {
+            maximumError = error;
+            auto* witness = new juce::DynamicObject();
+            witness->setProperty("curve", firm ? "firm" : "tanh");
+            witness->setProperty("input", input); witness->setProperty("previous", previous);
+            witness->setProperty("bias", bias); witness->setProperty("output", output);
+            witness->setProperty("independentQuadratureAverage", expected);
+            worstCase = witness;
+        }
+        ++cases;
+    };
+    const std::array<float, 17> inputs { -12.0f, -2.0f, -1.0f, -0.9802f, -0.48f,
+        -0.125f, -0.0001f, -1.0e-7f, 0.0f, 1.0e-7f, 0.0001f, 0.125f,
+        0.48f, 0.93718f, 1.0f, 2.0f, 12.0f };
+    const std::array<float, 12> deltas { 0.0f, 1.0e-7f, 1.0e-5f,
+        std::nextafter(1.0e-4f, 0.0f), 1.0e-4f, std::nextafter(1.0e-4f, 1.0f),
+        std::nextafter(0.125f, 0.0f), 0.125f, std::nextafter(0.125f, 1.0f), 0.2f, 1.0f, 2.0f };
+    for (const bool firm : { false, true })
+    for (const float bias : { -0.35f, 0.0f, 0.07f, 0.35f })
+    {
+        float zeroState = 0.0f; bool zeroPrimed = false;
+        for (const float liveBias : { bias, -bias, 0.0f, bias })
+            exactZero = process(0.0f, liveBias, firm, zeroState, zeroPrimed) == 0.0f && exactZero;
+        for (const float input : inputs)
+        {
+            float state = -123.0f; bool primed = false;
+            const float direct = firm ? applyNAMChaosC2FirmShoulder(input)
+                : std::tanh(input + bias) - std::tanh(bias);
+            exactPriming = process(input, bias, firm, state, primed) == direct && exactPriming;
+            exactConstant = process(input, bias, firm, state, primed) == direct && exactConstant;
+            for (const float delta : deltas)
+            {
+                verify(input, input - delta, bias, firm);
+                verify(input, input + delta, bias, firm);
+            }
+            verify(std::nextafter(input, -std::numeric_limits<float>::infinity()), input, bias, firm);
+            verify(std::nextafter(input, std::numeric_limits<float>::infinity()), input, bias, firm);
+        }
+        // Keep a live previous input while bias changes: both endpoints of an
+        // interval must use the current bias, never a stale previous offset.
+        float state = -0.72f; bool primed = true;
+        const std::array<float, 5> liveBiases { bias, -bias, 0.0f, 0.35f, -0.35f };
+        size_t biasStep = 0;
+        for (const float next : { -0.3f, 0.001f, 0.48f, 0.99f, -0.72f })
+        {
+            const float previous = state, liveBias = liveBiases[biasStep++];
+            const float output = process(next, liveBias, firm, state, primed);
+            const double expected = integralAverage(next, previous, liveBias, firm)
+                - (firm ? 0.0f : std::tanh(liveBias));
+            dynamicBiasStatePassed = std::isfinite(output) && std::abs(output - expected) <= 2.0e-7
+                && state == next && primed && dynamicBiasStatePassed;
+            verify(next, previous, liveBias, firm);
+        }
+        for (const float input : { -std::numeric_limits<float>::max(), std::numeric_limits<float>::max() })
+        {
+            float previous = 0.0f; bool extremePrimed = true;
+            const float output = process(input, bias, firm, previous, extremePrimed);
+            finiteExtremes = std::isfinite(output) && std::abs(output) <= 1.34f && finiteExtremes;
+        }
+    }
+    // Retain the exact one-ULP witnesses that exposed cancellation in the old
+    // float primitive quotients, in addition to the broader boundary grid.
+    verify(0.93718f, 0.93707f, 0.07f, false);
+    verify(-0.9802f, -0.9803f, 0.0f, true);
+    auto* value = new juce::DynamicObject();
+    value->setProperty("cases", cases); value->setProperty("exactZeroIncludingBiasChanges", exactZero);
+    value->setProperty("exactConstant", exactConstant); value->setProperty("exactFirstSample", exactPriming);
+    value->setProperty("stateUpdated", stateUpdated); value->setProperty("finiteFloatExtremes", finiteExtremes);
+    value->setProperty("dynamicBiasStatePassed", dynamicBiasStatePassed);
+    value->setProperty("maximumQuadratureError", maximumError); value->setProperty("worstCase", worstCase);
+    value->setProperty("maximumEndpointSwapDifference", maximumSymmetryError);
+    value->setProperty("maximumUlpStepAboveDerivativeBound", maximumUlpExcess);
+    auto* result = new juce::DynamicObject();
+    result->setProperty("id", "nam_distortion_adaa_numeric_contracts");
+    result->setProperty("status", passed && exactZero && exactConstant && exactPriming
+        && stateUpdated && finiteExtremes && dynamicBiasStatePassed ? "pass" : "fail");
+    result->setProperty("detail", "Both production ADAA cells must match independent composite8-point Gauss integration within2e-7, preserve endpoint bounds and swap symmetry, reject artificial one-ULP jumps, preserve exact zero under bias changes and constant/first-sample behavior, and remain finite at float extremes. Includes old/new delta boundaries and firm knees. These numerical contracts do not certify perceived sound quality.");
+    result->setProperty("value", value);
+    return result;
+}
+
+juce::var OpenStudioSaturator::runLowCutPrecisionRegression()
+{
+    juce::Array<juce::var> rows;
+    bool passed = true;
+    for (const double nativeRate : { 44100.0, 48000.0, 96000.0 })
+    for (const int factor : { 2, 4, 8 })
+    {
+        const double filterRate = nativeRate * factor;
+        OpenStudioSaturator processor(true);
+        processor.lowCutFreq.store(20.0f); processor.oversampleMode.store(0.0f);
+        processor.setPlayConfigDetails(1, 1, filterRate, 128);
+        processor.prepareToPlay(filterRate, 128);
+        const auto* coefficients = processor.lowCutFilterL.coefficients->getRawCoefficients();
+        const double dcMargin = 1.0 + coefficients[3] + coefficients[4];
+        const bool stable = dcMargin > 0.0 && 1.0 - coefficients[3] + coefficients[4] > 0.0
+            && 1.0 - coefficients[4] > 0.0;
+        bool exactZero = processor.lowCutFilterL.processSample(0.0) == 0.0
+            && processor.lowCutFilterR.processSample(0.0) == 0.0;
+
+        // Independent bilinear Butterworth design and direct-form-I state.
+        // Production uses the prepared lookup-table coefficients and JUCE DF-II.
+        const double tangent = std::tan(juce::MathConstants<double>::pi * 20.0 / filterRate);
+        const double tangentSquared = tangent * tangent;
+        const double normalizer = 1.0 / (1.0 + std::sqrt(2.0) * tangent + tangentSquared);
+        const double a1 = 2.0 * (tangentSquared - 1.0) * normalizer;
+        const double a2 = (1.0 - std::sqrt(2.0) * tangent + tangentSquared) * normalizer;
+        double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+        double maximumReferenceError = 0.0, maximumPerturbation = 0.0;
+        bool finite = true;
+        std::uint32_t seed = 0x8a5cd789u;
+        for (int sample = 0; sample < static_cast<int>(filterRate * 0.5); ++sample)
+        {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            const float input = static_cast<float>(0.1 * std::sin(
+                juce::MathConstants<double>::twoPi * 55.0 * sample / filterRate)
+                + (static_cast<double>(seed) / 2147483648.0 - 1.0) * 0.001);
+            const float perturbed = std::nextafter(input, std::numeric_limits<float>::infinity());
+            const double actual = processor.lowCutFilterL.processSample(input);
+            const double paired = processor.lowCutFilterR.processSample(perturbed);
+            const double reference = normalizer * (input - 2.0 * x1 + x2) - a1 * y1 - a2 * y2;
+            x2 = x1; x1 = input; y2 = y1; y1 = reference;
+            finite = finite && std::isfinite(actual) && std::isfinite(paired) && std::isfinite(reference);
+            maximumReferenceError = juce::jmax(maximumReferenceError, std::abs(actual - reference));
+            maximumPerturbation = juce::jmax(maximumPerturbation, std::abs(actual - paired));
+        }
+        processor.resetRealtimeStateForEmbeddedBypass();
+        exactZero = exactZero && processor.lowCutFilterL.processSample(0.0) == 0.0
+            && processor.lowCutFilterR.processSample(0.0) == 0.0;
+        double finalDcPeak = 0.0;
+        const int dcSamples = static_cast<int>(filterRate * 0.5);
+        for (int sample = 0; sample < dcSamples; ++sample)
+        {
+            const double output = processor.lowCutFilterL.processSample(0.125);
+            finite = finite && std::isfinite(output);
+            if (sample >= dcSamples - 128) finalDcPeak = juce::jmax(finalDcPeak, std::abs(output));
+        }
+        processor.releaseResources();
+        exactZero = exactZero && processor.lowCutFilterL.processSample(0.0) == 0.0
+            && processor.lowCutFilterR.processSample(0.0) == 0.0;
+        const bool rowPassed = stable && exactZero && finite && maximumReferenceError < 2.0e-7
+            && maximumPerturbation < 2.0e-7 && finalDcPeak < 1.0e-8;
+        passed = rowPassed && passed;
+        auto* row = new juce::DynamicObject();
+        row->setProperty("nativeRate", nativeRate); row->setProperty("oversamplingFactor", factor);
+        row->setProperty("actualFilterRate", filterRate); row->setProperty("dcPoleMargin", dcMargin);
+        row->setProperty("stablePoles", stable); row->setProperty("exactZeroAfterPrepareAndResets", exactZero);
+        row->setProperty("finite", finite); row->setProperty("maximumIndependentReferenceError", maximumReferenceError);
+        row->setProperty("maximumOneUlpPerturbation", maximumPerturbation);
+        row->setProperty("finalDcPeak", finalDcPeak); row->setProperty("passed", rowPassed);
+        rows.add(row);
+    }
+    auto* result = new juce::DynamicObject();
+    result->setProperty("id", "nam_saturator_low_cut_precision_contracts");
+    result->setProperty("status", passed ? "pass" : "fail");
+    result->setProperty("detail", "Actual prepared Saturator 20Hz low-cut coefficients/state must have stable poles, exact fresh/reset silence, match an independent bilinear/direct-form-I reference within 2e-7, avoid amplifying a one-ULP input perturbation above 2e-7 and decay a DC step below 1e-8. Covers 44.1/48/96kHz at 2x/4x/8x. No perceived sound quality is asserted.");
+    result->setProperty("value", rows);
+    return result;
 }
 
 static float getNAMEmbeddedDriveOperatingGain(
@@ -16460,6 +17016,16 @@ void OpenStudioNAMRack::setChaosSmallSignalNormalizerTarget(
             == bassInstrumentProfile
         ? bassInstrumentProfile
         : guitarInstrumentProfile;
+    const bool controlChanged =
+        ! chaosSmallSignalControlInitialized
+        || boundedMode != chaosSmallSignalLastMode
+        || boundedDrive != chaosSmallSignalLastDrive
+        || boundedTone != chaosSmallSignalLastTone
+        || boundedWeight != chaosSmallSignalLastWeight
+        || boundedProfile != chaosSmallSignalLastProfile;
+    if (! immediate && ! controlChanged)
+        return;
+
     const float requestedScale = resolveChaosSmallSignalScale(
         static_cast<float>(boundedMode), boundedDrive);
     if (immediate)
@@ -16476,16 +17042,6 @@ void OpenStudioNAMRack::setChaosSmallSignalNormalizerTarget(
         chaosSmallSignalControlInitialized = true;
         return;
     }
-
-    const bool controlChanged =
-        ! chaosSmallSignalControlInitialized
-        || boundedMode != chaosSmallSignalLastMode
-        || boundedDrive != chaosSmallSignalLastDrive
-        || boundedTone != chaosSmallSignalLastTone
-        || boundedWeight != chaosSmallSignalLastWeight
-        || boundedProfile != chaosSmallSignalLastProfile;
-    if (! controlChanged)
-        return;
 
     chaosSmallSignalLastMode = boundedMode;
     chaosSmallSignalLastDrive = boundedDrive;
@@ -16553,6 +17109,9 @@ void OpenStudioNAMRack::skipChaosSmallSignalNormalizer(
 
 void OpenStudioNAMRack::synchroniseChaosTopologyWhileBypassed() noexcept
 {
+    // This path replaces smoother state directly. The next audible callback
+    // must resolve its complete target snapshot even if the controls match.
+    chaosCoefficientCache.valid = false;
     const float mode = std::isfinite(chaosBlockMode)
         ? juce::jlimit(0.0f, 2.0f, chaosBlockMode)
         : 0.0f;
@@ -17072,6 +17631,8 @@ OpenStudioNAMRack::OpenStudioNAMRack()
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       rackDelay(6.1f)
 {
+    rackChorus.signalPath.store(0);
+
     retiredCabIRs.reserve(8);
     // The Rack owns one selectable shared island around both nonlinear stages.
     // Precision uses its purpose-built feedback circuit there, while the
@@ -17442,10 +18003,22 @@ double OpenStudioNAMRack::getMaximumAutomatedTailLengthSeconds() const
         | tailAutomationModulator | tailAutomationCab);
 }
 
+void OpenStudioNAMRack::invalidateEmbeddedDriveCoefficientCaches() noexcept
+{
+    precisionDriveCoefficientCache.valid = false;
+    chaosCoefficientCache.valid = false;
+    precisionDriveVolumeCache.valid = false;
+    chaosLevelCache.valid = false;
+    embeddedDriveOperatingGainCache.valid = false;
+}
+
 void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const juce::ScopedLock processorConfigurationLock(getCallbackLock());
     const juce::ScopedLock hostPublicationLock(modelHostPublicationLock);
+    invalidateEmbeddedDriveCoefficientCaches();
+    diagnosticPrecisionDriveCoefficientDesignCount.store(0, std::memory_order_relaxed);
+    diagnosticChaosCoefficientDesignCount.store(0, std::memory_order_relaxed);
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
     publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
     namEffectsDspVersion.store(
@@ -17738,6 +18311,8 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
     const int resampledCapacity = getNAMRackDspFrameCapacity(realtimeBufferCapacity, cachedSampleRate, cachedSampleRate * 4.0);
 
     workBuffer.setSize(2, realtimeBufferCapacity, false, false, true);
+    octaverExcitationGainBuffer.setSize(
+        1, realtimeBufferCapacity, false, false, true);
     namInputBuffer.setSize(2, realtimeBufferCapacity + kNAMRackResamplerGuardSamples, false, false, true);
     namOutputBuffer.setSize(2, realtimeBufferCapacity + kNAMRackResamplerGuardSamples, false, false, true);
     namResampledInputBuffer.setSize(2, resampledCapacity, false, false, true);
@@ -18317,6 +18892,7 @@ void OpenStudioNAMRack::prepareToPlay(double sampleRate, int samplesPerBlock)
                            octaverUpMix.load(std::memory_order_relaxed))
             : 0.0f);
     rackPolyOctaver.prepare(cachedSampleRate, cachedBlockSize);
+    rackFuzz.prepare(cachedSampleRate, getFuzzParameters());
     resetPrecisionDriveGateState(
         precisionDriveGate.load(std::memory_order_relaxed) <= 0.0001f);
     resetAmpFaceplateState();
@@ -18591,6 +19167,7 @@ void OpenStudioNAMRack::releaseResources()
     resetCompressorToneStage(false);
     rackPolyOctaver.setLevels(1.0f, 0.0f, 0.0f);
     rackPolyOctaver.reset();
+    rackFuzz.reset();
     rackChaos.releaseResources();
     compressorWasActive = false;
     compressorBypassDrainSamples = 0;
@@ -18935,6 +19512,9 @@ void OpenStudioNAMRack::syncEmbeddedProcessorParameters() noexcept
 
 void OpenStudioNAMRack::reset()
 {
+    invalidateEmbeddedDriveCoefficientCaches();
+    diagnosticPrecisionDriveCoefficientDesignCount.store(0, std::memory_order_relaxed);
+    diagnosticChaosCoefficientDesignCount.store(0, std::memory_order_relaxed);
     publishedTempoBpm.store(0.0f, std::memory_order_relaxed);
     publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
     inputLevelDb.store(-90.0f, std::memory_order_relaxed);
@@ -19307,6 +19887,7 @@ void OpenStudioNAMRack::reset()
                            octaverUpMix.load(std::memory_order_relaxed))
             : 0.0f);
     rackPolyOctaver.reset();
+    rackFuzz.prepare(cachedSampleRate, getFuzzParameters());
     const bool resetCompressorActive =
         compressorEnabled.load(
             std::memory_order_relaxed) >= 0.5f
@@ -21857,6 +22438,14 @@ juce::var OpenStudioNAMRack::getDiagnosticState() const
         "embeddedDriveMaximumProcessMs",
         diagnosticEmbeddedDriveMaximumProcessMs.load(
             std::memory_order_relaxed));
+    obj->setProperty(
+        "precisionDriveCoefficientDesignCount",
+        static_cast<juce::int64>(diagnosticPrecisionDriveCoefficientDesignCount.load(
+            std::memory_order_relaxed)));
+    obj->setProperty(
+        "distortionCoefficientDesignCount",
+        static_cast<juce::int64>(diagnosticChaosCoefficientDesignCount.load(
+            std::memory_order_relaxed)));
     obj->setProperty(
         "embeddedDriveSharedOversamplingLatencySamples",
         embeddedDriveOversamplingLatencySamples);
@@ -24442,6 +25031,21 @@ std::int64_t OpenStudioNAMRack::getCachedReverbTailSamples(
     return reverbTailCache.samples;
 }
 
+NAMFuzz::Parameters OpenStudioNAMRack::getFuzzParameters() const noexcept
+{
+    const float voice = fuzzVoice.load(std::memory_order_relaxed);
+    return {
+        fuzzEnabled.load(std::memory_order_relaxed) >= 0.5f,
+        fuzzDrive.load(std::memory_order_relaxed),
+        fuzzTone.load(std::memory_order_relaxed),
+        fuzzLevelDb.load(std::memory_order_relaxed),
+        std::isfinite(voice) ? juce::roundToInt(juce::jlimit(0.0f, 2.0f, voice)) : 0,
+        fuzzCleanMix.load(std::memory_order_relaxed),
+        isBassInstrumentProfileForCurrentBlock(),
+        calibrationReferenceDbu.load(std::memory_order_relaxed),
+    };
+}
+
 void OpenStudioNAMRack::processDualOctaverStage(
     juce::AudioBuffer<float>& buffer)
 {
@@ -24463,7 +25067,32 @@ void OpenStudioNAMRack::processDualOctaverStage(
         enabled ? requestedDirectMix : 1.0f,
         enabled ? requestedDownMix : 0.0f,
         enabled ? requestedUpMix : 0.0f);
-    rackPolyOctaver.processBlock(buffer);
+    rackFuzz.setParameters(getFuzzParameters());
+    // Hosts can exceed the prepared callback size. Reuse the fixed-capacity
+    // mono envelope and process the complete octave/fuzz pair in zero-copy
+    // views, so every frame still receives its actual smoothed mix gain.
+    const bool hasExcitationStorage =
+        octaverExcitationGainBuffer.getNumChannels() > 0
+        && octaverExcitationGainBuffer.getNumSamples() > 0;
+    float fallbackExcitationGain = 1.0f;
+    float* const excitationGains = hasExcitationStorage
+        ? octaverExcitationGainBuffer.getWritePointer(0)
+        : &fallbackExcitationGain;
+    const int capacity = hasExcitationStorage
+        ? octaverExcitationGainBuffer.getNumSamples() : 1;
+    const int numChannels = buffer.getNumChannels();
+    // Supported NAM Rack layouts are mono/stereo. JUCE's external-data views
+    // retain their pointers inline and do not allocate for these layouts. Keep
+    // all presented channels so the octaver's extra-channel direct policy stays
+    // intact if a host supplies more destinations than the negotiated layout.
+    for (int start = 0; numChannels > 0 && start < buffer.getNumSamples(); start += capacity)
+    {
+        const int count = juce::jmin(capacity, buffer.getNumSamples() - start);
+        juce::AudioBuffer<float> block(
+            buffer.getArrayOfWritePointers(), numChannels, start, count);
+        rackPolyOctaver.processBlock(block, excitationGains);
+        rackFuzz.processBlock(block, excitationGains);
+    }
     octaverWasActive = enabled
         && (requestedDownMix > 0.0001f
             || requestedUpMix > 0.0001f
@@ -25359,11 +25988,21 @@ void OpenStudioNAMRack::processEmbeddedDriveIsland(
         return;
     }
 
-    smoothedEmbeddedDriveOperatingGain.setTargetValue(
-        getNAMEmbeddedDriveOperatingGain(
-            calibrationReferenceDbu.load(
-                std::memory_order_relaxed),
-            isBassInstrumentProfileForCurrentBlock()));
+    const float calibrationReference = calibrationReferenceDbu.load(
+        std::memory_order_relaxed);
+    const bool bassOperatingProfile = isBassInstrumentProfileForCurrentBlock();
+    auto& operatingCache = embeddedDriveOperatingGainCache;
+    if (! operatingCache.valid
+        || operatingCache.control != calibrationReference
+        || operatingCache.bass != bassOperatingProfile)
+    {
+        operatingCache.control = calibrationReference;
+        operatingCache.bass = bassOperatingProfile;
+        operatingCache.gain = getNAMEmbeddedDriveOperatingGain(
+            calibrationReference, bassOperatingProfile);
+        operatingCache.valid = true;
+    }
+    smoothedEmbeddedDriveOperatingGain.setTargetValue(operatingCache.gain);
     auto* const operatingGainEnvelope =
         embeddedDriveOperatingGainBuffer
             .getWritePointer(0);
@@ -25548,35 +26187,57 @@ void OpenStudioNAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buf
 
     const float embeddedSampleRate = static_cast<float>(
         juce::jmax(1.0, cachedSampleRate * static_cast<double>(activeEmbeddedDriveOversamplingFactor.load(std::memory_order_relaxed))));
-    smoothedPrecisionDriveBandGain.setTargetValue(
-        getNAMPrecisionDriveBandGain(drive));
-    smoothedPrecisionDriveAttackCoefficient.setTargetValue(
-        getNAMPrecisionDriveAttackCoefficient(
-            attack,
-            embeddedSampleRate,
-            isBassInstrumentProfileForCurrentBlock()));
-    smoothedPrecisionDriveBrightCoefficient.setTargetValue(
-        getNAMPrecisionDriveBrightCoefficient(
-            bright,
-            embeddedSampleRate,
-            isBassInstrumentProfileForCurrentBlock()));
-    smoothedPrecisionDriveBassLowPreservation.setTargetValue(
-        isBassInstrumentProfileForCurrentBlock() ? 0.72f : 0.0f);
+    const bool bassProfile = isBassInstrumentProfileForCurrentBlock();
+    auto& coefficients = precisionDriveCoefficientCache;
+    if (! coefficients.valid
+        || coefficients.sampleRate != embeddedSampleRate
+        || coefficients.drive != drive
+        || coefficients.attack != attack
+        || coefficients.bright != bright
+        || coefficients.bass != bassProfile)
+    {
+        smoothedPrecisionDriveBandGain.setTargetValue(
+            getNAMPrecisionDriveBandGain(drive));
+        smoothedPrecisionDriveAttackCoefficient.setTargetValue(
+            getNAMPrecisionDriveAttackCoefficient(
+                attack, embeddedSampleRate, bassProfile));
+        smoothedPrecisionDriveBrightCoefficient.setTargetValue(
+            getNAMPrecisionDriveBrightCoefficient(
+                bright, embeddedSampleRate, bassProfile));
+        smoothedPrecisionDriveBassLowPreservation.setTargetValue(
+            bassProfile ? 0.72f : 0.0f);
+        // The retired OD808 circuit remains available to internal historical
+        // regression fixtures. Keep its target ramps warm without redesigning
+        // its tone network on every unchanged public Precision callback.
+        smoothedScreamerDriveResistanceOhms.setTargetValue(
+            getNAMScreamerDriveResistanceOhms(drive));
+        smoothedScreamerFeedbackLegCapacitanceFarads.setTargetValue(
+            getNAMScreamerFeedbackLegCapacitanceFarads(attack, bassProfile));
+        const auto targetScreamerTone =
+            getNAMScreamerToneCoefficients(bright, embeddedSampleRate);
+        smoothedScreamerToneB0.setTargetValue(targetScreamerTone.b0);
+        smoothedScreamerToneB1.setTargetValue(targetScreamerTone.b1);
+        smoothedScreamerToneB2.setTargetValue(targetScreamerTone.b2);
+        smoothedScreamerToneA1.setTargetValue(targetScreamerTone.a1);
+        smoothedScreamerToneA2.setTargetValue(targetScreamerTone.a2);
+        coefficients.dcCoefficient = std::exp(
+            -juce::MathConstants<float>::twoPi
+            * namNativeDriveDcBlockerHz / embeddedSampleRate);
+        coefficients.screamerInputHighPass1 =
+            getNAMScreamerHighPassCoefficient(15.9f, embeddedSampleRate);
+        coefficients.screamerInputHighPass2 =
+            getNAMScreamerHighPassCoefficient(15.6f, embeddedSampleRate);
+        coefficients.screamerOutputHighPass =
+            getNAMScreamerHighPassCoefficient(1.59f, embeddedSampleRate);
+        coefficients.sampleRate = embeddedSampleRate;
+        coefficients.drive = drive;
+        coefficients.attack = attack;
+        coefficients.bright = bright;
+        coefficients.bass = bassProfile;
+        coefficients.valid = true;
+        diagnosticPrecisionDriveCoefficientDesignCount.fetch_add(1, std::memory_order_relaxed);
+    }
     smoothedPrecisionDriveVoice.setTargetValue(requestedVoice);
-    smoothedScreamerDriveResistanceOhms.setTargetValue(
-        getNAMScreamerDriveResistanceOhms(drive));
-    smoothedScreamerFeedbackLegCapacitanceFarads.setTargetValue(
-        getNAMScreamerFeedbackLegCapacitanceFarads(
-            attack,
-            isBassInstrumentProfileForCurrentBlock()));
-    const auto targetScreamerTone =
-        getNAMScreamerToneCoefficients(
-            bright, embeddedSampleRate);
-    smoothedScreamerToneB0.setTargetValue(targetScreamerTone.b0);
-    smoothedScreamerToneB1.setTargetValue(targetScreamerTone.b1);
-    smoothedScreamerToneB2.setTargetValue(targetScreamerTone.b2);
-    smoothedScreamerToneA1.setTargetValue(targetScreamerTone.a1);
-    smoothedScreamerToneA2.setTargetValue(targetScreamerTone.a2);
     const bool renderScreamerCircuit =
         requestedVoice >= 0.5f
         || smoothedPrecisionDriveVoice.isSmoothing()
@@ -25590,9 +26251,7 @@ void OpenStudioNAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buf
     // One-pole DC blocking follows the intentionally asymmetric cell. Its
     // state is channel-local, as are both tone-shaping sections, so silent or
     // unrelated stereo lanes can never cross-modulate each other.
-    const float dcCoefficient = std::exp(
-        -juce::MathConstants<float>::twoPi
-        * namNativeDriveDcBlockerHz / embeddedSampleRate);
+    const float dcCoefficient = coefficients.dcCoefficient;
     constexpr float diodeBias = 0.025f;
     constexpr float positiveKnee = 0.44f;
     constexpr float negativeKnee = 0.49f;
@@ -25602,14 +26261,11 @@ void OpenStudioNAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buf
     const float zeroResponse = positiveKnee * std::tanh(
         diodeBias / positiveKnee);
     const float screamerInputHighPass1Coefficient =
-        getNAMScreamerHighPassCoefficient(
-            15.9f, embeddedSampleRate);
+        coefficients.screamerInputHighPass1;
     const float screamerInputHighPass2Coefficient =
-        getNAMScreamerHighPassCoefficient(
-            15.6f, embeddedSampleRate);
+        coefficients.screamerInputHighPass2;
     const float screamerOutputHighPassCoefficient =
-        getNAMScreamerHighPassCoefficient(
-            1.59f, embeddedSampleRate);
+        coefficients.screamerOutputHighPass;
     constexpr float screamerReissueOutputLoadGain =
         1000000.0f / (1000000.0f + 10000.0f);
     const int numSamples = buffer.getNumSamples();
@@ -25782,9 +26438,13 @@ void OpenStudioNAMRack::processPrecisionDriveStage(juce::AudioBuffer<float>& buf
         }
     }
 
-    smoothedPrecisionDriveVolumeGain.setTargetValue(
-        juce::Decibels::decibelsToGain(
-            volumeDb));
+    if (! precisionDriveVolumeCache.valid || precisionDriveVolumeCache.control != volumeDb)
+    {
+        precisionDriveVolumeCache.control = volumeDb;
+        precisionDriveVolumeCache.gain = juce::Decibels::decibelsToGain(volumeDb);
+        precisionDriveVolumeCache.valid = true;
+    }
+    smoothedPrecisionDriveVolumeGain.setTargetValue(precisionDriveVolumeCache.gain);
     applySmoothedGain(buffer, smoothedPrecisionDriveVolumeGain);
     // The same linked gain is applied independently to every audio lane.
     if (precisionDriveGateEnvelopeActiveForBlock
@@ -25929,9 +26589,6 @@ void OpenStudioNAMRack::processChaosStage(juce::AudioBuffer<float>& buffer, juce
     const float weight = juce::jlimit(
         0.0f, 1.0f,
         chaosBlockWeight);
-    const auto voice = getNAMChaosVoice(
-        chaosBlockMode,
-        drive);
     const float embeddedSampleRate = static_cast<float>(
         juce::jmax(
             1.0,
@@ -25939,89 +26596,111 @@ void OpenStudioNAMRack::processChaosStage(juce::AudioBuffer<float>& buffer, juce
                 * static_cast<double>(
                     activeEmbeddedDriveOversamplingFactor.load(
                         std::memory_order_relaxed))));
-    const auto onePole = [embeddedSampleRate] (float hz) noexcept
+    auto& coefficients = chaosCoefficientCache;
+    if (! coefficients.valid
+        || coefficients.sampleRate != embeddedSampleRate
+        || coefficients.mode != chaosBlockMode
+        || coefficients.drive != drive
+        || coefficients.tone != tone
+        || coefficients.weight != weight
+        || coefficients.profile != chaosBlockProfile)
     {
-        return 1.0f - std::exp(
-            -juce::MathConstants<float>::twoPi * hz
+        const auto voice = getNAMChaosVoice(chaosBlockMode, drive);
+        const auto onePole = [embeddedSampleRate] (float hz) noexcept
+        {
+            return 1.0f - std::exp(
+                -juce::MathConstants<float>::twoPi * hz
+                / embeddedSampleRate);
+        };
+        const float toneCurve = std::pow(tone, 0.82f);
+        const bool bassProfile =
+            chaosBlockProfile == bassInstrumentProfile;
+        const float profileCutScale = bassProfile ? 0.62f : 1.0f;
+        const float weightCutHz = profileCutScale
+            * (voice.weightMinimumHz
+               + (1.0f - weight) * (1.0f - weight)
+                   * (voice.weightMaximumHz
+                      - voice.weightMinimumHz));
+
+        smoothedChaosPreGain.setTargetValue(
+            juce::Decibels::decibelsToGain(voice.preGainDb));
+        smoothedChaosDensity.setTargetValue(voice.density);
+        smoothedChaosClippingSymmetry.setTargetValue(
+            voice.clippingSymmetry);
+        smoothedChaosPreLowCoefficient.setTargetValue(
+            onePole(
+                voice.preLowMinimumHz
+                + (voice.preLowMaximumHz - voice.preLowMinimumHz)
+                    * toneCurve));
+        smoothedChaosFirmBlend.setTargetValue(voice.firmBlend);
+        smoothedChaosCompressionBlend.setTargetValue(
+            voice.compressionBlend);
+        smoothedChaosDiodeBlend.setTargetValue(voice.diodeBlend);
+        smoothedChaosMakeupGain.setTargetValue(
+            juce::Decibels::decibelsToGain(voice.makeupGainDb));
+        smoothedChaosWeightCoefficient.setTargetValue(
+            onePole(weightCutHz));
+        smoothedChaosInterstageLowCoefficient.setTargetValue(
+            onePole(
+                voice.interstageMinimumHz
+                + (voice.interstageMaximumHz
+                   - voice.interstageMinimumHz) * toneCurve));
+        smoothedChaosPresenceCoefficient.setTargetValue(
+            onePole(voice.presenceHz));
+        smoothedChaosPresenceAmount.setTargetValue(
+            voice.presenceAmount + (tone - 0.5f) * 0.62f);
+        smoothedChaosBodyLowCoefficient.setTargetValue(
+            onePole(voice.bodyLowHz));
+        smoothedChaosBodyHighCoefficient.setTargetValue(
+            onePole(voice.bodyHighHz));
+        smoothedChaosBodyAmount.setTargetValue(voice.bodyAmount);
+        smoothedChaosAttackLowCoefficient.setTargetValue(
+            onePole(voice.attackLowHz));
+        smoothedChaosAttackHighCoefficient.setTargetValue(
+            onePole(voice.attackHighHz));
+        smoothedChaosAttackAmount.setTargetValue(voice.attackAmount);
+        smoothedChaosHarshLowCoefficient.setTargetValue(
+            onePole(voice.harshLowHz));
+        smoothedChaosHarshHighCoefficient.setTargetValue(
+            onePole(voice.harshHighHz));
+        smoothedChaosHarshAmount.setTargetValue(voice.harshAmount);
+        smoothedChaosPostLowCoefficient.setTargetValue(
+            onePole(
+                voice.postLowMinimumHz
+                + (voice.postLowMaximumHz - voice.postLowMinimumHz)
+                    * toneCurve));
+        smoothedChaosLowPreservation.setTargetValue(
+            bassProfile
+                ? voice.bassLowPreservation
+                : voice.guitarLowPreservation);
+
+        coefficients.diodeDriveDb = voice.diodeDriveDb;
+        coefficients.clippingSymmetry = voice.clippingSymmetry;
+        coefficients.dcCoefficient = std::exp(
+            -juce::MathConstants<float>::twoPi * namNativeDriveDcBlockerHz
             / embeddedSampleRate);
-    };
-    const float toneCurve = std::pow(tone, 0.82f);
-    const bool bassProfile =
-        chaosBlockProfile == bassInstrumentProfile;
-    const float profileCutScale = bassProfile ? 0.62f : 1.0f;
-    const float weightCutHz = profileCutScale
-        * (voice.weightMinimumHz
-           + (1.0f - weight) * (1.0f - weight)
-               * (voice.weightMaximumHz
-                  - voice.weightMinimumHz));
+        coefficients.lowPreservationCoefficient = 1.0f - std::exp(
+            -juce::MathConstants<float>::twoPi * 110.0f / embeddedSampleRate);
+        coefficients.sampleRate = embeddedSampleRate;
+        coefficients.mode = chaosBlockMode;
+        coefficients.drive = drive;
+        coefficients.tone = tone;
+        coefficients.weight = weight;
+        coefficients.profile = chaosBlockProfile;
+        coefficients.valid = true;
+        diagnosticChaosCoefficientDesignCount.fetch_add(1, std::memory_order_relaxed);
+    }
 
-    smoothedChaosPreGain.setTargetValue(
-        juce::Decibels::decibelsToGain(voice.preGainDb));
-    smoothedChaosDensity.setTargetValue(voice.density);
-    smoothedChaosClippingSymmetry.setTargetValue(
-        voice.clippingSymmetry);
-    smoothedChaosPreLowCoefficient.setTargetValue(
-        onePole(
-            voice.preLowMinimumHz
-            + (voice.preLowMaximumHz - voice.preLowMinimumHz)
-                * toneCurve));
-    smoothedChaosFirmBlend.setTargetValue(voice.firmBlend);
-    smoothedChaosCompressionBlend.setTargetValue(
-        voice.compressionBlend);
-    smoothedChaosDiodeBlend.setTargetValue(voice.diodeBlend);
-    smoothedChaosMakeupGain.setTargetValue(
-        juce::Decibels::decibelsToGain(voice.makeupGainDb));
-    smoothedChaosWeightCoefficient.setTargetValue(
-        onePole(weightCutHz));
-    smoothedChaosInterstageLowCoefficient.setTargetValue(
-        onePole(
-            voice.interstageMinimumHz
-            + (voice.interstageMaximumHz
-               - voice.interstageMinimumHz) * toneCurve));
-    smoothedChaosPresenceCoefficient.setTargetValue(
-        onePole(voice.presenceHz));
-    smoothedChaosPresenceAmount.setTargetValue(
-        voice.presenceAmount + (tone - 0.5f) * 0.62f);
-    smoothedChaosBodyLowCoefficient.setTargetValue(
-        onePole(voice.bodyLowHz));
-    smoothedChaosBodyHighCoefficient.setTargetValue(
-        onePole(voice.bodyHighHz));
-    smoothedChaosBodyAmount.setTargetValue(voice.bodyAmount);
-    smoothedChaosAttackLowCoefficient.setTargetValue(
-        onePole(voice.attackLowHz));
-    smoothedChaosAttackHighCoefficient.setTargetValue(
-        onePole(voice.attackHighHz));
-    smoothedChaosAttackAmount.setTargetValue(voice.attackAmount);
-    smoothedChaosHarshLowCoefficient.setTargetValue(
-        onePole(voice.harshLowHz));
-    smoothedChaosHarshHighCoefficient.setTargetValue(
-        onePole(voice.harshHighHz));
-    smoothedChaosHarshAmount.setTargetValue(voice.harshAmount);
-    smoothedChaosPostLowCoefficient.setTargetValue(
-        onePole(
-            voice.postLowMinimumHz
-            + (voice.postLowMaximumHz - voice.postLowMinimumHz)
-                * toneCurve));
-    smoothedChaosLowPreservation.setTargetValue(
-        bassProfile
-            ? voice.bassLowPreservation
-            : voice.guitarLowPreservation);
-
-    rackChaos.drive.store(
-        voice.diodeDriveDb, std::memory_order_relaxed);
-    rackChaos.toneFreq.store(
-        3000.0f + tone * 10500.0f,
-        std::memory_order_relaxed);
-    rackChaos.asymmetry.store(
-        voice.clippingSymmetry,
-        std::memory_order_relaxed);
+    // Re-publish the embedded processor's operating values even on a cache
+    // hit: an oversize/bypass fallback can have changed its Mix independently.
+    rackChaos.drive.store(coefficients.diodeDriveDb, std::memory_order_relaxed);
+    rackChaos.toneFreq.store(3000.0f + tone * 10500.0f, std::memory_order_relaxed);
+    rackChaos.asymmetry.store(coefficients.clippingSymmetry, std::memory_order_relaxed);
     rackChaos.mix.store(1.0f, std::memory_order_relaxed);
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
-    const float dcCoefficient = std::exp(
-        -juce::MathConstants<float>::twoPi * namNativeDriveDcBlockerHz
-        / embeddedSampleRate);
+    const float dcCoefficient = coefficients.dcCoefficient;
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const float preGain = smoothedChaosPreGain.getNextValue();
@@ -26158,9 +26837,8 @@ void OpenStudioNAMRack::processChaosStage(juce::AudioBuffer<float>& buffer, juce
 
     {
         smoothedChaosWetMix.setTargetValue(wet);
-        const float lowPreservationCoefficient = 1.0f - std::exp(
-            -juce::MathConstants<float>::twoPi
-            * 110.0f / embeddedSampleRate);
+        const float lowPreservationCoefficient =
+            coefficients.lowPreservationCoefficient;
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const float currentWet =
@@ -26213,13 +26891,15 @@ void OpenStudioNAMRack::processChaosStage(juce::AudioBuffer<float>& buffer, juce
             }
         }
     }
-    smoothedChaosLevelGain.setTargetValue(
-        juce::Decibels::decibelsToGain(
-            juce::jlimit(
-                -12.0f,
-                12.0f,
-                chaosLevelDb.load(
-                    std::memory_order_relaxed))));
+    const float levelDb = juce::jlimit(
+        -12.0f, 12.0f, chaosLevelDb.load(std::memory_order_relaxed));
+    if (! chaosLevelCache.valid || chaosLevelCache.control != levelDb)
+    {
+        chaosLevelCache.control = levelDb;
+        chaosLevelCache.gain = juce::Decibels::decibelsToGain(levelDb);
+        chaosLevelCache.valid = true;
+    }
+    smoothedChaosLevelGain.setTargetValue(chaosLevelCache.gain);
     applySmoothedGain(buffer, smoothedChaosLevelGain);
     if (chaosGateEnvelopeActiveForBlock
         && chaosGateGainBuffer.getNumSamples() >= buffer.getNumSamples())
@@ -26410,6 +27090,14 @@ void OpenStudioNAMRack::processDelayStage(juce::AudioBuffer<float>& buffer, juce
             publishedSeconds, std::memory_order_relaxed);
     };
     const bool enabled = delayEnabled.load(std::memory_order_relaxed) >= 0.5f;
+    if (!enabled && delayTailSamplesRemaining <= 0)
+    {
+        // Off-state controls are resolved and primed on the next engagement.
+        // With no retained tail, macro trigonometry cannot affect this block.
+        publishedDelayTailSeconds.store(0.0f, std::memory_order_relaxed);
+        delayWasActive = false;
+        return;
+    }
     const auto requestedDelayMacro = resolveDelayMacroState(
         delayTimeMs.load(std::memory_order_relaxed),
         delayFeedback.load(std::memory_order_relaxed),
@@ -28836,6 +29524,12 @@ void OpenStudioNAMRack::getStateInformation(juce::MemoryBlock& destData)
     tree.setProperty("octaverDownMix", static_cast<double>(octaverDownMix.load()), nullptr);
     tree.setProperty("octaverUpMix", static_cast<double>(octaverUpMix.load()), nullptr);
     tree.setProperty("octaverDirectMix", static_cast<double>(octaverDirectMix.load()), nullptr);
+    tree.setProperty("fuzzEnabled", static_cast<double>(fuzzEnabled.load()), nullptr);
+    tree.setProperty("fuzzDrive", static_cast<double>(fuzzDrive.load()), nullptr);
+    tree.setProperty("fuzzTone", static_cast<double>(fuzzTone.load()), nullptr);
+    tree.setProperty("fuzzLevelDb", static_cast<double>(fuzzLevelDb.load()), nullptr);
+    tree.setProperty("fuzzVoice", static_cast<double>(fuzzVoice.load()), nullptr);
+    tree.setProperty("fuzzCleanMix", static_cast<double>(fuzzCleanMix.load()), nullptr);
     tree.setProperty("preEqEnabled", static_cast<double>(preEqEnabled.load()), nullptr);
     tree.setProperty("preEq120Db", static_cast<double>(preEq120Db.load()), nullptr);
     tree.setProperty("preEq250Db", static_cast<double>(preEq250Db.load()), nullptr);
@@ -29351,6 +30045,12 @@ bool OpenStudioNAMRack::restoreStateInformationInternal(const void* data,
     octaverDownMix = static_cast<float>((double)tree.getProperty("octaverDownMix", 0.32));
     octaverUpMix = static_cast<float>((double)tree.getProperty("octaverUpMix", 0.18));
     octaverDirectMix = static_cast<float>((double)tree.getProperty("octaverDirectMix", 1.0));
+    fuzzEnabled = static_cast<float>(sanitizeNAMRackDelayToggle(tree.getProperty("fuzzEnabled", 0.0), false));
+    fuzzDrive = static_cast<float>(sanitizeNAMRackDelayContinuous(tree.getProperty("fuzzDrive", 0.5), 0.5, 0.0, 1.0));
+    fuzzTone = static_cast<float>(sanitizeNAMRackDelayContinuous(tree.getProperty("fuzzTone", 0.5), 0.5, 0.0, 1.0));
+    fuzzLevelDb = static_cast<float>(sanitizeNAMRackDelayContinuous(tree.getProperty("fuzzLevelDb", 0.0), 0.0, -18.0, 12.0));
+    fuzzVoice = static_cast<float>(std::round(sanitizeNAMRackDelayContinuous(tree.getProperty("fuzzVoice", 0.0), 0.0, 0.0, 2.0)));
+    fuzzCleanMix = static_cast<float>(sanitizeNAMRackDelayContinuous(tree.getProperty("fuzzCleanMix", 0.0), 0.0, 0.0, 1.0));
     preEqEnabled = static_cast<float>(sanitizeNAMRackDelayToggle(
         tree.getProperty("preEqEnabled", 0.0), false));
     preEq120Db = static_cast<float>(sanitizeNAMRackDelayContinuous(
@@ -29832,6 +30532,9 @@ OpenStudioBasicSynthInstrument::OpenStudioBasicSynthInstrument()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
+    for (size_t note = 0; note < noteFrequencies.size(); ++note)
+        noteFrequencies[note] = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
+    cachedPanLeft.fill(1); cachedPanRight.fill(1);
 }
 
 float OpenStudioBasicSynthInstrument::releaseModulationBound() const noexcept
@@ -29880,6 +30583,7 @@ double OpenStudioBasicSynthInstrument::getMaximumTailLengthSeconds() const noexc
 
 void OpenStudioBasicSynthInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    ratePole.prepare(sampleRate);
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     tailSampleRate.store(cachedSampleRate, std::memory_order_relaxed);
@@ -30058,7 +30762,9 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
     const float sr = static_cast<float>(juce::jmax(1.0, cachedSampleRate));
     const float attackStep = 1.0f / juce::jmax(1.0f, sr * attackMs.load(std::memory_order_relaxed) * 0.001f);
     const float sustainLevel = juce::jlimit(0.0f, 1.0f, sustain.load());
-    const float decayStep = (1.0f - sustainLevel) / juce::jmax(1.0f, sr * decayMs.load() * .001f);
+    const float decayMilliseconds = decayMs.load(std::memory_order_relaxed);
+    const float decaySamples = sr * decayMilliseconds * .001f;
+    const float decayStep = (1.0f - sustainLevel) / juce::jmax(1.0f, decaySamples);
     const float blend = juce::jlimit(0.0f, 1.0f, oscillatorBlend.load());
     const float releaseStep = 1.0f / juce::jmax(1.0f, sr * releaseMs.load(std::memory_order_relaxed) * 0.001f);
     const float bright = juce::jlimit(0.0f, 1.0f, brightness.load(std::memory_order_relaxed));
@@ -30098,8 +30804,21 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
             const float globalLfo=modulation.lfo(globalModulationVoice,modulationFrame);
             const float independentBlend = filterEnvelopeBlend.getNextValue();
             float mixed = 0.0f,mixedL=0.0f,mixedR=0.0f;
-            std::array<float,16> channelLevels{},panL{},panR{};
-            for(size_t ch=0;ch<16;++ch){auto control=channelFrame[ch];const int manager=mpe.manager(ch);if(manager>=0){const auto& master=channelFrame[static_cast<size_t>(manager)];control.level*=master.level;control.pan=BuiltInMIDIChannelMix::biasPan(control.pan,master.pan);}channelLevels[ch]=control.level;panL[ch]=control.pan==0?1:std::sqrt(1-control.pan);panR[ch]=control.pan==0?1:std::sqrt(1+control.pan);}
+            std::array<float,16> channelLevels{};
+            for(size_t ch=0;ch<16;++ch)
+            {
+                auto control=channelFrame[ch];const int manager=mpe.manager(ch);
+                if(manager>=0){const auto& master=channelFrame[static_cast<size_t>(manager)];control.level*=master.level;control.pan=BuiltInMIDIChannelMix::biasPan(control.pan,master.pan);}
+                channelLevels[ch]=control.level;
+                if(control.pan!=cachedPan[ch])
+                {
+                    cachedPan[ch]=control.pan;
+                    cachedPanLeft[ch]=control.pan==0?1:std::sqrt(1-control.pan);
+                    cachedPanRight[ch]=control.pan==0?1:std::sqrt(1+control.pan);
+                }
+            }
+            const auto& panL=cachedPanLeft;
+            const auto& panR=cachedPanRight;
             for (int voiceIndex = 0; voiceIndex < voiceCount;)
             {
                 const auto voiceRef = voiceRefs[static_cast<size_t>(voiceIndex)];
@@ -30114,10 +30833,11 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
                 }
 
                 const auto& previous=previousRoutes[channel][slot];
-                const float voiceAttackStep=previous[10]==0?attackStep:attackStep*std::exp2(-4*previous[10]);
+                auto& work=voiceWorkCache[channel][slot];
+                const float voiceAttackStep=previous[10]==0?attackStep:attackStep*work.attack.exponentialOfTwo(-4*previous[10]);
                 const float voiceSustain=previous[12]==0?sustainLevel:juce::jlimit(0.0f,1.0f,sustainLevel+previous[12]);
-                const float voiceDecayStep=previous[11]==0&&previous[12]==0?decayStep:(1-voiceSustain)/juce::jmax(1.0f,sr*decayMs.load()*.001f*std::exp2(4*previous[11]));
-                const float voiceReleaseStep=previous[13]==0?releaseStep:releaseStep*std::exp2(-4*previous[13]);
+                const float voiceDecayStep=previous[11]==0&&previous[12]==0?decayStep:(1-voiceSustain)/juce::jmax(1.0f,decaySamples*work.decay.exponentialOfTwo(4*previous[11]));
+                const float voiceReleaseStep=previous[13]==0?releaseStep:releaseStep*work.release.exponentialOfTwo(-4*previous[13]);
                 if (active[channel][slot] && !releasing[channel][slot])
                 {
                     if (!decaying[channel][slot])
@@ -30142,10 +30862,10 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
                 const float independentEnvelope = filterEnvelopes[channel][slot].next(releasing[channel][slot],previous[14],previous[15],previous[16],previous[17]);
                 const float filterEnv = independentBlend <= 0 ? envelope[channel][slot]
                     : envelope[channel][slot] + independentBlend * (independentEnvelope - envelope[channel][slot]);
-                const float freq = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(static_cast<int>(note)));
+                const float freq = noteFrequencies[note];
                 const bool expressiveMember = mpe.manager(channel) >= 0;
                 const auto expression = expressiveMember ? mpe.next(channel, slot) : BuiltInSynthMPE::Expression {};
-                const float bendFactor = std::pow(2.0f, (expressiveMember ? expression.bend : pitchBendSemitones[channel]) / 12.0f);
+                const float bendFactor = work.bend.powerOfTwo((expressiveMember ? expression.bend : pitchBendSemitones[channel]) / 12.0f);
                 const float mod = juce::jlimit(0.0f, 1.0f, expressiveMember ? expression.wheel : modWheel[channel])*matrixFrame.legacyWheel;
                 const float vibrato = std::sin(twoPi * (static_cast<float>(ageSamples[channel][slot]) / sr) * 5.4f) * mod * 0.018f;
                 auto& modulationVoice = modulationVoices[channel][slot];
@@ -30181,7 +30901,7 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
                 float voice = saw * (1.16f * (1.0f - voiceBlend)) + square * (2.0f * voiceBlend) * (0.22f + (voiceBrightness + mod * 0.25f) * 0.18f) + subOsc * voiceSub + transient;
 
                 const float voiceFilterCoeff=routed[9]==0?filterCoeff:juce::jlimit(.015f,.55f,.04f+voiceBrightness*voiceBrightness*.46f);
-                filterState[channel][slot] += voiceFilterCoeff * (voice - filterState[channel][slot]);
+                filterState[channel][slot] += (signalPath.load(std::memory_order_relaxed) >= .5f ? ratePole.map(voiceFilterCoeff) : voiceFilterCoeff) * (voice - filterState[channel][slot]);
                 auto voiceModulation=modulationFrame;voiceModulation.depth=voiceDepth;
                 if(routed[18]!=0)voiceModulation.envelope=juce::jlimit(-8.0f,8.0f,modulationFrame.envelope+4*routed[18]);
                 if(routed[19]!=0)voiceModulation.keyTrack=juce::jlimit(0.0f,1.0f,modulationFrame.keyTrack+routed[19]);
@@ -30229,6 +30949,7 @@ void OpenStudioBasicSynthInstrument::processBlock(juce::AudioBuffer<float>& buff
 void OpenStudioBasicSynthInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioBasicSynthInstrument", {
+        { "signalPath", signalPath.load() },
         { "attackMs", attackMs.load() },
         { "decayMs", decayMs.load() }, { "sustain", sustain.load() }, { "oscillatorBlend", oscillatorBlend.load() },
         { "releaseMs", releaseMs.load() },
@@ -30294,9 +31015,11 @@ void OpenStudioBasicSynthInstrument::getStateInformation(juce::MemoryBlock& dest
 
 void OpenStudioBasicSynthInstrument::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioBasicSynthInstrument");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
 
     decayMs = juce::jlimit(1.0f, 5000.0f, static_cast<float>(tree.getProperty("decayMs", 250.0f)));
     sustain = juce::jlimit(0.0f, 1.0f, static_cast<float>(tree.getProperty("sustain", 1.0f)));
@@ -30318,6 +31041,9 @@ void OpenStudioBasicSynthInstrument::setStateInformation(const void* data, int s
     for(const auto& control:macroMappings){const float raw=static_cast<float>(tree.getProperty(control.id,control.initial));setModulationControl(control.id,std::isfinite(raw)?raw:control.initial);}
     ccMacros.reset();
     channelMix.reset(cachedSampleRate);
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 bool OpenStudioBasicSynthInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -30402,6 +31128,7 @@ void OpenStudioPianoInstrument::clearVoices()
     for (auto& notes : releasing) notes.fill(false);
     for (auto& notes : sustained) notes.fill(false);
     for (auto& notes : phase) notes.fill(0.0f);
+    for (auto& channel : fractionalPhase) for (auto& voice : channel) voice.fill(0.0f);
     for (auto& notes : velocity) notes.fill(0.0f);
     for (auto& notes : envelope) notes.fill(0.0f);
     for (auto& notes : ageSamples) notes.fill(0);
@@ -30454,6 +31181,7 @@ void OpenStudioPianoInstrument::handleMidi(const juce::MidiMessage& message)
         releasing[static_cast<size_t>(channel)][slot] = false;
         sustained[static_cast<size_t>(channel)][slot] = false;
         phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        fractionalPhase[static_cast<size_t>(channel)][slot].fill(0.0f);
         velocity[static_cast<size_t>(channel)][slot] = message.getFloatVelocity();
         const size_t ch = static_cast<size_t>(channel);
         // Performance selection and strike colour are latched at note-on.
@@ -30607,16 +31335,17 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
                     naturalDecay[channel][slot] += 1.0 / (sr * (0.85f + bodyValue * 2.6f + (1.0f - noteBright) * .4f) * (1 + resonanceValue * pedalValues[channel] * .8f));
                 }
                 const float p = phase[channel][slot];
+                const auto partialRadians = [&](int index, float ratio) { return signalPath.load(std::memory_order_relaxed) >= .5f ? twoPi * builtInFractionalPhase(fractionalPhase[channel][slot][static_cast<size_t>(index)], freq * ratio / sr) : twoPi * p * ratio; };
                 float strike = builtinNoise(ageSamples[channel][slot], static_cast<int>(note))
                     * std::exp(-ageSec / 0.012f) * (0.012f + hammerValue * 0.045f) * modelTone;
                 const float fundamental = std::sin(twoPi * p) * (0.82f + bodyValue * 0.28f);
-                float partial2 = std::sin(twoPi * p * 2.003f) * (0.24f + toneValue * 0.20f * modelTone)
+                float partial2 = std::sin(partialRadians(0, 2.003f)) * (0.24f + toneValue * 0.20f * modelTone)
                                      * std::exp(-ageSec / 1.1f) * nyquistFade(freq * 2.003f, sr);
-                float partial3 = std::sin(twoPi * p * 3.011f) * (0.13f + toneValue * 0.15f * modelTone)
+                float partial3 = std::sin(partialRadians(1, 3.011f)) * (0.13f + toneValue * 0.15f * modelTone)
                                      * std::exp(-ageSec / 0.74f) * nyquistFade(freq * 3.011f, sr);
-                float partial5 = std::sin(twoPi * p * 5.031f) * (0.04f + toneValue * 0.08f * modelTone)
+                float partial5 = std::sin(partialRadians(2, 5.031f)) * (0.04f + toneValue * 0.08f * modelTone)
                                      * std::exp(-ageSec / 0.42f) * nyquistFade(freq * 5.031f, sr);
-                const float soundboard = std::sin(twoPi * p * 1.497f + 0.7f) * resonanceValue * 0.09f
+                const float soundboard = std::sin(partialRadians(3, 1.497f) + 0.7f) * resonanceValue * 0.09f
                                        * std::exp(-ageSec / 3.8f) * nyquistFade(freq * 1.497f, sr);
                 if (expressive)
                 {
@@ -30685,6 +31414,7 @@ void OpenStudioPianoInstrument::processBlock(juce::AudioBuffer<float>& buffer, j
 void OpenStudioPianoInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioPianoInstrument", {
+        { "signalPath", signalPath.load() },
         {"coupledBody",coupledBody.load()},{"bodyCoupling",bodyCoupling.load()},{"bodyDecay",bodyDecay.load()},
         { "tone", tone.load() },
         { "body", body.load() },
@@ -30705,9 +31435,11 @@ void OpenStudioPianoInstrument::getStateInformation(juce::MemoryBlock& destData)
 
 void OpenStudioPianoInstrument::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioPianoInstrument");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
     for (const auto& control : coupledBodyControls) { const float value=static_cast<float>(tree.getProperty(control.id,control.initial)); setPerformanceControl(control.id,std::isfinite(value)?value:control.initial); }
     for (const auto& control : performanceControls)
     {
@@ -30724,6 +31456,9 @@ void OpenStudioPianoInstrument::setStateInformation(const void* data, int sizeIn
     stereoWidth = static_cast<float>((double)tree.getProperty("stereoWidth", 0.62));
     model      = static_cast<float>((double)tree.getProperty("model", 0.0));
     channelMix.reset(cachedSampleRate);
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 bool OpenStudioPianoInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -30783,6 +31518,7 @@ double OpenStudioCleanGuitarInstrument::getMaximumTailLengthSeconds() const noex
 
 void OpenStudioCleanGuitarInstrument::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    ratePole.prepare(sampleRate);
     juce::ignoreUnused(samplesPerBlock);
     cachedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
     tailSampleRate.store(cachedSampleRate, std::memory_order_relaxed);
@@ -30813,6 +31549,7 @@ void OpenStudioCleanGuitarInstrument::clearVoices()
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : releasing) notes.fill(false);
     for (auto& notes : phase) notes.fill(0.0f);
+    for (auto& channel : fractionalPhase) for (auto& voice : channel) voice.fill(0.0f);
     for (auto& notes : velocity) notes.fill(0.0f);
     for (auto& notes : envelope) notes.fill(0.0f);
     for (auto& notes : pluckFilter) notes.fill(0.0f);
@@ -30948,6 +31685,7 @@ void OpenStudioCleanGuitarInstrument::handleMidi(const juce::MidiMessage& messag
         active[static_cast<size_t>(channel)][slot] = true;
         releasing[static_cast<size_t>(channel)][slot] = false;
         phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        fractionalPhase[static_cast<size_t>(channel)][slot].fill(0.0f);
         velocity[static_cast<size_t>(channel)][slot] = message.getFloatVelocity();
         envelope[static_cast<size_t>(channel)][slot] = 0.0f;
         pluckFilter[static_cast<size_t>(channel)][slot] = 0.0f;
@@ -30964,7 +31702,7 @@ void OpenStudioCleanGuitarInstrument::handleMidi(const juce::MidiMessage& messag
             if(loopVoice[ch][old]&&active[ch][old]&&voicePool.held[ch][old])
             {
                 transferred=pluckedLoop.transfer(ch*16+slot,ch*16+old);
-                if(transferred){pitch.setCurrentAndTargetValue(articulationPitch[ch][old].getCurrentValue());pitch.setTargetValue(static_cast<float>(note));envelope[ch][slot]=envelope[ch][old];phase[ch][slot]=phase[ch][old];pluckFilter[ch][slot]=pluckFilter[ch][old];ageSamples[ch][slot]=ageSamples[ch][old];active[ch][old]=false;envelope[ch][old]=0;}
+                if(transferred){pitch.setCurrentAndTargetValue(articulationPitch[ch][old].getCurrentValue());pitch.setTargetValue(static_cast<float>(note));envelope[ch][slot]=envelope[ch][old];phase[ch][slot]=phase[ch][old];fractionalPhase[ch][slot]=fractionalPhase[ch][old];pluckFilter[ch][slot]=pluckFilter[ch][old];ageSamples[ch][slot]=ageSamples[ch][old];active[ch][old]=false;envelope[ch][old]=0;}
             }
         }
         if(style==5){pitch.setCurrentAndTargetValue(static_cast<float>(note)-2);pitch.setTargetValue(static_cast<float>(note));}
@@ -31099,6 +31837,7 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
                 const float ageSec = static_cast<float>(ageSamples[channel][slot]) / sr;
                 const float freq = baseFreq * bendFactor;
                 const float p = phase[channel][slot];
+                const auto partial = [&](int index, float ratio) { return signalPath.load(std::memory_order_relaxed) >= .5f ? builtInFractionalPhase(fractionalPhase[channel][slot][static_cast<size_t>(index)], freq * ratio / sr) : p * ratio; };
                 const float noteBright = juce::jlimit(0.55f, 1.45f, 0.78f + (static_cast<float>(note) - 52.0f) * 0.009f);
                 const float pickupBright = modelIndex == 0 ? 1.08f : (modelIndex == 1 ? 1.22f : (modelIndex == 3 ? 1.18f : 0.96f));
                 float raw = 0;
@@ -31116,15 +31855,15 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
                     const float decay = std::exp(-ageSec / bodyDecay);
                     const float pickupPhase = modelIndex == 1 ? 0.18f : 0.09f;
                     const float fundamental = std::sin(twoPi * p) * 0.72f;
-                    const float partial2 = std::sin(twoPi * (p * 2.01f + pickupPhase)) * (0.28f + toneValue * 0.24f) * nyquistFade(freq * 2.01f, sr);
-                    const float partial3 = std::sin(twoPi * (p * 3.02f + 0.31f)) * (0.16f + toneValue * 0.14f) * nyquistFade(freq * 3.02f, sr);
-                    const float partial5 = std::sin(twoPi * (p * 5.07f + 0.11f)) * (0.045f + toneValue * 0.08f) * nyquistFade(freq * 5.07f, sr);
+                    const float partial2 = std::sin(twoPi * (partial(0, 2.01f) + pickupPhase)) * (0.28f + toneValue * 0.24f) * nyquistFade(freq * 2.01f, sr);
+                    const float partial3 = std::sin(twoPi * (partial(1, 3.02f) + 0.31f)) * (0.16f + toneValue * 0.14f) * nyquistFade(freq * 3.02f, sr);
+                    const float partial5 = std::sin(twoPi * (partial(2, 5.07f) + 0.11f)) * (0.045f + toneValue * 0.08f) * nyquistFade(freq * 5.07f, sr);
                     const float pluck = builtinNoise(ageSamples[channel][slot], static_cast<int>(note) + 37)
                         * std::exp(-ageSec / 0.018f) * (0.02f + pickValue * 0.075f) * pickupBright;
                     raw = (fundamental + partial2 + partial3 + partial5 + pluck) * decay * pickupBright;
                 }
                 const float filterCoeff = juce::jlimit(0.04f, 0.72f, 0.12f + toneValue * 0.46f + noteBright * 0.08f);
-                pluckFilter[channel][slot] += filterCoeff * (raw - pluckFilter[channel][slot]);
+                pluckFilter[channel][slot] += (signalPath.load(std::memory_order_relaxed) >= .5f ? ratePole.map(filterCoeff) : filterCoeff) * (raw - pluckFilter[channel][slot]);
                 raw = pluckFilter[channel][slot];
 
                 const float cleanAmp = modelIndex >= 2 ? std::tanh(raw * (1.08f + bodyValue * 0.24f)) : raw;
@@ -31188,6 +31927,7 @@ void OpenStudioCleanGuitarInstrument::processBlock(juce::AudioBuffer<float>& buf
 void OpenStudioCleanGuitarInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioCleanGuitarInstrument", {
+        { "signalPath", signalPath.load() },
         {"coupledBody",coupledBody.load()},{"bodyCoupling",bodyCoupling.load()},{"bodyDecay",bodyDecay.load()},
         { "model", model.load() },
         { "tone", tone.load() },
@@ -31214,9 +31954,11 @@ void OpenStudioCleanGuitarInstrument::getStateInformation(juce::MemoryBlock& des
 
 void OpenStudioCleanGuitarInstrument::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioCleanGuitarInstrument");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
     for (const auto& control : coupledBodyControls) { const float value=static_cast<float>(tree.getProperty(control.id,control.initial)); setStringControl(control.id,std::isfinite(value)?value:control.initial); }
     for (const auto& control : stringControls)
     {
@@ -31237,6 +31979,9 @@ void OpenStudioCleanGuitarInstrument::setStateInformation(const void* data, int 
     outputGain = static_cast<float>((double)tree.getProperty("outputGain", -14.0));
     channelMix.reset(cachedSampleRate);
     publishGuitarPerformance();
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 bool OpenStudioCleanGuitarInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -31311,6 +32056,7 @@ void OpenStudioDrumInstrument::clearVoices()
     for (auto& channel : chokeGain) channel.fill(1.0f);
     for (auto& notes : active) notes.fill(false);
     for (auto& notes : phase) notes.fill(0.0f);
+    for (auto& channel : fractionalPhase) for (auto& voice : channel) voice.fill(0.0f);
     for (auto& notes : velocity) notes.fill(0.0f);
     for (auto& notes : ageSamples) notes.fill(0);
 }
@@ -31401,6 +32147,7 @@ void OpenStudioDrumInstrument::handleMidi(const juce::MidiMessage& message)
         active[static_cast<size_t>(channel)][slot] = true;
         voiceArticulations[static_cast<size_t>(channel)][slot]=articulation;inputKeys[static_cast<size_t>(channel)][slot]=message.getNoteNumber();partialPhases[static_cast<size_t>(channel)][slot].fill(0);
         phase[static_cast<size_t>(channel)][slot] = 0.0f;
+        fractionalPhase[static_cast<size_t>(channel)][slot].fill(0.0f);
         velocity[static_cast<size_t>(channel)][slot] = curvedVelocity;
         ageSamples[static_cast<size_t>(channel)][slot] = 0;
 
@@ -31414,12 +32161,11 @@ void OpenStudioDrumInstrument::handleMidi(const juce::MidiMessage& message)
     else if (message.isAllNotesOff() || message.isAllSoundOff())
     {
         voicePool.releaseChannel(static_cast<size_t>(channel));
+        // CC123 releases notes, just like ordinary one-shot drum note-off.
+        // The offline renderer sends it at the source boundary to drain tails.
+        // Only CC120 is a channel-local hard panic.
         if (message.isAllSoundOff())
-        {
             active[static_cast<size_t>(channel)].fill(false);
-        }
-
-        active[static_cast<size_t>(channel)].fill(false);
     }
 }
 
@@ -31519,6 +32265,8 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
                 if (phase[channel][slot] >= 1.0f)
                     phase[channel][slot] -= std::floor(phase[channel][slot]);
 
+                const auto partialRadians = [&](int index, float ratio) { return signalPath.load(std::memory_order_relaxed) >= .5f ? twoPi * builtInFractionalPhase(fractionalPhase[channel][slot][static_cast<size_t>(index)], freq * ratio / static_cast<float>(cachedSampleRate)) : twoPi * phase[channel][slot] * ratio; };
+                const auto partialGain = [&](float ratio) { return signalPath.load(std::memory_order_relaxed) >= .5f ? nyquistFade(freq * ratio, static_cast<float>(cachedSampleRate)) : 1.0f; };
                 float drum = 0.0f;
                 if(articulated)drum=BuiltInDrumArticulations::render(articulation,partialPhases[channel][slot],freq,static_cast<float>(cachedSampleRate),ageSec/(.82f+velocityValue*.42f),noise,velocityValue,hihatPedal[channel],punchValue);
                 else if (midiNote == 35 || midiNote == 36)
@@ -31535,15 +32283,15 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
                 }
                 else if (midiNote == 42 || midiNote == 44 || midiNote == 46 || midiNote == 22 || midiNote == 26)
                 {
-                    const float metal = std::sin(twoPi * phase[channel][slot] * 7.1f) * 0.24f
-                                      + std::sin(twoPi * phase[channel][slot] * 11.7f) * 0.18f;
+                    const float metal = std::sin(partialRadians(0, 7.1f)) * 0.24f * partialGain(7.1f)
+                                      + std::sin(partialRadians(1, 11.7f)) * 0.18f * partialGain(11.7f);
                     drum = (noise * 0.78f + metal) * env;
                 }
                 else if (midiNote == 49 || midiNote == 51 || midiNote == 52 || midiNote == 53
                          || midiNote == 55 || midiNote == 57 || midiNote == 59)
                 {
-                    const float shimmer = std::sin(twoPi * phase[channel][slot] * 5.3f) * 0.15f
-                                        + std::sin(twoPi * phase[channel][slot] * 9.7f) * 0.12f;
+                    const float shimmer = std::sin(partialRadians(0, 5.3f)) * 0.15f * partialGain(5.3f)
+                                        + std::sin(partialRadians(1, 9.7f)) * 0.12f * partialGain(9.7f);
                     drum = (noise * 0.64f + shimmer) * env;
                 }
                 else
@@ -31552,7 +32300,7 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
                     drum = body * 0.9f + noise * 0.08f * std::exp(-ageSec / 0.04f);
                 }
 
-                const float roomTail = std::sin(twoPi * phase[channel][slot] * 0.37f + static_cast<float>(midiNote))
+                const float roomTail = std::sin(partialRadians(2, 0.37f) + static_cast<float>(midiNote))
                     * room * 0.08f * std::exp(-ageSec / 0.9f);
                 const float voice = (drum + roomTail) * velocityValue * gain * 0.85f * juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, pieceGain[static_cast<size_t>(pieceForNote(midiNote))].load()));
                 const float pan = juce::jlimit(-1.0f, 1.0f, drumPanPosition(midiNote) + panValues[piece]) * widthValue;
@@ -31612,6 +32360,7 @@ void OpenStudioDrumInstrument::processBlock(juce::AudioBuffer<float>& buffer, ju
 void OpenStudioDrumInstrument::getStateInformation(juce::MemoryBlock& destData)
 {
     saveParamsToMemory(destData, "OpenStudioDrumInstrument", {
+        { "signalPath", signalPath.load() },
         { "kit", kit.load() },
         { "tuning", tuning.load() },
         { "ambience", ambience.load() },
@@ -31638,9 +32387,11 @@ void OpenStudioDrumInstrument::getStateInformation(juce::MemoryBlock& destData)
 
 void OpenStudioDrumInstrument::setStateInformation(const void* data, int sizeInBytes)
 {
+    const float previousSignalPath = signalPath.load();
     auto tree = loadParamsFromMemory(data, sizeInBytes, "OpenStudioDrumInstrument");
     if (!tree.isValid())
         return;
+    signalPath.store(static_cast<float>(tree.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
 
     for (size_t i = 0; i < pieceGain.size(); ++i) pieceGain[i].store(juce::jlimit(-60.0f, 12.0f, static_cast<float>(tree.getProperty("pieceGain" + juce::String(static_cast<int>(i)), 0.0f))));
     for (size_t i = 0; i < 8; ++i)
@@ -31668,6 +32419,9 @@ void OpenStudioDrumInstrument::setStateInformation(const void* data, int sizeInB
     for(size_t i=0;i<noteMap.size();++i){const float mapped=static_cast<float>(tree.getProperty("noteMap"+juce::String(static_cast<int>(i)),static_cast<int>(i)));noteMap[i].store(std::isfinite(mapped)?static_cast<float>(juce::jlimit(-1,127,juce::roundToInt(mapped))):static_cast<float>(i));}
     mapPreset.store(std::isfinite(mapPreset.load())?juce::jlimit(0.0f,2.0f,std::round(mapPreset.load())):0.0f);
     channelMix.reset(cachedSampleRate);
+
+    if (previousSignalPath != signalPath.load() && getSampleRate() > 0 && getBlockSize() > 0)
+        prepareToPlay(getSampleRate(), getBlockSize());
 }
 
 bool OpenStudioDrumInstrument::isBusesLayoutSupported(const BusesLayout& layouts) const

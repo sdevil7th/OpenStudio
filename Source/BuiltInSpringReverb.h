@@ -1,7 +1,9 @@
 #pragma once
 #include <JuceHeader.h>
 #include "BuiltInReverbSpillover.h"
+#include "BuiltInInfiniteHoldBudget.h"
 #include <array>
+#include <tuple>
 #include <vector>
 
 // Original dispersive bidirectional delay model. Its coefficients are not a
@@ -14,6 +16,11 @@ public:
         float decay=3, damping=.5f, predelay=0, lowCut=20, highCut=20000, width=1;
         float count=2, dwell=0, dispersion=.6f, tension=.5f, bass=0, motion=.2f;
         bool hold=false, acceptsInput=false;
+        bool operator==(const Settings& other)const noexcept
+        {
+            return std::tie(decay,damping,predelay,lowCut,highCut,width,count,dwell,dispersion,tension,bass,motion,hold,acceptsInput)
+                ==std::tie(other.decay,other.damping,other.predelay,other.lowCut,other.highCut,other.width,other.count,other.dwell,other.dispersion,other.tension,other.bass,other.motion,other.hold,other.acceptsInput);
+        }
     };
 private:
     struct Line
@@ -64,6 +71,7 @@ private:
     bool enabled=false, awake=false, initialized=false;
     float bassPole=0, dcPole=0;
     BuiltInReverbRetirement<1> retirement;
+    BuiltInInfiniteHoldBudget infiniteWriteBudget,infiniteReadoutBudget;
 
 public:
     void prepare(double sampleRate)
@@ -85,6 +93,7 @@ public:
         for(auto& channel:springs)for(auto& spring:channel)spring.reset();
         for(auto& line:pre)line.reset();
         inputLow={};wetLow={};wetHigh={};dcInput={};dcOutput={};phase=0;initialized=false;awake=enabled=false;weight.setCurrentAndTargetValue(0);retirement.reset({weight});
+        infiniteWriteBudget.reset();infiniteReadoutBudget.reset();
     }
     double retiringTailSeconds()const noexcept{return retirement.retiringTailSeconds();}
     bool isSuspended() const noexcept { return !awake; }
@@ -98,11 +107,13 @@ public:
             next.tension=settings.tension;next.dispersion=settings.dispersion;next.count=settings.count;
         }
         retirement.configure(0,active,retainTails,juce::jlimit(.8,10.0,static_cast<double>(next.decay))*2+2+next.predelay*.001);
+        const bool targetsUnchanged=initialized&&enabled==active&&settings==next;
         const bool shapeChanged=!initialized||settings.tension!=next.tension||settings.dispersion!=next.dispersion||settings.decay!=next.decay||settings.hold!=next.hold;
         enabled=active;settings=next;
         if(active&&!awake){awake=true;initialized=false;}
         weight.setTargetValue(active?1.0f:0.0f);
         if(!awake)return;
+        if(targetsUnchanged)return;
         const auto set=[&](auto& smoother,float value){if(initialized)smoother.setTargetValue(value);else smoother.setCurrentAndTargetValue(value);};
         const int count=juce::jlimit(1,3,juce::roundToInt(next.count));
         const int colour=juce::jlimit(0,3,juce::roundToInt(next.dwell));
@@ -141,7 +152,7 @@ public:
         }
         initialized=true;
     }
-    std::array<float,3> process(float left,float right) noexcept
+    std::array<float,3> process(float left,float right,float returnGain=1) noexcept
     {
         const float mix=weight.getNextValue(),wetMix=retirement.next(0);if(!awake)return {};
         if(!enabled&&mix<=0&&wetMix<=0){reset();return {};}
@@ -150,6 +161,8 @@ public:
         const float useLow=lowEnable.getNextValue(),useHigh=highEnable.getNextValue(),depth=motion.getNextValue(),excitation=inputGate.getNextValue();
         phase+=juce::MathConstants<double>::twoPi*.37/fs;if(phase>=juce::MathConstants<double>::twoPi)phase-=juce::MathConstants<double>::twoPi;
         const std::array<float,2> input{left,right};std::array<float,2> wet{};
+        std::array<float,12> writes{};
+        const bool infinite=settings.hold&&settings.acceptsInput;
         for(size_t ch=0;ch<2;++ch)
         {
             float source=enabled&&std::isfinite(input[ch])?juce::jlimit(-8.0f,8.0f,input[ch]):0.0f;
@@ -161,7 +174,7 @@ public:
             for(size_t index=0;index<3;++index)
             {
                 auto& spring=springs[ch][index];const float length=spring.length.getNextValue(),loss=spring.loss.getNextValue();
-                const float offset=depth*static_cast<float>(fs*.00015*std::sin(phase+static_cast<double>(index)*1.7+static_cast<double>(ch)*.8));
+                const float offset=depth==0?0:depth*static_cast<float>(fs*.00015*std::sin(phase+static_cast<double>(index)*1.7+static_cast<double>(ch)*.8));
                 float outward=spring.forward.read(length+offset),inward=spring.backward.read(length-offset);
                 for(size_t stage=0;stage<stages;++stage)
                 {
@@ -169,13 +182,30 @@ public:
                     outward=spring.scatter[0][stage].process(outward,spring.a1[stage],spring.a2[stage]);inward=spring.scatter[1][stage].process(inward,spring.a1[stage],spring.a2[stage]);
                 }
                 spring.damping[0]+=damp*(outward-spring.damping[0]);spring.damping[1]+=damp*(inward-spring.damping[1]);
-                spring.forward.push(juce::jlimit(-4.0f,4.0f,delayed*.3f-spring.damping[1]*loss));
-                spring.backward.push(juce::jlimit(-4.0f,4.0f,-spring.damping[0]*loss));
+                writes[ch*6+index*2]=delayed*.3f-spring.damping[1]*loss;
+                writes[ch*6+index*2+1]=-spring.damping[0]*loss;
                 wet[ch]+=outward*spring.amount.getNextValue();
+            }
+        }
+        if(infinite)
+        {
+            // Bound continuing excitation in the bidirectional history, not
+            // just the final output. Dispersive allpasses can redistribute
+            // peaks, so the linked readout has its own smooth safety budget.
+            infiniteWriteBudget.process(writes,.25f/returnGain);
+            infiniteReadoutBudget.process(wet,1.0f/returnGain);
+        }
+        for(size_t ch=0;ch<2;++ch)
+        {
+            for(size_t index=0;index<3;++index)
+            {
+                springs[ch][index].forward.push(juce::jlimit(-4.0f,4.0f,writes[ch*6+index*2]));
+                springs[ch][index].backward.push(juce::jlimit(-4.0f,4.0f,writes[ch*6+index*2+1]));
             }
             wetLow[ch]+=low*(wet[ch]-wetLow[ch]);wet[ch]-=useLow*wetLow[ch];wetHigh[ch]+=high*(wet[ch]-wetHigh[ch]);wet[ch]+=useHigh*(wetHigh[ch]-wet[ch]);
         }
         const float mid=(wet[0]+wet[1])*.5f,side=(wet[0]-wet[1])*.5f*spread;
         return {(mid+side)*wetMix,(mid-side)*wetMix,mix};
     }
+    const BuiltInInfiniteHoldBudget& infiniteBudget()const noexcept{return infiniteWriteBudget;}
 };

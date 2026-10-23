@@ -8,9 +8,60 @@ lives in [Testing](testing.md) and the
 
 ## Now: release quality
 
+- Qualify the implemented built-in suite editor and Convolution changes using the
+  [editor maintenance and qualification gates](free-plugins.md#editor-maintenance-and-qualification).
+  Design 03 is implemented in the working tree; review and qualification remain
+  in progress. Verify Find-to-control navigation, primary controls in compact
+  windows, useful wide overviews, exact adjustment and complete-state comparison.
+  Retain every native parameter, contextual machine control, IR/MIDI/routing
+  workflow and original automation identity. Qualify responsive geometry,
+  Release callback cost and effect-specific audio laws separately; neither a
+  screenshot nor a parameter inventory proves sound, CPU headroom or completion.
+- Qualify the development-tree [standalone plugin changes](free-plugins.md)
+  through exact-artifact listening, live audio/MIDI devices and supported
+  platforms. [Retained evidence](testing.md#retained-audio-qualification-and-limits)
+  includes Shimmer and Pitch Correct callback-deadline failures at demanding
+  rates/buffers/instance counts and Original/Spread transition limits. Earlier
+  continuing-input Infinite Hold saturation is retained as a reproduced
+  baseline; the subsequent implementation passes all 16 bounded headroom
+  fixtures on the final Release build. Indefinite accumulation and listening
+  acceptance remain unasserted. Deterministic passes do not close the separate
+  performance, device or listening limits.
 - Complete release qualification for the NAM Rack and optional TONE3000
   workflow, including multi-capture selection, Guitar/Bass profiles, project and
   preset recovery, accessibility, and real-interface listening tests.
+- Qualify Octaver Fuzz as part of the complete guitar rig: preserve independent
+  octave tracking, raw clean blend and old-state fuzz-off recall; verify the
+  shared interface calibration convention, then audition the expanded
+  Octave/Fuzz/Drive/Distortion matrix through explicitly identified NAM amp and
+  cabinet fixtures at conservative and stress settings. The working-tree
+  531-case full-chain matrix passes structural checks; this is not listening
+  acceptance. Keep exact native
+  before/after float WAVs and resource/source hashes. The
+  [October 23 Swollen Pickle reference review](testing.md#swollen-pickle-reference-fuzz-review-october-23-2026)
+  implements moderate-gain refinement, an integrated Clean control and numerical
+  corrections in downstream Distortion/Saturator; exact-artifact listening is
+  still required. Use the
+  [artist research and scope](nam-rack.md#full-rig-fuzz-qualification-october-18-2026)
+  to guide one audible change at a time after baseline capture; no commercial
+  replica or preferred tone is established by measurements. Follow the
+  [NAM CPU and interaction contract](nam-rack.md#cpu-and-pedal-interaction-contract)
+  for implemented sample-boundary Octaver retirement and coefficient caching,
+  remaining two-Rack deadline limits, both recovered bass-preset scenarios and
+  broader pedal coverage. The Audient 8-to-16 buffer transaction has passed a
+  silent hardware test; that does not qualify a loaded two-track session.
+  Qualify the implemented [multicore track executor](nam-rack.md#four-track-live-monitoring-acceptance-target)
+  and address measured longest-track and wakeup bottlenecks. Persistent helpers
+  scale with physical cores; isolated native-NAM audio tracks can run in
+  parallel while hosted, MIDI/ARA and routed tracks retain serial processing.
+  The conservative eligibility gate adds no device buffering. The required target is four recording,
+  monitored NAM Racks at 16 samples and 4x Drive oversampling; 8 samples is a
+  separate stretch target. Bounded Release probes show lower average callback
+  costs, but four- and twelve-track cases still report missed or skipped work. The target
+  remains **not met**; bounded ownership/recording tests and a low average CPU
+  meter do not close the live deadline, recording-duration or listening gates.
+  Keep measured results and exact test scope in
+  [multicore qualification](testing.md#multicore-nam-live-qualification-october-23-2026).
 - Keep Windows, macOS, and Linux installation, startup, updates, and optional AI Tools
   setup reliable on clean systems.
 - Preserve old projects and presets while strengthening audio-thread safety,

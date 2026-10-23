@@ -82,6 +82,8 @@ public:
 
     // ---- Parameters (thread-safe) ----
 
+    std::atomic<float> signalPath {1}; // saved-state compatibility for mapper and detector
+
     // Bypass pitch correction (pass-through)
     std::atomic<float> bypass { 0.0f }; // 0=active, 1=bypassed
 
@@ -102,8 +104,15 @@ private:
     PitchDetector detector;
     PitchMapper mapper;
     signalsmith::stretch::SignalsmithStretch<float> stretcher;
+    signalsmith::stretch::SignalsmithStretch<float, void, true> correctedStretcher;
+    template<class Callback> decltype(auto) withPitchEngine(Callback&& callback)
+    {
+        if (activeSignalPath) return callback(correctedStretcher);
+        return callback(stretcher);
+    }
 
     double cachedSampleRate = 44100.0;
+    bool activeSignalPath = true;
     std::atomic<float> lastDetectedHz { 0.0f };
     std::atomic<float> lastCorrectedHz { 0.0f };
 
@@ -118,6 +127,9 @@ private:
     std::vector<const float*> inPtrs;          // Signalsmith input channel pointers
     std::vector<float*>       outPtrs;         // Signalsmith output channel pointers
     juce::AudioBuffer<float>  stretchOutputBuf; // Signalsmith output staging buffer
+    bool formantSettingsValid = false, appliedFormantCorrection = false;
+    float appliedFormantShift = 0;
+    void processPreparedBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, int midiOffset);
 
     // Ring slots can be overwritten while the UI copies them. Atomic fields
     // avoid a data race; an even, unchanged generation identifies one frame.

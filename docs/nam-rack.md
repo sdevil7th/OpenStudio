@@ -131,7 +131,8 @@ The current audible route is:
 Input trim
   -> Gate detector key (sidechain only)
   -> Compressor
-  -> Stereo Poly Octaver
+  -> Octaver Fuzz
+  -> optional Fuzz (independent switch)
   -> EQ Boost / pre-EQ
   -> Precision Drive
   -> Distortion
@@ -294,6 +295,17 @@ The main implementation lives in:
   combination; neither stage performs nested resampling.
 - No timing result from one machine is marketed as a universal CPU claim.
 
+The current resampler indexes each 48-tap window as at most two contiguous
+spans of its 128-sample history ring. The kernel, phase scheduler, zero padding
+and ordered double-precision accumulation remain unchanged; this removes
+repeated indexing work rather than selecting a different resampling algorithm.
+Delay also returns before resolving its macro controls when disabled with no
+remaining tail. Off-state edits are applied on engagement, while existing tails
+still drain through the normal processing path. Exact reference/lifecycle
+contracts gate these optimizations separately from wall-clock timing; see
+[testing](testing.md#octaver-fuzz-checks). They do not establish live-interface
+stability or an audible improvement.
+
 ### Input routing and stereo NAM contract
 
 The DAW track route is the sole input-topology authority. A one-channel route
@@ -350,6 +362,15 @@ peak and hold, and the numeric level and clip indication use only visible lanes.
 The output meter always renders independent L/R peaks from the final Rack output
 boundary. Linked input/output peak values remain compatibility fallbacks for an
 older native build; the frontend never invents stereo values from a linked peak.
+
+**Output peaks reduced recently** means the rack's final peak protection
+softened loud peaks. Lower **Output** if you want less of that compression.
+The amber message follows newly observed activity and becomes neutral history
+after three seconds without another event. Opening a rack with an existing
+counter shows **Earlier output peaks were reduced**, not a current warning.
+This differs from **Overload** (missed processing work) and the separate
+emergency safety mute. The message wraps and is keyboard accessible instead
+of hiding its explanation behind an ellipsis.
 
 Low-buffer timing results are machine/build-specific `diagnostic_only`
 evidence, not proof of ASIO stability. Driver safety and subjective stereo
@@ -565,7 +586,7 @@ and UI state. Legacy values are pruned without being mapped onto the post-FX
 Delay, so recalling an older tone cannot overwrite that Delay's saved settings.
 The existing post-FX Delay remains available and retains its Tape mode.
 
-Gate topology is unchanged. The rack uses `Stereo Poly Octaver`: independent L/R
+Gate topology is unchanged. The octave section of `Octaver Fuzz` uses independent L/R
 instances of the MIT Terrarium-derived ERB-PS2 topology, with fixed 6:1
 multirate processing, 80 complex bands at `Fs/6`, fast phase scaling, and
 polyphase reconstruction. Six-sample scheduling state is retained across host
@@ -581,6 +602,402 @@ were exactly zero in the final Release run. The optimized isolated 48 kHz /
 misses on the test machine. These are correctness and machine-specific timing
 checks only: perceived chord tracking, pick transients, voicing, and
 product-reference quality remain `not_asserted` until musician audition.
+
+### Octaver Fuzz (October 12, 2026 development checkout)
+
+The 156-pixel olive pedal replaces the former 120-pixel enclosure. Its upper
+row is Down/Up/Direct and its lower row is Fuzz/Tone/Level. The header provides
+a Vintage/Sustain/Gated voice selector; separate Octave and Fuzz footswitches
+and LEDs indicate the two active sections. The PRE row is 784 pixels wide,
+centred on the existing rack artboard. The October 23 layout integrates a
+dedicated Clean knob beside Voice, with a visible percentage. Enter/right-click
+opens exact entry; Escape cancels, double-click resets, and keyboard adjustment
+and Undo share the normal parameter path. Device Controls retains the same
+parameter. A registered SVG silkscreen overlays the unchanged olive body;
+stationary artwork and interactive controls have separate, measured bounds.
+
+The October 15 follow-up shortens the faceplate and compact product name to
+**Octaver Fuzz**. Stereo/polyphonic operation is unchanged.
+
+Fuzz runs after the stereo octave/direct mix and before PRE EQ. With Octave
+off it processes the unshifted signal. Vintage uses two asymmetric clipping
+cells with envelope-dependent bias and sag; Sustain uses two symmetric cells
+and a complementary scooped tone branch. Its bright branch retains a 15%
+low-frequency floor to avoid the measured bass/clean phase opposition of the
+original pure high-pass. Gated uses biased asymmetric cells and a smoothed
+channel-local gate. These are original digital voices, not
+circuit-qualified replicas. Guitar/Bass changes internal filter centres without
+changing the saved controls.
+
+The six stable additive parameters are `fuzzEnabled` (default off), `fuzzDrive`
+and `fuzzTone` (0-1, default 0.5), `fuzzLevelDb` (-18 to +12 dB, default 0),
+`fuzzVoice` (0 Vintage / 1 Sustain / 2 Gated), and `fuzzCleanMix` (0-1, default
+0). Clean blend refers to the signal immediately before fuzz, including active
+octave voices. Control changes and voice switching use 25 ms ramps. The
+nonlinear cells use first-order antiderivative antialiasing with DC removal;
+there is no additional oversampling island or reported integer plugin latency.
+ADAA has its inherent fractional-sample filtering delay. Processing uses fixed
+channel state without allocation, locks or file access in the callback.
+
+Older states and complete preset/Compare snapshots without fuzz fields restore
+fuzz off. Native/portable tone state, project state, A/B Compare and parameter
+Undo retain the fields. Existing persistence and DSP version markers remain
+unchanged because the controls are additive and have explicit migration defaults.
+Deterministic regressions cover bypass, silence, finite output/recovery, stereo
+isolation, reset, callback partitions and recall. Voice metrics are
+`diagnostic_only`; perceived tone and reference-pedal similarity are
+`not_asserted` until user audition.
+
+The order protects octave tracking from fuzz: octave analysis receives the
+pre-fuzz signal. Direct/Down/Up retain their original audio mix. A separate
+control-derived headroom gain scales only the nonlinear input and sag:
+`max(1, Direct) / max(max(1, Direct), Direct + Down + Up)`. It uses each sample's
+actual 20 ms ramped mixer coefficients, so compensation does not lead or lag
+knob changes. Solo voices keep their gain and quieter settings are never
+boosted. The clean branch and Gated detector retain the incoming mix level.
+This bounds extra excitation from mix controls; it does not separate chord
+notes or remove the sum/difference tones of shared clipping.
+
+Sustain has a fixed control-derived center-Tone makeup curve, bounded to 0-5 dB:
+`(1 - abs(2*Tone - 1)) * (3 + 2*min(1, 2*Drive))`. Its gain ramps over 25 ms.
+All fuzz wet voices then receive a shared 0.86 trim (about -1.31 dB), before
+Clean blend and the user's Level. There is no audio-driven AGC, output
+normalization or hidden limiter. The correction reduces default voice jumps;
+bright/dark Tone settings retain source-dependent level differences rather
+than boosting narrow transients to match full-band RMS. Level can still drive
+the following NAM/drive and final rack guard harder.
+
+Partial Clean blend mixes the immediate incoming octave sum with a filtered,
+ADAA-processed signal. Its frequency-dependent phase differences can color or
+thin the blend; adding a fixed dry delay alone would not match all the filters.
+At 100% Clean blend and Level 0 dB, the complete incoming octave mixture is
+restored. The lowest bass octave-down fundamentals also encounter the octave
+stage's 18 Hz high-pass plus the fuzz's Bass 12 Hz input high-pass and 12 Hz DC
+blocker. Gated intentionally attenuates quiet input. Guitar retains the original
+soft gate and 1/80 ms detector, with 3/12 ms gain attack/release. Bass has a
+separate 1/120 ms detector, opening at the existing Drive-dependent threshold,
+closing below half that threshold after 65 ms continuously below it, and
+3/30 ms gain attack/release. The 6 dB hysteresis and hold preserve decaying low
+notes through envelope troughs; sub-threshold re-entry can still remain gated.
+Sag keeps its independent original detector timing. Stereo channel state remains
+independent. These are audition cases, not findings that a particular output
+sounds wrong. Aliasing is reduced by ADAA/filtering but its audibility is not
+established.
+
+These October 15 development refinements change active fuzz voicing while
+retaining all control IDs, ranges and saved values. Earlier active development
+tones can sound different. Older projects without fuzz still restore it off;
+exact bypass, full-clean parity, native/portable/Compare recall and callback
+partition contracts are retained. There is no persistence or DSP version bump.
+
+The product research establishes a common pedal category, not sales rankings:
+[MXR Poly Blue Octave](https://www.jimdunlop.com/mxr-poly-blue-octave/) combines
+polyphonic octaves and independent fuzz;
+[EHX Octavix](https://www.ehx.com/products/octavix/) and
+[MXR Blue Box](https://www.jimdunlop.com/mxr-blue-box-fuzz/) illustrate octave
+fuzz, while [Orange Fur Coat](https://orangeamps.com/wp-content/uploads/2017/08/FUR-COAT-MANUAL-V1.pdf)
+provides an independently switched octave. Classic voice references include
+[Fuzz Face](https://www.jimdunlop.com/germanium-fuzz-face-mini-distortion/) and
+[Big Muff](https://www.ehx.com/wp-content/uploads/2021/01/big-muff-pi-manual.pdf).
+The implementation uses the published
+[antiderivative antialiasing method](https://www.mdpi.com/2076-3417/10/1/20)
+with an original bounded piecewise-cubic transfer and its analytic integral.
+
+### Full-rig fuzz qualification (October 18, 2026)
+
+The October 23 Swollen Pickle review distinguishes amplified input noise from
+self-generated noise. The [manufacturer's MkIIS manual](https://www.jimdunlop.com/content/manuals/WHE401S.pdf)
+describes separate intensity, filtering, mid-scoop and compression decisions.
+OpenStudio's symmetric, scooped Sustain voice is the closest architectural
+starting point; Vintage and Gated retain their other characters. This is not
+a circuit replica. The manufacturer's [instructional demonstration](https://www.youtube.com/watch?v=patkTztLSAs)
+was located, but its playback could not be inspected here; no listening or
+spectral-match claim is inferred from its metadata. The manual's analog noise
+specification is not comparable to our unweighted digital RMS fixture.
+
+Vintage/Sustain excitation now follows `1.5 + 73.5 * Fuzz^4`, replacing
+`5 + 70 * Fuzz^2`. This gives useful lower gain without a hidden gate or output
+normalization and retains the 75x full-drive endpoint. Gated keeps its original
+mapping. Moderate settings amplify less idle noise and also sustain quiet
+decays less strongly; saved active development tones therefore change. The
+input-keyed global Gate still needs an explicit threshold above real idle
+noise, with Release chosen for the instrument. Its gain acts after the native
+pedals and NAM models, before cabinet/time effects. A higher-gain stack can
+remain noisy with its gate open. Neither this mapping nor a quiet synthetic
+fixture qualifies the sound of a complete rig. See the current
+[qualification evidence](testing.md#swollen-pickle-reference-fuzz-review-october-23-2026)
+for the frozen-binary comparison and its limits.
+
+The stack review also corrected two numerical faults downstream of Fuzz:
+Distortion's antiderivative clipping cells used unstable float subtractions,
+and the shared Saturator low-cut lost precision at high oversampled rates.
+Stable interval evaluation and double low-cut coefficients/state retain the
+same intended transfer, cutoff and filter order. They add no oversampling
+stage or latency. Saved controls and state versions are unchanged; standalone
+Saturator also receives the low-cut correction, including its archived signal
+path, so old and corrected renders are not promised byte-identical. Native
+partition and numerical-oracle checks establish consistency; listening still
+qualifies the sound.
+
+The approved development work evaluates Fuzz together with the existing Drive,
+Distortion, NAM amp and cabinet, rather than treating pedal-only output as a
+finished guitar tone. Capture the unmodified voicing first, qualify interface
+calibration and compatibility, and make one audible refinement at a time after
+reviewing the exact exports. Preserve the six existing fuzz controls and
+old-state off defaults; do not add a persistence/DSP version change without
+migration and project/preset/Compare round-trip coverage.
+
+Fuzz now follows the embedded Drive's fixed +12 dBu operating convention:
+the interface reference determines a smoothed input gain and reciprocal wet
+recovery, while the raw clean branch remains unchanged. The default +12 dBu
+reference has unity calibration gain. A calibration-only capture at that
+default must not be described as an independent old-build full-rig baseline.
+Equivalent physical inputs at different digital interface references are a
+deterministic contract; preferred distortion and gate behavior remain listening
+questions. [Testing](testing.md#octaver-fuzz-checks) describes the matrix,
+pairing checks and separate two-Rack timing evidence.
+
+Rabea Massaad's own explanations support testing several useful interactions,
+not one universal pedal setting:
+
+- In the [Bare Knuckle interview, May 2, 2018](https://www.bareknucklepickups.co.uk/news/article/talking-boot-camp-with-rabea-afro),
+  he describes blending several fuzzes and octave with amp gain for different
+  intensities in a stereo Victory Kraken rig.
+- In the [Guitar World interview, August 23, 2022](https://www.guitarworld.com/features/rabea-massaad-neural-dsp-archetype-plugin),
+  he discusses fuzz into a high-gain amp and an Octavia texture, and how amp
+  Tight changes the feel. Conversational descriptions of adding an effect do
+  not establish its exact signal-routing order or a published circuit model.
+- In the [MusicRadar interview, September 23, 2022](https://www.musicradar.com/news/rabea-massaad-guitar-interview-neural-dsp),
+  he distinguishes vintage Bender-inspired fuzz from modern ThunderClaw-inspired
+  distortion, and discusses bass controls on fuzz and overdrive. This is his
+  account of the original 2022 plugin, not independent verification of later
+  plugin versions or OpenStudio's DSP.
+- [That Pedal Show's June 2, 2023 episode and routing notes](https://www.thatpedalshow.com/TPS-videodatabase/a-hang-with-rabea-%5Bstrats,-pedalboard-update,-music-man,-neural,-real-amps,-stormzy-&-more!%5D)
+  place drives/compression before the Kraken preamp, with wet effects downstream
+  of its FX send and a separate dry cabinet. The notes identify fuzz/octave
+  discussion at 18:50 and overdrives at 22:20; they do not supply verified knob
+  values for our test matrix.
+
+The implementation inference is to audition octave/fuzz into further gain,
+including deliberately dense combinations, while preserving the clean octave
+tracking path. These sources do not prescribe exact ChaosBed/Silverfox settings,
+prove a circuit replica, or establish an audible pass for the current Rack.
+
+The first bounded voicing candidate adds 12 Hz AC coupling between the two
+Guitar/Vintage clipping cells, so the first cell's signal-dependent DC does not
+unintentionally bias the second. Bass, Sustain and Gated keep their prior paths;
+the coupling filter stays warm and Guitar/Bass changes blend its contribution
+over 25 ms. Gains, clipping knees and post-tone controls stay unchanged. Capture the
+calibrated +12 dBu full-chain baseline before applying this candidate, and use
+the same fixtures/settings afterward. The intended circuit-state correction
+and finite/partition checks do not establish an audible improvement; exact-file
+audition remains pending. No new parameter or persistence/UI schema is planned.
+
+The development implementation also caches unchanged fuzz controls so normal
+callbacks do not repeatedly redesign filter coefficients. Preparing at any
+sample rate invalidates that cache. Fully settled, already-bypassed fuzz returns
+immediately; moving ramps and active retirement still advance in sample time.
+These reduce avoidable work without changing the requested controls. The
+same-controls reprepare, callback partition, bypass-transition and reset
+contracts protect the state semantics. They are not proof that two complete
+Racks meet an 8-frame hardware deadline; see the dated
+[two-instance evidence](testing.md#octaver-fuzz-checks).
+
+### CPU and pedal interaction contract
+
+The working tree implements exact sample-boundary Octaver retirement,
+unchanged-control Drive/Distortion coefficient caches, broader offline scenario
+coverage and clearer Fuzz/preset/device-setting workflows. Tone approval and
+physical two-track capacity remain separate from deterministic test passes.
+[Testing](testing.md#nam-audit-october-22-2026) retains the initial audit and
+their limits. The earlier standalone free-FX qualification does not certify NAM.
+
+The reported live reproduction is two armed tracks with separate guitar and
+bass inputs: **Bestest clean! with Distortion engaged**, plus a bass preset,
+using the Audient ASIO driver, an 8-sample buffer and 4x Drive oversampling in
+`python build.py dev --run`. The current saved Bestest already enables Precision
+Drive, Amp/Cab, EQ, Room, Doubler and Reverb; its Octave is off and absent legacy
+Fuzz fields restore off. Distortion therefore adds a second native drive stage.
+This is not evidence that active Fuzz caused the reported crackling. Saved
+presets also do not prove that no controls were changed during the live test.
+The user could not identify which of two recovered bass presets was loaded;
+both are included in qualification. Saved resource paths and hashes identify
+the tested captures and IRs. Synthetic diagnostic inputs do not recreate the
+original guitar/bass performance, and saved device settings do not establish
+the effective rate or oversampling during the reported session.
+
+| Priority | Finding | Action and acceptance |
+| --- | --- | --- |
+| P0 | Complete two-Rack fixtures can exceed callback deadlines with Fuzz both off and on. `success` previously described signal integrity without a separate capacity gate. | Implemented explicit preset/resource scenarios, shuffled repeated timings, full measured callbacks, p99/p99.9/max and separate capacity status/CLI gate. All 600 retained offline runs pass integrity; demanding configurations still fail capacity. Both recovered bass presets are included. The follow-up silent Audient probe confirms full-engine deadline misses at 8/16 samples and passes its bounded 128-sample measurements. Original performances, visible-app workload and audible hardware stability remain unasserted. The four-track/16-sample target below remains open; the 128-sample result does not close it. Check summed output headroom separately; see Testing for limits. |
+| P0 | Actual-source probing confirmed callback-dependent Octaver re-entry after full or individual wet-voice retirement, including a profile change overlapping retirement. | Implemented exact sample-boundary retirement, preservation of the still-active voice's shared state, and settled fully bypassed profile state. Permanent tests cover 3,024 retirement, 168 profile and 216 Octaver-to-Fuzz comparisons with exact output/excitation parity; 72 frozen unaffected cases remain exact. |
+| P1 | Drive/Distortion redesigned unchanged coefficients each callback; Drive also calculated retired OD808 circuit coefficients on the public Precision path. | Implemented sanitized control/profile/effective-rate caches, separate gain/calibration caching and conditional historical circuit design. Prepare/reset invalidates caches. Smoothing and compatibility code remain. Forced-redesign parity and all 129 frozen default Fuzz WAVs pass; no DSP/schema version was changed. |
+| P1 | Telemetry scans, normalization calculations and disabled-stage resets add overhead. | Moved unchanged normalization work behind the existing cache check. More invasive scan/reset changes are deferred: current stage timing does not isolate their benefit, and they must preserve meters, finite/peak protection and off-state edits. Safety guards remain at audio cadence. |
+| P1 | Active Fuzz computes all three voices, including at Clean 100%; Octaver processes both stereo lanes. | Measured Fuzz's incremental cost is small in the retained stage fixtures; voice suspension and mono reuse are deferred because they change warm state/re-entry semantics. Keep all voices warm and independent channel state. This is an optimization candidate, not a demonstrated cause of the reported crackle. |
+| P1 | The old full-chain matrix omitted Crunch, Octave-off comparisons and partial Fuzz Clean. | Implemented 531 functional full-chain cases: all 64 discrete topologies at two settings per material plus Clean, calibration, gate and octave-presence contexts. Both recovered bass presets are separately qualified for CPU with their own resources. Alternate amp families and real bass performance listening remain open; do not treat this as every continuous combination. |
+| P2 | Serial clipping and Clean-blend phase differences can obscure Fuzz character. Several gates and cumulative sub-bass filtering can alter decay. | Added Clean/gate/presence/calibration coverage and aligned nonlinear residual diagnostics with independent measurement controls. Native-level listening files remain available. Exact-artifact preference and real-bass performance remain unasserted; no new hidden normalization, delay or Fuzz voicing change was made in this follow-up. |
+| P2 | Clean, Level and the scope of oversampling are easy to misunderstand. | Implemented an integrated Clean knob with exact-entry, keyboard adjustment, reset and Undo, explaining the incoming octave sum, Level and downstream order. The Drive-only oversampling label remains explicit. Preset Profile review offers a named corrected copy without changing the original or active Rack. Settings reports requested versus accepted values and stays open on substitution. |
+
+The follow-up host audit also removes inactive instrument/IR audition clearing,
+render attempts and mixing from the device callback. Active leases, release
+tails and stop ramps remain eligible. Pitch scrub now advances only the actual
+callback length when the prepared scratch buffer is larger. These are bounded
+host corrections, not evidence that preview processing caused the reported
+constant crackling. Offline wall-clock misses alone cannot distinguish DSP
+work from scheduling interference; qualification must include the live ASIO
+callback and retain a separate headroom check.
+
+#### Four-track live-monitoring acceptance target
+
+The requested target is **four armed, recording and software-monitored tracks
+with full NAM Racks at 16 samples**, with **8 samples as the stretch target**.
+Retain 4x native-drive oversampling and the requested tone; qualify explicit
+preset/model/IR combinations on the user's machine at 44.1 and 48 kHz.
+The earlier 128-sample result is a temporary measured operating point, not
+acceptance of this requirement or evidence that a lower buffer is impossible.
+The expanded silent live probe supports recording and larger track counts,
+but still excludes visible editors and physical instrument signals.
+
+At 44.1 kHz, the complete callback has 362.8 microseconds at 16 samples and
+181.4 microseconds at 8. The former serial track loop could not use additional
+cores to shorten independent Rack processing. In the initial four-track Debug
+live baseline, mean engine time was 441.7 microseconds, already longer than
+the 16-sample period. Parallel execution reduced the mean to about 207
+microseconds in the paired preliminary run; this average improvement does not
+pass the deadline requirement. Retained results and their exact scope belong
+in [Testing](testing.md#multicore-nam-live-qualification-october-23-2026).
+
+**Implementation status: implemented in the development checkout; capacity
+qualification remains open.** `RealtimeTrackExecutor` uses persistent helpers,
+with an automatic count of physical CPU cores minus one (bounded to 0-127).
+The device callback also claims available jobs. There is no four-track cap or
+fixed thread per track; prepared jobs can outnumber helpers. On the inspected
+12-core machine, automatic mode creates 11 helpers. This is a scheduling
+policy, not a promise that 12 complete Racks meet a particular deadline.
+
+The initial path admits isolated audio tracks with a nonempty,
+native-NAM-only FX graph, without ARA, incoming or outgoing sends, or
+sidechains. At least two eligible tracks and an available helper are required.
+MIDI/instrument tracks, hosted plugins, other native FX, and even bypassed
+non-NAM processors keep their own tracks on the callback's serial path.
+Unrelated ineligible tracks do not disable parallel processing for independent
+NAM tracks. Connected tracks retain the existing dependency order. Eligibility
+is checked against the actual processor graph generation again at job entry.
+A concurrent graph edit can reject a job; effects are never removed or
+substituted to make a track eligible. With fewer than two eligible tracks or
+no helpers, the whole graph retains serial execution.
+
+Input/playback preparation and raw recording taps stay on the callback.
+Prepared per-track audio/MIDI storage separates concurrent DSP. Each Rack
+retains its sequential effect order. After the isolated NAM batch, the callback
+processes other tracks serially and combines every completed output in the
+existing dependency/summation order before master/monitoring processing. Work uses the **same
+device block**, with **zero added buffering samples**. No smaller model,
+automatic quality reduction, lower oversampling or extra monitoring block is
+introduced. Windows helpers register for MMCSS individually. Event sleep is
+the default; a bounded, opt-in polling interval is available to the diagnostic
+probe for controlled wakeup comparisons, not as a user tone setting. The probe
+also accepts a bounded recovery grace after the nominal collection deadline;
+the app default remains zero, no extra audio buffer is added, and crossing the
+nominal deadline still fails capacity. See Testing for the diagnostic flags.
+
+The engine pins the routing snapshot before publishing work and retains it
+until every worker has stopped touching its jobs. The callback's collection
+deadline includes a small final-mixing reserve, not a guarantee for arbitrary
+remaining serial/master work; the outer callback meter still covers all of it.
+The collection deadline does not interrupt native DSP
+already running, including a job claimed by the callback itself. Unclaimed
+jobs can be cancelled atomically. Completed lanes can still be mixed in order;
+unfinished lanes produce no late output in a later block. If workers remain
+active, every processor queued in that old batch stays quarantined until
+ownership drains, including already-completed lanes. Unowned tracks continue
+serial processing, sends, sidechains, recording and mixing in the existing
+dependency order; no new parallel batch starts while the old one remains.
+Raw armed-track recording for quarantined NAM lanes continues through a
+separate callback-owned tap, without touching their processor buffers. That
+tap retains incoming sends from the current routing snapshot, including a
+send added after the old isolated batch was dispatched. A new route from a
+quarantined source still receives silence during that overload;
+unrelated existing routes retain their normal signal path. Stop/reprepare, offline
+render and teardown drain workers off the audio thread. These containment
+rules prevent unsafe buffer reuse; a cancelled, rejected or quarantined job
+still fails capacity and can interrupt monitoring.
+
+The routing audit also corrected stopped-transport live monitoring: hardware
+input now adds to an existing incoming-send mixture instead of overwriting
+it. Release contracts verify stopped/playing Float32 and Hybrid64 routing,
+pending-batch recording and actual PDC delay; these functional passes do not
+qualify a low-buffer monitoring deadline.
+
+NAM Rack shows **Overload** and offers **Buffer** when recent worker failures
+occur, even if the outer callback meter is low. Audio Settings reports the
+same condition. Diagnostics retain deadline, rejected/cancelled job and
+quarantine counts separately; they are overlapping evidence, not counts to
+sum. A single recent worker failure warrants a warning, which clears after
+ten seconds of callback progress without another failure.
+
+```mermaid
+flowchart LR
+    A[Prepare inputs and raw recording taps] --> B[Track 1 on callback]
+    A --> C[Track 2 on worker]
+    A --> D[Track 3 on worker]
+    A --> E[Track 4 on worker]
+    B --> F[Combine in stable order]
+    C --> F
+    D --> F
+    E --> F
+    F --> G[Master and monitoring FX]
+    G --> H[Current device output block]
+```
+
+The feasibility gate is **serial preparation + dispatch/completion overhead +
+longest dependent processing path + final mixing/master work < device period**,
+with headroom for scheduling variation. Four workers do not divide every cost
+by four. Existing single-Rack wall-time outliers also require investigation;
+they do not yet distinguish intrinsic DSP cost from thread descheduling.
+[Independent paths and critical paths](https://help.ableton.com/hc/en-us/articles/209067649-Multi-core-performance-in-Ableton-Live-FAQ)
+explain the scheduling model, not a performance guarantee for OpenStudio.
+
+#### Regression and remaining acceptance gates
+
+The ownership rules above are maintenance invariants, not unfinished architecture.
+Jobs follow `Idle -> Ready -> Running -> Done -> Idle`; completion must cover
+processor access and scoped-guard teardown before storage is reused. Publish
+the snapshot lease before dispatch, retain ownership through abandoned-job
+retirement, and keep reclamation/joining off the callback. Do not add realtime
+`shared_ptr` destruction, unbounded waits or a callback fallback that processes
+a still-owned Rack twice. Each worker uses the same block position, rate,
+transport/automation epoch and denormal handling as serial execution.
+
+| Area | Retained contract and required qualification |
+| --- | --- |
+| Reproduction and timing | Use explicit Bestest/Distortion and both recovered bass presets, independent inputs and resource/state hashes. Compare one/two/four tracks at 44.1/48 kHz and 4x, then bounded mono/stereo, 2x/8x and high-rate stress separately. The 48 kHz model rate avoids conversion but shortens 16/8-frame deadlines to 333.3/166.7 us. Include host preparation, longest Rack, dispatch/completion and reduction/master work. Preallocated per-job traces must separate callback/helper work, cancelled jobs and timing overhead; wall time still includes preemption. |
+| Serial/parallel correctness | Preserve raw mono recording before monitor duplication/FX, punch/loop/latency compensation, PDC, mute/solo, sends, sidechains, pre-fader taps and Float32/Hybrid64 reduction. Compare matching event positions and summation order. `--realtime-track-self-test` exercises executor, graph eligibility and full-engine routing/recording/lifecycle contracts; current results belong in Testing. |
+| Overload and lifecycle | Controlled delayed-worker/cancellation fixtures must prove exactly-once ownership, no stale output, no buffer reuse and continued unrelated recording/routing. Drain ownership before device restart, preset/model/IR replacement, track removal, offline render or destruction. Retain rapid edits, variable partitions and callback-allocation coverage. A rejected, skipped, cancelled or quarantined job fails capacity even when the outer callback fits. |
+| Octaver and coefficient caches | Sample-boundary retirement and bypassed-profile settling are implemented. Preserve all six resampling phases, individual/both-voice off/on behavior, 1/5/6/7/19/31-sample off dwells, overlapping profile changes and Octaver-to-Fuzz transitions. Compare cached processing with forced coefficient redesign across reset/reprepare, off-edits and activation; preserve frozen unaffected output. |
+| Pedal interactions | The discrete core is Octave off/on x Fuzz off/Vintage/Sustain/Gated x Drive off/on x Distortion off/Heavy/Extreme/Crunch: 64 configurations per fixed profile/control/input set. Add Guitar/Bass, conservative/stress levels, all Direct/Down/Up presence masks, zero/end/interior Clean and Distortion Mix, +6/+12/+18/+24 dBu calibration and parameter extremes. Pairwise coverage of global/pedal gates, compressor, PRE/post EQ, captured pedal, room/doubler and time effects bounds the larger space; it is not exhaustive continuous coverage. |
+| Measured optimization | Investigate only demonstrated bottlenecks: dispatch/wakeup, cabinet bursts, matching mono histories, shared detector work or model kernels. One over-budget dependent Rack cannot be fixed by more workers. Drive/Distortion already share an oversampling island, mono input uses one NAM lane, and NAM shimmer is granular. Preserve signal/state/latency and safety cadence; do not substitute models, quality or bypassed stages. |
+| Routing expansion | General dependency batches and other native/hosted plugins remain separate work. Require source-before-consumer scheduling, deterministic fan-in and no concurrent accumulation; preserve serial cycle behavior without a new feedback delay. Chain, diamond, shared-bus, sidechain, automated-send, mute/solo and PDC parity plus plugin thread-affinity qualification are prerequisites. |
+| Sustained device acceptance | The four-track/16-sample target remains open. Require at least 30 minutes per required Debug and Release configuration with recording/monitoring, editors open, live controls and sustained tails; qualify 8 samples separately. Require zero callback/worker misses or skipped work, recording integrity, actual input routes and measured round-trip latency without new buffering. Unsupported driver counters are unknown, not zero. |
+| Sound and recall | Keep unnormalized native renders and separate level-matched audition copies. Include real bass B0/E1, chords, palm mutes, quiet decays and guitar-volume cleanup through clean/crunch/high-gain captures; avoid an extra Cab on full-rig captures. Preserve old Fuzz-off states and project/preset/Compare/Undo/portable recall. Alias measurements require aligned high-rate references, linear-commutation and deliberately broken negative controls; residuals alone are not tone approval. |
+
+The legacy Bass-labelled payload that restores Guitar has an explicit reviewed
+profile-copy workflow; names must never silently override deterministic state
+migration. Original user files remain unchanged. Exact-artifact audition remains
+the final decision for tone and continuity.
+
+The retained October 22 machine inspection found a Ryzen 9 7900X (12 cores,
+24 logical processors), Windows Balanced power plan, Audient iD software
+4.3.19 and USB driver package 5.1.0; the ASIO DLL reports 5.58.0.0, a different
+version namespace. Audient's [changelog](https://support.audient.com/hc/en-us/articles/206634065-iD-Driver-Change-Log)
+lists driver 5.2.3 in iD 4.3.20 and later software releases; installer changes
+do not establish a latency fix. Driver and supported power-mode comparisons
+remain controlled experiments. No driver, firmware or system setting was changed
+by that inspection.
+
+Use the [test commands and retained results](testing.md#nam-implementation-qualification-october-22-2026)
+for focused signal checks and the [multicore live matrix](testing.md#multicore-nam-live-qualification-october-23-2026)
+for capacity. Report `pass`, `fail`, `diagnostic_only` and `not_asserted`
+separately. No schema change or larger implicit buffer closes an unmet gate.
 
 ### Reverb
 
@@ -619,6 +1036,9 @@ during restore.
 ### State and recovery contract
 
 - A rack preset represents the complete creative tone.
+- Metadata sidecars and portable preset JSON use checked atomic file writes.
+  A failed sidecar save is reported and remains available to retry; cached
+  browser metadata is not treated as proof that the file was saved.
 - Device calibration is playback-environment state and does not silently travel
   as creative preset state.
 - Project state stores the exact child-capture/model identity, stable model/IR

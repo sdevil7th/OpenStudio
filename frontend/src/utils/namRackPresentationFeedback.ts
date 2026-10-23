@@ -1,5 +1,58 @@
 type NAMMetadataRecord = Record<string, unknown>;
 
+type NAMProtectionBoundary = "output" | "models";
+
+export function resolveNAMOutputProtectionCounter(diagnostics: NAMMetadataRecord | null | undefined): {
+  frames: number; boundary: NAMProtectionBoundary;
+} {
+  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  // A reported zero is authoritative. Older model-stage counters must not be
+  // described as final-output limiting, which the Output control can prevent.
+  if (diagnostics && Object.prototype.hasOwnProperty.call(diagnostics, "rackOutputSafetyGuardHitCount")) {
+    return { boundary: "output", frames: count(diagnostics.rackOutputSafetyGuardHitCount) };
+  }
+  return { boundary: "models", frames: count(diagnostics?.pedalNAMOutputSafetyGuardHitCount)
+    + count(diagnostics?.ampNAMOutputSafetyGuardHitCount) };
+}
+
+export type NAMOutputProtectionObservation = {
+  rack: string;
+  boundary: NAMProtectionBoundary;
+  frames: number;
+  processedBlocks: number;
+  recentUntilMs: number;
+};
+
+/** Native counters are lifetime totals, not a currently limiting indicator. */
+export function observeNAMOutputProtection(
+  previous: NAMOutputProtectionObservation | null,
+  rack: string,
+  frames: number,
+  processedBlocks: number,
+  nowMs: number,
+  boundary: NAMProtectionBoundary = "output",
+): NAMOutputProtectionObservation {
+  const count = Number.isFinite(frames) ? Math.max(0, frames) : 0;
+  const reset = !previous || previous.rack !== rack || previous.boundary !== boundary || count < previous.frames
+    || processedBlocks < previous.processedBlocks;
+  return {
+    rack, boundary, frames: count, processedBlocks,
+    recentUntilMs: reset ? 0 : count > previous.frames ? nowMs + 3000 : previous.recentUntilMs,
+  };
+}
+
+export function namOutputProtectionMessage(observation: NAMOutputProtectionObservation, nowMs: number) {
+  if (!observation.frames) return null;
+  if (observation.boundary === "models") {
+    return observation.recentUntilMs > nowMs
+      ? "NAM model peaks reduced recently. Lower Input or the Level feeding the model."
+      : "Earlier NAM model peaks were reduced. Lower Input or the Level feeding the model if this returns.";
+  }
+  return observation.recentUntilMs > nowMs
+    ? "Output peaks reduced recently. Lower Output to avoid extra compression on loud notes."
+    : "Earlier output peaks were reduced. Lower Output if this happens again.";
+}
+
 const IDENTITY_NOISE_TOKENS = new Set([
   "amp",
   "cab",

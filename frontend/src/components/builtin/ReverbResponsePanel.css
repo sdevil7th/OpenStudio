@@ -1,0 +1,7 @@
+.suite-reverb-envelope { background: #14241e; border-radius: 4px; }
+.suite-reverb-envelope text { fill: #adbeaf; font-family: system-ui, sans-serif; font-size: clamp(12px, .7cqi, 20px); }
+.suite-reverb-envelope .gridline { stroke: #42594c; stroke-width: 1px; }
+.reverb-desktop-response .suite-reverb-envelope { max-height: 760px; min-height: 96px; }
+.reverb-desktop-response>section { padding: clamp(16px, 1.3cqi, 38px); gap: 20px; }
+.reverb-desktop-response :is(label, button, select, h3) { font-size: clamp(12px, .8cqi, 22px); }
+.reverb-desktop-response p { font-size: clamp(10px, .65cqi, 18px); }

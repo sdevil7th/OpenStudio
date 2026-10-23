@@ -9,10 +9,10 @@ inline juce::var measureFreeSuiteStress()
         {"EQ Linear high resolution + spectral",[]{auto p=std::make_unique<OpenStudioEQ>(true);p->phaseMode.store(1);p->phaseQuality.store(2);p->spectralProcessing.store(1);for(int band=0;band<24;++band){p->bands[band].enabled.store(1);p->bands[band].gain.store(band%2?3.0f:-3.0f);}return p;}},
         {"Limiter 4x",[]{auto p=std::make_unique<OpenStudioLimiter>(true);p->oversampleQuality.store(2);return p;}},
         {"Limiter 16x",[]{auto p=std::make_unique<OpenStudioLimiter>(true);p->oversampleQuality.store(4);return p;}},
-        {"Synth 32 notes",[]{return std::make_unique<OpenStudioBasicSynthInstrument>();}},
-        {"Piano 32 notes + coupled body",[]{auto p=std::make_unique<OpenStudioPianoInstrument>();p->coupledBody.store(.5f);return p;}},
-        {"Guitar 32 notes",[]{return std::make_unique<OpenStudioCleanGuitarInstrument>();}},
-        {"Drums 32 notes + separate outputs",[]{auto p=std::make_unique<OpenStudioDrumInstrument>();for(size_t piece=0;piece<8;++piece)p->pieceOutput[piece].store(static_cast<float>(piece+1));return p;}},
+        {"Synth 32 voices on two channels",[]{return std::make_unique<OpenStudioBasicSynthInstrument>();}},
+        {"Piano 32 note-ons on two channels + coupled body",[]{auto p=std::make_unique<OpenStudioPianoInstrument>();p->coupledBody.store(.5f);return p;}},
+        {"Guitar 32 note-ons on two channels",[]{return std::make_unique<OpenStudioCleanGuitarInstrument>();}},
+        {"Drums 32 note-ons on two channels + separate outputs",[]{auto p=std::make_unique<OpenStudioDrumInstrument>();for(size_t piece=0;piece<8;++piece)p->pieceOutput[piece].store(static_cast<float>(piece+1));return p;}},
         {"Reverb Room to Shimmer switch with retained tail",[]{auto p=std::make_unique<OpenStudioReverb>(true);p->tailSpillover.store(1);p->decayTime.store(2);return p;}},
         {"Reverb 4-path IR / four outputs",[]{auto p=std::make_unique<OpenStudioReverb>(true);juce::AudioBuffer<float> ir(4,96000);ir.clear();for(int ch=0;ch<4;++ch)for(int i=ch;i<96000;i+=127)ir.setSample(ch,i,static_cast<float>(.03*std::exp(-i/20000.0)));const auto file=juce::File::getCurrentWorkingDirectory().getChildFile("output/performance-four-path-ir.wav");writeProbeWave(file,ir,48000);p->convolutionSpace.loadFile(file);auto* shape=new juce::DynamicObject();shape->setProperty("outputLayout",1);p->convolutionSpace.edit(juce::var(shape));p->algorithm.store(7);return p;}}
     };
@@ -31,6 +31,15 @@ inline juce::var measureFreeSuiteStress()
         const double prepareMs=juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks()-prepareStart)*1000;const auto bytesPrepared=privateBytes();
         const int iterations=name.startsWith("Eight parallel")?11250:1024;
         std::vector<double> times;times.reserve(static_cast<size_t>(iterations));int overruns=0;double peak=0;
+        std::vector<int> minimumVoices(processors.size(), std::numeric_limits<int>::max()), maximumVoices(processors.size(), -1);
+        const auto observedVoices=[](juce::AudioProcessor& processor)
+        {
+            if (auto* p=dynamic_cast<OpenStudioBasicSynthInstrument*>(&processor)) return p->getRenderingVoiceCountForRegression();
+            if (auto* p=dynamic_cast<OpenStudioPianoInstrument*>(&processor)) return p->getRenderingVoiceCountForRegression();
+            if (auto* p=dynamic_cast<OpenStudioCleanGuitarInstrument*>(&processor)) return p->getRenderingVoiceCountForRegression();
+            if (auto* p=dynamic_cast<OpenStudioDrumInstrument*>(&processor)) return p->getRenderingVoiceCountForRegression();
+            return -1;
+        };
         for(int frame=-128;frame<iterations;++frame)
         {
             for(size_t i=0;i<processors.size();++i)
@@ -38,17 +47,36 @@ inline juce::var measureFreeSuiteStress()
                 auto& buffer=audio[i];buffer.clear();midi[i].clear();
                 const bool tailOnly=name.contains("retained tail");
                 if(!tailOnly||frame<0)for(int sample=0;sample<block;++sample){const float value=.1f*std::sin(.0576f*static_cast<float>((frame+128)*block+sample));buffer.setSample(0,sample,value);buffer.setSample(1,sample,value);}
-                if(tailOnly&&frame==0)if(auto* reverb=dynamic_cast<OpenStudioReverb*>(processors[i].get()))reverb->selectAlgorithm(4);
+                if(tailOnly&&frame==0)if(auto* reverb=dynamic_cast<OpenStudioReverb*>(processors[i].get()))reverb->selectAlgorithm(static_cast<int>(OpenStudioReverb::Algorithm::Shimmer));
                 if(auto* eq=dynamic_cast<OpenStudioEQ*>(processors[i].get());eq&&eq->hasPreparedMIDIPrograms()&&(frame+128)%64==0)midi[i].addEvent(juce::MidiMessage::programChange(1,((frame+128)/64)%32),19);
-                if(processors[i]->acceptsMidi()&&(frame+128)%128==0){midi[i].addEvent(juce::MidiMessage::allSoundOff(1),0);for(int note=0;note<notes;++note)midi[i].addEvent(juce::MidiMessage::noteOn(1,36+note,.5f),0);}
+                if(processors[i]->acceptsMidi()&&(frame+128)%128==0)
+                {
+                    const int channels=(notes+15)/16;
+                    for(int channel=1;channel<=channels;++channel)midi[i].addEvent(juce::MidiMessage::allSoundOff(channel),0);
+                    for(int note=0;note<notes;++note)midi[i].addEvent(juce::MidiMessage::noteOn(1+note/16,36+note%16,.5f),0);
+                }
             }
             const auto started=juce::Time::getHighResolutionTicks();
             for(size_t i=0;i<processors.size();++i)processors[i]->processBlock(audio[i],midi[i]);
             const double elapsed=juce::Time::highResolutionTicksToSeconds(juce::Time::getHighResolutionTicks()-started)*1e6;
             if(frame>=0){times.push_back(elapsed);if(elapsed>block/rate*1e6)++overruns;}
+            if(frame>=0)for(size_t i=0;i<processors.size();++i)
+            {
+                const int voices=observedVoices(*processors[i]);
+                if(voices>=0){minimumVoices[i]=juce::jmin(minimumVoices[i],voices);maximumVoices[i]=juce::jmax(maximumVoices[i],voices);}
+            }
             for(const auto& buffer:audio)for(int ch=0;ch<buffer.getNumChannels();++ch)for(int sample=0;sample<block;++sample){const float value=buffer.getSample(ch,sample);finite=finite&&std::isfinite(value);peak=juce::jmax(peak,std::abs(static_cast<double>(value)));}
         }
         std::sort(times.begin(),times.end());auto* row=new juce::DynamicObject();row->setProperty("case",name);row->setProperty("rate",rate);row->setProperty("block",block);row->setProperty("instances",static_cast<int>(processors.size()));row->setProperty("notesPerInstrument",notes);
+        juce::Array<juce::var> voiceCounts;
+        for(size_t i=0;i<processors.size();++i)if(maximumVoices[i]>=0)
+        {
+            auto* voice=new juce::DynamicObject();voice->setProperty("processor",processors[i]->getName());
+            voice->setProperty("minimumRenderingVoices",minimumVoices[i]);voice->setProperty("maximumRenderingVoices",maximumVoices[i]);
+            voice->setProperty("noteOnRequests",notes);voice->setProperty("midiChannels",(notes+15)/16);voiceCounts.add(voice);
+            if(dynamic_cast<OpenStudioBasicSynthInstrument*>(processors[i].get()))finite=finite&&maximumVoices[i]==notes;
+        }
+        row->setProperty("observedVoiceCounts",voiceCounts);
         row->setProperty("iterations",iterations);row->setProperty("audioSeconds",iterations*block/rate);row->setProperty("prepareMs",prepareMs);row->setProperty("incrementalPreparedPrivateBytes",bytesPrepared-bytesBefore);row->setProperty("steadyPrivateGrowthBytes",privateBytes()-bytesPrepared);
         row->setProperty("medianUs",times[times.size()/2]);row->setProperty("p95Us",times[times.size()*95/100]);row->setProperty("p99Us",times[times.size()*99/100]);row->setProperty("maxUs",times.back());row->setProperty("deadlineOverruns",overruns);row->setProperty("peak",peak);rows.add(row);
     };

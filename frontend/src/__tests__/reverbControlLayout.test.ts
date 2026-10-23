@@ -10,6 +10,46 @@ function schema(type: number, values: Record<string, number> = {}): BuiltInPlugi
 const visibleIds = (layout: ReturnType<typeof reverbControlLayout>) => [layout.type === 7 ? "ir.shape" : layout.primary.id, ...layout.shape.map(control => control.id), ...layout.pages.flatMap(page => page.controls.map(control => control.id))];
 
 describe("approved Reverb native applicability", () => {
+  it("exposes the saved control behavior independently of Processing on every type", () => {
+    for (let type=0; type<41; ++type) {
+      const layout=reverbControlLayout(schema(type,{ reverbControlMode: 0, reverbReturnMode: 1 }));
+      const character=layout.pages.find(page=>page.id==="setup")!;
+      expect(character.controls[0].id).toBe("reverbReturnMode");
+      expect(character.controls.find(control=>control.id==="reverbControlMode")?.description).toContain("older saved states load Legacy");
+      expect(character.help).toContain("Wet/Dry");
+    }
+  });
+  it("shows pitch scheduling only for spectral Shimmer and broadband body only for Vowel", () => {
+    for (let type = 0; type < 41; ++type) {
+      const layout = reverbControlLayout(schema(type));
+      expect(visibleIds(layout).includes("shimmerScheduling")).toBe(type === 5);
+      expect(visibleIds(layout).includes("ambBody")).toBe(type === 20);
+    }
+    expect(visibleIds(reverbControlLayout(schema(5, { shimmerVoiceEngine: 0 })))).not.toContain("shimmerScheduling");
+    expect(reverbControlLayout(schema(5)).pages.find(page => page.id === "character")?.help).toContain("30 ms hop");
+    expect(reverbControlLayout(schema(20)).pages.find(page => page.id === "character")?.help).toContain("feedback tank are unchanged");
+  });
+  it("offers shared Return level in Setup on every type, including legacy and convolution engines", () => {
+    for (let type = 0; type < 41; ++type) {
+      const layout = reverbControlLayout(schema(type, { reverbReturnMode: 1, spaceEngine: 0, plateEngineExpanded: 0, springEngine: 0 }));
+      const character = layout.pages.find(page => page.id === "setup")!;
+      expect(character.controls[0].id).toBe("reverbReturnMode");
+      expect(character.controls[0].description).toContain("fixed wet-return trims");
+      expect(character.controls[0].description).toContain("Legacy Room/Hall/Chamber/Plate and custom IRs retain their levels");
+      expect(character.help).toContain("older states without this choice use Original");
+      expect(visibleIds(layout).filter(id => id === "reverbReturnMode")).toHaveLength(1);
+    }
+  });
+  it("offers Refined processing only where an active engine uses it", () => {
+    for (let type = 0; type < 41; ++type) {
+      const layout = reverbControlLayout(schema(type, { reverbCharacterMode: 0 }));
+      const applicable = type === 2 || type === 19 || (type >= 21 && type <= 35) || type >= 37;
+      expect(visibleIds(layout).includes("reverbCharacterMode")).toBe(applicable);
+    }
+    for (const plateEngineExpanded of [0, 2]) {
+      expect(visibleIds(reverbControlLayout(schema(2, { reverbCharacterMode: 0, plateEngineExpanded })))).not.toContain("reverbCharacterMode");
+    }
+  });
   it("uses the expanded native identity for all41 types, with timing and routing reachable", () => {
     for (let type = 0; type < 41; ++type) {
       const result = reverbControlLayout(schema(type));

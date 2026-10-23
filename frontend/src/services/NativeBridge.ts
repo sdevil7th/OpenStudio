@@ -24,6 +24,7 @@ import {
   namPreEqBandLabelsForProfile,
 } from "../utils/namInstrumentProfile";
 import { NAM_FULL_MODEL_SIZE } from "../utils/namRackPresetTransactions";
+import { NAM_FUZZ_VOICE_LABELS } from "../utils/namOctaverFuzz";
 import {
   NAM_RETIRED_PRE_EQ_BAND_STATE_KEYS,
   normalizeNAMEffectsDspVersion,
@@ -135,6 +136,7 @@ export interface PitchCorrectorData {
   midiOutput: boolean;      // MIDI output enabled
   midiChannel: number;      // 1-16
   noteEnables: boolean[];   // 12 booleans
+  signalPath?: number;     // 0: root-relative legacy masks, 1: absolute Custom mask
 }
 
 export interface PitchHistoryFrame {
@@ -434,7 +436,7 @@ export const NAM_RACK_STEREO_POLY_OCTAVER_LABEL = "Stereo Poly Octaver";
 const NAM_RACK_STEREO_POLY_OCTAVER_PRESENTATION = Object.freeze({
   label: NAM_RACK_STEREO_POLY_OCTAVER_LABEL,
   captionPrefix: "Polyphonic stereo",
-  hardwareTitle: "POLY OCTAVER",
+  hardwareTitle: "OCTAVER FUZZ",
   stereoPolyphonic: true,
 });
 
@@ -2032,6 +2034,35 @@ export type NAMTunerState =
   | "tracking"
   | "holding";
 
+/** Optional fields keep diagnostics compatible with older native backends. */
+export interface AudioTrackExecutionDiagnostics {
+  workers?: number;
+  mmcssRegisteredWorkers?: number;
+  mmcssPriorityWorkers?: number;
+  batches?: number;
+  completedBatches?: number;
+  completedLateBatches?: number;
+  hardDeadlineMisses?: number;
+  deadlineMisses?: number;
+  rejectedBatches?: number;
+  callbackJobs?: number;
+  workerJobs?: number;
+  cancelledJobs?: number;
+  workerWakeups?: number;
+  workerSpinBatches?: number;
+  workerEventSignals?: number;
+  workerSpinMicroseconds?: number;
+  recoveryGraceMicroseconds?: number;
+  wakeStrategy?: string;
+  parallelTrackBlocks?: number;
+  rejectedTrackJobs?: number;
+  quarantinedBlocks?: number;
+  physicalCores?: number;
+  addedBufferingSamples?: number;
+  /** Lifetime callback counter at the most recent failed or skipped track batch. */
+  lastFailureCallbackCounter?: number;
+}
+
 export interface AudioDebugSnapshot {
   transportPlaying: boolean;
   transportRecording: boolean;
@@ -2098,6 +2129,7 @@ export interface AudioDebugSnapshot {
   lastAudioCallbackDeadlineMissProcessMs?: number;
   lastAudioCallbackDeadlineMissWhileRecording?: boolean;
   audioDeviceXRunCount?: number;
+  trackExecution?: AudioTrackExecutionDiagnostics;
   audioCallbackTrackBufferResizeCount?: number;
   audioCallbackPitchScrubBufferResizeCount?: number;
   audioCallbackSidechainBufferResizeCount?: number;
@@ -2622,6 +2654,7 @@ declare global {
           sourcePresetName: string,
           targetPresetName: string,
         ) => Promise<boolean>;
+        copyNAMRackPresetWithInstrumentProfile?: (sourcePresetName: string, targetPresetName: string, profile: 0 | 1) => Promise<boolean>;
         deleteBuiltInFXPreset?: (
           pluginName: string,
           presetName: string,
@@ -2676,6 +2709,7 @@ declare global {
           maxVersions?: number,
           documentId?: string,
         ) => Promise<boolean>;
+        saveJsonDocumentToFile?: (filePath: string, jsonContent: string) => Promise<boolean>;
         projectRecovery?: (action: string, id?: string) => Promise<unknown>;
         workRecovery?: (action: string, id?: string, payload?: unknown) => Promise<unknown>;
         loadProjectFromFile?: (filePath: string) => Promise<string>;
@@ -5457,6 +5491,24 @@ class NativeBridge {
     return true;
   }
 
+  /** Creates a separate library copy; never loads it or changes the active rack. */
+  async copyNAMRackPresetWithInstrumentProfile(
+    sourcePresetName: string,
+    targetPresetName: string,
+    profile: 0 | 1,
+  ): Promise<boolean> {
+    if (!sourcePresetName.trim() || !targetPresetName.trim()
+      || sourcePresetName.localeCompare(targetPresetName, undefined, { sensitivity: "base" }) === 0
+      || (profile !== 0 && profile !== 1)) return false;
+    if (this.isNative) {
+      const copy = window.__JUCE__?.backend.copyNAMRackPresetWithInstrumentProfile;
+      return copy ? await copy(sourcePresetName, targetPresetName, profile) : false;
+    }
+    // A browser cannot rewrite the native binary preset format. UI fixtures may
+    // provide an explicit in-memory library; never claim an actual disk save.
+    return false;
+  }
+
   // Lua Scripting (OpenStudioScript)
   async runScript(
     scriptPath: string,
@@ -6258,6 +6310,22 @@ class NativeBridge {
     console.log(
       `[NativeBridge] Mock saveProjectToFile: ${filePath} (${jsonContent.length} bytes)`,
     );
+    return true;
+  }
+
+  /** Atomically save preset/metadata JSON without applying the project schema. */
+  async saveJsonDocumentToFile(filePath: string, jsonContent: string): Promise<boolean> {
+    if (this.isNative) {
+      const save = window.__JUCE__?.backend.saveJsonDocumentToFile;
+      return save ? await save(filePath, jsonContent) : false;
+    }
+    try {
+      const document: unknown = JSON.parse(jsonContent);
+      if (document === null || typeof document !== "object") return false;
+    } catch {
+      return false;
+    }
+    console.log(`[NativeBridge] Mock saveJsonDocumentToFile: ${filePath}`);
     return true;
   }
 
@@ -7565,6 +7633,7 @@ class NativeBridge {
         reverbVoice: [{ value: 0, label: "Studio" }, { value: 1, label: "Plate" }, { value: 2, label: "Hall" }, { value: 3, label: "Room" }],
         chaosMode: [{ value: 0, label: "Heavy" }, { value: 1, label: "Extreme" }, { value: 2, label: "Crunch" }],
         compressorSidechainHPF: [{ value: 0, label: "Off" }, { value: 1, label: "80 Hz" }, { value: 2, label: "240 Hz" }],
+        fuzzVoice: NAM_FUZZ_VOICE_LABELS.map((label, value) => ({ value, label })),
       };
       const param = (
         id: string,
@@ -7620,6 +7689,12 @@ class NativeBridge {
           param("octaverDownMix", "Oct -1", 0.32, 0, 1, "", "pitch"),
           param("octaverUpMix", "Oct +1", 0.18, 0, 1, "", "pitch"),
           param("octaverDirectMix", "Direct", 1, 0, 1.25, "", "pitch"),
+          param("fuzzEnabled", "Fuzz", 0, 0, 1, "", "pitch", "toggle"),
+          param("fuzzDrive", "Fuzz Drive", 0.5, 0, 1, "", "pitch"),
+          param("fuzzTone", "Fuzz Tone", 0.5, 0, 1, "", "pitch"),
+          param("fuzzLevelDb", "Fuzz Level", 0, -18, 12, "dB", "pitch"),
+          param("fuzzVoice", "Fuzz Voice", 0, 0, 2, "", "pitch", "enum"),
+          param("fuzzCleanMix", "Fuzz Clean Blend", 0, 0, 1, "", "pitch"),
           param("preEqEnabled", "PRE EQ", 0, 0, 1, "", "preEq", "toggle"),
           param("preEq120Db", "120 Hz", 0, -12, 12, "dB", "preEq"),
           param("preEq250Db", "250 Hz", 0, -12, 12, "dB", "preEq"),

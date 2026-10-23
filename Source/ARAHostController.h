@@ -11,6 +11,7 @@
 
 #include <JuceHeader.h>
 #include "ARADebug.h"
+#include <cstdint>
 
 #if OpenStudio_HAS_ARA
 #include <ARA_API/ARAInterface.h>
@@ -119,6 +120,7 @@ public:
 
 
 private:
+    friend class RuntimeSafetyRegression;
     bool araActive = false;
     juce::AudioPluginInstance* araProcessor = nullptr;
     double currentSampleRate = 44100.0;
@@ -177,7 +179,10 @@ private:
     class OpenStudioContentAccessController final : public ARA::Host::ContentAccessControllerInterface
     {
     public:
-        using Converter = ARAHostModel::ConversionFunctions<ARA::ARAContentType, ARA::ARAContentReaderHostRef>;
+        // JUCE copies sizeof(HostRef) bytes; the SDK content enum is only
+        // 32 bits, so widen it before converting to an opaque reader handle.
+        using Converter = ARAHostModel::ConversionFunctions<std::uintptr_t, ARA::ARAContentReaderHostRef>;
+        static_assert(sizeof(std::uintptr_t) == sizeof(ARA::ARAContentReaderHostRef));
 
         bool isMusicalContextContentAvailable (ARA::ARAMusicalContextHostRef, ARA::ARAContentType type) noexcept override;
         ARA::ARAContentGrade getMusicalContextContentGrade (ARA::ARAMusicalContextHostRef, ARA::ARAContentType) noexcept override;
