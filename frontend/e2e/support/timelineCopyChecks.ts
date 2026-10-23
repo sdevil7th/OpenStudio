@@ -3,6 +3,7 @@ import type Konva from "konva";
 import type { AudioClip, MIDIClip, Track, DAWState, createDefaultTrack, useDAWStore } from "../../src/store/useDAWStore";
 import type { commandManager } from "../../src/store/commands";
 import type { BrowserRegressionReport } from "./interactionFixtureTypes";
+import { primaryModifier } from "./platformInput";
 
 interface SeedOptions {
   multi?: boolean; snap?: boolean; snapType?: DAWState["snapType"]; sameStart?: boolean; ruler?: boolean;
@@ -23,6 +24,7 @@ interface TimelineCopyQa {
 declare global { interface Window { __clipPointerQA: TimelineCopyQa } }
 
 export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressionReport> {
+  const copyModifier = await primaryModifier(page);
   const checks: string[] = [];
   const pageErrors: string[] = [];
   const onPageError = (error: Error) => pageErrors.push(error.message);
@@ -172,7 +174,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
     await paint();
     const before = await read();
     const origin = await point();
-    await page.keyboard.down('Control');
+    await page.keyboard.down(copyModifier);
     await page.mouse.move(origin.x, origin.y);
     await page.mouse.down();
     await page.mouse.move(origin.x + 140, origin.y, { steps: 5 });
@@ -187,7 +189,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
     const previewStarts = previews.map(preview => preview.rects[0].x).sort((a, b) => a - b);
     assert(Math.abs(previewStarts[1] - previewStarts[0] - 206) < 0.1, `${kind}: preview timing spacing must remain 206px ${previewStarts}`);
     await page.mouse.up();
-    await page.keyboard.up('Control');
+    await page.keyboard.up(copyModifier);
     await paint();
     const after = await read();
     const originals = after.tracks.flatMap(track => [...track.clips, ...track.midiClips]).filter(clip => ['clip', 'other'].includes(clip.id));
@@ -205,14 +207,14 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
       await seed(kind, { multi: true, snap: false });
       const beforeCancel = await read();
       const start = await point();
-      await page.keyboard.down('Control');
+      await page.keyboard.down(copyModifier);
       await page.mouse.move(start.x, start.y);
       await page.mouse.down();
       await page.mouse.move(start.x + 140, start.y, { steps: 4 });
       if (cancel === 'Escape') await page.keyboard.press('Escape');
       else await page.evaluate(event => window.dispatchEvent(new Event(event)), cancel);
       await page.mouse.up();
-      await page.keyboard.up('Control');
+      await page.keyboard.up(copyModifier);
       await paint();
       const afterCancel = await read();
       assert(JSON.stringify(afterCancel.tracks) === JSON.stringify(beforeCancel.tracks) && afterCancel.undo === 0 && (await previewGeometry()).length === 0, `${kind}: ${cancel} must clear every preview without copies/history`);
@@ -222,7 +224,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   await seed('audio', { multi: true, snap: false, hiddenBefore: true });
   const beforeCollapsed = await read();
   const collapsedOrigin = await point(70, 1);
-  await page.keyboard.down('Control');
+  await page.keyboard.down(copyModifier);
   await page.mouse.move(collapsedOrigin.x, collapsedOrigin.y);
   await page.mouse.down();
   await page.mouse.move(collapsedOrigin.x + 140, collapsedOrigin.y, { steps: 5 });
@@ -230,7 +232,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   const collapsedPreviews = await previewGeometry();
   assert(collapsedPreviews.length === 2, 'collapsed-folder rows must retain both clip-copy previews');
   await page.mouse.up();
-  await page.keyboard.up('Control');
+  await page.keyboard.up(copyModifier);
   await paint();
   const afterCollapsed = await read();
   assert(afterCollapsed.tracks.find(track => track.id === 'hidden')?.clips.length === 0,
@@ -245,7 +247,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   await seed('audio', { multi: true, snap: false, mixedDestinations: true });
   const beforeMixed = await read();
   const mixedOrigin = await point();
-  await page.keyboard.down('Control');
+  await page.keyboard.down(copyModifier);
   await page.mouse.move(mixedOrigin.x, mixedOrigin.y);
   await page.mouse.down();
   await page.mouse.move(mixedOrigin.x + 140, mixedOrigin.y + 100, { steps: 5 });
@@ -254,7 +256,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   assert(mixedPreviews.length === 2 && mixedPreviews.every(preview => preview.rects[0].y >= 400),
     'mixed group must preview its real generated rows, not incompatible existing destinations');
   await page.mouse.up();
-  await page.keyboard.up('Control');
+  await page.keyboard.up(copyModifier);
   await paint();
   const afterMixed = await read();
   assert(afterMixed.tracks.length === 6 && afterMixed.tracks[4].clips.length === 1 && afterMixed.tracks[5].midiClips.length === 1,
@@ -269,9 +271,9 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   // Keep the simple gesture path covered independently of selected-group state.
   await seed('audio', { snap: false, hiddenBefore: true });
   const single = await point(70, 1);
-  await page.keyboard.down('Control');
+  await page.keyboard.down(copyModifier);
   await gesture(single, 80, 0);
-  await page.keyboard.up('Control');
+  await page.keyboard.up(copyModifier);
   await paint();
   assert((await read()).tracks.find(track => track.id === 'source')?.clips.length === 2,
     'single copies also resolve the actual visible source ID after a collapsed folder');
@@ -292,14 +294,14 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   await paint();
   const beforeHiddenSelection = await read();
   const hiddenSelectionOrigin = await point(70, 1);
-  await page.keyboard.down('Control');
+  await page.keyboard.down(copyModifier);
   await page.mouse.move(hiddenSelectionOrigin.x, hiddenSelectionOrigin.y);
   await page.mouse.down();
   await page.mouse.move(hiddenSelectionOrigin.x + 80, hiddenSelectionOrigin.y, { steps: 5 });
   await paint();
   assert((await previewGeometry()).length === 2, 'selected hidden sources must render safely alongside the visible anchor');
   await page.mouse.up();
-  await page.keyboard.up('Control');
+  await page.keyboard.up(copyModifier);
   await paint();
   const hiddenCopies = await read();
   assert(hiddenCopies.tracks.length === 8 && hiddenCopies.selected.length === 2 && hiddenCopies.undo === 1,
@@ -312,9 +314,9 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   const beforePending = await read();
   await page.evaluate(() => { window.__clipPointerQA.holdNextSync = true; });
   const pendingOrigin = await point();
-  await page.keyboard.down('Control');
+  await page.keyboard.down(copyModifier);
   await gesture(pendingOrigin, 140, 100);
-  await page.keyboard.up('Control');
+  await page.keyboard.up(copyModifier);
   await page.waitForFunction(() => window.__clipPointerQA.releaseSync !== null);
   const pendingIds = (await read()).tracks.slice(4).map(track => track.id);
   assert(pendingIds.length === 2, 'pending copy must have generated both destination rows');
@@ -338,7 +340,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
   } finally {
     await page.evaluate(() => window.__clipPointerQA?.releaseSync?.());
     await page.mouse.up();
-    await page.keyboard.up('Control');
+    await page.keyboard.up(copyModifier);
     page.off('pageerror', onPageError);
   }
 }

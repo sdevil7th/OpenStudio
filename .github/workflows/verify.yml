@@ -58,6 +58,7 @@ jobs:
           tests.test_reverb_qa_tools
           tests.test_nam_fuzz_refinement
           tests.test_desktop_qualification
+          tests.test_free_suite_ui_regression
 
   verify-ai-policy:
     name: AI execution policy (${{ matrix.os }})
@@ -227,7 +228,7 @@ jobs:
 
       - name: Test Windows startup qualification and process cleanup fixtures
         shell: pwsh
-        run: python -B -m unittest tests.test_desktop_qualification -v
+        run: python -B -m unittest tests.test_desktop_qualification tests.test_free_suite_ui_regression -v
 
       - name: Test Windows signing safeguards
         shell: pwsh
@@ -568,6 +569,14 @@ jobs:
       BUILD_DIR: build-verify-macos
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Prepare system FFmpeg for audio conversion qualification
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:

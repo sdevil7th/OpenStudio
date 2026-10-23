@@ -41,6 +41,14 @@ function Invoke-Fixture([string]$Name, [string]$Arguments, [bool]$ExpectedCrash 
         # 0xE0425354 is the deliberate noncontinuable fixture exception.
         # A different crash or an ASan abort is a failure, not a successful test.
         if (($ExpectedCrash -and $process.ExitCode -ne -532524204) -or (-not $ExpectedCrash -and $process.ExitCode -ne $ExpectedExit)) {
+            $resultPath = Join-Path $directory 'result.json'
+            if (Test-Path -LiteralPath $resultPath) {
+                try {
+                    $failed = @((Get-Content -Raw -Encoding UTF8 -LiteralPath $resultPath | ConvertFrom-Json).checks |
+                        Where-Object { $_.status -eq 'fail' } | Select-Object -First 20 -ExpandProperty name)
+                    if ($failed.Count) { Write-Host ('Failed native checks: ' + ($failed -join ', ')) }
+                } catch { Write-Warning "Could not read native failure details: $($_.Exception.Message)" }
+            }
             throw "Unexpected exit code $($process.ExitCode) for $Name; see $directory"
         }
         $results.Add(@{ fixture = $Name; exitCode = $process.ExitCode; status = 'pass' })

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { nativeBridge as bridgeType } from "../src/services/NativeBridge";
+import { primaryModifier } from "./support/platformInput";
 
 const address = { trackId: "nam-fuzz-workflow-qa", chain: "track", fxIndex: 0 } as const;
 const url = `/?${new URLSearchParams({ window: "pluginEditor", platform: "windows", windowChrome: "native", mockPlugin: "nam", sessionId: JSON.stringify({ address, title: "OpenStudio NAM Rack", fallbackName: "OpenStudio NAM Rack" }), namView: "rack", namFocus: "gate", namSection: "pre" })}`;
@@ -22,6 +23,7 @@ async function values(page: Page) {
 
 test("Fuzz Clean pedal knob supports exact entry, cancel, keyboard, reset and Undo", async ({ page }) => {
   await openRack(page);
+  const undoShortcut = `${await primaryModifier(page)}+z`;
   const knob = page.getByRole("slider", { name: "Fuzz Clean blend", exact: true });
   await expect(knob).toHaveAccessibleDescription(/Fuzz is bypassed/);
   await expect(knob).toHaveAccessibleDescription(/PRE EQ, Drive, Distortion/);
@@ -43,11 +45,11 @@ test("Fuzz Clean pedal knob supports exact entry, cancel, keyboard, reset and Un
   await expect(knob).toHaveAttribute("aria-valuenow", "0.386");
   await knob.dblclick();
   await expect(knob).toHaveAttribute("aria-valuenow", "0");
-  await page.keyboard.press("Control+z");
+  await page.keyboard.press(undoShortcut);
   await expect(knob).toHaveAttribute("aria-valuenow", "0.386");
-  await page.keyboard.press("Control+z");
+  await page.keyboard.press(undoShortcut);
   await expect(knob).toHaveAttribute("aria-valuenow", "0.384");
-  await page.keyboard.press("Control+z");
+  await page.keyboard.press(undoShortcut);
   await expect(knob).toHaveAttribute("aria-valuenow", "0");
 });
 

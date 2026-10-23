@@ -30,6 +30,16 @@ platform acceptance gates:
   contracts on their Release executables; Linux's feature qualification already
   runs those contracts. These workflow definitions still require an actual CI run.
 
+The macOS conversion fixtures require system FFmpeg on `PATH`; CI installs it
+when absent and prints its version before building. This is a test prerequisite,
+not bundled-runtime qualification. Native reports include an explicit FFmpeg
+availability check and conversion failure diagnostics. The Windows free-suite
+launcher uses the first npm application on `PATH` and propagates its native exit
+code; `tests.test_free_suite_ui_regression` covers multiple installations,
+failure propagation and environment restoration. Input fixtures choose the
+primary modifier from the browser's platform identity (Command on macOS), while
+asserting shortcut ownership separately for top-row and numpad keys.
+
 Before the SSH Linux qualification below, the local candidate passed 2,989
 frontend unit tests, 70 selected Chromium
 browser cases, 185 free-plugin regression groups, 264 render/export checks,
@@ -1555,6 +1565,14 @@ The following remain `not_asserted` until the user auditions the exact artifact:
 - absence of real-device crackle across interfaces and drivers.
 
 ## TONE3000 first-user acceptance
+
+`tools/tone-library-layout-browser-regression.js`, also run by
+`frontend/e2e/ui-audit-regressions.spec.ts`, checks compact capture feedback after
+keyboard collapse and after collapse/request completion in the same browser
+task. Native `<details>` owns its open state; asynchronous capture feedback must
+reveal the panel without a deferred toggle event hiding it again. The same
+fixture retains responsive geometry, keyboard access and same-pack reopening
+checks. Its catalog and account responses are mocked.
 
 Run this with a clean OS user or after removing only OpenStudio's saved
 TONE3000 session:

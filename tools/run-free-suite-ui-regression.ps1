@@ -22,13 +22,17 @@ try {
     try {
         # Windows PowerShell 5 wraps redirected native stderr in ErrorRecords.
         # Keep warnings/logs visible and judge the test process by its exit code.
-        $npmPath = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+        # setup-node and the system installation may both be on PATH. Preserve
+        # PATH priority and invoke one executable, not an array of command paths.
+        $npmPath = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         $previousErrorAction = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $LASTEXITCODE = $null
+            # Native commands update the global automatic variable even when
+            # this wrapper is invoked from another script (as it is in CI).
+            $global:LASTEXITCODE = $null
             & $npmPath exec -- playwright test e2e/free-suite-design03.spec.ts e2e/free-suite-effects.spec.ts e2e/free-suite-precision.spec.ts e2e/release-review-ui.spec.ts --project=chromium
-            $browserExitCode = $LASTEXITCODE
+            $browserExitCode = $global:LASTEXITCODE
         }
         finally { $ErrorActionPreference = $previousErrorAction }
         if ($null -eq $browserExitCode -or $browserExitCode -ne 0) { throw "Free-suite browser regression failed (exit $browserExitCode). See output/playwright/test-results." }

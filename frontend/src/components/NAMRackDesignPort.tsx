@@ -6341,13 +6341,27 @@ function SourceFlowSurface({
   config: NAMSourceFlowDesignConfig;
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
-  const [compactDetailsOpen, setCompactDetailsOpen] = useState(false);
+  // Let the native details element own manual toggles. Its queued toggle event
+  // must not overwrite a reveal requested by an async capture result.
+  const compactDetailsRef = useRef<HTMLDetailsElement | null>(null);
+  const compactDetailsRevealPending = useRef(false);
+  const revealCompactDetails = useCallback(() => {
+    if (compactDetailsRef.current) compactDetailsRef.current.open = true;
+    else compactDetailsRevealPending.current = true;
+  }, []);
+  const attachCompactDetails = useCallback((element: HTMLDetailsElement | null) => {
+    compactDetailsRef.current = element;
+    if (element && compactDetailsRevealPending.current) {
+      element.open = true;
+      compactDetailsRevealPending.current = false;
+    }
+  }, []);
   const emit = (
     action: NAMSourceFlowDesignActionId,
     value = "",
     rowId = "",
   ) => {
-    if (action === "select-row") setCompactDetailsOpen(true);
+    if (action === "select-row") revealCompactDetails();
     onAction({
       type: "nam-source-flow-design-port",
       instanceId: "native-source-flow",
@@ -6360,8 +6374,8 @@ function SourceFlowSurface({
   const appendSentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (config.captures?.items.length || config.captures?.busy || config.captures?.error)
-      setCompactDetailsOpen(true);
-  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error]);
+      revealCompactDetails();
+  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error, revealCompactDetails]);
   const actionStyle: NativeStyle = {
     "--tone-action-count": Math.max(1, config.actions.length),
     "--tone-action-width": `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
@@ -6654,8 +6668,7 @@ function SourceFlowSurface({
           {config.selectedAvailable ? (
             <details
               className="tone-compact-selection"
-              open={compactDetailsOpen}
-              onToggle={(event) => setCompactDetailsOpen(event.currentTarget.open)}
+              ref={attachCompactDetails}
             >
               <summary className="tone-compact-selection-summary" aria-label={`Show selected ${sourceResourceLabel} details and actions`}>
                 <span className="tone-compact-selection-copy">

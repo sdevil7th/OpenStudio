@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { createDefaultTrack, useDAWStore } from "../src/store/useDAWStore";
 import type { nativeBridge } from "../src/services/NativeBridge";
 import type {} from "./support/interactionFixtureTypes";
+import { primaryModifier } from "./support/platformInput";
 
 interface PeakRequest {
   trackId: string;
@@ -301,18 +302,20 @@ for (const [surface, selector] of [
     const before = await geometry(page);
     const anchorX = 350;
     const panPixels = 96;
+    const zoomModifier = await primaryModifier(page);
     // One synchronous browser task guarantees no animation frame can separate
     // these packets; real wheel handlers still resolve modifiers and route them.
-    const prevented = await page.locator(selector).first().evaluate((element, { anchorX, panPixels }) => {
+    const prevented = await page.locator(selector).first().evaluate((element, { anchorX, panPixels, zoomModifier }) => {
       const bounds = element.getBoundingClientRect();
       const common = { bubbles: true, cancelable: true, deltaMode: 0,
         clientX: bounds.left + anchorX, clientY: bounds.top + 18 };
-      const zoom = new WheelEvent("wheel", { ...common, deltaY: -80, ctrlKey: true });
+      const zoom = new WheelEvent("wheel", { ...common, deltaY: -80,
+        ctrlKey: zoomModifier === "Control", metaKey: zoomModifier === "Meta" });
       const pan = new WheelEvent("wheel", { ...common, deltaX: panPixels });
       element.dispatchEvent(zoom);
       element.dispatchEvent(pan);
       return { zoom: zoom.defaultPrevented, pan: pan.defaultPrevented };
-    }, { anchorX, panPixels });
+    }, { anchorX, panPixels, zoomModifier });
     await paint(page);
     const after = await geometry(page);
     expect(prevented).toEqual({ zoom: true, pan: true });
