@@ -722,7 +722,14 @@ jobs:
 
       - name: Install system dependencies
         shell: bash
+        timeout-minutes: 15
         run: |
+          # The hosted image prefers Azure's mirror, which has stalled package
+          # downloads in this job. Use its existing official HTTPS fallbacks.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+              | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           bash ./tools/setup-linux-prereqs.sh
           sudo apt-get install -y xvfb xauth openbox
 

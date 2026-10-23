@@ -181,26 +181,47 @@ void runAudioFileConversionRegression(const juce::File& root, const std::functio
     check("converter_wav_aiff_flac_are_finalized_and_readable", formatsPass);
     options.format = "wav";
     const auto protectedOutput = directory.getChildFile("preserve.wav");
-    protectedOutput.replaceWithText("existing destination");
     check("converter_pre_cancel_preserves_existing_destination",
-        AudioFileConversion::convert(stereo, protectedOutput, options, [] { return false; }).failed()
+        protectedOutput.replaceWithText("existing destination")
+        && AudioFileConversion::convert(stereo, protectedOutput, options, [] { return false; }).failed()
         && protectedOutput.loadFileAsString() == "existing destination");
     int cancellationChecks = 0;
     check("converter_running_child_cancel_preserves_existing_destination",
-        AudioFileConversion::convert(stereo, protectedOutput, options, [&] { return ++cancellationChecks < 3; }).failed()
+        protectedOutput.replaceWithText("existing destination")
+        && AudioFileConversion::convert(stereo, protectedOutput, options, [&] { return ++cancellationChecks < 3; }).failed()
         && protectedOutput.loadFileAsString() == "existing destination");
     options.timeoutMs = 1;
+    const auto timeoutDirectory = directory.getChildFile("timeout");
+    const auto timeoutOutput = timeoutDirectory.getChildFile("preserve.wav");
+    const bool timeoutReady = timeoutDirectory.createDirectory().wasOk()
+        && timeoutOutput.replaceWithText("existing destination");
+    bool delayedAfterStaging = false;
+    const auto allowConversion = [&] {
+        // Keep a real FFmpeg child and the strict deadline. If it finishes too
+        // quickly to hit a polling timeout, expire the budget at the observable
+        // staging checkpoint. This needs neither a callback-count assumption
+        // nor a production clock/process override.
+        if (!delayedAfterStaging && timeoutDirectory.getNumberOfChildFiles(juce::File::findFiles) > 1)
+        {
+            delayedAfterStaging = true;
+            juce::Thread::sleep(10);
+        }
+        return true;
+    };
+    const auto timeoutResult = AudioFileConversion::convert(stereo, timeoutOutput, options, allowConversion);
     check("converter_timeout_preserves_existing_destination",
-        AudioFileConversion::convert(stereo, protectedOutput, options, alive).failed()
-        && protectedOutput.loadFileAsString() == "existing destination");
+        timeoutReady && timeoutResult.failed() && timeoutOutput.loadFileAsString() == "existing destination"
+        && timeoutDirectory.getNumberOfChildFiles(juce::File::findFiles) == 1);
     options.timeoutMs = 30000;
     options.sampleRate = -1;
     check("converter_invalid_rate_rejected_before_publication",
-        AudioFileConversion::convert(stereo, protectedOutput, options, alive).failed()
+        protectedOutput.replaceWithText("existing destination")
+        && AudioFileConversion::convert(stereo, protectedOutput, options, alive).failed()
         && protectedOutput.loadFileAsString() == "existing destination");
     options.sampleRate = 48000;
     check("converter_unwritable_destination_is_reported",
         AudioFileConversion::convert(stereo, directory, options, alive).failed());
     check("converter_invalid_input_preserves_destination",
-        AudioFileConversion::convert(protectedOutput, same, options, alive).failed() && openFixture(same) != nullptr);
+        protectedOutput.replaceWithText("existing destination")
+        && AudioFileConversion::convert(protectedOutput, same, options, alive).failed() && openFixture(same) != nullptr);
 }

@@ -39,6 +39,14 @@ code; `tests.test_free_suite_ui_regression` covers multiple installations,
 failure propagation and environment restoration. Input fixtures choose the
 primary modifier from the browser's platform identity (Command on macOS), while
 asserting shortcut ownership separately for top-row and numpad keys.
+Linux native CI prefers the hosted image's official Ubuntu HTTPS archive
+fallbacks after observed Azure-mirror download stalls. Its dependency step has
+a 15-minute backstop and still fails on installation errors; the developer
+prerequisite script does not change the machine's mirror configuration.
+Conversion deadline qualification keeps a real FFmpeg child, checks that a
+timed-out operation preserves the destination and removes its staging file,
+and resets each negative fixture independently. The deadline is checked after
+process exit and immediately before publication as well as during polling.
 
 Before the SSH Linux qualification below, the local candidate passed 2,989
 frontend unit tests, 70 selected Chromium
