@@ -1,5 +1,6 @@
 """Exercise the Windows qualification wrapper without launching native audio or browsers."""
 
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,17 @@ WRAPPER = Path(__file__).resolve().parents[1] / "tools" / "run-free-suite-ui-reg
 
 @unittest.skipUnless(os.name == "nt" and POWERSHELL, "Windows PowerShell is required")
 class FreeSuiteUIWrapper(unittest.TestCase):
-    def run_fixture(self, *, browser_exit=0, omit_schema=False):
+    def run_fixture(self, *, browser_exit=0, omit_schema=False, use_short_root=False):
         with tempfile.TemporaryDirectory(prefix="free suite wrapper ") as directory:
             root = Path(directory)
+            if use_short_root:
+                # Windows may expose TEMP through an 8.3 alias (RUNNER~1 in CI).
+                # Volumes with short names disabled return the original path.
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = ctypes.windll.kernel32.GetShortPathNameW(directory, buffer, len(buffer))
+                self.assertGreater(length, 0)
+                self.assertLess(length, len(buffer))
+                root = Path(buffer.value)
             tools = root / "tools"
             tools.mkdir()
             (root / "frontend").mkdir()
@@ -81,9 +90,9 @@ catch { $failure = $_.Exception.Message }
             self.assertEqual(result["port"], "original-port")
             invocation = json.loads(invocation_path.read_text()) if invocation_path.exists() else None
             if invocation:
-                self.assertEqual(Path(invocation["candidate"]), candidates[0])
-                self.assertEqual(Path(invocation["cwd"]), root / "frontend")
-                self.assertEqual(Path(invocation["schema"]), root / "output/review/free-suite-ui/editor-schemas.json")
+                self.assertTrue(Path(invocation["candidate"]).samefile(candidates[0]))
+                self.assertTrue(Path(invocation["cwd"]).samefile(root / "frontend"))
+                self.assertTrue(Path(invocation["schema"]).samefile(root / "output/review/free-suite-ui/editor-schemas.json"))
                 self.assertEqual(invocation["port"], "5196")
                 self.assertEqual(invocation["arguments"], [
                     "exec", "--", "playwright", "test", "e2e/free-suite-design03.spec.ts",
@@ -100,6 +109,11 @@ catch { $failure = $_.Exception.Message }
     def test_browser_failure_is_not_hidden_and_context_is_restored(self):
         result, invocation = self.run_fixture(browser_exit=17)
         self.assertIn("Free-suite browser regression failed (exit 17)", result["failure"])
+        self.assertIsNotNone(invocation)
+
+    def test_short_directory_alias_preserves_filesystem_identity(self):
+        result, invocation = self.run_fixture(use_short_root=True)
+        self.assertIsNone(result["failure"])
         self.assertIsNotNone(invocation)
 
     def test_missing_native_schema_prevents_browser_launch(self):
