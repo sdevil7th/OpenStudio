@@ -66,7 +66,7 @@ OpenStudio is a desktop DAW built with a JUCE C++ audio backend and a React/Type
 
 OpenStudio production releases are distributed as platform-specific install packages.
 
-1. Download the latest Windows installer, macOS package, or Linux AppImage from the official download page.
+1. Download the Windows installer, macOS package, or Linux package qualified for your distribution from the official download page.
 2. Run the installer and complete the setup steps for your platform.
 3. Launch OpenStudio from the Start menu, Applications folder, or desktop shortcut.
 
@@ -84,19 +84,24 @@ If startup reports that the embedded browser is unavailable, **Repair Dependenci
 
 **macOS:** OpenStudio v1 ships as an unsigned DMG. Drag `OpenStudio.app` to `Applications`. If macOS blocks launch, right-click the app, choose **Open**, and if needed allow it under **System Settings > Privacy & Security**.
 
-**Linux:** mark the downloaded AppImage executable and launch it from your
-desktop or terminal. FFmpeg-backed operations use an optional system `ffmpeg`
-on `PATH`; the AppImage does not bundle an arbitrary host FFmpeg binary.
-Launch the AppImage file itself; copying only its internal `OpenStudio` executable
-leaves out the `webui`, effects, and script assets it needs to start.
-
-**Linux native installers (development candidate, not yet publicly released):**
-Ubuntu, Debian and Mint use `.deb`; Fedora uses `.rpm`. Open the matching package
+**Linux native packages:** Ubuntu, Debian and Mint use `.deb`; Fedora uses
+`.rpm` when a qualified package is supplied. The public v0.1.05 release includes
+an Ubuntu 22.04 amd64 DEB and an AppImage, with no RPM asset. Use the package
+qualified for your distribution/version; DEB is not an Arch-native installer.
+Open the matching package
 with the desktop software installer, approve normal administrator authentication,
 then launch **OpenStudio** from the application menu. The package manager installs
 runtime dependencies, including FFmpeg and credential-storage tools. Development
 headers are not required. Native-package updates use the matching package again;
 **Help > Check for Updates...** links to the download page. Do not run the app as root.
+
+**Linux AppImage:** when using the portable download, mark it executable and
+launch the AppImage file itself. Copying only its internal `OpenStudio`
+executable leaves out the `webui`, effects and script assets it needs to start.
+FFmpeg-backed operations use an optional system `ffmpeg` on `PATH`; the AppImage
+does not bundle an arbitrary host FFmpeg binary. AppImage availability does not
+establish compatibility with every distribution. See the
+[package qualification evidence](linux-installation-and-qualification-plan.md#published-package-recheck-2026-10-22-issue-23).
 
 If double-clicking a `.deb` opens **Archive Manager**, close that window; do not
 extract the package. In Files, right-click the downloaded `.deb`, choose **Open
@@ -145,7 +150,8 @@ When you first open OpenStudio, you should configure your audio settings:
 5. Choose a **Sample Rate** (44100 Hz or 48000 Hz are standard).
 6. Set a **Buffer Size** (lower values reduce latency but increase CPU load; 256 or 512 samples is a good starting point).
 7. Click **Apply** to activate the settings and inspect the accepted values without
-   closing the dialog, or **OK** to apply and close it.
+   closing the dialog, or **OK** to apply and close it when the requested values
+   are accepted.
 
 In the development checkout, changing the audio system, WASAPI **Mode**, or
 input/output device refreshes the reported choices and selects the new device's
@@ -153,6 +159,38 @@ reported default rate and preferred buffer size in the open dialog; adjustments 
 or buffer also revalidates the pending selection. **Cancel**, Escape, and the
 close button discard unapplied changes; selecting an audio system no longer
 activates it immediately.
+
+The October 23 development checkout labels the dialog's **Active audio** rate
+and buffer separately from **Pending** edits. For example, selecting 64 samples
+can show **Active audio: 44,100 Hz · 8 samples** and **Pending: 44,100 Hz ·
+64 samples** until Apply or OK. A supported rate or buffer edit on the same
+device stays pending during discovery; it does not reopen the running stream.
+After applying, check the active values before testing the complete project.
+If no device is open, the dialog reports that instead of showing zero-valued
+active settings.
+
+If discovery fails, the requested rate and buffer remain visible as pending;
+use **Retry** or correct the selection before applying. Apply verifies an explicit
+rate and buffer against the opened device. If a driver silently substitutes a
+different value, the dialog reports both values and attempts to restore the
+previous setup; the applied snapshot shows the actual recovery state.
+
+The October 22 development checkout also keeps **OK** open if an apply result
+reports success with a different buffer or sample rate. It shows the requested
+and accepted values, such as “Requested 16 samples; the driver accepted
+8 samples,” and the controls show the active settings for review. This feedback
+does not make an unsupported setting available or establish that a particular
+ASIO driver issue is fixed. Check the running rate/buffer display and test the
+actual interface before recording.
+
+Changing only the sample rate or buffer on the same audio system preserves an
+explicitly disabled input or output, including input-only/output-only ASIO and
+separate-device systems. The ASIO Driver label uses the active endpoint even
+when only input is enabled. After the native driver control panel closes, the
+dialog refreshes the actual configuration. If restarting the device failed,
+it shows that error and the actual closed-device state; reselect the same driver
+and Apply to attempt recovery. It does not keep displaying the old active
+configuration as though the restart succeeded.
 
 Inactive ASIO drivers are inspected for rates, buffer limits and preferred
 settings without opening an audio stream. Small buffers such as 8 and 16 samples
@@ -322,7 +360,7 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
   - Trim handles on the left and right edges (in Select or Smart tool mode)
 - **Grid lines**: Vertical lines aligned to the current grid setting (bar, beat, subdivision).
 - **Automation lanes**: Per-track lanes below the track that display automation curves.
-- **Time selection**: A highlighted region created with Primary+drag on the timeline background or Shift+drag on the ruler (`Primary` is Ctrl on Windows/Linux and Command on macOS).
+- **Time selection**: A highlighted editing region created with Primary+drag on the timeline background or set/extended with Shift+drag on the ruler (`Primary` is Ctrl on Windows/Linux and Command on macOS). A plain horizontal ruler drag sets the separate project/loop range. A plain vertical ruler drag zooms time out upward and in downward, anchored to its starting time; direction locks after a small threshold. Click without dragging seeks. Explicit mouse-profile/custom ruler actions take priority; see [input profiles](input-profiles.md#mouse-and-wheel-safety).
 - **Razor edits**: Semi-transparent selection areas created with Alt/Option+drag on the timeline background for precise non-destructive editing.
 
 **Essential Navigation:**
@@ -331,11 +369,11 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
 - **Shift+Scroll**: horizontal timeline scroll.
 - **Alt+Scroll**: track height resize.
 - **Ctrl+Shift+Scroll**: waveform-height zoom for the hovered track.
-- **First-session hotkeys**: `Space`, `Ctrl+R`, `Ctrl+T`, `Ctrl+M`, `S`, `B`, `Delete`, `Ctrl+S`, `F1`, `Ctrl+Shift+P`.
+- **First-session hotkeys**: `Space`, `R`, `1`, `+`/`=` and `-`, `Ctrl+T`, `Ctrl+M`, `S`, `B`, `Delete`, `Ctrl+S`, `F1`, `Ctrl+Shift+P`. These are OpenStudio-profile defaults; vendor profiles and custom overrides retain their effective bindings.
 - **Need a refresher?** Press `F1` for the searchable **Help Reference** and open **Help > Keyboard, Mouse & Trackpad** for the full shortcut list and custom scoped rebinding.
 
 **Zoom and Scroll:**
-- **Horizontal zoom**: `Ctrl+Scroll wheel` (or `Ctrl++` / `Ctrl+-`). Zoom range: 1 to 1000 pixels per second.
+- **Horizontal zoom**: `Ctrl+Scroll wheel`, `+`/`=` and `-` (also numpad `+`/`-`, with `Ctrl++` / `Ctrl+-` retained). Zoom range: 1 to 1000 pixels per second. Plain vertical ruler drag also zooms time.
 - **Playhead visibility**: the ruler marker and vertical line update together after zoom, scroll, or resize, including while stopped, whenever the playhead lies within the visible time range.
 - **Horizontal scroll**: Shift+scroll wheel, or use the horizontal scrollbar.
 - **Vertical scroll**: Scroll wheel when hovering over the track area.
@@ -358,7 +396,7 @@ The Transport Bar runs along the bottom of the window and provides:
 
 **Center Section - Transport Controls:**
 - **Go to Start** (skip back icon): Returns the playhead to the beginning.
-- **Record** (red circle): Starts recording on armed tracks. `Ctrl+R`
+- **Record** (red circle): `R` starts recording on armed tracks; pressing it again finishes the recording. `Ctrl+R` and numpad `*` remain aliases. Audio/MIDI tracks and Normal/Overdub/Replace modes use the same command.
 - **Play / Pause** (green triangle): Starts or pauses playback. The default `Space` shortcut starts or stops transport, including an active recording.
 - **Stop** (square): Stops playback or recording. There is no separate default keyboard shortcut.
 - **Pause** (parallel bars): Pauses playback in place.
@@ -642,7 +680,7 @@ When a track is armed, you can enable input monitoring to hear the live signal:
 
 1. Arm the desired track(s).
 2. Position the playhead where you want recording to begin.
-3. Press the **Record** button in the Transport Bar or press `Ctrl+R`.
+3. Press the **Record** button in the Transport Bar or press `R` (`Ctrl+R` and numpad `*` are aliases). Press `R` again to finish the recording.
 4. The transport status changes to `[Recording]` and a red dot indicator appears.
 5. Perform your recording.
 6. Press `Space` or the **Stop** button to end recording.
@@ -715,7 +753,7 @@ If the hardware MIDI queue loses messages, the sender discards the compromised b
 3. Select your MIDI input device on the track.
 4. Arm the track for recording.
 5. Enable monitoring to hear the instrument while playing.
-6. Press Record (`Ctrl+R`) and play your MIDI controller.
+6. Press Record (`R`, also `Ctrl+R` or numpad `*`) and play your MIDI controller. Press `R` again to finish.
 7. Press Stop when finished.
 8. A MIDI clip appears on the timeline containing the recorded note and CC data.
 
@@ -768,7 +806,7 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 - `Ctrl+A` to select all tracks.
 
 **Time selection:**
-- Primary+drag on the timeline background, or Shift+drag on the ruler, to create a time selection (`Primary` is Ctrl on Windows/Linux and Command on macOS).
+- Primary+drag on the timeline background creates a time selection; Shift+drag on the ruler sets or extends it (`Primary` is Ctrl on Windows/Linux and Command on macOS). Plain horizontal ruler drag changes the separate project/loop range and leaves the edit selection unchanged. These are OpenStudio-profile defaults; custom mappings take priority.
 - The time selection is highlighted as a shaded region.
 - Time selections are used for punch recording, rendering bounds, and editing operations.
 
@@ -777,7 +815,7 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 - Click and drag a clip to move it to a new position or track.
 - A click selects without moving or trimming the clip, even when it is off-grid. Small pointer movements below four screen pixels also count as a click.
 - When snap is enabled, the clip snaps to grid lines.
-- Hold `Primary` while dragging to copy the clip instead of moving it.
+- Hold `Primary` while dragging to copy the selected clip group with one Undo step. Half-transparent previews show its destination while originals stay in place. If compatible destination tracks must be appended, their span preserves source row order and gaps.
 - Hold `Shift` while dragging to lock movement to the first axis that crosses the drag threshold.
 - Hold `Alt`/`Option` while dragging to bypass snapping.
 - Multi-selected clips move together as a group.
@@ -853,6 +891,18 @@ Clipboard operations support:
 - Single clip copy/paste
 - Multi-clip copy/paste (preserves relative track positions)
 - Copy/Cut within time selection
+
+`Ctrl+D` duplicates the selected clips by one shared time offset: the span from
+the earliest selected start to the latest selected end. Relative gaps and track
+positions stay intact instead of each clip moving by its own length. Hold Ctrl
+(Command on macOS) while dragging a selected clip to copy the entire selected
+group. The complete audio/MIDI preview is shown at 50% opacity; the originals
+stay in place. Release to commit one Undo step, or press Escape to cancel.
+
+Holding Ctrl/Command while dragging a selected track header copies the entire
+selected track group, including its clips, settings and FX. Drop on another row
+to insert the copies before it. The track preview also shows 50% opacity, and
+the whole operation is one Undo step.
 
 ### 6.9 Nudging Clips
 
@@ -977,13 +1027,13 @@ The Piano Roll consists of several areas:
 
 1. Select the **Select** tool.
 2. Click a note to select it.
-3. `Ctrl+Click` to add/remove notes from the selection.
+3. `Shift+Click` to add/remove notes from the selection.
 4. Click and drag on empty space to rubber-band select multiple notes.
 5. Use **MIDI > Select All Notes** to select all notes in the clip.
 
 ### 7.5 Editing Notes
 
-- **Move**: Drag selected notes to a new pitch/time position.
+- **Move**: Drag selected notes to a new pitch/time position. Ctrl/Cmd+drag keeps each original pitch and moves time only, retaining the existing off-grid placement behavior. Shift+drag keeps each exact start time and moves pitch only. Constraints apply to the selected group; durations, velocities and relative spacing are preserved. Alt/Option+drag copies the notes; the complete copy-and-move is one Undo step.
 - **Resize**: Drag the right edge of a note to change its duration.
 - **Delete**: Select notes and press `Delete`, or use the **Erase** tool to click-delete individual notes.
 
@@ -1129,6 +1179,13 @@ Sends route a copy of the track's signal to a bus track for effects processing (
    - **Post-fader**: Send level follows the track fader.
 5. Sends can be enabled/disabled individually.
 
+**Development checkout:** a destination track's live hardware input now stays
+mixed with its incoming sends while the transport is stopped, as well as
+during playback. An armed destination's recording tap retains the incoming
+send mixture with its live input, including during NAM worker-overload
+recovery. An overloaded source can still interrupt its own contribution;
+check the recorded file and monitoring separately.
+
 ### 8.7 Bus and Group Tracks
 
 Bus tracks receive audio from sends and can apply their own FX chain:
@@ -1195,28 +1252,34 @@ OpenStudio supports three FX chain positions per track:
 
 OpenStudio includes a set of built-in effects identified by the `OpenStudio` prefix in current releases. Legacy `OpenStudio` effect names are still accepted for compatibility in older projects and scripts.
 
-**Approved editor redesign, 0.1.04 release candidate, October 8, 2026:** fifteen effect/instrument faces use the approved layouts. Pitch Correct opens the existing clip Edit Pitch workflow; it does not create a second graphical editor. These changes are included in the reviewed release candidate and are not yet published. NAM Rack retains its separate editor. Main controls remain visible in compact windows; detail panels scroll within the editor.
+**Design 03 editors, development checkout, October 22, 2026:** the revised non-NAM interfaces are implemented in the working tree, with qualification in progress. They use the existing native settings and history. This does not describe a published installer or establish final listening, device or visual acceptance. NAM Rack retains its separate editor. Pitch Correct retains realtime FX settings and the existing recorded-clip Edit Pitch workflow.
 
 | Plugin | Editor |
 |---|---|
 | **OpenStudio EQ** | Full-width 24-band graph, Filter/Dynamics inspector, Minimum/Linear/Minimum FIR selector, output strip; advanced analyzer, matching and MIDI program tools remain available |
-| **OpenStudio Graphic EQ** | Independent 10/31-band banks, all 31 faders in a wide window, frequency pages in compact windows, grouped edits and output trim |
+| **OpenStudio Graphic EQ** | Independent 10/31-band banks, all 31 faders in a wide window, frequency pages in compact windows, grouped edits, Flat bank, Reset selected and output trim |
 | **OpenStudio Compressor** | Model-specific primary controls, native level/reduction history, detector, linking and character details |
 | **OpenStudio Gate / Limiter** | Primary dynamics controls, native reduction/status readouts and model-relevant advanced controls |
 | **OpenStudio Delay** | Independent stereo timing, free/sync mode, host-tempo status, feedback, balance and colour; Motion, Ducking, Routing and Dual Engine B details |
-| **OpenStudio Reverb** | 41 types with contextual controls, wet/dry balance, native level readouts and the existing IR loading, preview, shape and output workflows |
+| **OpenStudio Reverb** | Search/category browser for 41 types, contextual machine pages, shared Setup policies, wet/dry/output strip, native readings, Response analysis and the existing IR workflows |
 | **OpenStudio Preamp / Saturator** | Drive, tone and output hierarchy with native signal-level feedback; retained engines and detailed colour controls |
 | **OpenStudio Chorus** | Chorus/Flanger/Phaser modes, contextual voices/stages, independent modulation divisions and tone controls |
 | **OpenStudio Gain Phase** | Manual gain, left/right timing and polarity, existing group alignment, all-pass phase shaping and spectral phase settings |
 | **OpenStudio Pitch Correct** | Opens the existing Edit Pitch session for an explicitly chosen eligible audio clip; realtime parameters remain available separately |
-| **Basic Synth / Piano / Clean Guitar** | Instrument-specific sound controls, advanced modulation/performance settings and audition keyboard; received keys/pedals are distinct from sounding/releasing voices |
-| **OpenStudio Drums** | Sixteen audition pads, eight piece inspectors/outputs, complete 128-note remapping and Ignore, with pad labels derived from effective native mappings |
+| **Basic Synth / Piano / Clean Guitar** | Compact sound/performance subpages, wide Overview, persistent output/audition controls; received keys/pedals remain distinct from sounding/releasing voices |
+| **OpenStudio Drums** | Core kit and Cymbals & extras compact pad views, named selected-piece inspector, eight output groups, wide Overview and complete 128-note remapping/Ignore |
+
+**Find a control:** use **Find** in the plugin toolbar to search native parameter names, modes or named workflows such as Modulation matrix, Drum map, EQ Match and Response analysis. Selecting a result opens its page and moves focus to the control or workflow entry. Find preserves the current sound: it does not switch a model or enable an effect. If a setting is inactive in the current configuration, it explains that its stored value is retained. Hidden machine memories and compatibility aliases are not listed as duplicate controls.
+
+**Window size:** compact editors prioritize the main sound controls and use tabs or expandable details for secondary settings. Synth Voice separates Oscillators, Filter and Amplifier; Modulation separates Matrix, LFO and Macros. Piano Performance separates Touch and Pedals. Guitar Play separates Sound, Articulation and Performance; Drums separates Pads, Selected piece and Character. Instrument output and audition controls stay outside the scrolling detail area. A wide, tall instrument host offers Overview with those existing sections together; smaller hosts return an active Overview to the main page. Dense details can scroll, and individual pages remain available. Large Reverb windows expose additional machine sections and manual Response analysis. These choices follow the plugin window's size, including display scaling, rather than the screen's advertised resolution. The suite's native minimum of 640x480 describes the outer window; the frame and title bar reduce the space available to its editor.
+
+**Inactive settings:** explanatory disabled controls or contextual pages retain saved values for other models and modes. For example, Articulated Drums retains the Legacy-only Kit and Hi-hat Tightness settings; Guitar's harmonic and slide controls apply to their relevant articulations. Gate disables Hold/Hysteresis in downward expansion, and Limiter explains Classic/Edge restrictions. Incoming MIDI, actual sounding voices and measured audio levels remain separate readouts; unavailable data is not replaced by simulated activity.
 
 Vintage hall/random retain Build-up (0-300 ms) and independent Input diffusion. Build-up is the summed delay of four input allpass stages before the tank, not an exact acoustic attack time. Zero preserves the original input; Input diffusion zero gives a simple added delay and higher values distribute the excitation. Tank Diffusion stays separate. Both types remember their controls independently, including presets, Compare and Undo.
 
 Drag a knob vertically, hold **Shift** for fine adjustment, or double-click to reset it. Click a value to enter a number; **Enter** commits and **Escape** cancels the entry. Normalized controls display percentages while retaining their native stored values. Focused knobs support arrow keys, Page Up/Down, Home and End. **Undo** and **Redo** apply to editor parameter gestures; an EQ node drag changes frequency and gain in one gesture. Select an EQ band by its numbered button to edit or enable it.
 
-The other free editors now share preset/history/A/B controls and keep their main surface within the window. Detailed controls use tabs. A/B compares complete native configurations, including hidden engine settings, compressor/reverb memories and embedded IRs. Preset, Default, Compare and IR changes share editor Undo/Redo. Comparison slots last for the editor session. Editors follow their processor identity through chain reordering and reject writes after removal. Plugin options provides complete `.ospreset` import/export and the saved processor-bypass setting. A preset from another processor type is rejected. The toolbar Host bypass controls the actual FX slot and synchronizes with the chain. It is separate from the processor state stored in presets and Compare, and supports editor Undo/Redo and main-window project history.
+The other free editors share preset/history/A/B controls. A continuous knob or slider gesture creates one editor Undo step; discrete choices use the same native edit path. A/B compares complete native configurations, including hidden engine settings, compressor/reverb memories and embedded IRs. The copy button follows the active slot: **A → B** when A is active, **B → A** when B is active. Preset, Default, Compare and IR changes share editor Undo/Redo. Comparison slots last for the editor session. Editors follow their processor identity through chain reordering and reject writes after removal. Plugin options provides complete `.ospreset` import/export and the saved processor-bypass setting. A preset from another processor type is rejected. The toolbar Host bypass controls the actual FX slot and synchronizes with the chain. It is separate from the processor state stored in presets and Compare, and supports editor Undo/Redo and main-window project history.
 
 **Original audio stages (development):** Compressor and Preamp offer Audio stages > Original stages, with Legacy as the default for both new and older state. Compressor applies separate input/output colour around gain reduction in FET, Tube Opto, Solid State Opto, Bus VCA and Punch VCA. FET Ratio Off retains these stages; Clean and Legacy models use a linear path. Headroom offset shifts the digital operating level, not interface dBu calibration. Compressor reserves the prepared 16x filter delay in addition to its 20 ms path, including the aligned dry signal. Preamp keeps the existing 4x path in Legacy; Original stages uses a prepared 16x FIR path with separately reported latency. It places input colour before Tone EQ, Output drive after it, and linear Output trim last. Audio character is a configuration change with one Undo step; Headroom and Preamp Output drive support automation. These original level- and history-dependent algorithms are not fitted commercial circuit models. Original Preamp reports 78 samples of filter delay; at 48 kHz Original Compressor reports 1038 samples in total. Original stages use more CPU than Legacy. Aggressive combined drive/headroom settings can alias; listening acceptance and reference fidelity remain open.
 
@@ -1338,15 +1401,45 @@ Limiter Response adds Crest (crest-adaptive recovery), Bus (soft-knee RMS compre
 
 Limiter Quality offers Off (1x), 2x, 4x, 8x, 16x and 32x audio processing. The limiter runs at the selected higher rate, then protects and meters the downsampled output. Quality changes restart processing history and update host delay compensation; they are saved in projects, presets and Compare but are not automatable. Old projects default to Off. At 48 kHz the total delays are 960, 1078, 1093, 1099, 1103 and 1104 samples respectively. Higher factors use more CPU; 16x/32x are primarily useful for offline evaluation. Oversampling does not establish better audible quality or guarantee every possible reconstructed peak.
 
+#### Signal compatibility and corrected processing (development)
+
+**Signal path:** EQ, Preamp, Saturator, Chorus, realtime Pitch Correct, Basic Synth, Piano, Clean Guitar and Drums offer **Plugin options > Signal path > Legacy / Corrected**. New instances and factory reset select Corrected; older complete states and named numeric snapshots select Legacy. The choice is saved with the plugin and included in Undo and Compare. Change it while stopped: changing paths resets processing history. It is independent of each instrument's voice engine and the effects' audio-character controls. NAM Rack retains its existing signal paths.
+
+Corrected preserves floating-point EQ headroom, makes Foldback symmetric, uses absolute C-B note switches only for Custom pitch scales, and supports the configured low-note pitch range at higher sample rates through anti-aliased analysis. It also uses continuous fractional instrument/modulation phases, maps Synth/Guitar tone poles to their 48 kHz reference, makes Preamp's internal bypass transparent after its reported latency, and commits Saturator type changes at the fade endpoint. Corrected pitch analysis uses an anti-aliased 22.05-32 kHz analysis stream and a 2048-sample window (about 64-93 ms). Work is spread over the next analysis hop (up to approximately 23 ms at 44.1 kHz). Low-note support therefore adds detector decision time; the audio stream's reported alignment latency is unchanged. All tested 48 kHz pitch workloads met their deadlines on the audit machine; repeated 192 kHz small-buffer probes recorded occasional single-instance misses and more frequent four-instance misses. Exact listening acceptance remains pending.
+
+Drum All Notes Off now lets one-shot decays finish; All Sound Off remains immediate. Automatic export tails include drum decay, chorus feedback, filter ringing and manual delay support. These declarations are conservative and can add silence. In the Articulated drum engine, **Kit** and **Hi-hat Tightness** are disabled because that engine supplies its own voices and hat response; those controls remain available in the Legacy voice engine. This voice-engine choice is separate from Signal path.
+
 #### Reverb and convolution
 
-Standalone Reverb also shows current-block L/R input and output sample peaks in dBFS. The output reading includes wet/dry mix, Send and ducking; mono is shown in both columns. Silence or unavailable data appears as a dash, and readings at or above 0 dBFS are highlighted. Current shows the latest block; Maximum shows native maxima retained across blocks until Reset peaks, processor reset or prepare. A 0 dBFS reached indicator stays visible after a brief full-scale event. Reset peaks acts on the next audio block, with pending status if processing is stopped. This telemetry action does not change audio, saved state or Undo. These are sample peaks, not true-peak or loudness measurements. Short windows keep the labelled numeric output controls visible while hiding their duplicate knobs.
+**Reverb Output (development):** The standalone Reverb footer has an **Output** control from -60 to +12 dB, default 0 dB. It changes the complete plugin output after the wet/dry mix and ducking, including retained tails and convolution cross outputs. Output remains editable in Send mode and keeps its value when switching reverb types. Projects, presets, Compare, portable preset files and editor Undo/Redo retain it; older saved states open at 0 dB. Lock balance continues to preserve the wet/dry routing fields when recalling presets; presets can restore their own Output value. This is an unreleased source-checkout addition.
+
+**Return level (development):** All 41 types show **Original / Calibrated** on **Setup**. Calibrated applies fixed wet-return trims to current algorithmic voices; the compatibility Legacy Room/Hall/Chamber/Plate engines and custom IRs retain their levels. Both Legacy and Dispersive Spring receive calibration. Wet, Dry and Output remain independent. Return level is also independent of **Processing: Original / Refined**: Original processing can use a Calibrated return. The shared choice stays editable in Send mode and is retained by projects, presets, Compare, portable files and editor Undo/Redo. New Reverb instances use Calibrated. Older saved states without this choice restore Original, preserving their previous return level. Factory reset chooses Calibrated. These fixed trims do not guarantee equal perceived loudness across settings or source material; Vowel hall remains particularly source-dependent, and audition is required. This is unshipped source-checkout behavior.
+
+**Controls (development):** Setup offers **Legacy / Corrected**, independently of Processing and Return level. Corrected ramps dedicated-engine Wet/Dry changes over 20 ms, bounds Spatial modulation by each delay's available range, and preserves 48 kHz damping time constants at other sample rates in Studio/Plate Legacy tone, Clear and Shimmer/Nonlinear. Tone changes are smoothed; explicit filter bypass remains exact. Vintage/Retro era processing retains its intentional rate conversion. New standalone instances, factory reset and the Voiced presets use Corrected; older states without this choice and the eight historical presets use Legacy. Projects, Compare, portable presets and Undo/Redo retain the choice. This does not change historical Legacy-engine Wet/Early routing: Early can remain audible at Wet zero in those engines. NAM Rack is unchanged. These are unshipped control corrections, not listening acceptance.
+
+**Voiced preset headroom and Shimmer (development):** The 41 individual Voiced presets use fixed Output trims (0 to -13 dB), designed for about 3 dB of sample-peak headroom on the shared guitar reference at Dry 70% / Wet 100% (input peak -1.09 dBFS). Output scales dry and wet together; raising it does not increase the reverb-to-dry ratio. The all-bank collection uses one shared -14 dB Output trim, because Output is global. Adjust Output to suit the track and downstream headroom. These are fixed authored choices, not automatic loudness matching or a guarantee against clipping on other material, boosted input or held accumulation. Saved states and the eight older factory presets retain their levels.
+
+The new **Factory - Voiced Shimmer** uses Input routing: octave/fifth voices feed the long base tank once. Tank and Input + Tank remain available for recirculating pitch, whose extra loop losses shorten decay. Decay is nominal, not a measured broadband RT60; damping and routing matter. Input/Both activate the input pitch pair and can cost more than Tank. Processing > Original remains available when the intentionally colored Refined Plate/Cloud readout is unwanted.
+
+**Factory voices (development):** In **Plugin options**, **Load voice preset** recalls the selected type's complete voiced preset. **Load voiced collection** installs all authored banks for browsing. Both actions replace plugin settings and support Undo; changing Type alone keeps edits. The Preset dropdown also offers `Factory - Voiced <type name>` for each of the 41 types, with authored timing, tone, density and family controls. **Factory - Voiced collection** installs those profiles into all type memories at once, then selects Room; browse the type selector to compare them. Width, Wet, Dry, Output and Processing are shared rather than per-type, so the collection uses a common balance/width and Refined processing. Individual voices also recall their own shared settings. The eight earlier presets, including Tight room, Long dark hall and Shimmer halo, retain their settings. Recall replaces complete plugin state as one undoable change. Save a new name or export current settings to keep edits. Generated entries cannot be overwritten or deleted; an existing user preset with the same name keeps priority. Lock balance preserves routing balance during recall, while Output, Return level and other shared character choices follow the preset. Constructor defaults and older projects retain their settings. These unshipped voices still require listening and are not loudness matched.
+
+**Contextual controls:** Shaped reflections displays Duration in milliseconds (25-2000 ms), with an early-envelope caption; storage and automation still use the original normalized value. Shimmer Amount double-click resets to the Shimmer bank's 50% starting value. Tone help shows effective Vintage/Retro era bandwidth limits. Bloom help explains that Length has no effect at zero Diffusion. Shimmer's Decay remains a nominal tank setting: Amount and Tank/Both pitch routing can shorten the actual tail; the Voiced preset uses Input routing and a fixed Output trim; this does not make the knob a measured broadband RT60.
+
+**Shimmer pitch scheduling (development):** Spectral Shimmer offers **Original / Spread** on Character. Spread divides spectral work, including FFT stages, and staggers the tank/input pitch roles. It retains the 120 ms analysis window and 30 ms hop, adding one hop to the pitched path while dry timing stays unchanged. This is an explicit saved choice, independent of Refined processing. New instances and older states without it use Original; the Voiced Shimmer and collection presets select Spread. A live scheduling change primes and warms the prepared alternate bank before a 20 ms fade, temporarily running both banks. In steady Spread/Input routing, the unused tank pitch bank sleeps. Selecting Tank/Both refills it with current audio for about 300 ms before the usual 50 ms route fade; the Input path remains audible while it warms, and an interrupted change can cancel the wakeup. Original-only routing retains its earlier behavior. Prepared memory remains allocated, and Both routing still processes both stages. High sample rates, many instances and live transitions involving Original can exceed callback budgets; see the dated measurements in [audio qualification limits](testing.md#retained-audio-qualification-and-limits). Device performance must be qualified on the actual setup.
+
+**Vowel broadband body (development):** Vowel hall adds **Broadband body** on Character. It mixes a wet bed beneath the existing vowel resonances, bypassing the formants while retaining common cuts and Width, helping material with little energy at the formant frequencies. Zero preserves the formant-only response; dry audio and feedback are unchanged. The control ramps over 20 ms and is stored with projects/presets/Compare. New instances and older states without it use zero; the Voiced Vowel and collection presets use a body contribution. It changes tonal balance and does not guarantee perceived loudness on every source.
+
+**Processing (development):** Applicable types show **Original / Refined** on the Character page. Original remains the default and is restored when older saved states lack this choice. Refined adds a short, signed wet-output diffusion stage with frequency coloration to Studio Plate and Cloud field; it uses settled integer tank taps when motion is off in Drifting, Clear and supported digital spaces. The control appears only when the selected engine uses it; Legacy/Modal Plate and Shaped reflections retain their own processing. Processing is shared across types and stored in projects, presets, Compare and portable preset files, with editor Undo/Redo. The new Bright short plate, Modulated cloud and Grand gallery factory voices explicitly select Refined. This is an unreleased opt-in change; audible improvements and loudness matching remain unqualified.
+
+Standalone Reverb also shows current-block L/R input and output sample peaks in dBFS. The output reading includes wet/dry mix, Send, ducking and Output trim; mono is shown in both columns. Silence or unavailable data appears as a dash, and readings at or above 0 dBFS are highlighted. Current shows the latest block; Maximum shows native maxima retained across blocks until Reset peaks, processor reset or prepare. A 0 dBFS reached indicator stays visible after a brief full-scale event. Reset peaks acts on the next audio block, with pending status if processing is stopped. This telemetry action does not change audio, saved state or Undo. These are sample peaks, not true-peak or loudness measurements. Short windows keep the labelled numeric output controls visible while hiding their duplicate knobs.
 
 **Reverb:** Room, Hall, Plate, Chamber, Spring, Shimmer, Nonlinear, Convolution, Church, Ambience, Vintage hall and Vintage random remember separate settings. Church has a larger sixteen-line network with dense scattering, long reflections and a 6 s default decay; Ambience emphasizes short early reflections over a quiet, sparse late field with a 0.35 s default decay. These two types always use their dedicated networks; they have no Legacy selector.
 
 Reverb peak measurement defaults to Sample. Choose 8x peak for an optional finite reconstructed-peak estimate in dBTP, with independent input/output L/R readings, Current/Maximum views and Reset peaks. The choice is saved and supports Undo/Redo and Compare; measured maxima are transient. Reset takes effect on the next audio block. Turning the estimate off clears its histories and stops its extra computation. This meter adds no audio latency and does not change or limit audio. It is an estimate, not a certified true-peak meter. Short editor windows keep the labelled numeric Wet/Dry/Width controls visible instead of the duplicate knobs.
 
 Nonlinear Hold circulates stored excitation through the current early envelope and sustains the independent late network. Freeze excludes new input; Infinite adds new diffused input. Duration and Shape edits wait for release, and modulation pauses. Output tone and Late level remain active. The early pattern repeats over Duration; this is an original hold mechanism. Releasing Hold restores ordinary feedback and decay; Spillover releases outgoing Hold before draining.
+
+**Hold headroom (development):** Infinite keeps admitting new input to a sustained tank; Freeze stops new held excitation. Earlier continuing-input tests reached safety clamps, especially maximum Nonlinear with a Calibrated return. The October 22 implementation adds smooth buildup handling to Nonlinear, Dispersive Spring and Rising while retaining these distinct Hold input policies. All 16 bounded headroom fixtures pass on the final local Release build without final safety-clamp hits. This does not establish indefinite stability, every possible input or listening acceptance. Reduce incoming level or excitation duration when needed; Wet or Output attenuation lowers the final level but cannot restore an already saturated tank. Return calibration changes wet readout gain rather than feedback.
 
 Nonlinear reverb has a Motion tab. Modulation moves both the reflection taps and the late reverb delays, with up to 2 ms peak movement at full depth. Mod rate controls both stages from 0.05 to 8 Hz. The default zero depth retains fixed delays. This is an original modulation design; the timing graph still shows only the early amplitude envelope.
 
@@ -1510,7 +1603,7 @@ The audition keys and pads use separate instrument voices in the live monitor/ma
 
 **Guitar plucked loop and chorus (development):** String > Engine selects Legacy additive synthesis or Plucked loop for new notes. Nominal decay spans 0.2-8 s before damping and palm-mute losses. Pick position and hardness shape each new excitation; pickup position, damping, Body and palm mute stay live. Body adds two original resonances, not a measured guitar body. Existing string-channel routing and bends apply to both engines. Chorus adds an independent stereo delay modulation (12 ms base, 0-6 ms depth, 0.05-5 Hz); Stereo motion remains the earlier pan modulation. Old states retain Legacy and zero delay-chorus mix. Undo, Compare, presets/projects and isolated keyboard audition include all controls. Prepared string memory is about 2.5 MB at 48 kHz and 9.8 MB at 192 kHz. Sampled instruments, coupled strings, hardware qualification and listening acceptance remain open.
 
-**Independent plugin outputs (development, October 3):** Drums > Piece > Piece output assigns each of eight pieces exclusively to Main 1/2 or an auxiliary stereo pair from 3/4 through 17/18. Select a pad or Drum piece first. In Track routing, create a send to a destination track and choose the matching Source channels. The destination can have its own FX and stem render. An unassigned pair is silent. Following stereo FX process the main pair while retaining auxiliaries; track gain, pan and pre/post-fader send choices apply to their selected pair. Old states restore every piece to Main 1/2. Project save/reopen, full plugin state, Undo and Compare retain routing. Isolated keyboard/pad audition intentionally folds the audition clone back to stereo without changing project routing. Stereo Freeze rejects tracks with enabled auxiliary sends; render the destination buses as stems instead.
+**Independent plugin outputs (development, October 3):** Drums > Kit > Selected piece > Output, or the Outputs page, assigns each of eight pieces exclusively to Main 1/2 or an auxiliary stereo pair from 3/4 through 17/18. Select a pad or Drum piece first. In Track routing, create a send to a destination track and choose the matching Source channels. The destination can have its own FX and stem render. An unassigned pair is silent. Following stereo FX process the main pair while retaining auxiliaries; track gain, pan and pre/post-fader send choices apply to their selected pair. Old states restore every piece to Main 1/2. Project save/reopen, full plugin state, Undo and Compare retain routing. Isolated keyboard/pad audition intentionally folds the audition clone back to stereo without changing project routing. Stereo Freeze rejects tracks with enabled auxiliary sends; render the destination buses as stems instead.
 
 **Drums piece controls and mapping (development):** Select a pad or Drum piece to edit its level, tuning and pan offset. Tuning spans +/-12 semitones for pitched components (including kick sweep); noise is unchanged. Pan offset is added to the existing piece position, clamped left/right, then scaled by Width. Tune/pan transitions take 20 ms. The mapping guide reports the native MIDI input-to-voice translation for the selected piece and current GM/Roland TD subset. It also identifies same-channel hat closure and supported poly-pressure chokes. Other notes retain synthesized fallback percussion. Pointer and Enter audition select the piece. All pieces survive Undo, Compare, automation and project/preset recall; old states default tune/pan to zero. The historical Velocity Curve is preserved: positive values soften response, negative values harden it, and zero retains exponent 1.135. These are synthesized drums; recorded articulations and sampled room ambience are not included. Custom input maps are described below.
 
@@ -1639,6 +1732,91 @@ If a project with heavy or problematic plugins is slow to load, open it in Safe 
 **OpenStudio NAM Rack** is the built-in Guitar/Bass workspace for NAM A1/A2
 pedal, amp, and full-rig captures.
 
+**Multicore monitoring, development checkout:** independent audio tracks whose
+FX chains contain only NAM Rack can share work across CPU cores without adding
+another audio buffer. Each Rack keeps its effect order, tone settings and
+oversampling. At least two independent NAM tracks are needed. A track with
+another effect type, MIDI/instrument processing, a send or a sidechain retains
+serial processing; unrelated NAM tracks can still share work across cores.
+There is no four-track limit, but available cores do not guarantee stability
+at very small buffers.
+
+If NAM Rack shows **Overload**, track processing recently missed a deadline or
+skipped work, even if the CPU or callback meter looks low. Use **Buffer** to
+open Audio Settings, try the next larger supported buffer and disable unused
+effects if needed. Audio Settings reports the same condition. Raw recording
+is kept separate from this monitoring overload recovery, but check the saved
+recording as well as what you hear. The four-track/16-sample target and the
+reported eight-sample crackling remain under qualification; see the
+[NAM performance guide](nam-rack.md#four-track-live-monitoring-acceptance-target).
+
+**Output peaks reduced recently** means NAM Rack softened loud output peaks.
+Lower **Output** to reduce that compression. After three seconds without new
+activity, the message becomes neutral **Earlier output peaks were reduced**
+history. It does not mean the CPU ran out of time; **Overload** reports that
+separate problem. Emergency safety muting retains its own explanation.
+
+**Octaver Fuzz, development checkout, October 23, 2026:** the wider olive
+pedal has Down, Up and Direct octave controls, plus Fuzz, Tone and Level.
+Choose Vintage (asymmetric, dynamic clipping), Sustain (symmetric clipping
+with a scooped tone), or Gated (biased clipping with an envelope gate).
+Separate **Octave** and **Fuzz** switches allow either section to work alone.
+Fuzz processes the octave/direct mix before PRE EQ. Direct is the unshifted
+octave input and passes through fuzz when enabled. Turn **Clean** on the pedal,
+beside **Voice**, to blend that incoming Direct/Down/Up mixture with the fuzz
+sound. The same parameter remains available in **Device Controls**. Focus the
+knob and press Enter, or right-click it, for exact percentage entry. Escape
+cancels the entry; double-click resets the blend. Arrow keys, fine adjustment
+and Undo are supported. While Fuzz is off, the blend is saved for when you
+engage it.
+
+**Level** controls the entire blend before PRE EQ → Drive → Distortion →
+Pedal Capture → Amp; increasing it pushes the following gain stages harder.
+At 100% Clean and 0 dB Level, Fuzz passes its incoming mixture unchanged.
+Clean therefore retains any active octave voices; it does not bypass the later
+drive stages. The header's **OS / DRIVE** setting applies to Precision Drive
+and Distortion across all NAM Rack instances, not to Fuzz or NAM captures.
+
+Vintage and Sustain now offer less gain in the lower and middle part of Fuzz's
+travel, retaining their full-gain endpoint. This reduces amplification of quiet
+input noise at moderate settings; it also reduces late-note sustain at those
+settings. Gated retains its previous gain range. For a sustained, scooped fuzz
+in the direction of the Swollen Pickle reference, start with **Sustain** and
+adjust Fuzz and Tone through your amp and cabinet. These are original voices,
+not a model of that pedal's circuit or matching knob positions.
+
+When stacking gain stages, set Fuzz **Level** for how hard it should drive the
+next pedal. The rack's **Gate** detects the clean input and attenuates the signal
+after the pedals and NAM models, before cabinet and time effects. Set its
+threshold above the measured idle input noise, then adjust **Release** in
+Device Controls so quiet notes decay as intended. A threshold below the noise
+floor leaves the gate open. Fuzz does not add a hidden noise gate; combining
+high Fuzz, Drive and Distortion gains can still amplify hiss strongly.
+
+Sustain retains a 15% low-frequency contribution at the bright end of Tone.
+It also receives fixed level makeup around the centre of Tone, tapering to
+zero at both ends; the amount follows Fuzz and Tone. A shared trim reserves
+headroom in all three wet voices before Clean blend, preserving the clean
+contribution. Voice levels still depend on the source material and Tone
+position, so use Level when comparing sounds, especially at the Tone extremes.
+Combining Direct, Down and Up applies an internal headroom pad only to the
+fuzz clipping cells and sag response. The pad follows the octave mix controls;
+the clean contribution and gate detector keep the incoming mix level. Octave
+tracking still happens before fuzz.
+
+In **Bass** mode, Gated uses a separate detector with 1 ms attack/120 ms release,
+a closing threshold 6 dB below its opening threshold, a 65 ms hold, and a
+3 ms attack/30 ms release for the gate gain. Guitar retains its previous gate
+behavior and sag timing. These changes use the existing controls.
+
+Fuzz defaults off for older projects, presets and Compare snapshots; bypass
+preserves the exact incoming octave/direct mix. The same parameter IDs and
+controls are retained in project/preset recall, A/B Compare and Undo. Saved
+active fuzz tones from earlier development builds may sound different with
+the revised processing. These are unreleased original fuzz algorithms rather
+than measured replicas of commercial pedals; listening quality remains
+unconfirmed until user audition.
+
 1. Add **OpenStudio NAM Rack** from the built-in effects list and select the
    live instrument input.
 2. Choose **Guitar** or **Bass**. The profile changes appropriate hidden
@@ -1668,6 +1846,24 @@ NAM capture or cabinet IR and use the Amp/Full-Rig that is already loaded.
 Exported rack presets reference local NAM/IR files instead of embedding those
 binaries, so another machine may require Locate, Search, or supported
 Re-download recovery.
+
+**Reviewing an older preset's instrument profile, development checkout,
+October 22, 2026:** open **Preset Library** from the current preset name. A
+**Profile review** collection appears when a preset's instrument label disagrees
+with its saved Guitar/Bass profile. It is available in either instrument mode;
+each affected row shows both the label and the saved sound. Loading the original
+uses its saved profile.
+
+If the label was intended, select the preset and choose **Create Bass copy…**
+or **Create Guitar copy…** in its details or its row's **Actions** menu. The
+Actions menu remains available in compact windows. Review the explanation,
+choose a unique name, and confirm **Create copy**. This saves an independent
+library copy with the chosen active profile and matching label, preserving the
+other saved settings. Changing profile changes voicing and EQ frequencies;
+it is not a guarantee of the intended tone. The original preset and current rack
+remain unchanged, and the copy is not loaded automatically. Select its instrument
+mode in the rack, find the new preset, and load it when ready to compare by ear.
+Existing names are not overwritten; a failed copy is reported in the library.
 
 Local `.nam` loading works without TONE3000. Public-build TONE3000 availability
 depends on the partner-approved integration and release configuration. On
@@ -2470,8 +2666,8 @@ platform keys without this portable notation.
 |-----------------------|-------------------------|
 | Play / Stop           | `Space`                 |
 | Stop                  | No separate default    |
-| Record                | `Ctrl+R`                |
-| Go to Start           | `Home`                  |
+| Record / Finish Recording | `R` (also `Ctrl+R`, numpad `*`) |
+| Go to Absolute Start  | `1` / `Home` (seek to zero and reveal beginning) |
 | Toggle Loop           | `L`                     |
 | Toggle Metronome Enable | `K`                   |
 | Start / Stop Click-Only Metronome | `Ctrl+Shift+Space` (macOS: `Cmd+Shift+Space`) |
@@ -2509,6 +2705,7 @@ platform keys without this portable notation.
 | Group Selected Clips       | `Ctrl+G`           |
 | Ungroup Selected Clips     | `Ctrl+Shift+G`     |
 | Toggle Clip Mute           | `U`                |
+| Duplicate Selected Clips   | `Ctrl+D` (shared group offset) |
 | Nudge Left                 | `Left`             |
 | Nudge Right                | `Right`            |
 | Nudge Left (Fine)          | `Ctrl+Left`        |
@@ -2522,6 +2719,10 @@ platform keys without this portable notation.
 | Split Tool    | `B`      |
 | Mute Tool     | `X`      |
 | Smart Tool    | `Y`      |
+
+Pitch Editor Select also uses `V`. The selected track's Record Arm command
+uses `Ctrl+Shift+R` in track controls; Piano Roll Select Range uses the same
+combination in its own editor scope. `R` is reserved for global Record.
 
 ### 16.5 Insert
 
@@ -2546,8 +2747,8 @@ platform keys without this portable notation.
 | Help Reference                  | `F1`                 |
 | Keyboard, Mouse & Trackpad      | Help menu            |
 | Zoom to Time Selection          | `Ctrl+Shift+E`       |
-| Zoom In                         | `Ctrl++`             |
-| Zoom Out                        | `Ctrl+-`             |
+| Zoom In                         | `+` / `=` / numpad `+` (also `Ctrl++`) |
+| Zoom Out                        | `-` / numpad `-` (also `Ctrl+-`) |
 | Zoom to Fit                     | `Ctrl+0`             |
 | Save Screenset 1                | `Ctrl+Shift+1`       |
 | Save Screenset 2                | `Ctrl+Shift+2`       |
@@ -2613,7 +2814,9 @@ platform keys without this portable notation.
 | Adjust / fine-adjust fade handle | Drag / Primary+Drag |
 | Symmetric fade / cycle fade shape | Shift+Drag / Alt/Option+Click handle |
 | Seek from ruler | Click ruler |
-| Set loop / time selection / zoom range | Primary+Drag / Shift+Drag / Alt/Option+Drag ruler |
+| Set project/loop range | Plain horizontal drag or Primary+Drag ruler |
+| Set/extend edit time selection / fit zoom range | Shift+Drag / Alt/Option+Drag ruler |
+| Zoom time around drag start | Plain vertical ruler drag (up: out, down: in) |
 | Context menu | Right-click |
 
 ---
@@ -2651,6 +2854,12 @@ platform keys without this portable notation.
 3. Reduce the number of active plugins.
 4. Close unnecessary background applications.
 5. Check your audio interface drivers are up to date.
+
+In the development checkout, NAM Rack's **Overload** warning can appear even
+when its callback meter is low: processing may have skipped track work to
+contain a missed deadline. Audio Settings distinguishes this from device-path
+interruptions and callback overruns. Increase the buffer and retest the same
+tracks; a low average CPU reading alone does not establish dropout-free audio.
 
 ### 17.4 Plugin Not Showing Up
 

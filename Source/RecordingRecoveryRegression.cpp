@@ -5,6 +5,9 @@
 #include "OwnedChildProcess.h"
 #include "ProjectFileStore.h"
 #include "ExpectedWavFailureLog.h"
+#include <atomic>
+#include <limits>
+#include <thread>
 
 namespace
 {
@@ -131,6 +134,209 @@ int runInterruptedRecordingFixture(const juce::File& root)
 
 void runRecordingRecoveryRegression(const juce::File& directory, const std::function<void(const char*, bool)>& check)
 {
+    // No device or user preferences: native recorder, synthetic audio and an
+    // isolated journal. The bounded total fits each writer FIFO even if disk
+    // scheduling pauses, so a preview-induced lost frame cannot be hidden.
+    const auto previewRoot = directory.getChildFile("recording-preview");
+    previewRoot.createDirectory();
+    for (const int blockSize : { 8, 16, 64 })
+    {
+        const auto blockRoot = previewRoot.getChildFile("blocks-" + juce::String(blockSize));
+        const auto checkBlock = [&](const char* name, bool passed) {
+            const auto qualifiedName = juce::String(name) + "_" + juce::String(blockSize) + "_samples";
+            check(qualifiedName.toRawUTF8(), passed);
+        };
+        AudioRecorder recorder(blockRoot.getChildFile("journals"));
+        const auto monoFile = blockRoot.getChildFile("mono.wav");
+        const auto stereoFile = blockRoot.getChildFile("stereo.wav");
+        const bool started = recorder.startRecording("mono", monoFile, 48000.0, 1)
+            && recorder.startRecording("stereo", stereoFile, 48000.0, 2);
+        checkBlock("recording_preview_concurrent_fixture_started", started);
+        if (started)
+        {
+            juce::AudioBuffer<float> mono(1, blockSize), stereo(2, blockSize);
+            for (int sample = 0; sample < blockSize; ++sample)
+            {
+                mono.setSample(0, sample, 0.125f);
+                stereo.setSample(0, sample, 0.125f); stereo.setSample(1, sample, -0.25f);
+            }
+            const auto write = [&] {
+                recorder.writeBlock("mono", mono, blockSize);
+                recorder.writeBlock("stereo", stereo, blockSize);
+            };
+            for (int block = 0; block < 4; ++block) write();
+            juce::WaitableEvent written;
+            bool independent = false;
+            std::thread writer;
+            {
+                // Deliberately stall every non-realtime preview/status lock.
+                // Audio writes must finish before these locks are released.
+                const juce::ScopedLock previewLock(recorder.previewRegistryLock);
+                const juce::ScopedLock statusLock(recorder.statusLock);
+                const juce::ScopedLock growthLock(recorder.recordingPreviews.at("mono")->growthLock);
+                writer = std::thread([&] { for (int block = 0; block < 64; ++block) write(); written.signal(); });
+                independent = written.wait(2000);
+            }
+            writer.join();
+            checkBlock("recording_writes_ignore_preview_status_growth_locks", independent);
+            std::atomic<bool> done { false }, previewValid { true };
+            std::atomic<int> polls { 0 };
+            juce::WaitableEvent polling;
+            std::thread reader([&] {
+                polling.signal();
+                while (!done.load(std::memory_order_acquire))
+                {
+                    for (const auto& id : { "mono", "stereo" })
+                    {
+                        const auto peaks = recorder.getRecordingPeaks(id, 256, 2048);
+                        if (const auto* values = peaks.getArray(); values != nullptr && !values->isEmpty())
+                        {
+                            const int channels = static_cast<int>((*values)[0]);
+                            if (channels != (juce::String(id) == "mono" ? 1 : 2)
+                                || (values->size() - 1) % (channels * 2) != 0) previewValid = false;
+                        }
+                    }
+                    if (recorder.takeWriteFailures().size() != 0) previewValid = false;
+                    recorder.maintainRecordingPreviews();
+                    polls.fetch_add(1, std::memory_order_release);
+                    std::this_thread::yield();
+                }
+            });
+            polling.wait(2000);
+            for (int block = 0; block < 512; ++block)
+            {
+                write();
+                if (block % 16 == 0) juce::Thread::sleep(1);
+            }
+            done.store(true, std::memory_order_release); reader.join();
+            const auto completed = recorder.stopAllRecordings(48000.0);
+            const int expectedFrames = (4 + 64 + 512) * blockSize;
+            bool exact = completed.size() == 2 && previewValid && polls.load() > 0
+                && recorder.getWriteLockMissCount() == 0 && recorder.getWriterBufferOverflowCount() == 0;
+            for (const auto& file : { monoFile, stereoFile })
+            {
+                juce::WavAudioFormat format;
+                std::unique_ptr<juce::AudioFormatReader> audio(format.createReaderFor(new juce::FileInputStream(file), true));
+                const int channels = file == monoFile ? 1 : 2;
+                juce::AudioBuffer<float> samples(channels, expectedFrames);
+                const bool readable = audio && audio->lengthInSamples == expectedFrames
+                    && audio->read(&samples, 0, expectedFrames, 0, true, true);
+                exact = readable && exact;
+                if (readable) for (int channel = 0; channel < channels; ++channel)
+                    for (int sample = 0; sample < expectedFrames; ++sample)
+                        exact = exact && samples.getSample(channel, sample) == (channel == 0 ? 0.125f : -0.25f);
+            }
+            checkBlock("recording_preview_status_poll_preserves_every_pcm_frame", exact);
+        }
+    }
+    {
+        AudioRecorder recorder(previewRoot.getChildFile("boundary-journals"));
+        const auto firstFile = previewRoot.getChildFile("boundary.wav");
+        const bool started = recorder.startRecording("boundary", firstFile, 48000.0, 1);
+        check("recording_preview_boundary_fixture_started", started);
+        if (started)
+        {
+            juce::AudioBuffer<float> block(1, 256);
+            block.clear(); block.setSample(0, 0, 0.125f);
+            recorder.writeBlock("boundary", block, 256);
+            const auto first = recorder.getRecordingPeaks("boundary", 256, 1);
+            block.clear(); block.setSample(0, 0, 0.75f);
+            recorder.writeBlock("boundary", block, 255);
+            const auto partial = recorder.getRecordingPeaks("boundary", 256, 2);
+            block.clear(); recorder.writeBlock("boundary", block, 1);
+            const auto repeated = recorder.getRecordingPeaks("boundary", 256, 1);
+            const auto appended = recorder.getRecordingPeaks("boundary", 256, 1, 256);
+            check("recording_preview_complete_bucket_append_matches_refetch",
+                first.size() == 3 && partial.size() == 3 && repeated.size() == 3 && appended.size() == 3
+                && static_cast<float>(first[2]) == 0.125f && static_cast<float>(repeated[2]) == 0.125f
+                && static_cast<float>(appended[2]) == 0.75f);
+            auto retained = recorder.recordingPreviews.at("boundary");
+            std::atomic<bool> done { false }, valid { true };
+            std::thread reader([&] {
+                while (!done.load(std::memory_order_acquire))
+                {
+                    const auto peaks = recorder.getRecordingPeaks("boundary", 256, 8192);
+                    if (const auto* values = peaks.getArray(); values != nullptr && !values->isEmpty())
+                        if (static_cast<int>((*values)[0]) != 1 || values->size() > 5) valid = false;
+                }
+            });
+            AudioRecorder::CompletedRecording previous;
+            const bool rolled = recorder.rolloverRecording("boundary", previewRoot.getChildFile("rolled.wav"), 48000.0, 1, 4.0, previous);
+            block.clear(); block.setSample(0, 0, -0.5f); recorder.writeBlock("boundary", block, 256);
+            const auto rolledPeaks = recorder.getRecordingPeaks("boundary", 256, 1);
+            recorder.stopRecording("boundary");
+            done.store(true, std::memory_order_release); reader.join();
+            check("recording_preview_stop_rollover_retains_readers_and_resets_take",
+                rolled && valid && previous.duration == 512.0 / 48000.0
+                && !retained->active.load() && retained->peakChunks[0][1] == 0.125f
+                && rolledPeaks.size() == 3 && static_cast<float>(rolledPeaks[1]) == -0.5f
+                && recorder.getRecordingPeaks("boundary", 256, 1).size() == 0);
+        }
+    }
+    {
+        AudioRecorder recorder(previewRoot.getChildFile("gap-journals"));
+        const bool started = recorder.startRecording("gap", previewRoot.getChildFile("gap.wav"), 48000.0, 1);
+        check("recording_preview_gap_fixture_started", started);
+        if (started)
+        {
+            // Advance only the preview clock to the first storage boundary.
+            // Real writes still exercise the callback's missing-storage path.
+            const auto preview = recorder.recordingPreviews.at("gap");
+            const auto boundary = preview->peakChunkEntries;
+            preview->peakTableSize.store(boundary, std::memory_order_release);
+            juce::AudioBuffer<float> block(1, 256);
+            block.clear(); block.setSample(0, 0, 0.5f);
+            recorder.writeBlock("gap", block, 256);
+            const bool clockAdvanced = preview->peakTableSize.load() == boundary + 1;
+            recorder.maintainRecordingPreviews();
+            block.clear(); block.setSample(0, 0, 0.75f);
+            recorder.writeBlock("gap", block, 256);
+            const auto peaks = recorder.getRecordingPeaks("gap", 256, 2,
+                static_cast<juce::int64>(boundary) * AudioRecorder::recordingPeakStride);
+            check("recording_preview_delayed_growth_keeps_zero_gap_and_sample_time",
+                clockAdvanced && peaks.size() == 5
+                && static_cast<float>(peaks[1]) == 0.0f && static_cast<float>(peaks[2]) == 0.0f
+                && static_cast<float>(peaks[4]) == 0.75f);
+            const auto maximum = boundary * AudioRecorder::RecordingPreview::PEAK_MAX_CHUNKS;
+            preview->peakTableSize.store(maximum, std::memory_order_release);
+            recorder.writeBlock("gap", block, 256);
+            const auto completed = recorder.stopAllRecordings(48000.0);
+            check("recording_preview_capacity_saturates_without_stopping_pcm",
+                preview->peakTableSize.load() == maximum && completed.size() == 1
+                && completed.front().duration == 768.0 / 48000.0
+                && recorder.getWriterBufferOverflowCount() == 0);
+        }
+    }
+    {
+        // Virtual published bucket history avoids writing hundreds of seconds
+        // of PCM merely to exercise visibility-independent maintenance/bounds.
+        AudioRecorder recorder(previewRoot.getChildFile("bounds-journals"));
+        auto preview = std::make_shared<AudioRecorder::RecordingPreview>(384000.0, 2);
+        recorder.recordingPreviews["virtual"] = preview;
+        preview->peakTableSize.store(preview->peakChunkEntries);
+        recorder.maintainRecordingPreviews(); // No waveform request preceded this.
+        const bool grew = preview->peakAllocatedChunks.load() == 2;
+        for (size_t chunk = 0; chunk < 2; ++chunk)
+            if (preview->peakChunks[chunk])
+                for (size_t entry = 0; entry < preview->peakChunkEntries; ++entry)
+                {
+                    auto* values = preview->peakChunks[chunk].get() + entry * 4;
+                    values[0] = -0.125f; values[1] = 0.25f; values[2] = -0.5f; values[3] = 0.75f;
+                }
+        preview->peakTableSize.store(preview->peakChunkEntries * 2, std::memory_order_release);
+        const auto pixels = recorder.getRecordingPeaks("virtual", 256, std::numeric_limits<int>::max());
+        const auto work = recorder.getRecordingPeaks("virtual", 65536, std::numeric_limits<int>::max());
+        const auto legacy = recorder.getRecordingPeaks("virtual", 64, 1);
+        const auto invalid = recorder.getRecordingPeaks("virtual", 0, 100);
+        const auto distant = recorder.getRecordingPeaks("virtual", 256, 10, std::numeric_limits<juce::int64>::max());
+        check("recording_preview_maintenance_grows_without_visible_requests", grew);
+        check("recording_preview_payload_work_and_integer_bounds",
+            pixels.size() == 1 + AudioRecorder::maximumRecordingPeakPixels * 4
+            && work.size() == 1 + static_cast<int>(AudioRecorder::maximumRecordingPeakEntriesPerRequest / 256) * 4
+            && legacy.size() == 5 && static_cast<float>(legacy[2]) == 0.25f
+            && invalid.size() == 0 && distant.size() == 0);
+    }
+
     checkFinalizationRecovery(directory, check);
     const auto root = directory.getChildFile("recording-interruption");
     root.createDirectory();

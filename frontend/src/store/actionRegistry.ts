@@ -1015,8 +1015,8 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "transport.play", name: "Play / Pause", category: "Transport", shortcut: "Space", execute: () => s().togglePlayPause() },
     { id: "transport.pause", name: "Pause in Place", category: "Transport", shortcutWhen: "transport_running", execute: () => s().pause() },
     { id: "transport.stop", name: "Stop", category: "Transport", execute: () => s().stop() },
-    { id: "transport.record", name: "Record", category: "Transport", shortcut: "Ctrl+R", canHandleShortcut: () => s().transport.isRecording || Boolean(s().recordSession) || s().tracks.some((t) => t.armed), execute: () => s().toggleRecord() },
-    { id: "transport.rewind", name: "Go to Start", category: "Transport", shortcut: "Home", execute: () => s().setCurrentTime(0) },
+    { id: "transport.record", name: "Record", category: "Transport", shortcut: "R", shortcutAliases: ["Ctrl+R", "NumpadMultiply"], canHandleShortcut: () => s().transport.isRecording || Boolean(s().recordSession) || s().tracks.some((t) => t.armed), execute: () => s().toggleRecord() },
+    { id: "transport.rewind", name: "Go to Start", category: "Transport", shortcut: "1", shortcutAliases: ["Home"], execute: () => s().goToStart() },
     { id: "transport.loop", name: "Toggle Loop", category: "Transport", shortcut: "L", execute: () => s().toggleLoop() },
     { id: "transport.metronome", name: "Toggle Metronome", category: "Transport", shortcut: "K", execute: () => { void s().toggleMetronome(); } },
     { id: "transport.metronomePractice", name: "Start / Stop Click-Only Metronome", category: "Transport", shortcut: CLICK_ONLY_METRONOME_SHORTCUT,
@@ -1458,7 +1458,7 @@ export function getRegisteredActions(): ActionDef[] {
     activeEditorAction("midi.tool.line", "Piano Roll: Line Tool", "MIDI Tools", "L", "piano_roll", undefined, "step_input_disabled"),
     activeEditorAction("midi.tool.zoom", "Piano Roll: Zoom Tool", "MIDI Tools", "Z", "piano_roll", undefined, "step_input_disabled"),
     activeEditorAction("midi.tool.pan", "Piano Roll: Pan Tool", "MIDI Tools", "H", "piano_roll", undefined, "step_input_disabled"),
-    activeEditorAction("midi.tool.range", "Piano Roll: Range Tool", "MIDI Tools", "R", "piano_roll", undefined, "step_input_disabled"),
+    activeEditorAction("midi.tool.range", "Piano Roll: Range Tool", "MIDI Tools", "Ctrl+Shift+R", "piano_roll", undefined, "step_input_disabled"),
     activeEditorAction("midi.repeatSelection", "Repeat MIDI Selection or Range", "MIDI", "Shift+R", "piano_roll"),
     activeEditorAction("midi.copySelection", "Copy MIDI Selection or Range", "MIDI", "Ctrl+C", "piano_roll"),
     activeEditorAction("midi.cutSelection", "Cut MIDI Selection or Range", "MIDI", "Ctrl+X", "piano_roll"),
@@ -1687,13 +1687,13 @@ export function getRegisteredActions(): ActionDef[] {
       canHandleShortcut: () => hasActiveScopedActionExecutor("view.zoomToSelection") && hasFiniteTimeSelection(),
       execute: () => { executeActiveScopedAction("view.zoomToSelection"); },
     },
-    { id: "view.zoomIn", name: "Zoom In", category: "View", shortcut: "Ctrl++", shortcutAliases: ["Ctrl+=", "Ctrl+Shift++"], execute: () => {
+    { id: "view.zoomIn", name: "Zoom In", category: "View", shortcut: "+", shortcutAliases: ["=", "Shift++", "NumpadAdd", "Ctrl++", "Ctrl+=", "Ctrl+Shift++"], execute: () => {
       const state = s();
-      state.setZoom(Math.min(state.pixelsPerSecond * 1.5, 500));
+      state.setZoom(state.pixelsPerSecond * 1.5);
     }},
-    { id: "view.zoomOut", name: "Zoom Out", category: "View", shortcut: "Ctrl+-", execute: () => {
+    { id: "view.zoomOut", name: "Zoom Out", category: "View", shortcut: "-", shortcutAliases: ["NumpadSubtract", "Ctrl+-"], execute: () => {
       const state = s();
-      state.setZoom(Math.max(state.pixelsPerSecond / 1.5, 10));
+      state.setZoom(state.pixelsPerSecond / 1.5);
     }},
     { id: "view.verticalZoomIn", name: "Vertical Zoom In", category: "View", shortcutScope: "timeline", canHandleShortcut: () => s().trackHeight < 500, execute: () => {
       const state = s();
@@ -1763,7 +1763,7 @@ export function getRegisteredActions(): ActionDef[] {
     { id: "track.duplicateSelected", name: "Duplicate Selected Tracks", category: "Track", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => !s().globalLocked && selectedTrackIds().length > 0, execute: () => {
       void s().duplicateSelectedTracks();
     }},
-    { id: "track.toggleSelectedArm", name: "Arm / Disarm Selected Tracks", category: "Track", shortcut: "R", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => selectedTrackIds().some((id) => {
+    { id: "track.toggleSelectedArm", name: "Arm / Disarm Selected Tracks", category: "Track", shortcut: "Ctrl+Shift+R", shortcutScope: "track_control_panel", shortcutScopes: ["track_control_panel", "mixer"], canHandleShortcut: () => selectedTrackIds().some((id) => {
       const track = s().tracks.find((candidate) => candidate.id === id);
       return Boolean(track && (track.armed || !track.recordSafe));
     }), execute: () => {
@@ -2132,7 +2132,7 @@ export function getRegisteredActions(): ActionDef[] {
     activeEditorAction("pitch.moveDownFine", "Move Selected Pitch Down 10 Cents", "Pitch Editor", "Shift+Down", "pitch_editor"),
     activeEditorAction("pitch.correctSelectedToScale", "Correct Selected Pitch Notes to Scale", "Pitch Editor", "Q", "pitch_editor"),
     activeEditorAction("pitch.mergeSelectedNotes", "Merge Selected Pitch Notes", "Pitch Editor", "Ctrl+J", "pitch_editor"),
-    activeEditorAction("pitch.tool.select", "Pitch Editor: Select Tool", "Pitch Editor Tools", "1", "pitch_editor"),
+    activeEditorAction("pitch.tool.select", "Pitch Editor: Select Tool", "Pitch Editor Tools", "V", "pitch_editor"),
     activeEditorAction("pitch.tool.drift", "Pitch Editor: Drift Tool", "Pitch Editor Tools", "2", "pitch_editor"),
     activeEditorAction("pitch.tool.vibrato", "Pitch Editor: Vibrato Tool", "Pitch Editor Tools", "3", "pitch_editor"),
     activeEditorAction("pitch.tool.transition", "Pitch Editor: Transition Tool", "Pitch Editor Tools", "4", "pitch_editor"),

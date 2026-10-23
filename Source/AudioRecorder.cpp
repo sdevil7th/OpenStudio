@@ -32,6 +32,45 @@ static float peakFromBuffer(const juce::AudioBuffer<float>& buffer, int numSampl
 #endif
 }
 
+AudioRecorder::RecordingPreview::RecordingPreview(double rate, int channels)
+    : sampleRate(rate),
+      numChannels(std::min(channels, PEAK_MAX_CHANNELS)),
+      peakChunkEntries(static_cast<size_t>(rate * PEAK_CHUNK_SECONDS / recordingPeakStride) + 2)
+{
+    peakChunks[0] = std::make_unique<float[]>(peakChunkEntries * static_cast<size_t>(numChannels * 2));
+    peakChunkPtrs[0].store(peakChunks[0].get(), std::memory_order_release);
+    peakAllocatedChunks.store(1, std::memory_order_release);
+}
+
+void AudioRecorder::growRecordingPreview(const std::shared_ptr<RecordingPreview>& preview)
+{
+    if (!preview->active.load(std::memory_order_acquire)) return;
+    const juce::ScopedLock lock(preview->growthLock);
+    const size_t chunks = preview->peakAllocatedChunks.load(std::memory_order_acquire);
+    const size_t capacity = chunks * preview->peakChunkEntries;
+    const size_t completed = std::min(preview->peakTableSize.load(std::memory_order_acquire), capacity);
+    const size_t reserve = static_cast<size_t>(preview->sampleRate * 30.0 / recordingPeakStride);
+    if (chunks >= RecordingPreview::PEAK_MAX_CHUNKS || capacity - completed > reserve) return;
+
+    // At most one 120-second chunk per maintenance pass, outside writerLock.
+    // A retained owner and this preview-only lock also support concurrent reads.
+    auto chunk = std::make_unique<float[]>(preview->peakChunkEntries * static_cast<size_t>(preview->numChannels * 2));
+    preview->peakChunks[chunks] = std::move(chunk);
+    preview->peakChunkPtrs[chunks].store(preview->peakChunks[chunks].get(), std::memory_order_release);
+    preview->peakAllocatedChunks.store(chunks + 1, std::memory_order_release);
+}
+
+void AudioRecorder::maintainRecordingPreviews()
+{
+    std::vector<std::shared_ptr<RecordingPreview>> previews;
+    {
+        const juce::ScopedLock lock(previewRegistryLock);
+        previews.reserve(recordingPreviews.size());
+        for (const auto& item : recordingPreviews) previews.push_back(item.second);
+    }
+    for (const auto& preview : previews) growRecordingPreview(preview);
+}
+
 AudioRecorder::AudioRecorder(const juce::File& recoveryRoot) : recoveryJournal(recoveryRoot)
 {
     // Start the background I/O thread for ThreadedWriter
@@ -73,6 +112,7 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
                                            double initialStartTime,
                                            CompletedRecording* replacedTake)
 {
+    const juce::ScopedLock control(controlLock);
     // Reject before opening a file or touching an existing take. A corrupt
     // device/configuration report must not become an enormous peak allocation.
     if (trackId.isEmpty() || !std::isfinite(sampleRate)
@@ -163,14 +203,7 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
     // Periodic header publication and checked flush, exclusively on disk thread.
     threadedWriter->setFlushInterval(static_cast<int>(sampleRate * 5.0));
 
-    // Pre-allocate incremental peak table for ~120 seconds of recording.
-    // Entry layout: [min_ch0, max_ch0, min_ch1, max_ch1] per PEAK_STRIDE samples.
-    // At 44.1kHz/256 stride: ~20 700 entries × 2 ch × 2 values × 4 B ≈ 660 KB/track.
-    // Zero-init so getRecordingPeaks can safely read unwritten entries as 0.
-    const size_t maxEntries = static_cast<size_t>(
-        sampleRate * ActiveRecording::PEAK_CHUNK_SECONDS / ActiveRecording::PEAK_STRIDE) + 2;
-    const int    entryFloats = std::min(numChannels, ActiveRecording::PEAK_MAX_CHANNELS) * 2;
-    auto peakBuf = std::unique_ptr<float[]>(new float[maxEntries * static_cast<size_t>(entryFloats)]());
+    auto preview = std::make_shared<RecordingPreview>(sampleRate, numChannels);
 
     // Brief lock: insert into map
     {
@@ -179,6 +212,7 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         if (previous != activeRecordings.end())
         {
             previous->second.isActive = false;
+            previous->second.preview->active.store(false, std::memory_order_release);
             if (replacedTake != nullptr && previous->second.threadedWriter)
             {
                 replacedTake->trackId = trackId;
@@ -197,7 +231,6 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         state.trackId = trackId;
         state.threadedWriter = std::move(threadedWriter);
         state.writeStatus = writeStatus;
-        pendingWriteStatuses.push_back(writeStatus);
         state.outputFile = file;
         state.isActive = true;
         state.startTime = initialStartTime;
@@ -206,16 +239,18 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         state.sampleRate = sampleRate;
         state.captureStartOnFirstWrite = true;
         state.hasStartTimeFallback = replacedTake != nullptr;
-        for (size_t chunk = 0; chunk < ActiveRecording::PEAK_MAX_CHUNKS; ++chunk)
-            state.peakChunkPtrs[chunk].store(nullptr, std::memory_order_relaxed);
-        state.peakChunks[0] = std::move(peakBuf);
-        state.peakChunkPtrs[0].store(state.peakChunks[0].get(), std::memory_order_release);
-        state.peakAllocatedChunks.store(1, std::memory_order_release);
-        state.peakChunkEntries = maxEntries;
-        state.peakTableSize.store(0, std::memory_order_relaxed);
+        state.preview = preview;
         state.accumMin[0] = state.accumMin[1] = 0.0f;
         state.accumMax[0] = state.accumMax[1] = 0.0f;
         state.accumCount = 0;
+    }
+    {
+        const juce::ScopedLock lock(previewRegistryLock);
+        recordingPreviews[trackId] = std::move(preview);
+    }
+    {
+        const juce::ScopedLock lock(statusLock);
+        pendingWriteStatuses.push_back(writeStatus);
     }
     previousWriter.reset();
     if (replacedTake != nullptr && previousWriteStatus)
@@ -310,10 +345,11 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
     // Cheaper than the old interleaved-copy path: only min/max comparisons,
     // no index arithmetic, and the peak table is ~100× smaller than sampleBuffer.
     // The audio thread is the sole writer; message thread reads via atomic size.
-    if (state.peakAllocatedChunks.load(std::memory_order_acquire) > 0)
+    auto& preview = *state.preview;
+    if (preview.peakAllocatedChunks.load(std::memory_order_acquire) > 0)
     {
-        const int chCount = std::min(state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS);
-        const float* chPtrs[ActiveRecording::PEAK_MAX_CHANNELS] = { nullptr, nullptr };
+        const int chCount = std::min(state.numChannels, RecordingPreview::PEAK_MAX_CHANNELS);
+        const float* chPtrs[RecordingPreview::PEAK_MAX_CHANNELS] = { nullptr, nullptr };
         chPtrs[0] = buffer.getReadPointer(0);
         if (chCount > 1)
             chPtrs[1] = buffer.getReadPointer(std::min(1, buffer.getNumChannels() - 1));
@@ -327,26 +363,29 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
                 if (v > state.accumMax[ch]) state.accumMax[ch] = v;
             }
 
-            if (++state.accumCount >= ActiveRecording::PEAK_STRIDE)
+            if (++state.accumCount >= recordingPeakStride)
             {
-                const size_t idx = state.peakTableSize.load(std::memory_order_relaxed);
-                const size_t chunkIndex = state.peakChunkEntries > 0
-                    ? idx / state.peakChunkEntries
-                    : ActiveRecording::PEAK_MAX_CHUNKS;
-                if (chunkIndex < state.peakAllocatedChunks.load(std::memory_order_acquire))
+                const size_t idx = preview.peakTableSize.load(std::memory_order_relaxed);
+                const size_t chunkIndex = preview.peakChunkEntries > 0
+                    ? idx / preview.peakChunkEntries
+                    : RecordingPreview::PEAK_MAX_CHUNKS;
+                if (chunkIndex < preview.peakAllocatedChunks.load(std::memory_order_acquire))
                 {
-                    if (float* chunk = state.peakChunkPtrs[chunkIndex].load(std::memory_order_acquire))
+                    if (float* chunk = preview.peakChunkPtrs[chunkIndex].load(std::memory_order_acquire))
                     {
-                        const size_t entryIndex = idx % state.peakChunkEntries;
+                        const size_t entryIndex = idx % preview.peakChunkEntries;
                         float* entry = chunk + entryIndex * static_cast<size_t>(chCount * 2);
                         for (int ch = 0; ch < chCount; ++ch)
                         {
                             entry[ch * 2]     = state.accumMin[ch];
                             entry[ch * 2 + 1] = state.accumMax[ch];
                         }
-                        state.peakTableSize.store(idx + 1, std::memory_order_release);
                     }
                 }
+                // Keep time aligned if control maintenance is temporarily late.
+                // Missing preview storage is a gap, never compressed audio time.
+                if (idx < preview.peakChunkEntries * RecordingPreview::PEAK_MAX_CHUNKS)
+                    preview.peakTableSize.store(idx + 1, std::memory_order_release);
                 state.accumMin[0] = state.accumMin[1] = 0.0f;
                 state.accumMax[0] = state.accumMax[1] = 0.0f;
                 state.accumCount = 0;
@@ -358,6 +397,7 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
 
 void AudioRecorder::stopRecording(const juce::String& trackId)
 {
+    const juce::ScopedLock control(controlLock);
     std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writerToFlush;
     juce::File outputFile;
     {
@@ -367,11 +407,16 @@ void AudioRecorder::stopRecording(const juce::String& trackId)
             return;
 
         it->second.isActive = false;
+        it->second.preview->active.store(false, std::memory_order_release);
         writerToFlush = std::move(it->second.threadedWriter);
         outputFile = it->second.outputFile;
         activeRecordings.erase(it);
     }
 
+    {
+        const juce::ScopedLock lock(previewRegistryLock);
+        recordingPreviews.erase(trackId);
+    }
     writerToFlush.reset();
     juce::Logger::writeToLog("AudioRecorder: Stopped recording track " + trackId
                            + " (" + outputFile.getFullPathName() + ")");
@@ -409,6 +454,7 @@ void AudioRecorder::setRecordingStartTime(const juce::String& trackId, double st
 std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(double currentSampleRate)
 {
     juce::ignoreUnused(currentSampleRate);
+    const juce::ScopedLock control(controlLock);
     std::map<juce::String, ActiveRecording> recordingsToFinalize;
     {
         const juce::ScopedLock lock(writerLock);
@@ -416,8 +462,14 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
         {
             juce::ignoreUnused(trackId);
             state.isActive = false;
+            state.preview->active.store(false, std::memory_order_release);
         }
         recordingsToFinalize.swap(activeRecordings);
+    }
+
+    {
+        const juce::ScopedLock lock(previewRegistryLock);
+        recordingPreviews.clear();
     }
 
     std::vector<CompletedRecording> finalizedClips;
@@ -458,7 +510,7 @@ std::vector<AudioRecorder::CompletedRecording> AudioRecorder::stopAllRecordings(
 juce::var AudioRecorder::takeWriteFailures()
 {
     juce::Array<juce::var> failures;
-    const juce::ScopedLock lock(writerLock);
+    const juce::ScopedLock lock(statusLock);
     for (const auto& state : pendingWriteStatuses)
     {
         const auto fault = state->fault.load(std::memory_order_acquire);
@@ -482,135 +534,62 @@ juce::var AudioRecorder::getRecordingPeaks(const juce::String& trackId,
                                            int numPixels,
                                            juce::int64 startSample)
 {
-    // Flat array format: [numChannels, min_ch0_px0, max_ch0_px0, min_ch1_px0, max_ch1_px0, ...]
+    // Preserve the requested sample scale, including old sub-stride callers.
+    // Bound both bridge payload and aggregation work; callers may append the
+    // returned prefix. New viewport clients use multiples of the 256-sample stride.
     juce::Array<juce::var> peakData;
-
-    size_t growFromChunk = ActiveRecording::PEAK_MAX_CHUNKS;
-    size_t growChunkEntries = 0;
-    int growEntryFloats = 0;
-    {
-        const juce::ScopedLock sl(writerLock);
-        auto it = activeRecordings.find(trackId);
-        if (it == activeRecordings.end() || !it->second.isActive.load())
-            return peakData;
-
-        const auto& state = it->second;
-        const size_t allocatedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
-        const size_t allocatedEntries = allocatedChunks * state.peakChunkEntries;
-        const size_t completedEntries = juce::jmin(
-            state.peakTableSize.load(std::memory_order_acquire), allocatedEntries);
-        const size_t entriesRemaining = allocatedEntries - completedEntries;
-        const size_t growThreshold = static_cast<size_t>(
-            state.sampleRate * 30.0 / ActiveRecording::PEAK_STRIDE);
-        if (entriesRemaining <= growThreshold
-            && allocatedChunks < ActiveRecording::PEAK_MAX_CHUNKS)
-        {
-            growFromChunk = allocatedChunks;
-            growChunkEntries = state.peakChunkEntries;
-            growEntryFloats = std::min(
-                state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS) * 2;
-        }
-    }
-
-    std::unique_ptr<float[]> nextChunk;
-    if (growFromChunk < ActiveRecording::PEAK_MAX_CHUNKS
-        && growChunkEntries > 0
-        && growEntryFloats > 0)
-    {
-        nextChunk = std::unique_ptr<float[]>(
-            new float[growChunkEntries * static_cast<size_t>(growEntryFloats)]());
-    }
-
-    // Brief lock only to publish growth and snapshot the recording entry.
-    int numChannels = 0;
-    size_t tableSize = 0;
-    size_t chunkEntries = 0;
-    std::array<const float*, ActiveRecording::PEAK_MAX_CHUNKS> chunkPtrs {};
-
-    {
-        const juce::ScopedLock sl(writerLock);
-        auto it = activeRecordings.find(trackId);
-        if (it == activeRecordings.end() || !it->second.isActive.load())
-            return peakData;
-
-        auto& state = it->second;
-        const size_t allocatedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
-        if (nextChunk && allocatedChunks == growFromChunk)
-        {
-            state.peakChunks[growFromChunk] = std::move(nextChunk);
-            state.peakChunkPtrs[growFromChunk].store(
-                state.peakChunks[growFromChunk].get(), std::memory_order_release);
-            state.peakAllocatedChunks.store(growFromChunk + 1, std::memory_order_release);
-        }
-
-        numChannels = std::min(state.numChannels, ActiveRecording::PEAK_MAX_CHANNELS);
-        tableSize = state.peakTableSize.load(std::memory_order_acquire);
-        chunkEntries = state.peakChunkEntries;
-        const size_t publishedChunks = state.peakAllocatedChunks.load(std::memory_order_acquire);
-        for (size_t chunk = 0; chunk < publishedChunks; ++chunk)
-            chunkPtrs[chunk] = state.peakChunkPtrs[chunk].load(std::memory_order_acquire);
-    }
-    // Lock released — read is lock-free (stable pointer, atomic size).
-    // getRecordingPeaks() and stopAllRecordings() both run on the message thread
-    // so they are never concurrent — no use-after-free risk.
-
+    if (samplesPerPixel <= 0 || numPixels <= 0) return peakData;
     startSample = std::max<juce::int64>(0, startSample);
-    if (numChannels == 0 || chunkEntries == 0 || tableSize == 0
-        || samplesPerPixel <= 0 || numPixels <= 0)
-        return peakData;
+    std::shared_ptr<RecordingPreview> preview;
+    {
+        const juce::ScopedLock lock(previewRegistryLock);
+        const auto found = recordingPreviews.find(trackId);
+        if (found == recordingPreviews.end()) return peakData;
+        preview = found->second;
+    }
+    if (!preview->active.load(std::memory_order_acquire)) return peakData;
 
-    // Each table entry covers PEAK_STRIDE samples.
-    // Use floating-point sample positions to correctly map pixels to peak entries,
-    // avoiding integer division truncation that caused waveform stretching.
-    // Previously, entriesPerPixel = samplesPerPixel / stride (integer division)
-    // would truncate e.g. 441/256 = 1 instead of 1.72, causing each pixel to read
-    // only one entry and covering just 58% of the actual recording at 100 pps.
-    const int stride = ActiveRecording::PEAK_STRIDE;
+    // No writerLock, no disk I/O and no growth allocation on this query path.
+    // Published entries are immutable. The retained owner makes stop/rollover
+    // safe even when a non-message-thread caller is still reading this take.
+    const size_t completed = preview->peakTableSize.load(std::memory_order_acquire);
+    const size_t chunks = preview->peakAllocatedChunks.load(std::memory_order_acquire);
+    const size_t tableSize = std::min(completed, chunks * preview->peakChunkEntries);
+    const auto coveredSamples = static_cast<juce::int64>(tableSize) * recordingPeakStride;
+    if (startSample >= coveredSamples) return peakData;
+    const auto completePixels = (coveredSamples - startSample) / samplesPerPixel;
+    const auto entriesPerPixel = (static_cast<juce::int64>(samplesPerPixel) + recordingPeakStride - 1)
+        / recordingPeakStride + ((startSample % recordingPeakStride != 0 || samplesPerPixel % recordingPeakStride != 0) ? 1 : 0);
+    const auto workLimitedPixels = static_cast<juce::int64>(maximumRecordingPeakEntriesPerRequest) / entriesPerPixel;
+    const int actualPeaks = static_cast<int>(std::min({ completePixels, workLimitedPixels,
+        static_cast<juce::int64>(numPixels), static_cast<juce::int64>(maximumRecordingPeakPixels) }));
+    if (actualPeaks <= 0) return peakData;
 
-    // Calculate how many complete pixels the peak table data can cover
-    const double totalSamplesCovered = static_cast<double>(tableSize) * stride;
-    const double availableSamples = juce::jmax(
-        0.0, totalSamplesCovered - static_cast<double>(startSample));
-    const int maxPixelsFromData = static_cast<int>(availableSamples / samplesPerPixel);
-    const int actualPeaks = std::min(numPixels, maxPixelsFromData);
-
-    if (actualPeaks <= 0)
-        return peakData;
-
+    const int numChannels = preview->numChannels;
     peakData.ensureStorageAllocated(1 + actualPeaks * numChannels * 2);
-    peakData.add(juce::var(numChannels));
-
+    peakData.add(numChannels);
     for (int pixel = 0; pixel < actualPeaks; ++pixel)
     {
-        // Map pixel range to sample range, then to peak table entry range
-        const double pixelStartSample = static_cast<double>(startSample)
-            + pixel * static_cast<double>(samplesPerPixel);
-        const double pixelEndSample = pixelStartSample + samplesPerPixel;
-        const size_t firstEntry = static_cast<size_t>(pixelStartSample / stride);
-        const size_t lastEntry = std::min(static_cast<size_t>(pixelEndSample / stride) + 1,
-                                          tableSize);
-
-        for (int ch = 0; ch < numChannels; ++ch)
+        const auto pixelStart = startSample + static_cast<juce::int64>(pixel) * samplesPerPixel;
+        const auto pixelEnd = pixelStart + samplesPerPixel;
+        const size_t firstEntry = static_cast<size_t>(pixelStart / recordingPeakStride);
+        // Exclusive end: an exactly aligned pixel must not read the next bucket.
+        const size_t lastEntry = static_cast<size_t>((pixelEnd + recordingPeakStride - 1) / recordingPeakStride);
+        for (int channel = 0; channel < numChannels; ++channel)
         {
-            float minVal = 0.0f, maxVal = 0.0f;
-            for (size_t e = firstEntry; e < lastEntry; ++e)
+            float minimum = 0.0f, maximum = 0.0f;
+            for (size_t entry = firstEntry; entry < lastEntry; ++entry)
             {
-                const size_t chunkIndex = e / chunkEntries;
-                const size_t entryIndex = e % chunkEntries;
-                if (chunkIndex >= chunkPtrs.size() || chunkPtrs[chunkIndex] == nullptr)
-                    continue;
-                const float* entry = chunkPtrs[chunkIndex]
-                    + entryIndex * static_cast<size_t>(numChannels * 2);
-                const float eMin = entry[ch * 2];
-                const float eMax = entry[ch * 2 + 1];
-                if (eMin < minVal) minVal = eMin;
-                if (eMax > maxVal) maxVal = eMax;
+                const size_t chunkIndex = entry / preview->peakChunkEntries;
+                const auto* chunk = preview->peakChunkPtrs[chunkIndex].load(std::memory_order_acquire);
+                if (chunk == nullptr) continue;
+                const auto* values = chunk + (entry % preview->peakChunkEntries) * static_cast<size_t>(numChannels * 2);
+                minimum = std::min(minimum, values[channel * 2]);
+                maximum = std::max(maximum, values[channel * 2 + 1]);
             }
-            peakData.add(juce::var(minVal));
-            peakData.add(juce::var(maxVal));
+            peakData.add(minimum); peakData.add(maximum);
         }
     }
-
     return peakData;
 }
 

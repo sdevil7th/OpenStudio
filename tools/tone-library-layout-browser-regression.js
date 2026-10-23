@@ -83,27 +83,48 @@ async page => {
   await details.locator('.nam-tone-capture-select').first().waitFor();
   check('Selecting the same pack reopens its compact model selector', await details.evaluate(el => el.open));
 
-  params.set('namQuery', 'headbangers');
-  await page.goto(new URL('/?' + params, page.url()).href);
-  await page.locator('.tone3000-account').waitFor();
-  await page.evaluate(async () => {
-    const { nativeBridge } = await import('/src/services/NativeBridge.ts');
-    nativeBridge.getTONE3000ToneDetail = () => new Promise(resolve => {
-      window.completeToneLayoutDetail = () => resolve({ success: false, statusCode: 500, error: 'Tone details unavailable' });
+  for (const completion of ['after-keyboard-collapse', 'same-task-as-collapse']) {
+    params.set('namQuery', 'headbangers');
+    await page.goto(new URL('/?' + params, page.url()).href);
+    await page.locator('.tone3000-account').waitFor();
+    await page.evaluate(async () => {
+      const { nativeBridge } = await import('/src/services/NativeBridge.ts');
+      nativeBridge.getTONE3000ToneDetail = () => new Promise(resolve => {
+        window.completeToneLayoutDetail = () => resolve({ success: false, statusCode: 500, error: 'Tone details unavailable' });
+      });
     });
-  });
-  await page.getByRole('button', { name: 'View 4 Captures', exact: true }).click();
-  const pendingDetails = page.locator('.tone-compact-selection');
-  await pendingDetails.getByText('Loading...', { exact: true }).waitFor();
-  check('Loading a pack with no models yet opens compact details', await pendingDetails.evaluate(el => el.open));
-  await pendingDetails.locator(':scope > summary').focus();
-  await page.keyboard.press('Enter');
-  check('Pending compact details can still be collapsed', await pendingDetails.evaluate(el => !el.open));
-  await page.evaluate(() => {
-    window.completeToneLayoutDetail();
-    delete window.completeToneLayoutDetail;
-  });
-  await pendingDetails.locator('.nam-tone-capture-error').waitFor();
-  check('A zero-model loading failure reopens visible capture feedback', await pendingDetails.evaluate(el => el.open && el.querySelector('.nam-tone-capture-error').textContent.includes('No downloadable NAM captures')));
+    await page.getByRole('button', { name: 'View 4 Captures', exact: true }).click();
+    const pendingDetails = page.locator('.tone-compact-selection');
+    await pendingDetails.getByText('Loading...', { exact: true }).waitFor();
+    check('Loading a pack with no models yet opens compact details', await pendingDetails.evaluate(el => el.open));
+    if (completion === 'same-task-as-collapse') {
+      // Native details mutate immediately, but their toggle event is queued.
+      // Resolve the request in the same task to exercise that exact boundary.
+      check('Same-task completion starts with collapsed compact details', await pendingDetails.evaluate(el => {
+        el.querySelector(':scope > summary').click();
+        const collapsed = !el.open;
+        window.completeToneLayoutDetail();
+        delete window.completeToneLayoutDetail;
+        return collapsed;
+      }));
+    } else {
+      await pendingDetails.locator(':scope > summary').focus();
+      await page.keyboard.press('Enter');
+      check('Pending compact details can still be collapsed', await pendingDetails.evaluate(el => !el.open));
+      await page.evaluate(() => {
+        window.completeToneLayoutDetail();
+        delete window.completeToneLayoutDetail;
+      });
+    }
+    await pendingDetails.locator('.nam-tone-capture-error').waitFor();
+    check(`${completion}: a zero-model loading failure reopens visible capture feedback`, await pendingDetails.evaluate(el => el.open && el.querySelector('.nam-tone-capture-error').textContent.includes('No downloadable NAM captures')));
+    await pendingDetails.locator(':scope > summary').focus();
+    // Space remains the app's reserved transport shortcut; Enter activates summary.
+    await page.keyboard.press('Enter');
+    check(`${completion}: feedback can still be collapsed with Enter`, await pendingDetails.evaluate(el => !el.open));
+    await page.keyboard.press('Enter');
+    await pendingDetails.locator('.nam-tone-capture-error').waitFor();
+    check(`${completion}: feedback can be reopened with Enter`, await pendingDetails.evaluate(el => el.open));
+  }
   return { status: 'pass', checks: checks.length, results: checks, scope: 'Real responsive UI with deterministic NAM fixtures; native account and audio quality not_asserted' };
 }

@@ -1,17 +1,18 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage, Layer, Rect, Line, Text } from "react-konva";
+import type { KonvaEventObject } from "konva/lib/Node";
 import { useShallow } from "zustand/shallow";
 import { useDAWStore } from "../store/useDAWStore";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import { snapToGrid } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
+import { getRulerDragZoom, resolveRulerDragAxis } from "../utils/timelineRulerDrag";
+import type { TimelineDragAxisLock } from "../utils/timelineDragAxisLock";
 import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
 import { getShortcutPlatform } from "../utils/platform";
 import { resolveWheelGesture } from "../utils/wheelGestureResolver";
 import { getTimelineHorizontalScrollMax } from "../utils/contextWheelBehaviors";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type KonvaEvent = any;
+import { resolveMouseModifierAction, type MouseModifierActionFor, type MouseModifierOverrideMap, type PointerModifierEventLike } from "../utils/mouseModifierResolver";
 
 export const TIMELINE_RULER_HEIGHT = 30;
 
@@ -23,18 +24,25 @@ export function TimelineRuler() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const rulerDragRef = useRef<{
-    type: "handle-pending" | "handle-drag" | "range-create" | "pending";
+    type: "handle-pending" | "handle-drag" | "range-create" | "time-select" | "zoom-create" | "pending" | "vertical-zoom";
+    action: MouseModifierActionFor<"ruler_click">;
     handle?: "start" | "end";
     startX: number;
     startTime: number;
+    currentTime?: number;
+    zoom?: {
+      startY: number;
+      initialZoom: number;
+      anchorTime: number;
+      axisLock: TimelineDragAxisLock | null;
+    };
   } | null>(null);
   const [, setRulerDragging] = useState(false);
+  const [zoomSelection, setZoomSelection] = useState<{ x: number; width: number } | null>(null);
 
   const {
     pixelsPerSecond,
     scrollX,
-    scrollY,
-    setZoom,
     setScroll,
     trackHeight,
     setTrackHeight,
@@ -51,8 +59,6 @@ export function TimelineRuler() {
     useShallow((state) => ({
       pixelsPerSecond: state.pixelsPerSecond,
       scrollX: state.scrollX,
-      scrollY: state.scrollY,
-      setZoom: state.setZoom,
       setScroll: state.setScroll,
       trackHeight: state.trackHeight,
       setTrackHeight: state.setTrackHeight,
@@ -80,14 +86,48 @@ export function TimelineRuler() {
   timeSignatureRef.current = timeSignature;
   const scrollXRef = useRef(scrollX);
   scrollXRef.current = scrollX;
-  const scrollYRef = useRef(scrollY);
-  scrollYRef.current = scrollY;
   const pixelsPerSecondRef = useRef(pixelsPerSecond);
   pixelsPerSecondRef.current = pixelsPerSecond;
   const trackHeightRef = useRef(trackHeight);
   trackHeightRef.current = trackHeight;
   const widthRef = useRef(width);
   widthRef.current = width;
+
+  // Publish the anchored transform together, at most once per animation frame.
+  // Store subscribers (including the playhead) must never see the new zoom
+  // paired with the previous scroll position.
+  const pendingZoomRef = useRef<{ pixelsPerSecond: number; scrollX: number } | null>(null);
+  const zoomFrameRef = useRef<number | null>(null);
+  const ownsRulerZoomRef = useRef(false);
+  const finishRulerZoom = useCallback(() => {
+    if (!ownsRulerZoomRef.current) return;
+    ownsRulerZoomRef.current = false;
+    useDAWStore.setState({ isTimelineRulerZooming: false });
+  }, []);
+  const flushZoom = useCallback(() => {
+    if (zoomFrameRef.current !== null) cancelAnimationFrame(zoomFrameRef.current);
+    zoomFrameRef.current = null;
+    const pending = pendingZoomRef.current;
+    pendingZoomRef.current = null;
+    if (pending) {
+      const nextZoom = Math.max(1, Math.min(1000, pending.pixelsPerSecond));
+      const nextScrollX = Math.max(0, pending.scrollX);
+      pixelsPerSecondRef.current = nextZoom;
+      scrollXRef.current = nextScrollX;
+      useDAWStore.setState({ pixelsPerSecond: nextZoom, scrollX: nextScrollX });
+    }
+  }, []);
+  const scheduleZoom = useCallback((view: { pixelsPerSecond: number; scrollX: number }) => {
+    pendingZoomRef.current = view;
+    if (zoomFrameRef.current === null) zoomFrameRef.current = requestAnimationFrame(flushZoom);
+  }, [flushZoom]);
+
+  useEffect(() => () => {
+    if (zoomFrameRef.current !== null) cancelAnimationFrame(zoomFrameRef.current);
+    zoomFrameRef.current = null;
+    pendingZoomRef.current = null;
+    finishRulerZoom();
+  }, [finishRulerZoom]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -140,59 +180,80 @@ export function TimelineRuler() {
       } else if (gesture.operation === "zoom" && gesture.target === "timeline") {
         const rect = container.getBoundingClientRect();
         const pointerX = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-        const currentZoom = pixelsPerSecondRef.current;
-        const timeAtPointer = (scrollXRef.current + pointerX) / currentZoom;
-        const nextZoom = Math.max(1, Math.min(1000, currentZoom * Math.exp(-gesture.amount * 0.0015)));
         const state = useDAWStore.getState();
+        const currentZoom = pendingZoomRef.current?.pixelsPerSecond ?? state.pixelsPerSecond;
+        const currentScrollX = pendingZoomRef.current?.scrollX ?? state.scrollX;
+        const timeAtPointer = (currentScrollX + pointerX) / currentZoom;
+        const nextZoom = Math.max(1, Math.min(1000, currentZoom * Math.exp(-gesture.amount * 0.0015)));
         const maxTimelineScroll = getTimelineHorizontalScrollMax(
           state.tracks,
           state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
           nextZoom,
           widthRef.current,
         );
-        setZoom(nextZoom);
-        setScroll(
-          Math.max(0, Math.min(maxTimelineScroll, timeAtPointer * nextZoom - pointerX)),
-          scrollYRef.current,
-        );
+        scheduleZoom({
+          pixelsPerSecond: nextZoom,
+          scrollX: Math.max(0, Math.min(maxTimelineScroll, timeAtPointer * nextZoom - pointerX)),
+        });
       } else if (gesture.operation === "resize" && gesture.target === "track-height") {
         const factor = gesture.amount > 0 ? 0.9 : 1.1;
         if (gesture.amount !== 0) setTrackHeight(trackHeightRef.current * factor);
       } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
+        // Preserve input order if a modifier changes before the queued zoom RAF.
+        flushZoom();
         const workspace = container.closest<HTMLElement>(".workspace");
         if (gesture.ruleId === "trackpad.pan" && workspace) workspace.scrollTop += gesture.delta.y;
         const state = useDAWStore.getState();
         const maxTimelineScroll = getTimelineHorizontalScrollMax(
           state.tracks,
           state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
-          pixelsPerSecondRef.current,
+          state.pixelsPerSecond,
           widthRef.current,
         );
         setScroll(
-          Math.max(0, Math.min(maxTimelineScroll, scrollXRef.current + gesture.amount)),
-          workspace?.scrollTop ?? scrollYRef.current,
+          Math.max(0, Math.min(maxTimelineScroll, state.scrollX + gesture.amount)),
+          workspace?.scrollTop ?? state.scrollY,
         );
       } else if (gesture.operation === "scroll") {
+        flushZoom();
         const workspace = container.closest(".workspace") as HTMLElement | null;
         if (workspace) {
           const maxScrollY = Math.max(0, workspace.scrollHeight - workspace.clientHeight);
           const nextScrollY = Math.max(0, Math.min(maxScrollY, workspace.scrollTop + gesture.amount));
           workspace.scrollTop = nextScrollY;
-          setScroll(scrollXRef.current, nextScrollY);
+          setScroll(useDAWStore.getState().scrollX, nextScrollY);
         }
       }
     };
 
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [setScroll, setTrackHeight, setZoom]);
+  }, [flushZoom, scheduleZoom, setScroll, setTrackHeight]);
 
-  const handleRulerMouseDown = (e: KonvaEvent) => {
+  const resolveRulerAction = (event: PointerModifierEventLike) => {
+    const state = useDAWStore.getState();
+    const platform = getShortcutPlatform();
+    return resolveMouseModifierAction(event, "ruler_click", {
+      platform: toMouseBehaviorPlatform(platform),
+      profile: getMouseBehaviorProfile(state.mouseBehaviorProfileId, platform).modifiers,
+      overrides: state.mouseModifiers as MouseModifierOverrideMap,
+    });
+  };
+
+  const handleRulerMouseDown = (e: KonvaEventObject<MouseEvent>) => {
+    if (e.evt.button !== 0) return;
+    const action = resolveRulerAction(e.evt);
+    if (action === "none") {
+      rulerDragRef.current = null;
+      return;
+    }
     const stage = e.target.getStage();
-    const pointerPos = stage.getPointerPosition();
+    const pointerPos = stage?.getPointerPosition();
     if (!pointerPos) return;
 
-    const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    flushZoom();
+    const view = useDAWStore.getState();
+    const rawClickedTime = Math.max(0, (pointerPos.x + view.scrollX) / view.pixelsPerSecond);
     const clickedTime = getRulerClickSnapTime({
       time: rawClickedTime,
       pixelsPerSecond: pixelsPerSecondRef.current,
@@ -200,16 +261,17 @@ export function TimelineRuler() {
       timeSignature: timeSignatureRef.current,
       gridSize: gridSizeRef.current,
       snapEnabled: snapEnabledRef.current,
-      ctrlBypass: Boolean(e.evt?.ctrlKey || e.evt?.metaKey),
+      ctrlBypass: false,
     });
 
-    const startX = projectRange.start * pixelsPerSecond - scrollX;
-    const endX = projectRange.end * pixelsPerSecond - scrollX;
+    const startX = projectRange.start * view.pixelsPerSecond - view.scrollX;
+    const endX = projectRange.end * view.pixelsPerSecond - view.scrollX;
     const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
-    if (inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
+    if (action === "seek" && inHandleZone && Math.abs(pointerPos.x - endX) < RANGE_HANDLE_HIT_PX) {
       rulerDragRef.current = {
         type: "handle-pending",
+        action,
         handle: "end",
         startX: pointerPos.x,
         startTime: clickedTime,
@@ -217,9 +279,10 @@ export function TimelineRuler() {
       setRulerDragging(true);
       return;
     }
-    if (inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
+    if (action === "seek" && inHandleZone && Math.abs(pointerPos.x - startX) < RANGE_HANDLE_HIT_PX) {
       rulerDragRef.current = {
         type: "handle-pending",
+        action,
         handle: "start",
         startX: pointerPos.x,
         startTime: clickedTime,
@@ -228,36 +291,43 @@ export function TimelineRuler() {
       return;
     }
 
-    if (e.evt?.shiftKey) {
+    if (action === "time_select") {
       const currentSel = useDAWStore.getState().timeSelection;
+      let anchor = useDAWStore.getState().transport.currentTime;
       if (currentSel) {
         const distToStart = Math.abs(clickedTime - currentSel.start);
         const distToEnd = Math.abs(clickedTime - currentSel.end);
-        if (distToStart < distToEnd) {
-          setTimeSelection(Math.min(clickedTime, currentSel.end), currentSel.end);
-        } else {
-          setTimeSelection(currentSel.start, Math.max(clickedTime, currentSel.start));
-        }
-      } else {
-        const playheadTime = useDAWStore.getState().transport.currentTime;
-        setTimeSelection(
-          Math.min(playheadTime, clickedTime),
-          Math.max(playheadTime, clickedTime),
-        );
+        anchor = distToStart < distToEnd ? currentSel.end : currentSel.start;
       }
+      setTimeSelection(Math.min(anchor, clickedTime), Math.max(anchor, clickedTime));
+      rulerDragRef.current = { type: "pending", action, startX: pointerPos.x, startTime: anchor, currentTime: clickedTime };
       return;
     }
 
     rulerDragRef.current = {
       type: "pending",
+      action,
       startX: pointerPos.x,
       startTime: clickedTime,
+      zoom: action === "seek" ? {
+        startY: pointerPos.y,
+        initialZoom: view.pixelsPerSecond,
+        anchorTime: rawClickedTime,
+        axisLock: null,
+      } : undefined,
     };
+    if (action === "seek") {
+      // Protect the pressed time before movement chooses an axis. Otherwise a
+      // queued follow frame can move the view before vertical zoom takes over.
+      ownsRulerZoomRef.current = true;
+      useDAWStore.setState({ isTimelineRulerZooming: true });
+    }
   };
 
-  const handleRulerDblClick = (e: KonvaEvent) => {
+  const handleRulerDblClick = (e: KonvaEventObject<MouseEvent>) => {
+    if (e.evt.button !== 0 || resolveRulerAction(e.evt) === "none") return;
     const stage = e.target.getStage();
-    const pointerPos = stage.getPointerPosition();
+    const pointerPos = stage?.getPointerPosition();
     if (!pointerPos) return;
 
     const clickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
@@ -298,6 +368,22 @@ export function TimelineRuler() {
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const pointerX = e.clientX - rect.left;
+      if (drag.zoom && (drag.type === "pending" || drag.type === "vertical-zoom")) {
+        const deltaY = e.clientY - rect.top - drag.zoom.startY;
+        drag.zoom.axisLock = resolveRulerDragAxis(drag.zoom.axisLock, pointerX - drag.startX, deltaY);
+        if (!drag.zoom.axisLock) return;
+        if (drag.zoom.axisLock === "y") {
+          drag.type = "vertical-zoom";
+          if (!ownsRulerZoomRef.current) {
+            ownsRulerZoomRef.current = true;
+            useDAWStore.setState({ isTimelineRulerZooming: true });
+          }
+          const view = getRulerDragZoom(drag.zoom.initialZoom, deltaY, drag.zoom.anchorTime, drag.startX);
+          scheduleZoom(view);
+          return;
+        }
+        finishRulerZoom(); // Horizontal intent no longer owns zoom suppression.
+      }
       const curScrollX = scrollXRef.current;
       const curPPS = pixelsPerSecondRef.current;
       let time = Math.max(0, (pointerX + curScrollX) / curPPS);
@@ -311,6 +397,7 @@ export function TimelineRuler() {
           gridSizeRef.current,
         );
       }
+      drag.currentTime = time;
 
       if (drag.type === "handle-pending") {
         if (Math.abs(pointerX - drag.startX) <= DRAG_THRESHOLD_PX) {
@@ -328,7 +415,8 @@ export function TimelineRuler() {
         setRulerDragging(true);
       } else if (drag.type === "pending") {
         if (Math.abs(pointerX - drag.startX) > DRAG_THRESHOLD_PX) {
-          drag.type = "range-create";
+          drag.type = drag.action === "time_select" ? "time-select"
+            : drag.action === "zoom_to" ? "zoom-create" : "range-create";
           let startTime = drag.startTime;
           if (snapEnabledRef.current) {
             startTime = snapToGrid(
@@ -339,7 +427,9 @@ export function TimelineRuler() {
             );
             drag.startTime = startTime;
           }
-          setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
+          if (drag.type === "time-select") setTimeSelection(Math.min(startTime, time), Math.max(startTime, time));
+          else if (drag.type === "zoom-create") setZoomSelection({ x: Math.min(drag.startX, pointerX), width: Math.abs(pointerX - drag.startX) });
+          else setProjectRange(Math.min(startTime, time), Math.max(startTime, time));
           setRulerDragging(true);
         }
       } else if (drag.type === "range-create") {
@@ -347,30 +437,60 @@ export function TimelineRuler() {
           Math.min(drag.startTime, time),
           Math.max(drag.startTime, time),
         );
+      } else if (drag.type === "time-select") {
+        setTimeSelection(Math.min(drag.startTime, time), Math.max(drag.startTime, time));
+      } else if (drag.type === "zoom-create") {
+        setZoomSelection({ x: Math.min(drag.startX, pointerX), width: Math.abs(pointerX - drag.startX) });
       }
     };
 
     const handleGlobalMouseUp = () => {
       const drag = rulerDragRef.current;
       if (!drag) return;
+      flushZoom();
 
-      if (drag.type === "pending") {
+      if (drag.type === "pending" && drag.action === "seek") {
         seekTo(drag.startTime);
       } else if (drag.type === "handle-pending") {
         seekTo(drag.startTime);
+      } else if (drag.type === "range-create" && drag.action === "loop_set") {
+        const state = useDAWStore.getState();
+        if (!state.transport.loopEnabled) state.toggleLoop();
+      } else if (drag.type === "zoom-create") {
+        const endTime = drag.currentTime ?? drag.startTime;
+        const duration = Math.abs(endTime - drag.startTime);
+        if (duration > 0.01) {
+          const nextZoom = Math.max(1, Math.min(1000, widthRef.current / duration));
+          scheduleZoom({ pixelsPerSecond: nextZoom, scrollX: Math.min(drag.startTime, endTime) * nextZoom });
+          flushZoom();
+        }
       }
 
       rulerDragRef.current = null;
+      finishRulerZoom();
+      setZoomSelection(null);
+      setRulerDragging(false);
+    };
+
+    const cancelRulerDrag = () => {
+      flushZoom();
+      rulerDragRef.current = null;
+      finishRulerZoom();
+      setZoomSelection(null);
       setRulerDragging(false);
     };
 
     window.addEventListener("mousemove", handleGlobalMouseMove);
     window.addEventListener("mouseup", handleGlobalMouseUp);
+    window.addEventListener("blur", cancelRulerDrag);
+    window.addEventListener("pointercancel", cancelRulerDrag);
     return () => {
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
+      window.removeEventListener("blur", cancelRulerDrag);
+      window.removeEventListener("pointercancel", cancelRulerDrag);
     };
-  }, [seekTo, setProjectRange]);
+  }, [finishRulerZoom, flushZoom, scheduleZoom, seekTo, setProjectRange, setTimeSelection]);
 
   const rulerDensity = useMemo(() => {
     const beatsPerBar = timeSignature.numerator;
@@ -566,6 +686,7 @@ export function TimelineRuler() {
             listening={false}
           />
           {rulerMarks}
+          {zoomSelection && <Rect x={zoomSelection.x} y={0} width={zoomSelection.width} height={TIMELINE_RULER_HEIGHT} fill="#0078d4" opacity={0.3} listening={false} />}
           <Playhead
             type="ruler"
             pixelsPerSecond={pixelsPerSecond}

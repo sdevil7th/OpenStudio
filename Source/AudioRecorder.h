@@ -4,6 +4,7 @@
 #include <array>
 #include <memory>
 #include <map>
+#include <functional>
 #include "RecordingWriterSafety.h"
 
 // Handles recording audio to disk for individual tracks.
@@ -51,14 +52,41 @@ public:
                            CompletedRecording& completedPreviousTake);
     std::vector<CompletedRecording> stopAllRecordings(double currentSampleRate);
 
+    // Control-thread maintenance is independent of preview visibility/polling.
+    void maintainRecordingPreviews();
+    static constexpr int recordingPeakStride = 256;
+    static constexpr int maximumRecordingPeakPixels = 8192;
+    static constexpr size_t maximumRecordingPeakEntriesPerRequest = 262144;
+
     // Get waveform peaks for a recording currently in progress
-    // Returns peaks calculated from buffered samples at the requested resolution
+    // Returns a bounded prefix of complete published pixels at the requested
+    // resolution. Readers retain preview storage across stop and rollover.
     juce::var getRecordingPeaks(const juce::String& trackId,
                                 int samplesPerPixel,
                                 int numPixels,
                                 juce::int64 startSample = 0);
 
 private:
+    struct RecordingPreview
+    {
+        RecordingPreview(double rate, int channels);
+        const double sampleRate;
+        const int numChannels;
+        const size_t peakChunkEntries;
+        std::atomic<bool> active { true };
+        static constexpr int PEAK_MAX_CHANNELS = 2;
+        static constexpr int PEAK_CHUNK_SECONDS = 120;
+        static constexpr size_t PEAK_MAX_CHUNKS = 120; // Four hours of preview.
+        std::array<std::unique_ptr<float[]>, PEAK_MAX_CHUNKS> peakChunks;
+        std::array<std::atomic<float*>, PEAK_MAX_CHUNKS> peakChunkPtrs {};
+        std::atomic<size_t> peakAllocatedChunks { 0 };
+        // Absolute completed-bucket index, including unavailable preview gaps.
+        // Each published bucket is immutable; readers acquire this size first.
+        std::atomic<size_t> peakTableSize { 0 };
+        juce::CriticalSection growthLock; // Preview/control threads only.
+    };
+    static void growRecordingPreview(const std::shared_ptr<RecordingPreview>& preview);
+
     struct ActiveRecording
     {
         juce::String trackId;
@@ -76,34 +104,21 @@ private:
         int debugLoggedBlocks = 0;
 #endif
 
-        // Incremental peak table for live waveform display.
-        //
-        // Instead of storing raw interleaved samples (~46 MB/track for 120 s),
-        // the audio thread accumulates min/max over PEAK_STRIDE samples and
-        // appends one entry when the stride is complete.  getRecordingPeaks()
-        // then reads O(pixels) entries instead of O(total samples).
-        //
-        // Memory: 120 s × 44100 / 256 ≈ 20 700 entries × 2 ch × 2 values × 4 B ≈ 660 KB/track.
-        // SPSC: audio thread writes (atomic size), message thread reads lock-free.
-        static constexpr int PEAK_STRIDE = 256;  // Samples per peak entry
-        static constexpr int PEAK_MAX_CHANNELS = 2;
-        static constexpr int PEAK_CHUNK_SECONDS = 120;
-        static constexpr size_t PEAK_MAX_CHUNKS = 120; // Four hours of live preview
-        std::array<std::unique_ptr<float[]>, PEAK_MAX_CHUNKS> peakChunks;
-        std::array<std::atomic<float*>, PEAK_MAX_CHUNKS> peakChunkPtrs {};
-        std::atomic<size_t> peakAllocatedChunks { 0 };
-        size_t peakChunkEntries = 0;
-        std::unique_ptr<float[]> peakTable;      // [min_ch0, max_ch0, min_ch1, max_ch1] × N
-        std::atomic<size_t>      peakTableSize { 0 };  // Completed entries (atomic)
-        size_t                   peakTableCapacity = 0;
+        std::shared_ptr<RecordingPreview> preview;
 
         // Accumulator — audio thread only (never touched from message thread)
-        float accumMin[PEAK_MAX_CHANNELS] { 0.0f, 0.0f };
-        float accumMax[PEAK_MAX_CHANNELS] { 0.0f, 0.0f };
+        float accumMin[RecordingPreview::PEAK_MAX_CHANNELS] { 0.0f, 0.0f };
+        float accumMax[RecordingPreview::PEAK_MAX_CHANNELS] { 0.0f, 0.0f };
         int   accumCount = 0;
     };
 
     std::map<juce::String, ActiveRecording> activeRecordings;
+    // Neither preview nor status polling ever acquires writerLock. Shared
+    // preview ownership keeps immutable published buckets alive for readers.
+    std::map<juce::String, std::shared_ptr<RecordingPreview>> recordingPreviews;
+    juce::CriticalSection previewRegistryLock;
+    juce::CriticalSection statusLock;
+    juce::CriticalSection controlLock; // Serializes start/stop/rollover publication.
     std::vector<std::shared_ptr<RecordingWriteStatus>> pendingWriteStatuses;
     bool startRecordingInternal(const juce::String& trackId,
                                 const juce::File& file,
@@ -120,5 +135,7 @@ private:
     std::atomic<int> writeLockMissCount { 0 };
     std::atomic<int> writerBufferOverflowCount { 0 };
 
+    friend void runRecordingRecoveryRegression(const juce::File&,
+        const std::function<void(const char*, bool)>&);
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioRecorder)
 };

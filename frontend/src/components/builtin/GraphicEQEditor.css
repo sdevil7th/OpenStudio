@@ -276,3 +276,19 @@
     padding-inline: 7px;
   }
 }
+@container graphic-eq (min-width:1600px) and (min-height:900px) {
+  .graphic-eq-heading { padding: 24px 32px; gap: 20px; }
+  .graphic-eq-response { flex-basis: 38cqh; max-height: none; min-height: 240px; margin: 0 32px 24px; }
+  .graphic-eq-response text { font-size: 16px; }
+  .graphic-eq-response>div { font-size: 15px; }
+  .graphic-eq-bands { flex: 0 1 420px; max-height: 500px; min-height: 240px; justify-content: center; gap: clamp(12px, 1cqw, 32px); padding: 0 32px 20px; }
+  .graphic-eq-band { max-width: 120px; gap: 14px; }
+  .graphic-eq-editor[data-mode="31"] .graphic-eq-band { max-width: 88px; }
+  .graphic-eq-value,.graphic-eq-editor[data-mode="31"] .graphic-eq-value { width: 60px; font-size: 19px; min-height: 36px; }
+  .graphic-eq-band .eq-button { min-height: 36px; font-size: 15px; }
+  .graphic-eq-fader,.graphic-eq-editor[data-mode="31"] .graphic-eq-fader { width: 34px; }
+  .graphic-eq-fader::-webkit-slider-thumb { width: 28px; height: 12px; margin-left: -13px; }
+  .graphic-eq-fader::-moz-range-thumb { width: 28px; height: 12px; }
+  .graphic-eq-group { margin: 0 32px; justify-content: center; gap: 24px; padding: 16px 20px; font-size: 15px; }
+  .graphic-eq-footer { margin: 20px 32px 0; padding: 20px; justify-content: center; gap: 60px; }
+}

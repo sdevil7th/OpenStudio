@@ -13,7 +13,7 @@ namespace
 std::array<float,OpenStudioEQ::MIDIProgramBank::configurationCount> OpenStudioEQ::midiProgramConfiguration() const noexcept
 {
     const auto flag=[](float value){return value>=.5f?1.0f:0.0f;};
-    return {flag(phaseMode.load()),static_cast<float>(juce::jlimit(0,2,juce::roundToInt(phaseQuality.load()))),flag(minimumPhaseFIR.load()),flag(analogResponse.load()),flag(spectralProcessing.load()),flag(linearBandDynamics.load()),flag(externalDetector.load())};
+    return {flag(phaseMode.load()),static_cast<float>(juce::jlimit(0,2,juce::roundToInt(phaseQuality.load()))),flag(minimumPhaseFIR.load()),flag(analogResponse.load()),flag(spectralProcessing.load()),flag(linearBandDynamics.load()),flag(externalDetector.load()),flag(signalPath.load())};
 }
 void OpenStudioEQ::publishMIDIPrograms(std::unique_ptr<MIDIProgramBank> next)
 {
@@ -107,7 +107,7 @@ void OpenStudioEQ::saveMIDIPrograms(juce::ValueTree& state) const
     for(int i=0;i<midiProgramOwner->count;++i)
     {
         const auto& entry=midiProgramOwner->entries[static_cast<size_t>(i)];juce::ValueTree slot("Slot");slot.setProperty("bank",entry.bank,nullptr);slot.setProperty("program",entry.program,nullptr);slot.setProperty("name",entry.name,nullptr);
-        juce::Array<juce::var> values,configuration;for(float value:entry.values)values.add(value);for(float value:entry.configuration)configuration.add(value);slot.setProperty("values",values,nullptr);slot.setProperty("configuration",configuration,nullptr);map.addChild(slot,-1,nullptr);
+        juce::Array<juce::var> values,configuration;for(float value:entry.values)values.add(value);for(size_t f=0;f<7;++f)configuration.add(entry.configuration[f]);slot.setProperty("signalPath",entry.configuration[7],nullptr);slot.setProperty("values",values,nullptr);slot.setProperty("configuration",configuration,nullptr);map.addChild(slot,-1,nullptr);
     }
     state.addChild(map,-1,nullptr);
 }
@@ -123,11 +123,12 @@ void OpenStudioEQ::restoreMIDIPrograms(const juce::ValueTree& state)
         {
             const auto slot=map.getChild(i);auto& entry=next->entries[static_cast<size_t>(i)];valid=readEQMIDIInteger(slot.getProperty("bank"),0,16383,entry.bank)&&readEQMIDIInteger(slot.getProperty("program"),0,127,entry.program);entry.name=slot.getProperty("name").toString().substring(0,80);
             const auto valuesVar=slot.getProperty("values"),configurationVar=slot.getProperty("configuration");const auto* values=valuesVar.getArray();const auto* configuration=configurationVar.getArray();
-            valid=valid&&slot.hasType("Slot")&&entry.bank>=0&&entry.bank<=16383&&entry.program>=0&&entry.program<=127&&values&&configuration&&values->size()==static_cast<int>(entry.values.size())&&configuration->size()==static_cast<int>(entry.configuration.size());
+            valid=valid&&slot.hasType("Slot")&&entry.bank>=0&&entry.bank<=16383&&entry.program>=0&&entry.program<=127&&values&&configuration&&values->size()==static_cast<int>(entry.values.size())&&configuration->size()==7;
             for(int old=0;valid&&old<i;++old)valid=next->entries[static_cast<size_t>(old)].bank!=entry.bank||next->entries[static_cast<size_t>(old)].program!=entry.program;
             if(!valid)break;
             size_t field=0;visitMIDIProgramParameters([&](auto&,float lo,float hi){const auto& property=(*values)[static_cast<int>(field)];const float value=static_cast<float>(property);valid=valid&&(property.isDouble()||property.isInt()||property.isInt64())&&std::isfinite(value)&&value>=lo&&value<=hi;entry.values[field++]=value;});
-            for(size_t f=0;f<entry.configuration.size();++f){const auto& property=(*configuration)[static_cast<int>(f)];const float value=static_cast<float>(property);valid=valid&&(property.isDouble()||property.isInt()||property.isInt64())&&std::isfinite(value)&&value>=0&&value<=(f==1?2.0f:1.0f)&&std::floor(value)==value;entry.configuration[f]=value;}
+            int signalMode=0;valid=valid&&readEQMIDIInteger(slot.getProperty("signalPath",0),0,1,signalMode);entry.configuration[7]=static_cast<float>(signalMode);
+            for(size_t f=0;f<7;++f){const auto& property=(*configuration)[static_cast<int>(f)];const float value=static_cast<float>(property);valid=valid&&(property.isDouble()||property.isInt()||property.isInt64())&&std::isfinite(value)&&value>=0&&value<=(f==1?2.0f:1.0f)&&std::floor(value)==value;entry.configuration[f]=value;}
             if(valid)++next->count;
         }
     }

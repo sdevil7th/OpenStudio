@@ -10339,6 +10339,22 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         const auto targetPresetName = args[2].toString();
                         completion(audioEngine.copyBuiltInFXPreset(pluginName, sourcePresetName, targetPresetName));
                     })
+                    .withNativeFunction ("copyNAMRackPresetWithInstrumentProfile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 3 || ! args[0].isString() || ! args[1].isString()
+                            || ! (args[2].isInt() || args[2].isInt64() || args[2].isDouble()))
+                        {
+                            completion(false);
+                            return;
+                        }
+                        const auto profile = static_cast<double>(args[2]);
+                        if (profile != 0.0 && profile != 1.0)
+                        {
+                            completion(false);
+                            return;
+                        }
+                        completion(audioEngine.copyNAMRackPresetWithInstrumentProfile(
+                            args[0].toString(), args[1].toString(), static_cast<int>(profile)));
+                    })
                     .withNativeFunction ("deleteBuiltInFXPreset", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         auto pluginName = args[0].toString();
                         auto presetName = args[1].toString();
@@ -12066,6 +12082,27 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                         } else {
                             completion(false);
                         }
+                    })
+                    .withNativeFunction ("saveJsonDocumentToFile", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        if (args.size() != 2 || !args[0].isString() || !args[1].isString()
+                            || !juce::File::isAbsolutePath(args[0].toString()))
+                        { completion(false); return; }
+                        const auto file = juce::File(args[0].toString());
+                        const auto json = args[1].toString();
+                        if (json.getNumBytesAsUTF8() > ProjectFileStore::maximumJsonDocumentBytes)
+                        { completion(false); return; }
+                        const juce::Component::SafePointer<MainComponent> safeThis(this);
+                        projectFilePool.addJob([file, json, completion, safeThis] {
+                           #if JUCE_WINDOWS
+                            ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                           #endif
+                            const auto result = ProjectFileStore::saveJsonDocument(file, json);
+                            const bool success = result.wasOk();
+                            if (!success) OpenStudioCrashDiagnostics::recordBreadcrumb("json_document_save_failed", result.getErrorMessage());
+                            juce::MessageManager::callAsync([completion, success, safeThis] {
+                                if (safeThis && !safeThis->secondaryWindowClosing) completion(success);
+                            });
+                        });
                     })
                     .withNativeFunction ("projectRecovery", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (!isMainWindow() || args.isEmpty()) { completion(juce::Array<juce::var>()); return; }
@@ -17444,6 +17481,11 @@ void MainComponent::timerCallback()
         windowCallbacks.pitchEditorSession("tick", {}, windowRole, windowInstanceId);
     if (isMainWindow() && audioEngine.finalizeInterruptedRecording())
         pendingRecordingDeviceInterruption = true;
+    // Preview storage must keep up even when the timeline is hidden or zooming
+    // suppresses waveform requests. This control-thread maintenance never
+    // acquires the recorder's audio-writer lock.
+    if (isMainWindow())
+        audioEngine.maintainRecordingPreviews();
     if (isMainWindow() && frontendStartupState == FrontendStartupState::ready)
         OpenStudioCrashDiagnostics::pulseMessageThread();
     OpenStudioCrashDiagnostics::flushRealtimeFaults();

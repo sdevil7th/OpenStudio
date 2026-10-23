@@ -4,8 +4,8 @@
   background: radial-gradient(ellipse at 50% 50%,#46342028,transparent 70%),#1a2227;
 }
 .saturator-approved .core-effect-face {
-  padding: 23px 25px;
-  gap: 23px;
+  padding: clamp(16px, 2.4cqi, 48px);
+  gap: clamp(16px, 2cqi, 36px);
 }
 .saturator-voices .effect-mode-switch {
   gap: 8px;
@@ -23,11 +23,11 @@
 }
 .saturator-main {
   min-height: 240px;
-  flex-basis: 265px;
-  flex-grow: 1;
+  flex-basis: clamp(265px, 32cqh, 620px);
+  flex-grow: 0;
 }
 .saturator-drive,.saturator-output {
-  width: 140px;
+  width: clamp(140px, 16cqi, 350px);
   flex-shrink: 0;
 }
 .saturator-main .core-signal-levels {
@@ -56,17 +56,17 @@
   min-width: 62px;
 }
 .saturator-tone .suite-value,.saturator-quality .suite-value {
-  font-size: 17px;
-  width: 62px;
+  font-size: clamp(17px, 1.7cqi, 30px);
+  width: clamp(62px, 6cqi, 116px);
 }
 .saturator-tone .suite-parameter>span:first-child {
-  font-size: 12px;
+  font-size: clamp(12px, 1.1cqi, 22px);
 }
 .saturator-detail>summary {
   cursor: pointer;
   color: #aabfc9;
   padding: 11px 14px;
-  font-size: 12px;
+  font-size: clamp(12px, 1.1cqi, 22px);
 }
 .saturator-caption {
   font-size: 11px;

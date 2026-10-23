@@ -530,6 +530,16 @@ public:
     void setForceAutomationReadForProcessing(bool forceRead) { forceAutomationReadDuringProcessing.store(forceRead, std::memory_order_relaxed); }
 
     bool tryProcessBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&);
+    // A zero generation is ineligible. This is a hint until the worker checks
+    // the same generation under its graph-reader lease. Dependencies, track
+    // lifetime, block context and exclusive processing remain the host's job.
+    uint64 getParallelNAMGraphGeneration() const noexcept;
+    // Rejection leaves audio/MIDI and DSP state untouched. A successful call
+    // processes only the validated native-NAM graph, even if a new graph is
+    // published during the block. Never retry a still-running job elsewhere.
+    bool tryProcessBlockParallel(juce::AudioBuffer<float>&, juce::MidiBuffer&,
+                                 uint64 expectedGeneration);
+    static juce::var runParallelNAMEligibilityRegression();
     void setDiagnosticsTrackId(const juce::String& id) { diagnosticsTrackId = id; }
     int getProcessorFault(bool input, int index) const;
 
@@ -614,7 +624,10 @@ private:
         juce::String builtInParamId;
     };
 
-    void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&);
+    struct RealtimeGraphSnapshot;
+    bool isParallelNAMGraphEligible(const RealtimeGraphSnapshot*) const noexcept;
+    void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&,
+                              const RealtimeGraphSnapshot* workerGraph = nullptr);
     void timerCallback() override;
     void refreshRealtimeFXTailBudgetOnControlThread();
     void resetExpiredRealtimeFXTailOnControlThread();
@@ -721,6 +734,7 @@ private:
     struct RealtimeGraphSnapshot
     {
         uint64 generation = 0;
+        bool containsOnlyNativeNAM = false;
         ProcessorSnapshot inputFX;
         ProcessorSnapshot trackFX;
         BypassSnapshot inputFXBypass;

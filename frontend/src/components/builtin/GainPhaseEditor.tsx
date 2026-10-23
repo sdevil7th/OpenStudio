@@ -1,5 +1,7 @@
 import { editorButton, editorSelect } from "./PluginEditorControls";
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
+import { useEditorOverview } from "./useEditorOverview";
 import { createEffectParameterRenderer, useApprovedEffectMeters, type ApprovedEffectEditorProps } from "./ApprovedEffectEditor";
 import { EQToolbar } from "./EQToolbar";
 import { GainPhaseAlignmentPanel } from "./GainPhaseAlignmentPanel";
@@ -19,6 +21,16 @@ const Correlation = memo(function Correlation(props: ApprovedEffectEditorProps) 
 export function GainPhaseEditor(props: ApprovedEffectEditorProps) {
   const [tab, setTab] = useState("Alignment");
   const [point, setPoint] = useState(0);
+  const editor = useRef<HTMLDivElement>(null);
+  const overview = useEditorOverview(editor);
+  usePluginFeatureReveal(editor, props.schema.pluginId ?? "gainphase", ({ parameterId: id, workflowId }) => {
+    if (id?.startsWith("spectralPhase") || workflowId === "spectral") {
+      setTab("Spectral");
+      const index = /^spectralPhase[LR](\d+)$/.exec(id ?? "");
+      if (index) setPoint(Number(index[1]));
+    } else if (id?.startsWith("phase")) setTab("Phase shaping");
+    else if (workflowId === "alignment") setTab("Alignment");
+  });
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const control = createEffectParameterRenderer(props);
   const value = (id: string) => props.schema.parameters.find(p => p.id === id)?.value ?? 0;
@@ -35,7 +47,7 @@ export function GainPhaseEditor(props: ApprovedEffectEditorProps) {
     finally { setBusy(false); }
   };
   const tabs = ["Alignment", "Phase shaping", "Spectral"];
-  return <div className="approved-effect-editor gain-phase-editor flex min-h-0 min-w-0 flex-1 flex-col">
+  return <div ref={editor} className="approved-effect-editor gain-phase-editor flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="gainphase" data-overview={overview}>
     <EQToolbar {...props} />
     <header className="gain-phase-heading flex shrink-0 items-center justify-between gap-4"><div><h2>GAIN / PHASE</h2><p>Timing, polarity and microphone alignment</p></div><span className="gain-phase-mark" aria-hidden="true">Ø</span></header>
     <div className="gain-phase-manual flex shrink-0 items-center justify-evenly gap-4 @max-[760px]/gain-phase:[&_.suite-parameter>span:last-child]:flex-col @max-[760px]/gain-phase:[&_.suite-parameter>span:last-child]:items-center @max-[760px]/gain-phase:[&_.suite-parameter>span:last-child]:gap-0">
@@ -55,15 +67,17 @@ export function GainPhaseEditor(props: ApprovedEffectEditorProps) {
           setTab(tabs[next]); document.getElementById(`phase-workspace-${next}`)?.focus();
         }}>{name}{name === "Phase shaping" && (value("phaseEnabledL") >= .5 || value("phaseEnabledR") >= .5) ? " •" : name === "Spectral" && value("spectralPhaseEnabled") >= .5 ? " •" : ""}</button>)}
     </div>
-    <div className="gain-phase-workspace min-h-0 flex-1 overflow-y-auto" id="phase-workspace" role="tabpanel" aria-labelledby={`phase-workspace-${tabs.indexOf(tab)}`}>
-      {tab === "Alignment" ? <GainPhaseAlignmentPanel address={props.address} historyReplayRevision={props.historyReplayRevision} onApply={props.onApplyAlignment} /> : <div className="flex flex-col gap-5 p-5">
-        {tab === "Phase shaping" ? <><div className="flex flex-wrap justify-evenly gap-4">{["L", "R"].map(channel => <section key={channel} className="flex flex-col gap-3" aria-label={`${channel === "L" ? "Left" : "Right"} phase rotation`}>
+    <div className="gain-phase-workspace min-h-0 flex-1 overflow-y-auto" data-feature={tab === "Alignment" ? "alignment" : tab === "Spectral" ? "spectral" : undefined} id="phase-workspace" role={overview ? "region" : "tabpanel"} aria-label={overview ? "Gain Phase overview" : undefined} aria-labelledby={overview ? undefined : `phase-workspace-${tabs.indexOf(tab)}`}>
+      {(tab === "Alignment" || overview) && <GainPhaseAlignmentPanel address={props.address} historyReplayRevision={props.historyReplayRevision} onApply={props.onApplyAlignment} />}
+      {(tab !== "Alignment" || overview) && <div className="gain-phase-shaping flex min-w-0 flex-col gap-5 p-5">
+        {(tab === "Phase shaping" || overview) && <section className="gain-phase-rotation flex flex-col gap-5" aria-label="Manual phase shaping">{overview && <div className="gain-phase-stage-heading"><span>MANUAL / ALL-PASS</span><h3>Phase shaping</h3></div>}<div className="flex flex-wrap justify-evenly gap-4">{["L", "R"].map(channel => <section key={channel} className="flex flex-col gap-3" aria-label={`${channel === "L" ? "Left" : "Right"} phase rotation`}>
           {control(`phaseEnabled${channel}`, false, `${channel === "L" ? "Left" : "Right"} phase`)}<div className="flex gap-5">{control(`phaseFrequency${channel}`, false, "Corner")}{control(`phaseStages${channel}`, false, "Stages")}</div>
-        </section>)}</div><Correlation {...props} /><p className="text-xs text-daw-text-muted">Correlation compares the output channels. It is independent of reference-track alignment confidence.</p></> : <>
+        </section>)}</div><Correlation {...props} /><p className="text-xs text-daw-text-muted">Correlation compares the output channels. It is independent of reference-track alignment confidence.</p></section>}
+        {(tab === "Spectral" || overview) && <section className="gain-phase-spectral flex flex-col gap-5" data-feature="spectral" aria-label="Saved spectral phase">{overview && <div className="gain-phase-stage-heading"><span>SAVED / SPECTRAL FIR</span><h3>Spectral phase</h3></div>}
           <div className="flex flex-wrap items-center justify-between gap-4">{control("spectralPhaseEnabled", false, "Spectral phase")}{control("spectralPhaseAmount", false, "Amount")}</div>
           <SpectralPhaseGuide schema={props.schema} />
           <details><summary className={`${editorButton} cursor-pointer`}>Edit saved phase points</summary><div className="mt-4 flex flex-wrap items-center justify-evenly gap-4"><label className="flex flex-col gap-2 text-xs">Frequency point<select className={editorSelect} aria-label="Spectral phase frequency point" value={point} onChange={event => setPoint(Number(event.target.value))}>{Array.from({ length: 48 }, (_, index) => <option value={index} key={index}>{Math.round(20 * 1000 ** (index / 47)).toLocaleString()} Hz</option>)}</select></label>{control(`spectralPhaseL${point}`, false, "Left phase")}{control(`spectralPhaseR${point}`, false, "Right phase")}</div></details>
-        </>}
+        </section>}
         <div className="flex justify-center gap-3">{(["L", "R"] as const).map(from => <button key={from} type="button" className={editorButton} disabled={busy} onClick={() => void copyChannel(from)}>Copy {from} → {from === "L" ? "R" : "L"}</button>)}</div>
         {error && <p role="alert" className="text-xs text-daw-record">{error}</p>}
       </div>}

@@ -86,7 +86,7 @@ export function MainToolbar({
   const shortcuts = useMemo(() => ({
     mixer: getEffectiveShortcutLabel("view.toggleMixer", "Ctrl+M"),
     loop: getEffectiveShortcutLabel("transport.loop", "L"),
-    record: getEffectiveShortcutLabel("transport.record", "Ctrl+R"),
+    record: getEffectiveShortcutLabel("transport.record", "R"),
     undo: getEffectiveShortcutLabel("edit.undo", "Ctrl+Z"),
     redo: getEffectiveShortcutLabel("edit.redo", "Ctrl+Shift+Z"),
     selectTool: getEffectiveShortcutLabel("tools.selectTool", "V"),

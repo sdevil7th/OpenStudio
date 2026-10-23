@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BuiltInPluginPanel,
   BuiltInParamControl,
@@ -14,7 +14,11 @@ import {
   shouldReadBackAfterParamWrite,
   stepForParam,
 } from "../components/BuiltInPluginPanel";
-import type { BuiltInParamDescriptor, BuiltInPluginSchema } from "../services/NativeBridge";
+import { nativeBridge, type BuiltInParamDescriptor, type BuiltInPluginSchema } from "../services/NativeBridge";
+import { SuiteParameter } from "../components/builtin/SuiteParameter";
+import { reverbControlLayout } from "../utils/reverbControlLayout";
+import { ReverbEditor } from "../components/builtin/ReverbEditor";
+import { capturePluginState, eqValues } from "../components/builtin/EQToolbar";
 
 function param(overrides: Partial<BuiltInParamDescriptor>): BuiltInParamDescriptor {
   return {
@@ -149,6 +153,8 @@ const panelSchemas = [
     continuous("decayTime", "Decay", 2.2, 0.1, 20, "space", "s"),
     continuous("wetLevel", "Wet", 0.33, 0, 1, "mix"),
     continuous("dryLevel", "Dry", 0.7, 0, 1, "mix"),
+    continuous("outputTrimDb", "Output", 0, -60, 12, "output", "dB"),
+    { ...choice("reverbReturnMode", "Return level", 1, ["Original", "Calibrated"], "character"), defaultValue: 1 },
   ]),
   schemaWithParams("OpenStudio Chorus", "Modulation", [
     choice("mode", "Mode", 0, ["Chorus", "Flanger", "Phaser"], "modulation"),
@@ -471,6 +477,97 @@ describe("BuiltInPluginPanel schema model", () => {
     expect(primaryParamIdsForKind("drums", drums)).toEqual(["kit", "mapPreset", "punch", "ambience", "outputGain"]);
     expect(primaryParamIdsForKind("reverb", reverb)).toContain("decayTime");
     expect(primaryParamIdsForKind("dynamics", limiter)).toEqual(["threshold", "ceiling", "lookaheadMs", "releaseMs"]);
+  });
+
+  it("keeps Reverb output trim editable while Send disables only the insert balance", () => {
+    const reverb = schemaWithParams("OpenStudio Reverb", "Reverb", [
+      choice("reverbTypeAll", "Reverb type", 0, ["Room", "Hall"], "space"),
+      toggle("sendMode", "Send", 1, "routing"),
+      continuous("dryLevel", "Dry", 0, 0, 1, "mix"),
+      continuous("wetLevel", "Wet", 1, 0, 1, "mix"),
+      param({ id: "outputTrimDb", label: "Output", value: -6, min: -60, max: 12, defaultValue: 0, unit: "dB" }),
+    ]);
+    reverb.pluginId = "reverb";
+    const html = renderToStaticMarkup(<ReverbEditor schema={reverb}
+      address={{ chain: "track", trackId: "reverb-output", fxIndex: 0 }} canUndo={false} canRedo={false}
+      onUndo={() => {}} onRedo={() => {}} onChange={() => {}} onGestureStart={() => {}} onGestureEnd={() => {}}
+      onApplyState={async () => true} onApplyValues={async () => true} onRecallPreset={async () => true} onFlush={async () => true} />);
+
+    // Output is a sibling of the inert balance, rather than a disabled child.
+    expect(html).toMatch(/class="reverb-balance[^\"]*" inert="" aria-disabled="true"/);
+    expect(html).toMatch(/data-param="wetLevel"[\s\S]*?<\/div><\/div><div data-param="outputTrimDb"/);
+    expect(html).toContain('role="slider" tabindex="0" aria-label="Output" aria-valuemin="-60" aria-valuemax="12" aria-valuenow="-6"');
+    expect(html).toContain('aria-label="Output value" type="number" min="-60" max="12"');
+  });
+
+  it("includes Reverb global choices in dirty detection and carries complete native state for Compare and export", async () => {
+    const reverb = schemaWithParams("OpenStudio Reverb", "Reverb", [
+      param({ id: "outputTrimDb", label: "Output", value: -9.125, min: -60, max: 12, defaultValue: 0, unit: "dB" }),
+      choice("reverbCharacterMode", "Processing", 1, ["Original", "Refined"], "character"),
+      { ...choice("reverbReturnMode", "Return level", 0, ["Original", "Calibrated"], "character"), defaultValue: 1 },
+    ]);
+    expect(eqValues(reverb)).toEqual({ outputTrimDb: -9.125, reverbCharacterMode: 1, reverbReturnMode: 0 });
+    const fullState = "native-state-with-output-processing-return-level-and-all-reverb-banks";
+    const read = vi.spyOn(nativeBridge, "getBuiltInPluginState").mockResolvedValue({
+      name: reverb.name, fullState, values: { outputTrimDb: -9.125, reverbCharacterMode: 1, reverbReturnMode: 0 },
+    });
+    try {
+      const address = { chain: "track" as const, trackId: "reverb-output", fxIndex: 0 };
+      expect(JSON.parse(await capturePluginState(address))).toEqual({ name: reverb.name, fullState });
+      expect(read).toHaveBeenCalledWith(address);
+    } finally { read.mockRestore(); }
+  });
+
+  it.each([0, 2, 4, 7, 19, 36, 40])("assigns Return level to Setup for type %i and preserves its saved choice", type => {
+    const reverb = schemaWithParams("OpenStudio Reverb", "Reverb", [
+      choice("reverbTypeAll", "Reverb type", type, Array.from({ length: 41 }, (_, index) => `Type ${index}`), "space"),
+      { ...choice("reverbReturnMode", "Return level", 1, ["Original", "Calibrated"], "character"), defaultValue: 1 },
+      continuous("wetLevel", "Wet", .33, 0, 1, "mix"), continuous("dryLevel", "Dry", .7, 0, 1, "mix"),
+    ]);
+    reverb.pluginId = "reverb";
+    const setup = reverbControlLayout(reverb).pages.find(page => page.id === "setup");
+    const control = setup?.controls.find(item => item.id === "reverbReturnMode");
+    expect(control).toBeDefined();
+    const saved = reverb.parameters.find(item => item.id === control!.id)!;
+    const html = renderToStaticMarkup(<SuiteParameter parameter={saved} label={control!.label}
+      description={control!.description} onChange={() => {}} />);
+    expect(html).toContain('data-param="reverbReturnMode"');
+    expect(html).toContain('aria-label="Return level"');
+    expect(html).toContain('aria-description="Calibrated applies fixed wet-return trims');
+    expect(html).toContain('<option value="0">Original</option><option value="1" selected="">Calibrated</option>');
+    expect(reverb.parameters.find(item => item.id === "wetLevel")?.value).toBe(.33);
+    expect(reverb.parameters.find(item => item.id === "dryLevel")?.value).toBe(.7);
+  });
+
+  it("displays the Original return choice from old-state readback instead of the fresh Calibrated default", () => {
+    const reverb = schemaWithParams("OpenStudio Reverb", "Reverb", [
+      choice("reverbTypeAll", "Reverb type", 0, ["Room", "Hall"], "space"),
+      { ...choice("reverbReturnMode", "Return level", 0, ["Original", "Calibrated"], "character"), defaultValue: 1 },
+    ]);
+    reverb.pluginId = "reverb";
+    const setup = reverbControlLayout(reverb).pages.find(page => page.id === "setup");
+    const control = setup?.controls.find(item => item.id === "reverbReturnMode");
+    expect(control).toBeDefined();
+    const saved = reverb.parameters.find(item => item.id === control!.id)!;
+    const html = renderToStaticMarkup(<SuiteParameter parameter={saved} label={control!.label}
+      description={control!.description} onChange={() => {}} />);
+    expect(html).toContain('<option value="0" selected="">Original</option><option value="1">Calibrated</option>');
+  });
+
+  it("renders the saved global Processing choice with Original and Refined options", () => {
+    const reverb = schemaWithParams("OpenStudio Reverb", "Reverb", [
+      choice("reverbTypeAll", "Reverb type", 19, Array.from({ length: 41 }, (_, type) => `Type ${type}`), "space"),
+      choice("reverbCharacterMode", "Processing", 1, ["Original", "Refined"], "character"),
+    ]);
+    reverb.pluginId = "reverb";
+    const html = renderToStaticMarkup(<ReverbEditor schema={reverb}
+      address={{ chain: "track", trackId: "reverb-refined", fxIndex: 0 }} canUndo={false} canRedo={false}
+      onUndo={() => {}} onRedo={() => {}} onChange={() => {}} onGestureStart={() => {}} onGestureEnd={() => {}}
+      onApplyState={async () => true} onApplyValues={async () => true} onRecallPreset={async () => true} onFlush={async () => true} />);
+    expect(html).toContain('data-param="reverbCharacterMode"');
+    expect(html).toContain('aria-label="Processing"');
+    expect(html).toContain('<option value="0">Original</option><option value="1" selected="">Refined</option>');
+    expect(html).toContain("The choice is shared across types.");
   });
 
   it("keeps grouped controls in plugin-specific order", () => {

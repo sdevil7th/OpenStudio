@@ -235,7 +235,10 @@ public:
     {
         return pitchScrubPreviewMayRender.load(std::memory_order_acquire);
     }
-    void renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate);
+    // A device callback may be shorter than its prepared scratch capacity.
+    // Passing its length avoids advancing the preview through unused samples.
+    void renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate,
+                                 int activeSampleCount = -1);
     PitchScrubPreviewStatus getPitchScrubPreviewStatus (const juce::String& clipId = {}) const;
     PitchPreviewRoutingStatus getPitchPreviewRoutingStatus (const juce::String& clipId = {}) const;
     // Lock-free aggregate route snapshot for diagnostics. Per-clip queries use

@@ -6,6 +6,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { formatShortcut } from "../utils/platform";
 import { matchesActionShortcut } from "../utils/globalShortcutDispatcher";
+import { getEffectiveShortcutLabel } from "../utils/inputProfileHelp";
 import {
   activateShortcutContext,
   registerShortcutSurface,
@@ -40,12 +41,12 @@ const MAX_PPS = 1000;
 const ZOOM_SENSITIVITY = 0.0015;
 
 const TOOL_DEFS: { id: PitchEditorTool; label: string; key: string; icon: React.ReactNode; title: string }[] = [
-  { id: "select", label: "Select", key: "1", icon: <MousePointer size={11} />, title: "Select & move notes (1)" },
-  { id: "drift", label: "Drift", key: "2", icon: <Activity size={11} />, title: "Edit pitch drift (2)" },
-  { id: "vibrato", label: "Vibrato", key: "3", icon: <Waves size={11} />, title: "Edit vibrato (3)" },
-  { id: "transition", label: "Trans", key: "4", icon: <ChevronRight size={11} />, title: "Edit transitions (4)" },
-  { id: "draw", label: "Draw", key: "5", icon: <Pencil size={11} />, title: "Draw pitch curve on note (5)" },
-  { id: "split", label: "Split", key: "6", icon: <Scissors size={11} />, title: "Split note at click (6)" },
+  { id: "select", label: "Select", key: "V", icon: <MousePointer size={11} />, title: "Select & move notes" },
+  { id: "drift", label: "Drift", key: "2", icon: <Activity size={11} />, title: "Edit pitch drift" },
+  { id: "vibrato", label: "Vibrato", key: "3", icon: <Waves size={11} />, title: "Edit vibrato" },
+  { id: "transition", label: "Trans", key: "4", icon: <ChevronRight size={11} />, title: "Edit transitions" },
+  { id: "draw", label: "Draw", key: "5", icon: <Pencil size={11} />, title: "Draw pitch curve on note" },
+  { id: "split", label: "Split", key: "6", icon: <Scissors size={11} />, title: "Split note at click" },
 ];
 
 const PITCH_TOOL_ACTIONS: Record<string, PitchEditorTool> = {
@@ -207,6 +208,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
     lowerZoneHeight, tcpWidth,
     pitchEditorTrackId, pitchEditorClipId,
     setLowerZoneHeight, closePitchEditor,
+    keyboardShortcutProfileId, customShortcuts,
   } = useDAWStore(
     useShallow((s) => ({
       lowerZoneHeight: s.lowerZoneHeight,
@@ -215,8 +217,15 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
       pitchEditorClipId: s.pitchEditorClipId,
       setLowerZoneHeight: s.setLowerZoneHeight,
       closePitchEditor: s.closePitchEditor,
+      keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+      customShortcuts: s.customShortcuts,
     }))
   );
+
+  const toolTitles = useMemo(() => Object.fromEntries(TOOL_DEFS.map(toolDef => [
+    toolDef.id,
+    `${toolDef.title} (${getEffectiveShortcutLabel(`pitch.tool.${toolDef.id}`, toolDef.key)})`,
+  ])), [keyboardShortcutProfileId, customShortcuts]);
 
   const clipInfo = useDAWStore(
     useShallow((s) => {
@@ -1187,7 +1196,7 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
                   <button
                     key={t.id}
                     onClick={() => setTool(t.id)}
-                    title={t.title}
+                    title={toolTitles[t.id]}
                     className={`flex items-center gap-1 px-1.5 py-1 text-[10px] rounded transition-colors ${
                       tool === t.id
                         ? "bg-daw-accent text-white shadow-sm"

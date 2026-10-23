@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
 
 // Three original spaces: integral-tap room/hall FDNs and an allpass echo loop.
@@ -12,6 +13,7 @@ public:
         float lowCut=20,highCut=20000,width=1,density=1,modulation=.25f,rate=.4f,amount=1;
         bool freeze=false, infiniteInput=false;
         float lowShelfDb=0;
+        bool correctedControls=false;
     };
     static constexpr std::array<float,15> beats{.0625f,.083333333f,.125f,.166666667f,.25f,.333333333f,.5f,.75f,1,1.5f,2,3,4,8,16};
     static float capacitySeconds(float choice) noexcept {return std::array<float,3>{6,24,96}[static_cast<size_t>(juce::jlimit(0,2,juce::roundToInt(choice)))];}
@@ -75,6 +77,14 @@ private:
             }
             initialized=true;
         }
+        float modulationDepth(float requested, float base, const Delay& line) const noexcept
+        {
+            if (!settings.correctedControls) return requested;
+            // Keep moving taps away from both interpolation limits, including
+            // transitions of the shortest Contour/Diffuse delay stages.
+            const float room = juce::jmax(0.0f, juce::jmin(base - 1.0f, static_cast<float>(line.data.size() - 2) - base));
+            return juce::jmin(requested, room * .45f);
+        }
         std::array<float,2> process(float left,float right,bool active)
         {
             ++frames;const float currentSize=sizeValue.getNextValue();const float fb=feedback.getNextValue(),damp=damping.getNextValue(),diffuse=diffusion.getNextValue(),motion=depth.getNextValue(),frequency=speed.getNextValue();
@@ -101,7 +111,7 @@ private:
                     for(size_t stage=0;stage<6;++stage)
                     {
                         const float length=times[stage]*(.2f+currentSize*3)*static_cast<float>(fs)*.001f;
-                        const float mod=motion*static_cast<float>(std::sin(juce::MathConstants<double>::twoPi*(phase+static_cast<double>(stage+ch*6)*.137)));
+                        const float mod=modulationDepth(motion,length,diffusers[ch][stage])*static_cast<float>(std::sin(juce::MathConstants<double>::twoPi*(phase+static_cast<double>(stage+ch*6)*.137)));
                         auto& line=diffusers[ch][stage];const float output=line.read(length+mod)-diffuse*signal;line.write(signal+diffuse*output);signal=output;
                     }
                     space[ch]=signal;
@@ -115,7 +125,7 @@ private:
                 for(int i=0;i<count;++i)
                 {
                     const auto index=static_cast<size_t>(i);const float time=lengths[index].getNextValue();
-                    const float mod=motion*(1-held)*static_cast<float>(std::sin(juce::MathConstants<double>::twoPi*(phase+static_cast<double>(i)*.173)));
+                    const float mod=modulationDepth(motion,time,lines[index])*(1-held)*static_cast<float>(std::sin(juce::MathConstants<double>::twoPi*(phase+static_cast<double>(i)*.173)));
                     const float value=lines[index].read((held>=.99999f?std::round(time):time)+mod);
                     dampState[index]+=(damp+held*(1-damp))*(value-dampState[index]);const float loss=losses[index].getNextValue();tank[index]=dampState[index]*(loss+held*(1-loss));
                     const float early=lines[index].read(time*(mode==0?.27f:.41f));
@@ -183,14 +193,16 @@ public:
             else if(running[i]&&engines[i].settings.freeze){auto retiring=engines[i].settings;retiring.freeze=false;engines[i].configure(retiring);}
         }
     }
-    std::array<float,3> process(float left,float right)
+    std::array<float,3> process(float left,float right,float returnBlend=0)
     {
         std::array<float,3> result{};if(!prepared)return result;
         left=std::isfinite(left)?juce::jlimit(-16.0f,16.0f,left):0;right=std::isfinite(right)?juce::jlimit(-16.0f,16.0f,right):0;
         for(size_t i=0;i<engines.size();++i)
         {
             const float weight=weights[i].getNextValue(),wetWeight=retirement.next(i);if(wetWeight==0&&weight==0&&weights[i].getTargetValue()==0){if(running[i])engines[i].reset();running[i]=false;continue;}
-            running[i]=true;const auto output=engines[i].process(left,right,weights[i].getTargetValue()>0);result[0]+=output[0]*wetWeight;result[1]+=output[1]*wetWeight;result[2]+=weight;
+            running[i]=true;const auto output=engines[i].process(left,right,weights[i].getTargetValue()>0);
+            const float returnWeight=BuiltInReverbReturnLevels::weighted(wetWeight,12+static_cast<int>(i),returnBlend);
+            result[0]+=output[0]*returnWeight;result[1]+=output[1]*returnWeight;result[2]+=weight;
         }
         return result;
     }

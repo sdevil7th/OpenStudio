@@ -88,9 +88,11 @@ export function GainPhaseAlignmentPanel({ address, onApply, historyReplayRevisio
     if (!changed.success) throw new Error(changed.error ?? "Group audition was not applied");
     if (mounted.current) setAudition({ ...audition, aligned: !audition.aligned });
   });
-  return <section id="utility-alignment" role="tabpanel" aria-label="Align tracks" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 py-4 text-xs">
+  return <section id="utility-alignment" role="tabpanel" aria-label="Align tracks" className="gain-phase-alignment flex min-h-0 flex-1 flex-col gap-4 px-5 py-4 text-xs">
+    <div className="gain-phase-setup flex min-w-0 flex-col gap-3">
+    <div className="gain-phase-stage-heading"><span>01 / SETUP</span><h3>Choose related inputs</h3></div>
     <p className="text-daw-text-muted">Select existing Gain Phase instances on related tracks. Play a continuous section with looping off, then analyze their inputs.</p>
-    <div className="flex items-end gap-2">
+    <div className="flex flex-wrap items-end gap-2 [&>label:first-child]:basis-full">
       <label className="flex min-w-0 flex-1 flex-col gap-1">Reference<select className="suite-select" aria-label="Alignment reference" disabled={busy} value={reference} onChange={event => { const id = event.target.value; setReference(id); setSelected(current => current.includes(id) ? current : [...current.slice(0, 7), id]); setResult(null); setAudition(null); setDiscovery(null); }}>
         {candidates.map(item => <option key={item.instanceId} value={item.instanceId}>{name(item)}</option>)}
       </select></label>
@@ -126,6 +128,14 @@ export function GainPhaseAlignmentPanel({ address, onApply, historyReplayRevisio
       {audition && <button className="suite-button" disabled={busy} onClick={switchAudition}>{audition.aligned ? "Hear before" : "Hear aligned"}</button>}
       {audition && <span role="status">{audition.aligned ? "Aligned group active" : "Original group active"}</span>}
     </div>
+    </div>
+    <div className="gain-phase-results flex min-w-0 flex-1 flex-col gap-3">
+    <div className="gain-phase-stage-heading"><span>02 / REVIEW</span><h3>Alignment proposal</h3></div>
+    {!result && !captureProgress && <div className="gain-phase-empty-results rounded border border-daw-border-light p-5">
+      <h4 className="mb-3 font-medium">{selected.length < 2 ? "Choose at least two inputs" : "Ready to analyze"}</h4>
+      <p className="text-daw-text-muted">A proposal appears here after analysis. Review each channel’s delay, polarity and match before applying the group.</p>
+      <ol className="mt-4 flex list-decimal flex-col gap-3 pl-4 text-daw-text-muted"><li>Choose a reference and related tracks.</li><li>Play a continuous passage with looping off, then select Analyze inputs.</li><li>Review and Apply group. Hear before / Hear aligned compares the result; Undo restores the whole group.</li></ol>
+    </div>}
     {captureProgress && <div className="flex shrink-0 items-center gap-2" role="status"><progress aria-label="Alignment progress" className="min-w-0 flex-1" max={1} value={captureProgress.progress} /><span>{captureProgress.stage === 0 ? "Waiting for capture" : captureProgress.stage === 1 ? `Capturing ${Math.round(captureProgress.progress * 100)}%` : `Analyzing ${Math.round(captureProgress.progress * 100)}%`}</span></div>}
     {error && <p role="alert" className="text-daw-record">{error}</p>}
     {discovery && <div className="flex shrink-0 flex-col gap-2 rounded border border-daw-border-light p-2" aria-label="Discovered alignment groups">
@@ -145,5 +155,6 @@ export function GainPhaseAlignmentPanel({ address, onApply, historyReplayRevisio
     </div>}
     {result && !result.accepted && <p role="status" className="text-daw-text-muted">No changes applied. Try a louder, less repetitive section or a smaller related group.</p>}
     <details className="shrink-0 text-xs leading-relaxed text-daw-text-muted"><summary className="cursor-pointer rounded focus-visible:outline-2 focus-visible:outline-daw-accent">How alignment works</summary><p className="pt-2">{channelPolicy === "linked" ? "Both channels receive the same delay and polarity, preserving the relative timing at the captured inputs. Conflicting channel estimates reject the group." : "Each channel is delayed independently to the latest arrival."} The reference can receive delay too. Apply replaces timing/polarity, enables processing and replaces manual phase rotation with the accepted fit, or Off. Editor Undo restores the entire group. All-pass searches one corner and one to four stages. Spectral learns a 48-point phase curve from one capture half, then checks the actual FIR against both halves and rejects over 1 dB of ripple at measured coherent frequencies. Both keep timing-only correction when evidence is weak or inconsistent. Find related groups uses captured audio from the checked inputs, with timing/polarity only. Every pair and lag/polarity cycle must qualify; weak bleed, silence, inconsistent sections or unrelated performances can remain unmatched. It does not infer an instrument from its name. The reference is preferred where present; other groups choose a strong measured reference. Apply changes only the reviewed group. Use group for analysis checks just those members for a subsequent phase fit. Longer captures require three separate timing estimates to agree. Each timing window is limited to 65,536 samples; short capture is limited to the same size. The 30/60/120 s modes retain three windows rather than the whole span and do not fit phase. Silence or timing changes in any measured window reject the group; unmeasured gaps are not evidence of agreement. Cancel analysis or close this panel to abort. An expired editor heartbeat also cancels after six seconds. Phase agreement is a heuristic, not an acoustic correctness score. Host latency compensation covers the saved FIR. Routing, FX order, bypass, latency and output changes invalidate captured proposals. Direct master only enforces its stated topology. Downstream frequency/phase response and unmeasured project gaps are not analyzed.</p></details>
+    </div>
   </section>;
 }

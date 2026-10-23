@@ -1,7 +1,10 @@
 #pragma once
+#include "BuiltInReverbDamping.h"
 #include <JuceHeader.h>
 #include "BuiltInReverbSpillover.h"
+#include "BuiltInReverbSparseDiffusion.h"
 #include <array>
+#include <tuple>
 #include <vector>
 
 // Standalone algorithmic plate, derived from Dattorro (JAES 45/9, 1997),
@@ -20,6 +23,13 @@ public:
         int decayFilter = 0; // Legacy damping, Off, or low-pass.
         float decayCutoff = 8000;
         bool outputCutOff = false;
+        bool refined = false;
+        bool correctedControls = false;
+        bool operator==(const Settings& other) const noexcept
+        {
+            return std::tie(decay,damping,diffusion,preDelay,lowCut,highCut,width,modulation,freeze,infiniteInput,decayFilter,decayCutoff,outputCutOff,refined,correctedControls)
+                == std::tie(other.decay,other.damping,other.diffusion,other.preDelay,other.lowCut,other.highCut,other.width,other.modulation,other.freeze,other.infiniteInput,other.decayFilter,other.decayCutoff,other.outputCutOff,other.refined,other.correctedControls);
+        }
     };
 
 private:
@@ -84,6 +94,8 @@ private:
         bool initialized = false;
         int drain = 0;
         Settings settings;
+        BuiltInReverbSparseDiffusion readoutDiffusion;
+        bool configuredActive = false;
 
         void prepare(double sampleRate, float characterScale)
         {
@@ -103,6 +115,7 @@ private:
             }
             for (auto* smoother : { &diffusion, &dampingPole, &highPole, &lowPole, &width, &modulation, &send, &preSamples })
                 smoother->reset(sampleRate, .05);
+            readoutDiffusion.prepare(sampleRate);
             reset();
         }
         void reset()
@@ -111,10 +124,14 @@ private:
             for (auto& line : loop) line.reset();
             predelay.reset(); feedback.fill(0); damp.fill(0); hp.fill(0); lp.fill(0);
             phase = 0; drain = 0; initialized = false;
+            readoutDiffusion.reset();
         }
         void configure(Settings next, bool active)
         {
+            const auto previous = settings;
             if (active) settings = next;
+            if (initialized && configuredActive == active && settings == previous) return;
+            configuredActive = active;
             const bool hold = active && settings.freeze;
             const auto set = [this](auto& smoother, float target)
             {
@@ -131,13 +148,14 @@ private:
             const float cutoff = 18000.0f * std::pow(1.0f / 36.0f, settings.damping);
             set(dampingPole, hold || settings.decayFilter == 1 ? 0 : settings.decayFilter == 2
                 ? std::exp(-juce::MathConstants<float>::twoPi * juce::jmin(rate * .45f, settings.decayCutoff) / rate)
-                : settings.damping * std::exp(-juce::MathConstants<float>::twoPi * cutoff / rate));
+                : BuiltInReverbDamping::legacyTone(settings.damping, cutoff, rate, settings.correctedControls));
             set(lowPole, std::exp(-juce::MathConstants<float>::twoPi * settings.lowCut / rate));
             set(highPole, settings.outputCutOff ? 0 : std::exp(-juce::MathConstants<float>::twoPi * juce::jmin(rate * .45f, settings.highCut) / rate));
             set(width, settings.width);
             set(modulation, hold ? 0 : settings.modulation * rate * .00045f);
             set(send, active && (!hold || settings.infiniteInput) ? 1.0f : 0.0f);
             set(preSamples, settings.preDelay * .001f * rate);
+            readoutDiffusion.configure(settings.refined);
             initialized = true;
         }
         std::array<float, 2> process(float mono, bool active)
@@ -159,7 +177,7 @@ private:
             for (size_t ch = 0; ch < 2; ++ch)
             {
                 const size_t offset = ch * 4;
-                const float excursion = depth * static_cast<float>(std::sin(phase + static_cast<double>(ch) * juce::MathConstants<double>::halfPi));
+                const float excursion = depth == 0 ? 0 : depth * static_cast<float>(std::sin(phase + static_cast<double>(ch) * juce::MathConstants<double>::halfPi));
                 const float excitation = signal * .3f + feedback[ch] * singleSampleLoss;
                 float value = loop[offset].allpass(settings.freeze && settings.infiniteInput ? juce::jlimit(-8.0f, 8.0f, excitation) : excitation, -.7f, excursion);
                 value = loop[offset + 1].delay(value);
@@ -181,6 +199,7 @@ private:
                 lp[ch] = value + lpPole * (lp[ch] - value);
                 output[ch] = lp[ch];
             }
+            output = readoutDiffusion.process(output);
             const float mid = (output[0] + output[1]) * .5f;
             const float side = (output[0] - output[1]) * .5f * width.getNextValue();
             return { mid + side, mid - side };
@@ -235,6 +254,17 @@ public:
         for(size_t i=0;i<tanks.size();++i)if(spillWeights.audibleRetiring(i))seconds=juce::jmax(seconds,static_cast<double>(tanks[i].drain)/tanks[i].rate);
         return seconds;
     }
+    bool isDormant() const noexcept
+    {
+        for (const auto& tank : tanks) if (tank.drain > 0) return false;
+        return true;
+    }
+    juce::uint64 sparseProcessedFrames() const noexcept
+    {
+        juce::uint64 frames = 0;
+        for (const auto& tank : tanks) frames += tank.readoutDiffusion.processedFrames();
+        return frames;
+    }
     std::array<float, 3> process(float left, float right)
     {
         if (!prepared) return {};
@@ -243,8 +273,10 @@ public:
         std::array<float, 3> output {};
         for (size_t i = 0; i < tanks.size(); ++i)
         {
-            const auto wet = tanks[i].process(mono, weights[i].getTargetValue() > 0);
+            const bool active = weights[i].getTargetValue() > 0;
             const float weight = weights[i].getNextValue(),wetWeight=spillWeights.next(i);
+            if (!active && wetWeight <= 0 && tanks[i].drain > 0) tanks[i].reset();
+            const auto wet = tanks[i].process(mono, active);
             output[0] += wet[0] * wetWeight; output[1] += wet[1] * wetWeight; output[2] += weight;
         }
         return output;

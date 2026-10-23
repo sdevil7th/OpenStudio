@@ -71,7 +71,10 @@ def qualification_environment(source):
     # that make a tiny fixture subset stand in for the full native suites.
     for selector in ('OPENSTUDIO_RECORDING_FIXTURES_ONLY',
                      'OPENSTUDIO_METRONOME_FIXTURES_ONLY',
-                     'OPENSTUDIO_RT_SAFETY_FIXTURES_ONLY'):
+                     'OPENSTUDIO_RT_SAFETY_FIXTURES_ONLY',
+                     'OPENSTUDIO_NAM_FUZZ_ONLY',
+                     'OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY',
+                     'OPENSTUDIO_NAM_TWO_RACK_CPU_CONTRACTS_ONLY'):
         env.pop(selector, None)
     return env
 
@@ -93,6 +96,22 @@ def window_lifecycle_check(data, code, safe_mode):
             'exitCode': code, 'checkCount': len(data.get('checks', [])),
             'testScope': 'native main/detached recovery lifecycle' if safe_mode
                          else 'native main/detached lifecycle and objective pitch editing'}
+
+
+def runtime_safety_check(data, code):
+    """Require actual native checks and an asserted POSIX publication failure."""
+    report = data if isinstance(data, dict) else {}
+    checks = report.get('checks')
+    checks_passed = (isinstance(checks, list) and bool(checks)
+                     and all(isinstance(check, dict) and check.get('status') == 'pass'
+                             for check in checks))
+    publication = report.get('posixAtomicPublicationPermissionFailure', 'missing')
+    okay = code == 0 and report.get('passed') is True and checks_passed and publication == 'pass'
+    return {'id': 'runtime-safety', 'status': 'pass' if okay else 'fail', 'exitCode': code,
+            'checkCount': len(checks) if isinstance(checks, list) else 0,
+            'checksPassed': checks_passed, 'posixAtomicPublicationPermissionFailure': publication,
+            'testScope': 'native runtime safety and recording fault injection; '
+                         'POSIX atomic publication failure under an unprivileged user'}
 
 
 def main():
@@ -196,8 +215,7 @@ def main():
             code = execute([app, '--runtime-safety-self-test', runtime], output / 'runtime.log', test_env('runtime'), 180)
             report = runtime / 'result.json'
             data = json.loads(report.read_text()) if report.exists() else {}
-            checks.append({'id': 'runtime-safety', 'status': 'pass' if code == 0 and data.get('passed') is True else 'fail', 'exitCode': code,
-                           'checkCount': len(data.get('checks', [])), 'testScope': 'native runtime safety and recording fault injection'})
+            checks.append(runtime_safety_check(data, code))
             report = output / 'engine.json'
             report.unlink(missing_ok=True)
             code = execute([app, '--automated-regression-headless', '--report', report], output / 'engine.log', test_env('engine'), 600, cwd=engine_cwd)

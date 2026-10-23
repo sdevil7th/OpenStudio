@@ -9,11 +9,35 @@ PitchDetector::PitchDetector()
 
 void PitchDetector::prepare(double sr, int /*maxBlockSize*/)
 {
-    sampleRate = sr;
+    decimation = rateNormalized ? juce::jmax(1, static_cast<int>(std::ceil(sr / 32000.0))) : 1;
+    sampleRate = sr / decimation;
+    // Windowed-sinc decimator. Compute a convolution only for retained samples;
+    // storage and coefficients are prepared off the callback. At 192 kHz this
+    // keeps the same 64 ms YIN window and substantially reduces YIN work.
+    const int length = decimation > 1 ? 64 * decimation + 1 : 1;
+    antiAliasCoefficients.assign(static_cast<size_t>(length), 0);
+    // Mirrored history makes the complete newest-to-oldest FIR window
+    // contiguous. The convolution keeps its original tap/accumulation order,
+    // but no longer branches to wrap the ring for every tap.
+    antiAliasHistory.assign(static_cast<size_t>(2 * length), 0);
+    const double cutoff = juce::jmin(6000.0, sampleRate * .4) / sr;
+    double sum = 0;
+    for (int i = 0; i < length; ++i)
+    {
+        const int offset = i - length / 2;
+        const double x = 2 * juce::MathConstants<double>::pi * cutoff * offset;
+        const double sinc = offset == 0 ? 2 * cutoff : std::sin(x) / (juce::MathConstants<double>::pi * offset);
+        const double window = length == 1 ? 1.0 : .42 - .5 * std::cos(2 * juce::MathConstants<double>::pi * i / (length - 1)) + .08 * std::cos(4 * juce::MathConstants<double>::pi * i / (length - 1));
+        antiAliasCoefficients[static_cast<size_t>(i)] = static_cast<float>(sinc * window);
+        sum += sinc * window;
+    }
+    for (auto& coefficient : antiAliasCoefficients) coefficient = static_cast<float>(coefficient / sum);
+    decimationPosition = antiAliasPosition = 0;
     inputBuffer.resize(frameSize * 2, 0.0f);
     yinBuffer.resize(frameSize / 2, 0.0f);
     writePos = 0;
     samplesAccumulated = 0;
+    pendingTau = 0;
     detectedFreq.store(0.0f, std::memory_order_relaxed);
     confidence.store(0.0f, std::memory_order_relaxed);
     clearHistory();
@@ -21,9 +45,12 @@ void PitchDetector::prepare(double sr, int /*maxBlockSize*/)
 
 void PitchDetector::reset()
 {
+    std::fill(antiAliasHistory.begin(), antiAliasHistory.end(), 0.0f);
+    decimationPosition = antiAliasPosition = 0;
     std::fill(inputBuffer.begin(), inputBuffer.end(), 0.0f);
     writePos = 0;
     samplesAccumulated = 0;
+    pendingTau = 0;
     detectedFreq.store(0.0f, std::memory_order_relaxed);
     confidence.store(0.0f, std::memory_order_relaxed);
     clearHistory();
@@ -33,7 +60,22 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
 {
     for (int i = 0; i < numSamples; ++i)
     {
-        inputBuffer[static_cast<size_t>(writePos)] = samples[i];
+        float sample = samples[i];
+        if (decimation > 1)
+        {
+            const int length = static_cast<int>(antiAliasCoefficients.size());
+            antiAliasHistory[static_cast<size_t>(antiAliasPosition)] = sample;
+            antiAliasHistory[static_cast<size_t>(antiAliasPosition + length)] = sample;
+            if (++antiAliasPosition == length) antiAliasPosition = 0;
+            if (++decimationPosition < decimation) continue;
+            decimationPosition = 0;
+            sample = 0;
+            const float* newest = antiAliasHistory.data() + antiAliasPosition + length - 1;
+            for (int tap = 0; tap < length; ++tap)
+                sample += antiAliasCoefficients[static_cast<size_t>(tap)] * newest[-tap];
+        }
+        if (rateNormalized) advanceYIN();
+        inputBuffer[static_cast<size_t>(writePos)] = sample;
         writePos = (writePos + 1) % static_cast<int>(inputBuffer.size());
         ++samplesAccumulated;
 
@@ -43,11 +85,10 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
 
             // Extract frame from ring buffer
             auto& frame = analysisFrame;
-            int readPos = (writePos - frameSize + static_cast<int>(inputBuffer.size())) % static_cast<int>(inputBuffer.size());
-            for (int j = 0; j < frameSize; ++j)
-            {
-                frame[static_cast<size_t>(j)] = inputBuffer[static_cast<size_t>((readPos + j) % static_cast<int>(inputBuffer.size()))];
-            }
+            const int readPos = (writePos - frameSize + static_cast<int>(inputBuffer.size())) % static_cast<int>(inputBuffer.size());
+            const int first = juce::jmin(frameSize, static_cast<int>(inputBuffer.size()) - readPos);
+            std::copy_n(inputBuffer.data() + readPos, first, frame.data());
+            std::copy_n(inputBuffer.data(), frameSize - first, frame.data() + first);
 
             // Compute RMS
             float sumSq = 0.0f;
@@ -66,13 +107,24 @@ void PitchDetector::processSamples(const float* samples, int numSamples)
                 continue;
             }
 
-            // Run YIN
-            float freq = runYIN(frame.data(), frameSize);
-
-            // Store result
-            float conf = confidence.load(std::memory_order_relaxed); // set by runYIN
-
-            publishFrame(freq, conf, rmsDB);
+            if (rateNormalized)
+            {
+                // Spread at most two lag dot-products per retained input sample.
+                // Every legal search completes before the next 512-sample frame;
+                // this adds <= one hop of analysis scheduling, without changing
+                // the YIN arithmetic or allocating callback storage.
+                pendingMinimum = minFreq; pendingMaximum = maxFreq; pendingRmsDB = rmsDB;
+                pendingTauMin = juce::jmax(1, static_cast<int>(sampleRate / maxFreq));
+                pendingTauMax = juce::jmin(frameSize / 2 - 1, static_cast<int>(sampleRate / minFreq));
+                pendingSum = 0; yinBuffer[0] = 1;
+                if (pendingTauMax > pendingTauMin) pendingTau = 1;
+                else { detectedFreq.store(0); confidence.store(0); publishFrame(0, 0, rmsDB); }
+            }
+            else
+            {
+                const float freq = runYIN(frame.data(), frameSize);
+                publishFrame(freq, confidence.load(std::memory_order_relaxed), rmsDB);
+            }
         }
     }
 }
@@ -120,6 +172,57 @@ float PitchDetector::runYIN(const float* frame, int size)
             : 0.0f;
     }
 
+    return finishYIN(tauMin, tauMax, minFreq, maxFreq);
+}
+
+void PitchDetector::advanceYIN() noexcept
+{
+    if (pendingTau == 0) return;
+    const int maximum = juce::jmin(frameSize / 2 - 1, pendingTauMax + 1);
+    // Compute adjacent lags together, retaining each sum's original order.
+    // This exposes independent accumulators and reuses the first input load;
+    // publication still occurs on exactly the same retained input sample.
+    if (pendingTau < maximum)
+    {
+        float first = 0, second = 0;
+        const float* frame = analysisFrame.data();
+        const float* shifted = frame + pendingTau;
+        for (int j = 0; j < frameSize / 2; ++j)
+        {
+            const float a = frame[j] - shifted[j];
+            const float b = frame[j] - shifted[j + 1];
+            first += a * a;
+            second += b * b;
+        }
+        pendingSum += first;
+        yinBuffer[static_cast<size_t>(pendingTau)] = pendingSum > 0 ? first * static_cast<float>(pendingTau) / pendingSum : 0;
+        ++pendingTau;
+        pendingSum += second;
+        yinBuffer[static_cast<size_t>(pendingTau)] = pendingSum > 0 ? second * static_cast<float>(pendingTau) / pendingSum : 0;
+        ++pendingTau;
+    }
+    else if (pendingTau == maximum)
+    {
+        float sum = 0;
+        for (int j = 0; j < frameSize / 2; ++j)
+        {
+            const float delta = analysisFrame[static_cast<size_t>(j)] - analysisFrame[static_cast<size_t>(j + pendingTau)];
+            sum += delta * delta;
+        }
+        pendingSum += sum;
+        yinBuffer[static_cast<size_t>(pendingTau)] = pendingSum > 0 ? sum * static_cast<float>(pendingTau) / pendingSum : 0;
+        ++pendingTau;
+    }
+    if (pendingTau > maximum)
+    {
+        pendingTau = 0;
+        const float frequency = finishYIN(pendingTauMin, pendingTauMax, pendingMinimum, pendingMaximum);
+        publishFrame(frequency, confidence.load(std::memory_order_relaxed), pendingRmsDB);
+    }
+}
+
+float PitchDetector::finishYIN(int tauMin, int tauMax, float minimum, float maximum)
+{
     // Step 3: Absolute threshold — find first dip below threshold
     int bestTau = -1;
     float bestVal = sensitivityThreshold;
@@ -163,7 +266,7 @@ float PitchDetector::runYIN(const float* frame, int size)
     float freq = (refinedTau > 0.0f) ? static_cast<float>(sampleRate) / refinedTau : 0.0f;
 
     // Clamp to valid range
-    if (freq < minFreq || freq > maxFreq)
+    if (freq < minimum || freq > maximum)
     {
         freq = 0.0f;
         conf = 0.0f;

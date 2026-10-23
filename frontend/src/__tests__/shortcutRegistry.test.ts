@@ -23,8 +23,8 @@ describe("shortcut registry", () => {
     expect(getActionShortcut("file.closeProject")).toBe("Ctrl+F4");
     expect(getActionShortcut("file.quit")).toBe("Ctrl+Q");
     expect(getActionShortcut("file.render")).toBe("Ctrl+Alt+R");
-    expect(getActionShortcut("view.zoomIn")).toBe("Ctrl++");
-    expect(getActionShortcut("view.zoomOut")).toBe("Ctrl+-");
+    expect(getActionShortcut("view.zoomIn")).toBe("+");
+    expect(getActionShortcut("view.zoomOut")).toBe("-");
     expect(getActionShortcut("view.zoomToFit")).toBe("Ctrl+0");
   });
 
@@ -59,7 +59,7 @@ describe("shortcut registry", () => {
   });
 
   it("uses the selected profile between custom overrides and registry defaults", () => {
-    expect(getActionShortcut("transport.rewind")).toBe("Home");
+    expect(getActionShortcut("transport.rewind")).toBe("1");
 
     useDAWStore.setState({
       keyboardShortcutProfileId: "reaper",

@@ -1889,7 +1889,8 @@ bool PlaybackEngine::hasPitchScrubPreview (const juce::String& clipId) const
  #pragma warning(push)
  #pragma warning(disable: 4244 4267 4305 4456)
 #endif
-void PlaybackEngine::renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate)
+void PlaybackEngine::renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, double sampleRate,
+                                            int activeSampleCount)
 {
     const juce::ScopedTryLock sl (lock);
     if (! sl.isLocked())
@@ -1910,7 +1911,11 @@ void PlaybackEngine::renderPitchScrubPreview (juce::AudioBuffer<float>& buffer, 
     const double readIncrement = playbackRatio;
     const int loopChannels = pitchScrubPreview.loopBuffer.getNumChannels();
     const int outputChannels = buffer.getNumChannels();
-    const int numSamples = buffer.getNumSamples();
+    const int numSamples = activeSampleCount < 0
+        ? buffer.getNumSamples()
+        : juce::jlimit(0, buffer.getNumSamples(), activeSampleCount);
+    if (numSamples == 0)
+        return;
     if (pitchScrubInputBuffer.getNumChannels() < loopChannels
         || pitchScrubInputBuffer.getNumSamples() < numSamples)
     {

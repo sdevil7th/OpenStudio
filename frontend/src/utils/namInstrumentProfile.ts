@@ -140,6 +140,16 @@ export function namStoredPresetMatchesInstrumentProfile(
   return namInstrumentProfileTagIsCompatible(preset.instrumentProfile, profile);
 }
 
+/** Library metadata can expose an old mismatch, but cannot silently migrate DSP. */
+export function namStoredPresetProfileMismatch(preset: {
+  instrumentProfile?: "guitar" | "bass";
+  metadata?: { instrumentProfile?: "guitar" | "bass" };
+}): { stored: "guitar" | "bass"; labelled: "guitar" | "bass" } | null {
+  const stored = preset.instrumentProfile;
+  const labelled = preset.metadata?.instrumentProfile;
+  return stored && labelled && stored !== labelled ? { stored, labelled } : null;
+}
+
 export function shouldClearNAMFactoryPresetIdentityOnProfileChange(
   activePresetTag: NAMInstrumentProfileTag | undefined,
   currentProfile: unknown,

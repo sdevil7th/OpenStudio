@@ -1,7 +1,10 @@
 #pragma once
+#include "BuiltInReverbDamping.h"
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
 #include <array>
+#include <tuple>
 #include <vector>
 
 // Original standalone studio spaces. Orthogonal feedback and delay-proportional
@@ -17,6 +20,12 @@ public:
         float width = 1, modulation = .15f, bassRatio = 1;
         bool freeze = false, infiniteInput = false;
         int decayFilter=0; float decayCutoff=8000; bool outputCutOff=false;
+        bool correctedControls = false;
+        bool operator==(const Settings& other)const noexcept
+        {
+            return std::tie(decay,size,damping,diffusion,preDelay,lowCut,highCut,early,width,modulation,bassRatio,freeze,infiniteInput,decayFilter,decayCutoff,outputCutOff,correctedControls)
+                ==std::tie(other.decay,other.size,other.damping,other.diffusion,other.preDelay,other.lowCut,other.highCut,other.early,other.width,other.modulation,other.bassRatio,other.freeze,other.infiniteInput,other.decayFilter,other.decayCutoff,other.outputCutOff,other.correctedControls);
+        }
     };
 private:
     struct Delay
@@ -60,6 +69,7 @@ private:
         std::array<juce::SmoothedValue<float>, 4> diffuserGain;
         juce::SmoothedValue<float> preSamples, inputGain, scatter, dampPole, lowPole, highPole, earlyGain, width, depth, size;
         std::array<float, 16> base {}, bassState {}, dampState {};
+        std::array<float, 8> reflectionFalloff {};
         std::array<float, 2> lowState {}, highState {};
         std::array<int, 4> diffuserLength {};
         Settings settings;
@@ -67,9 +77,12 @@ private:
         double phase = 0;
         int kind = 0, count = 8, stages = 1, drain = 0;
         bool initialized = false;
+        bool configuredActive = false;
         void prepare(double sampleRate, int type)
         {
             rate = static_cast<float>(sampleRate); kind = type;
+            for (size_t tap = 0; tap < reflectionFalloff.size(); ++tap)
+                reflectionFalloff[tap] = std::exp(-.21f * static_cast<float>(tap));
             count = kind == 1 || kind == 3 ? 16 : 8;
             stages = kind == 5 ? 2 : kind == 0 || kind == 4 ? 1 : (kind == 2 ? 3 : 4);
             constexpr std::array<std::array<float, 16>, 6> milliseconds {{
@@ -112,7 +125,10 @@ private:
         }
         void configure(const Settings& values, bool active)
         {
+            const auto previous=settings;
             if (active) settings = values;
+            if(initialized&&configuredActive==active&&settings==previous)return;
+            configuredActive=active;
             const bool hold = active && settings.freeze;
             const auto set = [this](auto& smoother, float target)
             {
@@ -134,7 +150,7 @@ private:
             const float cutoff = kind == 5 ? 20000 * std::pow(1.0f/16.0f,settings.damping) : 18000 * std::pow(1.0f/36.0f,settings.damping);
             set(dampPole,hold||settings.decayFilter==1 ? 0 : settings.decayFilter==2
                 ? std::exp(-juce::MathConstants<float>::twoPi*juce::jmin(rate*.45f,settings.decayCutoff)/rate)
-                : settings.damping*std::exp(-juce::MathConstants<float>::twoPi*cutoff/rate));
+                : BuiltInReverbDamping::legacyTone(settings.damping, cutoff, rate, settings.correctedControls));
             set(lowPole,std::exp(-juce::MathConstants<float>::twoPi*settings.lowCut/rate));
             set(highPole,settings.outputCutOff?0:std::exp(-juce::MathConstants<float>::twoPi*juce::jmin(rate*.45f,settings.highCut)/rate));
             set(earlyGain,settings.early); set(width,settings.width); set(depth,hold ? 0 : settings.modulation*rate*.00035f);
@@ -205,7 +221,7 @@ private:
             for (int tap = 0; tap < 8; ++tap)
             {
                 const float time = earlyMs[static_cast<size_t>(kind)][static_cast<size_t>(tap)] * .001f * rate * scale;
-                const float amplitude = earlyLevel*(kind == 4 ? .28f : .14f)*std::exp(-.21f*static_cast<float>(tap));
+                const float amplitude = earlyLevel*(kind == 4 ? .28f : .14f)*reflectionFalloff[static_cast<size_t>(tap)];
                 output[0] += early[static_cast<size_t>(tap%2)].read(time+1)*amplitude;
                 output[1] += early[static_cast<size_t>((tap+1)%2)].read(time*1.113f+1)*amplitude*(tap%3==0 ? -.8f : 1.0f);
             }
@@ -226,7 +242,7 @@ private:
             for (int i = 0; i < count; ++i)
             {
                 const auto slot = static_cast<size_t>(i);
-                const float excursion = modulation*static_cast<float>(std::sin(phase*(1.0+.07*i)+i*.93));
+                const float excursion = modulation==0?0:modulation*static_cast<float>(std::sin(phase*(1.0+.07*i)+i*.93));
                 const float value = lines[slot].read(length[slot].getNextValue()+excursion);
                 output[0] += value*normalization*(i%2==0 ? lateLevel : -lateLevel);
                 output[1] += value*normalization*(i%4<2 ? lateLevel : -lateLevel);
@@ -296,15 +312,27 @@ public:
         for(size_t i=0;i<engines.size();++i)if(spillWeights.audibleRetiring(i))seconds=juce::jmax(seconds,static_cast<double>(engines[i].drain)/engines[i].rate);
         return seconds;
     }
-    std::array<float,3> process(float left,float right)
+    bool isDormant() const noexcept
+    {
+        for (const auto& engine : engines) if (engine.drain > 0) return false;
+        return true;
+    }
+    std::array<float,3> process(float left,float right,float returnBlend=0)
     {
         if (!prepared) return {};
         const auto safe=[](float value) { return std::isfinite(value) ? juce::jlimit(-16.0f,16.0f,value) : 0.0f; };
         std::array<float,3> output {};
+        constexpr std::array<int,6> returnTypes {0,1,3,8,9,0};
         for (size_t i = 0; i < engines.size(); ++i)
         {
-            const auto wet=engines[i].process(safe(left),safe(right),weights[i].getTargetValue()>0);
-            const float weight=weights[i].getNextValue(),wetWeight=spillWeights.next(i); output[0]+=wet[0]*wetWeight; output[1]+=wet[1]*wetWeight; output[2]+=weight;
+            const bool active = weights[i].getTargetValue() > 0;
+            const float weight = weights[i].getNextValue(), wetWeight = spillWeights.next(i);
+            // Once its outgoing return is silent, invalidate history without
+            // clearing the prepared delay buffers on the audio thread.
+            if (!active && wetWeight <= 0 && engines[i].drain > 0) engines[i].reset();
+            const auto wet = engines[i].process(safe(left), safe(right), active);
+            const float returnWeight=BuiltInReverbReturnLevels::weighted(wetWeight,returnTypes[i],returnBlend);
+            output[0]+=wet[0]*returnWeight; output[1]+=wet[1]*returnWeight; output[2]+=weight;
         }
         return output;
     }

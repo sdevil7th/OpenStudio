@@ -4,6 +4,8 @@ import { Search } from "lucide-react";
 import type { BuiltInParamDescriptor } from "../../services/NativeBridge";
 import { findBuiltInParameter } from "../../utils/builtInExpandedSelectors";
 import { reverbControlLayout, type ReverbControl } from "../../utils/reverbControlLayout";
+import { reverbParameterPresentation } from "../../utils/reverbParameterPresentation";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { useApprovedEffectMeters, type ApprovedEffectEditorProps } from "./ApprovedEffectEditor";
 import { EQToolbar } from "./EQToolbar";
 import { SuiteParameter } from "./SuiteParameter";
@@ -11,6 +13,7 @@ import { ImpulseResponseEditor } from "./ImpulseResponseEditor";
 import { ReverbPeakReadouts } from "./ReverbPeakReadouts";
 import { ReverbResponsePanel } from "./ReverbResponsePanel";
 import "./ReverbEditor.css";
+import { useEditorOverview } from "./useEditorOverview";
 
 const studioTypes = new Set([0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 16, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40]);
 const number = (value: number | undefined, suffix: string, precision = 1) => Number.isFinite(value) ? `${value!.toFixed(precision)} ${suffix}` : "Unavailable";
@@ -39,6 +42,14 @@ export function ReverbEditor(props: ApprovedEffectEditorProps) {
   const machineName = machines.find(option => option.value === layout.type)?.label ?? schema.name;
   const [query, setQuery] = useState(""), [category, setCategory] = useState("all");
   const [selectedPage, setSelectedPage] = useState("character");
+  const editor = useRef<HTMLDivElement>(null);
+  const overview = useEditorOverview(editor);
+  usePluginFeatureReveal(editor, "reverb", ({ parameterId, workflowId }) => {
+    const owner = layout.pages.find(page => page.controls.some(control => parameter(control.id)?.id === parameterId));
+    if (owner) setSelectedPage(owner.id);
+    if (workflowId === "meters" || workflowId === "response") setSelectedPage(workflowId);
+    if (workflowId?.startsWith("ir-")) setSelectedPage("character");
+  });
   const [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const mutation = useRef(false);
   const identity = `${schema.instanceId ?? address.instanceId}:${address.chain}:${address.trackId}:${address.fxIndex}`;
@@ -58,13 +69,15 @@ export function ReverbEditor(props: ApprovedEffectEditorProps) {
     else props.onChange(descriptor, next);
   };
   const render = (control: string | ReverbControl, large = false) => {
-    const { id, label } = typeof control === "string" ? { id: control, label: undefined } : control;
+    const { id, label, description } = typeof control === "string" ? { id: control, label: undefined, description: undefined } : control;
     let descriptor = parameter(id);
     if (!descriptor) return null;
     if (id === "decayTime" && layout.dispersive) descriptor = { ...descriptor, min: .8, max: 10 };
     if (id === "decayTime" && layout.type === 6) descriptor = { ...descriptor, max: 2 };
     const name = label ?? (id === "retroAttack" ? layout.type === 32 ? "Early / tail" : layout.type === 36 ? "Envelope shape" : "Buildup" : id === "diffusion" && layout.type >= 24 ? "Late diffusion" : undefined);
-    return <SuiteParameter key={descriptor.id} parameter={descriptor} label={name} large={large} onChange={change} onGestureStart={props.onGestureStart} onGestureEnd={props.onGestureEnd} />;
+    const nativeDescriptor = descriptor;
+    const presentation = reverbParameterPresentation(nativeDescriptor, layout.type);
+    return <SuiteParameter key={descriptor.id} parameter={presentation.parameter} label={name} description={description} large={large} onChange={(_, next) => change(nativeDescriptor, presentation.toNative(next))} onGestureStart={props.onGestureStart} onGestureEnd={props.onGestureEnd} />;
   };
   const pages = [...layout.pages, { id: "meters", label: "Metering", controls: [] }, { id: "response", label: "Response", controls: [] }];
   const page = pages.find(item => item.id === selectedPage) ?? pages[0];
@@ -78,11 +91,19 @@ export function ReverbEditor(props: ApprovedEffectEditorProps) {
     && (category === "all" || category === "ir" && option.value === 7 || category === "studio" && studioTypes.has(option.value) || category === "creative" && option.value !== 7 && !studioTypes.has(option.value)));
   const modified = (controls: ReverbControl[]) => controls.some(control => { const p = parameter(control.id); return p && Math.abs(p.value - p.defaultValue) > 1e-5; });
   const family = layout.type === 7 ? "CONVOLUTION" : studioTypes.has(layout.type) ? "STUDIO" : "CREATIVE";
-  return <div className="approved-effect-editor reverb-editor flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Reverb editor">
+  const primaryIds = new Set([value(layout.sync) >= .5 ? layout.division : layout.time, layout.sync, layout.primary.id, ...layout.shape.map(control => control.id), "width", "sendMode", "mixLock", "dryLevel", "wetLevel", "outputTrimDb", "tailSpillover", layout.hold]
+    .filter((id): id is string => Boolean(id)).map(id => parameter(id)?.id));
+  const overviewPages = layout.pages.filter(item => item.id !== page.id).map(item => ({ ...item,
+    controls: item.controls.filter(control => !primaryIds.has(parameter(control.id)?.id)) })).filter(item => item.controls.length > 0);
+  const detailControls = <>
+    <div className="reverb-detail-controls flex flex-wrap items-center justify-evenly gap-x-5 gap-y-4">{page.controls.map(control => render(control))}</div>
+    {page.help && <details className="reverb-help"><summary>About {page.label.toLowerCase()}</summary><p>{page.help}</p></details>}
+  </>;
+  return <div ref={editor} className="approved-effect-editor reverb-editor flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="reverb" aria-label="Reverb editor">
     <EQToolbar {...props} />
     {error && <p className="reverb-error shrink-0 px-4 py-2 text-xs" role="alert">{error}</p>}
-    <div className="reverb-face flex min-h-0 min-w-0 flex-1" inert={busy} aria-busy={busy} data-machine={layout.type}>
-      <aside className="reverb-bank flex min-h-0 shrink-0 flex-col" aria-label="Reverb machine browser">
+    <div className="reverb-face flex min-h-0 min-w-0 flex-1" inert={busy} aria-busy={busy} data-machine={layout.type} data-overview={overview}>
+      <aside className="reverb-bank flex min-h-0 shrink-0 flex-col" data-feature="machines" data-param={machine?.id} aria-label="Reverb machine browser">
         <div className="reverb-bank-caption flex items-center justify-between"><span>REVERB MACHINES</span><span>{machines.length}</span></div>
         <label className="reverb-search flex items-center gap-2"><Search size={14} aria-hidden="true" /><input type="search" className="min-w-0 flex-1" aria-label="Search reverb machines" placeholder="Find a machine" value={query} onChange={event => setQuery(event.target.value)} /></label>
         <div className="reverb-filters flex" aria-label="Filter reverb machines">{[["all", "All"], ["studio", "Studio"], ["creative", "Creative"], ["ir", "IR"]].map(([id, label]) => <button type="button" key={id} aria-pressed={category === id} onClick={() => setCategory(id)}>{label}</button>)}</div>
@@ -92,27 +113,30 @@ export function ReverbEditor(props: ApprovedEffectEditorProps) {
       <main className="reverb-console flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="reverb-machine-heading flex shrink-0 items-center justify-between gap-4">
           <div className="reverb-machine-title min-w-0"><p className="reverb-overline">{family} <span>/</span> {String(layout.type + 1).padStart(2, "0")}</p><h2 className="truncate" title={machineName}>{machineName}</h2></div>
-          <label className="reverb-compact-picker min-w-0"><span className="sr-only">Reverb machine</span><select className="suite-select" aria-label="Reverb machine" value={layout.type} onChange={event => apply("algorithm", Number(event.target.value))}>{machines.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label className="reverb-compact-picker min-w-0" data-feature="machines" data-param={machine?.id}><span className="sr-only">Reverb machine</span><select className="suite-select" aria-label="Reverb machine" value={layout.type} onChange={event => apply("algorithm", Number(event.target.value))}>{machines.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
           {layout.hold ? <div className="reverb-hold shrink-0 text-center">{render({ id: layout.hold, label: layout.ambient ? "Hold" : held ? "Release hold" : "Hold" })}<span>{layout.ambient ? ["OFF", "INFINITE", "FREEZE"][Math.round(value(layout.hold))] : held ? "TEXTURE SUSTAINED" : "INFINITE / FREEZE"}</span></div> : <span className="reverb-engine-mark">{layout.type === 7 ? "IR / SPACE" : "REVERB / SPACE"}</span>}
         </header>
         <div className="reverb-primary grid shrink-0 items-center">
           <div className="reverb-predelay flex min-w-0 flex-col items-center gap-2">{render({ id: value(layout.sync) >= .5 ? layout.division : layout.time, label: layout.spatial ? "Input echo" : "Pre-delay" })}{render({ id: layout.sync, label: "Sync" })}</div>
-          <div className="reverb-decay min-w-0 text-center">{layout.type === 7 ? <div className="reverb-ir-identity"><span>APPLIED RESPONSE</span><strong>{schema.impulseResponse ? (schema.impulseResponse.processedDuration ?? schema.impulseResponse.trimSeconds).toFixed(2) : "—"}<small> s</small></strong><p className="truncate" title={schema.impulseResponse?.name}>{schema.impulseResponse?.name ?? "No response available"}</p><button className={editorButton} onClick={() => setSelectedPage("character")}>Shape IR</button></div> : render(layout.primary, true)}<span className="reverb-tick-caption">{layout.type === 7 ? "IR SHAPING BELOW" : layout.type === 16 ? "ROOM GEOMETRY" : layout.type === 6 ? "EARLY ENVELOPE" : layout.type === 14 ? "DIFFUSE RETURN" : layout.type === 15 ? "REPEAT TIME" : "REVERBERATION TIME"}</span></div>
+          <div className="reverb-decay min-w-0 text-center">{layout.type === 7 ? <div className="reverb-ir-identity"><span>APPLIED RESPONSE</span><strong>{schema.impulseResponse ? (schema.impulseResponse.processedDuration ?? schema.impulseResponse.trimSeconds).toFixed(2) : "—"}<small> s</small></strong><p className="truncate" title={schema.impulseResponse?.name}>{schema.impulseResponse?.name ?? "No response available"}</p><button className={editorButton} onClick={() => setSelectedPage("character")}>Shape IR</button></div> : render(layout.primary, true)}<span className="reverb-tick-caption">{layout.type === 7 ? "IR SHAPING BELOW" : layout.type === 16 ? "ROOM GEOMETRY" : (layout.type === 6 || layout.type === 36) ? "EARLY ENVELOPE" : layout.type === 14 ? "DIFFUSE RETURN" : layout.type === 15 ? "REPEAT TIME" : "REVERBERATION TIME"}</span></div>
           {layout.shape.map(control => render(control))}{render("width")}
         </div>
-        <section className="reverb-character flex min-h-0 flex-1 flex-col" aria-label="Reverb details">
+        <div className="reverb-workbench grid min-h-0 flex-1 gap-4"><section className="reverb-character flex min-h-0 flex-1 flex-col" aria-label="Reverb details">
           <div className="reverb-detail-tabs flex shrink-0 overflow-x-auto" role="tablist" aria-label="Reverb detail pages">{pages.map((item, index) => <button type="button" key={item.id} role="tab" id={`${tabPrefix}-${item.id}`} aria-controls={`${tabPrefix}-panel`} aria-selected={page.id === item.id} tabIndex={page.id === item.id ? 0 : -1} title={modified(item.controls) ? `${item.label}: modified settings` : item.label} onClick={() => selectPage(item.id)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? 0 : event.key === "End" ? pages.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + pages.length) % pages.length; selectPage(pages[next].id); document.getElementById(`${tabPrefix}-${pages[next].id}`)?.focus(); } }}>{item.label}{modified(item.controls) && <i aria-label="Modified" />}</button>)}</div>
-          <div className="reverb-context-body min-h-0 flex-1 overflow-y-auto" id={`${tabPrefix}-panel`} role="tabpanel" aria-labelledby={`${tabPrefix}-${page.id}`}>
-            {page.id === "character" && layout.type === 7 ? <ImpulseResponseEditor schema={schema} address={address} onApplyState={props.onApplyState} /> : page.id === "meters" ? <ReverbTelemetry schema={schema} address={address} onChange={props.onChange} detailed /> : page.id === "response" ? <ReverbResponsePanel schema={schema} address={address} /> : <>
-              <div className="reverb-detail-controls flex flex-wrap items-center justify-evenly gap-x-5 gap-y-4">{page.controls.map(control => render(control))}</div>
-              {page.help && <details className="reverb-help"><summary>About {page.label.toLowerCase()}</summary><p>{page.help}</p></details>}
-            </>}
+          <div className="reverb-context-body min-h-0 flex-1 overflow-y-auto" data-feature={page.id} id={`${tabPrefix}-panel`} role="tabpanel" aria-labelledby={`${tabPrefix}-${page.id}`}>
+            {page.id === "character" && layout.type === 7 ? <>{detailControls}<ImpulseResponseEditor schema={schema} address={address} onApplyState={props.onApplyState} /></> : page.id === "meters" ? <ReverbTelemetry schema={schema} address={address} onChange={props.onChange} detailed /> : page.id === "response" ? <ReverbResponsePanel schema={schema} address={address} onFlush={props.onFlush} /> : detailControls}
+            {overview && layout.type !== 7 && page.id !== "response" && page.id !== "meters" && <div className="reverb-overview-sections grid gap-6">{overviewPages.map(item => <section key={item.id} className="min-w-0 border-t border-daw-border-light py-5" aria-label={item.label}><h3 className="mb-5 text-base font-medium">{item.label}</h3><div className="flex flex-wrap items-center justify-around gap-6">{item.controls.map(control => render(control))}</div>{item.help && <details className="reverb-help"><summary>About {item.label.toLowerCase()}</summary><p>{item.help}</p></details>}</section>)}</div>}
           </div>
           {held && <p className="reverb-held-note shrink-0" role="status">Hold is active. Some machine controls take effect after release.</p>}
         </section>
+        {page.id !== "response" && layout.type !== 7 && <aside className="reverb-desktop-response min-h-0 flex-col overflow-y-auto rounded border border-daw-border-light bg-daw-dark" aria-label="Response analysis"><h3 className="px-4 pt-4 text-sm font-medium">Inspect this space</h3><ReverbResponsePanel schema={schema} address={address} onFlush={props.onFlush} /></aside>}
+        </div>
         <footer className="reverb-output flex shrink-0 items-center justify-between gap-4">
           <div className="reverb-output-routing min-w-0"><span className="reverb-output-label">OUTPUT</span><div className="mt-2 flex gap-2">{render({ id: "sendMode", label: "Send mode" })}{render({ id: "mixLock", label: "Lock balance" })}</div></div>
-          <div className="reverb-levels flex shrink-0 gap-5" inert={send} aria-disabled={send} title={send ? "Send mode is 100% wet. Disable it to restore the saved insert balance." : undefined}>{render("dryLevel")}{render("wetLevel")}</div>
+          <div className="reverb-levels flex shrink-0 flex-wrap justify-center gap-5">
+            <div className="reverb-balance flex gap-5" inert={send} aria-disabled={send} title={send ? "Send mode is 100% wet. Disable it to restore the saved insert balance." : undefined}>{render("dryLevel")}{render("wetLevel")}</div>
+            {render({ id: "outputTrimDb", label: "Output" })}
+          </div>
           <div className="reverb-spill text-center">{render("tailSpillover")}<span>{send ? "100% WET / SEND" : "CONTINUOUS TAILS"}</span></div>
         </footer>
         {page.id !== "meters" && <ReverbTelemetry schema={schema} address={address} onChange={props.onChange} />}

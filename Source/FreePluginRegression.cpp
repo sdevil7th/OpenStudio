@@ -8,6 +8,7 @@ namespace juce { class AudioProcessor; bool openStudioVST3AutomationQueueSelfTes
 #include "BuiltInEffects.h"
 #include "BuiltInEQMatch.h"
 #include "BuiltInEffects2.h"
+#include "FreePluginReverbCompatibilityRegression.h"
 #include "BuiltInUtilityEffects.h"
 #include "OpenStudioPitchCorrector.h"
 #include "BuiltInInstrumentPreview.h"
@@ -45,6 +46,25 @@ bool writeProbeWave(const juce::File& file, const juce::AudioBuffer<float>& audi
 }
 
 #include "FreePluginTenHourListening.h"
+#include "FreePluginReverbAudit.h"
+#include "FreePluginReverbOutputRegression.h"
+#include "FreePluginReverbRetirementRegression.h"
+#include "FreePluginReverbFactoryRegression.h"
+#include "FreePluginReverbRefinementRegression.h"
+#include "FreePluginReverbListening.h"
+#include "FreePluginReverbBalance.h"
+#include "FreePluginReverbReturnRegression.h"
+#include "FreePluginReverbReturnIRRegression.h"
+#include "FreePluginReverbControlRegression.h"
+#include "FreePluginReverbCorrectionRegression.h"
+#include "FreePluginReverbVoiceOptionsRegression.h"
+#include "FreePluginShimmerSchedulingRegression.h"
+#include "FreePluginShimmerPerformanceRegression.h"
+#include "FreePluginReverbExtendedRegression.h"
+#include "FreePluginReverbVoicedBalance.h"
+#include "FreePluginReverbSharedGuitarProject.h"
+#include "FreePluginReverbSparseDiffusionRegression.h"
+#include "FreePluginSettledReverbRegression.h"
 #include "FreePluginMultiOutputRegression.h"
 #include "FreePluginInstrumentTailRegression.h"
 #include "FreePluginInstrumentPerformanceRegression.h"
@@ -55,6 +75,11 @@ bool writeProbeWave(const juce::File& file, const juce::AudioBuffer<float>& audi
 #include "FreePluginGateOnsetRegression.h"
 #include "FreePluginHumanizeRegression.h"
 #include "FreePluginPerformanceRegression.h"
+#include "FreePluginOtherSignalAudit.h"
+#include "FreePluginSignalRepairRegression.h"
+#include "FreePluginDynamicsAudit.h"
+#include "FreePluginEQPhasePitchAudit.h"
+#include "FreePluginInstrumentAudit.h"
 #include "FreePluginAutomationRegistryRegression.h"
 #include "FreePluginVendorRenderDiagnostic.h"
 #include "FreePluginStressPerformance.h"
@@ -127,6 +152,8 @@ bool writeProbeWave(const juce::File& file, const juce::AudioBuffer<float>& audi
 #include "FreePluginEQPreparedProgramsRegression.h"
 #include "FreePluginContinuousAlignmentRegression.h"
 #include "FreePluginPitchCostRegression.h"
+#include "FreePluginPitchRealtimeRegression.h"
+#include "FreePluginSynthWorkRegression.h"
 #include "FreePluginReverbResponseRegression.h"
 #include "FreePluginEQDraftRegression.h"
 #include "FreePluginSostenutoRegression.h"
@@ -2668,22 +2695,33 @@ juce::var checkIRAudition()
     auto limited=renderBuiltInIRAudition(source,48000,0,0,{});
     const bool peakCap=limited.error.isEmpty()&&limited.attenuationDb<0&&limited.audio.getMagnitude(0,limited.audio.getNumSamples())<=.250001f;
     auto owner=std::make_shared<OpenStudioBasicSynthInstrument>();BuiltInIRPreview preview;
+    const bool initiallyIdle = !preview.mayRender();
     const auto stale=preview.begin("old"),ticket=preview.begin("new");
+    const bool preparationIdle = !preview.mayRender();
     juce::AudioBuffer<float> staleAudio(2,2000);staleAudio.clear();
     const bool staleRejected=!preview.publish(stale,std::move(staleAudio),48000,owner);
     juce::AudioBuffer<float> audio(2,2000);for(int ch=0;ch<2;++ch)for(int i=0;i<2000;++i)audio.setSample(ch,i,.1f);
-    const bool published=preview.publish(ticket,std::move(audio),48000,owner);preview.stop("old");
+    const bool published=preview.publish(ticket,std::move(audio),48000,owner);
+    const bool publicationVisible = preview.mayRender();
+    preview.stop("old");
     juce::AudioBuffer<float> output(2,512);output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);
     const bool otherOwnerCannotStop=output.getMagnitude(0,512)==.1f;
-    preview.stop("new");output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);
+    preview.stop("new");
+    const bool stopRampVisible = preview.mayRender();
+    output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);
     output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);const bool stopped=output.getMagnitude(0,512)==0;
+    const bool retiredIdle = !preview.mayRender();
     const auto removedTicket=preview.begin("removed");juce::AudioBuffer<float> removedAudio(2,2000);removedAudio.clear();removedAudio.applyGain(1);
-    preview.publish(removedTicket,std::move(removedAudio),48000,owner);owner.reset();output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);
+    const bool republished = preview.publish(removedTicket,std::move(removedAudio),48000,owner) && preview.mayRender();
+    owner.reset();output.clear();preview.render(output.getArrayOfWritePointers(),2,512,48000);
     const bool removalStops=!static_cast<bool>(preview.status("removed")["playing"]);
-    passed=passed&&finite&&bounded&&channelRouting&&unchanged&&cancelledClean&&peakCap&&staleRejected&&published&&otherOwnerCannotStop&&stopped&&removalStops;
+    const bool activityLifecycle = initiallyIdle && preparationIdle && publicationVisible
+        && stopRampVisible && retiredIdle && republished && !preview.mayRender();
+    passed=passed&&finite&&bounded&&channelRouting&&unchanged&&cancelledClean&&peakCap&&staleRejected&&published&&otherOwnerCannotStop&&stopped&&removalStops&&activityLifecycle;
     result->setProperty("pass",passed);result->setProperty("cases",cases);result->setProperty("impulseError",impulseError);
     result->setProperty("sourceUnchanged",unchanged);result->setProperty("cancelledClean",cancelledClean);result->setProperty("peakCap",peakCap);
     result->setProperty("staleRejected",staleRejected);result->setProperty("ownerStop",otherOwnerCannotStop&&stopped);result->setProperty("removalStops",removalStops);
+    result->setProperty("activityLifecycle", activityLifecycle);
     result->setProperty("audioQuality","not_asserted");return result;
 }
 
@@ -2692,7 +2730,15 @@ juce::var checkPreviewOwnership()
     auto source = std::make_shared<OpenStudioBasicSynthInstrument>(); source->prepareToPlay(48000, 256);
     BuiltInInstrumentPreview preview;
     const auto make = [] { return std::make_unique<OpenStudioBasicSynthInstrument>(); };
-    bool passed = preview.send("one", source, 60, true, 48000, make) && preview.send("two", source, 60, true, 48000, make);
+    const bool initiallyIdle = !preview.mayRender();
+    bool preparingIdle = false;
+    const auto firstMake = [&]
+    {
+        preparingIdle = !preview.mayRender();
+        return make();
+    };
+    bool passed = preview.send("one", source, 60, true, 48000, firstMake)
+        && preview.mayRender() && preview.send("two", source, 60, true, 48000, make);
     juce::AudioBuffer<float> buffer(2, 256), original(2, 256); juce::MidiBuffer midi;
     double previewEnergy = 0, sourceEnergy = 0;
     for (int i = 0; i < 30; ++i)
@@ -2704,8 +2750,17 @@ juce::var checkPreviewOwnership()
     for (int i = 0; i < 5; ++i) { buffer.clear(); preview.render(buffer.getArrayOfWritePointers(), 2, 256, 48000); }
     const bool secondSurvives = buffer.getMagnitude(0, 256) > 0;
     preview.stopAll();
+    const bool stopRampVisible = preview.mayRender();
     for (int i = 0; i < 5; ++i) { buffer.clear(); preview.render(buffer.getArrayOfWritePointers(), 2, 256, 48000); }
     const bool stopped = buffer.getMagnitude(0, 256) == 0;
+    bool activityLifecycle = initiallyIdle && preparingIdle && stopRampVisible && !preview.mayRender();
+    activityLifecycle = preview.send("reopened", source, 67, true, 48000, make)
+        && preview.mayRender() && activityLifecycle;
+    preview.send("reopened", source, 67, false, 48000, make);
+    const bool releaseTailVisible = preview.mayRender();
+    preview.stopAll();
+    for (int i = 0; i < 5; ++i) { buffer.clear(); preview.render(buffer.getArrayOfWritePointers(), 2, 256, 48000); }
+    activityLifecycle = activityLifecycle && releaseTailVisible && !preview.mayRender();
     bool bindingsMatch = true, previewRoutesIsolated = true;
     const auto checkBindings = [&bindingsMatch,&previewRoutesIsolated](const std::shared_ptr<juce::AudioProcessor>& controlSource, std::unique_ptr<juce::AudioProcessor> clone)
     {
@@ -2729,9 +2784,162 @@ juce::var checkPreviewOwnership()
     checkBindings(std::make_shared<OpenStudioDrumInstrument>(), std::make_unique<OpenStudioDrumInstrument>());
     checkBindings(std::make_shared<OpenStudioCleanGuitarInstrument>(), std::make_unique<OpenStudioCleanGuitarInstrument>());
     passed = passed && previewEnergy > 0 && sourceEnergy == 0 && secondSurvives && stopped;
-    passed = passed && bindingsMatch && previewRoutesIsolated;
+    passed = passed && bindingsMatch && previewRoutesIsolated && activityLifecycle;
     auto* result = new juce::DynamicObject(); result->setProperty("plugin", "Isolated preview leases"); result->setProperty("pass", passed);
-    result->setProperty("sourceRemainsSilent", sourceEnergy == 0); result->setProperty("otherEditorSurvivesStop", secondSurvives); result->setProperty("panicClears", stopped); result->setProperty("liveParameterBindings", bindingsMatch);result->setProperty("previewRoutesStayStereo",previewRoutesIsolated); return result;
+    result->setProperty("sourceRemainsSilent", sourceEnergy == 0); result->setProperty("otherEditorSurvivesStop", secondSurvives); result->setProperty("panicClears", stopped); result->setProperty("liveParameterBindings", bindingsMatch);result->setProperty("previewRoutesStayStereo",previewRoutesIsolated);
+    result->setProperty("activityLifecycle", activityLifecycle);
+    return result;
+}
+
+juce::var checkPreviewCallbackBounds()
+{
+    constexpr double rate = 48000.0;
+    constexpr int capacity = 512;
+    constexpr float poison = 0.375f;
+    const std::array<int, 5> blockSizes { 5, 8, 16, 127, capacity };
+    const auto poisonBuffer = [poison] (juce::AudioBuffer<float>& buffer)
+    {
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            juce::FloatVectorOperations::fill(buffer.getWritePointer(channel), poison, buffer.getNumSamples());
+    };
+    const auto suffixUntouched = [poison] (const juce::AudioBuffer<float>& buffer, int start)
+    {
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            for (int sample = start; sample < buffer.getNumSamples(); ++sample)
+                if (buffer.getSample(channel, sample) != poison)
+                    return false;
+        return true;
+    };
+    PlaybackEngine::PitchScrubPreviewData scrub;
+    scrub.trackId = "preview-bounds";
+    scrub.clipId = "preview-bounds-loop";
+    scrub.sourceSampleRate = rate;
+    scrub.loopBuffer.setSize(2, 4096);
+    for (int channel = 0; channel < 2; ++channel)
+        for (int sample = 0; sample < scrub.loopBuffer.getNumSamples(); ++sample)
+            scrub.loopBuffer.setSample(channel, sample, .1f * std::sin(
+                juce::MathConstants<float>::twoPi * static_cast<float>(sample) / (channel == 0 ? 97.0f : 131.0f)));
+
+    PlaybackEngine bounded, compact;
+    bounded.setPitchScrubPreview(scrub);
+    compact.setPitchScrubPreview(scrub);
+    juce::AudioBuffer<float> scratch(2, capacity);
+    bool scratchSuffixPreserved = true, exactScrubOutput = true;
+    juce::int64 expectedSamples = 0;
+    for (int repeat = 0; repeat < 16; ++repeat)
+        for (const int length : blockSizes)
+        {
+            poisonBuffer(scratch);
+            scratch.clear(0, length);
+            juce::AudioBuffer<float> reference(2, length);
+            reference.clear();
+            bounded.renderPitchScrubPreview(scratch, rate, length);
+            compact.renderPitchScrubPreview(reference, rate);
+            for (int channel = 0; channel < 2; ++channel)
+                exactScrubOutput = exactScrubOutput && std::memcmp(scratch.getReadPointer(channel),
+                    reference.getReadPointer(channel), static_cast<size_t>(length) * sizeof(float)) == 0;
+            scratchSuffixPreserved = scratchSuffixPreserved && suffixUntouched(scratch, length);
+            expectedSamples += length;
+        }
+    const bool exactScrubClock = bounded.getPitchScrubPreviewStatus(scrub.clipId).mixedSampleCount == expectedSamples;
+    poisonBuffer(scratch);
+    bounded.renderPitchScrubPreview(scratch, rate, 0);
+    const bool zeroLengthNoOp = suffixUntouched(scratch, 0)
+        && bounded.getPitchScrubPreviewStatus(scrub.clipId).mixedSampleCount == expectedSamples;
+    scratch.clear();
+    bounded.renderPitchScrubPreview(scratch, rate, capacity + 100);
+    const bool oversizedLengthClamped = bounded.getPitchScrubPreviewStatus(scrub.clipId).mixedSampleCount == expectedSamples + capacity;
+    bounded.clearPitchScrubPreview(scrub.clipId);
+    const bool scrubTailVisible = bounded.mayRenderPitchScrubPreview();
+    for (int block = 0; block < 256 && bounded.mayRenderPitchScrubPreview(); ++block)
+    {
+        scratch.clear(0, 8);
+        bounded.renderPitchScrubPreview(scratch, rate, 8);
+    }
+    const bool scrubRetired = scrubTailVisible && !bounded.mayRenderPitchScrubPreview();
+
+    auto owner = std::make_shared<OpenStudioBasicSynthInstrument>();
+    owner->prepareToPlay(rate, capacity);
+    BuiltInInstrumentPreview instrument;
+    BuiltInIRPreview ir;
+    bool previewSuffixPreserved = instrument.send("bounds", owner, 60, true, rate,
+        [] { return std::make_unique<OpenStudioBasicSynthInstrument>(); });
+    juce::AudioBuffer<float> irAudio(2, 8192);
+    for (int channel = 0; channel < 2; ++channel)
+        juce::FloatVectorOperations::fill(irAudio.getWritePointer(channel), .1f, irAudio.getNumSamples());
+    previewSuffixPreserved = ir.publish(ir.begin("bounds"), std::move(irAudio), rate, owner) && previewSuffixPreserved;
+    for (const int length : blockSizes)
+    {
+        poisonBuffer(scratch); scratch.clear(0, length);
+        if (instrument.mayRender()) instrument.render(scratch.getArrayOfWritePointers(), 2, length, rate);
+        previewSuffixPreserved = previewSuffixPreserved && suffixUntouched(scratch, length);
+        poisonBuffer(scratch); scratch.clear(0, length);
+        if (ir.mayRender()) ir.render(scratch.getArrayOfWritePointers(), 2, length, rate);
+        previewSuffixPreserved = previewSuffixPreserved && suffixUntouched(scratch, length);
+    }
+
+    // Prepare the real host callback with a fake device. This never opens an
+    // interface; its smaller blocks must advance scrub time by their length,
+    // not by the 512-sample scratch capacity prepared here.
+    class PreviewDevice final : public juce::AudioIODevice
+    {
+    public:
+        PreviewDevice() : AudioIODevice("Preview callback fixture", "Offline fixture") {}
+        juce::StringArray getOutputChannelNames() override { return { "Left", "Right" }; }
+        juce::StringArray getInputChannelNames() override { return {}; }
+        juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
+        juce::Array<int> getAvailableBufferSizes() override { return { 512 }; }
+        int getDefaultBufferSize() override { return 512; }
+        juce::String open(const juce::BigInteger&, const juce::BigInteger&, double, int) override { return "Offline fixture cannot open hardware"; }
+        void close() override {}
+        bool isOpen() override { return false; }
+        void start(juce::AudioIODeviceCallback*) override {}
+        void stop() override {}
+        bool isPlaying() override { return false; }
+        juce::String getLastError() override { return {}; }
+        int getCurrentBufferSizeSamples() override { return 512; }
+        double getCurrentSampleRate() override { return 48000.0; }
+        int getCurrentBitDepth() override { return 32; }
+        juce::BigInteger getActiveOutputChannels() const override { return juce::BigInteger(3); }
+        juce::BigInteger getActiveInputChannels() const override { return {}; }
+        int getOutputLatencyInSamples() override { return 0; }
+        int getInputLatencyInSamples() override { return 0; }
+    } device;
+    auto engine = std::make_unique<AudioEngine>(AudioEngine::DeviceStartup::offline);
+    engine->audioDeviceAboutToStart(&device);
+    engine->getPlaybackEngine().setPitchScrubPreview(scrub);
+    juce::int64 hostExpectedSamples = 0;
+    bool hostSuffixPreserved = true, hostSampleClock = true;
+    for (int repeat = 0; repeat < 8; ++repeat)
+        for (const int length : blockSizes)
+        {
+            poisonBuffer(scratch);
+            engine->audioDeviceIOCallbackWithContext(nullptr, 0,
+                scratch.getArrayOfWritePointers(), 2, length, {});
+            hostExpectedSamples += length;
+            hostSuffixPreserved = hostSuffixPreserved && suffixUntouched(scratch, length);
+            hostSampleClock = hostSampleClock
+                && engine->getPlaybackEngine().getPitchScrubPreviewStatus(scrub.clipId).mixedSampleCount == hostExpectedSamples;
+        }
+    const bool hardwareUnopened = engine->getDeviceManager().getCurrentAudioDevice() == nullptr;
+    engine->audioDeviceStopped();
+    auto* result = new juce::DynamicObject();
+    result->setProperty("plugin", "Preview active callback bounds");
+    result->setProperty("pass", scratchSuffixPreserved && exactScrubOutput && exactScrubClock
+        && zeroLengthNoOp && oversizedLengthClamped && scrubRetired && previewSuffixPreserved
+        && hostSuffixPreserved && hostSampleClock && hardwareUnopened);
+    result->setProperty("scratchSuffixPreserved", scratchSuffixPreserved);
+    result->setProperty("exactCompactScrubParity", exactScrubOutput && exactScrubClock);
+    result->setProperty("zeroLengthNoOp", zeroLengthNoOp);
+    result->setProperty("oversizedLengthClamped", oversizedLengthClamped);
+    result->setProperty("scrubReleaseRetires", scrubRetired);
+    result->setProperty("instrumentAndIRSuffixPreserved", previewSuffixPreserved);
+    result->setProperty("hostSuffixPreserved", hostSuffixPreserved);
+    result->setProperty("hostSampleClock", hostSampleClock);
+    result->setProperty("hostMixedSamples", hostExpectedSamples);
+    result->setProperty("hardwareUnopened", hardwareUnopened);
+    result->setProperty("audioQuality", "not_asserted");
+    return result;
 }
 
 juce::var checkModelMemoryAndHost()
@@ -3894,12 +4102,160 @@ juce::var checkPitchTelemetryPublication()
 }
 }
 
+namespace
+{
+juce::var checkFreeSignalRepairs()
+{
+    bool passed = true;
+    juce::Array<juce::var> checks;
+    for (const auto& result : {checkFreeSignalCompatibility(), checkSignalPoleAndMIDICompatibility(),
+         checkFreePitchRangeRepair(), checkFreeSignalTransitions(), checkDrumReleaseRepair(), checkSignalPitchFFTParity()})
+    {
+        passed = passed && static_cast<bool>(result["pass"]);
+        checks.add(result);
+    }
+    auto* result = new juce::DynamicObject();
+    result->setProperty("plugin", "Free-plugin deterministic signal repairs");
+    result->setProperty("pass", passed);
+    result->setProperty("checks", checks);
+    result->setProperty("audioQuality", "not_asserted");
+    return juce::var(result);
+}
+
+juce::var auditOtherSuiteCallbackHeap()
+{
+    bool pass = true, measured = false; juce::Array<juce::var> rows;
+    for (const auto& entry : freeSuiteFactories())
+    {
+        if (juce::String(entry.first) == "Reverb") continue;
+        for (double rate : {48000.0, 96000.0})
+        {
+            auto p = entry.second(); constexpr int blockSize = 128;
+            p->setRateAndBufferSizeDetails(rate, blockSize); p->prepareToPlay(rate, blockSize);
+            const auto schema = describeFreePluginForRegression(*p);
+            juce::AudioBuffer<float> audio(juce::jmax(2, p->getTotalNumOutputChannels()), blockSize);
+            juce::MidiBuffer midi; midi.ensureSize(8192); int allocations = 0, frees = 0;
+            juce::Array<juce::var> heapEvents;
+            bool finite = true, controls = true;
+            for (int frame = 0; frame < 96; ++frame)
+            {
+                if (frame == 32 || frame == 64)
+                    if (const auto* parameters = schema["parameters"].getArray())
+                        for (const auto& parameter : *parameters)
+                            if (parameter["automatable"] && parameter["type"].toString() != "meter")
+                                controls = setFreePluginParamForRegression(*p, parameter["id"].toString(),
+                                    static_cast<float>(static_cast<double>(parameter[frame == 32 ? "max" : "min"]))) && controls;
+                audio.clear(); midi.clear();
+                for (int i = 0; i < blockSize; ++i) for (int ch = 0; ch < 2; ++ch)
+                    audio.setSample(ch, i, .05f * std::sin(.1f * static_cast<float>(frame * blockSize + i)));
+                if (p->acceptsMidi() && frame % 32 == 0)
+                    for (int note : {36, 48, 60, 69}) midi.addEvent(juce::MidiMessage::noteOn(1, note, .7f), 0);
+#if JUCE_WINDOWS && defined(_DEBUG)
+                EQMIDIHeapProbe::allocations = EQMIDIHeapProbe::frees = 0;
+                EQMIDIHeapProbe::previous = _CrtSetAllocHook(EQMIDIHeapProbe::hook); EQMIDIHeapProbe::active = true;
+#endif
+                p->processBlock(audio, midi);
+#if JUCE_WINDOWS && defined(_DEBUG)
+                EQMIDIHeapProbe::active = false; _CrtSetAllocHook(EQMIDIHeapProbe::previous);
+                allocations += EQMIDIHeapProbe::allocations; frees += EQMIDIHeapProbe::frees; measured = true;
+                if (EQMIDIHeapProbe::allocations != 0 || EQMIDIHeapProbe::frees != 0)
+                {
+                    auto* event = new juce::DynamicObject(); event->setProperty("frame", frame);
+                    event->setProperty("allocations", EQMIDIHeapProbe::allocations); event->setProperty("frees", EQMIDIHeapProbe::frees);
+                    heapEvents.add(event);
+                }
+#endif
+                for (int ch = 0; ch < audio.getNumChannels(); ++ch) for (int i = 0; i < blockSize; ++i)
+                    finite = finite && std::isfinite(audio.getSample(ch, i));
+            }
+            auto* row = new juce::DynamicObject(); row->setProperty("plugin", entry.first); row->setProperty("rate", rate);
+            row->setProperty("allocations", allocations); row->setProperty("frees", frees); row->setProperty("finite", finite);
+            row->setProperty("heapEvents", heapEvents);
+            row->setProperty("controlsSet", controls); row->setProperty("pass", finite && controls && allocations == 0 && frees == 0);
+            pass = pass && static_cast<bool>(row->getProperty("pass")); rows.add(row);
+        }
+    }
+    auto* result = new juce::DynamicObject(); result->setProperty("plugin", "Non-Reverb callback CRT heap audit");
+    result->setProperty("pass", pass && measured); result->setProperty("heapMeasured", measured); result->setProperty("cases", rows);
+    result->setProperty("scope", "Windows Debug CRT only, callback thread allocations/frees at startup and exposed automatable extrema. Setter/prepare allocations excluded; not a complete allocator or race proof.");
+    return result;
+}
+
+juce::var auditOtherSuiteBaseline(const juce::File& fixtures)
+{
+    bool passed = true; juce::Array<juce::var> rows; std::vector<Factory> factories;
+    for (const auto& entry : freeSuiteFactories())
+    {
+        if (juce::String(entry.first) == "Reverb") continue;
+        factories.push_back(entry.second);
+        auto processor = entry.second();
+        const bool utility = dynamic_cast<OpenStudioUtilityEffect*>(processor.get()) != nullptr;
+        const auto row = checkProcessor(entry.second, utility ? juce::File{} : fixtures, false);
+        passed = passed && static_cast<bool>(row["pass"]); rows.add(row);
+    }
+    const auto matrix = checkSuiteControlMatrix(factories);
+    passed = passed && static_cast<bool>(matrix["pass"]); rows.add(matrix);
+    for (const auto& row : {checkPreampTone(), checkPreampReferenceAndMeters(), checkOpticalWorkflow(),
+         checkVCAWorkflow(), checkFETWorkflow(), checkSaturationColour(), checkUtilityAndLimiterContracts(),
+         checkLimiterGainWorkflow(), checkGraphicEQWorkflow(), checkManualPhaseAlignment(), checkExpandedEQ(),
+         checkEQMatching(), checkSynthFilterModulation(), checkSynthIndependentEnvelope(), checkSynthModulationMatrix(),
+         checkPianoExpressivePerformance(), checkCompressorAverageMeter(), checkOutputMeters(),
+         checkStandaloneDelayModes(), checkChorusSyncAndModes(), checkDynamicsAndPitchTiming(), checkMonoPitchSafety(),
+         checkEQEditorContract(), checkPitchTelemetryPublication(), checkLowRateChannelSafety(), checkFreePluginAutomationRanges()})
+    { passed = passed && static_cast<bool>(row["pass"]); rows.add(row); }
+    auto* result = new juce::DynamicObject(); result->setProperty("plugin", "Other free-plugin baseline contracts");
+    result->setProperty("pass", passed); result->setProperty("checks", rows);
+    result->setProperty("scope", "15 non-Reverb processors, existing deterministic contracts; low-rate and automation checks also retain existing shared-suite coverage. Sound quality not_asserted.");
+    return result;
+}
+}
+
 juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captureMissingFixtures, const juce::String& selectedCase)
 {
     juce::Array<juce::var> results;
     if (selectedCase.isNotEmpty())
     {
         const std::map<juce::String, std::function<juce::var()>> focused {
+            {"preview-callback-bounds", checkPreviewCallbackBounds},
+            {"ir-audition", checkIRAudition},
+            {"pitch-detector-parity", checkPitchDetectorSchedulingParity},
+            {"pitch-realtime-contracts", checkPitchRealtimeContracts},
+            {"synth-cached-work", checkSynthCachedWorkTransitions},
+            {"signal-repairs", checkFreeSignalRepairs},
+            {"audit-other-baseline", [&] { return auditOtherSuiteBaseline(fixtureDirectory); }},
+            {"audit-other-heap", auditOtherSuiteCallbackHeap},
+            {"signal-compatibility", checkFreeSignalCompatibility}, {"signal-poles-midi", checkSignalPoleAndMIDICompatibility}, {"signal-pitch-range", checkFreePitchRangeRepair}, {"signal-transitions", checkFreeSignalTransitions}, {"signal-drum-release", checkDrumReleaseRepair}, {"signal-pitch-performance", profileSignalPitchCost}, {"signal-pitch-fft-parity", checkSignalPitchFFTParity},
+            {"audit-modulation", auditChorusSignalContracts},
+            {"audit-shared-guitar", renderOtherPluginsSharedGuitar},
+            {"dynamics-audit", auditFreePluginDynamics},
+            {"audit-eq-phase-pitch", auditEQPhasePitchContracts},
+            {"instrument-audit", auditFreeInstrumentSignals},
+            {"reverb-audit", [] { return auditStandaloneReverb(); }},
+            {"reverb-audit-calibrated", [] { return auditStandaloneReverb(true); }},
+            {"reverb-return-level", checkReverbReturnCalibration},
+            {"reverb-corrected-controls", checkReverbControlBehavior},
+            {"reverb-correction-responses", checkReverbCorrectionResponses},
+            {"reverb-voice-options", checkReverbVoiceOptions},
+            {"reverb-shimmer-scheduling", checkShimmerScheduling},
+            {"reverb-shimmer-performance", checkShimmerPerformanceBehavior},
+            {"reverb-shimmer-instances", profileShimmerSchedulingInstances},
+            {"reverb-extended", checkReverbExtendedQualification},
+            {"reverb-extended-nonlinear-tail", checkReverbExtendedNonlinearTail},
+            {"reverb-extended-hold-headroom", checkReverbExtendedHoldHeadroom},
+            {"reverb-extended-heap", checkReverbExtendedHeapTransitions},
+            {"reverb-return-ir-crossfade", checkReverbReturnIRCrossfade},
+            {"reverb-balance", renderReverbBalancePack},
+            {"reverb-voiced-balance", renderReverbVoicedBalancePack},
+            {"reverb-shared-guitar-project", renderReverbSharedGuitarProject},
+            {"reverb-output", checkReverbOutputGain},
+            {"reverb-retirement", checkReverbRetirement},
+            {"reverb-factory", checkReverbFactoryPresets},
+            {"reverb-refinement-state", checkReverbRefinementState},
+            {"reverb-listening", renderReverbListeningPack},
+            {"reverb-instances", profileReverbInstances},
+            {"reverb-sparse-diffusion", checkReverbSparseDiffusion},
+            {"reverb-settled-taps", checkSettledReverbInterpolation},
+            {"reverb-compatibility-sleep", checkReverbCompatibilitySleep},
             {"plugin-discovery-identities", PluginManager::runDiscoveryIdentityRegression},
             {"low-rate-channel-safety", checkLowRateChannelSafety},
             {"automation-registry", checkFreePluginAutomationRegistry},
@@ -3930,6 +4286,7 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
         if (found == focused.end()) root->setProperty("error", "Unknown regression case");
         return root;
     }
+    results.add(checkPreviewCallbackBounds());
     const std::vector<Factory> factories {
         factory<OpenStudioEQ>(), [] { return std::make_unique<OpenStudioCompressor>(true); }, [] { return std::make_unique<OpenStudioGate>(true); },
         [] { return std::make_unique<OpenStudioLimiter>(true); }, [] { return std::make_unique<OpenStudioDelay>(24.1f,true); }, [] { return std::make_unique<OpenStudioReverb>(true); },
@@ -3937,7 +4294,7 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
         factory<OpenStudioBasicSynthInstrument>(), factory<OpenStudioPianoInstrument>(),
         factory<OpenStudioDrumInstrument>(), factory<OpenStudioCleanGuitarInstrument>()
     };
-    bool passed = true;
+    bool passed = static_cast<bool>(results[0]["pass"]);
     for (const auto& make : factories)
     {
         auto result = checkProcessor(make, fixtureDirectory, captureMissingFixtures);
@@ -3969,6 +4326,14 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     const auto dynamicsTiming = checkDynamicsAndPitchTiming();
     passed = passed && static_cast<bool>(dynamicsTiming["pass"]);
     results.add(dynamicsTiming);
+    const auto synthWork = checkSynthCachedWorkTransitions();
+    passed = passed && static_cast<bool>(synthWork["pass"]);
+    results.add(synthWork);
+    for (const auto& pitchResult : { checkPitchDetectorSchedulingParity(), checkPitchRealtimeContracts() })
+    {
+        passed = passed && static_cast<bool>(pitchResult["pass"]);
+        results.add(pitchResult);
+    }
     for (const auto kind : { OpenStudioUtilityEffect::Kind::Preamp, OpenStudioUtilityEffect::Kind::GraphicEQ, OpenStudioUtilityEffect::Kind::GainPhase })
     {
         const auto result = checkProcessor([kind] { return std::make_unique<OpenStudioUtilityEffect>(kind); }, {}, false);
@@ -3981,7 +4346,16 @@ juce::var runFreePluginRegression(const juce::File& fixtureDirectory, bool captu
     const auto reverbBanks = checkReverbTypeState();
     passed = passed && static_cast<bool>(reverbBanks["pass"]);
     results.add(reverbBanks);
-    for (const auto& result : { checkGuitarPerformanceTelemetry(), checkOriginalColourSpectra(), checkOriginalColourStages(), checkDelayTimingTelemetry(), checkInstrumentPerformanceTelemetry(), checkSustainedHumanize(), checkGateOnsetQualification(), checkInstrumentReleaseTails(), checkConvolutionOutputs(), checkDrumMultiOutputs(), checkReconstructedLimiter(), checkInstrumentArticulation(), checkAdditionalReverbs(), checkCreativeReverbControls(), checkCreativeRoutingAndLateDecay(), checkReverbHoldPolicies(), checkReverbSpillover(), checkFreePluginAutomationRanges(), checkConvolutionMotion(), checkStudioPlate(), checkStudioSpaces(), checkVintageSpaces(), checkVintageBassDecay(), checkVintageConversion(), checkVintageTankRate(), checkLongReverbPredelay(), checkModalPlate(), checkSpatialLongDelay(), checkIRBrightness(), checkIRSourceBlend(), checkPreampTone(), checkPreampReferenceAndMeters(), checkFETWorkflow(), checkFETDetectorTilt(), checkFETMultiButtons(), checkVCANoiseMonitor(), checkNonlinearMotion(), checkOpticalWorkflow(), checkVCAWorkflow(), checkGraphicEQWorkflow(), checkManualPhaseAlignment(), checkSpectralPhaseAlignment(), checkExpandedEQ(), checkLinearPhaseEQ(), checkEQBandDetectors(), checkAdvancedEQCuts(), checkMinimumPhaseEQ(), checkAnalogTargetEQ(), checkEQDraftProcessingModes(), checkEQAdaptiveDynamics(), checkSpectralEQ(), checkLinearBandDynamics(), checkExtendedEQShapes(), checkLimiterOversampling(), checkIntegratedLoudness(), checkLimiterResponses(), checkLimiterStrategies(), checkLimiterGainWorkflow(), checkSaturationColour(), checkSpatialReverbs(), checkPlateColour(), checkEchoRooms(), checkAmbientSpaces(), checkDispersiveSpring(), checkSpringHold(), checkMagneticHold(), checkNonlinearHold(), checkPositionedHold(), checkEQMIDIPrograms(), checkEQPreparedPrograms(), checkContinuousAlignment(), checkPitchBoundedLagParity(), checkAutomaticAlignment(), checkLinkedStereoAlignment(), checkAllPassFitting(), checkAlignmentSections(), checkSparseAlignment(), checkProjectSpanAlignment(), checkAlignmentGroups(), checkEQMatching(), checkGateExpansion(), checkStandaloneDelayModes(), checkDelayDiffusion(), checkSynthFilterModulation(), checkSynthIndependentEnvelope(), checkSynthModulationMatrix(), checkSynthMPE(), checkSynthOscillatorShapes(), checkExpandedSynthMatrix(), checkSynthDestinations(), checkGuitarArticulations(), checkCoupledInstrumentBodies(), checkIRPreparationCancellation(), checkConvolutionExtension(), checkCompactStudioRoom(), checkSpatialShelf(), checkEQSketch(), checkMixedEQSketch(), checkReverbPeakHold(), checkReverbReconstructedPeaks(), checkMIDISeekState(), checkMIDIControllerHistory(), checkMIDINoteMultiplicity(), checkVintageBuildUp(), checkDriftingReverb(), checkClearReverb(), checkRetroReverb(), checkStudioDecayFilters(), checkPlateDecayFilters(), checkModalPlateMaterial(), checkRenderedReverbResponse(), checkEQDraftPreview(), checkEQDraftUpdates(), checkSynthGuitarSostenuto(), checkMacroCCMapping(), checkMIDIChannelMix(), checkMIDIOutputPolicy(), TrackProcessor::runMIDIOutputQueueRegression(), checkRelativeRPN(), checkOverlappingMIDIOrder(), checkPitchSourceConfidence(), checkPianoExpressivePerformance(), checkDrumPieceControls(), checkDrumArticulations(), checkGuitarPluckedLoop(), checkChorusSyncAndModes(), checkReverbWorkflow(), checkReverbScheduling(), checkPortableConvolution(), checkMatrixConvolution(), checkConvolutionColour(), checkConvolutionCrossTerms(), checkCompressorAverageMeter(), checkOutputMeters(), checkIRAudition(), checkIRDecayEstimate(), checkIRBandDecayEstimate(), checkOctaveIRAnalysis(), checkIRDirectGeometry(), checkEQAnalyzerResolution(), checkReverbLevelReadouts(), checkExternalDetectors(), checkPreviewOwnership(), checkModelMemoryAndHost() })
+    const auto returnCalibration = checkReverbReturnCalibration();
+    passed = passed && static_cast<bool>(returnCalibration["pass"]);
+    results.add(returnCalibration);
+    const auto returnIRCrossfade = checkReverbReturnIRCrossfade();
+    passed = passed && static_cast<bool>(returnIRCrossfade["pass"]);
+    results.add(returnIRCrossfade);
+    const auto signalRepairs = checkFreeSignalRepairs();
+    passed = passed && static_cast<bool>(signalRepairs["pass"]);
+    results.add(signalRepairs);
+    for (const auto& result : { checkGuitarPerformanceTelemetry(), checkOriginalColourSpectra(), checkOriginalColourStages(), checkDelayTimingTelemetry(), checkInstrumentPerformanceTelemetry(), checkSustainedHumanize(), checkGateOnsetQualification(), checkInstrumentReleaseTails(), checkConvolutionOutputs(), checkDrumMultiOutputs(), checkReconstructedLimiter(), checkInstrumentArticulation(), checkAdditionalReverbs(), checkCreativeReverbControls(), checkCreativeRoutingAndLateDecay(), checkReverbHoldPolicies(), checkReverbSpillover(), checkReverbOutputGain(), checkReverbControlBehavior(), checkReverbRetirement(), checkReverbFactoryPresets(), checkReverbRefinementState(), checkReverbSparseDiffusion(), checkSettledReverbInterpolation(), checkReverbCompatibilitySleep(), checkFreePluginAutomationRanges(), checkConvolutionMotion(), checkStudioPlate(), checkStudioSpaces(), checkVintageSpaces(), checkVintageBassDecay(), checkVintageConversion(), checkVintageTankRate(), checkLongReverbPredelay(), checkModalPlate(), checkSpatialLongDelay(), checkIRBrightness(), checkIRSourceBlend(), checkPreampTone(), checkPreampReferenceAndMeters(), checkFETWorkflow(), checkFETDetectorTilt(), checkFETMultiButtons(), checkVCANoiseMonitor(), checkNonlinearMotion(), checkOpticalWorkflow(), checkVCAWorkflow(), checkGraphicEQWorkflow(), checkManualPhaseAlignment(), checkSpectralPhaseAlignment(), checkExpandedEQ(), checkLinearPhaseEQ(), checkEQBandDetectors(), checkAdvancedEQCuts(), checkMinimumPhaseEQ(), checkAnalogTargetEQ(), checkEQDraftProcessingModes(), checkEQAdaptiveDynamics(), checkSpectralEQ(), checkLinearBandDynamics(), checkExtendedEQShapes(), checkLimiterOversampling(), checkIntegratedLoudness(), checkLimiterResponses(), checkLimiterStrategies(), checkLimiterGainWorkflow(), checkSaturationColour(), checkSpatialReverbs(), checkPlateColour(), checkEchoRooms(), checkAmbientSpaces(), checkDispersiveSpring(), checkSpringHold(), checkMagneticHold(), checkNonlinearHold(), checkPositionedHold(), checkEQMIDIPrograms(), checkEQPreparedPrograms(), checkContinuousAlignment(), checkPitchBoundedLagParity(), checkAutomaticAlignment(), checkLinkedStereoAlignment(), checkAllPassFitting(), checkAlignmentSections(), checkSparseAlignment(), checkProjectSpanAlignment(), checkAlignmentGroups(), checkEQMatching(), checkGateExpansion(), checkStandaloneDelayModes(), checkDelayDiffusion(), checkSynthFilterModulation(), checkSynthIndependentEnvelope(), checkSynthModulationMatrix(), checkSynthMPE(), checkSynthOscillatorShapes(), checkExpandedSynthMatrix(), checkSynthDestinations(), checkGuitarArticulations(), checkCoupledInstrumentBodies(), checkIRPreparationCancellation(), checkConvolutionExtension(), checkCompactStudioRoom(), checkSpatialShelf(), checkEQSketch(), checkMixedEQSketch(), checkReverbPeakHold(), checkReverbReconstructedPeaks(), checkMIDISeekState(), checkMIDIControllerHistory(), checkMIDINoteMultiplicity(), checkVintageBuildUp(), checkDriftingReverb(), checkClearReverb(), checkRetroReverb(), checkStudioDecayFilters(), checkPlateDecayFilters(), checkModalPlateMaterial(), checkRenderedReverbResponse(), checkEQDraftPreview(), checkEQDraftUpdates(), checkSynthGuitarSostenuto(), checkMacroCCMapping(), checkMIDIChannelMix(), checkMIDIOutputPolicy(), TrackProcessor::runMIDIOutputQueueRegression(), checkRelativeRPN(), checkOverlappingMIDIOrder(), checkPitchSourceConfidence(), checkPianoExpressivePerformance(), checkDrumPieceControls(), checkDrumArticulations(), checkGuitarPluckedLoop(), checkChorusSyncAndModes(), checkReverbWorkflow(), checkReverbScheduling(), checkPortableConvolution(), checkMatrixConvolution(), checkConvolutionColour(), checkConvolutionCrossTerms(), checkCompressorAverageMeter(), checkOutputMeters(), checkIRAudition(), checkIRDecayEstimate(), checkIRBandDecayEstimate(), checkOctaveIRAnalysis(), checkIRDirectGeometry(), checkEQAnalyzerResolution(), checkReverbLevelReadouts(), checkExternalDetectors(), checkPreviewOwnership(), checkModelMemoryAndHost() })
     {
         passed = passed && static_cast<bool>(result["pass"]);
         results.add(result);

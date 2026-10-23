@@ -43,6 +43,7 @@ export type NAMPresetManagerUserPreset = {
   favorite: boolean;
   lastUsed?: number;
   active: boolean;
+  profileMismatch?: { stored: "guitar" | "bass"; labelled: "guitar" | "bass" };
 };
 
 type SelectedPreset =
@@ -79,6 +80,7 @@ type NAMPresetManagerModalProps = {
   onEditNotes: (name: string) => void | Promise<void>;
   onExportUser: (name: string) => void | Promise<void>;
   onDuplicateUser: (name: string) => void | Promise<void>;
+  onCopyLabelledProfile?: (name: string) => void | Promise<void>;
   onRenameUser: (name: string) => void | Promise<void>;
   onDeleteUser: (name: string) => void | Promise<void>;
 };
@@ -136,6 +138,7 @@ export function NAMPresetManagerModal({
   onEditNotes,
   onExportUser,
   onDuplicateUser,
+  onCopyLabelledProfile,
   onRenameUser,
   onDeleteUser,
 }: NAMPresetManagerModalProps) {
@@ -389,9 +392,11 @@ export function NAMPresetManagerModal({
                         </span>
                         <span>
                           <strong>{entry.name}</strong>
-                          <small>{entry.folder}{entry.tags.length > 0 ? ` · ${entry.tags.slice(0, 3).join(" · ")}` : ""}</small>
+                          <small>{entry.profileMismatch
+                            ? `Label: ${entry.profileMismatch.labelled === "bass" ? "Bass" : "Guitar"} · Saved sound: ${entry.profileMismatch.stored === "bass" ? "Bass" : "Guitar"}`
+                            : <>{entry.folder}{entry.tags.length > 0 ? ` · ${entry.tags.slice(0, 3).join(" · ")}` : ""}</>}</small>
                         </span>
-                        <em>User</em>
+                        <em>{entry.profileMismatch ? "Review profile" : "User"}</em>
                       </button>
                       <Menu as="div" className="nam-preset-library-overflow">
                         <MenuButton
@@ -427,6 +432,13 @@ export function NAMPresetManagerModal({
                           <MenuItem>
                             <button type="button" onClick={() => void runPresetAction(() => onDuplicateUser(entry.name))}><Copy size={13} aria-hidden="true" /> Duplicate</button>
                           </MenuItem>
+                          {entry.profileMismatch && onCopyLabelledProfile && (
+                            <MenuItem>
+                              <button type="button" onClick={() => void runPresetAction(() => onCopyLabelledProfile(entry.name))}>
+                                <Copy size={13} aria-hidden="true" /> Create {entry.profileMismatch.labelled === "bass" ? "Bass" : "Guitar"} copy…
+                              </button>
+                            </MenuItem>
+                          )}
                           <MenuItem>
                             <button type="button" onClick={() => void runPresetAction(() => onRenameUser(entry.name))}><Edit3 size={13} aria-hidden="true" /> Rename</button>
                           </MenuItem>
@@ -467,6 +479,22 @@ export function NAMPresetManagerModal({
           {selectedUser && (
             <>
               <p>{selectedUser.notes || "A complete saved NAM Rack preset."}</p>
+              {selectedUser.profileMismatch && (
+                <div className="flex flex-col gap-2 rounded-md border border-amber-300/30 bg-amber-300/5 p-3 text-xs text-amber-100" role="note" aria-label="Saved profile mismatch">
+                  <strong>Review instrument profile</strong>
+                  <p>
+                    Label: {selectedUser.profileMismatch.labelled === "bass" ? "Bass" : "Guitar"}. Saved sound: {selectedUser.profileMismatch.stored === "bass" ? "Bass" : "Guitar"}.
+                    {" "}Loading keeps the saved sound. If the label was intended, create a separate copy to audition that profile.
+                  </p>
+                  {onCopyLabelledProfile && (
+                    <button type="button" disabled={locked}
+                      className="rounded border border-amber-300/40 px-3 py-2 text-left font-medium hover:bg-amber-300/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200 disabled:opacity-50"
+                      onClick={() => void runPresetAction(() => onCopyLabelledProfile(selectedUser.name))}>
+                      Create {selectedUser.profileMismatch.labelled === "bass" ? "Bass" : "Guitar"} copy…
+                    </button>
+                  )}
+                </div>
+              )}
               <dl>
                 <div><dt>Collection</dt><dd>{selectedUser.folder}</dd></div>
                 <div><dt>Last used</dt><dd>{formatLastUsed(selectedUser.lastUsed)}</dd></div>

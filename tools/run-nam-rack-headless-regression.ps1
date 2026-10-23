@@ -2,6 +2,10 @@ param(
     [string]$AppPath,
     [string]$OutputRoot,
     [string]$Label = "nam-rack-regression",
+    # Explicit offline fixed-duration preset/CPU cases. Integrity and measured
+    # callback capacity are separate; only opt in to failing on capacity misses.
+    [string]$CpuScenarios,
+    [switch]$RequireCapacity,
     # The complete deterministic rack matrix takes roughly three minutes in a
     # Debug build on current developer hardware. Keep enough margin for CI and
     # slower machines without weakening the process-exit gate.
@@ -61,6 +65,12 @@ $processStartInfo.CreateNoWindow = $true
 $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 $processStartInfo.RedirectStandardOutput = $true
 $processStartInfo.RedirectStandardError = $true
+if ($CpuScenarios) {
+    $processStartInfo.EnvironmentVariables['OPENSTUDIO_NAM_CPU_SCENARIOS'] = (Resolve-Path -LiteralPath $CpuScenarios).Path
+    $processStartInfo.EnvironmentVariables['OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY'] = '1'
+    $processStartInfo.EnvironmentVariables.Remove('OPENSTUDIO_NAM_FUZZ_ONLY')
+    $processStartInfo.EnvironmentVariables.Remove('OPENSTUDIO_NAM_TWO_RACK_CPU_CONTRACTS_ONLY')
+}
 
 $process = [System.Diagnostics.Process]::Start($processStartInfo)
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -86,6 +96,7 @@ $result = Get-Content -Raw -Path $resultPath | ConvertFrom-Json
 Write-Host "NAM rack regression result: $resultPath"
 Write-Host "Objective gate status: $($result.objectiveGateStatus)"
 Write-Host "Subjective quality: $($result.subjectiveQuality)"
+if ($result.capacityStatus) { Write-Host "Offline callback capacity: $($result.capacityStatus) (physical-device stability not asserted)" }
 Write-Host "Summary: $($result.summary)"
 
 if ($result.checks) {
@@ -97,6 +108,9 @@ if ($result.checks) {
 if ($process.ExitCode -ne 0) {
     # A late shutdown crash/ASan abort must fail even after a passing JSON report.
     exit 3
+}
+if ($RequireCapacity -and $result.capacityStatus -ne 'pass') {
+    throw "Offline callback capacity did not pass. See the case deadline misses; signal integrity alone is insufficient."
 }
 if ($result.objectiveGateStatus -ne "pass") {
     exit 2

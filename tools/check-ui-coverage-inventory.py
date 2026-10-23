@@ -10,10 +10,14 @@ DEST = ROOT / 'docs/ui-coverage-inventory.json'
 
 def discover():
     entries = []
-    for file in sorted((ROOT / 'frontend/src/components').rglob('*.tsx')):
+    # Path ordering is case-insensitive on Windows; use the portable source
+    # spelling so regeneration has the same order on every supported OS.
+    for file in sorted((ROOT / 'frontend/src/components').rglob('*.tsx'),
+                       key=lambda path: path.relative_to(ROOT).as_posix()):
         source = file.relative_to(ROOT).as_posix()
         entries.append({'id': source, 'kind': 'component', 'source': source})
-    for file in sorted((ROOT / 'frontend/src').glob('*App.tsx')):
+    for file in sorted((ROOT / 'frontend/src').glob('*App.tsx'),
+                       key=lambda path: path.relative_to(ROOT).as_posix()):
         source = file.relative_to(ROOT).as_posix()
         entries.append({'id': source, 'kind': 'window-shell', 'source': source})
     section = ''

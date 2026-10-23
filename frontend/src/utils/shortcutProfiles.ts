@@ -83,6 +83,18 @@ const platformKeys = (
 
 export const CLICK_ONLY_METRONOME_SHORTCUT = "Ctrl+Shift+Space";
 
+// Keep existing source-DAW fallbacks stable when OpenStudio's own factory map
+// changes. Explicit source mappings/unassignments continue to take precedence.
+const PREVIOUS_OPENSTUDIO_BINDINGS: Readonly<Record<string, ProfileActionBindings>> = {
+  "transport.record": keys("Ctrl+R"),
+  "transport.rewind": keys("Home"),
+  "track.toggleSelectedArm": keys("R"),
+  "midi.tool.range": keys("R"),
+  "pitch.tool.select": keys("1"),
+  "view.zoomIn": keys("Ctrl++", "Ctrl+=", "Ctrl+Shift++"),
+  "view.zoomOut": keys("Ctrl+-"),
+};
+
 const SOURCE_KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
   {
     id: "openstudio",
@@ -1136,7 +1148,11 @@ const SOURCE_KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = [
 // profile-specific assignments and the user's custom override/unbind layer.
 export const KEYBOARD_SHORTCUT_PROFILES: readonly KeyboardShortcutProfile[] = SOURCE_KEYBOARD_SHORTCUT_PROFILES.map(profile => ({
   ...profile,
-  bindings: { "transport.metronomePractice": keys(CLICK_ONLY_METRONOME_SHORTCUT), ...profile.bindings },
+  bindings: {
+    ...(profile.id !== "openstudio" && profile.fallbackPolicy !== "strict" ? PREVIOUS_OPENSTUDIO_BINDINGS : {}),
+    "transport.metronomePractice": keys(CLICK_ONLY_METRONOME_SHORTCUT),
+    ...profile.bindings,
+  },
 }));
 
 const PROFILE_BY_ID = new Map<KeyboardShortcutProfileId, KeyboardShortcutProfile>(

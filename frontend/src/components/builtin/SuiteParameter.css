@@ -21,7 +21,7 @@
   border-radius: 6px;
   background: var(--color-daw-lighter);
   color: var(--color-daw-text);
-  font-size: 12px;
+  font-size: clamp(12px, 1.1cqi, 22px);
   cursor: pointer;
 }
 .suite-button[aria-pressed=true] {
@@ -37,8 +37,8 @@
   filter: brightness(1.2);
 }
 .suite-knob {
-  width: 56px;
-  height: 56px;
+  width: clamp(48px, 5.4cqi, 116px);
+  height: clamp(48px, 5.4cqi, 116px);
   position: relative;
   border-radius: 50%;
   touch-action: none;
@@ -49,10 +49,10 @@
   content: '';
   position: absolute;
   inset: 3px;
-  border: 5px solid var(--suite-surface);
+  border: 4px solid var(--suite-surface, #20292f);
   border-radius: 50%;
-  background: radial-gradient(circle at 38% 25%,#404954,#202730 70%);
-  box-shadow: inset 0 1px 1px #ffffff20,0 2px 5px #0008;
+  background: linear-gradient(150deg, #3b4348, #242b30);
+  box-shadow: inset 0 1px 0 #ffffff20, 0 2px 3px #0005;
 }
 /* The pivot is at 50%: 22% top + 112% of the 25%-high pointer. */
 .suite-knob::after {
@@ -69,13 +69,13 @@
 .suite-value {
   appearance: textfield;
   min-height: 32px;
-  width: 72px;
+  width: clamp(62px, 6cqi, 116px);
   padding: 2px 4px;
   border: 1px solid transparent;
   border-radius: 3px;
   background: transparent;
   color: var(--color-daw-text);
-  font-size: 19px;
+  font-size: clamp(16px, 1.7cqi, 30px);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -88,4 +88,30 @@
 .suite-value::-webkit-inner-spin-button {
   appearance: none;
 }
-/* Short reverb windows retain the labelled numeric editor for every control. */
+.suite-knob:focus-visible, .suite-fader:focus-visible, .suite-value:focus-visible, .suite-select:focus-visible, .suite-button:focus-visible {
+  outline: 2px solid var(--suite-accent, var(--color-daw-accent));
+  outline-offset: 3px;
+}
+.suite-knob[aria-disabled=true] { cursor: default; }
+.suite-fader {
+  position: relative;
+  width: clamp(44px, 5cqi, 88px);
+  height: clamp(134px, 17cqi, 320px);
+  margin-block: 12px;
+  touch-action: none;
+  cursor: ns-resize;
+  background: linear-gradient(90deg, transparent 45%, #10171b 45% 55%, transparent 55%), repeating-linear-gradient(to top, #74828a70 0 1px, transparent 1px 10%);
+}
+.suite-fader::after {
+  content: '';
+  position: absolute;
+  top: var(--suite-position);
+  left: 4px;
+  right: 4px;
+  height: 24px;
+  transform: translateY(-50%);
+  border: 1px solid #8a959b;
+  border-radius: 3px;
+  background: linear-gradient(#606c72 0 45%, #d4dbde 45% 53%, #343f46 53%);
+  box-shadow: 0 3px 5px #0007;
+}

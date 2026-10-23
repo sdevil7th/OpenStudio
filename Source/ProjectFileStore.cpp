@@ -1,6 +1,8 @@
 #include "ProjectFileStore.h"
 #include "JsonEnvelope.h"
 #include "RecoveryJournal.h"
+#include <json.hpp>
+#include <cstdio>
 #include <mutex>
 #include <set>
 
@@ -20,7 +22,7 @@ juce::Result checkedReplaceBytes(const juce::File& target, const void* bytes, si
 {
     juce::TemporaryFile temporary(target, juce::TemporaryFile::useHiddenFile);
     auto stream = temporary.getFile().createOutputStream();
-    if (!stream) return juce::Result::fail("Cannot create temporary project file.");
+    if (!stream) return juce::Result::fail("Cannot create temporary document file.");
     // File::replaceWithText ignores appendText's return value in our JUCE pin.
     // Check the write AND flush before publishing, especially on a full disk.
     const bool written = stream->write(bytes, size);
@@ -29,9 +31,17 @@ juce::Result checkedReplaceBytes(const juce::File& target, const void* bytes, si
     stream.reset();
     if (!written || status.failed()
         || temporary.getFile().getSize() != static_cast<juce::int64>(size))
-        return juce::Result::fail("Project write/flush failed; the previous file was retained.");
-    if (!temporary.overwriteTargetFileWithTemporary())
-        return juce::Result::fail("Project replacement failed; check the destination and recovery files.");
+        return juce::Result::fail("Document write/flush failed; the previous file was retained.");
+   #if JUCE_WINDOWS
+    const bool published = temporary.overwriteTargetFileWithTemporary();
+   #else
+    // JUCE's POSIX move/replace falls back to copying after rename fails.
+    // Copying can truncate the destination before ultimately returning false.
+    // A same-directory rename must either publish atomically or leave it alone.
+    const bool published = ProjectFileStore::detail::renameTemporaryFile(temporary.getFile(), target);
+   #endif
+    if (!published)
+        return juce::Result::fail("Document replacement failed; the previous file was retained.");
     return juce::Result::ok();
 }
 
@@ -55,6 +65,32 @@ juce::File nextRecovery(const juce::File& target, int maxVersions)
 
 namespace ProjectFileStore
 {
+#if !JUCE_WINDOWS
+bool detail::renameTemporaryFile(const juce::File& temporary, const juce::File& target)
+{
+    if (temporary == target || temporary.getParentDirectory() != target.getParentDirectory()
+        || !temporary.existsAsFile() || target.isDirectory()) return false;
+    return ::rename(temporary.getFullPathName().toRawUTF8(), target.getFullPathName().toRawUTF8()) == 0;
+}
+#endif
+
+juce::Result saveJsonDocument(const juce::File& target, const juce::String& json)
+{
+    if (!hasBoundedJsonEnvelope(json, maximumJsonDocumentBytes))
+        return juce::Result::fail("JSON document exceeds supported size or nesting, or is incomplete.");
+    const auto first = json.getCharPointer().findEndOfWhitespace();
+    const auto* utf8 = json.toRawUTF8();
+    // JUCE's JSON parser accepts trailing text and non-JSON string syntax.
+    // Validate the entire document without constructing another large DOM.
+    if ((*first != '{' && *first != '[')
+        || !nlohmann::json::accept(utf8, utf8 + json.getNumBytesAsUTF8()))
+        return juce::Result::fail("Invalid JSON document; no file was replaced.");
+    const std::lock_guard<std::mutex> guard(publicationMutex);
+    if (!target.getParentDirectory().isDirectory() || target.isDirectory())
+        return juce::Result::fail("JSON destination is not a writable file location.");
+    return checkedReplace(target, json);
+}
+
 juce::File RecoverySession::defaultRoot()
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)

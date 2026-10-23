@@ -2,7 +2,7 @@
   --instrument-accent: #c1b281;
 }
 .guitar-play-layout {
-  grid-template-columns: minmax(145px,.72fr) minmax(0,1.7fr) minmax(170px,.86fr);
+  grid-template-columns: minmax(210px,1fr) minmax(0,1.25fr) minmax(200px,1fr);
 }
 .guitar-two-columns {
   grid-template-columns: 1.25fr 1fr;
@@ -34,8 +34,8 @@
   white-space: nowrap;
 }
 .guitar-position {
-  height: 135px;
-  margin: 20px 0;
+  height: clamp(65px, 7.5cqi, 130px);
+  margin: 10px 0;
 }
 .guitar-neck {
   fill: #292f2c;
@@ -65,20 +65,24 @@
   width: 64px;
   color: var(--instrument-accent);
 }
-@container(max-width:790px) {
-  .guitar-play-layout {
-    grid-template-columns: minmax(140px,.7fr) minmax(0,1.4fr);
-  }
-  .guitar-play-layout>.instrument-section:last-child {
-    grid-column: 1/-1;
-  }
-  .guitar-two-columns {
-    grid-template-columns: 1fr;
-  }
-  .guitar-articulations>button {
-    padding-inline: 7px;
-  }
-  .guitar-position {
-    height: 110px;
-  }
+.guitar-engine-bar>label { width: min(260px, 55%); flex-direction: row; align-items: center; }
+.guitar-engine-bar>label>span { white-space: nowrap; }
+.guitar-articulations { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.guitar-articulations>button { padding: 5px 7px; flex-wrap: wrap; }
+.guitar-articulation-trims>.instrument-slider { flex: 1; }
+.guitar-performance .instrument-help { font-size: 11px; }
+.instrument-workspace[data-overview=true]>:is(.guitar-engine-bar,.guitar-play-layout) { grid-column: 1/-1; }
+.instrument-workspace[data-overview=true] .guitar-position { height: clamp(100px,7cqi,240px); }
+.instrument-workspace[data-overview=true] .guitar-articulations>button { min-height: clamp(40px,2.2cqi,75px); font-size: clamp(14px,.7cqi,24px); }
+.instrument-workspace[data-overview=true] .guitar-articulations small { font-size: clamp(11px,.5cqi,17px); }
+@container instrument (max-width:700px) {
+  .guitar-play-layout,.guitar-two-columns { grid-template-columns: 1fr; }
+  .guitar-play-layout[data-focus="Sound"]>:not(.guitar-sound),.guitar-play-layout[data-focus="Articulation"]>:not(.guitar-articulation-panel),.guitar-play-layout[data-focus="Performance"]>:not(.guitar-performance) { display: none; }
+  .guitar-articulations { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .guitar-articulations>button { min-height: 32px; }
+  .guitar-position { height: 52px; margin: 5px 0; }
+  .guitar-sound>.guitar-position,.guitar-sound>.instrument-subtle { display: none; }
+  .guitar-engine-bar { margin-bottom: 8px; }
+  .guitar-engine-bar>span { display: none; }
+  .guitar-engine-bar>label { flex: 1; width: auto; }
 }

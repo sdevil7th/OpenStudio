@@ -189,7 +189,10 @@ test("physical key-position and numpad bindings do not collapse to labels", asyn
     code: "Digit1",
     location: 0,
   });
-  expect(topRow.defaultPrevented).toBe(false);
+  // Digit1 is a global Go to Start shortcut, not the Numpad1 context binding.
+  expect(topRow).toEqual({ dispatchReturned: false, defaultPrevented: true });
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"registry"');
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"actionId":"transport.rewind"');
   await expect(page.getByLabel("Context hit counts")).toContainText('"piano_roll":1');
 
   const numpad = await dispatchKey(page, "piano-surface", {
@@ -198,6 +201,8 @@ test("physical key-position and numpad bindings do not collapse to labels", asyn
     location: 3,
   });
   expect(numpad).toEqual({ dispatchReturned: false, defaultPrevented: true });
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"owner":"piano_roll"');
+  await expect(page.getByLabel("Last shortcut result")).toContainText('"binding":"Numpad1"');
   await expect(page.getByLabel("Context hit counts")).toContainText('"piano_roll":2');
 });
 

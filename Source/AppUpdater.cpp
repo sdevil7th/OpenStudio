@@ -49,6 +49,14 @@ AppUpdater::AppUpdater(const juce::File& directory, bool restoreOnStartup) : sta
         rejectUnsupportedInstallerUpdate({});
         return; // Never restore or download a staged AppImage for a native package.
     }
+    // This member is constructed before startup logging creates the shared
+    // profile directory. Create a new profile privately, without changing an
+    // existing profile's permissions or metadata compatibility.
+    if (!stateDirectory.exists() && !UpdateInstaller::ensurePrivateDirectory(stateDirectory))
+    {
+        publishStatus(makeStatus("error", "Could not create a secure updater state folder."));
+        return;
+    }
     const auto stateFile = stateDirectory.getChildFile("updater-state.json");
     if (stateFile.existsAsFile())
     {
@@ -458,8 +466,8 @@ juce::var AppUpdater::performDownload(const juce::var& offer)
     const juce::URL url(downloadUrl);
     const auto installerFile = stateDirectory.getChildFile("updates")
         .getChildFile(juce::Uuid().toString()).getChildFile(getDownloadFileName(url, version));
-    if (installerFile.getParentDirectory().createDirectory().failed())
-        return finish("error", "Could not create the update download folder.");
+    if (!UpdateInstaller::ensurePrivateDirectory(installerFile.getParentDirectory()))
+        return finish("error", "Could not create a secure update download folder.");
     auto progress = [this, alive = jobs.token(), offer, size](juce::int64 bytes)
     {
         auto status = offer.clone();
@@ -649,7 +657,8 @@ void AppUpdater::recordSuccessfulCheck(const juce::String& latestVersion, const 
 bool AppUpdater::savePersistedState() const
 {
     const auto stateFile = stateDirectory.getChildFile("updater-state.json");
-    stateFile.getParentDirectory().createDirectory();
+    if (!stateDirectory.exists() && !UpdateInstaller::ensurePrivateDirectory(stateDirectory))
+        return false;
     return stateFile.replaceWithText(juce::JSON::toString(persistedState));
 }
 

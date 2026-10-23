@@ -126,6 +126,14 @@ struct CLAPAutomationFixture
 
 juce::var runOpenStudioCLAPAutomationRegression()
 {
+    const auto setupFailure = [](const char* reason)
+    {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("plugin", "CLAP automation protocol fixture");
+        result->setProperty("pass", false);
+        result->setProperty("setupFailure", reason);
+        return juce::var(result);
+    };
     // Timer dispatch depends on JUCE's message queue as well as its clock.
     // Headless startup has not entered the normal app dispatch loop yet.
     const auto dispatchUntil = [](const std::function<bool()>& ready, int milliseconds)
@@ -178,6 +186,10 @@ juce::var runOpenStudioCLAPAutomationRegression()
     if (guiExtension != nullptr)
         extensionsPass = extensionsPass && !guiExtension->request_resize(&host->host, 640, 480)
             && !guiExtension->request_show(&host->host) && !guiExtension->request_hide(&host->host);
+    if (instance->getParameters().size() != 3
+        || std::any_of(instance->getParameters().begin(), instance->getParameters().end(),
+                       [](const auto* parameter) { return parameter == nullptr; }))
+        return setupFailure("Initial CLAP parameter enumeration is incomplete");
     PluginParameterCapture capture(instance);
     instance->prepareToPlay(48000, 64);
     bool pass = instance->getParameters().size() == 3 && instance->getParameters()[0]->isAutomatable()
@@ -198,16 +210,19 @@ juce::var runOpenStudioCLAPAutomationRegression()
     fixture.gain = 0.75;
     fixture.phase = 1;
     const auto* extension = static_cast<const clap_host_params_t*>(host->host.get_extension(&host->host, CLAP_EXT_PARAMS));
+    if (extension == nullptr) return setupFailure("CLAP parameter host extension is unavailable");
     extension->request_flush(&host->host);
     flushOpenStudioCLAPParameterEvents(instance.get());
     capture.drain("track", false, 0, events);
+    const auto gestureState = capture.stateFor(0);
     pass = pass && events.size() == 2 && events[0]["phase"].toString() == "begin"
-        && events[1]["phase"].toString() == "value" && capture.stateFor(0)->gesture.load()
+        && events[1]["phase"].toString() == "value" && gestureState != nullptr && gestureState->gesture.load()
         && std::abs(instance->getParameters()[0]->getValue() - 0.75f) < 1.0e-6f;
     events.clear();
     juce::Thread::sleep(220);
     capture.drain("track", false, 0, events);
-    pass = pass && events.isEmpty() && capture.stateFor(0)->touching.load();
+    const auto idleTouchState = capture.stateFor(0);
+    pass = pass && events.isEmpty() && idleTouchState != nullptr && idleTouchState->touching.load();
     fixture.phase = 2;
     extension->request_flush(&host->host);
     flushOpenStudioCLAPParameterEvents(instance.get());
@@ -243,9 +258,13 @@ juce::var runOpenStudioCLAPAutomationRegression()
     host->poll(CLAP_PARAM_RESCAN_ALL, false);
     events.clear();
     capture.drain("track", false, 0, events);
+    const auto* appendedParameter = instance->getParameters().size() == 4
+        ? dynamic_cast<juce::HostedAudioProcessorParameter*>(instance->getParameters()[3]) : nullptr;
+    if (appendedParameter == nullptr)
+        return setupFailure("CLAP topology rescan did not append a hosted parameter");
     const bool topologyPass = instance->getParameters().size() == 4 && instance->getParameters()[1] == originalChoice
         && !instance->getParameters()[0]->isAutomatable() && instance->getParameters()[3]->isAutomatable()
-        && dynamic_cast<juce::HostedAudioProcessorParameter*>(instance->getParameters()[3])->getParameterID() == "3"
+        && appendedParameter->getParameterID() == "3"
         && std::count_if(events.begin(), events.end(), [](const juce::var& event) { return event["phase"].toString() == "metadata"; }) == 1
         && std::none_of(events.begin(), events.end(), [](const juce::var& event) { return event["phase"].toString() == "value"; });
     instance->getParameters()[3]->setValue(.25f);
@@ -318,7 +337,8 @@ juce::var runOpenStudioCLAPAutomationRegression()
     extension->clear(&host->host, 3, CLAP_PARAM_CLEAR_ALL);
     host->poll(0, false); events.clear(); timedCapture.drain("track", false, 0, events);
     getOpenStudioCLAPParameterReferenceGeneration(instance.get(), 3, referenceGeneration);
-    clearPass = clearPass && referenceGeneration == 2 && !timedCapture.stateFor(3)->touching.load();
+    const auto clearedState = timedCapture.stateFor(3);
+    clearPass = clearPass && referenceGeneration == 2 && clearedState != nullptr && !clearedState->touching.load();
 
     // Producers never retry a dropped edit. Verify bounded contention does not
     // corrupt accepted events, reorder a producer, or prevent queue reuse.
@@ -374,8 +394,10 @@ juce::var runOpenStudioCLAPAutomationRegression()
     graph->setParameterTree(juce::AudioProcessorParameterGroup("root", "Root", "/",
         std::make_unique<juce::AudioParameterFloat>(juce::ParameterID("replacement", 1), "Replacement", 0.0f, 2.0f, .5f)));
     events.clear(); replacementCapture.drain("replacement", false, 0, events);
+    const auto replacementState = replacementCapture.stateFor(0);
     bool replacementPass = events.size() == 1 && events[0]["phase"].toString() == "metadata"
-        && !replacementCapture.stateFor(0)->touching.load() && originalMeaning != pluginParameterMeaning(graph.get(), 0);
+        && replacementState != nullptr && !replacementState->touching.load()
+        && originalMeaning != pluginParameterMeaning(graph.get(), 0);
     events.clear(); graph->getParameters()[0]->setValueNotifyingHost(.8f); replacementCapture.drain("replacement", false, 0, events);
     replacementPass = replacementPass && events.size() == 1 && events[0]["phase"].toString() == "value"
         && events[0]["metadata"]["hostParamId"].toString() == "replacement";

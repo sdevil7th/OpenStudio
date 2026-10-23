@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useEditorOverview } from "./useEditorOverview";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { findBuiltInParameter } from "../../utils/builtInExpandedSelectors";
 import { EQToolbar } from "./EQToolbar";
 import { changedEffectSettings, detailDescription, EffectDetailIndicator } from "./EffectDetailIndicator";
@@ -26,7 +28,18 @@ export function CompressorEditor(props: ApprovedEffectEditorProps) {
   const [channel, setChannel] = useState(0);
   const routing = v(`${prefix}Routing`), bank = `${prefix}${routing === 0 ? 0 : channel}`;
   const ratioOff = fet && v("fetRatio") === 5;
-  const [detail, setDetail] = useState<Detail>("Tone & timing");
+  const [detail, setDetail] = useState<Detail | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const overview = useEditorOverview(editor);
+  usePluginFeatureReveal(editor, "compressor", ({ parameterId: id }) => {
+    if (!id) return;
+    const bankChannel = /^(?:busVca|punchVca)([01])/.exec(id);
+    if (bankChannel) setChannel(Number(bankChannel[1]));
+    if (/^meter/.test(id)) setDetail("Metering");
+    else if (/^(punchNoise|punchHum|punchMonitor)/.test(id)) setDetail("Noise & monitor");
+    else if (/sidechain|detector|externalDetector|lookahead|stereoLink|HighPass/i.test(id)) setDetail("Sidechain");
+    else setDetail("Tone & timing");
+  });
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const change: ApprovedEffectEditorProps["onChange"] = (parameter, next) => {
     if (!["model", "audioCharacter"].includes(parameter.id)) { props.onChange(parameter, next); return; }
@@ -37,7 +50,7 @@ export function CompressorEditor(props: ApprovedEffectEditorProps) {
   };
   const control = createEffectParameterRenderer({ ...props, onChange: change });
   const tabs: Detail[] = ["Tone & timing", "Sidechain", "Metering", ...(model === 6 && currentEngine ? ["Noise & monitor" as const] : [])];
-  const shownDetail = tabs.includes(detail) ? detail : "Tone & timing";
+  const shownDetail = detail && tabs.includes(detail) ? detail : null;
   const ratio = p("fetRatio");
   const activeBanks = routing === 0 ? [`${prefix}0`] : [`${prefix}0`, `${prefix}1`];
   const toneIds = fet ? ["fetRecovery", "fetTilt"] : optical ? [] : vca ? model === 5 ? activeBanks.flatMap(id => [`${id}Attack`, `${id}Release`, `${id}AutoRelease`]) : [] : ["knee", "autoRelease", "autoMakeup"];
@@ -50,7 +63,17 @@ export function CompressorEditor(props: ApprovedEffectEditorProps) {
   };
   const audioStageState = [v("audioCharacter") >= .5 ? model >= 2 ? "Original stages active" : "Linear path; colour inactive for this model" : changedEffectSettings(props.schema, ["headroom"]) ? "Headroom retained while Legacy is active" : "", changedEffectSettings(props.schema, ["audioCharacter", "headroom"])].filter(Boolean).join("; ");
 
-  return <EffectMeterProvider {...props}><div className="approved-effect-editor core-effect-editor compressor-approved flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="compressor">
+  const renderDetail = (shownDetail: Detail) => <div className="core-detail-content flex flex-wrap items-center justify-start p-[14px_18px] gap-[20px]">
+          {shownDetail === "Sidechain" ? <>{control("externalDetector", false, "Key source")}{ratioOff ? <p className="core-detail-note text-[12px] leading-[1.6]">The detector does not reduce gain while Ratio is Off.</p> : vca ? <>{control(`${bank}HighPass`, false, "Key high pass · 90 Hz")}{control("lookaheadMs", false, "Lookahead")}</> : <>{!optical && <>{!fet && control("detectorMode", false, "Detection")}{control("sidechainHPF", false, "Key high pass")}</>}{control("lookaheadMs", false, "Lookahead")}{control("stereoLink", false, "Stereo link")}</>}</>
+            : shownDetail === "Metering" ? <>{control("meterMode", false, "Display")}{control("meterChannel", false, "Meter channel")}{control("meterReference", false, "Calibration")}<CalibratedMeter mode={v("meterMode")} channel={v("meterChannel")} reference={v("meterReference")} /><p className="core-detail-note text-[12px] leading-[1.6]">300 ms average · the main output history shows peaks.</p></>
+            : shownDetail === "Noise & monitor" ? <>{control("punchNoiseLeft", false, routing === 2 ? "Noise · Mid" : "Noise · Left")}{routing !== 0 ? control("punchNoiseRight", false, routing === 2 ? "Noise · Side" : "Noise · Right") : <p className="core-detail-note text-[12px] leading-[1.6]">Noise linked to both channels</p>}{control("punchHum", false, "Hum frequency")}{control("punchMonitor", false, "Listen")}</>
+            : fet ? ratioOff ? <p className="core-detail-note text-[12px] leading-[1.6]">Choose a compression ratio to edit recovery and detector tilt.</p> : <>{control("fetRecovery", false, "Recovery memory")}{control("fetTilt", false, "Detector tilt")}<p className="core-detail-note text-[12px] leading-[1.6]">{ratio?.enumOptions?.length ?? 0} single and multi-button ratio choices<br />are available in the Ratio menu.</p></>
+            : optical ? <p className="core-detail-note text-[12px] leading-[1.6]">Recovery follows the selected optical response. Peak reduction and HF emphasis shape its action.</p>
+            : vca ? model === 5 ? <>{control(`${bank}Attack`, false, "Attack")}{v(`${bank}AutoRelease`) < .5 && control(`${bank}Release`, false, "Release")}{control(`${bank}AutoRelease`, false, "Auto release")}<p className="core-detail-note text-[12px] leading-[1.6]">{routing === 0 ? "Linked timing" : `Editing ${routing === 2 ? channel ? "Side" : "Mid" : channel ? "Right" : "Left"}`}</p></> : <p className="core-detail-note text-[12px] leading-[1.6]">Punch VCA uses program-dependent timing. Input, Threshold and Ratio shape its response.</p>
+            : <>{control("knee", false, "Knee")}{control("autoRelease", false, "Auto release")}{control("autoMakeup", false, "Estimated makeup")}</>}
+        </div>;
+
+  return <EffectMeterProvider {...props}><div ref={editor} className="approved-effect-editor core-effect-editor compressor-approved flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="compressor">
     <EQToolbar {...props} />
     <div className="core-effect-face flex min-h-0 flex-1 flex-col overflow-y-auto p-[18px_24px] gap-[15px]" inert={busy}>
       <div className="compressor-models shrink-0"><EffectModeSwitch {...props} onChange={change} parameter={p("model")} label="Compressor model" /></div>
@@ -65,19 +88,11 @@ export function CompressorEditor(props: ApprovedEffectEditorProps) {
         {fet ? <>{control("fetInput", true, "Input")}<div className="compressor-ratio flex flex-col items-center gap-3">{control("fetRatio", false, "Ratio / button combination")}{ratioOff && <span className="core-detail-note text-[12px] leading-[1.6]">Compression off</span>}</div>{ratioOff ? <p className="core-detail-note text-[12px] leading-[1.6]">Input and output remain active.<br />Compression timing is inactive.</p> : <>{control("fetAttack", false, "Attack")}{control("fetRelease", false, "Release")}</>}{control("fetOutput", true, "Output")}</>
           : optical ? <>{control(`${prefix}Reduction`, true, "Peak reduction")}<div className="compressor-opto flex flex-col items-center gap-3">{control(`${prefix}Mode`, false, "Operation")}<p className="core-detail-note text-[12px] leading-[1.6]">Program-dependent recovery<br />with optical memory</p></div>{control(`${prefix}Emphasis`, false, "HF emphasis")}{control(`${prefix}Gain`, true, "Makeup gain")}</>
           : vca ? <>{control(`${bank}Input`, false, "Input")}{control(`${bank}Threshold`, true, "Threshold")}<div className="compressor-ratio flex flex-col items-center gap-3">{v(`${bank}Infinity`) >= .5 ? <span className="text-lg">Ratio ∞:1</span> : control(`${bank}Ratio`, false, "Ratio")}{control(`${bank}Infinity`, false, "Infinity ratio")}</div>{control(`${bank}Output`, true, "Output")}</>
-          : <>{control("threshold", true, "Threshold")}{control("ratio", false, "Ratio")}{control("attack", false, "Attack")}{control("release", false, "Release")}{control("makeupGain", true, "Makeup")}</>}
+          : <>{control("threshold", true, "Threshold")}{control("ratio", false, "Ratio")}{control("attack", false, "Attack")}{control("release", false, v("autoRelease") >= .5 ? "Release · auto" : "Release", v("autoRelease") >= .5)}{control("makeupGain", true, v("autoMakeup") >= .5 ? "Makeup · auto" : "Makeup", v("autoMakeup") >= .5)}</>}
       </div>
-      <section className="core-detail shrink-0" aria-label="Compressor detail">
-        <div className="core-detail-tabs flex flex-wrap p-[0_8px] gap-[3px]" role="group" aria-label="Compressor detail pages">{tabs.map(tab => <button type="button" key={tab} aria-label={tab} aria-description={detailState[tab] || undefined} title={detailDescription(tab, detailState[tab])} aria-pressed={shownDetail === tab} onClick={() => setDetail(tab)}>{tab}<EffectDetailIndicator summary={detailState[tab]} /></button>)}</div>
-        <div className="core-detail-content flex flex-wrap items-center justify-start p-[14px_18px] gap-[20px]">
-          {shownDetail === "Sidechain" ? <>{control("externalDetector", false, "Key source")}{ratioOff ? <p className="core-detail-note text-[12px] leading-[1.6]">The detector does not reduce gain while Ratio is Off.</p> : vca ? <>{control(`${bank}HighPass`, false, "Key high pass · 90 Hz")}{control("lookaheadMs", false, "Lookahead")}</> : <>{!optical && <>{!fet && control("detectorMode", false, "Detection")}{control("sidechainHPF", false, "Key high pass")}</>}{control("lookaheadMs", false, "Lookahead")}{control("stereoLink", false, "Stereo link")}</>}</>
-            : shownDetail === "Metering" ? <>{control("meterMode", false, "Display")}{control("meterChannel", false, "Meter channel")}{control("meterReference", false, "Calibration")}<CalibratedMeter mode={v("meterMode")} channel={v("meterChannel")} reference={v("meterReference")} /><p className="core-detail-note text-[12px] leading-[1.6]">300 ms average · the main output history shows peaks.</p></>
-            : shownDetail === "Noise & monitor" ? <>{control("punchNoiseLeft", false, routing === 2 ? "Noise · Mid" : "Noise · Left")}{routing !== 0 ? control("punchNoiseRight", false, routing === 2 ? "Noise · Side" : "Noise · Right") : <p className="core-detail-note text-[12px] leading-[1.6]">Noise linked to both channels</p>}{control("punchHum", false, "Hum frequency")}{control("punchMonitor", false, "Listen")}</>
-            : fet ? ratioOff ? <p className="core-detail-note text-[12px] leading-[1.6]">Choose a compression ratio to edit recovery and detector tilt.</p> : <>{control("fetRecovery", false, "Recovery memory")}{control("fetTilt", false, "Detector tilt")}<p className="core-detail-note text-[12px] leading-[1.6]">{ratio?.enumOptions?.length ?? 0} single and multi-button ratio choices<br />are available in the Ratio menu.</p></>
-            : optical ? <p className="core-detail-note text-[12px] leading-[1.6]">Recovery follows the selected optical response. Peak reduction and HF emphasis shape its action.</p>
-            : vca ? model === 5 ? <>{control(`${bank}Attack`, false, "Attack")}{v(`${bank}AutoRelease`) < .5 && control(`${bank}Release`, false, "Release")}{control(`${bank}AutoRelease`, false, "Auto release")}<p className="core-detail-note text-[12px] leading-[1.6]">{routing === 0 ? "Linked timing" : `Editing ${routing === 2 ? channel ? "Side" : "Mid" : channel ? "Right" : "Left"}`}</p></> : <p className="core-detail-note text-[12px] leading-[1.6]">Punch VCA uses program-dependent timing. Input, Threshold and Ratio shape its response.</p>
-            : <>{control("knee", false, "Knee")}{control("autoRelease", false, "Auto release")}{control("autoMakeup", false, "Estimated makeup")}</>}
-        </div>
+      <section className="core-detail shrink-0" data-overview={overview} aria-label="Compressor detail">
+        <div className="core-detail-tabs flex flex-wrap p-[0_8px] gap-[3px]" role="group" aria-label="Compressor detail pages">{tabs.map(tab => <button type="button" key={tab} aria-label={tab} aria-description={detailState[tab] || undefined} title={detailDescription(tab, detailState[tab])} aria-expanded={shownDetail === tab} onClick={() => setDetail(shownDetail === tab ? null : tab)}>{tab}<EffectDetailIndicator summary={detailState[tab]} /></button>)}</div>
+        {(overview ? tabs : shownDetail ? [shownDetail] : []).map(page => <section key={page}>{overview && <h3 className="border-t border-daw-border-light px-5 pt-5 text-lg">{page}</h3>}{renderDetail(page)}</section>)}
       </section>
       {p("audioCharacter") && <details className="core-detail core-advanced shrink-0"><summary aria-description={audioStageState || undefined} title={detailDescription("Audio stages", audioStageState)}>Audio stages<EffectDetailIndicator summary={audioStageState} /></summary>
         <div className="core-detail-content flex flex-wrap items-center p-[14px_18px] gap-[20px]">{control("audioCharacter", false, "Audio character")}{v("audioCharacter") >= .5 && model >= 2 && control("headroom", false, "Headroom")}

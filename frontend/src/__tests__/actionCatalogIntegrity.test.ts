@@ -304,7 +304,7 @@ describe("action catalog integrity", () => {
       expect(getRegisteredAction(actionId), actionId).toBeUndefined();
     }
     expect(getRegisteredAction("track.toggleSelectedArm")).toMatchObject({
-      shortcut: "R",
+      shortcut: "Ctrl+Shift+R",
       shortcutScope: "track_control_panel",
     });
     expect(getDeferredActions().filter((action) => action.reason === "requires_undo_support"))

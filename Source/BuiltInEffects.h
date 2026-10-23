@@ -1,4 +1,5 @@
 #pragma once
+#include "BuiltInFilterTail.h"
 #include "BuiltInEQMIDIPrograms.h"
 #include "BuiltInAlignmentCapture.h"
 
@@ -109,7 +110,10 @@ public:
 
     static constexpr int numBands = 8; // legacy channel-strip/native-editor count
     static constexpr int maxBands = 24;
+    std::atomic<float> signalPath {0}; // corrected for new standalone instances only
     const int bandCount;
+    mutable std::atomic<double> retainedFilterTail {0};
+    std::array<std::atomic<double>, maxBands> retainedBandTails {};
     static constexpr std::array<float, numBands> defaultFrequencies { 20.0f, 100.0f, 250.0f, 500.0f, 1000.0f, 2500.0f, 6000.0f, 20000.0f };
 
     struct BandParams
