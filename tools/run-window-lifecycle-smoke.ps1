@@ -118,7 +118,9 @@ if ($ValidateOnly) {
     return
 }
 
-$resolvedAppPath = (Resolve-Path -LiteralPath $AppPath).Path
+# Use the same normalization as the reported executable below: on Windows,
+# Resolve-Path alone can retain an 8.3 alias which GetFullPath expands.
+$resolvedAppPath = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $AppPath).Path)
 # Reject older executables before launching: unknown flags are ignored by them,
 # which could otherwise reopen the user's saved low-buffer ASIO device.
 $binary = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($resolvedAppPath))

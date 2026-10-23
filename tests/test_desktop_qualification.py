@@ -3,6 +3,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -170,6 +171,38 @@ sys.exit(7)
         self.assertEqual(self.message(process)["event"], "error")
         process.wait(timeout=5)
         self.assertIsNone(self.sentinel.poll())
+
+    @unittest.skipUnless(POWERSHELL, "PowerShell is required for wrapper integration")
+    def test_powershell_wrapper_selects_first_python_application_on_path(self):
+        selected = self.root / "selected interpreter.txt"
+        candidates = [self.root / "first python", self.root / "second python"]
+        for index, directory in enumerate(candidates):
+            directory.mkdir()
+            interpreter = directory / "python3"
+            interpreter.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s' {index} > {shlex.quote(str(selected))}\n"
+                f"exec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
+            interpreter.chmod(0o700)
+        runner = self.root / "python candidates.ps1"
+        runner.write_text('''
+param($Module, $Python)
+$ErrorActionPreference = 'Stop'
+if (@(Get-Command python3 -CommandType Application).Count -lt 2) { throw 'Fixture requires multiple Python candidates.' }
+Import-Module $Module -Force
+$owned = Start-OwnedDesktopProcess -FilePath $Python -ArgumentList @('-c', 'import sys; sys.exit(7)')
+try {
+    if (!$owned.WaitForExit(10000)) { throw 'Fixture application timed out.' }
+    if ($owned.ExitCode -ne 7) { throw 'Fixture application result was lost.' }
+} finally { $owned.Dispose() }
+''', encoding="utf-8")
+        environment = os.environ.copy()
+        environment["PATH"] = os.pathsep.join([*(str(path) for path in candidates), environment.get("PATH", "")])
+        result = subprocess.run([POWERSHELL, "-NoProfile", "-File", str(runner),
+                                 str(LIFECYCLE.with_name("OwnedDesktopProcess.psm1")), sys.executable],
+                                env=environment, capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(selected.read_text(), "0")
 
     @unittest.skipUnless(POWERSHELL, "PowerShell is required for wrapper integration")
     def test_powershell_wrapper_waits_for_app_but_disposes_retained_session(self):
@@ -414,6 +447,29 @@ try {
     def test_report_from_another_executable_cannot_qualify_this_binary(self):
         report = self.report_fixture()
         report["executablePath"] = str(self.root / "unrelated" / "OpenStudio.exe")
+        record = self.run_mock_process(report=report)
+        self.assertFalse(record["success"])
+        self.assertIn("different executable", record["error"])
+
+    def test_short_executable_path_uses_the_same_identity_normalization(self):
+        import ctypes
+        original_app = self.app
+        long_directory = self.root / "long executable path with spaces"
+        long_directory.mkdir()
+        long_app = long_directory / self.app.name
+        shutil.copyfile(self.app, long_app)
+        short_path = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(long_app), short_path, len(short_path))
+        self.assertGreater(length, 0, "Unable to query the existing executable's short path")
+        self.assertLess(length, len(short_path))
+        if short_path.value.casefold() == str(long_app).casefold():
+            self.skipTest("The fixture volume does not create 8.3 path aliases")
+        self.app = Path(short_path.value)
+        record = self.run_mock_process()
+        self.assertTrue(record["success"], record.get("error"))
+        # Another existing executable with identical bytes must still be rejected.
+        report = self.report_fixture()
+        report["executablePath"] = str(original_app)
         record = self.run_mock_process(report=report)
         self.assertFalse(record["success"])
         self.assertIn("different executable", record["error"])

@@ -7,7 +7,7 @@ function Start-OwnedDesktopProcess {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         # A live session leader owns the group even after the application exits.
         # Its stdin is a lifetime lease: EOF also cleans up if this host exits.
-        $python = (Get-Command python3 -CommandType Application -ErrorAction Stop).Source
+        $python = (Get-Command python3 -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $python
         $startInfo.UseShellExecute = $false
