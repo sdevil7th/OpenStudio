@@ -465,6 +465,24 @@ final run; the baseline's 43/62 amp/cab misses at 44.1 kHz / 8 and the earlier
 after-run's 11/35 demonstrate why noisy single runs cannot establish an overall
 performance improvement.
 
+### Plugin parameter gesture history
+
+Run `npm run test -- src/__tests__/builtInPluginPanel.test.tsx
+src/__tests__/builtInPluginParamHistory.test.ts` from `frontend`, then run
+`npx playwright test e2e/nam-fuzz-workflow.spec.ts --project=chromium` on
+Windows and macOS. The browser fixture starts its own Vite server and uses
+the platform's primary Undo modifier.
+
+For Fuzz Clean, enter 38.4%, cancel a 75% draft, adjust finely to 38.6%,
+then reset to 0%. Three Undo operations must restore 38.6%, 38.4%, and 0%;
+Redo must replay the three committed edits. Cancel must add no history step.
+Exercise transitions before deferred blur/key-up commits run, with native
+writes still pending; a delay added between actions can hide the race.
+Also verify pointer-to-focus handoff, held-key and wheel continuation,
+separate gestures of the same parameter, dependent parameter changes and
+failed writes. History boundaries must not duplicate native automation
+begins or allow an older gesture end to close a newer gesture.
+
 ### Swollen Pickle reference fuzz review, October 23, 2026
 
 This is working-tree evidence against base app commit

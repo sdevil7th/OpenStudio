@@ -51,6 +51,12 @@ test("Fuzz Clean pedal knob supports exact entry, cancel, keyboard, reset and Un
   await expect(knob).toHaveAttribute("aria-valuenow", "0.384");
   await page.keyboard.press(undoShortcut);
   await expect(knob).toHaveAttribute("aria-valuenow", "0");
+  const redoShortcut = `${await primaryModifier(page)}+Shift+z`;
+  for (const expected of ["0.384", "0.386", "0"]) {
+    await page.keyboard.press(redoShortcut);
+    await expect(knob).toHaveAttribute("aria-valuenow", expected);
+    await expect.poll(async () => (await values(page))?.fuzzCleanMix).toBeCloseTo(Number(expected));
+  }
 });
 
 for (const viewport of [{ width: 640, height: 480 }, { width: 900, height: 600 }, { width: 1280, height: 900 }, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }]) {

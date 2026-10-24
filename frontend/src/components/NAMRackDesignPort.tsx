@@ -4644,6 +4644,7 @@ function FuzzCleanKnob() {
           max={100}
           step={stepForParam(param) * 100}
           value={draft}
+          data-param-id={param.id}
           aria-label="Fuzz Clean blend percentage"
           aria-describedby={descriptionId}
           className="nam-fuzz-clean-entry rounded border border-amber-300 bg-neutral-950 px-1 text-center text-xs tabular-nums text-amber-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
