@@ -15,6 +15,19 @@ executable-path comparison, which does not account for POSIX aliases. GitHub pub
 submission were skipped; preflight performed no Store mutation. A corrected
 release must run its own preflight and submit its exact new package.
 
+[PR #33](https://github.com/sdevil7th/OpenStudio/pull/33) corrects the POSIX
+file-identity check and retains packaged lifecycle evidence on failure. Its
+alias fixtures passed on both native macOS architectures. The subsequent
+[0.1.07 run](https://github.com/sdevil7th/OpenStudio/actions/runs/40072590094)
+was deliberately cancelled before publication after macOS browser CI exposed
+a separate parameter-history race: consecutive edits of Fuzz Clean could merge,
+making Undo skip an intermediate value. [PR #35](https://github.com/sdevil7th/OpenStudio/pull/35)
+captures those history boundaries without duplicating native automation begins,
+and closes Touch gestures when keyboard Undo/Redo cancels their deferred commit.
+Neither attempt published a GitHub application release or submitted a Store
+update; 0.1.07 did not reach live Store preflight. Release notes for the follow-up
+must retain the full feature range since the last published version, 0.1.05.
+
 The [October 8 recovery run](https://github.com/sdevil7th/OpenStudio/actions/runs/37806805920)
 successfully uploaded and committed the existing submission
 `1152921505702075647` for package `0.1.5.0`. Its retained report reached
@@ -26,14 +39,14 @@ Store upgrade.
 
 The October 24 repository check confirms `OPENSTUDIO_STORE_ENABLED=true`,
 the three required `MS_STORE_*` environment secret names, and the `v*`-only
-Store environment without required reviewers. A normal `v0.1.06` tag therefore
-builds and validates MSIX `0.1.6.0`, runs live read-only Store preflight before
+Store environment without required reviewers. A normal numeric application tag
+builds and validates its matching MSIX, runs live read-only Store preflight before
 GitHub publication, then submits the matching package after publication. The
 new tag's preflight must establish the current published baseline and reject
 an unrelated pending submission.
 
 The release-specific publishing policy remains scoped to `v0.1.05`.
-`v0.1.06` inherits the last published submission's saved publishing mode.
+Later application tags inherit the last published submission's saved publishing mode.
 `Immediate` publishes after successful certification; `Manual` retains a
 publication hold. Do not rerun the old recovery or extend its policy without
 checking the current baseline. Retain the new release's sanitized readiness

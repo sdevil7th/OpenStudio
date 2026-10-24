@@ -1134,10 +1134,12 @@ function BuiltInPluginPanelContent({
     canRedo: paramHistory.canRedo(),
     undo: () => {
       clearScheduledParamCommit();
+      void finishAutomationGestures();
       void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
     redo: () => {
       clearScheduledParamCommit();
+      void finishAutomationGestures();
       void paramHistory.redo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
   });

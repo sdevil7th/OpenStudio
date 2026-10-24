@@ -34,7 +34,7 @@ export default defineConfig({
         userAgent: process.platform === 'darwin' ? devices['Desktop Safari'].userAgent
           : `Mozilla/5.0 (${desktopIdentity}) AppleWebKit/605.1.15 (KHTML, like Gecko) Safari/605.1.15`,
       },
-      testMatch: /(?:media-file-dialogs|mixer-controls|input-profile-wheel|automation-input-runtime|audio-settings-switching|ui-audit-regressions|render-export-flow|profile-onboarding|nam-rack-approved-surfaces)\.spec\.ts/,
+      testMatch: /(?:media-file-dialogs|mixer-controls|input-profile-wheel|automation-input-runtime|audio-settings-switching|ui-audit-regressions|render-export-flow|profile-onboarding|nam-rack-approved-surfaces|nam-fuzz-workflow)\.spec\.ts/,
     },
   ],
   webServer: {

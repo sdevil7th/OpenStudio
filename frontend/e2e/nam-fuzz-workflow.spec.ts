@@ -6,7 +6,7 @@ const address = { trackId: "nam-fuzz-workflow-qa", chain: "track", fxIndex: 0 } 
 const url = `/?${new URLSearchParams({ window: "pluginEditor", platform: "windows", windowChrome: "native", mockPlugin: "nam", sessionId: JSON.stringify({ address, title: "OpenStudio NAM Rack", fallbackName: "OpenStudio NAM Rack" }), namView: "rack", namFocus: "gate", namSection: "pre" })}`;
 type PresetEntries = Awaited<ReturnType<typeof bridgeType.getBuiltInFXPresets>>;
 interface ProfileCopyQa { entries: PresetEntries; calls: [string, string, 0 | 1][]; fail: boolean }
-declare global { interface Window { namProfileCopyQa: ProfileCopyQa } }
+declare global { interface Window { namProfileCopyQa: ProfileCopyQa; namFuzzGestureQa: boolean[] } }
 
 async function openRack(page: Page) {
   await page.goto(url);
@@ -23,6 +23,16 @@ async function values(page: Page) {
 
 test("Fuzz Clean pedal knob supports exact entry, cancel, keyboard, reset and Undo", async ({ page }) => {
   await openRack(page);
+  await page.evaluate(async () => {
+    const path = "/src/services/NativeBridge.ts";
+    const { nativeBridge } = await import(/* @vite-ignore */ path) as typeof import("../src/services/NativeBridge");
+    window.namFuzzGestureQa = [];
+    const original = nativeBridge.builtInPluginGesture.bind(nativeBridge);
+    nativeBridge.builtInPluginGesture = async (address, id, starting) => {
+      if (id === "fuzzCleanMix") window.namFuzzGestureQa.push(starting);
+      return original(address, id, starting);
+    };
+  });
   const undoShortcut = `${await primaryModifier(page)}+z`;
   const knob = page.getByRole("slider", { name: "Fuzz Clean blend", exact: true });
   await expect(knob).toHaveAccessibleDescription(/Fuzz is bypassed/);
@@ -57,10 +67,19 @@ test("Fuzz Clean pedal knob supports exact entry, cancel, keyboard, reset and Un
     await expect(knob).toHaveAttribute("aria-valuenow", expected);
     await expect.poll(async () => (await values(page))?.fuzzCleanMix).toBeCloseTo(Number(expected));
   }
+  await expect.poll(() => page.evaluate(() => {
+    const gestures = window.namFuzzGestureQa;
+    return gestures[gestures.length - 1];
+  })).toBe(false);
+  const gestures = await page.evaluate(() => window.namFuzzGestureQa);
+  expect(gestures.length).toBeGreaterThan(0);
+  expect(gestures).toEqual(Array.from({ length: gestures.length }, (_, index) => index % 2 === 0));
 });
 
 for (const viewport of [{ width: 640, height: 480 }, { width: 900, height: 600 }, { width: 1280, height: 900 }, { width: 1920, height: 1080 }, { width: 3840, height: 2160 }]) {
-  test(`Fuzz Clean is integrated without overlapping controls at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+  test(`Fuzz Clean is integrated without overlapping controls at ${viewport.width}x${viewport.height}`, async ({ page, browserName }, testInfo) => {
+    // WebKit's image-heavy rack workflows need more case time; assertion deadlines stay unchanged.
+    if (browserName === "webkit") test.setTimeout(90_000);
     await page.setViewportSize(viewport);
     await openRack(page);
     const knob = page.getByRole("slider", { name: "Fuzz Clean blend", exact: true });
@@ -114,7 +133,8 @@ for (const viewport of [{ width: 640, height: 480 }, { width: 900, height: 600 }
 }
 
 for (const width of [1280, 900, 640]) {
-test(`profile review at ${width}px creates only an explicitly confirmed library copy and reports duplicate or failed copies`, async ({ page }, testInfo) => {
+test(`profile review at ${width}px creates only an explicitly confirmed library copy and reports duplicate or failed copies`, async ({ page, browserName }, testInfo) => {
+  if (browserName === "webkit") test.setTimeout(90_000);
   await page.setViewportSize({ width, height: width === 640 ? 480 : 900 });
   await openRack(page);
   if (width <= 900) {

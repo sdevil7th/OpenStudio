@@ -469,7 +469,7 @@ performance improvement.
 
 Run `npm run test -- src/__tests__/builtInPluginPanel.test.tsx
 src/__tests__/builtInPluginParamHistory.test.ts` from `frontend`, then run
-`npx playwright test e2e/nam-fuzz-workflow.spec.ts --project=chromium` on
+`npx playwright test e2e/nam-fuzz-workflow.spec.ts --project=chromium --project=webkit` on
 Windows and macOS. The browser fixture starts its own Vite server and uses
 the platform's primary Undo modifier.
 
@@ -481,7 +481,12 @@ writes still pending; a delay added between actions can hide the race.
 Also verify pointer-to-focus handoff, held-key and wheel continuation,
 separate gestures of the same parameter, dependent parameter changes and
 failed writes. History boundaries must not duplicate native automation
-begins or allow an older gesture end to close a newer gesture.
+begins or allow an older gesture end to close a newer gesture. Keyboard Undo/Redo
+must finish native Touch even when it cancels the pending edit-commit timer;
+the browser regression checks balanced native begin/end calls as well as values.
+The core workflow retains its 30-second case budget. WebKit's image-heavy
+geometry and preset-copy cases allow 90 seconds, with assertion deadlines
+unchanged; this separates screenshot cost from a missing functional transition.
 
 ### Swollen Pickle reference fuzz review, October 23, 2026
 
