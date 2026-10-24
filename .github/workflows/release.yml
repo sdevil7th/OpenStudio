@@ -886,9 +886,10 @@ jobs:
             "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
 
       - name: Exercise the finished AppImage launcher
+        # The preceding Openbox report stays in the parent; this suite requires fresh output.
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop --render
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage/launcher --desktop --render
 
       - name: Attest Linux installer build provenance
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3

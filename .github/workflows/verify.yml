@@ -869,11 +869,12 @@ jobs:
         run: python3 tools/smoke-linux-appimage.py "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
 
       - name: Exercise final AppImage launcher and native windows
+        # The preceding Openbox report stays in the parent; this suite requires fresh output.
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
-          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop
+          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage/launcher --desktop
 
       - name: Retain Linux qualification evidence
         if: always()

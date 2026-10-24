@@ -465,6 +465,29 @@ final run; the baseline's 43/62 amp/cab misses at 44.1 kHz / 8 and the earlier
 after-run's 11/35 demonstrate why noisy single runs cannot establish an overall
 performance improvement.
 
+### Plugin parameter gesture history
+
+Run `npm run test -- src/__tests__/builtInPluginPanel.test.tsx
+src/__tests__/builtInPluginParamHistory.test.ts` from `frontend`, then run
+`npx playwright test e2e/nam-fuzz-workflow.spec.ts --project=chromium --project=webkit` on
+Windows and macOS. The browser fixture starts its own Vite server and uses
+the platform's primary Undo modifier.
+
+For Fuzz Clean, enter 38.4%, cancel a 75% draft, adjust finely to 38.6%,
+then reset to 0%. Three Undo operations must restore 38.6%, 38.4%, and 0%;
+Redo must replay the three committed edits. Cancel must add no history step.
+Exercise transitions before deferred blur/key-up commits run, with native
+writes still pending; a delay added between actions can hide the race.
+Also verify pointer-to-focus handoff, held-key and wheel continuation,
+separate gestures of the same parameter, dependent parameter changes and
+failed writes. History boundaries must not duplicate native automation
+begins or allow an older gesture end to close a newer gesture. Keyboard Undo/Redo
+must finish native Touch even when it cancels the pending edit-commit timer;
+the browser regression checks balanced native begin/end calls as well as values.
+The core workflow retains its 30-second case budget. WebKit's image-heavy
+geometry and preset-copy cases allow 90 seconds, with assertion deadlines
+unchanged; this separates screenshot cost from a missing functional transition.
+
 ### Swollen Pickle reference fuzz review, October 23, 2026
 
 This is working-tree evidence against base app commit
@@ -1245,6 +1268,15 @@ The Playwright configuration starts its own Vite server. These migrated suites
 use typed helpers in `frontend/e2e/support/`; no standalone browser script or
 pre-running server is needed. Public behavior and profile-dependent ruler actions are described in
 [input profiles](input-profiles.md#mouse-and-wheel-safety).
+
+The PR #35 Ubuntu trace at `be48dfc1` failed in the ruler fixture's asynchronous
+module bootstrap with `Resulting promise was garbage collected`, before any
+ruler interaction. It showed one successful document load, no Vite reconnect or
+reload, and the fixture's seeded track already rendered. The fixture now uses
+App's exact store URL in a document-owned module script, followed by synchronous
+setup, as the recording fixture already does. This corrects test lifetime
+ownership; all ruler assertions and timeouts remain unchanged. It does not
+establish the cause of the separate packaged AppImage lifecycle exit 2.
 
 Recording zoom coverage is in `recordingWaveformPreview.test.ts` and
 `e2e/recording-zoom.spec.ts`. The browser fixture seeds two takes at 556 seconds,
@@ -2250,10 +2282,33 @@ adjacent logs are retained even when the qualification step fails.
 
 Local Windows qualification of that correction ran 26 tests: 16 passed and 10
 POSIX-only cases were skipped. An explicit Windows PowerShell 5.1 wrapper run
-passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixture execution
-and a new successful packaged release run remain required. Evidence is retained
+passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixtures
+subsequently passed in PR #33 on both macOS architectures; a new successful
+packaged release run remains required. Evidence is retained
 under ignored `output/review/release-0106/`; it does not change the separate
 audio, installation and listening limits above.
+
+The recovery branch's initial [PR #35 run](https://github.com/sdevil7th/OpenStudio/actions/runs/40074265576)
+passed the installed Linux package's normal/safe, render, runtime and engine
+checks, plus AppImage contents and ABI checks. Its separate Openbox AppImage
+lifecycle process exited with code 2. The report was outside the uploaded
+artifact directories, so that run cannot identify the failed native check;
+do not classify it as a missing-assets failure or a passing lifecycle test.
+`smoke-linux-appimage.py` now defaults to
+`output/linux-appimage/window-manager-lifecycle.json`, inside the retained
+artifact tree, and prints bounded, allowlisted failed-check/startup diagnostics.
+Its adjacent application and startup logs are retained too. Fixtures cover the
+actual default invocation, malformed reports, failure details and owned-process
+cleanup. The [diagnostic run](https://github.com/sdevil7th/OpenStudio/actions/runs/40075858881)
+then passed all 85 Openbox lifecycle checks and all ten frontend roles reached
+ready, using the extracted AppImage executable. This does not identify the
+earlier exit-2 cause. Its subsequent launcher suite stopped before launching
+because the retained report made that suite's output directory nonempty.
+Keep the window-manager report in the parent and run the launcher suite in
+fresh `output/linux-appimage/launcher`; both remain inside the uploaded artifact
+tree. The freshness guard must continue rejecting existing evidence, and
+neither a passing Openbox check nor a composition fixture qualifies the final
+launcher suite on its own.
 
 ## Desktop and recording acceptance
 

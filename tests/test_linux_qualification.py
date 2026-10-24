@@ -1,10 +1,15 @@
 import importlib.util
+from contextlib import redirect_stderr, redirect_stdout
+import io
+import json
 import os
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('qualification', Path(__file__).resolve().parents[1] / 'tools/run-linux-qualification.py')
 qualification = importlib.util.module_from_spec(spec)
@@ -12,6 +17,106 @@ spec.loader.exec_module(qualification)
 
 
 class NativeDiagnosticsTests(unittest.TestCase):
+    def test_launcher_uses_fresh_child_without_replacing_window_manager_evidence(self):
+        workflows = Path(__file__).resolve().parents[1] / '.github/workflows'
+        for name in ('verify.yml', 'release.yml'):
+            with self.subTest(workflow=name):
+                commands = []
+                for line in (workflows / name).read_text(encoding='utf-8').splitlines():
+                    if 'tools/run-linux-qualification.py' not in line:
+                        continue
+                    # Both folded `run:` values and shell block commands carry
+                    # the CLI on one line; parse its arguments, not exact text.
+                    command = shlex.split(line.strip().removeprefix('run: '))
+                    if '--app' in command and command[command.index('--app') + 1].endswith('.AppImage'):
+                        commands.append(command)
+                self.assertEqual(len(commands), 1, 'Each workflow must qualify its finished AppImage')
+                command = commands[0]
+                self.assertIn('--output', command)
+                configured_output = Path(command[command.index('--output') + 1])
+                self.assertFalse(configured_output.is_absolute(), 'Evidence must stay in the checkout artifacts')
+                self.assert_launcher_evidence_isolation(configured_output)
+
+    def assert_launcher_evidence_isolation(self, configured_output):
+        # This composes the real CLI freshness guard with mocked native results;
+        # it does not launch or qualify an actual Linux application.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / 'OpenStudio.AppImage'
+            app.write_bytes(b'fixture only; never executed')
+            parent = root / 'output/linux-appimage'
+            parent.mkdir(parents=True)
+            retained = parent / 'window-manager-lifecycle.json'
+            original = b'{"fixture":"retained window-manager evidence"}\n'
+            retained.write_bytes(original)
+            launcher = (root / configured_output).resolve()
+            self.assertTrue(launcher.is_relative_to(parent.resolve()),
+                            'Both phases must remain inside the retained AppImage artifact directory')
+            argv = ['run-linux-qualification.py', '--app', str(app), '--desktop', '--output']
+            error_output = io.StringIO()
+            with mock.patch.object(sys, 'argv', [*argv, str(parent)]), \
+                 mock.patch.object(qualification, 'execute') as execute, redirect_stderr(error_output):
+                with self.assertRaises(SystemExit) as rejected:
+                    qualification.main()
+            self.assertEqual(rejected.exception.code, 2)
+            self.assertIn('Use a fresh output directory', error_output.getvalue())
+            execute.assert_not_called()
+            self.assertEqual(retained.read_bytes(), original)
+
+            def native_fixture(command, log, _env, _timeout, **_):
+                report = Path(command[command.index('--report') + 1])
+                self.assertEqual(report.parent, launcher.resolve())
+                log.write_text('mock native fixture\n')
+                if '--startup-self-test' in command:
+                    report.write_text('shellReady=true\n')
+                else:
+                    self.assertIn('--window-lifecycle-harness', command)
+                    report.write_text(json.dumps({
+                        'success': True, 'startupMode': 'normal',
+                        'checks': [{'id': name, 'status': 'pass'} for name in (
+                            'main_frontend_ready', 'mixer_frontend_ready', 'mixer_reopened_frontend_ready',
+                            'midi_frontend_ready', 'midi_reopened_frontend_ready',
+                            'plugin_frontend_ready', 'plugin_reopened_frontend_ready',
+                            'plugin_removed_editor_stays_closed', 'pitch_cycle_1_interactive_ready',
+                            'pitch_cycle_2_interactive_ready', 'pitch_native_relative_shift_committed',
+                            'pitch_native_undo_preserved')],
+                    }))
+                return 0
+
+            read_text = Path.read_text
+
+            def read_fixture_os(path, *args, **kwargs):
+                if path == Path('/etc/os-release'):
+                    return 'NAME="Mock Linux fixture"\n'
+                return read_text(path, *args, **kwargs)
+
+            with mock.patch.object(sys, 'argv', [*argv, str(launcher)]), \
+                 mock.patch.dict(os.environ, {'DISPLAY': ':fixture'}), \
+                 mock.patch.object(qualification.Path, 'read_text', read_fixture_os), \
+                 mock.patch.object(qualification, 'execute', side_effect=native_fixture) as execute, \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(qualification.main(), 0)
+            self.assertEqual(execute.call_count, 4)
+            self.assertEqual(retained.read_bytes(), original)
+            result_path = launcher / 'qualification.json'
+            result = json.loads(result_path.read_text())
+            self.assertTrue(result['success'])
+            self.assertEqual(result['audioQuality'], 'not_asserted')
+            self.assertEqual({check['id'] for check in result['checks']}, {
+                'startup', 'runtime-path-argv0', 'runtime-path-inherited-appdir',
+                'native-window-lifecycle', 'native-runtime-diagnostics'})
+
+            # Reusing even the child remains forbidden and must preserve both reports.
+            launcher_evidence = result_path.read_bytes()
+            with mock.patch.object(sys, 'argv', [*argv, str(launcher)]), \
+                 mock.patch.object(qualification, 'execute') as execute, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as rejected:
+                    qualification.main()
+            self.assertEqual(rejected.exception.code, 2)
+            execute.assert_not_called()
+            self.assertEqual(result_path.read_bytes(), launcher_evidence)
+            self.assertEqual(retained.read_bytes(), original)
+
     @staticmethod
     def runtime_report():
         return {
