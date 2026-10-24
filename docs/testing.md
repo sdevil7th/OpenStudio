@@ -2299,8 +2299,16 @@ do not classify it as a missing-assets failure or a passing lifecycle test.
 artifact tree, and prints bounded, allowlisted failed-check/startup diagnostics.
 Its adjacent application and startup logs are retained too. Fixtures cover the
 actual default invocation, malformed reports, failure details and owned-process
-cleanup. This corrects evidence capture; diagnosing the native failure requires
-the next packaged run and its report.
+cleanup. The [diagnostic run](https://github.com/sdevil7th/OpenStudio/actions/runs/40075858881)
+then passed all 85 Openbox lifecycle checks and all ten frontend roles reached
+ready, using the extracted AppImage executable. This does not identify the
+earlier exit-2 cause. Its subsequent launcher suite stopped before launching
+because the retained report made that suite's output directory nonempty.
+Keep the window-manager report in the parent and run the launcher suite in
+fresh `output/linux-appimage/launcher`; both remain inside the uploaded artifact
+tree. The freshness guard must continue rejecting existing evidence, and
+neither a passing Openbox check nor a composition fixture qualifies the final
+launcher suite on its own.
 
 ## Desktop and recording acceptance
 
