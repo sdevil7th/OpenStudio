@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import type { DAWState, useDAWStore } from "../../src/store/useDAWStore";
+import type { DAWState, createDefaultTrack, useDAWStore } from "../../src/store/useDAWStore";
 import type { BrowserRegressionReport } from "./interactionFixtureTypes";
 
 type RulerSeedOverrides = Partial<Pick<DAWState, "scrollX" | "projectRange">>;
@@ -16,6 +16,7 @@ interface RulerView {
 declare global {
   interface Window {
     __rulerGestureQA: { store: typeof useDAWStore };
+    __rulerGestureModules: { store: typeof useDAWStore; createDefaultTrack: typeof createDefaultTrack };
   }
 }
 
@@ -46,12 +47,21 @@ export async function runRulerChecks(page: Page): Promise<BrowserRegressionRepor
     });
     await page.goto('/?platform=windows&windowChrome=native');
     await page.getByText('Starting OpenStudio...', { exact: true }).waitFor({ state: 'hidden' });
-    await page.evaluate(async () => {
-      // Follow App's transformed Vite import so HMR cannot create a second store.
-      const source = await (await fetch('/src/App.tsx')).text();
-      const match = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/);
-      if (!match) throw new Error('Cannot locate the real App store import');
-      const { useDAWStore: store, createDefaultTrack } = await import(/* @vite-ignore */ match[1]) as typeof import("../../src/store/useDAWStore");
+    await page.getByRole('contentinfo', { name: 'Transport controls' }).waitFor({ state: 'visible' });
+    // Follow App's exact Vite URL, but let the document own module loading:
+    // Chromium can collect a CDP evaluation's pending dynamic-import Promise.
+    const appResponse = await page.request.get('/src/App.tsx');
+    assert(appResponse.ok(), 'App source must be available for the fixture');
+    const source = await appResponse.text();
+    const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
+    assert(storeUrl, 'Cannot locate the real App store import');
+    await page.addScriptTag({ type: 'module', content: `
+      import { useDAWStore as store, createDefaultTrack } from ${JSON.stringify(storeUrl)};
+      window.__rulerGestureModules = { store, createDefaultTrack };
+    ` });
+    await page.waitForFunction(() => Boolean(window.__rulerGestureModules));
+    await page.evaluate(() => {
+      const { store, createDefaultTrack } = window.__rulerGestureModules;
       const track = createDefaultTrack('ruler-browser-qa', 'Ruler browser QA', '#4379ee', 'audio', []);
       window.__rulerGestureQA = { store };
       store.setState({

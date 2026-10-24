@@ -1269,6 +1269,15 @@ use typed helpers in `frontend/e2e/support/`; no standalone browser script or
 pre-running server is needed. Public behavior and profile-dependent ruler actions are described in
 [input profiles](input-profiles.md#mouse-and-wheel-safety).
 
+The PR #35 Ubuntu trace at `be48dfc1` failed in the ruler fixture's asynchronous
+module bootstrap with `Resulting promise was garbage collected`, before any
+ruler interaction. It showed one successful document load, no Vite reconnect or
+reload, and the fixture's seeded track already rendered. The fixture now uses
+App's exact store URL in a document-owned module script, followed by synchronous
+setup, as the recording fixture already does. This corrects test lifetime
+ownership; all ruler assertions and timeouts remain unchanged. It does not
+establish the cause of the separate packaged AppImage lifecycle exit 2.
+
 Recording zoom coverage is in `recordingWaveformPreview.test.ts` and
 `e2e/recording-zoom.spec.ts`. The browser fixture seeds two takes at 556 seconds,
 holds the serial preview response, and exercises the visible ruler in both
