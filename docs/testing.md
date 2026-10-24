@@ -2209,6 +2209,52 @@ The opt-in native `-CaseName ten-hour-listening` retains its historical command 
 
 Keep generated JSON, WAV, screenshots, hashes and failed/intermediate runs under ignored `output/`. Store lasting contracts in the maintenance guide and executable tests. The 3 October development baseline passed 2,480 frontend tests, 168 native groups and 233 host checks; current source still requires appropriately scoped checks after changes.
 
+## October 24 0.1.06 release attempt
+
+[Release run 40067513185](https://github.com/sdevil7th/OpenStudio/actions/runs/40067513185)
+tested tag `v0.1.06` at `e0d9d41e7a2bfac7795a36f7f43c35e93d2561d5`.
+This was a failed publication attempt, not a distributed application release.
+
+- Windows: the actual installer passed installation, 99 normal-mode installed
+  lifecycle checks and uninstall. The tested executable SHA-256 was
+  `490ae61640acf6b3dc8586e1c1158110d00f2149228e3fca876facf0f2b4d08d`.
+  The host was build 26100 with an elevated account and explicit offline
+  operation. This does not qualify Windows 10 Repair, safe mode, a standard-user
+  installation, previous-version upgrade or physical audio. The direct-download
+  installer was unsigned; no code-signing certificate was configured.
+- Linux: the installed Ubuntu 22.04 package passed 85 normal and 76 safe lifecycle
+  checks, 264 render/export checks, 361 runtime-safety checks and 40 engine
+  groups. The glibc 2.35 ABI audit passed. The finished AppImage passed launcher,
+  85 lifecycle and 264 render checks under extract-and-run/Xvfb. These results
+  do not establish physical audio, native Wayland or the original Arch/fish
+  reporter's installation behavior.
+- macOS: universal compilation, runtime validation and unsigned DMG construction
+  passed. The mounted application exited successfully and its required native
+  lifecycle report assertions passed, but the wrapper then rejected executable
+  identity. Its lexical `GetFullPath` comparison did not account for parent
+  aliases such as `/var` and `/private/var`. The complete packaged qualification
+  therefore failed; do not count it as a macOS release pass.
+- Store: read-only preflight confirmed the previous 0.1.05 submission is
+  Published and the new package's effective publishing mode is Immediate.
+  Failed macOS qualification skipped GitHub publication, Store submission and
+  website dispatch. No 0.1.06 Store mutation occurred.
+
+The wrapper correction compares POSIX filesystem identity with
+`os.path.samefile`, using the Python 3 dependency already required by its owned
+process supervisor. Different existing files, missing paths and case-distinct
+files on a case-sensitive volume still fail. The report destination cannot
+alias and replace the executable. Windows retains its existing normalization
+and 8.3-path coverage without a new Python dependency. Parent-symlink and actual
+macOS `/var` fixtures run before native compilation; packaged failure JSON and
+adjacent logs are retained even when the qualification step fails.
+
+Local Windows qualification of that correction ran 26 tests: 16 passed and 10
+POSIX-only cases were skipped. An explicit Windows PowerShell 5.1 wrapper run
+passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixture execution
+and a new successful packaged release run remain required. Evidence is retained
+under ignored `output/review/release-0106/`; it does not change the separate
+audio, installation and listening limits above.
+
 ## Desktop and recording acceptance
 
 Build packaged assets before native UI qualification. `tools/run-window-lifecycle-smoke.ps1` forces the packaged frontend; a running Vite must not influence the result. Use `-AppPath` for the exact Debug, Release or installed executable being tested. On an idle interactive Windows desktop, explicitly opt into physical mouse input and repeated pitch windows:

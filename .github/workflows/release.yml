@@ -708,6 +708,15 @@ jobs:
             -ReportPath "$REPORT_PATH" \
             -TimeoutSeconds 180
 
+      - name: Retain packaged macOS qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-packaged-qualification
+          path: ${{ runner.temp }}/OpenStudio_PackagedWindowLifecycleHarness*
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Verify macOS release outputs
         shell: bash
         run: |

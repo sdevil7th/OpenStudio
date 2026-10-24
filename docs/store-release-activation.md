@@ -5,6 +5,16 @@ original scope.
 
 ## October 24 release readiness and recovered 0.1.05 submission
 
+The [0.1.06 release attempt](https://github.com/sdevil7th/OpenStudio/actions/runs/40067513185)
+passed live Store preflight. Its report confirms the prior submission
+`1152921505702075647` is **Published**, no pending update blocks submission, and
+the effective mode is **Immediate**. The checked `0.1.6.0` MSIX SHA-256 was
+`4d0ac49968561b21b27a08b60b660d4421fde12b7be253c496b4fb51aa972c3f`.
+The macOS qualification wrapper then blocked publication at its lexical
+executable-path comparison, which does not account for POSIX aliases. GitHub publication and Store
+submission were skipped; preflight performed no Store mutation. A corrected
+release must run its own preflight and submit its exact new package.
+
 The [October 8 recovery run](https://github.com/sdevil7th/OpenStudio/actions/runs/37806805920)
 successfully uploaded and committed the existing submission
 `1152921505702075647` for package `0.1.5.0`. Its retained report reached
