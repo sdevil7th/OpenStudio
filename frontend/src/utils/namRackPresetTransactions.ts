@@ -11,6 +11,7 @@ import {
   sanitizeNAMRackDspState,
 } from "./namPortableState";
 import { normalizeNAMInstrumentProfile } from "./namInstrumentProfile";
+import { NAM_FUZZ_DEFAULT_VALUES, hasCurrentNAMFuzzValues, normalizeNAMFuzzValues } from "./namOctaverFuzz";
 
 export type NAMHeaderPresetTarget =
   | { kind: "factory"; id: string; name: string }
@@ -631,6 +632,7 @@ const CURRENT_NAM_RACK_COMPONENT_DEFAULTS: Readonly<Record<string, number>> = {
   octaverDownMix: 0.32,
   octaverUpMix: 0.18,
   octaverDirectMix: 1,
+  ...NAM_FUZZ_DEFAULT_VALUES,
   preEqEnabled: 0,
   preEq120Db: 0,
   preEq250Db: 0,
@@ -905,6 +907,7 @@ export function migrateLegacyNAMRackPresetDspState(
     values, "precisionDriveVolumeDb",
   ) ? values.precisionDriveVolumeDb : 0;
   const migratedValues = { ...CURRENT_NAM_RACK_COMPONENT_DEFAULTS, ...values };
+  Object.assign(migratedValues, normalizeNAMFuzzValues(values));
   migratedValues.preEqEnabled = preEqRecognized
     ? normalizeNAMDelayToggle(values.preEqEnabled, 0)
     : 0;
@@ -1114,6 +1117,7 @@ export function isCurrentNAMRackPresetState(state: unknown): boolean {
   return normalizeNAMInstrumentProfile(values.instrumentProfile) === values.instrumentProfile
     && normalizeNAMReverbVoice(values.reverbVoice) === values.reverbVoice
     && normalizeNAMDelayToggle(values.reverbPad, 0) === values.reverbPad
+    && hasCurrentNAMFuzzValues(values)
     && hasCurrentNAMPreEqValues(values)
     && hasCurrentNAMGraphicEqFilterValues(values)
     && hasCurrentNAMDelayPresetValues(values)

@@ -2,10 +2,11 @@
 import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError, toastBridgeError } from "../../utils/bridgeErrorHandler";
-import { createDefaultTrack } from "../useDAWStore";
+import { createDefaultTrack, type Track } from "../useDAWStore";
 import { syncTrackMIDIClipsToBackend } from "../../utils/midiClipSerialization";
 import { buildTrackRenameChanges } from "../../utils/trackRename";
 import { buildTrackFolderGroupPlan } from "../../utils/trackFolderGrouping";
+import { insertTrackCopies, trackCopySourceIds } from "../../utils/trackCopyPlanning";
 import { notifyInstrumentChanged } from "../../utils/fxChain";
 import { isClipEditLocked } from "../../utils/clipEditLock";
 import { markTrackMonitorUserMutation } from "../../utils/trackMonitorOwnership";
@@ -413,7 +414,7 @@ function cloneMidiClip(clip: any): any {
     ...clip,
     id: crypto.randomUUID(),
     events: clip.events?.map((event: any) => ({ ...event })) ?? [],
-    ccEvents: clip.ccEvents?.map((event: any) => ({ ...event })) ?? [],
+    ccEvents: clip.ccEvents?.map((event: any) => ({ ...event, ...(event.id ? { id: crypto.randomUUID() } : {}) })) ?? [],
   };
 }
 
@@ -1707,15 +1708,14 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
       }
     },
 
-    duplicateSelectedTracks: async () => {
+    duplicateSelectedTracks: async (options?: { trackIds?: readonly string[]; beforeTrackId?: string }) => {
       const state = get();
       if (state.globalLocked) return [];
-      const sourceIds = selectedExistingTrackIds(state);
+      const sourceIds = trackCopySourceIds(state.tracks, options?.trackIds ?? selectedExistingTrackIds(state));
       if (sourceIds.length === 0) return [];
 
-      const sources = sourceIds
-        .map((trackId) => state.tracks.find((track) => track.id === trackId))
-        .filter(Boolean);
+      const selectedIds = new Set(sourceIds);
+      const sources: Track[] = state.tracks.filter((track: Track) => selectedIds.has(track.id));
       if (sources.length === 0) return [];
 
       const idMap = new Map(sources.map((sourceTrack) => [sourceTrack.id, crypto.randomUUID()]));
@@ -1734,10 +1734,7 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
         lastSelectedTrackId: state.lastSelectedTrackId,
       };
 
-      const insertDuplicates = (tracks: any[]) => tracks.flatMap((track) => {
-        const entry = duplicates.find(({ sourceTrack }) => sourceTrack.id === track.id);
-        return entry ? [track, entry.duplicate] : [track];
-      });
+      const insertDuplicates = (tracks: Track[]) => insertTrackCopies(tracks, duplicates, options?.beforeTrackId);
 
       const applyDuplicates = async (respectGlobalLock = false) => {
         const canApply = () => !respectGlobalLock || (
@@ -1766,7 +1763,8 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
           }));
           for (const { sourceTrack, duplicate } of duplicates) {
             const insertIndex = get().tracks.findIndex((track) => track.id === duplicate.id);
-            await syncDuplicatedTrackToBackend(sourceTrack, duplicate, insertIndex);
+            const insertedTrack = get().tracks[insertIndex];
+            await syncDuplicatedTrackToBackend(sourceTrack, insertedTrack, insertIndex);
             if (!canApply()) throw globalLockAbort;
           }
           return true;

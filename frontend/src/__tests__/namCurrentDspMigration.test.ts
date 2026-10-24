@@ -1,4 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
 import { readFileSync as readRawFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -39,6 +38,21 @@ describe("current-only NAM Rack DSP migration", () => {
     expect(normalizeNAMEffectsDspVersion(19)).toBe(20);
     expect(normalizeNAMEffectsDspVersion(20)).toBe(20);
     expect(normalizeNAMEffectsDspVersion(21)).toBeUndefined();
+  });
+
+  it("retains saved octave controls while migrating old state to the current octave/fuzz route", () => {
+    const values = { octaverEnabled: 1, octaverDownMix: 0.63, octaverUpMix: 0.21, octaverDirectMix: 0.87 };
+    for (const legacyVersion of [1, 10, 19, 20]) {
+      const migrated = migrateLegacyNAMRackPresetDspState({
+        values,
+        dspState: { namEffectsDspVersion: legacyVersion, reverbEngineVersion: 1 },
+      }, { completePreset: true });
+      expect(migrated).toMatchObject({
+        values: { ...values, fuzzEnabled: 0 },
+        dspState: { namEffectsDspVersion: 20, reverbEngineVersion: 5 },
+      });
+      expect(migrateLegacyNAMRackPresetDspState(migrated, { completePreset: true })).toEqual(migrated);
+    }
   });
 
   it("migrates a complete legacy tone without retaining obsolete pedal voices", () => {
@@ -611,7 +625,9 @@ describe("current-only NAM Rack DSP migration", () => {
       "reverbEngineVersion.store(\n        static_cast<float>(currentReverbEngineVersion)",
     );
     expect(rackSource.slice(octaverStart, octaverEnd)).not.toContain("namEffectsDspVersion.load");
-    expect(rackSource.slice(octaverStart, octaverEnd)).toContain("rackPolyOctaver.processBlock(buffer)");
+    // Native NAMFuzzRegression covers octave-only, fuzz-only and combined route
+    // execution and callback partitions. This audit checks migration ownership,
+    // independently of the processor's buffer-view or excitation arguments.
     expect(rackSource).not.toContain("resetOctaverState");
     expect(rackSource).not.toContain("octaverDetectorGateOpen");
     expect(rackSource.slice(processStart, processEnd)).not.toContain("namEffectsDspVersion.load");

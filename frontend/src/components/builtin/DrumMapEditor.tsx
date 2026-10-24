@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { Modal } from "../ui";
 import { nativeBridge, type BuiltInPluginAddress, type BuiltInPluginSchema } from "../../services/NativeBridge";
 
-type Props = { schema: BuiltInPluginSchema; address: BuiltInPluginAddress; onApply: (values: Record<string, number>) => Promise<boolean>; onClose: () => void };
-export function DrumMapEditor({ schema, address, onApply, onClose }: Props) {
+type Props = { schema: BuiltInPluginSchema; address: BuiltInPluginAddress; onApply: (values: Record<string, number>) => Promise<boolean>; onClose: () => void; initialInput?: number; featureOwner?: string };
+export function DrumMapEditor({ schema, address, onApply, onClose, initialInput = 36, featureOwner }: Props) {
   const saved = Array.from({ length: 128 }, (_, note) => schema.parameters.find(p => p.id === `noteMap${note}`)?.value ?? note);
   const savedEnabled = (schema.parameters.find(p => p.id === "customMapEnabled")?.value ?? 0) >= .5;
   const fingerprint = JSON.stringify([savedEnabled, saved]);
-  const [mapping, setMapping] = useState(saved), [enabled, setEnabled] = useState(savedEnabled), [input, setInput] = useState(36);
+  const [mapping, setMapping] = useState(saved), [enabled, setEnabled] = useState(savedEnabled), [input, setInput] = useState(Math.max(0, Math.min(127, Math.round(initialInput))));
   const [busy, setBusy] = useState(false), [learning, setLearning] = useState(false), [message, setMessage] = useState("");
   const armed = useRef<{ serial: number; until: number } | null>(null), mounted = useRef(true);
   useEffect(() => { setMapping(JSON.parse(fingerprint)[1]); setEnabled(JSON.parse(fingerprint)[0]); armed.current = null; setLearning(false); }, [fingerprint]);
@@ -47,12 +47,12 @@ export function DrumMapEditor({ schema, address, onApply, onClose }: Props) {
   };
   const changed = mapping.filter((target, note) => target !== note).length;
   return <Modal isOpen title="Drum MIDI map" onClose={() => { if (!busy) onClose(); }} size="lg">
-    <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto p-1 text-sm">
+    <div className="flex max-h-[65vh] flex-col gap-4 overflow-y-auto p-1 text-sm" data-feature-owner={featureOwner} data-feature="drum-map">
       <p className="text-xs text-daw-text-muted">Custom mapping runs before the selected GM, Roland TD or Extended studio map. It applies to every MIDI channel. Each destination is an input note in that map; Ignore suppresses the note. Apply saves all changes as one Undo step.</p>
       <label className="flex items-center gap-2"><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} />Enable custom mapping</label>
       <div className="flex flex-wrap items-end gap-4">
         <label className="flex flex-col gap-2">Incoming note<select className={editorSelect} aria-label="Incoming drum note" value={input} disabled={busy} onChange={event => setInput(Number(event.target.value))}>{Array.from({ length: 128 }, (_, note) => <option key={note} value={note}>MIDI {note}</option>)}</select></label>
-        <label className="flex flex-col gap-2">Destination<select className={editorSelect} aria-label="Drum destination note" value={mapping[input]} disabled={busy} onChange={event => setMapping(current => current.map((target, note) => note === input ? Number(event.target.value) : target))}><option value={-1}>Ignore</option>{Array.from({ length: 128 }, (_, note) => <option key={note} value={note}>Map note {note}</option>)}</select></label>
+        <label className="flex flex-col gap-2" data-param={`noteMap${input}`}>Destination<select className={editorSelect} aria-label="Drum destination note" value={mapping[input]} disabled={busy} onChange={event => setMapping(current => current.map((target, note) => note === input ? Number(event.target.value) : target))}><option value={-1}>Ignore</option>{Array.from({ length: 128 }, (_, note) => <option key={note} value={note}>Map note {note}</option>)}</select></label>
         <button className={editorButton} disabled={busy || learning} onClick={() => void learn()}>Learn input</button>
         {learning && <button className={editorButton} onClick={() => { armed.current = null; setLearning(false); setMessage("Learn cancelled."); }}>Cancel learn</button>}
       </div>

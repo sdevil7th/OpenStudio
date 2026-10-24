@@ -23,6 +23,7 @@ import { getDisplayEffectiveShortcut } from "../store/actionRegistry";
 interface SortableTrackHeaderProps {
   track: Track;
   children?: React.ReactNode;
+  copying?: boolean;
 }
 
 /** Compute nesting depth of a track (0 = top-level, 1 = inside one folder, etc.) */
@@ -38,7 +39,7 @@ function getTrackNestingLevel(track: Track, allTracks: Track[]): number {
   return depth;
 }
 
-export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
+export function SortableTrackHeader({ track, copying = false }: SortableTrackHeaderProps) {
   const {
     attributes,
     listeners,
@@ -358,9 +359,9 @@ export function SortableTrackHeader({ track }: SortableTrackHeaderProps) {
   };
 
   const style = {
-    transform: CSS.Transform.toString(transform),
+    transform: copying ? undefined : CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.5 : 1,
+    opacity: isDragging && !copying ? 0.5 : 1,
     position: "relative" as const,
     zIndex: isDragging ? 999 : 1,
   };

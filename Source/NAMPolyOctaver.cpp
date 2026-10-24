@@ -38,11 +38,13 @@
 */
 
 #include "NAMPolyOctaver.h"
+#include "NAMFuzz.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace
@@ -529,6 +531,16 @@ void NAMPolyOctaver::resetDspState() noexcept
     dspStateIsReset = true;
 }
 
+void NAMPolyOctaver::retireWetPath() noexcept
+{
+    if (! dspStateIsReset)
+        resetDspState();
+    // No wet history remains audible. Off-edited profiles must be ready when
+    // a voice returns, rather than retaining an indefinitely paused morph.
+    for (auto& profile : smoothedBassProfile)
+        profile.setCurrentAndTargetValue(profile.getTargetValue());
+}
+
 void NAMPolyOctaver::reset() noexcept
 {
     resetDspState();
@@ -768,6 +780,21 @@ NAMPolyOctaver::VoiceFrame NAMPolyOctaver::processVoiceSample(
         return output;
 
     auto& rateState = channelRateStates[static_cast<std::size_t>(channel)];
+    // Retire each reconstruction path on its first muted host frame, not at
+    // the next six-frame boundary or callback. Keep the shared analysis bank
+    // and resampling clock alive for the other voice.
+    if (! generateOctaveDown && rateState.downInterpolatorActive)
+    {
+        rateState.downInterpolator.reset();
+        rateState.pendingDownOutput.fill(0.0f);
+        rateState.downInterpolatorActive = false;
+    }
+    if (! generateOctaveUp && rateState.upInterpolatorActive)
+    {
+        rateState.upInterpolator.reset();
+        rateState.pendingUpOutput.fill(0.0f);
+        rateState.upInterpolatorActive = false;
+    }
     if (! std::isfinite(input))
     {
         input = 0.0f;
@@ -829,10 +856,7 @@ NAMPolyOctaver::VoiceFrame NAMPolyOctaver::processVoiceSample(
             }
             else
             {
-                if (rateState.downInterpolatorActive)
-                    rateState.downInterpolator.reset();
                 rateState.pendingDownOutput.fill(0.0f);
-                rateState.downInterpolatorActive = false;
             }
 
             if (generateOctaveUp)
@@ -844,10 +868,7 @@ NAMPolyOctaver::VoiceFrame NAMPolyOctaver::processVoiceSample(
             }
             else
             {
-                if (rateState.upInterpolatorActive)
-                    rateState.upInterpolator.reset();
                 rateState.pendingUpOutput.fill(0.0f);
-                rateState.upInterpolatorActive = false;
             }
             rateState.phase = 0;
         }
@@ -868,25 +889,37 @@ NAMPolyOctaver::VoiceFrame NAMPolyOctaver::processVoiceSample(
     return output;
 }
 
-void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer) noexcept
+void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer,
+                                  float* excitationGains) noexcept
 {
     juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = buffer.getNumSamples();
     const int numChannels = buffer.getNumChannels();
+    const auto fillUnityExcitation = [excitationGains, numSamples] () noexcept
+    {
+        if (excitationGains != nullptr && numSamples > 0)
+            std::fill_n(excitationGains, numSamples, 1.0f);
+    };
     if (numSamples <= 0 || numChannels <= 0)
+    {
+        fillUnityExcitation();
         return;
+    }
 
     if (! prepared.load(std::memory_order_acquire))
+    {
+        fillUnityExcitation();
         return;
+    }
 
     synchroniseLevelTargets();
     synchroniseProfileTargets();
 
     if (wetPathIsExactlySilent() && directPathIsExactlyUnity())
     {
-        if (! dspStateIsReset)
-            resetDspState();
+        fillUnityExcitation();
+        retireWetPath();
         diagnosticProcessedBlocks.fetch_add(1, std::memory_order_relaxed);
         diagnosticProcessedSamples.fetch_add(
             static_cast<std::uint64_t>(numSamples),
@@ -899,8 +932,8 @@ void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer) noexcept
 
     if (allPathsAreExactlySilent())
     {
-        if (! dspStateIsReset)
-            resetDspState();
+        fillUnityExcitation();
+        retireWetPath();
         buffer.clear();
         diagnosticProcessedBlocks.fetch_add(1, std::memory_order_relaxed);
         diagnosticProcessedSamples.fetch_add(
@@ -914,8 +947,8 @@ void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer) noexcept
 
     if (wetPathIsExactlySilent())
     {
-        if (! dspStateIsReset)
-            resetDspState();
+        fillUnityExcitation();
+        retireWetPath();
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const float directLevel = smoothedDirectLevel.getNextValue();
@@ -933,14 +966,6 @@ void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer) noexcept
     }
 
     const int processedChannels = juce::jmin(numChannels, maximumChannels);
-    const bool generateOctaveDown =
-        smoothedOctaveDownLevel.isSmoothing()
-        || smoothedOctaveDownLevel.getCurrentValue() != 0.0f
-        || smoothedOctaveDownLevel.getTargetValue() != 0.0f;
-    const bool generateOctaveUp =
-        smoothedOctaveUpLevel.isSmoothing()
-        || smoothedOctaveUpLevel.getCurrentValue() != 0.0f
-        || smoothedOctaveUpLevel.getTargetValue() != 0.0f;
     std::array<float*, maximumChannels> channelData {};
     for (int channel = 0; channel < processedChannels; ++channel)
         channelData[static_cast<std::size_t>(channel)] =
@@ -954,6 +979,29 @@ void NAMPolyOctaver::processBlock(juce::AudioBuffer<float>& buffer) noexcept
         const float directLevel = smoothedDirectLevel.getNextValue();
         const float downLevel = smoothedOctaveDownLevel.getNextValue();
         const float upLevel = smoothedOctaveUpLevel.getNextValue();
+        // A level can finish its fade inside this callback. Re-evaluate on the
+        // exact frame so short and long callbacks retain identical histories.
+        const bool generateOctaveDown = downLevel != 0.0f
+            || smoothedOctaveDownLevel.getTargetValue() != 0.0f;
+        const bool generateOctaveUp = upLevel != 0.0f
+            || smoothedOctaveUpLevel.getTargetValue() != 0.0f;
+        if (excitationGains != nullptr)
+        {
+            const float reference = juce::jmax(1.0f, directLevel);
+            excitationGains[sample] = reference / juce::jmax(
+                reference, directLevel + downLevel + upLevel);
+        }
+
+        if (! generateOctaveDown && ! generateOctaveUp)
+        {
+            retireWetPath();
+            for (int channel = 0; channel < numChannels; ++channel)
+            {
+                auto& value = buffer.getWritePointer(channel)[sample];
+                value = directLevel == 0.0f ? 0.0f : value * directLevel;
+            }
+            continue;
+        }
 
         for (int channel = 0; channel < processedChannels; ++channel)
         {
@@ -1104,6 +1152,214 @@ NAMPolyOctaver::Diagnostics NAMPolyOctaver::getDiagnostics() const noexcept
     return result;
 }
 
+NAMPolyOctaver::LifecycleTestResult NAMPolyOctaver::runLifecycleSelfTest(
+    double sampleRate)
+{
+    LifecycleTestResult result;
+    const double rate = std::isfinite(sampleRate) && sampleRate > 1000.0
+        ? sampleRate : 48000.0;
+    const int rampSamples = juce::jmax(1, static_cast<int>(std::floor(
+        rate * static_cast<double>(levelRampSeconds))));
+    using Levels = std::array<float, 3>;
+    const Levels active { 1.0f, 0.7f, 0.4f };
+    const Levels bypass { 1.0f, 0.0f, 0.0f };
+    struct Event
+    {
+        int sample;
+        Levels levels;
+        int profile = -1;
+        bool changeLevels = true;
+    };
+    struct Rendered
+    {
+        std::array<std::vector<float>, maximumChannels> audio;
+        std::vector<float> excitation;
+    };
+    const auto render = [&] (int count, int channels, int partition,
+                             Levels initial, int profile,
+                             const std::vector<Event>& events, int fuzzVoice = -1)
+    {
+        Rendered output;
+        output.excitation.resize(static_cast<std::size_t>(count));
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            auto& samples = output.audio[static_cast<std::size_t>(channel)];
+            samples.resize(static_cast<std::size_t>(count));
+            for (int sample = 0; sample < count; ++sample)
+            {
+                const double time = sample / rate;
+                samples[static_cast<std::size_t>(sample)] = static_cast<float>(
+                    0.18 * std::sin(juce::MathConstants<double>::twoPi
+                        * (channel == 0 ? 41.2034 : 110.0) * time)
+                    + 0.07 * std::sin(juce::MathConstants<double>::twoPi
+                        * (channel == 0 ? 901.0 : 1301.0) * time + 0.3));
+            }
+        }
+        auto processor = std::make_unique<NAMPolyOctaver>();
+        processor->setLevels(initial[0], initial[1], initial[2]);
+        processor->setInstrumentProfile(profile);
+        processor->prepare(rate, 2048);
+        NAMFuzz fuzz;
+        NAMFuzz::Parameters fuzzParameters;
+        fuzzParameters.enabled = true;
+        fuzzParameters.voice = juce::jmax(0, fuzzVoice);
+        fuzzParameters.bass = profile == 1;
+        fuzzParameters.drive = 0.73f;
+        fuzzParameters.tone = 0.31f;
+        fuzzParameters.levelDb = -4.25f;
+        fuzzParameters.cleanMix = 0.27f;
+        fuzzParameters.calibrationReferenceDbu = 18.0f;
+        fuzz.prepare(rate, fuzzParameters);
+        std::size_t eventIndex = 0;
+        for (int start = 0; start < count;)
+        {
+            while (eventIndex < events.size() && events[eventIndex].sample == start)
+            {
+                const auto& event = events[eventIndex++];
+                if (event.changeLevels)
+                    processor->setLevels(event.levels[0], event.levels[1], event.levels[2]);
+                if (event.profile >= 0)
+                {
+                    processor->setInstrumentProfile(event.profile);
+                    fuzzParameters.bass = event.profile == 1;
+                    fuzz.setParameters(fuzzParameters);
+                }
+            }
+            int blockSize = juce::jmin(partition, count - start);
+            if (eventIndex < events.size())
+                blockSize = juce::jmin(blockSize, events[eventIndex].sample - start);
+            std::array<float*, maximumChannels> pointers {};
+            for (int channel = 0; channel < channels; ++channel)
+                pointers[static_cast<std::size_t>(channel)] =
+                    output.audio[static_cast<std::size_t>(channel)].data() + start;
+            juce::AudioBuffer<float> block(pointers.data(), channels, blockSize);
+            auto* excitation = output.excitation.data() + start;
+            processor->processBlock(block, excitation);
+            if (fuzzVoice >= 0)
+                fuzz.processBlock(block, excitation);
+            start += blockSize;
+        }
+        return output;
+    };
+    const auto audioDifference = [] (const Rendered& left, const Rendered& right,
+                                     int channels, int begin, int end)
+    {
+        float maximum = 0.0f;
+        for (int channel = 0; channel < channels; ++channel)
+            for (int sample = begin; sample < end; ++sample)
+            {
+                const auto ch = static_cast<std::size_t>(channel);
+                const auto index = static_cast<std::size_t>(sample);
+                const float a = left.audio[ch][index], b = right.audio[ch][index];
+                if (! std::isfinite(a) || ! std::isfinite(b))
+                    return std::numeric_limits<float>::infinity();
+                maximum = juce::jmax(maximum, std::abs(a - b));
+            }
+        return maximum;
+    };
+    const auto mutedLevels = [] (int voice)
+    {
+        return Levels { 1.0f, voice == 2 ? 0.7f : 0.0f,
+                               voice == 1 ? 0.4f : 0.0f };
+    };
+    // Include each phase of the six-frame resampler and very short off periods:
+    // restarting before the next reduced-rate tick must also discard that
+    // voice's reconstruction history without disturbing the continuing voice.
+    for (int channels : { 1, 2 })
+    for (int profile : { 0, 1 })
+    for (int voice = 0; voice < 3; ++voice)
+    for (int phase = 0; phase < resampleFactor; ++phase)
+    for (int dwell : { 0, 1, 5, 6, 7, 19, 31 })
+    {
+        const int fadeAt = 257 + phase;
+        const int resumeAt = fadeAt + rampSamples + dwell;
+        const int count = resumeAt + rampSamples + 83;
+        const auto muted = mutedLevels(voice);
+        const std::vector<Event> events { { fadeAt, muted }, { resumeAt, active } };
+        const auto reference = render(count, channels, 1, active, profile, events);
+        const auto remaining = render(count, channels, 2048, muted, profile, {});
+        result.maximumUnaffectedVoiceDifference = juce::jmax(
+            result.maximumUnaffectedVoiceDifference,
+            audioDifference(reference, remaining, channels,
+                fadeAt + rampSamples - 1, resumeAt));
+        for (int partition : { 31, 2048 })
+        {
+            const auto actual = render(count, channels, partition, active, profile, events);
+            result.maximumRetirementDifference = juce::jmax(
+                result.maximumRetirementDifference,
+                audioDifference(reference, actual, channels, 0, count));
+            result.maximumMetadataDifference = juce::jmax(result.maximumMetadataDifference,
+                maximumAbsoluteDifference(reference.excitation, actual.excitation));
+            ++result.retirementComparisons;
+        }
+    }
+    for (int channels : { 1, 2 })
+    for (int profile : { 0, 1 })
+    {
+        const int activateAt = 2 * rampSamples + 31;
+        const int count = activateAt + rampSamples + 83;
+        for (float direct : { 0.0f, 0.5f, 1.0f, 1.25f })
+        {
+            const Levels dry { direct, 0.0f, 0.0f };
+            const auto fresh = render(count, channels, 1, dry, profile,
+                { { activateAt, active } });
+            for (int partition : { 1, 31, 2048 })
+            {
+                const auto edited = render(count, channels, partition, dry, 1 - profile,
+                    { { 17, dry, profile, false }, { activateAt, active } });
+                result.maximumRetiredProfileDifference = juce::jmax(
+                    result.maximumRetiredProfileDifference,
+                    audioDifference(fresh, edited, channels, 0, count));
+                ++result.profileComparisons;
+            }
+        }
+        // A profile morph near retirement used to advance differently through
+        // the zero-wet callback suffix, surviving even a long bypass interval.
+        const int fadeAt = 257;
+        const int resumeAt = fadeAt + rampSamples + 2048;
+        const int end = resumeAt + rampSamples + 83;
+        const std::vector<Event> events { { fadeAt, bypass },
+            { fadeAt + rampSamples - 17, bypass, 1 - profile, false },
+            { resumeAt, active } };
+        const auto reference = render(end, channels, 1, active, profile, events);
+        for (int partition : { 31, 2048 })
+        {
+            const auto actual = render(end, channels, partition, active, profile, events);
+            result.maximumRetiredProfileDifference = juce::jmax(
+                result.maximumRetiredProfileDifference,
+                audioDifference(reference, actual, channels, 0, end));
+            ++result.profileComparisons;
+        }
+        for (int voice = 0; voice < 3; ++voice)
+        for (int fuzzVoice = 0; fuzzVoice < 3; ++fuzzVoice)
+        {
+            const int pairResume = fadeAt + rampSamples + 19;
+            const int pairEnd = pairResume + rampSamples + 83;
+            const std::vector<Event> pairEvents {
+                { fadeAt, mutedLevels(voice) }, { pairResume, active } };
+            const auto pairReference = render(pairEnd, channels, 1,
+                active, profile, pairEvents, fuzzVoice);
+            for (int partition : { 31, 2048 })
+            {
+                const auto actual = render(pairEnd, channels, partition,
+                    active, profile, pairEvents, fuzzVoice);
+                result.maximumFuzzPairDifference = juce::jmax(
+                    result.maximumFuzzPairDifference,
+                    audioDifference(pairReference, actual, channels, 0, pairEnd));
+                ++result.fuzzPairComparisons;
+            }
+        }
+    }
+    result.retirementPartitionPassed = result.maximumRetirementDifference == 0.0f
+        && result.maximumMetadataDifference == 0.0f;
+    result.unaffectedVoicePassed = result.maximumUnaffectedVoiceDifference == 0.0f;
+    result.retiredProfileRecallPassed = result.maximumRetiredProfileDifference == 0.0f;
+    result.fuzzPairPartitionPassed = result.maximumFuzzPairDifference == 0.0f;
+    result.passed = result.retirementPartitionPassed && result.unaffectedVoicePassed
+        && result.retiredProfileRecallPassed && result.fuzzPairPartitionPassed;
+    return result;
+}
+
 void NAMPolyOctaver::resetDiagnostics() noexcept
 {
     diagnosticProcessedBlocks.store(0, std::memory_order_relaxed);
@@ -1122,6 +1378,161 @@ NAMPolyOctaver::SelfTestResult NAMPolyOctaver::runDeterministicSelfTest(
         ? sampleRate
         : 48000.0;
     static constexpr double twoPi = 2.0 * juce::MathConstants<double>::pi;
+
+    {
+        // Metadata must describe the exact audio frame's ramped coefficients,
+        // while requesting it must never change the octave audio itself.
+        const int rampCount = juce::jmax(1, static_cast<int>(std::floor(
+            safeSampleRate * static_cast<double>(levelRampSeconds))));
+        const int sampleCount = rampCount * 5 + 67;
+        const std::array<int, 3> changes { 0, rampCount * 2 + 17,
+                                          rampCount * 3 + 43 };
+        const std::array<std::array<float, 3>, 3> levels {{
+            { 1.25f, 1.0f, 1.0f }, { 0.5f, 0.25f, 0.75f },
+            { 1.0f, 0.0f, 0.0f },
+        }};
+        bool coefficientBudgetPassed = true;
+        const auto render = [&] (
+            const std::vector<int>& partitions, bool withMetadata,
+            std::vector<float>& left, std::vector<float>& right,
+            std::vector<float>& gains)
+        {
+            const auto processor = std::make_unique<NAMPolyOctaver>();
+            processor->prepare(safeSampleRate, 257);
+            left.resize(static_cast<std::size_t>(sampleCount));
+            right.resize(static_cast<std::size_t>(sampleCount));
+            gains.assign(static_cast<std::size_t>(sampleCount), -1.0f);
+            for (int sample = 0; sample < sampleCount; ++sample)
+            {
+                const double time = static_cast<double>(sample) / safeSampleRate;
+                left[static_cast<std::size_t>(sample)] = static_cast<float>(
+                    0.18 * std::sin(twoPi * 110.0 * time));
+                right[static_cast<std::size_t>(sample)] = static_cast<float>(
+                    0.14 * std::sin(twoPi * 173.0 * time + 0.2));
+            }
+            std::array<juce::SmoothedValue<float>, 3> expectedLevels;
+            for (std::size_t index = 0; index < expectedLevels.size(); ++index)
+            {
+                expectedLevels[index].reset(safeSampleRate, levelRampSeconds);
+                expectedLevels[index].setCurrentAndTargetValue(index == 0 ? 1.0f : 0.0f);
+            }
+            int start = 0;
+            std::size_t partition = 0, change = 0;
+            while (start < sampleCount)
+            {
+                if (change < changes.size() && start == changes[change])
+                {
+                    const auto& target = levels[change];
+                    processor->setLevels(target[0], target[1], target[2]);
+                    for (std::size_t index = 0; index < expectedLevels.size(); ++index)
+                        expectedLevels[index].setTargetValue(target[index]);
+                    ++change;
+                }
+                int count = juce::jmin(partitions[partition % partitions.size()], sampleCount - start);
+                if (change < changes.size()) count = juce::jmin(count, changes[change] - start);
+                std::array<float*, 2> channels { left.data() + start, right.data() + start };
+                juce::AudioBuffer<float> block(channels.data(), 2, count);
+                processor->processBlock(block, withMetadata ? gains.data() + start : nullptr);
+                for (int sample = 0; sample < count; ++sample)
+                {
+                    const float direct = expectedLevels[0].getNextValue();
+                    const float down = expectedLevels[1].getNextValue();
+                    const float up = expectedLevels[2].getNextValue();
+                    if (! withMetadata) continue;
+                    const float gain = gains[static_cast<std::size_t>(start + sample)];
+                    const double reference = juce::jmax(1.0, static_cast<double>(direct));
+                    const double sum = static_cast<double>(direct) + down + up;
+                    const float floatReference = juce::jmax(1.0f, direct);
+                    const float expectedGain = floatReference / juce::jmax(
+                        floatReference, direct + down + up);
+                    result.maximumExcitationFloatCoefficientDifference = juce::jmax(
+                        result.maximumExcitationFloatCoefficientDifference,
+                        std::abs(gain - expectedGain));
+                    const float error = static_cast<float>(std::abs(
+                        static_cast<double>(gain) - reference / juce::jmax(reference, sum)));
+                    result.maximumExcitationCoefficientError = juce::jmax(
+                        result.maximumExcitationCoefficientError, error);
+                    const double epsilonBudget =
+                        std::numeric_limits<float>::epsilon() * reference;
+                    const double excess = juce::jmax(0.0,
+                        static_cast<double>(gain) * sum - reference);
+                    result.maximumExcitationBudgetExcessEpsilons = juce::jmax(
+                        result.maximumExcitationBudgetExcessEpsilons,
+                        static_cast<float>(excess / epsilonBudget));
+                    // Two rounded float additions and a rounded float division
+                    // contribute less than two float epsilons relative error.
+                    // Keep an exact float-coefficient check above; the double
+                    // oracle measures numerical residual, not a different law.
+                    coefficientBudgetPassed = coefficientBudgetPassed
+                        && std::isfinite(gain) && gain > 0.0f && gain <= 1.0f
+                        && excess <= 2.0 * epsilonBudget;
+                }
+                start += count;
+                ++partition;
+            }
+        };
+        std::vector<float> plainLeft, plainRight, unusedGains;
+        std::vector<float> regularLeft, regularRight, regularGains;
+        std::vector<float> unevenLeft, unevenRight, unevenGains;
+        render({ 257 }, false, plainLeft, plainRight, unusedGains);
+        render({ 257 }, true, regularLeft, regularRight, regularGains);
+        render({ 1, 7, 31, 193, 3, 1024, 11 }, true, unevenLeft, unevenRight, unevenGains);
+        result.maximumExcitationMetadataPartitionDifference =
+            maximumAbsoluteDifference(regularGains, unevenGains);
+        result.maximumExcitationAudioDifference = juce::jmax(
+            maximumAbsoluteDifference(plainLeft, regularLeft),
+            maximumAbsoluteDifference(plainRight, regularRight));
+        result.maximumExcitationAudioDifference = juce::jmax(
+            result.maximumExcitationAudioDifference,
+            juce::jmax(maximumAbsoluteDifference(regularLeft, unevenLeft),
+                       maximumAbsoluteDifference(regularRight, unevenRight)));
+
+        constexpr int fastCount = 37;
+        std::array<float, fastCount + 1> gains {};
+        const auto hasUnityMetadata = [&] ()
+        {
+            return std::all_of(gains.begin(), gains.begin() + fastCount,
+                               [] (float gain) { return gain == 1.0f; })
+                && gains.back() == -9.0f;
+        };
+        bool fastPathsPassed = true;
+        const auto fastProcessor = std::make_unique<NAMPolyOctaver>();
+        juce::AudioBuffer<float> fastAudio(2, fastCount);
+        fastAudio.clear();
+        gains.fill(-9.0f);
+        fastProcessor->processBlock(fastAudio, gains.data()); // Unprepared.
+        fastPathsPassed = fastPathsPassed && hasUnityMetadata();
+        for (const float direct : { 0.0f, 0.5f, 1.0f, 1.25f })
+        {
+            fastProcessor->setLevels(direct, 0.0f, 0.0f);
+            fastProcessor->prepare(safeSampleRate, fastCount);
+            gains.fill(-9.0f);
+            fastProcessor->processBlock(fastAudio, gains.data());
+            fastPathsPassed = fastPathsPassed && hasUnityMetadata();
+        }
+        juce::AudioBuffer<float> noChannels(0, fastCount);
+        gains.fill(-9.0f);
+        fastProcessor->processBlock(noChannels, gains.data());
+        fastPathsPassed = fastPathsPassed && hasUnityMetadata();
+        // Metadata is control-only, including when the incoming audio is silent.
+        fastProcessor->setLevels(1.0f, 1.0f, 1.0f);
+        fastProcessor->prepare(safeSampleRate, fastCount);
+        gains.fill(-9.0f);
+        fastProcessor->processBlock(fastAudio, gains.data());
+        for (int sample = 0; sample < fastCount; ++sample)
+            fastPathsPassed = fastPathsPassed && gains[static_cast<std::size_t>(sample)] == 1.0f / 3.0f;
+        fastPathsPassed = fastPathsPassed && gains.back() == -9.0f;
+        juce::AudioBuffer<float> noSamples(2, 0);
+        gains.fill(-9.0f);
+        fastProcessor->processBlock(noSamples, gains.data());
+        fastPathsPassed = fastPathsPassed && gains.front() == -9.0f;
+        result.excitationCoefficientBudgetPassed = coefficientBudgetPassed;
+        result.excitationFastPathsPassed = fastPathsPassed;
+        result.excitationMetadataPassed = coefficientBudgetPassed && fastPathsPassed
+            && result.maximumExcitationFloatCoefficientDifference == 0.0f
+            && result.maximumExcitationMetadataPartitionDifference == 0.0f
+            && result.maximumExcitationAudioDifference == 0.0f;
+    }
 
     {
         constexpr int sampleCount = 257;
@@ -1568,6 +1979,7 @@ NAMPolyOctaver::SelfTestResult NAMPolyOctaver::runDeterministicSelfTest(
             && result.stopbandRejectionDb <= -70.0f;
     }
 
+    result.lifecycle = runLifecycleSelfTest(safeSampleRate);
     result.passed = result.exactBypassPassed
         && result.exactSilencePassed
         && result.resetDeterminismPassed
@@ -1579,6 +1991,8 @@ NAMPolyOctaver::SelfTestResult NAMPolyOctaver::runDeterministicSelfTest(
         && result.bassLowNotePassed
         && result.liveProfileSwitchPassed
         && result.liveProfileSwitchPartitionPassed
-        && result.stopbandRejectionPassed;
+        && result.stopbandRejectionPassed
+        && result.excitationMetadataPassed
+        && result.lifecycle.passed;
     return result;
 }

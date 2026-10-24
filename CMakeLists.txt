@@ -252,6 +252,27 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET ysfx-private)
         TARGET_DIRECTORY ysfx-private
         APPEND PROPERTY COMPILE_OPTIONS "-Wno-ignored-attributes")
 endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET lice)
+    # SWELL checks opendir immediately after CreateDirectory, intentionally
+    # discarding the macro's boolean result.
+    set_property(SOURCE
+        "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-miscdlg-generic.cpp"
+        TARGET_DIRECTORY lice
+        APPEND PROPERTY COMPILE_OPTIONS "-Wno-unused-value")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        # At the pinned YSFX revision, PNG tRNS rejects alpha/even channel
+        # counts before writing tc[3]. GCC 15 loses that bound after inlining.
+        set_property(SOURCE "${ysfx_SOURCE_DIR}/sources/lice_stb/lice_stb_png.cpp"
+            TARGET_DIRECTORY lice
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-stringop-overflow")
+        # The empty-token fallback cannot satisfy n[0] == '('; short-circuit
+        # evaluation protects n[1] in WDL_hasStringsEx.
+        set_property(SOURCE
+            "${ysfx_SOURCE_DIR}/thirdparty/WDL/source/WDL/swell/swell-miscdlg-generic.cpp"
+            TARGET_DIRECTORY lice
+            APPEND PROPERTY COMPILE_OPTIONS "-Wno-array-bounds")
+    endif()
+endif()
 if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$" AND TARGET lice)
     # Pinned WDL/SWELL supports legacy AppKit APIs, and stb's writer uses
     # sprintf internally. Limit deprecation exceptions to their vendor sources;
@@ -493,6 +514,7 @@ target_sources(OpenStudio PRIVATE
     Source/RecordingRecovery.cpp
     Source/RecordingRecoveryRegression.cpp
     Source/AudioEngine.cpp
+    Source/RealtimeTrackExecutor.cpp
     Source/MetronomeRegression.cpp
     Source/FreePluginRegression.cpp
     Source/NAMDelayRegression.h
@@ -588,6 +610,7 @@ endif()
 # creates periodic work spikes that do not represent the shipped DSP.
 set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     Source/AudioEngine.cpp
+    Source/RealtimeTrackExecutor.cpp
     Source/AudioRecorder.cpp
     Source/PlaybackEngine.cpp
     Source/TrackProcessor.cpp
@@ -601,6 +624,8 @@ set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     Source/NAMCabPresentation.cpp
     Source/NAMPolyOctaver.cpp
     Source/OpenStudioPitchCorrector.cpp
+    Source/PitchDetector.cpp
+    Source/PitchMapper.cpp
     Source/TunerPitchTracker.cpp
     "${juce_SOURCE_DIR}/modules/juce_audio_basics/juce_audio_basics.cpp"
     "${juce_SOURCE_DIR}/modules/juce_audio_devices/juce_audio_devices.cpp"

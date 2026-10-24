@@ -1,7 +1,7 @@
 void OpenStudioEQ::applyMIDIConfiguration(const std::array<float,MIDIProgramBank::configurationCount>& values) noexcept
 {
     phaseMode.store(values[0]);phaseQuality.store(values[1]);minimumPhaseFIR.store(values[2]);analogResponse.store(values[3]);
-    spectralProcessing.store(values[4]);linearBandDynamics.store(values[5]);externalDetector.store(values[6]);
+    spectralProcessing.store(values[4]);linearBandDynamics.store(values[5]);externalDetector.store(values[6]);signalPath.store(values[7]);
 }
 
 std::shared_ptr<BuiltInEQPreparedPrograms> OpenStudioEQ::preparedMIDIView() const

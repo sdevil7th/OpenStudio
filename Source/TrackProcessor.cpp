@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <thread>
 
 // Maximum channel count for the pre-allocated FX processing buffer.
 // Must be large enough for multi-output instruments (e.g. Komplete Kontrol = 32 out).
@@ -1616,6 +1617,19 @@ void TrackProcessor::publishRealtimeStateSnapshots()
     next->inputFXPrecisionOverrides = inputFXForceFloatOverrides;
     next->trackFXPrecisionOverrides = trackFXForceFloatOverrides;
     next->instrument = instrumentPlugin;
+    const auto allNativeNAM = [] (const ProcessorSnapshot& processors)
+    {
+        return std::all_of(processors.begin(), processors.end(), [] (const ProcessorPtr& processor)
+        {
+            return dynamic_cast<OpenStudioNAMRack*>(processor.get()) != nullptr;
+        });
+    };
+    // Classify on publication, never by names or a callback-time plugin scan.
+    // Bypassed hosted slots also disqualify the graph: a bypass edit must not
+    // introduce an unqualified processor into a worker's processing path.
+    next->containsOnlyNativeNAM = next->instrument == nullptr
+        && (!next->inputFX.empty() || !next->trackFX.empty())
+        && allNativeNAM(next->inputFX) && allNativeNAM(next->trackFX);
     int outputChannels = 2;
     const auto includeOutputs = [&] (const auto& processors)
     {
@@ -2061,8 +2075,9 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
         const auto* synth = dynamic_cast<const OpenStudioBasicSynthInstrument*>(processor);
         const auto* piano = dynamic_cast<const OpenStudioPianoInstrument*>(processor);
         const auto* guitar = dynamic_cast<const OpenStudioCleanGuitarInstrument*>(processor);
+        const auto* drums = dynamic_cast<const OpenStudioDrumInstrument*>(processor);
         double tail = processor->getTailLengthSeconds();
-        if ((!synth && !piano && !guitar) || !automationSnapshot) return tail;
+        if ((!synth && !piano && !guitar && !drums) || !automationSnapshot) return tail;
         for (const auto& route : *automationSnapshot)
         {
             if (!route || route->fxIndex != fxIndex || route->isInputFX != isInputFX
@@ -2073,9 +2088,10 @@ double TrackProcessor::getOfflineRenderTailLengthSeconds() const
             // conservatively reserve the maximum for those instrument routes.
             const bool relevant = id.isEmpty() || id == "releaseMs"
                 || (synth && id.startsWith("matrix"))
+                || (drums && (id.startsWith("pieceDecay") || id == "articulationEngine"))
                 || ((piano || guitar) && (id == "coupledBody" || id == "bodyDecay"));
             if (relevant) return synth ? synth->getMaximumTailLengthSeconds()
-                : piano ? piano->getMaximumTailLengthSeconds() : guitar->getMaximumTailLengthSeconds();
+                : piano ? piano->getMaximumTailLengthSeconds() : guitar ? guitar->getMaximumTailLengthSeconds() : drums->getMaximumTailLengthSeconds();
         }
         return tail;
     };
@@ -2566,11 +2582,182 @@ bool TrackProcessor::tryProcessBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     return true;
 }
 
-void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+bool TrackProcessor::isParallelNAMGraphEligible(const RealtimeGraphSnapshot* graph) const noexcept
+{
+    return graph != nullptr && graph->generation != 0 && graph->containsOnlyNativeNAM
+        && trackType.load(std::memory_order_acquire) == TrackType::Audio
+        && araFXIndexForRealtime.load(std::memory_order_acquire) < 0;
+}
+
+uint64 TrackProcessor::getParallelNAMGraphGeneration() const noexcept
+{
+    const ScopedTrackRealtimeReader graphReadGuard(realtimeGraphAudioReaders);
+    const auto* const graph = realtimeGraphSnapshotForAudio.load(std::memory_order_seq_cst);
+    return isParallelNAMGraphEligible(graph) ? graph->generation : 0;
+}
+
+bool TrackProcessor::tryProcessBlockParallel(juce::AudioBuffer<float>& buffer,
+                                            juce::MidiBuffer& midiMessages,
+                                            uint64 expectedGeneration)
+{
+    if (expectedGeneration == 0)
+        return false;
+
+    // Control-side chain and precision edits already use this lock. A worker
+    // may reject the block but must never wait for them. Device/offline
+    // preparation and destruction additionally require the host's worker drain.
+    const juce::ScopedTryLock processingGuard(getCallbackLock());
+    if (!processingGuard.isLocked())
+        return false;
+    const ScopedTrackRealtimeReader graphReadGuard(realtimeGraphAudioReaders);
+    const auto* const graph = realtimeGraphSnapshotForAudio.load(std::memory_order_seq_cst);
+    if (!isParallelNAMGraphEligible(graph) || graph->generation != expectedGeneration)
+        return false;
+    if (preparedRealtimeBlockCapacity <= 0
+        || buffer.getNumSamples() > preparedRealtimeBlockCapacity
+        || buffer.getNumChannels() < 1 || buffer.getNumChannels() > getProcessingChannelCount()
+        || !ProcessorSafety::isFinite(buffer))
+        return false;
+    if (buffer.getNumSamples() == 0)
+        return true;
+
+    processBlockInternal(buffer, midiMessages, graph);
+    return true;
+}
+
+juce::var TrackProcessor::runParallelNAMEligibilityRegression()
+{
+    constexpr double sampleRate = 48000.0;
+    constexpr int capacity = 16;
+    auto serial = std::make_unique<TrackProcessor>();
+    auto parallel = std::make_unique<TrackProcessor>();
+    const bool emptyRejected = parallel->getParallelNAMGraphGeneration() == 0;
+    bool configured = serial->addTrackFX(std::make_unique<OpenStudioNAMRack>(), sampleRate, capacity)
+        && parallel->addTrackFX(std::make_unique<OpenStudioNAMRack>(), sampleRate, capacity);
+    serial->prepareToPlay(sampleRate, capacity);
+    parallel->prepareToPlay(sampleRate, capacity);
+    auto* serialRack = dynamic_cast<OpenStudioNAMRack*>(serial->getTrackFXProcessor(0));
+    auto* parallelRack = dynamic_cast<OpenStudioNAMRack*>(parallel->getTrackFXProcessor(0));
+    configured = configured && serialRack != nullptr && parallelRack != nullptr;
+    const auto processedBlocks = [] (const OpenStudioNAMRack* rack)
+    {
+        return rack != nullptr ? static_cast<juce::int64>(
+            rack->getDiagnosticState().getProperty("processedBlockCount", -1)) : -1;
+    };
+    const auto sameAudio = [] (const juce::AudioBuffer<float>& left, const juce::AudioBuffer<float>& right)
+    {
+        if (left.getNumChannels() != right.getNumChannels() || left.getNumSamples() != right.getNumSamples())
+            return false;
+        for (int channel = 0; channel < left.getNumChannels(); ++channel)
+            for (int sample = 0; sample < left.getNumSamples(); ++sample)
+                if (left.getSample(channel, sample) != right.getSample(channel, sample))
+                    return false;
+        return true;
+    };
+    bool parity = configured;
+    juce::int64 blockCount = 0;
+    for (int iteration = 0; iteration < 32 && configured; ++iteration)
+    {
+        for (int length : {1, 8, 16})
+        {
+            juce::AudioBuffer<float> reference(2, length), candidate(2, length);
+            for (int channel = 0; channel < 2; ++channel)
+                for (int sample = 0; sample < length; ++sample)
+                    reference.setSample(channel, sample, 0.025f * static_cast<float>((sample + iteration + channel) % 7 - 3));
+            candidate.makeCopyOf(reference);
+            juce::MidiBuffer referenceMidi, candidateMidi;
+            serial->setCurrentBlockPosition(static_cast<double>(iteration) * capacity / sampleRate);
+            parallel->setCurrentBlockPosition(static_cast<double>(iteration) * capacity / sampleRate);
+            const auto generation = parallel->getParallelNAMGraphGeneration();
+            parity = serial->tryProcessBlock(reference, referenceMidi)
+                && parallel->tryProcessBlockParallel(candidate, candidateMidi, generation)
+                && sameAudio(reference, candidate) && parity;
+            ++blockCount;
+        }
+    }
+    parity = parity && processedBlocks(serialRack) == blockCount && processedBlocks(parallelRack) == blockCount;
+
+    juce::AudioBuffer<float> input(2, capacity);
+    for (int channel = 0; channel < 2; ++channel)
+        juce::FloatVectorOperations::fill(input.getWritePointer(channel), 0.125f, capacity);
+    const auto rejectsUnchanged = [&] (uint64 generation)
+    {
+        juce::AudioBuffer<float> candidate;
+        candidate.makeCopyOf(input);
+        juce::MidiBuffer midi;
+        midi.addEvent(juce::MidiMessage::noteOn(1, 60, juce::uint8{100}), 0);
+        const auto before = processedBlocks(parallelRack);
+        return !parallel->tryProcessBlockParallel(candidate, midi, generation)
+            && sameAudio(input, candidate) && midi.getNumEvents() == 1
+            && processedBlocks(parallelRack) == before;
+    };
+    const auto originalGeneration = parallel->getParallelNAMGraphGeneration();
+    const bool zeroRejected = rejectsUnchanged(0);
+    parallel->bypassTrackFX(0, true);
+    const auto bypassGeneration = parallel->getParallelNAMGraphGeneration();
+    const bool staleRejected = originalGeneration != 0 && bypassGeneration != originalGeneration
+        && rejectsUnchanged(originalGeneration);
+    parallel->bypassTrackFX(0, false);
+    const auto currentGeneration = parallel->getParallelNAMGraphGeneration();
+    parallel->setTrackType(TrackType::MIDI);
+    const bool midiRejected = parallel->getParallelNAMGraphGeneration() == 0 && rejectsUnchanged(currentGeneration);
+    parallel->setTrackType(TrackType::Instrument);
+    const bool instrumentRejected = parallel->getParallelNAMGraphGeneration() == 0 && rejectsUnchanged(currentGeneration);
+    parallel->setTrackType(TrackType::Audio);
+    parallel->araFXIndexForRealtime.store(0, std::memory_order_release);
+    const bool araRejected = parallel->getParallelNAMGraphGeneration() == 0 && rejectsUnchanged(currentGeneration);
+    parallel->araFXIndexForRealtime.store(-1, std::memory_order_release);
+
+    bool busyRejected = false;
+    {
+        juce::WaitableEvent lockHeld, releaseLock;
+        std::thread control([&]
+        {
+            const juce::ScopedLock lock(parallel->getCallbackLock());
+            lockHeld.signal();
+            releaseLock.wait(2000);
+        });
+        if (lockHeld.wait(2000))
+            busyRejected = rejectsUnchanged(currentGeneration);
+        releaseLock.signal();
+        control.join();
+    }
+    struct NameOnlyNAMPretender final : OpenStudioEQ
+    {
+        const juce::String getName() const override { return "OpenStudio NAM Rack"; }
+    };
+    const bool nonNAMAdded = parallel->addInputFX(std::make_unique<NameOnlyNAMPretender>(), sampleRate, capacity);
+    const bool nonNAMRejected = nonNAMAdded && parallel->getParallelNAMGraphGeneration() == 0
+        && rejectsUnchanged(currentGeneration);
+    parallel->bypassInputFX(0, true);
+    const bool bypassedNonNAMRejected = parallel->getParallelNAMGraphGeneration() == 0;
+    parallel->removeInputFX(0);
+    const bool eligibilityRecovered = parallel->getParallelNAMGraphGeneration() != 0;
+    parallel->releaseResources();
+    const bool releasedRejected = rejectsUnchanged(parallel->getParallelNAMGraphGeneration());
+    auto* result = new juce::DynamicObject();
+    result->setProperty("pass", emptyRejected && zeroRejected && parity && staleRejected && midiRejected
+        && instrumentRejected && araRejected && busyRejected && nonNAMRejected && bypassedNonNAMRejected
+        && eligibilityRecovered && releasedRejected);
+    result->setProperty("emptyAndZeroRejected", emptyRejected && zeroRejected);
+    result->setProperty("serialWorkerExactParity", parity);
+    result->setProperty("parityBlocks", blockCount);
+    result->setProperty("staleGenerationRejectedWithoutProcessing", staleRejected);
+    result->setProperty("midiInstrumentAndARARejected", midiRejected && instrumentRejected && araRejected);
+    result->setProperty("busyControlLockRejectedWithoutProcessing", busyRejected);
+    result->setProperty("nonNAMIdentityAndBypassRejected", nonNAMRejected && bypassedNonNAMRejected);
+    result->setProperty("eligibilityRecovered", eligibilityRecovered);
+    result->setProperty("releasedCapacityRejected", releasedRejected);
+    result->setProperty("scope", "Device-free graph eligibility and single-owner entrypoint contracts; scheduler timing and concurrent lifecycle qualification are separate.");
+    return juce::var(result);
+}
+
+void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages,
+                                           const RealtimeGraphSnapshot* workerGraph)
 {
     const int activeARAFXIndexForBlock =
-        araFXIndexForRealtime.load(
-            std::memory_order_acquire);
+        workerGraph != nullptr ? -1
+            : araFXIndexForRealtime.load(std::memory_order_acquire);
     auto* const activeARAControllerForBlock =
         activeARAFXIndexForBlock >= 0
             ? araController.get()
@@ -2584,15 +2771,16 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
-    const auto currentTrackType = trackType.load(std::memory_order_acquire);
+    const auto currentTrackType = workerGraph != nullptr
+        ? TrackType::Audio : trackType.load(std::memory_order_acquire);
     // Avoid MSVC's process-wide atomic<shared_ptr> spin lock in the audio
     // callback. Control-side publication retains replaced immutable graphs
     // until this reader epoch has drained.
     const ScopedTrackRealtimeReader graphReadGuard(
-        realtimeGraphAudioReaders);
+        realtimeGraphAudioReaders, workerGraph == nullptr);
     const auto* const graphSnapshot =
-        realtimeGraphSnapshotForAudio.load(
-            std::memory_order_seq_cst);
+        workerGraph != nullptr ? workerGraph
+            : realtimeGraphSnapshotForAudio.load(std::memory_order_seq_cst);
     const uint64 graphGeneration =
         graphSnapshot != nullptr ? graphSnapshot->generation : 0;
     const auto* const inputFXSnapshot =

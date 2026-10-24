@@ -4,7 +4,7 @@
   --instrument-muted: #9baab4;
   --suite-accent: var(--instrument-accent);
   --suite-surface: #1a2229;
-  container-type: inline-size;
+  container: instrument / inline-size;
   color: #e5eaed;
   background: #192126;
 }
@@ -17,12 +17,12 @@
   border-bottom: 1px solid var(--instrument-line);
 }
 .instrument-tabs>button {
-  min-height: 42px;
-  padding: 0 17px;
+  min-height: 34px;
+  padding: 0 15px;
   white-space: nowrap;
   border-bottom: 2px solid transparent;
   color: var(--instrument-muted);
-  font-size: 12px;
+  font-size: clamp(12px, .9cqi, 16px);
   font-weight: 600;
 }
 .instrument-tabs>button[aria-pressed=true] {
@@ -39,7 +39,7 @@
   vertical-align: middle;
 }
 .instrument-workspace {
-  background: linear-gradient(155deg,#232d33,#182026);
+  background: #1c252c;
 }
 .instrument-section {
   border: 1px solid var(--instrument-line);
@@ -47,36 +47,38 @@
   background: #1a2229;
 }
 .instrument-section h3 {
-  font-size: 12px;
+  font-size: clamp(12px, .9cqi, 16px);
   font-weight: 650;
   letter-spacing: .04em;
 }
 .instrument-section header>span,.instrument-help,.instrument-subtle {
   color: var(--instrument-muted);
-  font-size: 12px;
+  font-size: clamp(12px, .9cqi, 16px);
 }
 .instrument-controls>* {
   flex: 1 1 65px;
-  max-width: 155px;
+  max-width: 190px;
 }
+.instrument-controls { container-type: inline-size; }
 .approved-instrument-editor .suite-knob {
-  width: 55px;
-  height: 55px;
-  --suite-knob-size: 55px;
+  --suite-knob-size: clamp(48px, 5.2cqi, 90px);
+  width: var(--suite-knob-size);
+  height: var(--suite-knob-size);
 }
 .approved-instrument-editor .suite-parameter[data-large=true] .suite-knob {
-  width: 70px;
-  height: 70px;
+  --suite-knob-size: clamp(58px, 6.4cqi, 110px);
 }
 .approved-instrument-editor .suite-value {
   max-width: 65px;
+  min-height: 24px;
+  font-size: clamp(13px, 1.05cqi, 18px);
 }
 .approved-instrument-editor .suite-select {
   width: 100%;
   min-height: 32px;
   background: #131c22;
   border-color: #43515c;
-  font-size: 12px;
+  font-size: clamp(12px, .9cqi, 16px);
 }
 .approved-instrument-editor .suite-button {
   min-height: 34px;
@@ -90,8 +92,7 @@
   color: var(--instrument-accent);
 }
 .instrument-output-control {
-  width: 200px;
-  max-width: 40%;
+  width: clamp(125px, 17cqi, 265px);
 }
 .instrument-output-control .instrument-slider {
   gap: 3px;
@@ -100,7 +101,7 @@
   height: 10px;
 }
 .instrument-keyboard {
-  height: 62px;
+  height: clamp(44px, 4.5cqi, 76px);
   border: 1px solid #536069;
   border-radius: 4px;
   isolation: isolate;
@@ -181,7 +182,7 @@
   stroke-linecap: round;
 }
 .instrument-envelope {
-  height: 104px;
+  height: clamp(64px, 8cqi, 140px);
   margin: 8px 0;
 }
 .instrument-envelope-fill {
@@ -191,7 +192,7 @@
   fill: var(--instrument-muted);
   font: 10px ui-monospace,monospace;
 }
-@container(max-width:690px) {
+@container instrument (max-width:700px) {
   .instrument-tabs {
     padding-inline: 8px;
   }
@@ -205,16 +206,52 @@
     padding: 11px;
   }
   .instrument-keyboard {
-    height: 52px;
+    height: 44px;
   }
   .instrument-keyboard-section {
     padding: 8px 10px;
   }
   .instrument-performance {
-    padding-inline: 10px;
+    padding: 5px 10px;
+    gap: 3px 10px;
+    font-size: 10px;
   }
   .approved-instrument-editor .suite-knob {
-    width: 49px;
-    height: 49px;
+    --suite-knob-size: 46px;
   }
+}
+
+.instrument-focus-tabs { display: none; }
+.instrument-focus-tabs button { min-height: 30px; padding: 4px 12px; border: 1px solid var(--instrument-line); border-radius: 4px; color: var(--instrument-muted); font-size: 12px; }
+.instrument-focus-tabs button[aria-pressed=true] { color: var(--instrument-accent); background: #d7b99312; border-color: #8f826d; }
+.instrument-slider:has(input:disabled) { opacity: .45; }
+.instrument-keyboard-actions { color: var(--instrument-muted); }
+.instrument-keyboard-actions .instrument-text-button { min-height: 20px; }
+.instrument-section>header { margin-bottom: 12px; }
+.instrument-controls .suite-parameter>span:first-child { font-size: clamp(12px, .95cqi, 18px); }
+.instrument-workspace .instrument-help { line-height: 1.5; }
+.instrument-workspace[data-overview=true] {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  align-content: start;
+  gap: clamp(20px,1.2cqi,40px);
+  padding: clamp(20px,1.2cqi,40px);
+}
+.instrument-workspace[data-overview=true] .instrument-section { padding: clamp(18px,1.1cqi,36px); }
+.instrument-workspace[data-overview=true] .instrument-controls { gap: clamp(14px,1cqi,30px); }
+.instrument-workspace[data-overview=true] .suite-knob { --suite-knob-size: clamp(64px,14cqi,150px); }
+.instrument-workspace[data-overview=true] .suite-parameter[data-large=true] .suite-knob { --suite-knob-size: clamp(80px,18cqi,190px); }
+.instrument-workspace[data-overview=true] .suite-value { max-width: 100px; font-size: clamp(16px,.85cqi,26px); min-height: 32px; }
+.instrument-workspace[data-overview=true] :is(.instrument-section h3,.instrument-slider label,.suite-parameter>span:first-child,label[data-param]>span) { font-size: clamp(14px,.75cqi,24px); }
+.instrument-workspace[data-overview=true] :is(.instrument-help,.instrument-section header>span,.suite-select) { font-size: clamp(13px,.6cqi,21px); }
+.instrument-workspace[data-overview=true] .instrument-envelope { height: clamp(110px,8cqi,260px); }
+.instrument-workspace[data-overview=true] .instrument-section>header { margin-bottom: 24px; }
+@container instrument (max-width:700px) {
+  .instrument-focus-tabs { display: flex; }
+  .instrument-section>header { margin-bottom: 8px; }
+  .instrument-section header>span { font-size: 10px; }
+  .instrument-controls { gap: 10px 8px; }
+  .instrument-keyboard-bar { gap: 8px; }
+  .instrument-keyboard-actions>span { display: none; }
+  .instrument-envelope { height: 58px; }
 }

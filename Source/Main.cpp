@@ -1,5 +1,7 @@
 #include "RegressionMessagePump.h"
 #include "AudioDeviceProbe.h"
+#include "NAMLiveCallbackProbe.h"
+#include "RealtimeTrackExecutorRegression.h"
 #include "RuntimeLocation.h"
 #include <JuceHeader.h>
 #include "ApplicationLaunchState.h"
@@ -977,7 +979,7 @@ int runHeadlessRenderExportRegression(AudioEngine& audioEngine,
                                       const juce::File& outputDirectory,
                                       const juce::File& reportFile)
 {
-    auto result = audioEngine.runRenderExportRegression(outputDirectory);
+    auto result = audioEngine.runRenderExportRegression(outputDirectory, true);
     const bool wroteReport = writeHeadlessResult(reportFile, result);
     const bool pass = result.isObject()
         && result.getProperty("objectiveGateStatus", {}).toString() == "pass";
@@ -1254,6 +1256,71 @@ public:
             }
             quit(); return;
         }
+        const auto realtimeTest = getCommandLineOptionValue(commandLine, "--realtime-track-self-test");
+        if (realtimeTest.isNotEmpty())
+        {
+            auto* report = new juce::DynamicObject();
+            const auto executor = runRealtimeTrackExecutorRegression();
+            const auto eligibility = TrackProcessor::runParallelNAMEligibilityRegression();
+            const auto engine = AudioEngine::runParallelTrackRegression();
+            report->setProperty("executor", executor);
+            report->setProperty("eligibility", eligibility);
+            report->setProperty("engine", engine);
+            const bool passed = static_cast<bool>(executor["pass"]) && static_cast<bool>(eligibility["pass"])
+                && static_cast<bool>(engine["pass"]);
+            report->setProperty("pass", passed);
+            const juce::File target(realtimeTest);
+            const bool written = target.getParentDirectory().createDirectory()
+                && target.replaceWithText(juce::JSON::toString(juce::var(report), true));
+            setApplicationReturnValue(passed && written ? 0 : 1);
+            quit(); return;
+        }
+        const auto namLiveProbe = getCommandLineOptionValue(commandLine, "--nam-live-callback-probe");
+        if (namLiveProbe.isNotEmpty())
+        {
+            const auto output = getCommandLineOptionValue(commandLine, "--output-dir");
+            const auto guitar = getCommandLineOptionValue(commandLine, "--guitar-preset");
+            const auto bass = getCommandLineOptionValue(commandLine, "--bass-preset");
+            NAMLiveCallbackProbe::Options options;
+            const auto tracks = getCommandLineOptionValue(commandLine, "--probe-tracks");
+            const auto rate = getCommandLineOptionValue(commandLine, "--probe-rate");
+            const auto oversampling = getCommandLineOptionValue(commandLine, "--probe-oversampling");
+            const auto warmup = getCommandLineOptionValue(commandLine, "--probe-warmup-seconds");
+            const auto seconds = getCommandLineOptionValue(commandLine, "--probe-seconds");
+            const auto workers = getCommandLineOptionValue(commandLine, "--probe-workers");
+            const auto spin = getCommandLineOptionValue(commandLine, "--probe-worker-spin-us");
+            const auto grace = getCommandLineOptionValue(commandLine, "--probe-worker-grace-us");
+            const auto buffers = getCommandLineOptionValue(commandLine, "--probe-buffers");
+            if (tracks.isNotEmpty()) options.trackCount = tracks.getIntValue();
+            if (rate.isNotEmpty()) options.sampleRate = rate.getDoubleValue();
+            if (oversampling.isNotEmpty()) options.oversamplingFactor = oversampling.getIntValue();
+            if (warmup.isNotEmpty()) options.warmupSeconds = warmup.getIntValue();
+            if (seconds.isNotEmpty()) options.measurementSeconds = seconds.getIntValue();
+            if (workers.isNotEmpty()) options.workerCount = workers.getIntValue();
+            if (spin.isNotEmpty()) options.workerSpinMicroseconds = spin.getIntValue();
+            if (grace.isNotEmpty()) options.recoveryGraceMicroseconds = grace.getIntValue();
+            if (buffers.isNotEmpty())
+            {
+                options.buffers.clear();
+                for (const auto& value : juce::StringArray::fromTokens(buffers, ",", ""))
+                    options.buffers.push_back(value.getIntValue());
+            }
+            options.recording = commandLineHasFlag(commandLine, "--probe-recording");
+           #if JUCE_WINDOWS
+            ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+           #endif
+            setApplicationReturnValue(output.isNotEmpty() && guitar.isNotEmpty() && bass.isNotEmpty()
+                ? NAMLiveCallbackProbe::run(namLiveProbe, juce::File(guitar), juce::File(bass), juce::File(output), options) : 2);
+            quit(); return;
+        }
+        const auto audioBufferProbeName = getCommandLineOptionValue(commandLine, "--audio-buffer-probe");
+        if (audioBufferProbeName.isNotEmpty())
+        {
+            const auto output = getCommandLineOptionValue(commandLine, "--output-dir");
+            setApplicationReturnValue(output.isNotEmpty()
+                ? AudioDeviceProbe::runSilentASIOBufferChange(audioBufferProbeName, juce::File(output)) : 2);
+            quit(); return;
+        }
         const auto audioProbeName = getCommandLineOptionValue(commandLine, "--audio-device-probe");
         if (audioProbeName.isNotEmpty())
         {
@@ -1343,6 +1410,8 @@ public:
         const auto pluginScanSearchPathsFile = getCommandLineOptionValue(commandLine, "--plugin-search-paths-file");
         const auto pluginScanRegressionHeadlessMode = commandLineHasFlag(commandLine, "--plugin-scan-regression-headless");
         const auto windowLifecycleHarnessMode = commandLineHasFlag(commandLine, "--window-lifecycle-harness");
+        const bool windowLifecycleOffline = windowLifecycleHarnessMode
+            && commandLineHasFlag(commandLine, "--window-lifecycle-offline");
         ScopedHeadlessRegressionMessages headlessMessages(
             automatedRegressionHeadlessMode || renderExportRegressionHeadlessMode
             || pitchRegressionHeadlessJobPath.isNotEmpty()
@@ -1526,7 +1595,11 @@ public:
             quit();
             return;
         }
-        audioEngine = std::make_unique<AudioEngine>();
+        const bool focusedNAMOffline = namRackRegressionReportPath.isNotEmpty()
+            && (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_FUZZ_ONLY", {}) == "1"
+                || juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY", {}) == "1");
+        audioEngine = std::make_unique<AudioEngine>(focusedNAMOffline || windowLifecycleOffline || renderExportRegressionHeadlessMode
+            ? AudioEngine::DeviceStartup::offline : AudioEngine::DeviceStartup::openHardware);
         audioEngine->onFXSlotsRemoved = [this](const juce::String& trackId,
                                               const juce::String& chain, int firstIndex)
         {
@@ -1663,9 +1736,9 @@ public:
 
             const int editorReviewHoldMs = juce::jlimit(0, 60000,
                 getCommandLineOptionValue(commandLine, "--plugin-editor-review-hold-ms").getIntValue());
-            juce::Timer::callAfterDelay(1000, [this, reportFile, editorReviewHoldMs]()
+            juce::Timer::callAfterDelay(1000, [this, reportFile, editorReviewHoldMs, windowLifecycleOffline]()
             {
-                runWindowLifecycleHarness(reportFile, editorReviewHoldMs);
+                runWindowLifecycleHarness(reportFile, editorReviewHoldMs, windowLifecycleOffline);
             });
         }
     }
@@ -1951,13 +2024,13 @@ private:
                 { "OpenStudio Reverb", "reverb" }, { "OpenStudio Delay", "delay" },
                 { "OpenStudio Chorus", "chorus" }, { "OpenStudio Basic Synth", "synth" },
                 { "OpenStudio Piano", "piano" }, { "OpenStudio Clean Guitar", "guitar" },
-                { "OpenStudio Drums", "drums" }
+                { "OpenStudio Drums", "drums" }, { "OpenStudio Pitch Correct", "pitch" }
             };
             for (const auto& entry : legacyNames)
                 if (name == entry.first) { pluginId = entry.second; break; }
         }
         const juce::StringArray compactIds { "eq", "geq", "compressor", "gate", "limiter", "preamp",
-            "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums" };
+            "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums", "pitch" };
         PluginEditorWindowGeometry result;
         if (compactIds.contains(pluginId))
         {
@@ -2331,7 +2404,8 @@ private:
         MainComponent::broadcastEventToRole(MainComponent::WindowRole::main, "builtInPluginEditorWindowClosed", juce::var(payload));
     }
 
-    void runWindowLifecycleHarness(const juce::File& reportFile, int editorReviewHoldMs = 0)
+    void runWindowLifecycleHarness(const juce::File& reportFile, int editorReviewHoldMs = 0,
+                                   bool offlineRequested = false)
     {
         pitchRecoveryFileOverride = reportFile.getSiblingFile(reportFile.getFileNameWithoutExtension() + "-recovery.json");
         pitchRecoveryCheckpoint = juce::var();
@@ -2367,6 +2441,8 @@ private:
                 auto* evidence = new juce::DynamicObject();
                 evidence->setProperty("role", role);
                 evidence->setProperty("documentRequests", requests);
+                evidence->setProperty("startupState", component != nullptr
+                    ? component->getFrontendStartupStateDescription() : "missing");
                 frontendDocuments->add(juce::var(evidence));
                 return component != nullptr && component->hasFrontendStartupSucceeded() && requests == 1;
             }});
@@ -2433,7 +2509,7 @@ private:
             return mainWindow->getBounds() == originalBounds;
         }});
         const auto probeDriver = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_AUDIO_PROBE_DRIVER", "");
-        if (probeDriver.isNotEmpty())
+        if (probeDriver.isNotEmpty() && !offlineRequested)
             steps->push_back({ "audio_capability_query_preserves_active_setup", 0, [this, probeDriver, reportFile]() {
                 const auto before = audioEngine->getAudioDeviceSetup();
                 const auto stopsBefore = audioEngine->getAudioDebugSnapshot().getProperty("audioDeviceStopCount", {});
@@ -2792,7 +2868,7 @@ private:
         steps->push_back({ "plugin_editor_geometry_contract", 0, [this]()
         {
             for (const auto& id : juce::StringArray { "eq", "geq", "compressor", "gate", "limiter", "preamp",
-                     "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums" })
+                     "saturator", "utility", "reverb", "delay", "chorus", "synth", "piano", "guitar", "drums", "pitch" })
             {
                 auto* session = new juce::DynamicObject();
                 session->setProperty("pluginId", id);
@@ -2963,7 +3039,7 @@ private:
         auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
         const std::weak_ptr<std::function<void()>> weakRunner = runner;
-        *runner = [this, reportFile, checks, inputEvidence, frontendDocuments, steps, stepIndex, stepAttempt, weakRunner, midiSessionId]() mutable
+        *runner = [this, reportFile, checks, inputEvidence, frontendDocuments, steps, stepIndex, stepAttempt, weakRunner, midiSessionId, offlineRequested]() mutable
         {
             // Timers own the next invocation. The function must not own itself,
             // otherwise all check results survive application shutdown.
@@ -2972,9 +3048,18 @@ private:
                 return;
             if (*stepIndex >= steps->size())
             {
+                const auto telemetry = audioEngine->getRealtimeAudioTelemetry();
+                const bool audioDeviceOpened = audioEngine->getDeviceManager().getCurrentAudioDevice() != nullptr;
+                const auto deviceStarts = static_cast<juce::int64>(telemetry.getProperty("audioDeviceStartCount", -1));
+                const auto callbacks = static_cast<juce::int64>(telemetry.getProperty("lastCallbackCounter", -1));
+                if (offlineRequested)
+                    addHarnessCheck(*checks, "lifecycle_no_hardware_device_opened",
+                        !audioDeviceOpened && deviceStarts == 0 && callbacks == 0 ? "pass" : "fail",
+                        "Explicit offline lifecycle mode requires no audio device, zero device starts and zero hardware callbacks.");
                 const bool success = ! hasFailedHarnessCheck(*checks);
                 auto* root = new juce::DynamicObject();
                 root->setProperty("harnessMode", "window_lifecycle");
+                root->setProperty("executablePath", OpenStudioRuntime::executableFile().getFullPathName());
                 root->setProperty("startupMode", startupMode == MainComponent::StartupMode::safe ? "safe" : "normal");
                 root->setProperty("pitchEditing", startupMode == MainComponent::StartupMode::safe ? "not_asserted: recovery UI only" : "objective normal-mode editing checks");
                 root->setProperty("success", success);
@@ -2982,6 +3067,13 @@ private:
                 root->setProperty("nativeBrowserComponents", MainComponent::getBrowserInstanceCounts());
                 root->setProperty("inputMeasurements", juce::var(*inputEvidence));
                 root->setProperty("frontendDocuments", juce::var(*frontendDocuments));
+                root->setProperty("offlineRequested", offlineRequested);
+                root->setProperty("audioDeviceOpened", audioDeviceOpened);
+                root->setProperty("audioDeviceStartCount", deviceStarts);
+                root->setProperty("audioCallbackCount", callbacks);
+                root->setProperty("startupSelfTest", MainComponent::buildStartupSelfTestReport());
+                root->setProperty("browserExecutableFolderOverride", juce::SystemStats::getEnvironmentVariable("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", {}));
+                root->setProperty("userDataFolderOverride", juce::SystemStats::getEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", {}));
                 root->setProperty("platform", juce::SystemStats::getOperatingSystemName());
                 root->setProperty("multiMonitorDpi", "not_asserted");
                 root->setProperty("pitchState", handlePitchEditorSession("status", {}, MainComponent::WindowRole::main, {}));

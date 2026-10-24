@@ -79,7 +79,8 @@ inline juce::var checkMinimumPhaseEQ()
     statePass = statePass && restored->minimumPhaseFIR.load() == 0 && restored->getLatencySamples() == 0;
     const auto schema = describeFreePluginForRegression(*original);
     const auto* parameters = schema["parameters"].getArray();
-    descriptors = parameters && parameters->size() >= 2 && (*parameters)[parameters->size()-2]["id"].toString() == "minimumPhaseFIR" && !static_cast<bool>((*parameters)[parameters->size()-2]["automatable"]);
+    // The frozen index must survive later appended configuration fields.
+    descriptors = parameters && parameters->size() > 716 && (*parameters)[716]["id"].toString() == "minimumPhaseFIR" && !static_cast<bool>((*parameters)[716]["automatable"]);
     result->setProperty("pass", finite && latency && causal && statePass && descriptors && targetError < .5 && graphError < .08 && partitionError < 1e-8 && bypassError == 0);
     result->setProperty("finite", finite); result->setProperty("latency256", latency); result->setProperty("causal", causal);
     result->setProperty("targetErrorDbAboveMinus60", targetError); result->setProperty("graphErrorDbAboveMinus60", graphError);

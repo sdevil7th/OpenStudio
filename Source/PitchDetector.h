@@ -21,6 +21,8 @@ class PitchDetector
 public:
     PitchDetector();
 
+    // Configuration only: call before prepare, never from an audio callback.
+    void setRateNormalized(bool enabled) noexcept { rateNormalized = enabled; }
     void prepare(double sampleRate, int maxBlockSize);
 
     // Feed audio samples; call this every processBlock.
@@ -49,6 +51,9 @@ public:
 
 private:
     double sampleRate = 44100.0;
+    bool rateNormalized = false;
+    int decimation = 1, decimationPosition = 0, antiAliasPosition = 0;
+    std::vector<float> antiAliasCoefficients, antiAliasHistory;
 
     // Ring buffer for accumulating input samples
     std::vector<float> inputBuffer;
@@ -65,6 +70,10 @@ private:
     // YIN internals
     std::vector<float> yinBuffer;
     float runYIN(const float* frame, int size);
+    float finishYIN(int tauMin, int tauMax, float minimum, float maximum);
+    void advanceYIN() noexcept;
+    int pendingTau = 0, pendingTauMin = 0, pendingTauMax = 0;
+    float pendingSum = 0, pendingMinimum = 40, pendingMaximum = 1000, pendingRmsDB = -100;
     float parabolicInterpolation(int tauEstimate) const;
 
     // Results

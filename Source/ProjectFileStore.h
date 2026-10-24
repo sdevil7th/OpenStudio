@@ -3,6 +3,19 @@
 
 namespace ProjectFileStore
 {
+    inline constexpr size_t maximumJsonDocumentBytes = 256u * 1024u * 1024u;
+    // Presets/metadata, without project schema or recovery side effects.
+    // Worker/control threads only; accepts one bounded JSON object or array.
+    juce::Result saveJsonDocument(const juce::File& target, const juce::String& json);
+
+   #if !JUCE_WINDOWS
+    namespace detail
+    {
+        // Same-directory publication primitive; no copy fallback on failure.
+        bool renameTemporaryFile(const juce::File& temporary, const juce::File& target);
+    }
+   #endif
+
     // Worker/control threads only. Checked temporary writes and serialized
     // replacement; recovery generations are ordinary loadable .osproj files.
     juce::Result save(const juce::File& target, const juce::String& json,

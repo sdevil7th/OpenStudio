@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import classNames from "classnames";
 import {
@@ -31,6 +31,7 @@ import { registerScopedActionExecutor } from "../store/actionRegistry";
 import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
 import { activateShortcutContext } from "../utils/shortcutContext";
 import { TrackNameEditor } from "./TrackNameEditor";
+import { getEffectiveShortcutLabel } from "../utils/inputProfileHelp";
 
 interface TrackHeaderProps {
   track: Track;
@@ -79,6 +80,8 @@ export const TrackHeader = React.memo(function TrackHeader({
     removeInstrumentWithUndo,
     setTrackSamplerSampleWithUndo,
     clearTrackSamplerSampleWithUndo,
+    keyboardShortcutProfileId,
+    customShortcuts,
   } = useDAWStore(
     useShallow((s) => ({
       toggleTrackMute: s.toggleTrackMute,
@@ -105,7 +108,14 @@ export const TrackHeader = React.memo(function TrackHeader({
       removeInstrumentWithUndo: s.removeInstrumentWithUndo,
       setTrackSamplerSampleWithUndo: s.setTrackSamplerSampleWithUndo,
       clearTrackSamplerSampleWithUndo: s.clearTrackSamplerSampleWithUndo,
+      keyboardShortcutProfileId: s.keyboardShortcutProfileId,
+      customShortcuts: s.customShortcuts,
     })),
+  );
+
+  const armShortcut = useMemo(
+    () => getEffectiveShortcutLabel("track.toggleSelectedArm", "Ctrl+Shift+R"),
+    [keyboardShortcutProfileId, customShortcuts],
   );
 
   const groupInfo = getTrackGroupInfo(track.id, trackGroups);
@@ -396,7 +406,7 @@ export const TrackHeader = React.memo(function TrackHeader({
               active={track.armed}
               activeStyle="glow"
               onClick={handleRecordArm}
-              title="Record Arm (R)"
+              title={`Record Arm (${armShortcut})`}
               aria-label={
                 track.armed
                   ? "Disarm track recording"

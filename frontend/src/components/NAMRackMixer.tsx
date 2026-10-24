@@ -87,7 +87,7 @@ export const NAM_RACK_ADVANCED_CONTROL_IDS = {
   input: ["inputTrimDb"],
   gate: ["gateThresholdDb", "gateReleaseMs"],
   compressor: ["compressorEnabled", "compressorComp", "compressorAttackMs", "compressorReleaseMs", "compressorToneDb", "compressorIntensity", "compressorSidechainHPF", "compressorMix", "compressorVolumeDb"],
-  octaver: ["octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix"],
+  octaver: ["octaverEnabled", "octaverDownMix", "octaverUpMix", "octaverDirectMix", "fuzzEnabled", "fuzzDrive", "fuzzTone", "fuzzLevelDb", "fuzzVoice", "fuzzCleanMix"],
   "pre-eq": ["preEqEnabled", "preEq120Db", "preEq250Db", "preEq500Db", "preEq1kDb", "preEq2k5Db", "preEq5kDb", "preEq8kDb", "preEq12kDb", "preEqHPFHz", "preEqLPFHz"],
   "precision-drive": [
     "precisionDriveEnabled", "precisionDriveDrive", "precisionDriveVolumeDb", "precisionDriveBright", "precisionDriveAttack", "precisionDriveGate",

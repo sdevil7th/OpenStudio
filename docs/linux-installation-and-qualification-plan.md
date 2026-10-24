@@ -1,5 +1,91 @@
 # Linux installation and feature qualification
 
+## 0.1.06 SSH candidate qualification (2026-10-23)
+
+The unpublished candidate passes the recorded Ubuntu 22.04/26.04 source,
+packaged startup and regression checks, plus DEB upgrade/removal/reinstall in
+an isolated VM. The existing physical-host installation and checkout remain
+unchanged. The [testing guide](testing.md#ssh-linux-qualification-of-the-working-tree)
+owns the exact source/artifact hashes, commands, results and evidence locations;
+the [issue matrix](testing.md#open-github-issue-scenarios) records each reporter's
+remaining reproduction requirements. Keep those results there rather than
+duplicating a release checkpoint in this platform guide. Native Wayland, Arch/FUSE,
+physical audio/MIDI, listening and final downloaded-package acceptance remain
+outside these Xvfb/VM results.
+
+## Published-package recheck (2026-10-22, issue #23)
+
+[Issue #23](https://github.com/sdevil7th/OpenStudio/issues/23) originally reports
+0.1.03 AppImage resource lookup on Arch Linux. The October 21 follow-up says a
+newer build still fails, but supplies no artifact name, hash or fresh log. That
+report remains unverified; moving to DEB does not establish an Arch fix. DEB is
+the Ubuntu/Debian/Mint package format, and RPM is the Fedora format; neither is
+an Arch-native installer.
+
+The current [v0.1.05 release](https://github.com/sdevil7th/OpenStudio/releases/tag/v0.1.05)
+contains **both** a DEB and an AppImage, with no RPM asset. Its source tag is
+`649012c77f86eb9cbfee616bd16a588576c63112`. Read-only downloads matched the
+published checksums:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `OpenStudio-0.1.05-1-ubuntu-22.04-amd64.deb` | `6185a87294cf91e280da0179f74962db1c7b73725de065be82a555c1b845f9a9` |
+| `OpenStudio-0.1.05-linux-x86_64.AppImage` | `2f6cfd58086eecf68f2020c35f6a1f1f5d5ea051b00cf0d47c369229bd35c733` |
+
+Archive inspection found the DEB executable and sibling `webui`, `effects`,
+`scripts` and model assets under `/usr/lib/openstudio`, with `/usr/bin/OpenStudio`
+linked to that executable. The AppImage contains the same required asset layout
+under `usr/bin`, and `AppRun` links to `usr/bin/OpenStudio`. Both ELF payloads
+contain the `/proc/self/exe` lookup introduced in committed
+[d67637ca](https://github.com/sdevil7th/OpenStudio/commit/d67637ca776bc0d521437f511effebc57aaae8e8).
+This resolves resources from the running payload rather than the outer AppImage
+filename or inherited `APPDIR`. The DEB dependency metadata declares the Ubuntu
+22.04 glibc floor and system GTK/WebKit dependencies. Archive presence and these
+strings establish packaging/source evidence, not a fresh launch result.
+
+The release's [Ubuntu Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/37790026737/job/113354712043)
+succeeded, including installed native-package qualification, packaged AppImage
+launch and the finished-launcher lifecycle gate. Those gates require main and
+detached frontend readiness, beyond `--startup-self-test`. They qualify that
+Ubuntu X11/XWayland CI environment, not native Wayland, Arch, physical audio or
+every supported desktop. The website currently prefers the DEB for a new Linux
+download; its legacy Linux download/updater contract still points to AppImage.
+
+The current working-tree qualification tool also clears the three NAM-only
+fixture selectors, so inherited developer environment variables cannot narrow
+`--features` silently. Portable regression checks pass on this Windows host
+(4 passed; 13 ELF/packaging/process-group checks skipped). No Linux distribution
+is installed in WSL here; neither downloaded package was executed or installed.
+Local archive evidence is under ignored
+`output/issue-23-published-20261022-36534515/evidence.json`; retain the public
+hashes and CI evidence above independently of that local directory.
+
+### Acceptance on a Linux qualification runner
+
+Use the exact downloaded hash, normal installed application-menu launch and a
+fresh evidence directory for each mode. On each supported DEB/RPM distribution,
+verify declared dependencies, offline startup, normal and safe main/detached
+`boot-ready`, and removal/upgrade behavior. For AppImage, qualify both extracted
+payload resource lookup and the finished launcher from an unrelated working
+directory; prerequisite self-test alone is insufficient. An Arch reproduction
+needs the current artifact identity and log, then real frontend readiness against
+that host's GTK/WebKit dependencies. Existing Ubuntu results cannot substitute.
+
+These commands are developer qualification steps on a prepared Linux runner,
+not customer installation requirements (replace the artifact/fixture paths):
+
+```bash
+xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-installed-normal --desktop --render --features --nam-fixtures /path/to/example_models
+xvfb-run -a python3 tools/run-linux-qualification.py --app /usr/bin/OpenStudio --output output/linux-installed-safe --desktop --safe-mode
+python3 tools/smoke-linux-appimage.py /path/to/OpenStudio-0.1.05-linux-x86_64.AppImage --report output/linux-finished-appimage.json
+```
+
+The first two commands also exercise changed `argv[0]` and stale `APPDIR` asset
+lookup; the last exercises the finished AppImage with a fresh profile and window
+manager. Follow with the actual target desktop; Xvfb cannot establish native
+Wayland or hardware behavior. The older dated checkpoints below retain their
+original scope and do not describe the current public artifact inventory.
+
 Latest AI follow-up: [installed AI audit on Ubuntu 22.04/24.04/26.04](ai-ubuntu-qualification-2026-10-01.md).
 Revision 11 passes in-app stem installation/inference; Basic Pitch fails and full
 generation qualification remains blocked. This supersedes earlier AI status below.
@@ -10,7 +96,7 @@ harness ownership leak is corrected and diagnostic failures now fail qualificati
 Live Audient DAW signal verification and native Windows/macOS remain open.
 
 
-Status (2026-10-01, latest checkpoint): revision 6 DEB adds the Linux mixer-control
+Status (2026-10-01 checkpoint): revision 6 DEB adds the Linux mixer-control
 correction; revision 5 remains the last four-distribution DEB/RPM qualification.
 Both use the Ubuntu 22.04 native build. Installed checks run in real Ubuntu 22.04,
 Debian 13, Fedora 44 and Mint 22.3 live VMs. Fedora/Mint graphical installation and

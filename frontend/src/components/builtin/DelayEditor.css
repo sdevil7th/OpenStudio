@@ -65,7 +65,7 @@
   border: 1px solid #738076;
   background: #cbd0c5;
   color: #242c27;
-  min-height: 228px;
+  min-height: clamp(210px, 25cqi, 480px);
   --suite-accent: #344a2e;
   --suite-surface: #cbd0c5;
   --color-daw-text: #293326;
@@ -98,7 +98,7 @@
   background: #cbd0c5;
   color: #212a23;
   padding: 0 8px 6px 0;
-  font-size: 44px;
+  font-size: clamp(32px, 4.3cqi, 86px);
   font-weight: 500;
   letter-spacing: -2px;
   height: 61px;
@@ -122,7 +122,7 @@
   border-radius: 0;
   background: transparent;
   color: #212a23;
-  font-size: 44px;
+  font-size: clamp(32px, 4.3cqi, 86px);
   letter-spacing: -2px;
   font-weight: 500;
   text-align: left;
@@ -540,3 +540,8 @@
     gap: 9px;
   }
 }
+
+.delay-detail-body[data-overview=true] { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 36px; padding: 28px; }
+.delay-detail-body[data-overview=true]>section { border: 1px solid #3c4b43; border-radius: 4px; padding: clamp(18px, 1.5cqi, 42px); }
+.delay-detail-body[data-overview=true] .delay-detail-controls { justify-content: center; margin-block: 30px; gap: 40px; }
+.delay-detail-body[data-overview=true] p { font-size: clamp(12px, .75cqi, 20px); line-height: 1.7; }

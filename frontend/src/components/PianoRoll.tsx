@@ -60,6 +60,12 @@ import {
   type PianoRollGestureSession,
 } from "../utils/pianoRollInteraction";
 import {
+  buildMidiNoteDragCopy,
+  getMidiNoteMoveDeltas,
+  getMidiNoteShiftSelection,
+  hasMidiNoteDragStarted,
+} from "../utils/pianoRollNoteDrag";
+import {
   midiSourceTimeToProjectX,
   projectXToMidiSourceTime,
 } from "../utils/timelineGeometry";
@@ -162,6 +168,12 @@ interface NoteDragState {
   mode: DragMode;
   noteIds: string[];
   originalEvents: MIDIEvent[];
+  sourceEvents: MIDIEvent[];
+  originalSelection: string[];
+  pendingClickSelection?: string[];
+  isCopy?: boolean;
+  startX: number;
+  startY: number;
   startPointerTime: number;
   startPointerNote: number;
   activeNoteId: string;
@@ -653,6 +665,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const [transformDialog, setTransformDialog] = useState<TransformDialogState | null>(null);
   const [controllerDialog, setControllerDialog] = useState<ControllerTransformDialogState | null>(null);
   const [dragState, setDragState] = useState<NoteDragState | null>(null);
+  const noteDragActivatedRef = useRef(false);
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [velocityEdit, setVelocityEdit] = useState<VelocityEditState | null>(null);
   const [ccDrawState, setCCDrawState] = useState<CCDrawState | null>(null);
@@ -959,7 +972,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         void useDAWStore.getState().syncMIDITrackToBackend(trackId, { debounce: false });
       }
 
-      const restoredSelection = dragState?.noteIds
+      const restoredSelection = dragState?.originalSelection
         ?? (velocityEdit ? [velocityEdit.noteId] : undefined)
         ?? (wheelTarget ? [wheelTarget.initialNoteId] : undefined);
       if (restoredSelection) useDAWStore.getState().setSelectedNoteIds(restoredSelection);
@@ -968,6 +981,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       gestureSessionRef.current = null;
       ccDrawStateRef.current = null;
       latestDragAuditionRef.current = null;
+      noteDragActivatedRef.current = false;
       setDragState(null);
       setDrawingState(null);
       setVelocityEdit(null);
@@ -3541,6 +3555,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const pos = getPointer(event);
     if (!pos) return;
 
+    if (dragState.mode === "move" && !noteDragActivatedRef.current) {
+      if (!hasMidiNoteDragStarted(dragState.startX, dragState.startY, pos.x, pos.y)) return;
+      noteDragActivatedRef.current = true;
+    }
+
     const nativeEvent = event.evt as MouseEvent;
     const bypassSnap = Boolean(nativeEvent?.ctrlKey || nativeEvent?.metaKey);
     const pointerTime = snapTime(getTimeFromX(pos.x), {
@@ -3548,19 +3567,24 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       originalTime: dragState.startPointerTime,
     });
     const pointerNote = getNoteFromY(pos.y);
-    const deltaTime = pointerTime - dragState.startPointerTime;
-    const deltaNote = pointerNote - dragState.startPointerNote;
+    const selectedIds = new Set(dragState.noteIds);
+    const moveDeltas = getMidiNoteMoveDeltas(
+      parseMIDINotePairs(dragState.sourceEvents, clipId).filter((pair) => selectedIds.has(pair.id)),
+      pointerTime - dragState.startPointerTime,
+      pointerNote - dragState.startPointerNote,
+      nativeEvent,
+    );
 
     const { events: nextEvents, nextIds, auditionPair } = rebuildMIDIEventsForNotes(
-      dragState.originalEvents,
+      dragState.sourceEvents,
       clipId,
       dragState.noteIds,
       (pair) => {
         if (dragState.mode === "move") {
           return {
             ...pair,
-            startTime: Math.max(0, pair.startTime + deltaTime),
-            noteNumber: clamp(pair.noteNumber + deltaNote, 0, 127),
+            startTime: pair.startTime + moveDeltas.deltaTime,
+            noteNumber: pair.noteNumber + moveDeltas.deltaNote,
           };
         }
 
@@ -3711,20 +3735,30 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       && selectedNoteIds.length > 0
     ) {
       if (!pos) return;
-      const nextIds = duplicateSelectedMIDINotes(trackId, clipId);
-      if (nextIds.length === 0) return;
+      const originalEvents = getLatestClipEvents();
+      const originalIsModified = useDAWStore.getState().isModified;
+      const copy = buildMidiNoteDragCopy(originalEvents, clipId, selectedNoteIds);
+      if (!copy) return;
+      const nextIds = copy.noteIds;
+      previewMIDIClipEvents(trackId, clipId, copy.events);
       setSelectedNoteIds(nextIds);
+      noteDragActivatedRef.current = false;
       setDragState({
         mode: "move",
         noteIds: nextIds,
-        originalEvents: getLatestClipEvents(),
+        originalEvents,
+        sourceEvents: copy.events,
+        originalSelection: [...selectedNoteIds],
+        isCopy: true,
+        startX: pos.x,
+        startY: pos.y,
         startPointerTime: snapTime(getTimeFromX(pos.x), {
           bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
           originalTime: pair.startTime,
         }),
         startPointerNote: pair.noteNumber,
         activeNoteId: nextIds[0],
-        originalIsModified: useDAWStore.getState().isModified,
+        originalIsModified,
       });
       latestDragAuditionRef.current = {
         noteNumber: pair.noteNumber,
@@ -3733,16 +3767,21 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       return;
     }
 
-    let nextSelection = selectedNoteIds;
-    if (modifier) {
+    // A selected body's Shift gesture stays pending until movement distinguishes
+    // pitch-only dragging from a selection-toggle click. Edges retain resizing.
+    const pendingShiftSelection = modifier && edge === "body" && tool === "select" && midiTargetEditable
+      ? getMidiNoteShiftSelection(selectedNoteIds, id)
+      : null;
+    let nextSelection = pendingShiftSelection?.dragSelection ?? selectedNoteIds;
+    if (modifier && !pendingShiftSelection) {
       nextSelection = selectedNoteIds.includes(id)
         ? selectedNoteIds.filter((noteId) => noteId !== id)
         : [...selectedNoteIds, id];
-    } else if (!selectedNoteIds.includes(id)) {
+    } else if (!pendingShiftSelection && !selectedNoteIds.includes(id)) {
       nextSelection = [id];
     }
 
-    setSelectedNoteIds(nextSelection);
+    if (!pendingShiftSelection) setSelectedNoteIds(nextSelection);
     auditionNote(pair.noteNumber, pair.velocity);
 
     if ((tool !== "select" && tool !== "trim") || !nextSelection.includes(id)) return;
@@ -3756,10 +3795,17 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           ? "resize-end"
           : "move";
 
+    const originalEvents = getLatestClipEvents();
+    noteDragActivatedRef.current = false;
     setDragState({
       mode,
       noteIds: mode === "move" ? nextSelection : [id],
-      originalEvents: getLatestClipEvents(),
+      originalEvents,
+      sourceEvents: originalEvents,
+      originalSelection: [...selectedNoteIds],
+      pendingClickSelection: pendingShiftSelection?.clickSelection,
+      startX: pos.x,
+      startY: pos.y,
       startPointerTime: snapTime(getTimeFromX(pos.x), {
         bypassSnap: Boolean(nativeEvent.ctrlKey || nativeEvent.metaKey),
         originalTime: pair.startTime,
@@ -3775,12 +3821,12 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, [
     auditionNote,
     clipId,
-    duplicateSelectedMIDINotes,
     commitMIDIClipEvents,
     getLatestClipEvents,
     getTimeFromX,
     legatoSelectedMIDINotes,
     pixelsPerSecond,
+    previewMIDIClipEvents,
     removeMIDINotes,
     scrollX,
     selectedNoteIds,
@@ -4301,14 +4347,22 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
 
     if (dragState) {
-      const finalEvents = getLatestClipEvents();
-      const description = dragState.mode === "move"
-        ? "Move MIDI notes"
-        : "Resize MIDI note";
-      commitMIDIClipEvents(trackId, clipId, dragState.originalEvents, finalEvents, description);
-      const preview = latestDragAuditionRef.current;
-      if (preview) auditionNote(preview.noteNumber, preview.velocity, { durationMs: 140 });
+      const pendingClick = dragState.mode === "move" && !noteDragActivatedRef.current && !dragState.isCopy;
+      if (pendingClick) {
+        if (dragState.pendingClickSelection) setSelectedNoteIds(dragState.pendingClickSelection);
+      } else {
+        const finalEvents = getLatestClipEvents();
+        const description = dragState.isCopy
+          ? "Copy MIDI notes"
+          : dragState.mode === "move"
+            ? "Move MIDI notes"
+            : "Resize MIDI note";
+        commitMIDIClipEvents(trackId, clipId, dragState.originalEvents, finalEvents, description);
+        const preview = latestDragAuditionRef.current;
+        if (preview) auditionNote(preview.noteNumber, preview.velocity, { durationMs: 140 });
+      }
       latestDragAuditionRef.current = null;
+      noteDragActivatedRef.current = false;
       setDragState(null);
     }
 

@@ -416,6 +416,42 @@
   text-shadow: 0 1px rgba(255,255,255,.42);
 }
 
+.nam-rack-design-port .octaver-fuzz-faceplate {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  user-select: none;
+}
+.nam-rack-design-port .octaver-fuzz :is(.fuzz-voice-display, .fuzz-clean-readout) {
+  font-size: 7px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.nam-rack-design-port .octaver-fuzz .fuzz-clean-readout {
+  font-variant-numeric: tabular-nums;
+}
+.nam-rack-design-port .nam-fuzz-clean-entry {
+  position: absolute;
+  left: var(--clean-entry-x);
+  top: var(--clean-entry-y);
+  width: 44px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  z-index: 45;
+  appearance: textfield;
+}
+.nam-rack-design-port .nam-fuzz-clean-entry::-webkit-inner-spin-button,
+.nam-rack-design-port .nam-fuzz-clean-entry::-webkit-outer-spin-button {
+  appearance: none;
+}
+.nam-rack-design-port .nam-fuzz-clean-control[data-editing="true"] :is(.asset-control, .knob-position-indicator, .control-hit) {
+  visibility: hidden;
+}
+
 /* Premium NAM Rack: the active runtime shell. Kept as a final, tightly scoped
    layer so the legacy design boards remain available to the source-flow view. */
 

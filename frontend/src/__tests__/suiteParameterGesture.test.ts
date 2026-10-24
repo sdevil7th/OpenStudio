@@ -2,15 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BuiltInParamDescriptor } from "../services/NativeBridge";
 import { useDAWStore } from "../store/useDAWStore";
 import { createSuiteParameterWheel, parseSuiteParameterDraft } from "../utils/suiteParameterGesture";
-import { BuiltInPluginParamHistory } from "../utils/builtInPluginParamHistory";
+import { BuiltInPluginParamHistory, type BuiltInPluginHistoryReplay } from "../utils/builtInPluginParamHistory";
 
 const originalProfile = useDAWStore.getState().mouseBehaviorProfileId;
 const descriptor = (value = .5): BuiltInParamDescriptor => ({ id: "mix", label: "Mix", type: "continuous", min: 0, max: 1, value, defaultValue: .5 });
 afterEach(() => { useDAWStore.setState({ mouseBehaviorProfileId: originalProfile }); vi.useRealTimers(); });
 
-function control(initial = .5) {
-  let parameter = descriptor(initial);
-  const history = new BuiltInPluginParamHistory("chorus-instance");
+function control(initial = .5, overrides: Partial<BuiltInParamDescriptor> = {}) {
+  let parameter = { ...descriptor(initial), ...overrides };
+  const history = new BuiltInPluginParamHistory("suite-instance");
   const commits: Promise<boolean>[] = [];
   const begin = vi.fn(() => { history.begin(parameter.id, parameter.label, parameter.value); });
   const commit = vi.fn(() => { commits.push(history.commit(async () => true)); });
@@ -31,7 +31,7 @@ describe("suite knob gestures", () => {
     await vi.advanceTimersByTimeAsync(180); await Promise.all(knob.commits);
     expect(knob.commit).toHaveBeenCalledTimes(1);
     expect(knob.history.getUndoEntries()).toHaveLength(1);
-    const replay = vi.fn(async () => true);
+    const replay = vi.fn<BuiltInPluginHistoryReplay>(async () => true);
     await expect(knob.history.undo(async () => true, replay)).resolves.toBe("applied");
     expect(replay.mock.calls[0]).toEqual([expect.objectContaining({ changes: [{ paramId: "mix", label: "Mix", before: .5, after: expect.closeTo(.5008, 10) }] }), "before"]);
     await expect(knob.history.redo(async () => true, replay)).resolves.toBe("applied");
@@ -68,5 +68,26 @@ describe("suite knob gestures", () => {
     expect(parseSuiteParameterDraft(" ", 100, descriptor())).toBeNull();
     expect(parseSuiteParameterDraft("NaN", 100, descriptor())).toBeNull();
     expect(parseSuiteParameterDraft("Infinity", 100, descriptor())).toBeNull();
+  });
+
+  it("keeps Reverb output edits in decibels and a wheel burst in one reversible gesture", async () => {
+    vi.useFakeTimers(); useDAWStore.setState({ mouseBehaviorProfileId: "cubase" });
+    const output = { id: "outputTrimDb", label: "Output", min: -60, max: 12, defaultValue: 0, unit: "dB" };
+    const knob = control(-9, output);
+    const parameter = { ...descriptor(-9), ...output };
+    expect(parseSuiteParameterDraft("-9.125", 1, parameter)).toBe(-9.125);
+    expect(parseSuiteParameterDraft("-75", 1, parameter)).toBe(-60);
+    expect(parseSuiteParameterDraft("18", 1, parameter)).toBe(12);
+    knob.wheel.wheel({ deltaY: -100 }); knob.wheel.wheel({ deltaY: -100 });
+    await vi.advanceTimersByTimeAsync(180); await Promise.all(knob.commits);
+    expect(knob.begin).toHaveBeenCalledTimes(1); expect(knob.commit).toHaveBeenCalledTimes(1);
+    expect(knob.history.getUndoEntries()).toEqual([{ instanceId: "suite-instance", changes: [{
+      paramId: "outputTrimDb", label: "Output", before: -9, after: knob.value(),
+    }] }]);
+    const replay = vi.fn<BuiltInPluginHistoryReplay>(async () => true);
+    await expect(knob.history.undo(async () => true, replay)).resolves.toBe("applied");
+    await expect(knob.history.redo(async () => true, replay)).resolves.toBe("applied");
+    expect(replay.mock.calls.map(call => call[1])).toEqual(["before", "after"]);
+    knob.wheel.dispose();
   });
 });

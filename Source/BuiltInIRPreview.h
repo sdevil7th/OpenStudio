@@ -48,6 +48,13 @@ public:
         result->setProperty("preparing",owns&&preparing);result->setProperty("playing",owns&&state.load()>0&&!stopRequested.load());
         result->setProperty("progress",owns?progress.load():0.0f);return result;
     }
+    // Preparation alone is not audible. Published audio, including its stop
+    // ramp, stays active until render retires it; a later publication is seen
+    // by the next callback without another mutable activity flag.
+    bool mayRender() const noexcept
+    {
+        return state.load(std::memory_order_acquire) > 0;
+    }
     void render(float* const* output,int channels,int count,double sampleRate) noexcept
     {
         int ready=1;if(!state.compare_exchange_strong(ready,2))return;

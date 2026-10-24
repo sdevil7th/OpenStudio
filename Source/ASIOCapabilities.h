@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <cmath>
 
 #if JUCE_WINDOWS && JUCE_ASIO
 #ifndef NOMINMAX
@@ -58,16 +59,21 @@ inline bool query(const juce::String& name, juce::DynamicObject& result,
     if (preferred > 0 && preferred >= minimum && preferred <= maximum
         && !buffers.contains(juce::var(static_cast<int>(preferred)))) buffers.add(static_cast<int>(preferred));
     double currentRate = 0;
-    driver->getSampleRate(&currentRate);
+    const bool currentRateRead = driver->getSampleRate(&currentRate) == ASE_OK
+        && std::isfinite(currentRate) && currentRate > 0.0;
     juce::Array<juce::var> rates;
     for (const double rate : { 8000., 11025., 16000., 22050., 32000., 44100., 48000., 64000., 88200., 96000., 176400., 192000., 352800., 384000., 705600., 768000. })
         if (driver->canSampleRate(rate) == ASE_OK) rates.add(rate);
-    if (currentRate > 0 && !rates.contains(juce::var(currentRate))) rates.add(currentRate);
+    if (currentRateRead && !rates.contains(juce::var(currentRate))) rates.add(currentRate);
     if (rates.isEmpty() || buffers.isEmpty()) return false;
     result.setProperty("sampleRates", rates);
     result.setProperty("bufferSizes", buffers);
-    result.setProperty("defaultSampleRate", currentRate > 0 ? currentRate : static_cast<double>(rates[0]));
+    result.setProperty("defaultSampleRate", currentRateRead ? currentRate : static_cast<double>(rates[0]));
     result.setProperty("defaultBufferSize", static_cast<int>(preferred > 0 ? preferred : minimum));
+    // Qualification/restoration must distinguish a driver readback from defaults.
+    result.setProperty("currentSampleRateReadbackValid", currentRateRead);
+    result.setProperty("reportedCurrentSampleRate", currentRateRead ? currentRate : 0.0);
+    result.setProperty("reportedPreferredBufferSize", static_cast<int>(preferred));
     long inputs = 0, outputs = 0;
     if (driver->getChannels(&inputs, &outputs) == ASE_OK)
     {

@@ -17,8 +17,8 @@ inline juce::var checkReverbHoldPolicies()
         juce::AudioBuffer<float> output(2,length),block(2,blockSize);juce::MidiBuffer midi;juce::uint32 random=123;
         for(int start=0;start<length;)
         {
-            if(start==startHold){if(type==5)reverb->shimmerHold.store(1);else reverb->freezeMode.store(1);}
-            if(start==releaseHold){reverb->shimmerHold.store(0);reverb->freezeMode.store(0);}
+            if(start==startHold){if(type==5)reverb->shimmerHold.store(1);else if(type==6)reverb->nonlinearHold.store(1);else reverb->freezeMode.store(1);}
+            if(start==releaseHold){reverb->shimmerHold.store(0);reverb->nonlinearHold.store(0);reverb->freezeMode.store(0);}
             int count=juce::jmin(blockSize,length-start);for(int event:{startHold,extraStart,extraEnd,releaseHold})if(start<event)count=juce::jmin(count,event-start);
             block.setSize(2,count,false,false,true);block.clear();
             for(int i=0;i<count;++i)
@@ -31,9 +31,9 @@ inline juce::var checkReverbHoldPolicies()
         }
         return output;
     };
-    for(double rate:{44100.0,48000.0,96000.0,192000.0})for(int type:{0,1,2,3,5,8,9,12,13})
+    for(double rate:{44100.0,48000.0,96000.0,192000.0})for(int type:{0,1,2,3,5,6,8,9,12,13})
     {
-        if(rate!=48000&&type!=1&&type!=2&&type!=5&&type!=12)continue;
+        if(rate!=48000&&type!=1&&type!=2&&type!=5&&type!=6&&type!=12)continue;
         const auto frozen=render(type,rate,127,false,false),rejected=render(type,rate,127,false,true),added=render(type,rate,127,true,true);
         double rejectError=0,addedDifference=0,heldEnergy=0,releasedEnergy=0;
         for(int ch=0;ch<2;++ch)for(int i=0;i<frozen.getNumSamples();++i)

@@ -19,6 +19,7 @@ import {
 import { _editSnapshots, syncAutomationLaneToBackend } from "./storeHelpers";
 import { createAutomationPointId } from "./automation";
 import { isClipEditLocked } from "../../utils/clipEditLock";
+import { createTimelineClipCopyAction } from "./timelineClipCopy";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
@@ -3259,13 +3260,15 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       if (sources.length === 0) return [];
 
       const selectionBefore = cloneSelectionSnapshot(state);
+      const groupOffset = Math.max(...sources.map((found) => found.clip.startTime + found.clip.duration))
+        - Math.min(...sources.map((found) => found.clip.startTime));
       const duplicates = sources.map((found: any) => ({
         trackId: found.trackId,
         kind: found.kind,
         clip: {
           ...cloneTimelineClipDeep(found.clip, true),
           id: crypto.randomUUID(),
-          startTime: found.clip.startTime + found.clip.duration,
+          startTime: found.clip.startTime + groupOffset,
         },
       }));
       const newIds = duplicates.map((entry: any) => entry.clip.id);
@@ -3323,71 +3326,20 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       return newIds;
     },
 
-    duplicateClipToPosition: (clipId, targetTrackId, targetStartTime) => {
-      const state = get();
-      const found = findTimelineClip(state, clipId);
-      const targetTrack = state.tracks.find((track: any) => track.id === targetTrackId);
-      if (!found
-          || !targetTrack
-          || isClipEditLocked(state, found.clip)
-          || !Number.isFinite(targetStartTime)) return null;
+    duplicateClipToPosition: (clipId, targetTrackId, targetStartTime) => (
+      get().duplicateClipsToPositions([{ clipId, targetTrackId, targetStartTime: Math.max(0, targetStartTime) }])[0] ?? null
+    ),
 
-      const isMidi = found.kind === "midi";
-      if (isMidi && targetTrack.type !== "midi" && targetTrack.type !== "instrument") return null;
-      if (!isMidi && (targetTrack.type === "midi" || targetTrack.type === "instrument")) return null;
-
-      const oldTracks = cloneTracksForTimelineUndo(state.tracks);
-      const selectionBefore = cloneSelectionSnapshot(state);
-      const newClipId = crypto.randomUUID();
-      const newClip = {
-        ...cloneTimelineClipDeep(found.clip, true),
-        id: newClipId,
-        startTime: Math.max(0, targetStartTime),
-        color: targetTrack.color || found.clip.color,
-      };
-      let newTracks = oldTracks.map((track: any) => track.id === targetTrackId
-        ? isMidi
-          ? { ...track, midiClips: [...track.midiClips, newClip] }
-          : { ...track, clips: [...track.clips, newClip] }
-        : track);
-      if (state.moveEnvelopesWithItems && !state.lockSettings?.envelopes) {
-        newTracks = copyAutomationPointsWithClips(newTracks, [{
-          clipId,
-          sourceTrackId: found.trackId,
-          targetTrackId,
-          originalStartTime: found.clip.startTime,
-          newStartTime: newClip.startTime,
-          duration: found.clip.duration,
-        }], oldTracks);
-      }
-      newTracks = cloneTracksForTimelineUndo(newTracks);
-      const selectionAfter = {
-        ...selectionBefore,
-        selectedClipId: newClipId,
-        selectedClipIds: [newClipId],
-      };
-      const applySnapshot = (tracks: any[], selection: any, context: string) => {
-        const previousTracks = cloneTracksForTimelineUndo(get().tracks);
-        const nextTracks = cloneTracksForTimelineUndo(tracks);
-        set({ tracks: nextTracks, ...selection, isModified: true });
-        if (isMidi) syncMIDITracksForTimelineClips(get, nextTracks);
-        else syncClipPropertyEdit(get, context);
-        syncAutomationTrackSnapshots(previousTracks, nextTracks);
-      };
-
-      commandManager.execute({
-        type: "DUPLICATE_CLIP_TO_POSITION",
-        description: isMidi ? "Copy MIDI clip" : "Copy clip",
-        timestamp: Date.now(),
-        execute: () => applySnapshot(newTracks, selectionAfter, "copy audio clip"),
-        undo: () => applySnapshot(oldTracks, selectionBefore, "undo copy audio clip"),
-      });
-      set({
-        canUndo: commandManager.canUndo(),
-        canRedo: commandManager.canRedo(),
-      });
-      return newClipId;
-    },
+    duplicateClipsToPositions: createTimelineClipCopyAction({
+      set,
+      get,
+      cloneTracks: cloneTracksForTimelineUndo,
+      cloneClip: cloneTimelineClipDeep,
+      copyAutomation: copyAutomationPointsWithClips,
+      syncAudio: (context) => syncClipPropertyEdit(get, context),
+      syncMIDI: (tracks) => syncMIDITracksForTimelineClips(get, tracks),
+      syncAutomation: syncAutomationTrackSnapshots,
+    }),
 
     repeatClip: (clipId, repeatCount = 3) => {
       const state = get();

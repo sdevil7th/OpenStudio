@@ -22,6 +22,7 @@ import {
 import { dispatchGlobalShortcut } from "./utils/globalShortcutDispatcher";
 import { toGlobalShortcutPayload } from "./utils/domShortcutEvent";
 import { activateShortcutContext } from "./utils/shortcutContext";
+import { trackDragSourceIds } from "./utils/trackCopyPlanning";
 import {
   installModalContextMenuLeakGuard,
   shouldSuppressWorkspaceContextMenu,
@@ -118,6 +119,8 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  type DragStartEvent,
+  type DragEndEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -1410,14 +1413,55 @@ function App() {
   );
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [activeTrackCopy, setActiveTrackCopy] = useState(false);
+  const trackDragIdsRef = useRef<string[]>([]);
+  const trackCopyRef = useRef(false);
 
-  const handleDragStart = (event: any) => {
-    setActiveDragId(event.active.id.toString());
+  useEffect(() => {
+    if (!activeDragId) return;
+    const onModifier = (event: KeyboardEvent) => {
+      const copy = event.ctrlKey || event.metaKey;
+      trackCopyRef.current = copy;
+      setActiveTrackCopy(copy);
+    };
+    window.addEventListener("keydown", onModifier);
+    window.addEventListener("keyup", onModifier);
+    return () => {
+      window.removeEventListener("keydown", onModifier);
+      window.removeEventListener("keyup", onModifier);
+    };
+  }, [activeDragId]);
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const draggedId = event.active.id.toString();
+    const state = useDAWStore.getState();
+    trackDragIdsRef.current = trackDragSourceIds(state.tracks, state.selectedTrackIds, draggedId);
+    const modifiers = event.activatorEvent as PointerEvent | KeyboardEvent;
+    trackCopyRef.current = Boolean(modifiers.ctrlKey || modifiers.metaKey);
+    setActiveTrackCopy(trackCopyRef.current);
+    setActiveDragId(draggedId);
   };
 
-  const handleDragEnd = (event: any) => {
+  const clearTrackDrag = () => {
     setActiveDragId(null);
+    setActiveTrackCopy(false);
+    trackCopyRef.current = false;
+    trackDragIdsRef.current = [];
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const copy = trackCopyRef.current;
+    const sourceIds = [...trackDragIdsRef.current];
+    clearTrackDrag();
     const { active, over } = event;
+
+    if (copy && active && over && sourceIds.length > 0) {
+      void useDAWStore.getState().duplicateSelectedTracks({
+        trackIds: sourceIds,
+        beforeTrackId: active.id !== over.id ? over.id.toString() : undefined,
+      });
+      return;
+    }
 
     if (active && over && active.id !== over.id) {
       const { selectedTrackIds, reorderMultipleTracks } = useDAWStore.getState();
@@ -1425,7 +1469,7 @@ function App() {
       if (selectedTrackIds.length > 1 && selectedTrackIds.includes(active.id.toString())) {
         reorderMultipleTracks(selectedTrackIds, over.id.toString());
       } else {
-        reorderTrack(active.id, over.id);
+        reorderTrack(active.id.toString(), over.id.toString());
       }
     }
   };
@@ -1528,6 +1572,7 @@ function App() {
               collisionDetection={closestCenter}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
+              onDragCancel={clearTrackDrag}
             >
               <SortableContext
                 items={visibleTracks.map((t) => t.id)}
@@ -1539,7 +1584,7 @@ function App() {
                   );
                   return (
                     <div key={track.id}>
-                      <SortableTrackHeader track={track} />
+                      <SortableTrackHeader track={track} copying={activeTrackCopy} />
                       {spacer && (
                         <div
                           className="bg-daw-darker border-b border-daw-border cursor-row-resize group relative"
@@ -1574,14 +1619,11 @@ function App() {
               </SortableContext>
               <DragOverlay dropAnimation={null}>
                 {activeDragId && (() => {
-                  const { selectedTrackIds } = useDAWStore.getState();
-                  const isMulti = selectedTrackIds.length > 1 && selectedTrackIds.includes(activeDragId);
-                  const dragTracks = isMulti
-                    ? tracks.filter((t) => selectedTrackIds.includes(t.id))
-                    : tracks.filter((t) => t.id === activeDragId);
+                  const dragTracks = tracks.filter((track) => trackDragIdsRef.current.includes(track.id));
+                  const isMulti = dragTracks.length > 1;
                   const trackHeight = useDAWStore.getState().trackHeight;
                   return (
-                    <div className="opacity-80 shadow-xl rounded overflow-hidden" style={{ width: '100%' }}>
+                    <div className={`${activeTrackCopy ? "opacity-50" : "opacity-80"} shadow-xl rounded overflow-hidden w-full`} data-track-drag-copy={activeTrackCopy}>
                       {dragTracks.map((t) => (
                         <div
                           key={t.id}
@@ -1592,9 +1634,9 @@ function App() {
                           <span className="ml-2 text-xs text-neutral-200 truncate">{t.name}</span>
                         </div>
                       ))}
-                      {isMulti && (
+                      {(isMulti || activeTrackCopy) && (
                         <div className="bg-blue-600/80 text-white text-[10px] text-center py-0.5">
-                          {dragTracks.length} tracks
+                          {activeTrackCopy ? "Copy " : ""}{dragTracks.length} track{dragTracks.length === 1 ? "" : "s"}
                         </div>
                       )}
                     </div>

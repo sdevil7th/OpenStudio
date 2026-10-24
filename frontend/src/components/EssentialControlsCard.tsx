@@ -41,7 +41,7 @@ export function EssentialControlsCard() {
   const shortcuts = useMemo(() => ({
     help: getEffectiveShortcutLabel("help.contextualHelp", "F1"),
     play: getEffectiveShortcutLabel("transport.play", "Space"),
-    record: getEffectiveShortcutLabel("transport.record", "Ctrl+R"),
+    record: getEffectiveShortcutLabel("transport.record", "R"),
     addTrack: getEffectiveShortcutLabel("insert.audioTrack", "Ctrl+T"),
     mixer: getEffectiveShortcutLabel("view.toggleMixer", "Ctrl+M"),
   }), [customShortcuts, keyboardShortcutProfileId]);

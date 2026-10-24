@@ -1,4 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this asset audit in Node.
 import { readFileSync } from "node:fs";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";

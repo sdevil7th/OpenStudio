@@ -1,4 +1,6 @@
 #pragma once
+#include "BuiltInReverbDamping.h"
+#include "BuiltInInfiniteHoldBudget.h"
 #include <JuceHeader.h>
 #include <array>
 #include <vector>
@@ -47,7 +49,7 @@ public:
             for (size_t stage = 0; stage < smear.size(); ++stage)
                 diffusers[channel][stage].prepare(static_cast<size_t>(rate * (smear[stage] + static_cast<float>(channel) * .0003f)) + 1);
         for (auto& gain : feedback) gain.reset(rate, .05);
-        holdWeight.reset(rate,.05);
+        holdWeight.reset(rate,.05);dampingRamp.reset(rate,.05);
         reset();
     }
     void reset() noexcept
@@ -58,9 +60,9 @@ public:
     void resetLate() noexcept
     {
         for (auto& line : tank) line.reset();
-        damping.fill(0); initialized = false;holdWeight.setCurrentAndTargetValue(0);
+        damping.fill(0); initialized = false;holdWeight.setCurrentAndTargetValue(0);holdBudget.reset();
     }
-    void configure(float decay, float tone, bool hold=false) noexcept
+    void configure(float decay, float tone, bool hold=false, bool corrected=false) noexcept
     {
         const float seconds = juce::jlimit(.1f, 20.0f, decay);
         for (size_t i = 0; i < tank.size(); ++i)
@@ -69,6 +71,9 @@ public:
             if (initialized) feedback[i].setTargetValue(gain); else feedback[i].setCurrentAndTargetValue(gain);
         }
         dampingCoefficient = juce::jlimit(.03f, .95f, .95f - tone * .9f);
+        correctedControls=corrected;
+        const float target=BuiltInReverbDamping::alpha(dampingCoefficient,rate);
+        if(initialized)dampingRamp.setTargetValue(target);else dampingRamp.setCurrentAndTargetValue(target);
         if(initialized)holdWeight.setTargetValue(hold?1.0f:0.0f);else holdWeight.setCurrentAndTargetValue(hold?1.0f:0.0f);
         initialized = true;
     }
@@ -88,8 +93,10 @@ public:
         }
         return result;
     }
-    std::array<float, 2> process(const std::array<float, 2>& input, float depthSamples = 0, float phaseSine = 0, float phaseCosine = 1) noexcept
+    std::array<float, 2> process(const std::array<float, 2>& input, float depthSamples = 0, float phaseSine = 0, float phaseCosine = 1, float infiniteLimit = 0) noexcept
     {
+        const float nextTone=dampingRamp.getNextValue();
+        if(correctedControls)dampingCoefficient=nextTone;
         const float held=holdWeight.getNextValue(),tone=dampingCoefficient+(1-dampingCoefficient)*held;
         std::array<float, 8> taps {};
         float sum = 0;
@@ -99,23 +106,29 @@ public:
             sum += taps[i];
         }
         std::array<float, 2> wet {};
+        std::array<float, 8> nextSamples {};
         for (size_t i = 0; i < tank.size(); ++i)
         {
             const float reflection = taps[i] - .25f * sum;
             damping[i] += tone * (reflection - damping[i]);
             const float next=input[i % 2] * .22f + damping[i] * feedback[i].getNextValue();
-            tank[i].write(held>0?juce::jlimit(-4.0f,4.0f,next):next);
+            nextSamples[i]=next;
             wet[i % 2] += taps[i] * (i < 4 ? .35f : -.35f);
         }
+        if(infiniteLimit>0)holdBudget.process(nextSamples,infiniteLimit);
+        for(size_t i=0;i<tank.size();++i)
+            tank[i].write(held>0?juce::jlimit(-4.0f,4.0f,nextSamples[i]):nextSamples[i]);
         return wet;
     }
+    const BuiltInInfiniteHoldBudget& infiniteBudget()const noexcept{return holdBudget;}
 private:
     float rate = 48000, dampingCoefficient = .5f;
-    bool initialized = false;
-    juce::SmoothedValue<float> holdWeight;
+    bool initialized = false, correctedControls = false;
+    juce::SmoothedValue<float> holdWeight,dampingRamp;
     std::array<Delay, 8> tank;
     std::array<std::array<Delay, 4>, 2> diffusers;
     std::array<float, 8> damping {};
     std::array<std::array<float, 2>, 8> phaseRotations {};
     std::array<juce::SmoothedValue<float>, 8> feedback;
+    BuiltInInfiniteHoldBudget holdBudget;
 };

@@ -24,10 +24,14 @@
 #include "BuiltInEffects.h"
 #include "BuiltInUtilityEffects.h"
 #include "BuiltInEffects2.h"
+#include "BuiltInReverbFactoryPresets.h"
 #include "NAMModelSafety.h"
 #include "PluginStateValidation.h"
 #include "SendGraphSafety.h"
 #include "NAMDelayRegression.h"
+#include "NAMFuzzRegression.h"
+#include "NAMNonlinearAliasAnalysis.h"
+#include "NAMRackCpuRegression.h"
 #include "OpenStudioPitchCorrector.h"
 #include "PitchAnalyzer.h"
 #include "PitchResynthesizer.h"
@@ -38,6 +42,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <filesystem>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -2869,7 +2874,8 @@ class ScopedAudioCallbackProcessingPause final
 public:
     ScopedAudioCallbackProcessingPause(
         std::atomic<bool>& processingPauseFlagToUse,
-        juce::AudioDeviceManager& deviceManager)
+        juce::AudioDeviceManager& deviceManager,
+        RealtimeTrackExecutor* executor = nullptr)
         : processingPauseFlag(processingPauseFlagToUse),
           previousPauseState(
               processingPauseFlag.exchange(
@@ -2877,6 +2883,7 @@ public:
     {
         const juce::ScopedLock callbackDrain(
             deviceManager.getAudioCallbackLock());
+        if (executor != nullptr) executor->drain();
     }
 
     ~ScopedAudioCallbackProcessingPause()
@@ -3297,7 +3304,8 @@ void AudioEngine::publishRealtimeMonitoringSnapshot(
         snapshot.get(), std::memory_order_seq_cst);
 }
 
-AudioEngine::AudioEngine()
+AudioEngine::AudioEngine(DeviceStartup startup)
+    : deviceStartupMode(startup)
 {
     pluginAutomationClock->positionSource = &currentSamplePosition;
     masterTrimVolumeAutomation.setDefaultValue(0.0f);
@@ -3347,14 +3355,28 @@ AudioEngine::AudioEngine()
 
     // Now open the audio device and register the callback. This is done last so
     // that all members above are valid when audioDeviceAboutToStart() fires.
-    loadDeviceSettings();
-    deviceManager.addAudioCallback (this);
+    if (startup == DeviceStartup::openHardware)
+    {
+        loadDeviceSettings();
+        registerHardwareAudioCallback();
+    }
+    else
+    {
+        juce::Logger::writeToLog("AudioEngine: Offline startup; hardware settings, device opens and callback registration skipped.");
+    }
 
     // Initialize Lua scripting engine (runs on message thread only)
     scriptEngine.registerAPI(*this);
 
     juce::Logger::writeToLog("AudioEngine: MIDI Manager initialized");
     juce::Logger::writeToLog("AudioEngine: Lua ScriptEngine initialized");
+}
+
+void AudioEngine::registerHardwareAudioCallback()
+{
+    if (deviceStartupMode == DeviceStartup::offline) return;
+    hardwareCallbackRegistrationCount.fetch_add(1, std::memory_order_relaxed);
+    deviceManager.addAudioCallback(this);
 }
 
 AudioEngine::~AudioEngine()
@@ -3371,6 +3393,8 @@ AudioEngine::~AudioEngine()
     controlSurfaceManager.setCallback(nullptr);
     deferredCallbacks.invalidate();
     deviceManager.removeAudioCallback (this);
+    drainRealtimeTrackExecution();
+    realtimeTrackExecutor.stop();
     realtimeTrackSnapshotForAudio.store(
         nullptr, std::memory_order_seq_cst);
     realtimeMasterFXSnapshotForAudio.store(
@@ -3876,6 +3900,10 @@ void AudioEngine::rebuildRealtimeProcessingSnapshots()
         entry.node = nodeIt->second;
         entry.processor =
             dynamic_cast<TrackProcessor*>(entry.node->getProcessor());
+        entry.work = std::make_shared<RealtimeTrackWork>();
+        entry.work->capacity = juce::jmax(1, currentBlockSize);
+        entry.work->buffer.setSize(TrackProcessor::maxProcessingChannels, entry.work->capacity);
+        entry.work->midi.ensureSize(131072);
 
         if (auto* track = entry.processor)
         {
@@ -3901,6 +3929,7 @@ void AudioEngine::rebuildRealtimeProcessingSnapshots()
         sidechainOutputBuffers,
         sendAccumBuffers);
     trackSnapshot.processingOrder.resize(tracks.size());
+    trackSnapshot.jobs = std::make_unique<RealtimeTrackExecutor::Job[]>(tracks.size());
     buildSidechainProcessingOrder(
         tracks,
         trackSnapshot.processingOrder.data(),
@@ -4513,6 +4542,7 @@ void AudioEngine::registerWindowsAudioCallbackMMCSS() noexcept
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
+    drainRealtimeTrackExecution();
     if (device == nullptr)
     {
         juce::Logger::writeToLog("AudioEngine ERROR: audioDeviceAboutToStart called with nullptr device!");
@@ -4641,7 +4671,6 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
                 * continuityRampSeconds));
     // Covers bounded seek caches (including per-note pressure), the fixed input
     // queue and a full channel/note reset without growing these buffers at seek.
-    reusableRealtimeMidiBuffer.ensureSize(131072);
     reusableMasterMidiBuffer.ensureSize(131072);
     reusableMonitoringMidiBuffer.ensureSize(131072);
         for (auto& continuity : masterFXContinuity)
@@ -4713,10 +4742,13 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         // this device.
         recalculatePDC();
     }
+    realtimeTrackExecutor.prepare(requestedRealtimeWorkers);
 }
 
 void AudioEngine::audioDeviceStopped()
 {
+    drainRealtimeTrackExecution();
+    realtimeTrackExecutor.stop();
     instrumentPreview.stopAll();
     irPreview.stopAll();
     if (isRecordMode.load(std::memory_order_acquire))
@@ -4743,6 +4775,118 @@ void AudioEngine::audioDeviceStopped()
         // restart avoids leaking another disconnected IO-node pair each time
         // the device configuration changes.
     }
+}
+
+void AudioEngine::runParallelTrackJob(void* context) noexcept
+{
+    auto& work = *static_cast<RealtimeTrackWork*>(context);
+    const ScopedPluginAutomationProcessing capture(work.position, work.rate,
+                                                   work.automationEpoch, work.playing);
+    work.processed = work.processor->tryProcessBlockParallel(work.buffer, work.midi,
+                                                            work.graphGeneration);
+}
+
+void AudioEngine::drainRealtimeTrackExecution()
+{
+    realtimeTrackExecutor.drain();
+    if (pendingParallelSnapshot != nullptr)
+    {
+        pendingParallelSnapshot = nullptr;
+        realtimeSnapshotAudioReaders.fetch_sub(1, std::memory_order_seq_cst);
+    }
+}
+
+bool AudioEngine::setRealtimeTrackWorkerCount(int workers)
+{
+    if (workers < -1 || workers > RealtimeTrackExecutor::maximumWorkerCount) return false;
+    const ScopedAudioCallbackProcessingPause pause(isRendering, deviceManager, &realtimeTrackExecutor);
+    drainRealtimeTrackExecution();
+    requestedRealtimeWorkers = workers;
+    return realtimeTrackExecutor.prepare(workers);
+}
+
+bool AudioEngine::setRealtimeTrackWorkerSpinMicroseconds(int microseconds)
+{
+    const ScopedAudioCallbackProcessingPause pause(isRendering, deviceManager, &realtimeTrackExecutor);
+    return realtimeTrackExecutor.setWorkerSpinMicroseconds(microseconds);
+}
+
+bool AudioEngine::setProbeTrackRecoveryGraceMicroseconds(int microseconds)
+{
+    if (deviceStartupMode != DeviceStartup::offline || microseconds < 0 || microseconds > 2000)
+        return false;
+    probeTrackRecoveryGraceMicroseconds.store(microseconds, std::memory_order_release);
+    return true;
+}
+
+bool AudioEngine::setProbeNAMRackOversamplingFactor(const juce::String& trackId, int factor)
+{
+    // Probe-only request before device preparation; never change saved settings.
+    if (deviceStartupMode != DeviceStartup::offline || deviceManager.getCurrentAudioDevice() != nullptr
+        || isRecordMode.load() || isRendering.load() || (factor != 2 && factor != 4 && factor != 8))
+        return false;
+    const auto owner = getPublishedBuiltInProcessor(trackId, "track", 0);
+    auto* rack = dynamic_cast<OpenStudioNAMRack*>(owner.processor.get());
+    if (rack == nullptr) return false;
+    rack->setEmbeddedDriveOversamplingFactor(factor);
+    return rack->getEmbeddedDriveOversamplingFactor() == factor;
+}
+
+juce::var AudioEngine::getRealtimeTrackExecutionDiagnostics() const
+{
+    auto result = realtimeTrackExecutor.getDiagnosticState();
+    if (auto* object = result.getDynamicObject())
+    {
+        object->setProperty("parallelTrackBlocks", static_cast<juce::int64>(parallelTrackBlocks.load()));
+        object->setProperty("rejectedTrackJobs", static_cast<juce::int64>(parallelTrackRejectedJobs.load()));
+        object->setProperty("quarantinedBlocks", static_cast<juce::int64>(parallelQuarantinedBlocks.load()));
+        object->setProperty("lastFailureCallbackCounter", static_cast<juce::int64>(parallelLastFailureCallback.load()));
+        object->setProperty("physicalCores", juce::SystemStats::getNumPhysicalCpus());
+        object->setProperty("addedBufferingSamples", 0);
+        object->setProperty("recoveryGraceMicroseconds", probeTrackRecoveryGraceMicroseconds.load());
+    }
+    return result;
+}
+
+bool AudioEngine::setProbeRecordingDirectory(const juce::File& directory)
+{
+    if (deviceStartupMode != DeviceStartup::offline || isRecordMode.load()
+        || directory == juce::File()) return false;
+    probeRecordingDirectory = directory;
+    return true;
+}
+
+void AudioEngine::recordQuarantinedTrackInput(const RealtimeTrackEntry& entry,
+    const float* const* inputs, int inputCount, int samples, juce::int64 blockPosition)
+{
+    // This is a recorder-only lane. It never accesses DSP buffers, MIDI queues,
+    // position setters, meters or any other worker-owned TrackProcessor state.
+    if (!isPlaying.load() || !isRecordMode.load() || recordingDeviceInterrupted.load()) return;
+    const double position = static_cast<double>(blockPosition) / juce::jmax(1.0, currentSampleRate);
+    if (punchEnabled.load() && (position < punchStartTime.load() || position >= punchEndTime.load())) return;
+    const double compensated = juce::jmax(0.0, static_cast<double>(blockPosition - inputLatencySamples)
+                                              / juce::jmax(1.0, currentSampleRate));
+    auto* track = entry.processor;
+    if (track == nullptr || !track->getRecordArmed() || track->getTrackType() != TrackType::Audio) return;
+    const int start = track->getInputStartChannel();
+    const int channels = juce::jmin(track->getInputChannelCount(), reusableTrackBuffer.getNumChannels());
+    if (start < 0 || start >= inputCount || channels <= 0) return;
+    reusableTrackBuffer.clear(0, samples);
+    // A newer routing snapshot may add an incoming send after this processor
+    // entered the old, isolated batch. Only the callback writes this current
+    // accumulator; preserve its contribution without touching owned DSP data.
+    if (entry.sendAccumBuffer != nullptr && entry.sendAccumBuffer->getNumSamples() >= samples)
+        for (int channel = 0; channel < juce::jmin(2, reusableTrackBuffer.getNumChannels(),
+                                                  entry.sendAccumBuffer->getNumChannels()); ++channel)
+            reusableTrackBuffer.addFrom(channel, 0, *entry.sendAccumBuffer, channel, 0, samples);
+    playbackEngine.fillTrackBuffer(entry.id, reusableTrackBuffer,
+        position - track->getPlaybackOffset() / 1000.0, samples, currentSampleRate);
+    const bool automationCanUnmute = track->getMuteAutomation().shouldPlayback()
+        && track->getMuteAutomation().hasPlaybackData();
+    if (!track->getMute() || automationCanUnmute)
+        for (int channel = 0; channel < channels && start + channel < inputCount; ++channel)
+            reusableTrackBuffer.addFrom(channel, 0, inputs[start + channel], samples);
+    audioRecorder.writeBlock(entry.id, reusableTrackBuffer, samples, compensated);
 }
 
 void AudioEngine::audioDeviceError(
@@ -6568,22 +6712,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             ? juce::Time::getHighResolutionTicks()
             : 0;
 
-    // The immutable routing publication owns the sidechain/send topological
-    // order. The callback only walks that precomputed array.
+    // Both execution modes share input preparation, raw recording and final
+    // reduction. Only the independent per-track DSP runs on audio workers.
     bool anyActiveARAInCallback = false;
-    for (int orderIdx = 0;
-         orderIdx < rtTracks->processingOrderCount;
-         ++orderIdx)
+    const auto prepareTrack = [&](const RealtimeTrackEntry& trackEntry,
+                                  RealtimeTrackWork& work) -> bool
     {
-        const int trackIdx =
-            rtTracks->processingOrder[
-                static_cast<size_t>(orderIdx)];
-        const auto& trackEntry =
-            rtTracks->tracks[static_cast<size_t>(trackIdx)];
         const auto& trackId = trackEntry.id;
         auto* track = trackEntry.processor;
         if (!track)
-            continue;
+            return false;
 
         const bool hasActiveARA = track->hasActiveARA();
         if (hasActiveARA)
@@ -6609,7 +6747,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (excludedBySolo && !needsRecordingPath)
         {
             track->resetRMS();
-            continue;
+            return false;
         }
 
         const bool isMidiTrack = track->getTrackType() == TrackType::MIDI
@@ -6635,7 +6773,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             // Safety check
             if (startChan < 0 || startChan >= numInputChannels)
-                continue;
+                return false;
         }
 
         // Skip this track if it's not playing clips and not eligible for live input.
@@ -6651,35 +6789,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 false))
         {
             track->resetRMS();  // Clear meter so it drops to zero when idle
-            continue;
+            return false;
         }
 
-        // Non-owning view of the pre-allocated buffer — avoids heap alloc on audio thread.
-        // ALWAYS 2 channels (stereo) for proper pan support.
-        //
-        // IMPORTANT: getWritePointer() is used (not getArrayOfWritePointers()) because
-        // it sets isClear=false on reusableTrackBuffer as a side effect. Without this,
-        // AudioBuffer's isClear optimisation makes clear() a no-op when a previous iteration
-        // left isClear=true, and makes applyGain/getRMSLevel skip processing (they also
-        // guard on isClear), causing stale signal to accumulate across track iterations.
-        //
-        // A callback larger than the device's prepared maximum is a host/device
-        // configuration fault. Resizing only this wrapper buffer here would
-        // allocate on the realtime thread while every TrackProcessor/plugin
-        // scratch buffer is still prepared for the old maximum. Omit the track
-        // for this exceptional block and expose it through diagnostics.
-        if (reusableTrackBuffer.getNumSamples() < numSamples || reusableTrackBuffer.getNumChannels() < 2)
+        if (numSamples > work.capacity || track->getProcessingChannelCount() > TrackProcessor::maxProcessingChannels)
         {
-            audioCallbackTrackBufferResizeCount.fetch_add (1, std::memory_order_relaxed);
+            audioCallbackTrackBufferResizeCount.fetch_add(1, std::memory_order_relaxed);
             track->resetRMS();
-            continue;
+            return false;
         }
-
-        const int trackChannels = juce::jmin(track->getProcessingChannelCount(), reusableTrackBuffer.getNumChannels());
-        std::array<float*, TrackProcessor::maxProcessingChannels> trackChans {};
-        for (int channel = 0; channel < trackChannels; ++channel)
-            trackChans[static_cast<size_t>(channel)] = reusableTrackBuffer.getWritePointer(channel);
-        juce::AudioBuffer<float> trackBuffer(trackChans.data(), trackChannels, numSamples);
+        // Capacity is reserved during publication. avoidReallocating keeps
+        // active block/channel changes inside the owned allocation.
+        work.buffer.setSize(track->getProcessingChannelCount(), numSamples, false, false, true);
+        auto& trackBuffer = work.buffer;
         trackBuffer.clear();
 
         // ========== MIX IN ACCUMULATED SENDS from other tracks ==========
@@ -6753,9 +6875,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                         < numInputChannels;
                  ++ch)
             {
-                if (isPlaying)
+                if (isPlaying || trackEntry.hasIncomingSends)
                 {
-                    // Mix input with playback (overdub mode)
+                    // Preserve accumulated sends while monitoring stopped,
+                    // and playback material while overdubbing.
                     juce::FloatVectorOperations::add(
                         trackBuffer.getWritePointer(ch),
                         inputChannelData[startChan + ch],
@@ -6838,30 +6961,42 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             / juce::jmax(
                 1.0, currentSampleRate));
 
-        // Immutable per-effect bindings are shared by playback and export.
-        track->setSidechainBuffers(&trackEntry.sidechainRoutes);
 
         // Process through track (applies volume, pan, FX, automation)
-        reusableRealtimeMidiBuffer.clear();
-        track->buildMidiBuffer(reusableRealtimeMidiBuffer,
+        work.midi.clear();
+        track->buildMidiBuffer(work.midi,
                                blockStartTimeSeconds,
                                numSamples,
                                currentSampleRate,
                                isPlaying.load());
-        auto& midiMessages = reusableRealtimeMidiBuffer;
+        auto& midiMessages = work.midi;
         int prevMidiMax = midiMaxEventsPerBlock.load(std::memory_order_relaxed);
         while (midiMessages.getNumEvents() > prevMidiMax
                && !midiMaxEventsPerBlock.compare_exchange_weak(prevMidiMax, midiMessages.getNumEvents(),
                                                                std::memory_order_relaxed))
         {
         }
-        const bool trackProcessed = track->tryProcessBlock(trackBuffer, midiMessages);
-        track->setSidechainBuffers(nullptr);
-        if (!trackProcessed)
-        {
-            track->resetRMS();
-            continue;
-        }
+        work.processor = track;
+        work.excludedBySolo = excludedBySolo;
+        work.shouldReadHardwareInput = shouldReadHardwareInput;
+        work.hasActiveARA = hasActiveARA;
+        work.position = blockStartTimeSeconds;
+        work.rate = currentSampleRate;
+        work.automationEpoch = blockCaptureEpoch;
+        work.playing = isPlaying.load(std::memory_order_acquire);
+        return true;
+    };
+    const auto reduceTrack = [&](const RealtimeTrackEntry& trackEntry,
+                                 RealtimeTrackWork& work)
+    {
+        auto* track = trackEntry.processor;
+        const auto& trackId = trackEntry.id;
+        auto& trackBuffer = work.buffer;
+        auto& midiMessages = work.midi;
+        const bool excludedBySolo = work.excludedBySolo;
+        const bool shouldReadHardwareInput = work.shouldReadHardwareInput;
+        const bool hasActiveARA = work.hasActiveARA;
+        juce::ignoreUnused(trackId, shouldReadHardwareInput, hasActiveARA);
         if (shouldLogCallbackSummary && isPlaying.load())
         {
             OPENSTUDIO_LOG_AUDIO_ENGINE_PLAYBACK("track stage track=" + trackId
@@ -6962,6 +7097,143 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
             }
         }
+    };
+
+    // A worker which exceeded its collection deadline still owns its buffers
+    // and processor. Never touch a queued lane's block state until the entire
+    // batch retires, including lanes already completed in that same batch.
+    if (pendingParallelSnapshot != nullptr && realtimeTrackExecutor.isIdle())
+    {
+        pendingParallelSnapshot = nullptr;
+        realtimeSnapshotAudioReaders.fetch_sub(1, std::memory_order_seq_cst);
+    }
+    if (pendingParallelSnapshot != nullptr)
+    {
+        parallelQuarantinedBlocks.fetch_add(1, std::memory_order_relaxed);
+        parallelLastFailureCallback.store(callbackCounter, std::memory_order_relaxed);
+        for (int orderIdx = 0; orderIdx < rtTracks->processingOrderCount; ++orderIdx)
+        {
+            const auto& entry = rtTracks->tracks[static_cast<size_t>(rtTracks->processingOrder[static_cast<size_t>(orderIdx)])];
+            // The old snapshot is pinned and jobIndex was frozen before
+            // dispatch. Check identity without reading worker-owned results,
+            // even if control changes have published a newer current graph.
+            const bool ownedByPendingBatch = std::any_of(pendingParallelSnapshot->tracks.begin(),
+                pendingParallelSnapshot->tracks.end(), [&](const RealtimeTrackEntry& pendingEntry)
+                { return pendingEntry.processor == entry.processor && pendingEntry.work->jobIndex >= 0; });
+            if (ownedByPendingBatch)
+            {
+                recordQuarantinedTrackInput(entry, inputChannelData, numInputChannels,
+                                           numSamples, blockStartSamplePosition);
+                continue;
+            }
+            // Keep unrelated sends, sidechains and recorder taps in their
+            // existing dependency order. No new worker batch can start while
+            // the previous batch still owns any processor or scratch buffer.
+            auto& work = *entry.work;
+            work.prepared = prepareTrack(entry, work);
+            if (!work.prepared) continue;
+            entry.processor->setSidechainBuffers(&entry.sidechainRoutes);
+            work.processed = entry.processor->tryProcessBlock(work.buffer, work.midi);
+            entry.processor->setSidechainBuffers(nullptr);
+            if (work.processed) reduceTrack(entry, work);
+            else entry.processor->resetRMS();
+        }
+    }
+    else
+    {
+        int independentTracks = 0;
+        for (const auto& entry : rtTracks->tracks)
+        {
+            auto& work = *entry.work;
+            work.prepared = false;
+            work.processed = false;
+            work.jobIndex = -1;
+            // Only isolated native NAM lanes can move ahead of the existing
+            // dependency order. Hosted/MIDI/ARA and connected tracks retain
+            // their callback-thread processing and routing order below.
+            const bool isolated = entry.sidechainRoutes.empty() && entry.sends.empty()
+                && !entry.hasIncomingSends && entry.sidechainOutputBuffer == nullptr;
+            work.graphGeneration = isolated && entry.processor != nullptr
+                ? entry.processor->getParallelNAMGraphGeneration() : 0;
+            if (work.graphGeneration != 0) ++independentTracks;
+        }
+        const bool parallelEligible = realtimeTrackExecutor.getWorkerCount() > 0
+            && independentTracks > 1
+            && independentTracks <= RealtimeTrackExecutor::maximumJobCount;
+        int jobCount = 0;
+        if (parallelEligible)
+        {
+            for (int orderIdx = 0; orderIdx < rtTracks->processingOrderCount; ++orderIdx)
+            {
+                const auto& entry = rtTracks->tracks[static_cast<size_t>(rtTracks->processingOrder[static_cast<size_t>(orderIdx)])];
+                auto& work = *entry.work;
+                if (work.graphGeneration == 0) continue;
+                work.prepared = prepareTrack(entry, work);
+                if (!work.prepared) continue;
+                work.jobIndex = jobCount;
+                auto& job = rtTracks->jobs[static_cast<size_t>(jobCount++)];
+                job.context = &work;
+                job.run = &AudioEngine::runParallelTrackJob;
+            }
+        }
+        if (jobCount > 0)
+        {
+            // Pin before publication: a worker can be descheduled before it
+            // enters TrackProcessor's own graph reader scope.
+            realtimeSnapshotAudioReaders.fetch_add(1, std::memory_order_seq_cst);
+            pendingParallelSnapshot = rtTracks;
+            const auto now = juce::Time::getHighResolutionTicks();
+            const double elapsedMs = juce::Time::getMillisecondCounterHiRes() - callbackStartWallTimeMs;
+            // This is a collection target, not a guarantee for the remaining
+            // serial/master work. The full callback deadline meter includes
+            // those stages and reports any overrun independently.
+            const double remainingMs = juce::jmax(0.0, callbackBlockDurationMs - 0.012 - elapsedMs);
+            const auto cutoff = now + static_cast<juce::int64>(remainingMs * 0.001
+                * static_cast<double>(juce::Time::getHighResolutionTicksPerSecond()));
+            const auto hardCutoff = cutoff
+                + static_cast<juce::int64>(probeTrackRecoveryGraceMicroseconds.load(std::memory_order_acquire))
+                    * juce::Time::getHighResolutionTicksPerSecond() / 1000000;
+            if (!realtimeTrackExecutor.runBatch(rtTracks->jobs.get(), jobCount, cutoff, hardCutoff))
+                parallelLastFailureCallback.store(callbackCounter, std::memory_order_relaxed);
+            parallelTrackBlocks.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Keep every reduction in the original order. Serial sends/sidechains
+        // therefore reach their destinations before preparation, and Float32
+        // and Hybrid64 master sums retain their original accumulation order.
+        for (int orderIdx = 0; orderIdx < rtTracks->processingOrderCount; ++orderIdx)
+        {
+            const auto& entry = rtTracks->tracks[static_cast<size_t>(rtTracks->processingOrder[static_cast<size_t>(orderIdx)])];
+            auto& work = *entry.work;
+            if (parallelEligible && work.graphGeneration != 0)
+            {
+                if (!work.prepared) continue;
+                // Done is published after run() and all its processor/context
+                // guards return. Consume completed lanes even when another
+                // lane ran late; running lanes retain exclusive ownership.
+                if (rtTracks->jobs[static_cast<size_t>(work.jobIndex)].state.load(std::memory_order_acquire)
+                    != RealtimeTrackExecutor::State::done) continue;
+                if (!work.processed)
+                {
+                    parallelTrackRejectedJobs.fetch_add(1, std::memory_order_relaxed);
+                    parallelLastFailureCallback.store(callbackCounter, std::memory_order_relaxed);
+                }
+            }
+            else
+            {
+                work.prepared = prepareTrack(entry, work);
+                if (!work.prepared) continue;
+                entry.processor->setSidechainBuffers(&entry.sidechainRoutes);
+                work.processed = entry.processor->tryProcessBlock(work.buffer, work.midi);
+                entry.processor->setSidechainBuffers(nullptr);
+            }
+            if (work.processed) reduceTrack(entry, work);
+            else entry.processor->resetRMS();
+        }
+        if (pendingParallelSnapshot != nullptr && realtimeTrackExecutor.isIdle())
+        {
+            pendingParallelSnapshot = nullptr;
+            realtimeSnapshotAudioReaders.fetch_sub(1, std::memory_order_seq_cst);
+        }
     }
 
     if (shouldSampleAudioCallbackStages)
@@ -6994,10 +7266,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
         else
         {
-            reusablePitchScrubBuffer.clear();
+            reusablePitchScrubBuffer.clear(0, numSamples);
             playbackEngine.renderPitchScrubPreview (
                 reusablePitchScrubBuffer,
-                currentSampleRate);
+                currentSampleRate,
+                numSamples);
             if (numOutputChannels > 0)
             {
                 if (useHybrid64Summing)
@@ -7031,9 +7304,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Isolated instrument audition joins only the live monitor/master path.
     // Track recording queues and offline rendering never see these notes.
-    if (reusablePitchScrubBuffer.getNumSamples() >= numSamples && reusablePitchScrubBuffer.getNumChannels() >= 2)
+    if (instrumentPreview.mayRender()
+        && reusablePitchScrubBuffer.getNumSamples() >= numSamples
+        && reusablePitchScrubBuffer.getNumChannels() >= 2)
     {
-        reusablePitchScrubBuffer.clear();
+        for (int channel = 0; channel < 2; ++channel)
+            reusablePitchScrubBuffer.clear(channel, 0, numSamples);
         instrumentPreview.render(reusablePitchScrubBuffer.getArrayOfWritePointers(), 2, numSamples, currentSampleRate);
         for (int ch = 0; ch < juce::jmin(2, numOutputChannels); ++ch)
             for (int i = 0; i < numSamples; ++i)
@@ -7095,9 +7371,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // IR audition is already rendered wet-only. Bypass every FX chain so a
     // master/monitor-hosted source cannot process its own preview a second time.
-    if(reusablePitchScrubBuffer.getNumSamples()>=numSamples&&reusablePitchScrubBuffer.getNumChannels()>=2)
+    if (irPreview.mayRender()
+        && reusablePitchScrubBuffer.getNumSamples() >= numSamples
+        && reusablePitchScrubBuffer.getNumChannels() >= 2)
     {
-        reusablePitchScrubBuffer.clear();
+        for (int channel = 0; channel < 2; ++channel)
+            reusablePitchScrubBuffer.clear(channel, 0, numSamples);
         irPreview.render(reusablePitchScrubBuffer.getArrayOfWritePointers(),2,numSamples,currentSampleRate);
         for(int ch=0;ch<juce::jmin(2,numOutputChannels);++ch)for(int i=0;i<numSamples;++i)
             if(hybrid64PostChainActive)reusableMasterBufferDouble.addSample(ch,i,reusablePitchScrubBuffer.getSample(ch,i));
@@ -7433,6 +7712,7 @@ bool AudioEngine::removeTrack(const juce::String& trackId)
     //     prevent a removed TrackProcessor from being torn down mid-block.
     {
         const juce::ScopedLock audioCallbackGuard (deviceManager.getAudioCallbackLock());
+        drainRealtimeTrackExecution();
         const juce::ScopedLock sl (mainProcessorGraph->getCallbackLock());
 
         auto it = trackMap.find(trackId);
@@ -8310,6 +8590,10 @@ juce::var AudioEngine::queryAudioDeviceSetup(const juce::var& request)
     // Message-thread discovery only. Never open/start a probe or query a streaming
     // device: some drivers cannot tolerate a second instance of themselves.
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    juce::Logger::writeToLog("AudioDeviceSetup query: type="
+        + request.getProperty("audioDeviceType", {}).toString()
+        + " requestedRate=" + request.getProperty("sampleRate", 0).toString()
+        + " requestedBuffer=" + request.getProperty("bufferSize", 0).toString());
     auto result = getAudioDeviceSetup().clone();
     auto* data = result.getDynamicObject();
     auto current = result.getProperty("current", {}).clone();
@@ -8325,10 +8609,12 @@ juce::var AudioEngine::queryAudioDeviceSetup(const juce::var& request)
     juce::Array<juce::var> adjustments;
     auto fail = [&](const juce::String& message)
     {
+        juce::Logger::writeToLog("AudioDeviceSetup query failed: " + message);
         data->setProperty("error", message);
         data->setProperty("capabilityStatus", "unavailable");
         data->setProperty("sampleRates", juce::Array<juce::var>());
         data->setProperty("bufferSizes", juce::Array<juce::var>());
+        data->setProperty("current", current);
         return result;
     };
     if (selectedType == nullptr) return fail("The selected audio system is unavailable.");
@@ -8343,26 +8629,35 @@ juce::var AudioEngine::queryAudioDeviceSetup(const juce::var& request)
     };
     data->setProperty("inputs", asValues(inputs));
     data->setProperty("outputs", asValues(outputs));
+    const bool useDefaultDevices = typeName != current.getProperty("audioDeviceType", {}).toString();
     auto selectDevice = [&](const char* key, const juce::StringArray& names, bool input)
     {
-        const auto requested = request.getProperty(key, {}).toString();
-        if (names.contains(requested)) return requested;
-        const auto index = selectedType->getDefaultDeviceIndex(input);
-        const auto resolved = names.isEmpty() ? juce::String() : names[juce::jlimit(0, names.size() - 1, index)];
-        if (requested != resolved) adjustments.add(juce::String(input ? "Input" : "Output") + " device changed to " + (resolved.isEmpty() ? "unavailable" : resolved) + ".");
-        return resolved;
+        return AudioDeviceConfiguration::resolveDeviceName(
+            request, juce::Identifier(key), names, selectedType->getDefaultDeviceIndex(input), useDefaultDevices);
     };
     auto input = selectDevice("inputDevice", inputs, true);
     auto output = selectDevice("outputDevice", outputs, false);
-    if (!selectedType->hasSeparateInputsAndOutputs()) input = output;
+    if (!selectedType->hasSeparateInputsAndOutputs())
+    {
+        const auto names = AudioDeviceConfiguration::resolveCoupledDeviceNames(
+            request, input, output, useDefaultDevices);
+        input = names.input;
+        output = names.output;
+    }
+    if (request.getProperty("inputDevice", {}).toString() != input)
+        adjustments.add("Input device changed to " + (input.isEmpty() ? juce::String("unavailable") : input) + ".");
+    if (request.getProperty("outputDevice", {}).toString() != output)
+        adjustments.add("Output device changed to " + (output.isEmpty() ? juce::String("unavailable") : output) + ".");
     const bool sameDevice = deviceManager.getCurrentAudioDevice() != nullptr
-        && typeName == current.getProperty("audioDeviceType", {}).toString()
-        && input == current.getProperty("inputDevice", {}).toString()
-        && output == current.getProperty("outputDevice", {}).toString();
+        && AudioDeviceConfiguration::isSameStreamingDevice(
+            typeName, input, output,
+            current.getProperty("audioDeviceType", {}).toString(),
+            current.getProperty("inputDevice", {}).toString(),
+            current.getProperty("outputDevice", {}).toString(),
+            selectedType->hasSeparateInputsAndOutputs());
     draft->setProperty("audioDeviceType", typeName);
     draft->setProperty("inputDevice", input);
     draft->setProperty("outputDevice", output);
-    data->setProperty("current", current);
 
     if (!sameDevice)
     {
@@ -8375,7 +8670,8 @@ juce::var AudioEngine::queryAudioDeviceSetup(const juce::var& request)
         {
             if (isTransportRecording() || isRendering.load())
                 return fail("Stop recording or rendering before inspecting another ASIO driver.");
-            if (!ASIOCapabilities::query(output, *data, *draft))
+            const auto driverName = output.isNotEmpty() ? output : input;
+            if (!ASIOCapabilities::query(driverName, *data, *draft))
                 return fail("The ASIO driver could not report its settings without activation. Check that it is connected and not in use by another application.");
             data->setProperty("capabilityMessage", "Driver-reported options and preferred settings. Apply verifies the selected configuration; buffer restrictions can depend on sample rate.");
         }
@@ -8417,6 +8713,13 @@ juce::var AudioEngine::queryAudioDeviceSetup(const juce::var& request)
             || static_cast<int>(current.getProperty("bufferSize", 0)) <= 0))
         return fail("No compatible rates and buffers were reported for this device pair.");
     data->setProperty("adjustments", adjustments);
+    juce::Logger::writeToLog("AudioDeviceSetup query resolved: rate="
+        + current.getProperty("sampleRate", 0).toString()
+        + " buffer=" + current.getProperty("bufferSize", 0).toString()
+        + " sameStreamingDevice=" + juce::String(sameDevice ? "true" : "false"));
+    // Publish after all edits. JUCE compares DynamicObjects by value, so setting
+    // an equal clone before mutation can leave the old object in the response.
+    data->setProperty("current", current);
     return result;
 }
 
@@ -8582,6 +8885,9 @@ juce::var AudioEngine::buildAudioDeviceSetupSnapshot(
 
 juce::var AudioEngine::openAudioDeviceControlPanel()
 {
+    const juce::ScopeGuard refreshActualSetup { [this] {
+        refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
+    } };
     auto* response = new juce::DynamicObject();
     response->setProperty("success", false);
     response->setProperty("opened", false);
@@ -8630,7 +8936,6 @@ juce::var AudioEngine::openAudioDeviceControlPanel()
         response->setProperty("sampleRate", device->getCurrentSampleRate());
         response->setProperty("bufferSize", device->getCurrentBufferSizeSamples());
     }
-    refreshAudioDeviceSetupSnapshot(device);
     response->setProperty("success", true);
     return juce::var(response);
 }
@@ -8692,7 +8997,10 @@ bool AudioEngine::applyAudioDeviceSetup(
     juce::String& errorMessage,
     bool useDefaultDevices)
 {
-    juce::Logger::writeToLog("AudioEngine: Setting Audio Device...");
+    juce::Logger::writeToLog("AudioDeviceSetup apply: type=" + type
+        + " input=" + input + " output=" + output
+        + " requestedRate=" + juce::String(sampleRate, 0)
+        + " requestedBuffer=" + juce::String(bufferSize));
 
     if (isTransportRecording() || isRendering.load())
     {
@@ -8712,6 +9020,7 @@ bool AudioEngine::applyAudioDeviceSetup(
     // default. Preserve Automatic's conservative targets before the transaction.
     setup.sampleRate = sampleRate > 0 ? sampleRate : 48000.0;
     setup.bufferSize = bufferSize > 0 ? bufferSize : 512;
+    juce::AudioDeviceManager::AudioDeviceSetup acceptedSetup;
     errorMessage = AudioDeviceConfiguration::apply(
         deviceManager, type, setup, useDefaultDevices,
         isMicrophonePermissionGrantedForInput(),
@@ -8720,11 +9029,21 @@ bool AudioEngine::applyAudioDeviceSetup(
             applyRoutedDeviceChannelPolicy(
                 requested, requested.inputDeviceName.isNotEmpty() ? 2 : 0,
                 requested.outputDeviceName.isNotEmpty() ? 2 : 0);
-        });
+        }, sampleRate > 0, bufferSize > 0, &acceptedSetup);
+    juce::Logger::writeToLog("AudioDeviceSetup accepted: rate="
+        + juce::String(acceptedSetup.sampleRate, 0)
+        + " buffer=" + juce::String(acceptedSetup.bufferSize)
+        + " success=" + juce::String(errorMessage.isEmpty() ? "true" : "false")
+        + (errorMessage.isEmpty() ? juce::String() : " error=" + errorMessage));
     // Failed opens may stop the callback; publish the rolled-back setup too.
     refreshAudioDeviceSetupSnapshot(deviceManager.getCurrentAudioDevice());
     if (errorMessage.isNotEmpty())
     {
+        const auto restored = deviceManager.getAudioDeviceSetup();
+        juce::Logger::writeToLog("AudioDeviceSetup after failed apply: rate="
+            + juce::String(restored.sampleRate, 0)
+            + " buffer=" + juce::String(restored.bufferSize)
+            + " deviceOpen=" + juce::String(deviceManager.getCurrentAudioDevice() != nullptr ? "true" : "false"));
         juce::Logger::writeToLog("AudioEngine: Error setting device: " + errorMessage);
         return false;
     }
@@ -9336,7 +9655,8 @@ void AudioEngine::setTransportRecording(bool recording)
     }
     if (recording)
     {
-        const auto destination = getPreferredAppDataDirectory().getChildFile("Audio");
+        const auto destination = probeRecordingDirectory != juce::File()
+            ? probeRecordingDirectory : getPreferredAppDataDirectory().getChildFile("Audio");
         const auto ready = prepareRecordingDirectory(destination);
         if (ready.failed())
         {
@@ -9626,7 +9946,7 @@ juce::var AudioEngine::runEngineBenchmarks()
     const juce::ScopedLock offlineRenderTransaction(
         offlineRenderTransactionLock);
     const ScopedAudioCallbackProcessingPause realtimeProcessingPause(
-        isRendering, deviceManager);
+        isRendering, deviceManager, &realtimeTrackExecutor);
 
     auto* root = new juce::DynamicObject();
 
@@ -9848,7 +10168,7 @@ void AudioEngine::setProcessingPrecision(const juce::String& precisionModeString
     // callbacks on the existing early-out until the replacement publications
     // are complete.
     const ScopedAudioCallbackProcessingPause realtimeProcessingPause(
-        isRendering, deviceManager);
+        isRendering, deviceManager, &realtimeTrackExecutor);
 
     ProcessingPrecisionMode newMode = precisionModeString == "hybrid64"
         ? ProcessingPrecisionMode::Hybrid64
@@ -10414,6 +10734,72 @@ private:
 
 juce::var AudioEngine::runNAMRackRegression()
 {
+    const auto finaliseFocusedResult = [this] (juce::var result)
+    {
+        const bool deviceOpen = deviceManager.getCurrentAudioDevice() != nullptr;
+        const auto starts = audioDeviceStartCount.load(std::memory_order_relaxed);
+        const auto callbacks = audioCallbackCounter.load(std::memory_order_relaxed);
+        const bool offline = !deviceOpen && starts == 0 && callbacks == 0;
+        if (auto* object = result.getDynamicObject())
+        {
+            object->setProperty("audioDeviceOpened", deviceOpen);
+            object->setProperty("audioDeviceStartCount", static_cast<juce::int64>(starts));
+            object->setProperty("audioCallbackCount", static_cast<juce::int64>(callbacks));
+            auto checks = object->getProperty("checks");
+            if (!checks.isArray()) checks = juce::Array<juce::var>();
+            auto* check = new juce::DynamicObject();
+            check->setProperty("id", "focused_nam_no_hardware_device_opened");
+            check->setProperty("status", offline ? "pass" : "fail");
+            check->setProperty("detail", "Focused NAM QA requires no current audio device, zero device starts and zero hardware callbacks.");
+            checks.getArray()->add(check);
+            object->setProperty("checks", checks);
+            if (!offline)
+            {
+                object->setProperty("objectiveGateStatus", "fail");
+                object->setProperty("success", false);
+                object->setProperty("done", false);
+            }
+        }
+        return result;
+    };
+    const bool fuzzOnly = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_FUZZ_ONLY", {}) == "1";
+    const bool twoRackCpuOnly = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY", {}) == "1";
+    if ((fuzzOnly || twoRackCpuOnly)
+        && (deviceManager.getCurrentAudioDevice() != nullptr
+            || audioDeviceStartCount.load(std::memory_order_relaxed) != 0
+            || audioCallbackCounter.load(std::memory_order_relaxed) != 0))
+    {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("objectiveGateStatus", "fail");
+        result->setProperty("subjectiveQuality", "not_asserted");
+        result->setProperty("summary", "Focused NAM QA refused to run after hardware audio startup; use the focused headless command.");
+        return finaliseFocusedResult(juce::var(result));
+    }
+    // Opt-in focused QA uses the production fuzz and octave paths without
+    // running unrelated rack/model fixtures or opening an audio device.
+    if (fuzzOnly)
+    {
+        auto checks = NAMFuzzRegression::run(*this);
+        const auto profileCopy = runNAMRackPresetProfileCopyRegression();
+        const auto profileCopyChecks = profileCopy.getProperty("checks", {});
+        if (const auto* profileChecks = profileCopyChecks.getArray())
+            for (const auto& check : *profileChecks)
+                checks.add(check);
+        else
+            NAMRackCpuRegression::addCheck(checks, "nam_profile_copy_result", "fail", "Preset profile copy regression did not return its checks array.");
+        bool passed = static_cast<bool>(profileCopy.getProperty("success", false));
+        for (const auto& check : checks)
+            passed = passed && check.getProperty("status", {}).toString() != "fail";
+        auto* result = new juce::DynamicObject();
+        result->setProperty("objectiveGateStatus", passed ? "pass" : "fail");
+        result->setProperty("subjectiveQuality", "not_asserted");
+        result->setProperty("summary", "Focused NAM Octaver Fuzz contracts; optional interaction measurements and listening exports are diagnostic only.");
+        result->setProperty("checks", juce::var(checks));
+        result->setProperty("success", passed);
+        result->setProperty("done", passed);
+        return finaliseFocusedResult(juce::var(result));
+    }
+
     // Keep sizeable rack fixtures off the aggregate regression stack. The
     // expanded matrix exceeded safe headroom even with an 8 MiB Windows stack.
     // These allocations are test setup, never the realtime processing path.
@@ -10615,6 +11001,49 @@ juce::var AudioEngine::runNAMRackRegression()
         rack.reverbPreDelayMs.store(32.0f);
         rack.reverbEnabled.store(1.0f);
     };
+
+    if (twoRackCpuOnly)
+    {
+        const auto resamplerParity = NAMRackCpuRegression::runResamplerParity<
+            OpenStudioNAMRack::NAMResamplerKernel, OpenStudioNAMRack::NAMResamplerState>();
+        const auto delayParity = NAMRackCpuRegression::runInactiveDelayParity(
+            [] (OpenStudioNAMRack& rack, juce::AudioBuffer<float>& block, juce::MidiBuffer& midi)
+            {
+                rack.processDelayStage(block, midi);
+            },
+            [] (const OpenStudioNAMRack& rack)
+            {
+                return std::array<double, 3> {
+                    static_cast<double>(rack.delayTailSamplesRemaining),
+                    static_cast<double>(rack.publishedDelayTailSeconds.load(std::memory_order_relaxed)),
+                    rack.delayWasActive ? 1.0 : 0.0
+                };
+            });
+        const auto driveParity = NAMRackCpuRegression::runDriveCacheParity([] (OpenStudioNAMRack& rack)
+        {
+            rack.invalidateEmbeddedDriveCoefficientCaches();
+        });
+        const bool contractsPassed = static_cast<bool>(resamplerParity.getProperty("pass", false))
+            && static_cast<bool>(delayParity.getProperty("pass", false)) && static_cast<bool>(driveParity.getProperty("pass", false));
+        juce::var result;
+        if (!contractsPassed || juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_CONTRACTS_ONLY", {}) == "1")
+        {
+            auto* report = new juce::DynamicObject();
+            report->setProperty("objectiveGateStatus", "pass");
+            report->setProperty("subjectiveQuality", "not_asserted");
+            report->setProperty("timingStatus", "not_asserted");
+            report->setProperty("summary", "Focused NAM resampler reference parity and inactive Delay contracts; no models or audio devices required.");
+            result = juce::var(report);
+        }
+        else
+        {
+            const auto scenarios = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_CPU_SCENARIOS", {}).trim();
+            result = scenarios.isEmpty()
+                ? NAMRackCpuRegression::run(findNAMCoreExample, configureRack, writeFixtureIR)
+                : NAMRackCpuRegression::runScenarios(juce::File::getCurrentWorkingDirectory().getChildFile(scenarios));
+        }
+        return finaliseFocusedResult(NAMRackCpuRegression::withOptimizationContracts(result, resamplerParity, delayParity, driveParity));
+    }
 
     auto fillInput = [&] (juce::AudioBuffer<float>& buffer,
                           int blockIndex,
@@ -18218,9 +18647,7 @@ juce::var AudioEngine::runNAMRackRegression()
         constexpr int referenceRateFactor = 4;
         constexpr int referenceOversamplingFactor = 8;
         constexpr int decimatorTapCount = 513;
-        constexpr int decimatorHalfLength = decimatorTapCount / 2;
         constexpr int occupiedBinStride = 11;
-        constexpr double analysisPeriodSeconds = 0.010;
         constexpr double sourceDurationSeconds = 0.28;
         constexpr std::array<double, 3> sampleRates {
             44100.0, 48000.0, 96000.0
@@ -18236,68 +18663,10 @@ juce::var AudioEngine::runNAMRackRegression()
             0.17, 1.13, 2.41, -0.71
         };
 
-        std::vector<double> decimatorCoefficients(
-            static_cast<size_t>(decimatorTapCount), 0.0);
-        constexpr double normalizedCutoff =
-            0.45 / static_cast<double>(referenceRateFactor);
-        double coefficientSum = 0.0;
-        for (int tap = 0; tap < decimatorTapCount; ++tap)
+        const NAMNonlinearAliasAnalysis aliasAnalysis(referenceRateFactor);
+        const auto decimate = [&aliasAnalysis] (const std::vector<float>& highRate)
         {
-            const int offset = tap - decimatorHalfLength;
-            const double sincArgument =
-                2.0 * normalizedCutoff * static_cast<double>(offset);
-            const double sinc = offset == 0
-                ? 1.0
-                : std::sin(juce::MathConstants<double>::pi * sincArgument)
-                    / (juce::MathConstants<double>::pi * sincArgument);
-            const double phase = static_cast<double>(tap)
-                / static_cast<double>(decimatorTapCount - 1);
-            const double window = 0.35875
-                - 0.48829 * std::cos(
-                    juce::MathConstants<double>::twoPi * phase)
-                + 0.14128 * std::cos(
-                    2.0 * juce::MathConstants<double>::twoPi * phase)
-                - 0.01168 * std::cos(
-                    3.0 * juce::MathConstants<double>::twoPi * phase);
-            const double coefficient =
-                2.0 * normalizedCutoff * sinc * window;
-            decimatorCoefficients[static_cast<size_t>(tap)] = coefficient;
-            coefficientSum += coefficient;
-        }
-        for (auto& coefficient : decimatorCoefficients)
-            coefficient /= coefficientSum;
-
-        const auto decimate = [&decimatorCoefficients] (
-            const std::vector<float>& highRate)
-        {
-            std::vector<float> result;
-            if (highRate.size()
-                <= decimatorCoefficients.size())
-            {
-                return result;
-            }
-            const int lastCentre = static_cast<int>(highRate.size())
-                - 256 - 1;
-            const int outputCount = 1
-                + (lastCentre - 256) / 4;
-            result.reserve(static_cast<size_t>(juce::jmax(0, outputCount)));
-            for (int centre = 256;
-                 centre <= lastCentre;
-                 centre += 4)
-            {
-                double sum = 0.0;
-                const int first = centre - 256;
-                for (int tap = 0;
-                     tap < static_cast<int>(decimatorCoefficients.size());
-                     ++tap)
-                {
-                    sum += decimatorCoefficients[static_cast<size_t>(tap)]
-                        * static_cast<double>(
-                            highRate[static_cast<size_t>(first + tap)]);
-                }
-                result.push_back(static_cast<float>(sum));
-            }
-            return result;
+            return aliasAnalysis.decimate(highRate);
         };
 
         struct AliasRender
@@ -18398,178 +18767,8 @@ juce::var AudioEngine::runNAMRackRegression()
             return result;
         };
 
-        const auto makeSpectrum = [] (const std::vector<float>& period)
-        {
-            const int count = static_cast<int>(period.size());
-            std::vector<std::complex<double>> spectrum(
-                static_cast<size_t>(count / 2 + 1));
-            for (int bin = 0; bin <= count / 2; ++bin)
-            {
-                const double angle =
-                    -juce::MathConstants<double>::twoPi
-                    * static_cast<double>(bin)
-                    / static_cast<double>(count);
-                const std::complex<double> step(
-                    std::cos(angle), std::sin(angle));
-                std::complex<double> oscillator(1.0, 0.0);
-                std::complex<double> sum(0.0, 0.0);
-                for (const float sample : period)
-                {
-                    sum += static_cast<double>(sample) * oscillator;
-                    oscillator *= step;
-                }
-                spectrum[static_cast<size_t>(bin)] = sum;
-            }
-            return spectrum;
-        };
-
-        struct AlignedResidual
-        {
-            double unoccupiedRatio = 1.0;
-            double occupiedRatio = 1.0;
-            double fractionalAdvance = 0.0;
-            int integerAdvance = 0;
-            int unoccupiedBins = 0;
-            int occupiedBins = 0;
-            bool finite = false;
-        };
-
-        const auto measureAlignedResidual = [&] (
-            const std::vector<float>& device,
-            const std::vector<float>& reference,
-            double sampleRate,
-            double expectedAdvance,
-            int occupiedStride)
-        {
-            AlignedResidual result;
-            const int available = juce::jmin(
-                static_cast<int>(device.size()),
-                static_cast<int>(reference.size()));
-            const int periodSamples = juce::jmax(
-                32,
-                static_cast<int>(std::round(
-                    sampleRate * analysisPeriodSeconds)));
-            result.integerAdvance = static_cast<int>(
-                std::round(expectedAdvance));
-            const int margin = std::abs(result.integerAdvance) + 8;
-            const int referenceStart = available - margin - periodSamples;
-            const int deviceStart =
-                referenceStart + result.integerAdvance;
-            if (referenceStart < 0
-                || deviceStart < 0
-                || referenceStart + periodSamples > available
-                || deviceStart + periodSamples > available)
-            {
-                return result;
-            }
-
-            std::vector<float> devicePeriod(
-                static_cast<size_t>(periodSamples));
-            std::vector<float> referencePeriod(
-                static_cast<size_t>(periodSamples));
-            for (int sample = 0; sample < periodSamples; ++sample)
-            {
-                devicePeriod[static_cast<size_t>(sample)] =
-                    device[static_cast<size_t>(deviceStart + sample)];
-                referencePeriod[static_cast<size_t>(sample)] =
-                    reference[static_cast<size_t>(referenceStart + sample)];
-            }
-            const auto deviceSpectrum = makeSpectrum(devicePeriod);
-            const auto referenceSpectrum = makeSpectrum(referencePeriod);
-            double maximumReferenceMagnitude = 0.0;
-            for (size_t bin = 1; bin < referenceSpectrum.size(); ++bin)
-            {
-                if (static_cast<int>(bin) % occupiedStride != 0)
-                    continue;
-                maximumReferenceMagnitude = juce::jmax(
-                    maximumReferenceMagnitude,
-                    std::abs(referenceSpectrum[bin]));
-            }
-            const double occupiedFloor = juce::jmax(
-                1.0e-14, maximumReferenceMagnitude * 1.0e-5);
-
-            double bestError = std::numeric_limits<double>::max();
-            for (int stepIndex = -128; stepIndex <= 128; ++stepIndex)
-            {
-                const double fractional =
-                    static_cast<double>(stepIndex) / 256.0;
-                double error = 0.0;
-                int bins = 0;
-                for (size_t bin = 1; bin < referenceSpectrum.size(); ++bin)
-                {
-                    const double frequency = static_cast<double>(bin)
-                        * sampleRate / static_cast<double>(periodSamples);
-                    if (frequency < 20.0
-                        || frequency > sampleRate * 0.45
-                        || static_cast<int>(bin) % occupiedStride != 0
-                        || std::abs(referenceSpectrum[bin]) < occupiedFloor)
-                    {
-                        continue;
-                    }
-                    const double phase =
-                        juce::MathConstants<double>::twoPi
-                        * static_cast<double>(bin) * fractional
-                        / static_cast<double>(periodSamples);
-                    const std::complex<double> rotated =
-                        deviceSpectrum[bin]
-                        * std::complex<double>(
-                            std::cos(phase), std::sin(phase));
-                    error += std::norm(rotated - referenceSpectrum[bin]);
-                    ++bins;
-                }
-                if (bins > 0 && error < bestError)
-                {
-                    bestError = error;
-                    result.fractionalAdvance = fractional;
-                }
-            }
-
-            double referencePower = 0.0;
-            double occupiedResidualPower = 0.0;
-            double unoccupiedResidualPower = 0.0;
-            for (size_t bin = 1; bin < referenceSpectrum.size(); ++bin)
-            {
-                const double frequency = static_cast<double>(bin)
-                    * sampleRate / static_cast<double>(periodSamples);
-                if (frequency < 20.0 || frequency > sampleRate * 0.45)
-                    continue;
-                const double phase =
-                    juce::MathConstants<double>::twoPi
-                    * static_cast<double>(bin)
-                    * result.fractionalAdvance
-                    / static_cast<double>(periodSamples);
-                const std::complex<double> rotated = deviceSpectrum[bin]
-                    * std::complex<double>(
-                        std::cos(phase), std::sin(phase));
-                const double residual = std::norm(
-                    rotated - referenceSpectrum[bin]);
-                const bool analyticallyOccupied =
-                    static_cast<int>(bin) % occupiedStride == 0;
-                if (analyticallyOccupied)
-                {
-                    referencePower += std::norm(referenceSpectrum[bin]);
-                    occupiedResidualPower += residual;
-                    ++result.occupiedBins;
-                }
-                else
-                {
-                    unoccupiedResidualPower += residual;
-                    ++result.unoccupiedBins;
-                }
-            }
-            result.unoccupiedRatio = std::sqrt(
-                unoccupiedResidualPower
-                / juce::jmax(1.0e-30, referencePower));
-            result.occupiedRatio = std::sqrt(
-                occupiedResidualPower
-                / juce::jmax(1.0e-30, referencePower));
-            result.finite = result.unoccupiedBins > 0
-                && result.occupiedBins > 0
-                && std::isfinite(result.unoccupiedRatio)
-                && std::isfinite(result.occupiedRatio)
-                && std::isfinite(result.fractionalAdvance);
-            return result;
-        };
+        const auto measureAlignedResidual =
+            NAMNonlinearAliasAnalysis::measureAlignedResidual;
 
         juce::Array<juce::var> rateValues;
         bool allProductionCasesPass = true;
@@ -56172,7 +56371,7 @@ juce::var AudioEngine::runNAMRackRegression()
             // Keep the hardware callback paused across both counter reads.
             // renderProject resumes its caller's prior pause state; otherwise
             // live monitoring can increment this counter immediately after export.
-            const ScopedAudioCallbackProcessingPause monitoringFixturePause(isRendering, deviceManager);
+            const ScopedAudioCallbackProcessingPause monitoringFixturePause(isRendering, deviceManager, &realtimeTrackExecutor);
             juce::AudioBuffer<float> block(2, 64);
             block.clear();
             juce::MidiBuffer events;
@@ -56821,6 +57020,45 @@ juce::var AudioEngine::runNAMRackRegression()
             "stopbandRejectionPassed",
             result.stopbandRejectionPassed);
         object->setProperty(
+            "excitationMetadataPassed",
+            result.excitationMetadataPassed);
+        auto* lifecycle = new juce::DynamicObject();
+        lifecycle->setProperty("pass", result.lifecycle.passed);
+        lifecycle->setProperty("retirementPartitionPassed", result.lifecycle.retirementPartitionPassed);
+        lifecycle->setProperty("unaffectedVoicePassed", result.lifecycle.unaffectedVoicePassed);
+        lifecycle->setProperty("retiredProfileRecallPassed", result.lifecycle.retiredProfileRecallPassed);
+        lifecycle->setProperty("fuzzPairPartitionPassed", result.lifecycle.fuzzPairPartitionPassed);
+        lifecycle->setProperty("retirementComparisons", result.lifecycle.retirementComparisons);
+        lifecycle->setProperty("profileComparisons", result.lifecycle.profileComparisons);
+        lifecycle->setProperty("fuzzPairComparisons", result.lifecycle.fuzzPairComparisons);
+        lifecycle->setProperty("maximumRetirementDifference", result.lifecycle.maximumRetirementDifference);
+        lifecycle->setProperty("maximumMetadataDifference", result.lifecycle.maximumMetadataDifference);
+        lifecycle->setProperty("maximumUnaffectedVoiceDifference", result.lifecycle.maximumUnaffectedVoiceDifference);
+        lifecycle->setProperty("maximumRetiredProfileDifference", result.lifecycle.maximumRetiredProfileDifference);
+        lifecycle->setProperty("maximumFuzzPairDifference", result.lifecycle.maximumFuzzPairDifference);
+        object->setProperty("lifecycle", juce::var(lifecycle));
+        object->setProperty(
+            "excitationCoefficientBudgetPassed",
+            result.excitationCoefficientBudgetPassed);
+        object->setProperty(
+            "excitationFastPathsPassed",
+            result.excitationFastPathsPassed);
+        object->setProperty(
+            "maximumExcitationCoefficientError",
+            result.maximumExcitationCoefficientError);
+        object->setProperty(
+            "maximumExcitationFloatCoefficientDifference",
+            result.maximumExcitationFloatCoefficientDifference);
+        object->setProperty(
+            "maximumExcitationBudgetExcessEpsilons",
+            result.maximumExcitationBudgetExcessEpsilons);
+        object->setProperty(
+            "maximumExcitationMetadataPartitionDifference",
+            result.maximumExcitationMetadataPartitionDifference);
+        object->setProperty(
+            "maximumExcitationAudioDifference",
+            result.maximumExcitationAudioDifference);
+        object->setProperty(
             "maximumResetDifference",
             result.maximumResetDifference);
         object->setProperty(
@@ -56870,8 +57108,12 @@ juce::var AudioEngine::runNAMRackRegression()
         checks,
         "stereo_poly_octaver_multirate_contract",
         polyOctaverSelfTestsPassed ? "pass" : "fail",
-        "The V8 Stereo Poly Octaver must preserve exact bypass/silence, deterministic reset and arbitrary callback partitions, independent L/R state, finite recovery, Guitar octave-target dominance, Bass B0/E1 response, bounded partition-invariant live profile switching, and at least 70 dB stop-band rejection at 44.1/48/96 kHz. Subjective chord/transient quality and pedal similarity remain not asserted.",
+        "The V8 Stereo Poly Octaver must preserve exact bypass/silence, deterministic reset and arbitrary callback partitions, independent L/R state, finite recovery, Guitar octave-target dominance, Bass B0/E1 response, bounded partition-invariant live profile switching, exact same-frame excitation coefficients with a two-float-epsilon budget, unchanged audio with optional metadata, and at least 70 dB stop-band rejection at 44.1/48/96 kHz. Subjective chord/transient quality and pedal similarity remain not asserted.",
         juce::var(polyOctaverSelfTests));
+
+    const auto fuzzRegressionChecks = NAMFuzzRegression::run(*this);
+    for (const auto& fuzzCheck : fuzzRegressionChecks)
+        checks.add(fuzzCheck);
 
     auto runNAMRackMonoInputStereoOutputProbe = [] ()
     {
@@ -64175,6 +64417,20 @@ static juce::var describePitchVisualization(OpenStudioPitchCorrector* pitch)
     return juce::var(viz.get());
 }
 
+static std::atomic<float>* freeSignalPath(juce::AudioProcessor* processor)
+{
+    if (auto* p = dynamic_cast<OpenStudioEQ*>(processor)) return p->supportsExternalKey() ? &p->signalPath : nullptr;
+    if (auto* p = dynamic_cast<OpenStudioChorus*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioSaturator*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioBasicSynthInstrument*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioPianoInstrument*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioCleanGuitarInstrument*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioDrumInstrument*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioPitchCorrector*>(processor)) return &p->signalPath;
+    if (auto* p = dynamic_cast<OpenStudioUtilityEffect*>(processor)) return p->kind == OpenStudioUtilityEffect::Kind::Preamp ? &p->values[15] : nullptr;
+    return nullptr;
+}
+
 static juce::var describeBuiltInProcessorUnchecked(juce::AudioProcessor* processor,
                                                    const juce::String& chainType,
                                                    int fxIndex)
@@ -64995,6 +65251,12 @@ static juce::var describeBuiltInProcessorUnchecked(juce::AudioProcessor* process
             addToggleParam(params,"nonlinearHold","Hold",reverb->nonlinearHold.load(),0,"hold");
             addToggleParam(params,"positionedHold","Hold",reverb->positionedHold.load(),0,"hold");
             addToggleParam(params,"reconstructedPeaks","8x peak estimate",reverb->reconstructedPeaks.load(),0,"metering");
+            addContinuousParam(params,"outputTrimDb","Output",reverb->outputTrimDb.load(),-60,12,0,"dB","output");
+            addEnumParam(params,"reverbCharacterMode","Processing",reverb->reverbCharacterMode.load(),0,makeEnumOptions({"Original","Refined"}),"character");
+            addEnumParam(params,"reverbReturnMode","Return level",reverb->reverbReturnMode.load(),1,makeEnumOptions({"Original","Calibrated"}),"character");
+            addEnumParam(params,"shimmerScheduling","Pitch scheduling",reverb->shimmerScheduling.load(),0,makeEnumOptions({"Original","Spread"}),"character");
+            addContinuousParam(params,"ambBody","Broadband body",reverb->ambBody.load(),0,1,0,{},"character");
+            addEnumParam(params,"reverbControlMode","Controls",reverb->reverbControlMode.load(),1,makeEnumOptions({"Legacy","Corrected"}),"character");
         }
         auto result = makeBuiltInSchemaObject(reverb->getName(), "Reverb", chainType, fxIndex, params);
         if (reverb->standaloneBanking) result.getDynamicObject()->setProperty("impulseResponse", reverb->convolutionSpace.info());
@@ -65092,6 +65354,12 @@ static juce::var describeBuiltInProcessorUnchecked(juce::AudioProcessor* process
         addContinuousParam(params, "octaverDownMix", "Oct -1", rack->octaverDownMix.load(), 0.0f, 1.0f, 0.32f, {}, "pitch");
         addContinuousParam(params, "octaverUpMix", "Oct +1", rack->octaverUpMix.load(), 0.0f, 1.0f, 0.18f, {}, "pitch");
         addContinuousParam(params, "octaverDirectMix", "Direct", rack->octaverDirectMix.load(), 0.0f, 1.25f, 1.0f, {}, "pitch");
+        addToggleParam(params, "fuzzEnabled", "Fuzz", rack->fuzzEnabled.load(), 0.0f, "pitch");
+        addContinuousParam(params, "fuzzDrive", "Fuzz", rack->fuzzDrive.load(), 0.0f, 1.0f, 0.5f, {}, "pitch");
+        addContinuousParam(params, "fuzzTone", "Fuzz Tone", rack->fuzzTone.load(), 0.0f, 1.0f, 0.5f, {}, "pitch");
+        addContinuousParam(params, "fuzzLevelDb", "Fuzz Level", rack->fuzzLevelDb.load(), -18.0f, 12.0f, 0.0f, "dB", "pitch");
+        addEnumParam(params, "fuzzVoice", "Fuzz Voice", rack->fuzzVoice.load(), 0.0f, makeEnumOptions({ "Vintage", "Sustain", "Gated" }), "pitch");
+        addContinuousParam(params, "fuzzCleanMix", "Fuzz Clean Blend", rack->fuzzCleanMix.load(), 0.0f, 1.0f, 0.0f, {}, "pitch");
         const bool bassPreEqProfile =
             rack->getInstrumentProfile()
                 == OpenStudioNAMRack::bassInstrumentProfile;
@@ -65438,6 +65706,18 @@ juce::var describeFreePluginForRegression(juce::AudioProcessor& processor)
 
 static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce::String& paramId, float value)
 {
+    if (paramId == "signalPath")
+    {
+        if (!std::isfinite(value)) return false;
+        auto* signal = freeSignalPath(processor); if (!signal) return false;
+        signal->store(value >= .5f ? 1.0f : 0.0f);
+        // Configuration changes occur under the host publication lock, never
+        // as sample automation. Reprepare bounded voice/filter state off-callback.
+        if (processor->getSampleRate() > 0 && processor->getBlockSize() > 0)
+            processor->prepareToPlay(processor->getSampleRate(), processor->getBlockSize());
+        return true;
+    }
+
     if(paramId=="externalDetector")if(auto* eq=dynamic_cast<OpenStudioEQ*>(processor);eq&&eq->hasPreparedMIDIPrograms())return false;
     if (paramId == "externalDetector")
         if (auto* effect = dynamic_cast<OpenStudioBuiltInEffect*>(processor); effect != nullptr && effect->supportsExternalKey())
@@ -65916,6 +66196,12 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         }
         if (paramId == "algorithm" || ((paramId == "reverbType" || paramId == "reverbTypeExpanded" || paramId == "reverbTypeExtended" || paramId == "reverbTypeAll") && reverb->standaloneBanking)) { reverb->selectAlgorithm(static_cast<int>(std::round(value))); return true; }
         if (paramId == "sendMode" && reverb->standaloneBanking) { reverb->selectSendMode(value >= 0.5f); return true; }
+        if (paramId == "outputTrimDb" && reverb->standaloneBanking) return storeClamped(reverb->outputTrimDb, value, -60.0f, 12.0f);
+        if (paramId == "reverbCharacterMode" && reverb->standaloneBanking) return storeClamped(reverb->reverbCharacterMode, std::round(value), 0.0f, 1.0f);
+        if (paramId == "reverbReturnMode" && reverb->standaloneBanking) return storeClamped(reverb->reverbReturnMode, std::round(value), 0.0f, 1.0f);
+        if (paramId == "shimmerScheduling" && reverb->standaloneBanking) return storeClamped(reverb->shimmerScheduling, std::round(value), 0.0f, 1.0f);
+        if (paramId == "ambBody" && reverb->standaloneBanking) return storeClamped(reverb->ambBody, value, 0.0f, 1.0f);
+        if (paramId == "reverbControlMode" && reverb->standaloneBanking) return storeClamped(reverb->reverbControlMode, std::round(value), 0.0f, 1.0f);
         if (paramId == "mixLock") return storeClamped(reverb->mixLock, value, 0.0f, 1.0f);
         if (paramId == "insertWet") return storeClamped(reverb->insertWet, value, 0.0f, 1.0f);
         if (paramId == "insertDry") return storeClamped(reverb->insertDry, value, 0.0f, 1.0f);
@@ -66024,6 +66310,12 @@ static bool setBuiltInProcessorParam(juce::AudioProcessor* processor, const juce
         if (paramId == "octaverDownMix") return storeClamped(rack->octaverDownMix, value, 0.0f, 1.0f);
         if (paramId == "octaverUpMix") return storeClamped(rack->octaverUpMix, value, 0.0f, 1.0f);
         if (paramId == "octaverDirectMix") return storeClamped(rack->octaverDirectMix, value, 0.0f, 1.25f);
+        if (paramId == "fuzzEnabled") return storeClamped(rack->fuzzEnabled, std::round(value), 0.0f, 1.0f);
+        if (paramId == "fuzzDrive") return storeClamped(rack->fuzzDrive, value, 0.0f, 1.0f);
+        if (paramId == "fuzzTone") return storeClamped(rack->fuzzTone, value, 0.0f, 1.0f);
+        if (paramId == "fuzzLevelDb") return storeClamped(rack->fuzzLevelDb, value, -18.0f, 12.0f);
+        if (paramId == "fuzzVoice") return storeClamped(rack->fuzzVoice, std::round(value), 0.0f, 2.0f);
+        if (paramId == "fuzzCleanMix") return storeClamped(rack->fuzzCleanMix, value, 0.0f, 1.0f);
         if (paramId == "preEqEnabled") return storeClamped(rack->preEqEnabled, value, 0.0f, 1.0f);
         if (paramId == "preEq120Db") return storeClamped(rack->preEq120Db, value, -12.0f, 12.0f);
         if (paramId == "preEq250Db") return storeClamped(rack->preEq250Db, value, -12.0f, 12.0f);
@@ -66285,7 +66577,8 @@ static bool requiresLockedBuiltInControlMutation(
     // state, and updates reported latency. Keep it on the explicit locked/PDC
     // path; every other exposed control in the processors above is a scalar
     // publication consumed and smoothed by processBlock().
-    return (dynamic_cast<OpenStudioReverb*>(processor) != nullptr && (parameterId == "predelayCapacity" || parameterId == "spatialDelayCapacity" || (parameterId.startsWith("spatial")&&parameterId.endsWith(".delayCapacity")) || parameterId.startsWith("modal")))
+    return parameterId == "signalPath"
+        || (dynamic_cast<OpenStudioReverb*>(processor) != nullptr && (parameterId == "predelayCapacity" || parameterId == "spatialDelayCapacity" || (parameterId.startsWith("spatial")&&parameterId.endsWith(".delayCapacity")) || parameterId.startsWith("modal")))
         || (dynamic_cast<OpenStudioUtilityEffect*>(processor) != nullptr && (parameterId == "spectralPhaseEnabled" || parameterId == "audioCharacter"))
         || (dynamic_cast<OpenStudioSaturator*>(processor) != nullptr && parameterId == "oversampleMode")
         || (dynamic_cast<OpenStudioLimiter*>(processor) != nullptr && parameterId == "oversampleQuality")
@@ -67319,6 +67612,21 @@ juce::var AudioEngine::getBuiltInFXPresets(const juce::String& pluginName)
         }
     }
 
+    if (safePluginName == "OpenStudio Reverb")
+    {
+        for (const auto& voice : OpenStudioReverbFactoryPresets::voices)
+        {
+            // Existing disk entries retain priority, including a historical
+            // user preset that happens to share a new factory display name.
+            if (seenNames.contains(juce::String(voice.name).toLowerCase()))
+                continue;
+            auto* preset = new juce::DynamicObject();
+            preset->setProperty("name", voice.name);
+            preset->setProperty("factory", true);
+            preset->setProperty("metadata", OpenStudioReverbFactoryPresets::metadata(voice));
+            presetList.add(juce::var(preset));
+        }
+    }
     return presetList;
 }
 
@@ -67361,6 +67669,12 @@ bool AudioEngine::saveBuiltInFXPreset(const juce::String& trackId, const juce::S
     auto* processor = processorOwner.get();
     if (processor == nullptr)
         return false;
+
+    if (OpenStudioReverbFactoryPresets::isFactory(processor->getName(), safePresetName)
+        && ! findBuiltInPresetFile(processor->getName(), safePresetName).existsAsFile())
+    {
+        return false; // Generated factory entries are immutable.
+    }
 
     juce::MemoryBlock stateData;
     if (auto* rack =
@@ -67432,12 +67746,19 @@ bool AudioEngine::loadBuiltInFXPreset(const juce::String& trackId, const juce::S
         return false;
 
     const auto file = findBuiltInPresetFile(processor->getName(), safePresetName);
-    if (!file.existsAsFile())
-        return false;
-
     juce::MemoryBlock stateData;
-    if (!file.loadFileAsData(stateData))
+    const bool generatedFactory = ! file.existsAsFile()
+        && OpenStudioReverbFactoryPresets::isFactory(processor->getName(), safePresetName);
+    if (file.existsAsFile() ? ! file.loadFileAsData(stateData)
+                           : ! generatedFactory || ! OpenStudioReverbFactoryPresets::buildState(safePresetName, stateData))
         return false;
+    if (generatedFactory)
+    {
+        auto* reverb = dynamic_cast<OpenStudioReverb*>(processor);
+        if (reverb == nullptr || ! reverb->standaloneBanking)
+            return false;
+        OpenStudioReverbFactoryPresets::preserveLockedMix(*reverb, stateData);
+    }
 
     int latencyBefore = 0;
     int latencyAfter = 0;
@@ -67530,8 +67851,13 @@ juce::String AudioEngine::getBuiltInFXPresetData(const juce::String& pluginName,
 
     const auto file = findBuiltInPresetFile(safePluginName, safePresetName);
     juce::MemoryBlock storedPayload;
-    if (! file.existsAsFile() || ! file.loadFileAsData(storedPayload)
-        || storedPayload.getSize() == 0)
+    if (file.existsAsFile())
+    {
+        if (! file.loadFileAsData(storedPayload) || storedPayload.getSize() == 0)
+            return {};
+    }
+    else if (! OpenStudioReverbFactoryPresets::isFactory(safePluginName, safePresetName)
+             || ! OpenStudioReverbFactoryPresets::buildState(safePresetName, storedPayload))
     {
         return {};
     }
@@ -67563,7 +67889,8 @@ bool AudioEngine::saveBuiltInFXPresetData(const juce::String& pluginName,
         return false;
     }
 
-    if (findBuiltInPresetFile(safePluginName, safePresetName).existsAsFile())
+    if (findBuiltInPresetFile(safePluginName, safePresetName).existsAsFile()
+        || OpenStudioReverbFactoryPresets::isFactory(safePluginName, safePresetName))
         return false;
 
     juce::MemoryBlock storedPayload;
@@ -67611,19 +67938,22 @@ bool AudioEngine::copyBuiltInFXPreset(const juce::String& pluginName,
 
     const auto safePluginName = pluginName.trim();
     const auto sourceFile = findBuiltInPresetFile(safePluginName, sourceName);
-    if (! sourceFile.existsAsFile())
+    const bool generatedFactory = ! sourceFile.existsAsFile()
+        && OpenStudioReverbFactoryPresets::isFactory(safePluginName, sourceName);
+    if (! sourceFile.existsAsFile() && ! generatedFactory)
         return false;
 
     // Duplicate/Rename must never silently replace an existing library entry,
     // including the alternate legacy extension.
-    if (findBuiltInPresetFile(safePluginName, targetName).existsAsFile())
+    if (findBuiltInPresetFile(safePluginName, targetName).existsAsFile()
+        || OpenStudioReverbFactoryPresets::isFactory(safePluginName, targetName))
         return false;
     const auto dir = getPersistentBuiltInPresetsDir(safePluginName);
     if (! dir.createDirectory())
         return false;
     const auto targetFile = dir.getChildFile(
         targetName
-        + (safePluginName == "OpenStudio NAM Rack"
+        + (safePluginName == "OpenStudio NAM Rack" || generatedFactory
                ? ".ospreset"
                : sourceFile.getFileExtension()));
 
@@ -67631,7 +67961,12 @@ bool AudioEngine::copyBuiltInFXPreset(const juce::String& pluginName,
     // so Duplicate/Rename cannot momentarily recall a different live tone.
     juce::MemoryBlock storedPayload;
     juce::File metadataSource = sourceFile;
-    if (safePluginName == "OpenStudio NAM Rack")
+    if (generatedFactory)
+    {
+        if (! OpenStudioReverbFactoryPresets::buildState(sourceName, storedPayload))
+            return false;
+    }
+    else if (safePluginName == "OpenStudio NAM Rack")
     {
         NAMRackPresetFileMigration migration;
         if (! migrateNAMRackPresetFileToCurrent(
@@ -67651,6 +67986,26 @@ bool AudioEngine::copyBuiltInFXPreset(const juce::String& pluginName,
     if (! writeBuiltInPresetPayloadAtomically(targetFile, storedPayload))
         return false;
 
+    if (generatedFactory)
+    {
+        const auto* voice = OpenStudioReverbFactoryPresets::find(sourceName);
+        if (voice == nullptr)
+        {
+            (void) targetFile.deleteFile();
+            return false;
+        }
+        const auto json = juce::JSON::toString(OpenStudioReverbFactoryPresets::metadata(*voice));
+        const juce::MemoryBlock storedMetadata(json.toRawUTF8(), json.getNumBytesAsUTF8());
+        const auto targetMetadata = getBuiltInPresetMetadataFile(targetFile);
+        if (! writeBuiltInPresetPayloadAtomically(targetMetadata, storedMetadata))
+        {
+            (void) targetFile.deleteFile();
+            (void) targetMetadata.deleteFile();
+            return false;
+        }
+        return true;
+    }
+
     const auto sourceMetadata = getBuiltInPresetMetadataFile(metadataSource);
     if (sourceMetadata.existsAsFile())
     {
@@ -67666,6 +68021,367 @@ bool AudioEngine::copyBuiltInFXPreset(const juce::String& pluginName,
         }
     }
     return true;
+}
+
+namespace
+{
+bool isSafeNAMProfileCopyName(const juce::String& name)
+{
+    if (! isSafeBuiltInPresetName(name) || name.endsWithChar('.'))
+        return false;
+    for (const auto character : name)
+        if (character < 32 || character == 127)
+            return false;
+
+    // Reject Windows device aliases on every platform so copied presets remain portable.
+    const auto stem = name.upToFirstOccurrenceOf(".", false, false).toUpperCase();
+    if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL")
+        return false;
+    if (stem.length() == 4 && (stem.startsWith("COM") || stem.startsWith("LPT")))
+        return ! ((stem[3] >= '1' && stem[3] <= '9')
+            || stem[3] == 0x00b9 || stem[3] == 0x00b2 || stem[3] == 0x00b3);
+    return true;
+}
+
+bool namProfileCopyTargetExists(const juce::String& targetName)
+{
+    const auto payloadName = targetName + ".ospreset";
+    const auto metadataName = payloadName + ".metadata.json";
+    for (const auto& directory : getBuiltInPresetDirectoriesStableFirst("OpenStudio NAM Rack"))
+        for (const auto& file : directory.findChildFiles(juce::File::findFilesAndDirectories, false))
+            if (file.getFileName().equalsIgnoreCase(payloadName)
+                || file.getFileName().equalsIgnoreCase(metadataName))
+                return true;
+    return false;
+}
+
+std::filesystem::path namPresetFilesystemPath(const juce::File& file)
+{
+    return std::filesystem::u8path(file.getFullPathName().toRawUTF8());
+}
+
+bool publishNewNAMPresetFile(const juce::File& stagingFile, const juce::File& targetFile)
+{
+    // A same-directory hard link atomically publishes complete bytes without replacing
+    // an existing file. Unsupported filesystems fail closed; no destructive fallback.
+    std::error_code error;
+    std::filesystem::create_hard_link(
+        namPresetFilesystemPath(stagingFile), namPresetFilesystemPath(targetFile), error);
+    return ! error;
+}
+
+void rollbackNewNAMPresetFile(const juce::File& stagingFile, const juce::File& targetFile)
+{
+    // Retain the staging link until commit so rollback cannot remove an orphan sidecar
+    // or a file replaced by another writer after publication.
+    std::error_code error;
+    if (std::filesystem::equivalent(
+            namPresetFilesystemPath(stagingFile), namPresetFilesystemPath(targetFile), error)
+        && ! error)
+        (void) targetFile.deleteFile();
+}
+
+bool copyNAMRackPresetWithInstrumentProfileImpl(
+    const juce::String& sourcePresetName,
+    const juce::String& targetPresetName,
+    int instrumentProfile,
+    const std::function<void(const juce::File&)>& beforePayloadPublication = {})
+{
+    // This is a message/control-thread library operation, never an audio callback.
+    static juce::CriticalSection copyLock;
+    const juce::ScopedLock lock(copyLock);
+    const auto sourceName = sourcePresetName.trim();
+    const auto targetName = targetPresetName.trim();
+    if (! isSafeBuiltInPresetName(sourceName) || ! isSafeNAMProfileCopyName(targetName)
+        || (instrumentProfile != OpenStudioNAMRack::guitarInstrumentProfile
+            && instrumentProfile != OpenStudioNAMRack::bassInstrumentProfile)
+        || namProfileCopyTargetExists(targetName))
+        return false;
+
+    const auto sourceFile = findBuiltInPresetFile("OpenStudio NAM Rack", sourceName);
+    juce::MemoryBlock payload;
+    bool migrated = false;
+    if (! sourceFile.existsAsFile() || ! sourceFile.loadFileAsData(payload)
+        || payload.getSize() == 0
+        || ! OpenStudioNAMRack::migratePresetStateToCurrent(payload, migrated))
+        return false;
+
+    auto state = juce::ValueTree::readFromData(payload.getData(), payload.getSize());
+    if (! state.hasType("OpenStudioNAMRack"))
+        return false;
+    // Preserve the normal migration and all tone/resource/UI properties. The user's
+    // explicit profile choice is the sole change to the resulting canonical state.
+    state.setProperty("instrumentProfile", instrumentProfile, nullptr);
+    payload.reset();
+    {
+        juce::MemoryOutputStream stream(payload, false);
+        state.writeToStream(stream);
+    }
+
+    const auto sourceMetadataFile = getBuiltInPresetMetadataFile(sourceFile);
+    juce::var sourceMetadata;
+    if (sourceMetadataFile.exists())
+    {
+        if (! sourceMetadataFile.existsAsFile())
+            return false;
+        sourceMetadata = juce::JSON::parse(sourceMetadataFile);
+        const auto* object = sourceMetadata.getDynamicObject();
+        if (object == nullptr
+            || (object->hasProperty("kind")
+                && object->getProperty("kind").toString().isNotEmpty()
+                && object->getProperty("kind").toString() != "openstudio.namRackPresetMetadata")
+            || (object->hasProperty("metadata")
+                && object->getProperty("metadata").getDynamicObject() == nullptr))
+            return false;
+    }
+
+    juce::var metadata;
+    juce::var envelope;
+    if (sourceMetadata.getDynamicObject() != nullptr && sourceMetadata.hasProperty("metadata"))
+    {
+        envelope = sourceMetadata;
+        metadata = sourceMetadata.getProperty("metadata", {});
+    }
+    else
+    {
+        // Older sidecars store the metadata object directly rather than in an envelope.
+        metadata = sourceMetadata.getDynamicObject() != nullptr
+            ? sourceMetadata : juce::var(new juce::DynamicObject());
+        envelope = juce::var(new juce::DynamicObject());
+        envelope.getDynamicObject()->setProperty("schemaVersion", 1);
+        envelope.getDynamicObject()->setProperty("kind", "openstudio.namRackPresetMetadata");
+        envelope.getDynamicObject()->setProperty("pluginName", "OpenStudio NAM Rack");
+    }
+    metadata.getDynamicObject()->setProperty("instrumentProfile",
+        instrumentProfile == OpenStudioNAMRack::bassInstrumentProfile ? "bass" : "guitar");
+    envelope.getDynamicObject()->setProperty("presetName", targetName);
+    envelope.getDynamicObject()->setProperty("metadata", metadata);
+    const auto metadataJSON = juce::JSON::toString(envelope);
+
+    const auto directory = getPersistentBuiltInPresetsDir("OpenStudio NAM Rack");
+    if (! directory.createDirectory())
+        return false;
+    const auto targetFile = directory.getChildFile(targetName + ".ospreset");
+    const auto targetMetadataFile = getBuiltInPresetMetadataFile(targetFile);
+    juce::TemporaryFile stagedPayload(targetFile, juce::TemporaryFile::useHiddenFile);
+    juce::TemporaryFile stagedMetadata(targetMetadataFile, juce::TemporaryFile::useHiddenFile);
+    if (! stagedPayload.getFile().replaceWithData(payload.getData(), payload.getSize())
+        || ! stagedMetadata.getFile().replaceWithData(
+            metadataJSON.toRawUTF8(), metadataJSON.getNumBytesAsUTF8())
+        || namProfileCopyTargetExists(targetName)
+        || ! publishNewNAMPresetFile(stagedMetadata.getFile(), targetMetadataFile))
+        return false;
+
+    // The payload is the library's commit marker: listing never sees half-written data
+    // or a new preset without its sidecar. The hook is only used by isolated regressions.
+    if (beforePayloadPublication)
+        beforePayloadPublication(targetFile);
+    if (! publishNewNAMPresetFile(stagedPayload.getFile(), targetFile))
+    {
+        rollbackNewNAMPresetFile(stagedMetadata.getFile(), targetMetadataFile);
+        return false;
+    }
+    return true;
+}
+}
+
+bool AudioEngine::copyNAMRackPresetWithInstrumentProfile(
+    const juce::String& sourcePresetName,
+    const juce::String& targetPresetName,
+    int instrumentProfile)
+{
+    return copyNAMRackPresetWithInstrumentProfileImpl(
+        sourcePresetName, targetPresetName, instrumentProfile);
+}
+
+juce::var AudioEngine::runNAMRackPresetProfileCopyRegression()
+{
+    ScopedBuiltInPresetTestDirectories isolatedPresetStorage;
+    juce::ignoreUnused(isolatedPresetStorage);
+    juce::Array<juce::var> checks;
+    bool passed = true;
+    const auto check = [&] (const juce::String& id, bool success, const juce::String& detail)
+    {
+        juce::DynamicObject::Ptr item = new juce::DynamicObject();
+        item->setProperty("id", id);
+        item->setProperty("status", success ? "pass" : "fail");
+        item->setProperty("detail", detail);
+        checks.add(juce::var(item.get()));
+        passed = passed && success;
+    };
+    const auto serialize = [] (const juce::ValueTree& tree)
+    {
+        juce::MemoryBlock bytes;
+        {
+            juce::MemoryOutputStream stream(bytes, false);
+            tree.writeToStream(stream);
+        }
+        return bytes;
+    };
+    const auto read = [] (const juce::File& file)
+    {
+        juce::MemoryBlock bytes;
+        (void) file.loadFileAsData(bytes);
+        return bytes;
+    };
+    const auto directory = getPersistentBuiltInPresetsDir("OpenStudio NAM Rack");
+    const auto legacyDirectory = getLegacyBuiltInPresetsDir("OpenStudio NAM Rack");
+    const auto payloadFile = [&] (const juce::String& name)
+    {
+        return directory.getChildFile(name + ".ospreset");
+    };
+    const auto metadataFile = [&] (const juce::String& name)
+    {
+        return getBuiltInPresetMetadataFile(payloadFile(name));
+    };
+
+    juce::ValueTree legacyState("OpenStudioNAMRack");
+    legacyState.setProperty("namEffectsDspVersion", 2, nullptr);
+    legacyState.setProperty("ampModelPath", "preserved/model.nam", nullptr);
+    legacyState.setProperty("cabIRPath", "preserved/cab.wav", nullptr);
+    legacyState.setProperty("drive", 0.554, nullptr);
+    legacyState.setProperty("unknownFutureField", "preserve this", nullptr);
+    legacyState.setProperty("uiStateJSON", "{\"customView\":\"preserved\"}", nullptr);
+    juce::ValueTree child("PreservedChild");
+    child.setProperty("value", 37, nullptr);
+    legacyState.addChild(child, -1, nullptr);
+    const auto sourceBytes = serialize(legacyState);
+    const auto sourceFile = legacyDirectory.getChildFile("Legacy Bass.ospreset");
+    const auto sourceMetadata = getBuiltInPresetMetadataFile(sourceFile);
+    const juce::String sourceJSON(
+        "{\"schemaVersion\":1,\"kind\":\"openstudio.namRackPresetMetadata\","
+        "\"pluginName\":\"OpenStudio NAM Rack\",\"presetName\":\"Legacy Bass\","
+        "\"extensionField\":{\"preserve\":true},\"metadata\":{\"instrumentProfile\":\"bass\","
+        "\"notes\":\"Keep these notes\",\"folder\":\"Recovered\",\"tags\":[\"bass\",\"recovered\"]}}");
+    const bool fixturesWritten = directory.createDirectory().wasOk()
+        && legacyDirectory.createDirectory().wasOk()
+        && sourceFile.replaceWithData(sourceBytes.getData(), sourceBytes.getSize())
+        && sourceMetadata.replaceWithText(sourceJSON);
+    check("profile_copy_fixture_setup", fixturesWritten, "Only temporary fixture directories are used.");
+
+    auto canonicalBytes = sourceBytes;
+    bool migrated = false;
+    const bool canonicalized = OpenStudioNAMRack::migratePresetStateToCurrent(canonicalBytes, migrated);
+    auto expectedState = juce::ValueTree::readFromData(canonicalBytes.getData(), canonicalBytes.getSize());
+    expectedState.setProperty("instrumentProfile", OpenStudioNAMRack::bassInstrumentProfile, nullptr);
+    const bool copied = fixturesWritten
+        && copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "Bass corrected", 1);
+    const auto copiedBytes = read(payloadFile("Bass corrected"));
+    const auto copiedState = juce::ValueTree::readFromData(copiedBytes.getData(), copiedBytes.getSize());
+    check("profile_copy_legacy_migration_and_profile_only", copied && canonicalized && migrated
+        && expectedState.isEquivalentTo(copiedState),
+        "Copy matches normal in-memory migration with only canonical instrumentProfile changed; all other properties and children match.");
+    check("profile_copy_source_bytes_untouched", read(sourceFile) == sourceBytes
+        && sourceMetadata.loadFileAsString() == sourceJSON
+        && ! payloadFile("Legacy Bass").exists(),
+        "The original legacy payload and sidecar remain byte-identical and are not silently migrated into persistent storage.");
+
+    const auto copiedMetadata = juce::JSON::parse(metadataFile("Bass corrected"));
+    auto expectedMetadata = juce::JSON::parse(sourceJSON);
+    expectedMetadata.getDynamicObject()->setProperty("presetName", "Bass corrected");
+    check("profile_copy_metadata_preserved", copied
+        && juce::JSON::toString(copiedMetadata) == juce::JSON::toString(expectedMetadata),
+        "Notes, folders, tags, unknown fields and the chosen profile survive in the new sidecar.");
+    const auto firstCopyMetadataBytes = read(metadataFile("Bass corrected"));
+    check("profile_copy_duplicate_case_rejected",
+        ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "BASS CORRECTED", 0)
+        && read(payloadFile("Bass corrected")) == copiedBytes
+        && read(metadataFile("Bass corrected")) == firstCopyMetadataBytes,
+        "A case-insensitive existing entry is never overwritten.");
+    const bool reverseCopied = copyNAMRackPresetWithInstrumentProfile("Bass corrected", "Guitar corrected", 0);
+    const auto reverseBytes = read(payloadFile("Guitar corrected"));
+    check("profile_copy_current_reverse_profile", reverseCopied
+        && OpenStudioNAMRack::getTonePresetInstrumentProfile(
+            reverseBytes.getData(), static_cast<int>(reverseBytes.getSize())) == 0
+        && juce::JSON::parse(metadataFile("Guitar corrected")).getProperty("metadata", {})
+            .getProperty("instrumentProfile", {}).toString() == "guitar",
+        "Current-state copies can explicitly choose Guitar and synchronize sidecar metadata.");
+
+    const juce::String orphanText("Keep this pre-existing orphan sidecar");
+    const bool orphanCreated = metadataFile("Orphan").replaceWithText(orphanText);
+    check("profile_copy_orphan_sidecar_rejected", orphanCreated
+        && ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "ORPHAN", 1)
+        && metadataFile("Orphan").loadFileAsString() == orphanText
+        && ! payloadFile("Orphan").exists(),
+        "A pre-existing orphan sidecar is preserved, including case-insensitive collisions.");
+
+    bool invalidRejected = ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "Invalid profile", 2)
+        && ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "Invalid profile", -1)
+        && ! copyNAMRackPresetWithInstrumentProfile("Missing source", "Missing copy", 1)
+        && ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", "legacy bass", 1);
+    for (const auto* invalidName : { "", "..", "../escape", "a\\b", "bad:name", "trailing.", "CON", "com1.test", "LPT9" })
+        invalidRejected = ! copyNAMRackPresetWithInstrumentProfile("Legacy Bass", invalidName, 1)
+            && invalidRejected;
+    check("profile_copy_invalid_requests_rejected", invalidRejected,
+        "Missing sources, invalid profiles, unsafe paths/device names and existing legacy names are rejected.");
+
+    const bool badPayloadCreated = payloadFile("Malformed").replaceWithText("not a NAM preset");
+    const bool badMetadataCreated = metadataFile("Bass corrected").replaceWithText("malformed JSON");
+    check("profile_copy_malformed_inputs_rejected", badPayloadCreated && badMetadataCreated
+        && ! copyNAMRackPresetWithInstrumentProfile("Malformed", "Bad payload copy", 1)
+        && ! copyNAMRackPresetWithInstrumentProfile("Bass corrected", "Bad metadata copy", 1)
+        && ! payloadFile("Bad payload copy").exists() && ! payloadFile("Bad metadata copy").exists(),
+        "Corrupt state and sidecars fail without publishing an incomplete copy.");
+    (void) metadataFile("Bass corrected").replaceWithData(
+        firstCopyMetadataBytes.getData(), firstCopyMetadataBytes.getSize());
+
+    const bool flatSourceWritten = payloadFile("Flat metadata").replaceWithData(sourceBytes.getData(), sourceBytes.getSize())
+        && metadataFile("Flat metadata").replaceWithText("{\"notes\":\"flat preserved\",\"unknown\":42}");
+    const bool flatCopied = flatSourceWritten
+        && copyNAMRackPresetWithInstrumentProfile("Flat metadata", "Flat copied", 1);
+    const auto flatMetadata = juce::JSON::parse(metadataFile("Flat copied")).getProperty("metadata", {});
+    check("profile_copy_flat_metadata_supported", flatCopied
+        && flatMetadata.getProperty("notes", {}).toString() == "flat preserved"
+        && static_cast<int>(flatMetadata.getProperty("unknown", 0)) == 42
+        && flatMetadata.getProperty("instrumentProfile", {}).toString() == "bass",
+        "Legacy flat metadata is retained in a readable sidecar envelope.");
+    const bool bareSourceWritten = payloadFile("No metadata").replaceWithData(sourceBytes.getData(), sourceBytes.getSize());
+    check("profile_copy_missing_metadata_created", bareSourceWritten
+        && copyNAMRackPresetWithInstrumentProfile("No metadata", "Bare copied", 1)
+        && juce::JSON::parse(metadataFile("Bare copied")).getProperty("metadata", {})
+            .getProperty("instrumentProfile", {}).toString() == "bass",
+        "Presets without sidecars gain explicit profile metadata in the new copy.");
+
+    const juce::String concurrentPayload("concurrent payload must survive");
+    const bool failedCommit = copyNAMRackPresetWithInstrumentProfileImpl(
+        "Legacy Bass", "Commit collision", 1, [&] (const juce::File& target)
+        {
+            (void) target.replaceWithText(concurrentPayload);
+        });
+    check("profile_copy_failed_commit_rolls_back_owned_metadata", ! failedCommit
+        && payloadFile("Commit collision").loadFileAsString() == concurrentPayload
+        && ! metadataFile("Commit collision").exists(),
+        "A payload publication collision preserves the new competing payload and removes only our staged sidecar.");
+    const juce::String concurrentMetadata("concurrent metadata must survive");
+    const bool replacedCommit = copyNAMRackPresetWithInstrumentProfileImpl(
+        "Legacy Bass", "Replaced sidecar", 1, [&] (const juce::File& target)
+        {
+            const auto targetMetadata = getBuiltInPresetMetadataFile(target);
+            (void) targetMetadata.deleteFile();
+            (void) targetMetadata.replaceWithText(concurrentMetadata);
+            (void) target.replaceWithText(concurrentPayload);
+        });
+    check("profile_copy_rollback_preserves_replacement", ! replacedCommit
+        && metadataFile("Replaced sidecar").loadFileAsString() == concurrentMetadata
+        && payloadFile("Replaced sidecar").loadFileAsString() == concurrentPayload,
+        "Rollback recognizes that a competing writer replaced the sidecar and preserves that replacement.");
+
+    bool listed = false;
+    const auto library = getBuiltInFXPresets("OpenStudio NAM Rack");
+    if (const auto* entries = library.getArray())
+        for (const auto& entry : *entries)
+            if (entry.getProperty("name", {}).toString() == "Bass corrected")
+                listed = entry.getProperty("instrumentProfile", {}).toString() == "bass"
+                    && entry.getProperty("metadata", {}).getProperty("metadata", {})
+                        .getProperty("instrumentProfile", {}).toString() == "bass";
+    check("profile_copy_library_refresh_matches_payload", listed,
+        "Library refresh exposes matching canonical and sidecar profiles for the copied entry.");
+
+    juce::DynamicObject::Ptr result = new juce::DynamicObject();
+    result->setProperty("success", passed);
+    result->setProperty("checks", checks);
+    result->setProperty("scope", "Isolated temporary preset files; no processor, user preset, device or audio callback is touched.");
+    return juce::var(result.get());
 }
 
 bool AudioEngine::deleteBuiltInFXPreset(const juce::String& pluginName, const juce::String& presetName)
@@ -67886,6 +68602,15 @@ static juce::var describeBuiltInProcessor(juce::AudioProcessor* processor,
                                          int fxIndex)
 {
     auto schema = describeBuiltInProcessorUnchecked(processor, chainType, fxIndex);
+    if (auto* signal = freeSignalPath(processor))
+        if (auto* parameters = schema["parameters"].getArray())
+        {
+            for (int i = parameters->size(); --i >= 0;)
+                if ((*parameters)[i]["id"].toString() == "signalPath") parameters->remove(i);
+            addEnumParam(*parameters, "signalPath", "Signal path", signal->load(), 1,
+                makeEnumOptions({"Legacy", "Corrected"}), "configuration");
+            parameters->getLast().getDynamicObject()->setProperty("automatable", false);
+        }
     if (auto* parameters = schema["parameters"].getArray())
         for (auto& item : *parameters)
             if (auto* parameter = item.getDynamicObject())
@@ -69062,6 +69787,15 @@ bool AudioEngine::setBuiltInPluginState(const juce::String& trackId, const juce:
         }
     }
 
+    // Named numeric snapshots predate the signal-path selector. A values-only
+    // edit is intentionally partial and must not change compatibility mode.
+    const auto migrationOwner = getPublishedBuiltInProcessor(trackId, chainType, fxIndex);
+    const auto* migrationProcessor = migrationOwner.processor.get();
+    if (migrationProcessor && stateObject->getProperty("name").toString() == migrationProcessor->getName()
+        && freeSignalPath(migrationOwner.processor.get()) && !parameterValues.empty()
+        && std::none_of(parameterValues.begin(), parameterValues.end(), [](const auto& entry) { return entry.first == "signalPath"; }))
+        parameterValues.emplace_back("signalPath", 0.0f);
+
     if (completePortableNAMBundle)
     {
         const auto findParameter = [&] (const juce::String& id)
@@ -69764,6 +70498,7 @@ bool AudioEngine::removeTrackInputFX(const juce::String& trackId, int fxIndex)
         // the snapshot is replaced, then release the retained processor only
         // after it can no longer be processed.
         const juce::ScopedLock audioCallbackGuard (deviceManager.getAudioCallbackLock());
+        drainRealtimeTrackExecution();
         {
             const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
             auto it = trackMap.find(trackId);
@@ -69813,6 +70548,7 @@ bool AudioEngine::removeTrackFX(const juce::String& trackId, int fxIndex)
     bool removed = false;
     {
         const juce::ScopedLock audioCallbackGuard (deviceManager.getAudioCallbackLock());
+        drainRealtimeTrackExecution();
         {
             const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
             auto it = trackMap.find(trackId);
@@ -70040,6 +70776,7 @@ bool AudioEngine::removeMasterFX(int fxIndex)
         // the swap; only then is releaseResources() lifetime-safe.
         {
             const juce::ScopedLock audioCallbackGuard (deviceManager.getAudioCallbackLock());
+            drainRealtimeTrackExecution();
         }
         if (retiringProcessor)
         {
@@ -70365,6 +71102,7 @@ void AudioEngine::removeMonitoringFX(int fxIndex)
     {
         {
             const juce::ScopedLock audioCallbackGuard (deviceManager.getAudioCallbackLock());
+            drainRealtimeTrackExecution();
         }
         if (retiringProcessor)
         {
@@ -71516,6 +72254,7 @@ juce::var AudioEngine::getMidiDiagnostics() const
 juce::var AudioEngine::getRealtimeAudioTelemetry() const
 {
     auto* root = new juce::DynamicObject();
+    root->setProperty("trackExecution", getRealtimeTrackExecutionDiagnostics());
     root->setProperty("telemetryMode", "compact-lock-free");
     root->setProperty(
         "transportPlaying",
@@ -71917,6 +72656,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("transportPlaying", isPlaying.load());
     root->setProperty("transportRecording", isRecordMode.load());
     root->setProperty("offlineRenderActive", isRendering.load());
+    root->setProperty("trackExecution", getRealtimeTrackExecutionDiagnostics());
     root->setProperty("transportPosition", getTransportPosition());
     root->setProperty("sampleRate", currentSampleRate);
     root->setProperty("blockSize", currentBlockSize);
@@ -73186,7 +73926,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     if (wasPlaying) isPlaying = false;
     if (wasRecording) isRecordMode = false;
     const ScopedAudioCallbackProcessingPause realtimeProcessingPause(
-        isRendering, deviceManager);
+        isRendering, deviceManager, &realtimeTrackExecutor);
     // Restore transport state before the processing-pause guard below resumes
     // the device callback, including every early-return path.
     struct ScopedRenderTransportMode
@@ -75089,7 +75829,7 @@ bool AudioEngine::renderProjectWithDither(const juce::String& source, double sta
                          includedClipIds);
 }
 
-juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirectory)
+juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirectory, bool requireOffline)
 {
     juce::Array<juce::var> checks;
     juce::Array<juce::var> artifacts;
@@ -75110,6 +75850,35 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             pumpRegressionMessages();
         overallPass = overallPass && pass;
     };
+
+    const auto hardwareEvidence = [this]()
+    {
+        auto* evidence = new juce::DynamicObject();
+        evidence->setProperty("startupMode", deviceStartupMode == DeviceStartup::offline ? "offline" : "openHardware");
+        evidence->setProperty("audioDeviceOpened", deviceManager.getCurrentAudioDevice() != nullptr);
+        evidence->setProperty("audioDeviceStartCount", static_cast<juce::int64>(audioDeviceStartCount.load(std::memory_order_relaxed)));
+        evidence->setProperty("audioCallbackCount", static_cast<juce::int64>(audioCallbackCounter.load(std::memory_order_relaxed)));
+        evidence->setProperty("callbackRegistrationCount", static_cast<int>(hardwareCallbackRegistrationCount.load(std::memory_order_relaxed)));
+        return juce::var(evidence);
+    };
+    const auto isOfflineEvidence = [](const juce::var& evidence)
+    {
+        return evidence["startupMode"].toString() == "offline" && !static_cast<bool>(evidence["audioDeviceOpened"])
+            && static_cast<juce::int64>(evidence["audioDeviceStartCount"]) == 0
+            && static_cast<juce::int64>(evidence["audioCallbackCount"]) == 0
+            && static_cast<int>(evidence["callbackRegistrationCount"]) == 0;
+    };
+    const auto hardwareBefore = hardwareEvidence();
+    if (requireOffline && !isOfflineEvidence(hardwareBefore))
+    {
+        addCheck("offline_launch_contract", false, "Headless export QA refuses hardware startup, device opens or callback registration.", hardwareBefore);
+        auto* failed = new juce::DynamicObject();
+        failed->setProperty("harnessMode", "render_export_regression");
+        failed->setProperty("objectiveGateStatus", "fail");
+        failed->setProperty("checks", checks); failed->setProperty("hardwareBefore", hardwareBefore);
+        failed->setProperty("subjectiveQuality", "not_asserted");
+        return juce::var(failed);
+    }
 
     const bool outputDirectoryReady = outputDirectory.createDirectory()
         || outputDirectory.isDirectory();
@@ -75290,7 +76059,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             "Cancel aborts every armed recorder and leaves plugin state/history untouched.");
         isPlaying.store(playingBefore);isLooping.store(loopBefore);isRendering.store(renderBefore);currentSamplePosition.store(positionBefore);
         currentSampleRate=rateBefore;
-        deviceManager.addAudioCallback(this);
+        registerHardwareAudioCallback();
     }
     removeTrack(alignTrackB);auto* removedRequest=new juce::DynamicObject();removedRequest->setProperty("entries",applied["after"]);const auto removed=gainPhaseAlignment("apply",juce::var(removedRequest));
     addCheck("alignment_removed_member_rejects_whole_group",!static_cast<bool>(removed["success"])&&static_cast<double>(getBuiltInPluginState(alignTrackA,"track",0)["values"]["delayL"])==0,"A removed member cannot redirect an old group transaction or partially change surviving members.");
@@ -76566,6 +77335,34 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         }
     }
     addCheck("vintage_internal_rate_export_parity",tankPass&&tankError<2e-6&&tankChange>1e-6,"Prepared low-rate tanks render consistently in master, stem and selected-item exports.",tankError);
+    juce::AudioBuffer<float> reverbOutputMaster, reverbOutputStem, reverbOutputSelected;
+    bool reverbOutputExport = tankPass && setBuiltInPluginParam(phaseTrack, "track", 1, "outputTrimDb", 6)
+        && renderPhaseCase("master", "reverb-output-master", reverbOutputMaster)
+        && renderPhaseCase("stem:" + phaseTrack, "reverb-output-stem", reverbOutputStem)
+        && renderPhaseCase("selected_items", "reverb-output-selected", reverbOutputSelected);
+    double reverbOutputError = 0;
+    reverbOutputExport = reverbOutputExport && reverbOutputMaster.getNumSamples() == tankStem.getNumSamples()
+        && reverbOutputStem.getNumSamples() == tankStem.getNumSamples()
+        && reverbOutputSelected.getNumSamples() == tankStem.getNumSamples();
+    if (reverbOutputExport) for (int ch = 0; ch < 2; ++ch) for (int i = 0; i < tankStem.getNumSamples(); ++i)
+    {
+        const double scaledWet = tankStem.getSample(ch, i) * juce::Decibels::decibelsToGain(6.0f);
+        reverbOutputError = std::max({reverbOutputError,
+            std::abs(reverbOutputStem.getSample(ch, i) - scaledWet),
+            std::abs(reverbOutputSelected.getSample(ch, i) - scaledWet),
+            std::abs(reverbOutputMaster.getSample(ch, i) - phaseBaseline.getSample(ch, i) * .5 - scaledWet)});
+    }
+    addCheck("reverb_output_gain_export", reverbOutputExport && reverbOutputError < 2e-6,
+        "Final +6 dB gain scales actual stem, selected-item and master exports consistently.", reverbOutputError);
+    const auto reverbOutputSaved = getBuiltInPluginState(phaseTrack, "track", 1);
+    const bool reverbOutputRecall = rateReverb && setBuiltInPluginParam(phaseTrack, "track", 1, "outputTrimDb", -6)
+        && setBuiltInPluginState(phaseTrack, "track", 1, juce::JSON::toString(reverbOutputSaved))
+        && rateReverb->outputTrimDb.load() == 6
+        && setBuiltInPluginState(phaseTrack, "track", 1, "{\"factoryDefault\":true}")
+        && rateReverb->outputTrimDb.load() == 0
+        && setBuiltInPluginState(phaseTrack, "track", 1, juce::JSON::toString(tankState));
+    addCheck("reverb_output_gain_host_recall", reverbOutputRecall,
+        "Complete host state recalls final output gain and factory reset restores unity.");
     bool tankRecall=rateReverb&&setBuiltInPluginParam(phaseTrack,"track",1,"vintageTankRate",2)
         &&setBuiltInPluginState(phaseTrack,"track",1,juce::JSON::toString(tankState))&&rateReverb->vintageTankRate[0].load()==1;
     tankRecall=setBuiltInPluginState(phaseTrack,"track",1,"{\"factoryDefault\":true}")&&tankRecall
@@ -76997,7 +77794,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     bool macroFactory=setBuiltInPluginState(macroTrack,"track",0,"{\"factoryDefault\":true}");
     if(macroSynth)for(const auto& control:macroSynth->macroMappings)macroFactory=macroFactory&&(macroSynth->*control.member).load()==0;else macroFactory=false;
     addCheck("macro_cc_host_factory",macroFactory,"Factory reset disables all controller mappings and restores Any-channel defaults.");
-    removeTrack(macroTrack);deviceManager.addAudioCallback(this);
+    removeTrack(macroTrack);registerHardwareAudioCallback();
     const bool diffusionMounted = removeTrackFX(phaseTrack, 1) && addTrackBuiltInFX(phaseTrack, "OpenStudio Delay", false);
     bool diffusionReady = diffusionMounted && setBuiltInPluginParam(phaseTrack,"track",1,"delayType",4)
         && setBuiltInPluginParam(phaseTrack,"track",1,"delayTimeL",31) && setBuiltInPluginParam(phaseTrack,"track",1,"delayTimeR",43)
@@ -77018,6 +77815,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
 
 #include "AudioEngineHostBypassRegression.inc"
 #include "AudioEngineAnalogCharacterRegression.inc"
+#include "ReverbFactoryLibraryRegression.inc"
 #include "AudioEnginePresetFileRegression.inc"
 #include "AudioEngineOutputRoutingRegression.inc"
 #include "AudioEngineInstrumentTailRegression.inc"
@@ -77154,6 +77952,13 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     }
 
     auto* root = new juce::DynamicObject();
+    const auto hardwareAfter = hardwareEvidence();
+    if (requireOffline)
+        addCheck("offline_launch_contract", isOfflineEvidence(hardwareBefore) && isOfflineEvidence(hardwareAfter),
+            "Explicit offline startup retained zero device starts, hardware callbacks and callback registrations for the complete export fixture.", hardwareAfter);
+    root->setProperty("hardwareBefore", hardwareBefore);
+    root->setProperty("hardwareAfter", hardwareAfter);
+    root->setProperty("offlineRequired", requireOffline);
     root->setProperty("harnessMode", "render_export_regression");
     root->setProperty("claimLevel", "objective_only");
     root->setProperty("objectiveGateStatus", overallPass ? "pass" : "fail");
@@ -77909,7 +78714,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
     const bool freezeWasPlaying = isPlaying.exchange(false, std::memory_order_acq_rel);
     const bool freezeWasRecording = isRecordMode.exchange(false, std::memory_order_acq_rel);
     const ScopedAudioCallbackProcessingPause realtimeProcessingPause(
-        isRendering, deviceManager);
+        isRendering, deviceManager, &realtimeTrackExecutor);
     struct ScopedFreezeTransportMode
     {
         std::atomic<bool>& playing;
@@ -79372,6 +80177,7 @@ juce::var AudioEngine::getPitchCorrectorData(const juce::String& trackId, int fx
     for (int i = 0; i < 12; ++i)
         noteEnables.add(mapper.isNoteEnabled(i));
     obj->setProperty("noteEnables", noteEnables);
+    obj->setProperty("signalPath", pc->signalPath.load());
 
     return juce::var(obj.get());
 }
@@ -82300,6 +83106,7 @@ juce::var AudioEngine::shutdownARAForTrack(const juce::String& trackId)
     // control-owned unique_ptr.
     const juce::ScopedLock audioCallbackGuard(
         deviceManager.getAudioCallbackLock());
+    drainRealtimeTrackExecution();
     it->second->shutdownARA();
     obj->setProperty("success", true);
     return juce::var(obj.release());
@@ -82316,6 +83123,7 @@ bool AudioEngine::isARAActiveForTrack(const juce::String& trackId) const
 #include "AudioEngineStageAutomation.inc"
 #include "AudioEngineAutomationPreview.inc"
 #include "AudioEngineAutomationPreviewRegression.inc"
+#include "AudioEngineParallelRegression.inc"
 
 bool AudioEngine::setAutomationTrimValue(const juce::String& id, float db, const juce::String& parameterId)
 {

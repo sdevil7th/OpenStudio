@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="2320" viewBox="0 0 156 232">
+  <defs>
+    <linearGradient id="well" x2="0" y2="1">
+      <stop stop-color="#050706"/>
+      <stop offset="1" stop-color="#101611"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#well)" stroke="#727a63" stroke-width=".45">
+    <rect x="13" y="51" width="42" height="12" rx="1.5"/>
+    <rect x="83" y="51" width="58" height="12" rx="1.5"/>
+  </g>
+  <g fill="#e1e0d6" font-family="Arial, Helvetica, sans-serif" font-weight="700" text-anchor="middle" dominant-baseline="central">
+    <g font-size="7">
+      <text x="34" y="18">CLEAN</text>
+      <text x="112" y="18">VOICE</text>
+    </g>
+    <g font-size="7.5">
+      <text x="34.32" y="107">DOWN</text>
+      <text x="78" y="107">UP</text>
+      <text x="121.68" y="107">DIRECT</text>
+      <text x="34.32" y="151">FUZZ</text>
+      <text x="78" y="151">TONE</text>
+      <text x="121.68" y="151">LEVEL</text>
+    </g>
+    <text x="78" y="164" font-size="8.5">OCTAVER FUZZ</text>
+    <g font-size="6.5">
+      <text x="43.68" y="189.08">OCTAVE</text>
+      <text x="112.32" y="189.08">FUZZ</text>
+    </g>
+  </g>
+</svg>

@@ -1,7 +1,12 @@
 #pragma once
 #include "AppUpdater.h"
 #include "UpdateManifest.h"
+#include "UpdateInstaller.h"
+#include "RuntimeLocation.h"
 #include <monocypher-ed25519.h>
+#if JUCE_MAC || JUCE_LINUX
+ #include <sys/stat.h>
+#endif
 
 // Headless fixtures use an ephemeral test key. No network or installer launch.
 class UpdaterRegression
@@ -20,6 +25,63 @@ public:
             auto* item = new juce::DynamicObject();
             item->setProperty("name", name); item->setProperty("pass", pass); checks.add(juce::var(item));
         };
+       #if JUCE_MAC || JUCE_LINUX
+        // The report may be under /tmp, which is deliberately not trusted for
+        // executable staging. Exercise fresh profile creation under the user's
+        // trusted home instead, without touching the actual application profile.
+        const auto privateRoot = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile(".openstudio-updater-regression-" + juce::Uuid().toString());
+        const bool rootCreated = !privateRoot.exists()
+            && UpdateInstaller::ensurePrivateDirectory(privateRoot);
+        check("private_profile_fixture_created", rootCreated);
+        if (rootCreated)
+        {
+            struct ScopedTestUmask
+            {
+                explicit ScopedTestUmask(mode_t value) : previous(::umask(value)) {}
+                ~ScopedTestUmask() { ::umask(previous); }
+                mode_t previous;
+            };
+            auto modeOf = [](const juce::File& path) -> mode_t {
+                struct stat info {};
+                return ::lstat(path.getFullPathName().toRawUTF8(), &info) == 0
+                    ? static_cast<mode_t>(info.st_mode & 0777) : static_cast<mode_t>(0);
+            };
+            for (const auto mask : { static_cast<mode_t>(0002), static_cast<mode_t>(0077) })
+            {
+                const ScopedTestUmask scopedMask(mask);
+                const auto profile = privateRoot.getChildFile("profile-" + juce::String(static_cast<int>(mask)));
+                AppUpdater fresh(profile);
+                const bool packageManaged = OpenStudioRuntime::nativePackageFormat().isNotEmpty();
+                check(((packageManaged ? "native_package_constructor_skips_profile_" : "constructor_creates_private_profile_")
+                       + juce::String(static_cast<int>(mask))).toRawUTF8(),
+                      packageManaged ? !profile.exists() : modeOf(profile) == 0700);
+                fresh.persistedState = juce::JSON::parse(R"({"lastSeenVersion":"999.1.1"})");
+                const auto downloads = profile.getChildFile("updates");
+                const auto stagedFolder = downloads.getChildFile(juce::Uuid().toString());
+                check(("persist_then_stage_private_profile_" + juce::String(static_cast<int>(mask))).toRawUTF8(),
+                      fresh.savePersistedState()
+                      && juce::JSON::parse(profile.getChildFile("updater-state.json"))["lastSeenVersion"] == "999.1.1"
+                      && UpdateInstaller::ensurePrivateDirectory(stagedFolder)
+                      && modeOf(profile) == 0700 && modeOf(downloads) == 0700 && modeOf(stagedFolder) == 0700);
+                // The profile may be removed between construction and a later
+                // check; persistence must not recreate it with ambient 0775.
+                const bool removed = profile.deleteRecursively();
+                check(("persist_recreates_private_profile_" + juce::String(static_cast<int>(mask))).toRawUTF8(),
+                      removed && fresh.savePersistedState() && modeOf(profile) == 0700);
+            }
+            const auto existingProfile = privateRoot.getChildFile("existing-insecure-profile");
+            const bool existingCreated = UpdateInstaller::ensurePrivateDirectory(existingProfile)
+                && ::chmod(existingProfile.getFullPathName().toRawUTF8(), 0775) == 0;
+            AppUpdater existing(existingProfile);
+            existing.persistedState = juce::JSON::parse(R"({"lastSeenVersion":"999.1.1"})");
+            check("existing_profile_metadata_preserved_but_staging_rejected", existingCreated
+                  && existing.savePersistedState() && modeOf(existingProfile) == 0775
+                  && !UpdateInstaller::ensurePrivateDirectory(existingProfile.getChildFile("updates"))
+                  && !existingProfile.getChildFile("updates").exists());
+            check("private_profile_fixture_removed", privateRoot.deleteRecursively());
+        }
+       #endif
         uint8_t seed[32] {}, secret[64] {}, key[32] {};
         for (int i = 0; i < 32; ++i) seed[i] = static_cast<uint8_t>(i + 1);
         crypto_ed25519_key_pair(secret, key, seed);

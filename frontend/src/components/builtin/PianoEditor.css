@@ -2,14 +2,14 @@
   --instrument-accent: #dac295;
 }
 .piano-instrument-layout {
-  grid-template-columns: 1.05fr 1.1fr 1fr;
+  grid-template-columns: 1.7fr 1fr;
 }
 .piano-two-columns {
   grid-template-columns: 1fr 1fr;
 }
 .piano-drawing {
-  height: 150px;
-  margin: 17px 0;
+  height: clamp(90px, 10cqi, 190px);
+  margin: 12px 0;
 }
 .piano-body {
   fill: #263138;
@@ -37,29 +37,9 @@
   stroke: #59616a;
   stroke-width: 1;
 }
-.piano-signature {
-  margin-top: 15px;
-  color: var(--instrument-accent);
-}
-.piano-signature>strong {
-  font-size: 43px;
-  font-weight: 300;
-  line-height: 1;
-}
-.piano-signature>span {
-  font-size: 12px;
-  letter-spacing: .12em;
-}
-.piano-signature small {
-  display: block;
-  font-size: 11px;
-  letter-spacing: 0;
-  color: var(--instrument-muted);
-  margin-top: 6px;
-}
 .piano-touch-curve {
-  height: 110px;
-  margin: 15px 0;
+  height: clamp(70px, 9cqi, 150px);
+  margin: 8px 0;
 }
 .piano-touch-reference {
   stroke: #5e6669;
@@ -80,20 +60,21 @@
   line-height: 1.65;
   color: var(--instrument-muted);
 }
-@container(max-width:780px) {
-  .piano-instrument-layout {
-    grid-template-columns: 1fr 1fr;
-  }
-  .piano-instrument-layout>.instrument-section:last-child {
-    grid-column: 1/-1;
-  }
-  .piano-two-columns {
-    grid-template-columns: 1fr;
-  }
-  .piano-drawing {
-    height: 125px;
-  }
-  .piano-touch-curve {
-    height: 90px;
-  }
+.piano-model-bar>label { flex: 0 1 230px; }
+.instrument-workspace[data-overview=true]>.piano-overview-main { grid-column: 1/-1; }
+.instrument-workspace[data-overview=true] .piano-touch-curve { height: clamp(130px,10cqi,350px); }
+.instrument-workspace[data-overview=true] .piano-drawing { height: clamp(130px,8cqi,280px); }
+.instrument-workspace[data-overview=true] .piano-model-bar>label { flex-basis: 350px; }
+.instrument-workspace[data-overview=true] .piano-instrument-layout .instrument-controls { padding-block: clamp(20px,2cqi,65px); }
+@container instrument (max-width:700px) {
+  .piano-instrument-layout,.piano-two-columns { grid-template-columns: 1fr; }
+  .piano-instrument-layout>.piano-touch-summary { display: none; }
+  .piano-model-bar { gap: 12px; margin-bottom: 8px; }
+  .piano-model-bar>label { flex: 1; flex-direction: row; align-items: center; }
+  .piano-model-bar>span { display: none; }
+  .piano-model-bar>label>span { white-space: nowrap; }
+  .piano-trim-row { gap: 12px; margin-top: 14px; }
+  .piano-performance-layout[data-focus="Touch"]>.piano-pedals,.piano-performance-layout[data-focus="Pedals"]>.piano-touch { display: none; }
+  .piano-touch-curve { height: 60px; }
+  .piano-drawing { height: 85px; }
 }

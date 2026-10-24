@@ -4,6 +4,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
 import { getShortcutPlatform } from "../utils/platform";
 import { resolveWheelGesture, type WheelSurface, type WheelSubtarget } from "../utils/wheelGestureResolver";
+import { resolveMouseModifierAction, type MouseModifierOverrideMap } from "../utils/mouseModifierResolver";
 import { NativeSelect } from "./ui";
 
 const surfaces: { value: string; label: string; surface: WheelSurface; subtarget: WheelSubtarget }[] = [
@@ -19,7 +20,7 @@ const surfaces: { value: string; label: string; surface: WheelSurface; subtarget
 
 export function InputGestureReference() {
   const [surfaceId, setSurfaceId] = useState("timeline");
-  const { profileId } = useDAWStore(useShallow((s) => ({ profileId: s.mouseBehaviorProfileId })));
+  const { profileId, mouseModifiers } = useDAWStore(useShallow((s) => ({ profileId: s.mouseBehaviorProfileId, mouseModifiers: s.mouseModifiers })));
   const platform = getShortcutPlatform();
   const profile = getMouseBehaviorProfile(profileId, platform);
   const context = surfaces.find((s) => s.value === surfaceId)!;
@@ -48,6 +49,16 @@ export function InputGestureReference() {
       : "No assigned action";
     return { label: [...keys, "Wheel"].join(" + "), action };
   });
+  if (surfaceId === "ruler" && resolveMouseModifierAction({}, "ruler_click", {
+    platform: toMouseBehaviorPlatform(platform), profile: profile.modifiers,
+    overrides: mouseModifiers as MouseModifierOverrideMap,
+  }) === "seek") {
+    rows.unshift(
+      { label: "Click", action: "Seek playhead" },
+      { label: "Horizontal drag", action: "Select time" },
+      { label: "Vertical drag", action: "Zoom time: up out, down in" },
+    );
+  }
   return <div className="flex min-w-0 flex-col gap-3">
     <div className="flex flex-wrap items-end justify-between gap-3">
       <p className="max-w-sm text-xs leading-relaxed text-neutral-400">Current mappings for {profile.name}. Behavior depends on where the pointer is.</p>

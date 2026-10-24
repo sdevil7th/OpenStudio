@@ -1,4 +1,5 @@
 #pragma once
+#include "BuiltInFilterTail.h"
 #include "BuiltInEffects.h"
 #include "BuiltInPreampTone.h"
 #include "BuiltInAverageMeter.h"
@@ -81,6 +82,7 @@ public:
                 controls.push_back({ id.toRawUTF8(), id.toRawUTF8(), -1440, 1440, 0, "degrees" });
             }
         }
+        if (kind == Kind::Preamp) controls.push_back({ "signalPath", "Signal path", 0, 1, 1, "" });
         for (size_t i = 0; i < controls.size(); ++i) values[i].store(controls[i].initial);
     }
     const juce::String getName() const override
@@ -88,9 +90,49 @@ public:
         return kind == Kind::Preamp ? "OpenStudio Preamp" : kind == Kind::GraphicEQ ? "OpenStudio Graphic EQ" : "OpenStudio Gain Phase";
     }
     const Kind kind;
-    double getTailLengthSeconds() const override { return kind == Kind::Preamp && values[12].load() >= .5f ? 1.0 : 0.0; }
+    double getTailLengthSeconds() const override
+    {
+        const double fs = juce::jmax(1.0, visualRate.load());
+        double tail = 0;
+        if (kind == Kind::Preamp) return values[12].load() >= .5f ? 1.0 : 0.0;
+        if (kind == Kind::GainPhase)
+        {
+            for (size_t ch = 0; ch < 2; ++ch)
+            {
+                double channel = (juce::jlimit(0.0f, 2048.0f, values[3 + ch].load()) + 4.0) / fs;
+                if (values[8 + ch].load() >= .5f)
+                    channel += (juce::jlimit(0, 3, juce::roundToInt(values[12 + ch].load())) + 1)
+                        * BuiltInFilterTail::pole(std::abs(BuiltInPhaseAlignment::coefficient(fs, values[10 + ch].load())), fs);
+                tail = juce::jmax(tail, channel);
+            }
+            if (values[14].load() >= .5f)
+                tail += static_cast<double>(BuiltInLinearPhaseEQ::tapCount(1) + BuiltInLinearPhaseEQ::quantum) / fs;
+        }
+        else
+        {
+            const auto settings = graphicSettings();
+            // Both banks can carry state during the mode fade.
+            for (int bank = 0; bank < 2; ++bank)
+            {
+                double bankTail = 0;
+                for (size_t i = 0; i < (bank == 0 ? 10u : BuiltInGraphicEQ::bandCount); ++i)
+                {
+                    const float gain = bank == 0 ? values[i].load() : settings.gains[i];
+                    if (gain == 0) continue;
+                    bankTail += BuiltInFilterTail::biquad(BuiltInGraphicEQ::peak(fs,
+                        bank == 0 ? 31.25 * std::exp2(static_cast<double>(i)) : BuiltInGraphicEQ::frequencies[i],
+                        gain, bank == 0 ? std::sqrt(2.0) : BuiltInGraphicEQ::q()), fs);
+                }
+                tail = juce::jmax(tail, bankTail);
+            }
+            tail += BuiltInFilterTail::biquad(BuiltInGraphicEQ::cut(fs, settings.highPass, true, settings.highPassEnabled >= .5f), fs)
+                  + BuiltInFilterTail::biquad(BuiltInGraphicEQ::cut(fs, settings.lowPass, false, settings.lowPassEnabled >= .5f), fs);
+        }
+        return BuiltInFilterTail::retain(retainedTail, tail > 0 ? tail + .02 : 0);
+    }
     std::vector<Control> controls;
-    std::array<std::atomic<float>, 128> values {};
+    static constexpr size_t controlCapacity = 128;
+    std::array<std::atomic<float>, controlCapacity> values {};
     std::atomic<float> correlation { 0.0f };
     std::unique_ptr<BuiltInAlignmentCapture> alignmentCapture;
     bool setControl(const juce::String& id, float value, bool deferConfiguration = false)
@@ -144,7 +186,10 @@ public:
         refreshSpectralConfiguration(true);
         if (kind == Kind::GraphicEQ) { graphic.prepare(sampleRate); graphicCapture->prepare(sampleRate); }
         if (kind == Kind::GainPhase) phase.prepare(sampleRate);
+        maximumBlock = juce::jmax(1, maximumBlock);
+        preparedMaximumBlock = maximumBlock;
         scratch.setSize(2, maximumBlock);
+        preampDry.setSize(2, maximumBlock);
         delays.setSize(2, 4096);
         if (kind == Kind::Preamp)
         {
@@ -159,6 +204,8 @@ public:
             else oversampler = std::make_unique<juce::dsp::Oversampling<float>>(2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true);
             oversampler->initProcessing(static_cast<size_t>(maximumBlock));
             setLatencySamples(static_cast<int>(oversampler->getLatencyInSamples()));
+            preampBypass.reset(sampleRate, .010);
+            preampBypass.setCurrentAndTargetValue(values[3].load());
             tone.prepare(sampleRate * preampOversamplingFactor);
             for (auto& stage : originalPreamp) stage.prepare(sampleRate * preampOversamplingFactor, BuiltInOriginalColour::Preamp);
             averageMeter.prepare(sampleRate);
@@ -174,7 +221,10 @@ public:
     void reset() override
     {
         if(alignmentCapture)alignmentCapture->abort();
-        delays.clear(); scratch.clear(); position = 0; updateCounter = 0;
+        retainedTail.store(0);
+        tailControls.fill(std::numeric_limits<float>::quiet_NaN());
+        delays.clear(); scratch.clear(); preampDry.clear(); position = 0; updateCounter = 0;
+        preampBypass.setCurrentAndTargetValue(values[3].load());
         filterState = {}; dcInput = {}; dcOutput = {}; powers = {};
         for (size_t ch = 0; ch < 2; ++ch)
         {
@@ -194,7 +244,18 @@ public:
         juce::ScopedNoDenormals noDenormals;
         const int channels = juce::jmin(2, buffer.getNumChannels());
         const int samples = buffer.getNumSamples();
-        if (channels == 0 || samples == 0) return;
+        if (channels == 0 || samples == 0 || !prepared) return;
+        if (kind == Kind::Preamp && samples > preparedMaximumBlock)
+        {
+            std::array<float*, 2> pointers {};
+            for (int offset = 0; offset < samples; offset += preparedMaximumBlock)
+            {
+                for (int ch = 0; ch < channels; ++ch) pointers[static_cast<size_t>(ch)] = buffer.getWritePointer(ch, offset);
+                juce::AudioBuffer<float> slice(pointers.data(), channels, juce::jmin(preparedMaximumBlock, samples - offset));
+                processBlock(slice, midi);
+            }
+            return;
+        }
         if(alignmentCapture&&alignmentCapture->state.load(std::memory_order_relaxed)==1)
         {
             const auto playbackPosition=getPlayHead()?getPlayHead()->getPosition():juce::Optional<juce::AudioPlayHead::PositionInfo>();
@@ -206,6 +267,19 @@ public:
         if (spectral) spectral->request(spectralSnapshot());
         if (kind == Kind::Preamp)
         {
+            const bool corrected = values[15].load() >= .5f;
+            preampBypass.setTargetValue(values[3].load());
+            if (corrected) for (int i = 0; i < samples; ++i)
+            {
+                const int read = (position - getLatencySamples() + delays.getNumSamples()) % delays.getNumSamples();
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    const float input = buffer.getSample(ch, i);
+                    delays.setSample(ch, position, std::isfinite(input) ? input : 0.0f);
+                    preampDry.setSample(ch, i, delays.getSample(ch, read));
+                }
+                if (++position == delays.getNumSamples()) position = 0;
+            }
             averageMeter.measure(buffer,false);
             float inputPeak=0,drivenPeak=0;
             for(int ch=0;ch<channels;++ch)for(int i=0;i<samples;++i){const float sample=buffer.getSample(ch,i);if(std::isfinite(sample))inputPeak=juce::jmax(inputPeak,std::abs(sample));}
@@ -220,7 +294,8 @@ public:
                 const float drive = juce::Decibels::decibelsToGain(smooth[0].getNextValue());
                 const float trim = juce::Decibels::decibelsToGain(smooth[1].getNextValue());
                 const float colour = smooth[2].getNextValue();
-                const float bypass = smooth[3].getNextValue();
+                const float savedBypass = smooth[3].getNextValue();
+                const float bypass = corrected ? 0.0f : savedBypass;
                 const float referenceGain=juce::Decibels::decibelsToGain(smooth[11].getNextValue());
                 const float character = smooth[12].getNextValue();
                 const float outputDrive = juce::Decibels::decibelsToGain(smooth[13].getNextValue());
@@ -261,13 +336,28 @@ public:
                 }
             }
             oversampler->processSamplesDown(working);
-            for (int ch = 0; ch < channels; ++ch) buffer.copyFrom(ch, 0, scratch, ch, 0, samples);
+            for (int i = 0; i < samples; ++i)
+            {
+                const float amount = preampBypass.getNextValue();
+                for (int ch = 0; ch < channels; ++ch)
+                {
+                    const float wet = scratch.getSample(ch, i);
+                    buffer.setSample(ch, i, corrected ? (1 - amount) * wet + amount * preampDry.getSample(ch, i) : wet);
+                }
+            }
             inputDb.store(juce::Decibels::gainToDecibels(inputPeak,-100.0f));
             outputDb.store(juce::Decibels::gainToDecibels(buffer.getMagnitude(0,samples),-100.0f));
             drivenReferenceDb.store(juce::Decibels::gainToDecibels(drivenPeak,-100.0f));
             averageMeter.measure(buffer,true);
             return;
         }
+        bool tailChanged = false;
+        for (size_t i = 0; i < controls.size(); ++i)
+        {
+            const float value = values[i].load();
+            tailChanged = tailChanged || value != tailControls[i]; tailControls[i] = value;
+        }
+        if (tailChanged) getTailLengthSeconds();
         if (kind == Kind::GraphicEQ) { graphic.configure(graphicSettings()); graphicCapture->beginBlock(samples); }
         std::array<double,2> desiredDelay {};
         if (kind == Kind::GainPhase)
@@ -368,9 +458,11 @@ public:
     {
         const auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(size));
         if (!state.isValid() || state.getType().toString() != getName().removeCharacters(" ")) return;
-        for (const auto& control : controls) setControl(control.id, static_cast<float>(state.getProperty(control.id, control.initial)), true);
+        const float previousSignalPath = values[15].load();
+        for (const auto& control : controls) setControl(control.id, static_cast<float>(state.getProperty(control.id, juce::String(control.id) == "signalPath" ? 0.0f : control.initial)), true);
         refreshSpectralConfiguration(true);
         refreshCharacterConfiguration();
+        if (kind == Kind::Preamp && prepared && previousSignalPath != values[15].load()) prepareToPlay(rate, preparedMaximumBlock);
     }
     BuiltInGraphicEQ::Settings graphicSettings() const
     {
@@ -434,12 +526,15 @@ private:
     BuiltInGraphicEQ graphic;
     std::unique_ptr<BuiltInSpectrumCapture> graphicCapture;
     std::atomic<double> visualRate { 44100 };
+    mutable std::atomic<double> retainedTail {0};
     std::atomic<float> inputDb { -100 }, outputDb { -100 };
     BuiltInPreampTone tone;
     BuiltInAverageMeter averageMeter;
     std::atomic<float> drivenReferenceDb{-100};
     double rate = 44100.0;
-    juce::AudioBuffer<float> scratch, delays;
+    std::array<float, controlCapacity> tailControls {};
+    juce::AudioBuffer<float> scratch, delays, preampDry;
+    juce::SmoothedValue<float> preampBypass;
     std::array<juce::SmoothedValue<float>, 64> smooth;
     std::array<BuiltInOriginalColour, 2> originalPreamp;
     int position = 0;

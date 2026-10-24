@@ -39,6 +39,7 @@ public:
     };
 
     // ---- Parameters (all thread-safe) ----
+    void setCorrectedNoteMask(bool enabled) { correctedNoteMask.store(enabled); }
     void setKey(int rootNote);          // 0=C, 1=C#, ..., 11=B
     void setScale(Scale scale);
     void setRetuneSpeed(float ms);      // 0=instant snap, 400=gentle
@@ -57,7 +58,7 @@ public:
     float getHumanize() const { return humanizePercent.load(std::memory_order_relaxed); }
     HumanizeMode getHumanizeMode() const { return static_cast<HumanizeMode>(humanizeMode.load(std::memory_order_relaxed)); }
     int getTranspose() const { return transposeSemitones.load(std::memory_order_relaxed); }
-    bool isNoteEnabled(int note) const { return noteEnables[note % 12].load(std::memory_order_relaxed); }
+    bool isNoteEnabled(int note) const { return noteEnables[static_cast<size_t>((note % 12 + 12) % 12)].load(std::memory_order_relaxed); }
     bool getFormantCorrection() const { return formantCorrectionOn.load(std::memory_order_relaxed); }
     float getFormantShift() const { return formantShiftSemitones.load(std::memory_order_relaxed); }
     float getCorrectionStrength() const { return correctionStrength.load(std::memory_order_relaxed); }
@@ -91,6 +92,7 @@ public:
     static const char* getScaleName(Scale scale);
 
 private:
+    std::atomic<bool> correctedNoteMask { false }; // Other callers retain historical mapping.
     std::atomic<int> rootNote { 0 };      // 0=C
     std::atomic<int> currentScale { 0 };  // Scale::Chromatic
     std::atomic<float> retuneSpeedMs { 50.0f };
@@ -107,6 +109,11 @@ private:
     float currentOutputMidi = 0.0f;
     bool hasLastOutput = false;
     double cachedSampleRate = 44100.0;
+    // Audio-thread-owned coefficient caches. Parameter and callback-size changes
+    // invalidate them by value, without changing either smoothing law.
+    float cachedLegacySpeed = -1, cachedLegacyDelta = -1, cachedLegacyAlpha = 0;
+    float cachedSustainedSpeed = -1, cachedSustainedAlpha = 0;
+    double cachedSustainedDelta = -1;
 
     // Callback-owned, allocation-free sustained-note tracking. These are
     // original timing heuristics, not a model of a commercial pitch corrector.

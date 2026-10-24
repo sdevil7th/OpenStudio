@@ -6,6 +6,8 @@ import { useApprovedEffectMeters, type ApprovedEffectEditorProps } from "./Appro
 import "./InstrumentEditorParts.css";
 import { ProfiledRangeInput } from "../ui/ProfiledRangeInput";
 import { instrumentTabSummary } from "./instrumentTabSummary";
+import { usePluginFeatureReveal, type PluginFeatureRevealRequest } from "../../utils/pluginFeatureNavigation";
+import { parseSuiteParameterDraft } from "../../utils/suiteParameterGesture";
 
 const InstrumentMeters = createContext<BuiltInPluginSchema["visualization"]>(undefined);
 function InstrumentMeterBoundary({ props, children }: { props: ApprovedEffectEditorProps; children: ReactNode }) {
@@ -14,25 +16,54 @@ function InstrumentMeterBoundary({ props, children }: { props: ApprovedEffectEdi
 }
 export const useInstrumentPerformance = () => useContext(InstrumentMeters);
 
-export function InstrumentShell({ props, kind, tabs, tab, onTab, children, footer }: {
+export function useInstrumentPage(defaultPage: string) {
+  const [tab, setTab] = useState(defaultPage), [wide, setWide] = useState(false);
+  return { tab, setTab, wide, onOverviewChange: (next: boolean) => {
+    setWide(next);
+    setTab(previous => next && previous === defaultPage ? "Overview" : !next && previous === "Overview" ? defaultPage : previous);
+  } };
+}
+
+export function InstrumentShell({ props, kind, tabs, tab, onTab, onReveal, wide, onOverviewChange, children, footer }: {
   props: ApprovedEffectEditorProps; kind: string; tabs: string[]; tab: string; onTab: (tab: string) => void;
+  onReveal?: (request: PluginFeatureRevealRequest) => void; wide?: boolean; onOverviewChange?: (wide: boolean) => void;
   children: ReactNode; footer?: ReactNode;
 }) {
-  return <InstrumentMeterBoundary props={props}><div className={`approved-effect-editor approved-instrument-editor instrument-${kind} flex min-h-0 min-w-0 flex-1 flex-col`} data-suite-kind={kind}>
+  const element = useRef<HTMLDivElement>(null);
+  const overviewChange = useRef(onOverviewChange); overviewChange.current = onOverviewChange;
+  usePluginFeatureReveal(element, props.schema.pluginId ?? kind, request => onReveal?.(request));
+  useEffect(() => {
+    const root = element.current; if (!root) return;
+    let previous = false;
+    const observer = new ResizeObserver(entries => {
+      const bounds = entries[0]?.contentRect; if (!bounds) return;
+      const next = bounds.width >= 1600 && bounds.height >= 900;
+      if (next !== previous) { previous = next; overviewChange.current?.(next); }
+    });
+    observer.observe(root); return () => observer.disconnect();
+  }, []);
+  return <InstrumentMeterBoundary props={props}><div ref={element} className={`approved-effect-editor approved-instrument-editor instrument-${kind} flex min-h-0 min-w-0 flex-1 flex-col`} data-suite-kind={kind} data-instrument-page={tab}>
     <EQToolbar {...props} />
     <nav className="instrument-tabs flex shrink-0 gap-1 overflow-x-auto px-4" aria-label={`${props.schema.name} pages`}>
-      {tabs.map(name => {
+      {(wide ? ["Overview", ...tabs] : tabs).map(name => {
         const summary = instrumentTabSummary(props.schema, kind, name);
         return <button key={name} type="button" aria-label={name} aria-description={summary || undefined} title={summary || name} aria-pressed={name === tab} onClick={() => onTab(name)}>{name}{summary && <span className="instrument-tab-indicator" aria-hidden="true" />}</button>;
       })}
     </nav>
-    <div className="instrument-workspace min-h-0 min-w-0 flex-1 overflow-y-auto p-4">{children}</div>
+    <div className="instrument-workspace min-h-0 min-w-0 flex-1 overflow-y-auto p-4" data-overview={tab === "Overview"}>{children}</div>
     {footer}
   </div></InstrumentMeterBoundary>;
 }
 
-export function InstrumentSection({ title, detail, children, className = "" }: { title: string; detail?: string; children: ReactNode; className?: string }) {
-  return <section className={`instrument-section min-w-0 ${className} p-[14px]`} aria-label={title}>
+/** Compact views retain the same controls and gestures as the expanded layout. */
+export function InstrumentFocusTabs({ sections, selected, onSelect, label = "Compact view" }: {
+  sections: string[]; selected: string; onSelect: (section: string) => void; label?: string;
+}) {
+  return <nav className="instrument-focus-tabs mb-2 flex gap-1" aria-label={label}>{sections.map(section => <button key={section} type="button" aria-pressed={selected === section} onClick={() => onSelect(section)}>{section}</button>)}</nav>;
+}
+
+export function InstrumentSection({ title, detail, children, className = "", feature }: { title: string; detail?: string; children: ReactNode; className?: string; feature?: string }) {
+  return <section className={`instrument-section min-w-0 ${className} p-[14px]`} aria-label={title} data-instrument-section={title} data-feature={feature}>
     <header className="mb-3 flex items-baseline justify-between gap-2"><h3>{title}</h3>{detail && <span>{detail}</span>}</header>{children}
   </section>;
 }
@@ -44,23 +75,39 @@ export function InstrumentHelp({ children }: { children: ReactNode }) {
 }
 export const instrumentValue = (schema: BuiltInPluginSchema, id: string, fallback = 0) => findBuiltInParameter(schema, id)?.value ?? fallback;
 
-export function InstrumentSlider({ props, id, label }: { props: ApprovedEffectEditorProps; id: string; label?: string }) {
+export function InstrumentSlider({ props, id, label, disabled = false }: { props: ApprovedEffectEditorProps; id: string; label?: string; disabled?: boolean }) {
   const parameter = findBuiltInParameter(props.schema, id);
-  const [draft, setDraft] = useState(String(parameter?.value ?? 0));
-  const editing = useRef(false), cancelled = useRef(false);
-  useEffect(() => { if (!editing.current) setDraft(String(Number((parameter?.value ?? 0).toFixed(3)))); }, [parameter?.value]);
+  const percent = parameter?.min === 0 && parameter.max > 0 && parameter.max <= 1 && !parameter.unit;
+  const factor = percent ? 100 : 1;
+  const displayValue = Number(((parameter?.value ?? 0) * factor).toFixed(3));
+  const [draft, setDraft] = useState(String(displayValue));
+  const editing = useRef(false), cancelled = useRef(false), dirtyDraft = useRef(false);
+  useEffect(() => { if (!editing.current) setDraft(String(displayValue)); }, [displayValue]);
+  useEffect(() => {
+    // A disabled focused input need not blur. Discard the draft so enabling it
+    // later cannot apply an edit from the previously active configuration.
+    if (disabled) {
+      editing.current = false; cancelled.current = false; dirtyDraft.current = false;
+      setDraft(String(displayValue));
+    }
+  }, [disabled, displayValue]);
   if (!parameter) return null;
   const set = (value: number) => props.onChange(parameter, Math.max(parameter.min, Math.min(parameter.max, value)));
   const commit = () => {
     editing.current = false;
-    if (!cancelled.current && draft.trim() && Number.isFinite(Number(draft))) { props.onGestureStart(parameter.id); set(Number(draft)); props.onGestureEnd(); }
-    cancelled.current = false; setDraft(String(Number(parameter.value.toFixed(3))));
+    const next = disabled || cancelled.current || !dirtyDraft.current ? null : parseSuiteParameterDraft(draft, factor, parameter);
+    cancelled.current = false; dirtyDraft.current = false;
+    if (next !== null && next !== parameter.value) {
+      props.onGestureStart(parameter.id);
+      try { set(next); } finally { props.onGestureEnd(); }
+    }
+    setDraft(String(next === null ? displayValue : Number((next * factor).toFixed(3))));
   };
-  return <div className="instrument-slider flex min-w-0 flex-col gap-2" data-param={parameter.id}><label className="flex items-center justify-between gap-2 text-xs"><span>{label ?? parameter.label}</span>
-    <input type="number" aria-label={`${label ?? parameter.label} value`} className="suite-value" min={parameter.min} max={parameter.max} step="any" value={draft}
-      onFocus={event => { editing.current = true; cancelled.current = false; event.currentTarget.select(); }} onChange={event => setDraft(event.currentTarget.value)} onBlur={commit}
-      onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") { event.stopPropagation(); cancelled.current = true; event.currentTarget.blur(); } }} /></label>
-    <ProfiledRangeInput aria-label={label ?? parameter.label} min={parameter.min} max={parameter.max} step={(parameter.max - parameter.min) / 1000} value={parameter.value}
+  return <div className="instrument-slider flex min-w-0 flex-col gap-2" data-param={parameter.id}><label className="flex items-center justify-between gap-2 text-xs"><span>{label ?? parameter.label}</span><span className="instrument-slider-number inline-flex items-center gap-1">
+    <input type="number" disabled={disabled} aria-label={`${label ?? parameter.label} value`} className="suite-value" min={parameter.min * factor} max={parameter.max * factor} step="any" value={draft}
+      onFocus={event => { editing.current = true; cancelled.current = false; dirtyDraft.current = false; event.currentTarget.select(); }} onChange={event => { dirtyDraft.current = true; setDraft(event.currentTarget.value); }} onBlur={commit}
+      onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); if (event.key === "Escape") { event.stopPropagation(); cancelled.current = true; event.currentTarget.blur(); } }} />{percent && <span className="instrument-subtle">%</span>}</span></label>
+    <ProfiledRangeInput disabled={disabled} aria-label={label ?? parameter.label} min={parameter.min} max={parameter.max} step={(parameter.max - parameter.min) / 1000} value={parameter.value}
       onValueChange={set} onBeginEdit={() => props.onGestureStart(parameter.id)} onCommitEdit={props.onGestureEnd}
       onDoubleClick={() => { props.onGestureStart(parameter.id); set(parameter.defaultValue); props.onGestureEnd(); }} /></div>;
 }
@@ -123,10 +170,13 @@ export function InstrumentKeyboard({ address, piano = false, output }: { address
     onKeyDown={event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); if (!event.repeat) preview.start(midi); } }}
     onKeyUp={event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); preview.stop(midi); } }}>
     {!black && midi % 12 === 0 ? instrumentNoteName(midi) : ""}</button>;
-  return <div className="instrument-keyboard-section shrink-0 px-4 py-3">
-    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs"><span>KEYBOARD <span className="instrument-subtle">· isolated audition</span></span>{output && <div className="instrument-output-control">{output}</div>}<span role="status">{preview.error}</span>
-      <button className="instrument-text-button" type="button" onClick={() => { preview.stopAll(); setHidden(!hidden); }}>{hidden ? "Show keyboard" : "Hide keyboard"}</button></div>
-    {!hidden && <div className="instrument-keyboard flex" aria-label="Audition keyboard">{cells.map(cell => <div key={cell.white} className="instrument-key-cell relative min-w-0 flex-1">{key(cell.white, false)}{cell.black !== undefined && key(cell.black, true)}</div>)}</div>}
+  return <div className="instrument-keyboard-section shrink-0 px-4 py-2">
+    <div className="instrument-keyboard-bar flex min-w-0 items-center gap-3">
+      <div className="instrument-keyboard-actions flex shrink-0 flex-col gap-1 text-xs"><span>Audition</span><button className="instrument-text-button" type="button" aria-expanded={!hidden} onClick={() => { preview.stopAll(); setHidden(!hidden); }}>{hidden ? "Show keys" : "Hide keys"}</button></div>
+      {!hidden && <div className="instrument-keyboard flex min-w-0 flex-1" aria-label="Audition keyboard">{cells.map(cell => <div key={cell.white} className="instrument-key-cell relative min-w-0 flex-1">{key(cell.white, false)}{cell.black !== undefined && key(cell.black, true)}</div>)}</div>}
+      {output && <div className="instrument-output-control ml-auto shrink-0">{output}</div>}
+    </div>
+    {preview.error && <p role="status" className="mt-1 text-xs">{preview.error}</p>}
   </div>;
 }
 

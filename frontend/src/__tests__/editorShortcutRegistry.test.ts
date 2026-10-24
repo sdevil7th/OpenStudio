@@ -138,7 +138,7 @@ describe("editor shortcut registry", () => {
       ["pitch.moveUp", "Up"],
       ["pitch.moveUpFine", "Shift+Up"],
       ["pitch.mergeSelectedNotes", "Ctrl+J"],
-      ["pitch.tool.select", "1"],
+      ["pitch.tool.select", "V"],
       ["pitch.tool.split", "6"],
       ["pitch.closeEditor", "Esc"],
     ];

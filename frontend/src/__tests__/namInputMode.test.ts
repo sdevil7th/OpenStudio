@@ -1,4 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -141,6 +140,7 @@ describe("NAM Rack automatic input routing contract", () => {
       expect(resolveNAMRackOctaverPresentation(version)).toMatchObject({
         label: "Stereo Poly Octaver",
         captionPrefix: "Polyphonic stereo",
+        hardwareTitle: "OCTAVER FUZZ",
         stereoPolyphonic: true,
       });
     }

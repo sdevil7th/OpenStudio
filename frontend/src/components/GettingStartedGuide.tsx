@@ -75,7 +75,7 @@ function buildGuideSteps(): GuideStep[] {
   const audioTrackShortcut = shortcut("insert.audioTrack", "Ctrl+T");
   const midiTrackShortcut = shortcut("insert.midiTrack", "Ctrl+Shift+T");
   const instrumentTrackShortcut = shortcut("insert.quickAddInstrument", "Ctrl+Shift+I");
-  const recordShortcut = shortcut("transport.record", "Ctrl+R");
+  const recordShortcut = shortcut("transport.record", "R");
   const preferencesShortcut = shortcut("options.preferences", "Ctrl+,");
   const importShortcut = shortcut("insert.mediaFile", "Insert");
   const saveShortcut = shortcut("file.save", "Ctrl+S");

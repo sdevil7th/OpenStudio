@@ -1,4 +1,4 @@
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useMemo, memo } from "react";
 import classNames from "classnames";
 import { useShallow } from "zustand/shallow";
 import {
@@ -16,7 +16,7 @@ import { MetronomeSettings } from "./MetronomeSettings";
 import { MetronomeControls } from "./MetronomeControls";
 import { PracticeTimerStatus } from "./PracticeTimer";
 import { Button, Input, TimeSignatureInput } from "./ui";
-import { formatShortcut } from "../utils/platform";
+import { getEffectiveShortcutLabel } from "../utils/inputProfileHelp";
 
 function formatSMPTE(seconds: number, frameRate: number): string {
   const totalFrames = Math.floor(seconds * frameRate);
@@ -120,7 +120,9 @@ export function TransportBar() {
     toggleLoop,
     setTempo,
     tapTempo,
-    seekTo,
+    goToStart,
+    keyboardShortcutProfileId,
+    customShortcuts,
     timeSignature,
     setTimeSignature,
   } = useDAWStore(
@@ -133,7 +135,9 @@ export function TransportBar() {
       toggleLoop: state.toggleLoop,
       setTempo: state.setTempo,
       tapTempo: state.tapTempo,
-      seekTo: state.seekTo,
+      goToStart: state.goToStart,
+      keyboardShortcutProfileId: state.keyboardShortcutProfileId,
+      customShortcuts: state.customShortcuts,
       timeSignature: state.timeSignature,
       setTimeSignature: state.setTimeSignature,
     })),
@@ -146,6 +150,13 @@ export function TransportBar() {
   const loopEnabled = useDAWStore((state) => state.transport.loopEnabled);
   const recordMode = useDAWStore((state) => state.recordMode);
   const rippleMode = useDAWStore((state) => state.rippleMode);
+
+  const shortcuts = useMemo(() => ({
+    start: getEffectiveShortcutLabel("transport.rewind", "1"),
+    record: getEffectiveShortcutLabel("transport.record", "R"),
+    play: getEffectiveShortcutLabel("transport.play", "Space"),
+    loop: getEffectiveShortcutLabel("transport.loop", "L"),
+  }), [keyboardShortcutProfileId, customShortcuts]);
 
   const [tempTempo, setTempTempo] = useState(tempo.toString());
   const [showMetronomeSettings, setShowMetronomeSettings] = useState(false);
@@ -185,7 +196,7 @@ export function TransportBar() {
   };
 
   const handleGoToStart = async () => {
-    await seekTo(0);
+    await goToStart();
   };
 
   const handleTempoBlur = () => {
@@ -250,7 +261,7 @@ export function TransportBar() {
             variant="default"
             size="icon-lg"
             onClick={handleGoToStart}
-            title="Go to Start (Home)"
+            title={`Go to Start (${shortcuts.start})`}
             aria-label="Go to Start"
           >
             <SkipBack size={16} />
@@ -261,7 +272,7 @@ export function TransportBar() {
             active={isRecording}
             disabled={!hasArmedTracks && !isRecording}
             onClick={handleRecord}
-            title={isRecording || hasArmedTracks ? `Record (${formatShortcut("Ctrl+R")})` : "Arm a track to record"}
+            title={isRecording || hasArmedTracks ? `Record (${shortcuts.record})` : "Arm a track to record"}
             aria-label={isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
           >
             <Circle size={16} fill="currentColor" />
@@ -272,7 +283,7 @@ export function TransportBar() {
             active={isPlaying && !isRecording}
             disabled={isPlaying && !isPaused}
             onClick={handlePlay}
-            title="Play (Space)"
+            title={`Play (${shortcuts.play})`}
             aria-label="Play"
           >
             <Play size={16} fill="currentColor" />
@@ -282,7 +293,7 @@ export function TransportBar() {
             size="icon-lg"
             disabled={!isPlaying && !isPaused}
             onClick={handleStop}
-            title="Stop (Space)"
+            title={`Stop (${shortcuts.play})`}
             aria-label="Stop"
           >
             <Square size={14} fill="currentColor" />
@@ -303,7 +314,7 @@ export function TransportBar() {
             size="icon-lg"
             active={loopEnabled}
             onClick={toggleLoop}
-            title="Toggle Loop (L)"
+            title={`Toggle Loop (${shortcuts.loop})`}
             aria-label={loopEnabled ? "Disable Loop" : "Enable Loop"}
           >
             <Repeat size={16} />
