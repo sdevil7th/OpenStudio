@@ -1,6 +1,34 @@
 # Microsoft Store activation plan
 
-Status recorded: October 8, 2026.
+Status reviewed: October 24, 2026. Historical checkpoints below retain their
+original scope.
+
+## October 24 release readiness and recovered 0.1.05 submission
+
+The [October 8 recovery run](https://github.com/sdevil7th/OpenStudio/actions/runs/37806805920)
+successfully uploaded and committed the existing submission
+`1152921505702075647` for package `0.1.5.0`. Its retained report reached
+`PreProcessing` with `targetPublishMode=Immediate`. The exact MSIX SHA-256 was
+`e816fb874fa50168042cfb064d1364570e0d07f3a3812cce8508f77efcc60eb1`.
+This supersedes the uncommitted-draft status recorded in the earlier attempt
+below; it does not establish current certification, publication or an installed
+Store upgrade.
+
+The October 24 repository check confirms `OPENSTUDIO_STORE_ENABLED=true`,
+the three required `MS_STORE_*` environment secret names, and the `v*`-only
+Store environment without required reviewers. A normal `v0.1.06` tag therefore
+builds and validates MSIX `0.1.6.0`, runs live read-only Store preflight before
+GitHub publication, then submits the matching package after publication. The
+new tag's preflight must establish the current published baseline and reject
+an unrelated pending submission.
+
+The release-specific publishing policy remains scoped to `v0.1.05`.
+`v0.1.06` inherits the last published submission's saved publishing mode.
+`Immediate` publishes after successful certification; `Manual` retains a
+publication hold. Do not rerun the old recovery or extend its policy without
+checking the current baseline. Retain the new release's sanitized readiness
+and submission reports, then verify certification, delivery and a Store-installed
+upgrade separately.
 
 ## October 8 unpublished 0.1.04 attempt and 0.1.05 follow-up
 
