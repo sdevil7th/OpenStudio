@@ -2273,10 +2273,25 @@ adjacent logs are retained even when the qualification step fails.
 
 Local Windows qualification of that correction ran 26 tests: 16 passed and 10
 POSIX-only cases were skipped. An explicit Windows PowerShell 5.1 wrapper run
-passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixture execution
-and a new successful packaged release run remain required. Evidence is retained
+passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixtures
+subsequently passed in PR #33 on both macOS architectures; a new successful
+packaged release run remains required. Evidence is retained
 under ignored `output/review/release-0106/`; it does not change the separate
 audio, installation and listening limits above.
+
+The recovery branch's initial [PR #35 run](https://github.com/sdevil7th/OpenStudio/actions/runs/40074265576)
+passed the installed Linux package's normal/safe, render, runtime and engine
+checks, plus AppImage contents and ABI checks. Its separate Openbox AppImage
+lifecycle process exited with code 2. The report was outside the uploaded
+artifact directories, so that run cannot identify the failed native check;
+do not classify it as a missing-assets failure or a passing lifecycle test.
+`smoke-linux-appimage.py` now defaults to
+`output/linux-appimage/window-manager-lifecycle.json`, inside the retained
+artifact tree, and prints bounded, allowlisted failed-check/startup diagnostics.
+Its adjacent application and startup logs are retained too. Fixtures cover the
+actual default invocation, malformed reports, failure details and owned-process
+cleanup. This corrects evidence capture; diagnosing the native failure requires
+the next packaged run and its report.
 
 ## Desktop and recording acceptance
 

@@ -1,5 +1,7 @@
 import importlib.util
+from contextlib import redirect_stderr
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import wave
 
 
@@ -30,6 +33,95 @@ SUPERVISOR = LIFECYCLE.with_name("owned-desktop-process.py")
 
 
 class DesktopQualification(unittest.TestCase):
+    def test_appimage_default_report_is_inside_retained_artifact_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            appimage = root / "OpenStudio.AppImage"
+            appimage.touch()
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(sys, "argv", ["smoke-linux-appimage.py", str(appimage)]), \
+                     mock.patch.object(desktop.shutil, "which", return_value="fixture-tool"), \
+                     mock.patch.object(desktop.subprocess, "call", return_value=7) as launch:
+                    self.assertEqual(desktop.main(), 7)
+                command = launch.call_args.args[0]
+                report = Path(command[command.index("--report") + 1])
+                self.assertEqual(report, root.resolve() / "output/linux-appimage/window-manager-lifecycle.json")
+                self.assertTrue(report.parent.is_dir())
+            finally:
+                os.chdir(previous)
+
+    def test_appimage_failure_summary_is_bounded_and_only_includes_lifecycle_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "lifecycle.json"
+            report.write_text(json.dumps({
+                "harnessMode": "window_lifecycle", "success": False, "environment": {"secret": "do-not-print"},
+                "checks": [{"id": "pitch_interactive", "status": "fail", "detail": "x" * 2000,
+                            "unrelated": "do-not-print"}] * 20,
+                "frontendDocuments": [{"role": "pitch", "startupState": "timedOut",
+                                       "url": "do-not-print"}] * 20,
+                "startupSelfTest": {"shellReady": True, "browserBackendSupported": False,
+                                    "packagedFrontendPresent": True, "runtimePath": "do-not-print"},
+            }), encoding="utf-8")
+            summary = desktop.failure_diagnostics(report)
+            self.assertIs(summary["success"], False)
+            self.assertEqual(summary["harnessMode"], "window_lifecycle")
+            self.assertEqual(summary["failedCheckCount"], 20)
+            self.assertEqual(len(summary["failedChecks"]), 12)
+            self.assertEqual(summary["failedChecks"][0],
+                             {"id": "pitch_interactive", "status": "fail", "detail": "x" * 512})
+            self.assertEqual(len(summary["frontendDocuments"]), 12)
+            self.assertEqual(summary["frontendDocuments"][0], {"role": "pitch", "startupState": "timedOut"})
+            self.assertEqual(summary["startupSelfTest"], {"shellReady": True, "browserBackendSupported": False,
+                                                        "packagedFrontendPresent": True})
+            self.assertEqual(summary["logPath"], str(report.with_suffix(".log")))
+            self.assertNotIn("do-not-print", json.dumps(summary))
+
+    def test_appimage_missing_or_invalid_failure_report_still_provides_log_locations(self):
+        cases = [(None, "report was not written"), (b"{bad-json", "report is unreadable or malformed"),
+                 (b"[]", "report is unreadable or malformed"), (b"\xff", "report is unreadable or malformed"),
+                 (b" " * (desktop.MAX_DIAGNOSTIC_REPORT_BYTES + 1), "report exceeds diagnostic size limit")]
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "lifecycle.json"
+            for content, expected in cases:
+                with self.subTest(expected=expected, bytes=None if content is None else len(content)):
+                    if content is not None:
+                        report.write_bytes(content)
+                    summary = desktop.failure_diagnostics(report)
+                    self.assertEqual(summary["reportError"], expected)
+                    self.assertEqual(summary["reportPath"], str(report))
+                    self.assertEqual(summary["startupLogPath"], str(report.with_suffix(".startup.log")))
+
+    def test_appimage_native_failure_prints_failed_check_and_preserves_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            appimage, report = root / "OpenStudio.AppImage", root / "lifecycle.json"
+            appimage.touch()
+            manager, application = mock.Mock(), mock.Mock()
+            manager.poll.return_value = None
+            application.wait.return_value = 2
+
+            def launch(command, **_):
+                if command[0] == "openbox":
+                    return manager
+                report.write_text(json.dumps({"harnessMode": "window_lifecycle", "success": False,
+                                              "checks": [{"id": "plugin_bounds_stable", "status": "fail",
+                                                          "detail": "window bounds changed"}]}), encoding="utf-8")
+                return application
+
+            error_output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["smoke-linux-appimage.py", str(appimage),
+                                                  "--inside-display", "--report", str(report)]), \
+                 mock.patch.object(desktop.subprocess, "Popen", side_effect=launch), \
+                 mock.patch.object(desktop, "stop_process_group") as cleanup, redirect_stderr(error_output):
+                self.assertEqual(desktop.main(), 1)
+            self.assertIn("Packaged application exited with 2", error_output.getvalue())
+            self.assertIn('"id": "plugin_bounds_stable"', error_output.getvalue())
+            self.assertIn('"detail": "window bounds changed"', error_output.getvalue())
+            self.assertEqual(cleanup.call_args_list, [mock.call(application), mock.call(manager)])
+            self.assertTrue(report.with_suffix(".log").is_file())
+
     def test_boot_alone_does_not_qualify_detached_windows(self):
         with self.assertRaises(ValueError):
             desktop.validate_report({"harnessMode": "window_lifecycle", "success": True,
