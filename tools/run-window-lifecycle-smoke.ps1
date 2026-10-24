@@ -112,6 +112,26 @@ function Read-LifecycleReport([string]$Path) {
     catch { throw "Invalid window lifecycle report JSON: $($_.Exception.Message)" }
 }
 
+function Test-LifecycleExecutableIdentity([string]$ExpectedPath, [string]$ReportedPath) {
+    if ([string]::IsNullOrWhiteSpace($ReportedPath) -or
+        !(Test-Path -LiteralPath $ExpectedPath -PathType Leaf) -or
+        !(Test-Path -LiteralPath $ReportedPath -PathType Leaf)) { return $false }
+    if ($onWindows) {
+        return [IO.Path]::GetFullPath($ReportedPath).Equals(
+            [IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)
+    }
+    # GetFullPath is lexical: macOS /var and /private/var can name the same
+    # mounted executable. Compare filesystem identity, never file contents or
+    # case-folded POSIX paths. Python 3 is also required by the process owner.
+    $python = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $python) { throw 'Python 3 is required to verify POSIX executable identity.' }
+    $identity = & $python.Source -c 'import os, sys; print("same" if os.path.samefile(sys.argv[1], sys.argv[2]) else "different")' $ExpectedPath $ReportedPath
+    if ($LASTEXITCODE -ne 0 -or $identity -notin @('same', 'different')) {
+        throw 'Unable to verify POSIX executable identity.'
+    }
+    return $identity -eq 'same'
+}
+
 if ($ValidateOnly) {
     Assert-LifecycleReport (Read-LifecycleReport $ReportPath) $StartupMode
     Write-Output "Window lifecycle report validated ($StartupMode): $ReportPath"
@@ -140,7 +160,7 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path ([IO.Path]::GetTempPath()) ('OpenStudio_WindowLifecycle_' + [guid]::NewGuid().ToString('N') + '.json')
 }
 $ReportPath = [IO.Path]::GetFullPath($ReportPath)
-if ($ReportPath -eq $resolvedAppPath) { throw 'ReportPath must not replace the executable.' }
+if (Test-LifecycleExecutableIdentity $resolvedAppPath $ReportPath) { throw 'ReportPath must not replace the executable.' }
 $reportDirectory = Split-Path -Parent $ReportPath
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 if (Test-Path -LiteralPath $ReportPath) { Remove-Item -LiteralPath $ReportPath -Force }
@@ -173,8 +193,8 @@ try {
     if ($process.ExitCode -ne 0) { throw "Window lifecycle process exited with code $($process.ExitCode). Report: $ReportPath" }
     $report = Read-LifecycleReport $ReportPath
     Assert-LifecycleReport $report $StartupMode
-    if (![IO.Path]::GetFullPath($report.executablePath).Equals($resolvedAppPath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Lifecycle report belongs to a different executable.'
+    if (!(Test-LifecycleExecutableIdentity $resolvedAppPath $report.executablePath)) {
+        throw "Lifecycle report belongs to a different executable. Expected '$resolvedAppPath'; reported '$($report.executablePath)'."
     }
     $frontendPath = $report.startupSelfTest.packagedFrontendPath
     if ([string]::IsNullOrWhiteSpace($frontendPath) -or !(Test-Path -LiteralPath $frontendPath -PathType Leaf)) {

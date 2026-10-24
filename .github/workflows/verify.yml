@@ -570,6 +570,10 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Test POSIX desktop ownership and lifecycle identity
+        shell: bash
+        run: python3 -B -m unittest tests.test_desktop_qualification -v
+
       - name: Prepare system FFmpeg for audio conversion qualification
         shell: bash
         run: |
@@ -676,10 +680,6 @@ jobs:
             output/review/runtime-Release-*/contracts/*.log
             output/review/runtime-Release-*/qualification.json
           if-no-files-found: warn
-
-      - name: Test POSIX desktop process ownership
-        shell: bash
-        run: python3 -B -m unittest tests.test_desktop_qualification -v
 
       - name: Retain native FX order regression evidence (macOS)
         if: always()
